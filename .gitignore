@@ -39,6 +39,10 @@ third_party/llama.cpp/src/llama.cpp                      # generated
 models/*.gguf
 models/*.bin
 
+# === Android SDK tools (large, download separately) ===
+cmdline-tools.zip
+cmdline-tools/
+
 # === OS ===
 .DS_Store
 Thumbs.db
@@ -54,3 +58,9 @@ desktop.ini
 *.keystore
 *.jks
 key.properties
+
+# === Archives ===
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z

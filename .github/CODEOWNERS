@@ -1,0 +1,21 @@
+# TongYi-Lite Code Owners
+#
+# 每个文件的修改需要经过对应负责人的代码审查。
+# 格式：路径 pattern @GitHub-username
+
+# Flutter 层
+lib/ @liangjianzeng
+
+# Android 原生层
+android/ @liangjianzeng
+
+# 文档
+docs/ @liangjianzeng
+README.md @liangjianzeng
+CONTRIBUTING.md @liangjianzeng
+CHANGELOG.md @liangjianzeng
+
+# 配置文件
+*.yaml @liangjianzeng
+*.yml @liangjianzeng
+.github/ @liangjianzeng
