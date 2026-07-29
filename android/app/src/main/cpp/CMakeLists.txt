@@ -18,6 +18,23 @@ if(NOT EXISTS ${LLAMA_CPP_DIR}/src/llama.cpp)
 endif()
 
 # --------------------------------------------------------------------------
+# llama.cpp build options
+# --------------------------------------------------------------------------
+# Disable features incompatible with Android NDK cross-compilation
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP ON CACHE BOOL "" FORCE)
+set(GGML_KLEIDIAI ON CACHE BOOL "" FORCE)
+
+# Enable Vulkan GPU acceleration on Android
+# Requires LunarG Vulkan SDK (glslc) on the build host for shader compilation
+option(GGML_VULKAN "ggml: use Vulkan for GPU acceleration" OFF)
+if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    message(STATUS "Vulkan GPU acceleration enabled for arm64-v8a")
+endif()
+
+# --------------------------------------------------------------------------
 # llmlib: static library from llama.cpp
 # --------------------------------------------------------------------------
 add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
@@ -51,6 +68,4 @@ target_link_libraries(tongyilite_jni
 # --------------------------------------------------------------------------
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_definitions(tongyilite_jni PRIVATE GGML_SYSTEM_ARCH=ARM)
-    set(GGML_KLEIDIAI ON CACHE BOOL "" FORCE)
-    set(GGML_OPENMP ON CACHE BOOL "" FORCE)
 endif()

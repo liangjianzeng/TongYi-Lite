@@ -33,7 +33,7 @@
 | 维度 | 说明 |
 |------|------|
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b1017+ (CPU/KleidiAI/SME2) |
+| **推理引擎** | llama.cpp b1017+ (Vulkan GPU / KleidiAI / SME2) |
 | **默认模型** | Qwen3-1.7B-Instruct Q4_K_M (~1.2 GB) |
 | **视觉模型** | Qwen3.5-4B + mmproj |
 | **前端框架** | Flutter 3.x (Material3) |
@@ -191,18 +191,19 @@ flutter logs | grep TongYiLite
 
 ## 架构决策记录
 
-### P0 修正（基于 llama.cpp b1017 官方示例验证）
+### P0 已实现（基于 llama.cpp b1017+ 官方示例验证）
 
-1. **Android GPU 加速 → CPU-only MVP**：官方 Android 预编译包仅 CPU（KleidiAI + SME2），Vulkan 需自研 NDK
-2. **HTTP Server → JNI 直调**：官方 `com.arm.aichat` 示例用 JNI 无 HTTP，更高效省内存
-3. **VL 模型内存 3-3.5GB**（含 mmproj）：视觉模块需分层降级策略
+1. **HTTP Server → JNI 直调**：官方 `com.arm.aichat` 示例用 JNI 无 HTTP，更高效省内存
+2. **Vulkan GPU 加速**：ggml-vulkan 后端编译进 APK，Vulkan 1.2+ 设备自动启用 GPU 推理
+3. **CPU 优化**：KleidiAI + SME2 作为 Vulkan 不可用时的备选加速方案
+4. **VL 模型内存 3-3.5GB**（含 mmproj）：视觉模块需分层降级策略
 
 ### P1 计划
 
-4. **视觉理解**：Qwen3-VL-3B + mmproj
-5. **语音识别**：sherpa-onnx (WeNet) 流式 STT
-6. **TTS 播报**：Android TextToSpeech 离线引擎
-7. **Plugin 市场**：热插拔、签名验证、沙箱
+5. **视觉理解**：Qwen3-VL-3B + mmproj
+6. **语音识别**：sherpa-onnx (WeNet) 流式 STT
+7. **TTS 播报**：Android TextToSpeech 离线引擎
+8. **Plugin 市场**：热插拔、签名验证、沙箱
 
 ---
 
