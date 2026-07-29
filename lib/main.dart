@@ -1,23 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'dart:async';
 
-import 'package:tongyi_lite/providers/chat_provider.dart';
-import 'package:tongyi_lite/services/inference_service.dart';
-import 'package:tongyi_lite/services/model_manager.dart';
-import 'package:tongyi_lite/services/storage_service.dart';
-import 'package:tongyi_lite/screens/home_screen.dart';
-import 'package:tongyi_lite/services/speech_service.dart';
-import 'package:tongyi_lite/services/tts_service.dart';
+import 'providers/chat_provider.dart';
+import 'services/inference_service.dart';
+import 'screens/home_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize native inference engine at startup
   final inference = InferenceService();
   await inference.initialize();
 
-  // Check loaded status and memory
   final isLoaded = await inference.isLoaded();
   final memory = await inference.getMemoryInfo();
   debugPrint('[APP] Native engine loaded: $isLoaded');

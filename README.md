@@ -6,7 +6,7 @@
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-b1017+-red)](https://github.com/ggerganov/llama.cpp)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **端到端离线的 Android AI 助手。** 本地模型推理 · 视觉理解 · 语音识别 · TTS 播报 · Plugin 热插拔 · 荒野求生游戏化任务
+> **端到端离线的 Android AI 助手。** 本地模型推理 · Vulkan GPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
 >
 > **数据不出设备，隐私安全无忧。**
 
@@ -18,9 +18,9 @@
 - [项目结构](#项目结构)
 - [前置环境](#前置环境)
 - [构建步骤](#构建步骤)
-- [模型下载](#模型下载)
+- [模型下载与管理](#模型下载与管理)
 - [运行](#运行)
-- [远程任务 + Plugin](#远程任务--plugin荒野求生模式)
+- [远程任务 + Plugin（荒野求生模式）](#远程任务--plugin荒野求生模式)
 - [架构决策记录](#架构决策记录)
 - [常见问题](#常见问题)
 - [贡献指南](#贡献指南)
@@ -35,10 +35,9 @@
 | **目标平台** | Android APK (API 33+) |
 | **推理引擎** | llama.cpp b1017+ (Vulkan GPU / KleidiAI / SME2) |
 | **默认模型** | Qwen3-1.7B-Instruct Q4_K_M (~1.2 GB) |
-| **视觉模型** | Qwen3.5-4B + mmproj |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调 (无 HTTP Server) |
-| **模型下载源** | ModelScope (阿里) / HuggingFace |
+| **模型下载源** | hf-mirror.com → ModelScope → HuggingFace（自动回退） |
 
 ---
 
@@ -51,23 +50,39 @@ TongYi-Lite/
 │   │   ├── build.gradle.kts          # Gradle 配置
 │   │   └── src/main/
 │   │       ├── cpp/
-│   │       │   ├── CMakeLists.txt    # llama.cpp NDK 构建
-│   │       │   └── tongyilite_jni.cpp  # JNI 桥接层
-│   │       ├── java/.../
-│   │       │   ├── MainActivity.kt       # Flutter + MethodChannel
-│   │       │   ├── InferenceEngine.kt    # Kotlin 推理封装
-│   │       │   └── service/InferenceService.kt  # 前台服务
+│   │       │   ├── CMakeLists.txt    # llama.cpp NDK 构建（含 Vulkan）
+│   │       │   └── tongyilite_jni.cpp  # JNI 桥接层（GPU offload -1）
+│   │       ├── java/com/dgxspark/tongyilite/
+│   │       │   ├── MainActivity.kt           # Flutter + MethodChannel
+│   │       │   ├── InferenceEngine.kt        # Kotlin 推理封装
+│   │       │   └── service/InferenceService.kt  # 前台服务（保活）
 │   │       └── AndroidManifest.xml
 │   ├── build.gradle.kts
 │   ├── gradle.properties
 │   └── settings.gradle.kts
+├── third_party/llama.cpp/          # llama.cpp 子模块 (b1017+)
+│   ├── src/                        # 推理引擎源码
+│   ├── ggml/src/ggml-vulkan/       # Vulkan GPU 后端
+│   └── ...
 ├── lib/                              # Flutter Dart 层
-│   ├── main.dart                     # 入口
-│   ├── models/                       # 数据模型 (ChatMessage, ModelInfo ...)
-│   ├── services/                     # 推理/存储/模型管理/语音
-│   ├── widgets/                      # UI 组件
-│   ├── screens/                      # 页面 (Chat, Settings, ModelManager ...)
-│   └── providers/                    # Riverpod 状态管理
+│   ├── main.dart                     # 入口（初始化 JNI + ProviderScope）
+│   ├── models/
+│   │   ├── model_info.dart           # ModelConfig / MirrorEntry / DownloadTask
+│   │   ├── chat_message.dart         # 聊天消息模型
+│   │   └── conversation.dart         # 会话模型
+│   ├── services/
+│   │   ├── inference_service.dart    # JNI 推理桥接（MethodChannel + EventChannel）
+│   │   ├── download_service.dart     # Dio 下载核心（断点续传 + 镜像回退）
+│   │   ├── model_manager.dart        # 模型缓存 / 内存检测
+│   │   └── storage_service.dart      # SQLite 持久化（对话/消息）
+│   ├── providers/
+│   │   ├── chat_provider.dart        # Riverpod 聊天状态 + 当前模型选择
+│   │   └── download_provider.dart    # Riverpod 下载任务状态管理
+│   ├── screens/
+│   │   ├── home_screen.dart          # 聊天主页面
+│   │   └── settings_screen.dart      # 设置页（模型选择 + 下载进度）
+│   └── widgets/
+│       └── chat_bubble.dart          # 消息气泡组件
 ├── docs/                             # 设计文档
 │   ├── architecture_design_v2.md     # 架构设计 v2
 │   ├── plugin_architecture.md        # Plugin 插件架构
@@ -120,19 +135,15 @@ cd TongYi-Lite
 git submodule update --init --recursive
 ```
 
+> **注意**：首次 `git submodule update` 会从 GitHub 下载 llama.cpp（约 3000+ 文件），需要网络畅通。国内用户建议使用代理。
+
 ### 2. 获取 Flutter 依赖
 
 ```bash
 flutter pub get
 ```
 
-### 3. 生成模型下载目录
-
-```bash
-mkdir -p android/app/src/main/assets/models
-```
-
-### 4. 构建调试 APK
+### 3. 构建调试 APK
 
 ```bash
 flutter build apk --debug
@@ -140,7 +151,7 @@ flutter build apk --debug
 
 输出: `build/app/outputs/flutter-apk/app-debug.apk`
 
-### 5. 构建发布 APK (AAB)
+### 4. 构建发布 APK (AAB)
 
 ```bash
 flutter build appbundle --release
@@ -150,17 +161,43 @@ flutter build appbundle --release
 
 ---
 
-## 模型下载
+## 模型下载与管理
 
-首次启动时，应用会引导你从 ModelScope 下载模型 GGUF 文件：推荐 Qwen3-1.7B-Q4_K_M (~1.2 GB)。
+应用内置完整的模型下载系统，无需手动下载。在 **设置** 页面即可操作：
 
-也可手动下载到设备存储：
+### 使用方式
 
-```bash
-# 使用 wget/curl 下载
-wget -O /sdcard/TongYi-Lite/models/qwen3-1.7b-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf
+1. 打开 App → 点击右上角 ⚙️ **设置**
+2. 在"模型管理"区域选择需要的模型，点击 **[下载]**
+3. 下载过程中可实时查看进度条、百分比和预估剩余时间
+4. 支持 [暂停] / [继续] 操作，网络中断后自动断点续传
+5. 下载完成后点击 **[加载到内存]** 即可在聊天中使用
+
+### 镜像策略（HuggingFace 优先走国内）
+
 ```
+1. hf-mirror.com     → HuggingFace 国内 CDN（最快）
+2. ModelScope        → 阿里云模型社区（备选）
+3. huggingface.co    → 直连（最后手段）
+```
+
+自动检测镜像可用性，失败时无缝切换下一个源。
+
+### 支持的模型
+
+| 模型 | 大小 | 类型 | 最低 RAM |
+|------|------|------|---------|
+| Qwen3-0.6B (Q4_K_M) | 420 MB | text | 500 MB |
+| Qwen3-1.7B (Q4_K_M) | 1.2 GB | text | 1.2 GB |
+| Qwen3-1.7B (Q5_K_M) | 1.5 GB | text | 1.5 GB |
+| Qwen3.5-4B (Q4_K_M) | 2.5 GB | vision | 3.5 GB |
+
+### 技术实现
+
+- **Dio** HTTP 客户端 + `onReceiveProgress` 回调实时上报进度
+- **HTTP Range** 头实现断点续传（检查 `.tmp` 文件长度后从断点继续）
+- **Riverpod StateNotifier** 管理下载状态，UI 自动响应更新
+- 最多同时 **2 个并发下载**任务
 
 ---
 
@@ -174,25 +211,9 @@ flutter run -d <device_id>
 flutter logs | grep TongYiLite
 ```
 
----
+### Vulkan GPU 加速
 
-## 模型下载与管理
-
-首次使用时，进入 **设置** 页面选择并下载所需模型。支持：
-
-- **多镜像源优先**：hf-mirror.com → ModelScope → HuggingFace 直连
-- **断点续传**：网络中断后可自动恢复下载
-- **实时进度展示**：下载进度条 + 百分比 + 预估剩余时间
-- **磁盘空间检测**：显示模型占用和可用空间
-
-### 支持的模型
-
-| 模型 | 大小 | 类型 | 最低 RAM |
-|------|------|------|---------|
-| Qwen3-0.6B (Q4_K_M) | 420 MB | text | 500 MB |
-| Qwen3-1.7B (Q4_K_M) | 1.2 GB | text | 1.2 GB |
-| Qwen3-1.7B (Q5_K_M) | 1.5 GB | text | 1.5 GB |
-| Qwen3.5-4B (Q4_K_M) | 2.5 GB | vision | 3.5 GB |
+当设备支持 Vulkan 1.2+ 时，所有模型层自动卸载到 GPU（`n_gpu_layers = -1`），可获得显著的性能提升。Vulkan 不可用时自动回退到 CPU + KleidiAI/SME2 优化。
 
 ---
 
@@ -216,7 +237,7 @@ flutter logs | grep TongYiLite
 1. **HTTP Server → JNI 直调**：官方 `com.arm.aichat` 示例用 JNI 无 HTTP，更高效省内存
 2. **Vulkan GPU 加速**：ggml-vulkan 后端编译进 APK，Vulkan 1.2+ 设备自动启用 GPU 推理
 3. **CPU 优化**：KleidiAI + SME2 作为 Vulkan 不可用时的备选加速方案
-4. **VL 模型内存 3-3.5GB**（含 mmproj）：视觉模块需分层降级策略
+4. **应用内模型下载系统**：Dio + HTTP Range 断点续传 + 国内镜像自动回退链
 
 ### P1 计划
 
@@ -244,18 +265,19 @@ echo $ANDROID_HOME
 <details>
 <summary><b>Q: 推理速度慢 / 内存溢出</b></summary>
 
-- 尝试使用更小的模型（如 Qwen3-0.5B 或 Qwen3-1.7B Q3_K_M）
+- 尝试使用更小的模型（如 Qwen3-0.6B 或 Qwen3-1.7B Q3_K_M）
 - 关闭后台应用释放 RAM
 - 设备需 ≥ 4GB RAM 才能流畅运行 1.7B 模型
+- 确保 Vulkan GPU 加速已启用（检查设置页是否显示"已完成"状态）
 
 </details>
 
 <details>
-<summary><b>Q: 模型下载失败</b></summary>
+<summary><b>Q: 模型下载失败 / 速度慢</b></summary>
 
-- 检查网络连接
-- 尝试从 ModelScope 镜像站下载
-- 手动下载后通过 adb push 到设备
+- 应用会自动尝试多个镜像源，无需手动切换
+- 如所有镜像均不可用，请检查网络连接或开启代理
+- 支持断点续传：中断后点击"继续"即可从断点恢复
 
 </details>
 
