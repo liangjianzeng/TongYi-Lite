@@ -8,12 +8,12 @@
 
 ## [Unreleased]
 
-### 计划中
+### 新增
 
-- [ ] 视觉理解模块 (Qwen3.5-4B + mmproj)
-- [ ] 语音识别 (sherpa-onnx / WeNet)
-- [ ] TTS 离线播报
-- [ ] Plugin 市场与热插拔
+- **Vulkan GPU 加速**：启用 ggml-vulkan 后端，Android 设备 Vulkan 1.2+ 自动启用 GPU 推理
+  - `CMakeLists.txt` 添加 `GGML_VULKAN=ON`，arm64-v8a 自动开启
+  - `tongyilite_jni.cpp` 将 `n_gpu_layers` 从 0 改为 -1（全部层卸载到 GPU）
+  - CPU 优化（KleidiAI + SME2）作为 Vulkan 不可用时的备选方案
 
 ---
 

@@ -3,7 +3,7 @@
  *
  * Design principles (validated against llama.cpp b10173 official com.arm.aichat example):
  * 1. Direct JNI calls to llama C API — NO HTTP server inside the APK
- * 2. CPU-only for MVP (KleidiAI + SME2) — Vulkan is a future P2 item
+ * 2. Vulkan GPU acceleration on Android (Vulkan 1.2+ required)
  * 3. Token-by-token callback to Dart via JNI to achieve streaming typewriter effect
  * 4. Thread-safe: inference runs on a dedicated native thread, not the UI thread
  */
@@ -64,7 +64,8 @@ struct InferenceEngine {
         // Model params
         model_params = llama_model_default_params();
         // mmap for memory efficiency on mobile
-        model_params.n_gpu_layers = 0;  // CPU-only for MVP
+        // Offload all layers to Vulkan GPU; falls back to CPU if Vulkan unavailable
+        model_params.n_gpu_layers = -1;  // -1 = offload all layers to GPU
 
         model = llama_model_load_from_file(model_path, model_params);
         if (!model) {
