@@ -46,15 +46,15 @@ class ModelManager {
       minRamMB: 500,
     ),
     ModelConfig(
-      id: 'qwen2.5-vl-3b-q4_k_m',
-      name: 'Qwen2.5-VL-3B Instruct (Q4_K_M)',
+      id: 'qwen3.5-4b-q4_k_m',
+      name: 'Qwen3.5-4B Instruct (Q4_K_M)',
       type: ModelType.vision,
-      url: 'https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf',
-      mirrorUrl: 'https://modelscope.cn/guanpengchuan/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf',
-      sizeBytes: 2000 * 1024 * 1024,
-      sizeMBDisplay: '2.0 GB',
-      recommended: false,
-      minRamMB: 3000,
+      url: 'https://huggingface.co/Qwen/Qwen3.5-4B-Instruct-GGUF/resolve/main/Qwen3.5-4B-Instruct-Q4_K_M.gguf',
+      mirrorUrl: 'https://modelscope.cn/guanpengchuan/Qwen3.5-4B-Instruct-GGUF/resolve/main/Qwen3.5-4B-Instruct-Q4_K_M.gguf',
+      sizeBytes: 2500 * 1024 * 1024,
+      sizeMBDisplay: '2.5 GB',
+      recommended: true,
+      minRamMB: 3500,
     ),
   ];
 

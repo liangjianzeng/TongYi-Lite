@@ -43,7 +43,7 @@
 │                            ▼                                  │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │              LLM 推理引擎 (llama.cpp)                  │    │
-│  │         Qwen3-1.7B / Qwen2.5-VL-3B / ...             │    │
+│  │         Qwen3-1.7B / Qwen3.5-4B / ...          │
 │  └─────────────────────────┬────────────────────────────┘    │
 │                            │                                  │
 │              ┌─────────────┼─────────────┐                    │
@@ -62,7 +62,7 @@
 
 | 模块 | 功能 | 离线可用性 | 端侧实现方案 |
 |------|------|-----------|-------------|
-| **视觉理解** | 拍照/上传图片 → AI 解读 | ✅ 完全离线 | Qwen2.5-VL-3B / InternVL2.5-2B + llama.cpp |
+| **视觉理解** | 拍照/上传图片 → AI 解读 | ✅ 完全离线 | Qwen3.5-4B / InternVL2.5 + llama.cpp |
 | **语音输入** | 说话 → 文字 → 送入对话 | ✅ 完全离线 | sherpa-onnx (WeNet) / Android SpeechRecognizer |
 | **TTS播报** | AI回复 → 朗读输出 | ✅ 部分离线 | Android TTS引擎 + Piper (可选本地模型) |
 | **文字对话** | 文本输入 → LLM 流式回复 | ✅ 完全离线 | Qwen3-1.7B + llama.cpp |
@@ -102,7 +102,7 @@
 │                    ▼                                          │
 │  ┌──────────────────────────────────────┐                    │
 │  │         LLM Inference (llama.cpp)    │                    │
-│  │    Qwen3-1.7B-Instruct / Qwen2.5-VL │                    │
+│  │    Qwen3-1.7B-Instruct / Qwen3.5-4B │                    │
 │  └─────────────────┬────────────────────┘                    │
 │                    ▼                                          │
 │  ┌──────────┐        ┌──────────┐                            │
@@ -120,12 +120,12 @@
 
 | 模型 | 参数量 | Q4_K_M 体积 | 中文能力 | 手机端可行性 | 推荐度 |
 |------|--------|------------|---------|-------------|--------|
-| **Qwen2.5-VL-3B-Instruct** | 3.2B | ~2.0 GB | ⭐⭐⭐⭐⭐ | ✅ 中端以上手机可运行 | ⭐⭐⭐⭐⭐ (首选) |
+| **Qwen3.5-4B-Instruct** | 3.2B | ~2.0 GB | ⭐⭐⭐⭐⭐ | ✅ 中端以上手机可运行 | ⭐⭐⭐⭐⭐ (首选) |
 | InternVL2.5-2B | 2.1B | ~1.4 GB | ⭐⭐⭐⭐ | ✅ 流畅 | ⭐⭐⭐⭐ |
 | MiniCPM-V 2.6 (8B) | 8B | ~5.0 GB | ⭐⭐⭐⭐⭐ | ❌ 仅高端旗舰 | B+ |
-| Qwen2.5-VL-7B-Instruct | 7.4B | ~4.5 GB | ⭐⭐⭐⭐⭐ | ❌ 体积过大 | C |
+| Qwen2.5-VL-7B-Instruct (旧，不建议) | 7.4B | ~4.5 GB | ⭐⭐⭐⭐⭐ | ❌ 体积过大 | C |
 
-### 3.2 Qwen2.5-VL-3B 详解（视觉理解首选）
+### 3.2 Qwen3.5-4B 详解（视觉理解首选）
 
 **核心能力**：
 - **图片描述**："Describe this image in detail" → 生成自然语言描述
@@ -147,7 +147,7 @@ Base64 / 文件路径 → llama.cpp multimodal API
     ▼
 POST http://localhost:8080/v1/chat/completions
 {
-  "model": "qwen2.5-vl-3b",
+  "model": "qwen3.5-4b",
   "messages": [
     {
       "role": "user",
@@ -165,7 +165,7 @@ SSE Stream → Flutter 流式渲染回复
 ```
 
 **llama.cpp 多模态支持现状（2025-2026）**：
-- llama.cpp v0.3.x+ 已原生支持 Qwen2.5-VL 架构的视觉编码器和语言模型联合推理
+- llama.cpp v0.3.x+ 已原生支持 Qwen3.5-4B 架构的视觉编码器和语言模型联合推理
 - 图片经过 Vision Encoder → Visual Tokens → 注入 LLM Context
 - 手机端建议图片最大分辨率 768×768（平衡质量和内存）
 
@@ -222,7 +222,7 @@ class VisionService {
     final base64Data = base64Encode(imageBytes);
 
     return await _inference.chatWithImage(
-      model: 'qwen2.5-vl-3b',
+      model: 'qwen3.5-4b',
       prompt: '请详细描述这张图片的内容，包括场景、物体、颜色等细节。用中文回答。',
       imageData: base64Data,
       onToken: (token) => /* update streaming UI */,
@@ -234,7 +234,7 @@ class VisionService {
     final base64Data = base64Encode(imageBytes);
 
     return await _inference.chatWithImage(
-      model: 'qwen2.5-vl-3b',
+      model: 'qwen3.5-4b',
       prompt: '请提取图片中的所有文字内容，保持原始格式。如果有英文也一并提取。',
       imageData: base64Data,
     );
@@ -245,7 +245,7 @@ class VisionService {
     final base64Data = base64Encode(imageBytes);
 
     return await _inference.chatWithImage(
-      model: 'qwen2.5-vl-3b',
+      model: 'qwen3.5-4b',
       prompt: question,
       imageData: base64Data,
     );
@@ -476,7 +476,7 @@ class InferenceService {
 | 任务类型 | 推荐模型 | Q4_K_M 体积 | 说明 |
 |---------|---------|------------|------|
 | **纯文本对话** | Qwen3-1.7B-Instruct | ~1.2 GB | 速度快，中文能力强 |
-| **图片理解/描述** | Qwen2.5-VL-3B-Instruct | ~2.0 GB | 视觉编码器 + LLM |
+| **图片理解/描述** | Qwen3.5-4B-Instruct | ~2.0 GB | 视觉编码器 + LLM |
 | **复杂推理** | Qwen3-4B-Instruct | ~2.8 GB | 更大上下文，更强推理 |
 
 ```dart
@@ -488,7 +488,7 @@ class ModelRouter {
       case 'chat':
         return _config.textModel ?? 'qwen3-1.7b';
       case 'vision':
-        return _config.visionModel ?? 'qwen2.5-vl-3b';
+        return _config.visionModel ?? 'qwen3.5-4b';
       case 'reasoning':
         return _config.reasoningModel ?? 'qwen3-4b';
       default:
@@ -807,15 +807,15 @@ class ModelRegistry {
 
     // === 视觉理解模型 ===
     ModelInfo(
-      id: 'qwen2.5-vl-3b',
-      name: 'Qwen2.5-VL-3B-Instruct',
+      id: 'qwen3.5-4b',
+      name: 'Qwen3.5-4B-Instruct',
       type: ModelType.vision,
       params: '3.2B',
       contextLength: 32000,
       quantization: 'Q4_K_M',
       sizeMB: 2000,
       description: '视觉理解，图片描述/VQA/OCR',
-      sourceUrl: 'https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct-GGUF',
+      sourceUrl: 'https://huggingface.co/Qwen/Qwen3.5-4B-Instruct-GGUF',
     ),
 
     // === STT 语音识别模型 ===
@@ -1213,11 +1213,11 @@ TongYi-Lite/
 ├── backend/                          # Python 参考后端（开发调试用）
 │   ├── server.py                     # FastAPI HTTP Server
 │   ├── engine.py                     # llama-cpp-python 引擎封装
-│   └── vision_engine.py              # Qwen2.5-VL 多模态推理
+│   └── vision_engine.py              # Qwen3.5-4B 多模态推理
 │
 ├── models/                           # 模型文件（git-lfs）
 │   ├── qwen3-1.7b-q4_k_m.gguf       # ~1.2 GB (文本对话)
-│   ├── qwen2.5-vl-3b-q4_k_m.gguf    # ~2.0 GB (视觉理解)
+│   ├── qwen3.5-4b-q4_k_m.gguf    # ~2.0 GB (视觉理解)
 │   └── sherpa-wenet-ctc-large.onnx  # ~40 MB (语音识别)
 │
 ├── docs/                             # 文档
@@ -1375,7 +1375,7 @@ TongYi-Lite/
 │  👁️ 视觉理解模型                      │
 │  ─────────────────                  │
 │  ┌───────────────────────────────┐  │
-│  │ 🟪 Qwen2.5-VL-3B-Instruct     │  │
+│  │ 🟪 Qwen3.5-4B-Instruct     │  │
 │  │    3.2B · Q4_K_M · 2.0 GB     │  │
 │  │    ✅ 已下载                   │  │
 │  │              [切换] [删除]      │  │
@@ -1460,7 +1460,7 @@ TongYi-Lite/
 │       TongYi-Lite v2: 端侧 AI 智能体          │
 ├─────────────────────────────────────────────┤
 │                                             │
-│  👁️ 视觉理解：Qwen2.5-VL-3B + llama.cpp     │
+│  👁️ 视觉理解：Qwen3.5-4B + llama.cpp     │
 │    → 拍照/上传图片 → AI描述/VQA/OCR          │
 │                                             │
 │  🎤 语音输入：sherpa-onnx (WeNet)            │

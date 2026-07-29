@@ -31,7 +31,7 @@
 |---|---------|----------------------|------|
 | ⚠️1 | "Android 用 **Vulkan + ARM NEON** GPU 加速" | 官方 Android 预编译包与示例**仅 CPU**（KleidiAI + SME2），无 Vulkan 预编译；Vulkan 后端需自行 NDK 交叉编译 | 性能预期需下调；GPU 加速是工程项而非现成能力 |
 | ⚠️2 | "前端 Flutter 通过 **localhost:8080 HTTP Server** 与 llama-server 通信" | 官方 Android 示例（`com.arm.aichat`）采用 **直接 JNI 调用 llama C API**，不跑 HTTP server | 架构更简单更省内存，但通信层需重新设计 |
-| ⚠️3 | "Qwen2.5-VL-3B 在手机上 ~2GB 流畅运行" | VL 模型需额外 **mmproj 视觉编码器**（+几百 MB）+ 双阶段推理，3B-VL 在中端机内存紧张 | 视觉模块需分层降级策略 |
+| ⚠️3 | "Qwen3.5-4B 在手机上 ~2GB 流畅运行" | VL 模型需额外 **mmproj 视觉编码器**（+几百 MB）+ 双阶段推理，3B-VL 在中端机内存紧张 | 视觉模块需分层降级策略 |
 
 ### 修正后整体仍然成立 ✅
 
@@ -187,12 +187,12 @@ C++: ai_chat.cpp (直接调用 llama C API)
 ### 🔴 不足 3（重要）：视觉模型内存预算被严重低估
 
 **文档假设**：
-> "Qwen2.5-VL-3B-Instruct | Q4_K_M ~2.0 GB | ✅ 中端以上手机可运行"
+> "Qwen3.5-4B-Instruct | Q4_K_M ~2.0 GB | ✅ 中端以上手机可运行"
 
 **真实情况**：
 1. VL 模型不是单文件，而是 **LLM 部分 + 视觉编码器（mmproj）两部分**：
-   - `qwen2.5-vl-3b-q4_k_m.gguf`（语言模型，~2GB）
-   - `mmproj-qwen2.5-vl-3b-f16.gguf`（视觉编码器，**+0.5-1GB**）
+   - `qwen3.5-4b-q4_k_m.gguf`（语言模型，~2GB）
+   - `mmproj-qwen3.5-4b-f16.gguf`（视觉编码器，**+0.5-1GB**）
 2. 运行时还需要：图片预处理内存 + 视觉 token 注入上下文
 3. 实际运行内存占用：**3-3.5GB**，而非文档说的 ~2GB
 
@@ -202,8 +202,8 @@ C++: ai_chat.cpp (直接调用 llama C API)
 
 | 设备档位 | 可用内存 | 推荐视觉方案 | 体积 |
 |---------|---------|------------|------|
-| 🟢 旗舰（≥8GB） | ~5GB+ | Qwen2.5-VL-3B（LLM+mmproj） | ~3GB |
-| 🟡 中端（6-8GB） | ~3.5GB | Qwen2.5-VL-**2B**（更小变体）或 3B-Q3 | ~2GB |
+| 🟢 旗舰（≥8GB） | ~5GB+ | Qwen3.5-4B（LLM+mmproj） | ~3GB |
+| 🟡 中端（6-8GB） | ~3.5GB | Qwen3.5-4B（更小变体）或 3B-Q3 | ~2GB |
 | 🔴 低端（≤6GB） | ~3GB | **MOONCHIP/MiniCPM-Llama3-V 2.5（8B 但优化）** 或**禁用视觉**，仅文字 | — |
 
 并增加**启动时内存自检**：视觉功能仅在内存充足时解锁，否则隐藏入口，避免崩溃。
@@ -301,7 +301,7 @@ C++: ai_chat.cpp (直接调用 llama C API)
 |------|------|------|---------|---------|--------|
 | 文字对话（旗舰） | Qwen3-1.7B-Q4_K_M | 1.2GB | ~2GB | ≥6GB RAM | ✅ |
 | 文字对话（中端） | Qwen3-0.6B-Q4_K_M | 0.42GB | ~1GB | ≥4GB RAM | ✅ |
-| 视觉理解（旗舰） | Qwen2.5-VL-3B + mmproj | 3GB | ~3.5GB | ≥8GB RAM | ✅ |
+| 视觉理解（旗舰） | Qwen3.5-4B + mmproj | 3GB | ~3.5GB | ≥8GB RAM | ✅ |
 | 视觉理解（中端） | 更小 VL 或降级禁用 | ~2GB | ~2.5GB | 6-8GB RAM | ⚠️ |
 | 语音识别 STT | sherpa-onnx WeNet | 0.04GB | ~0.1GB | 全机型 | ✅ |
 | TTS | Android 系统引擎 | 系统级 | ~0.03GB | 全机型 | ✅ |
@@ -354,7 +354,7 @@ C++: ai_chat.cpp (直接调用 llama C API)
 
 | 模块 | 任务 | 依据 |
 |------|------|------|
-| 视觉理解 | Qwen2.5-VL + mmproj + 分层降级 | **修正点 3** |
+| 视觉理解 | Qwen3.5-4B + mmproj + 分层降级 | **修正点 3** |
 | 语音输入 | sherpa-onnx STT 集成 | `architecture_design_v2.md` 第 4 节 |
 | TTS 播报 | Android TextToSpeech | `architecture_design_v2.md` 第 4 节 |
 
@@ -391,7 +391,7 @@ Week 11+   ▏█████████ Phase 4: 持续打磨
 | ID | 风险 | 概率 | 影响 | 缓解措施 | 负责阶段 |
 |----|------|------|------|---------|---------|
 | R1 | CPU-only 性能不达标（<8 tok/s） | 中 | 高 | P0 提前验证；备选更小模型 Qwen3-0.6B | Phase 0 |
-| R2 | Qwen2.5-VL 在中端机 OOM | 高 | 高 | 分层降级 + 内存自检门槛 | Phase 2 |
+| R2 | Qwen3.5-4B 在中端机 OOM | 高 | 高 | 分层降级 + 内存自检门槛 | Phase 2 |
 | R3 | Vulkan 后端兼容性差（Adreno/Mali） | 高 | 中 | CPU-only 兜底；Vulkan 设为 P2 可选 | Phase 4 |
 | R4 | Android 后台杀进程导致推理中断 | 高 | 中 | ForegroundService + 断点恢复 | Phase 1 |
 | R5 | llama.cpp 版本快速迭代导致 API 变更 | 中 | 中 | 锁定 b10173 版本，升级前做回归 | 全周期 |

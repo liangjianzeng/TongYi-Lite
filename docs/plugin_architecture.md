@@ -1559,7 +1559,7 @@ class PluginMarketplaceScreen extends StatelessWidget {
 │  │     └─ 未安装 → 加入离线队列，推送"需要下载"通知         │     │
 │  │     ↓                                                │     │
 │  │  3. Plugin 执行任务                                    │     │
-│  │     ├─ 视觉任务：调用 VLM (Qwen2.5-VL) → 分析图片       │     │
+│  │     ├─ 视觉任务：调用 VLM (Qwen3.5-4B) → 分析图片       │     │
 │  │     ├─ 语音任务：调用 STT (sherpa-onnx) → 转写文字      │     │
 │  │     └─ 文本/文件任务：调用 LLM (Qwen3-1.7B) → 处理      │     │
 │  │     ↓                                                │     │
