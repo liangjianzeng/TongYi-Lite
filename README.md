@@ -176,6 +176,26 @@ flutter logs | grep TongYiLite
 
 ---
 
+## 模型下载与管理
+
+首次使用时，进入 **设置** 页面选择并下载所需模型。支持：
+
+- **多镜像源优先**：hf-mirror.com → ModelScope → HuggingFace 直连
+- **断点续传**：网络中断后可自动恢复下载
+- **实时进度展示**：下载进度条 + 百分比 + 预估剩余时间
+- **磁盘空间检测**：显示模型占用和可用空间
+
+### 支持的模型
+
+| 模型 | 大小 | 类型 | 最低 RAM |
+|------|------|------|---------|
+| Qwen3-0.6B (Q4_K_M) | 420 MB | text | 500 MB |
+| Qwen3-1.7B (Q4_K_M) | 1.2 GB | text | 1.2 GB |
+| Qwen3-1.7B (Q5_K_M) | 1.5 GB | text | 1.5 GB |
+| Qwen3.5-4B (Q4_K_M) | 2.5 GB | vision | 3.5 GB |
+
+---
+
 ## 远程任务 + Plugin（荒野求生模式）
 
 见 [`docs/plugin_architecture.md`](docs/plugin_architecture.md) 设计文档。

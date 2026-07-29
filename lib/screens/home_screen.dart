@@ -5,6 +5,7 @@ import '../models/chat_message.dart';
 import '../services/inference_service.dart';
 import '../services/storage_service.dart';
 import '../widgets/chat_bubble.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -74,7 +75,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             icon: const Icon(Icons.settings),
             tooltip: '设置',
             onPressed: () {
-              // TODO: Navigate to settings
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
             },
           ),
         ],
