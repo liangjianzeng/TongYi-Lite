@@ -10,6 +10,12 @@
 
 ### 新增
 
+- **模型下载系统**：完整的模型选择、下载和缓存管理功能
+  - 多镜像源优先（hf-mirror → ModelScope → HuggingFace）
+  - HTTP Range 断点续传，支持网络中断恢复
+  - Riverpod 状态管理 + UI 实时进度展示
+  - SHA256 文件完整性校验
+  - 磁盘空间检测和存储信息展示
 - **Vulkan GPU 加速**：启用 ggml-vulkan 后端，Android 设备 Vulkan 1.2+ 自动启用 GPU 推理
   - `CMakeLists.txt` 添加 `GGML_VULKAN=ON`，arm64-v8a 自动开启
   - `tongyilite_jni.cpp` 将 `n_gpu_layers` 从 0 改为 -1（全部层卸载到 GPU）

@@ -3,10 +3,16 @@ import 'dart:async';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 import '../services/inference_service.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import '../services/model_manager.dart';
 import '../services/storage_service.dart';
 
 final inferenceServiceProvider = Provider((ref) => InferenceService());
 final storageServiceProvider = Provider((ref) => StorageService());
+
+/// Currently selected model ID - change from SettingsScreen to switch models.
+final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3-1.7b-q4_k_m');
 
 final conversationsProvider = StateNotifierProvider<ConversationsNotifier, List<Conversation>>((ref) {
   return ConversationsNotifier(ref.read(storageServiceProvider));
@@ -45,6 +51,22 @@ final streamTokensProvider = StateProvider<List<String>>((ref) => []);
 class ChatNotifier extends StateNotifier<bool> {
   final InferenceService _inference;
   final StorageService _storage;
+
+  /// Ensure the correct model is loaded before sending a message.
+  Future<void> ensureModelLoaded(String modelId) async {
+    final isLoaded = await _inference.isLoaded();
+    if (!isLoaded) {
+      await loadModelFromFile(modelId);
+    }
+  }
+
+  /// Load a model from the cached .gguf file on disk.
+  Future<void> loadModelFromFile(String modelId) async {
+    final appDir = await getApplicationDocumentsDirectory();
+    final path = '${appDir.path}/models/${modelId}.gguf';
+    debugPrint('[ChatNotifier] Loading model from: $path');
+    await _inference.loadModel(path);
+  }
   ChatNotifier(this._inference, this._storage) : super(false);
 
   Future<String> sendMessage(String conversationId, String prompt) async {
@@ -84,5 +106,7 @@ class ChatNotifier extends StateNotifier<bool> {
 }
 
 final chatNotifierProvider = StateNotifierProvider<ChatNotifier, bool>((ref) {
-  return ChatNotifier(ref.read(inferenceServiceProvider), ref.read(storageServiceProvider));
+  final inference = ref.read(inferenceServiceProvider);
+  final storage = ref.read(storageServiceProvider);
+  return ChatNotifier(inference, storage);
 });

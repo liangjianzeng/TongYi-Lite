@@ -64,3 +64,4 @@ key.properties
 *.tar.gz
 *.tar.bz2
 *.7z
+.zcode/
