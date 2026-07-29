@@ -146,7 +146,7 @@ flutter logs | grep TongYiLite
 3. **VL 模型内存 3-3.5GB**（含 mmproj）：视觉模块需分层降级策略
 
 ### P1 计划
-4. **视觉理解**：Qwen2.5-VL-3B + mmproj
+4. **视觉理解**：Qwen3-VL-3B + mmproj
 5. **语音识别**：sherpa-onnx (WeNet) 流式 STT
 6. **TTS 播报**：Android TextToSpeech 离线引擎
 7. **Plugin 市场**：热插拔、签名验证、沙箱
