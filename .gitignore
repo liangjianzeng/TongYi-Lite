@@ -1,0 +1,56 @@
+# TongYi-Lite .gitignore
+
+# === Build outputs ===
+**/build/
+**/.dart_tool/
+**/.gradle/
+**/generated/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.jar
+*.so
+*.o
+*.a
+*.d
+*.log
+
+# === Flutter ===
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+
+# === Android ===
+*.iml
+.idea/
+*.hprof
+local.properties
+.android/
+captures/
+
+# === Native / llama.cpp ===
+third_party/llama.cpp/build/
+third_party/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.c  # generated
+third_party/llama.cpp/src/llama.cpp                      # generated
+
+# === Models (large files, never commit) ===
+models/*.gguf
+models/*.bin
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE ===
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Secrets ===
+*.keystore
+*.jks
+key.properties
