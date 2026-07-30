@@ -48,7 +48,7 @@ final messagesProvider = FutureProvider.autoDispose.family<List<ChatMessage>, St
 final isGeneratingProvider = StateProvider<bool>((ref) => false);
 final streamTokensProvider = StateProvider<List<String>>((ref) => []);
 
-class ChatNotifier extends StateNotifier<bool> {
+class ChatNotifier extends ConsumerStateNotifier<bool> {
   final InferenceService _inference;
   final StorageService _storage;
 
@@ -70,6 +70,9 @@ class ChatNotifier extends StateNotifier<bool> {
   ChatNotifier(this._inference, this._storage) : super(false);
 
   Future<String> sendMessage(String conversationId, String prompt) async {
+    // Ensure model is loaded before sending message
+    final modelId = ref.read(currentModelIdProvider);
+    await ensureModelLoaded(modelId);
     state = true;
     final userMsg = ChatMessage(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
