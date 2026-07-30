@@ -111,7 +111,7 @@ class StorageService {
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-      isStreaming: r['isStreaming'] as int? == 1,
+      isStreaming: (r['isStreaming'] as int?) == 1,
     )).toList();
   }
 
@@ -150,7 +150,7 @@ class StorageService {
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-      isStreaming: r['isStreaming'] as int? == 1,
+      isStreaming: (r['isStreaming'] as int?) == 1,
     )).toList();
   }
 

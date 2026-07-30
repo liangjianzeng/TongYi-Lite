@@ -6,7 +6,7 @@
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-b1017+-red)](https://github.com/ggerganov/llama.cpp)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **端到端离线的 Android AI 助手。** 本地模型推理 · Vulkan GPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
+> **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp） · Vulkan GPU / KleidiAI CPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
 >
 > **数据不出设备，隐私安全无忧。**
 
@@ -232,30 +232,89 @@ flutter logs | grep TongYiLite
 
 ## 架构决策记录
 
-### P0 已实现（基于 llama.cpp b1017+ 官方示例验证）
+### P0 已实现 ✅（基于 llama.cpp b1017+ 官方示例验证）
 
-1. **HTTP Server → JNI 直调**：官方 `com.arm.aichat` 示例用 JNI 无 HTTP，更高效省内存
-2. **Vulkan GPU 加速**：ggml-vulkan 后端编译进 APK，Vulkan 1.2+ 设备自动启用 GPU 推理
-3. **CPU 优化**：KleidiAI + SME2 作为 Vulkan 不可用时的备选加速方案
-4. **应用内模型下载系统**：Dio + HTTP Range 断点续传 + 国内镜像自动回退链
+| # | 功能 | 状态 | 说明 |
+|---|------|------|------|
+| 1 | **JNI 直调** | ✅ | 无 HTTP Server，高效省内存 |
+| 2 | **CPU 推理** | ✅ | KleidiAI + SME2 加速（Vulkan 不可用时回退） |
+| 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + hf-mirror/ModelScope/HF 镜像自动回退 |
+| 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
+| 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 
-### P1 计划
+### P1 计划 🚧
 
-5. **视觉理解**：Qwen3-VL-3B + mmproj
-6. **语音识别**：sherpa-onnx (WeNet) 流式 STT
-7. **TTS 播报**：Android TextToSpeech 离线引擎
-8. **Plugin 市场**：热插拔、签名验证、沙箱
+6. **视觉理解**：Qwen3-VL-3B + mmproj（模型已就绪）
+7. **语音识别**：sherpa-onnx (WeNet) 流式 STT
+8. **TTS 播报**：Android TextToSpeech 离线引擎
+9. **Plugin 市场**：热插拔、签名验证、沙箱
+10. **Vulkan GPU 加速**：需安装 LunarG Vulkan SDK（glslc）后可启用
 
 ---
 
 ## 常见问题
 
 <details>
-<summary><b>Q: 构建时报 NDK / CMake 错误</b></summary>
+<summary><b>Q: 构建时报 Gradle plugin "dev.flutter.flutter-gradle-plugin" not found</b></summary>
 
-确保 `ANDROID_NDK_ROOT` 和 `ANDROID_HOME` 环境变量正确设置，且 NDK 版本 ≥ r29。
+该插件不发布到任何公开 Maven 仓库，必须通过 `includeBuild` 复合构建从 Flutter SDK 本地解析。确保 `settings.gradle.kts` 中包含：
+```kotlin
+pluginManagement {
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+}
+```
 
+</details>
+
+<details>
+<summary><b>Q: dl.google.com 连接超时 / Maven 依赖下载失败</b></summary>
+
+国内网络访问 Google CDN 不稳定。已在 `pluginManagement.repositories` 和 `allprojects.repositories` 中添加阿里云镜像：
+- `https://maven.aliyun.com/repository/google`
+- `https://maven.aliyun.com/repository/public`
+- `https://maven.aliyun.com/repository/gradle-plugin`
+
+</details>
+
+<details>
+<summary><b>Q: CMake 找不到 llama.cpp / 路径错误</b></summary>
+
+CMakeLists.txt 中从 `android/app/src/main/cpp/` 到项目根目录需要 **5 层** `../`。当前配置已验证通过：
+```cmake
+set(PROJECT_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../..)
+```
+
+</details>
+
+<details>
+<summary><b>Q: CMake 报 Vulkan glslc not found</b></summary>
+
+Vulkan GPU 加速需要 LunarG Vulkan SDK（含 `glslc` shader compiler）。当前构建已禁用 Vulkan，使用 CPU + KleidiAI/SME2 推理。如需启用 GPU 加速：
+1. 安装 LunarG Vulkan SDK（https://vulkan.lunarg.com）
+2. 取消注释 CMakeLists.txt 中的 `set(GGML_VULKAN ON)`
+
+</details>
+
+<details>
+<summary><b>Q: JNI 编译报 "unknown type name 'common_chat_templates'" / API 不兼容</b></summary>
+
+llama.cpp b1017+ 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_vocab*`。已适配所有变更：
+- `llama_new_context_with_model()` → `llama_init_from_model()`
+- `llama_tokenize(model, ...)` → `llama_tokenize(vocab, ...)`
+- `llama_token_eos(model)` → `llama_vocab_eos(vocab)`
+- 手动实现 temperature + top-p 采样（`llama_sampler_init_simple` 不存在）
+
+</details>
+
+<details>
+<summary><b>Q: NDK / CMake 错误</b></summary>
+
+确保已安装以下工具：
 ```bash
+# Android SDK cmdline-tools (含 sdkmanager)
+sdkmanager "ndk;27.0.12077973" "cmake;3.31.6" --install
+
+# 验证
 echo $ANDROID_NDK_ROOT
 echo $ANDROID_HOME
 ```

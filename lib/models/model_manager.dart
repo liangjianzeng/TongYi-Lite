@@ -1,31 +1,12 @@
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import '../models/model_info.dart';
 
 /// Manages model caching and local storage.
-/// Delegates download logic to DownloadService; this class only handles
-/// file-system queries (isModelCached, getCachedSize, allModels, etc.).
 class ModelManager {
   static final ModelManager _instance = ModelManager._internal();
   factory ModelManager() => _instance;
   ModelManager._internal();
-
-  /// Convenience accessor – mirrors the list in model_info.dart.
-  List<ModelConfig> get allModels => builtInModels();
-
-  /// Get recommended/default model
-  ModelConfig get recommendedModel =>
-      builtInModels().firstWhere((m) => m.recommended);
-
-  /// Get a model by ID
-  ModelConfig? getModel(String id) {
-    try {
-      return builtInModels().firstWhere((m) => m.id == id);
-    } catch (_) {
-      return null;
-    }
-  }
 
   Future<Directory> _getModelsDir() async {
     final appDir = await getApplicationDocumentsDirectory();

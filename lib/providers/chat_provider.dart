@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:async';
 import '../models/chat_message.dart';
@@ -5,7 +6,6 @@ import '../models/conversation.dart';
 import '../services/inference_service.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
-import '../services/model_manager.dart';
 import '../services/storage_service.dart';
 
 final inferenceServiceProvider = Provider((ref) => InferenceService());
@@ -14,7 +14,8 @@ final storageServiceProvider = Provider((ref) => StorageService());
 /// Currently selected model ID - change from SettingsScreen to switch models.
 final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3-1.7b-q4_k_m');
 
-final conversationsProvider = StateNotifierProvider<ConversationsNotifier, List<Conversation>>((ref) {
+final conversationsProvider =
+    StateNotifierProvider<ConversationsNotifier, List<Conversation>>((ref) {
   return ConversationsNotifier(ref.read(storageServiceProvider));
 });
 
@@ -40,7 +41,8 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
 }
 
 final currentConversationProvider = StateProvider<Conversation?>((ref) => null);
-final messagesProvider = FutureProvider.autoDispose.family<List<ChatMessage>, String>((ref, convId) async {
+final messagesProvider = FutureProvider.autoDispose.family<List<ChatMessage>,
+    String>((ref, convId) async {
   final storage = ref.read(storageServiceProvider);
   return storage.getAllMessages(convId);
 });
@@ -48,7 +50,7 @@ final messagesProvider = FutureProvider.autoDispose.family<List<ChatMessage>, St
 final isGeneratingProvider = StateProvider<bool>((ref) => false);
 final streamTokensProvider = StateProvider<List<String>>((ref) => []);
 
-class ChatNotifier extends ConsumerStateNotifier<bool> {
+class ChatNotifier extends StateNotifier<bool> {
   final InferenceService _inference;
   final StorageService _storage;
 
@@ -67,12 +69,13 @@ class ChatNotifier extends ConsumerStateNotifier<bool> {
     debugPrint('[ChatNotifier] Loading model from: $path');
     await _inference.loadModel(path);
   }
+
   ChatNotifier(this._inference, this._storage) : super(false);
 
-  Future<String> sendMessage(String conversationId, String prompt) async {
-    // Ensure model is loaded before sending message
-    final modelId = ref.read(currentModelIdProvider);
-    await ensureModelLoaded(modelId);
+  Future<String> sendMessage(String conversationId, String prompt,
+      {String? modelId}) async {
+    final targetModelId = modelId ?? 'qwen3-1.7b-q4_k_m';
+    await ensureModelLoaded(targetModelId);
     state = true;
     final userMsg = ChatMessage(
       id: DateTime.now().millisecondsSinceEpoch.toString(),

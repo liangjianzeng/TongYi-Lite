@@ -3,9 +3,8 @@
  *
  * Design principles (validated against llama.cpp b10173 official com.arm.aichat example):
  * 1. Direct JNI calls to llama C API — NO HTTP server inside the APK
- * 2. Vulkan GPU acceleration on Android (Vulkan 1.2+ required)
- * 3. Token-by-token callback to Dart via JNI to achieve streaming typewriter effect
- * 4. Thread-safe: inference runs on a dedicated native thread, not the UI thread
+ * 2. Token-by-token callback to Dart via JNI to achieve streaming typewriter effect
+ * 3. Thread-safe: inference runs on a dedicated native thread, not the UI thread
  */
 
 #include <android/log.h>
@@ -16,6 +15,9 @@
 #include <thread>
 #include <condition_variable>
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <random>
 #include <functional>
 
 // llama.cpp headers
@@ -32,11 +34,11 @@
 // ============================================================================
 
 struct InferenceEngine {
-    llama_model  *model   = nullptr;
+    llama_model *model   = nullptr;
+    const struct llama_vocab *vocab = nullptr; // extracted from model for new API
     llama_context *context = nullptr;
     llama_model_params model_params;
     llama_context_params ctx_params;
-    common_chat_templates tmpl;
 
     // Generation state
     std::vector<llama_token> prompt_tokens;
@@ -64,14 +66,16 @@ struct InferenceEngine {
         // Model params
         model_params = llama_model_default_params();
         // mmap for memory efficiency on mobile
-        // Offload all layers to Vulkan GPU; falls back to CPU if Vulkan unavailable
-        model_params.n_gpu_layers = -1;  // -1 = offload all layers to GPU
+        // Offload all layers to GPU; falls back to CPU if no GPU available
+        model_params.n_gpu_layers = -1;  // -1 = offload all layers to GPU (CPU fallback)
 
         model = llama_model_load_from_file(model_path, model_params);
         if (!model) {
             LOGE("Failed to load model from: %s", model_path);
             return false;
         }
+
+        vocab = llama_model_get_vocab(model);
 
         // Context params
         ctx_params = llama_context_default_params();
@@ -85,7 +89,7 @@ struct InferenceEngine {
             ctx_params.n_ctx = trained_ctx;
         }
 
-        context = llama_new_context_with_model(model, ctx_params);
+        context = llama_init_from_model(model, ctx_params);
         if (!context) {
             LOGE("Failed to create context (OOM?)");
             llama_model_free(model);
@@ -94,15 +98,6 @@ struct InferenceEngine {
         }
 
         n_ctx = llama_n_ctx(context);
-
-        // Detect chat template from model
-        const char *tmpl_name = common_chat_templates_source(model);
-        if (tmpl_name) {
-            common_chat_templates_init(&tmpl, model);
-            LOGI("Chat template: %s", tmpl_name);
-        } else {
-            LOGW("No built-in chat template detected, using chatml fallback");
-        }
 
         LOGI("Model loaded. n_ctx=%d, n_embd=%d, n_layer=%d",
              n_ctx,
@@ -115,6 +110,7 @@ struct InferenceEngine {
         std::lock_guard<std::mutex> lock(mtx);
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
+        vocab = nullptr;
     }
 
     bool is_loaded() const {
@@ -127,7 +123,7 @@ struct InferenceEngine {
     std::vector<llama_token> tokenize(const char *text, bool add_bos) {
         int n_tokens = text == nullptr ? 1 : (int)strlen(text);
         std::vector<llama_token> tokens(n_tokens + (add_bos ? 1 : 0));
-        int n = llama_tokenize(model, text, n_tokens, tokens.data(), tokens.size(), add_bos, true);
+        int n = llama_tokenize(vocab, text, n_tokens, tokens.data(), tokens.size(), add_bos, true);
         if (n < 0) {
             n = -n;
         }
@@ -156,7 +152,7 @@ struct InferenceEngine {
         should_stop = false;
 
         // 1. Tokenize prompt
-        bool add_bos = llama_should_add_bos_token(model);
+        bool add_bos = llama_vocab_get_add_bos(vocab);
         prompt_tokens = tokenize(prompt, add_bos);
         n_prompt = (int)prompt_tokens.size();
 
@@ -187,25 +183,66 @@ struct InferenceEngine {
 
         // 3. Auto-generate tokens
         std::string result;
-        const llama_token eos = llama_token_eos(model);
+        const llama_token eos = llama_vocab_eos(vocab);
 
         while (n_gen < max_tokens && !should_stop) {
-            llama_token new_token;
+            llama_token new_token = 0;
 
-            // Sample next token
-            auto * logits = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
+            // Sample next token using softmax + temperature + top-p
+            auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
+            int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
 
-            // Apply temperature & top-p via simple sampling
-            auto * candidates = llama_sampler_init_simple(
-                nullptr, 0,
-                temperature,
-                top_p,
-                1,    // top_k
-                0.0f, // min_p
-                false // typical
-            );
-            new_token = llama_sampler_sample(candidates, context, logits);
-            llama_sampler_free(candidates);
+            // Build candidate list from logits
+            std::vector<llama_token_data> candidates(n_vocab);
+            for (int32_t i = 0; i < n_vocab; ++i) {
+                candidates[i].id = i;
+                candidates[i].logit = logits_arr[i];
+                candidates[i].p = 0.0f;
+            }
+
+            // Temperature scaling
+            for (auto &c : candidates) {
+                c.logit /= temperature;
+            }
+
+            // Top-p sampling: sort by logit descending, keep top cumulative probability
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const llama_token_data &a, const llama_token_data &b) {
+                          return a.logit > b.logit;
+                      });
+
+            float cumsum = 0.0f;
+            size_t keep = n_vocab;
+            for (size_t i = 0; i < n_vocab; ++i) {
+                cumsum += std::exp(candidates[i].logit - candidates[0].logit);
+                if (cumsum >= top_p) {
+                    keep = i + 1;
+                    break;
+                }
+            }
+
+            // Renormalize probabilities for kept tokens
+            float max_logit = candidates[0].logit;
+            float sum_exp = 0.0f;
+            for (size_t i = 0; i < keep; ++i) {
+                candidates[i].p = std::exp(candidates[i].logit - max_logit);
+                sum_exp += candidates[i].p;
+            }
+            for (size_t i = 0; i < keep; ++i) {
+                candidates[i].p /= sum_exp;
+            }
+
+            // Weighted sampling from top-p candidates
+            float r = static_cast<float>(std::rand()) / RAND_MAX;
+            new_token = candidates[keep - 1].id;
+            float acc = 0.0f;
+            for (size_t i = 0; i < keep; ++i) {
+                acc += candidates[i].p;
+                if (r <= acc) {
+                    new_token = candidates[i].id;
+                    break;
+                }
+            }
 
             if (new_token == eos) {
                 LOGI("EOS reached at gen=%d", n_gen);
@@ -214,7 +251,7 @@ struct InferenceEngine {
 
             // Convert token to string
             char buf[256];
-            int n = llama_token_to_piece(model, new_token, buf, sizeof(buf), 0, true);
+            int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
             if (n > 0) {
                 std::string piece(buf, n);
                 result += piece;
@@ -260,7 +297,7 @@ struct InferenceEngine {
 
     int64_t get_context_size_bytes() const {
         if (!context) return 0;
-        return (int64_t)llama_get_state_size(context);
+        return (int64_t)llama_state_get_size(context);
     }
 };
 
@@ -452,7 +489,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetModelInfo(JNIEnv *env, job
              g_engine.n_ctx,
              llama_model_n_embd(g_engine.model),
              llama_model_n_layer(g_engine.model),
-             llama_model_n_vocab(g_engine.model));
+             llama_vocab_n_tokens(g_engine.vocab));
     return env->NewStringUTF(buf);
 }
 

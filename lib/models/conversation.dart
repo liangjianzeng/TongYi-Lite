@@ -1,5 +1,3 @@
-import 'chat_message.dart';
-
 class Conversation {
   final String id;
   final String title;
@@ -24,19 +22,19 @@ class Conversation {
       'title': title,
       'modelId': modelId,
       'messageCount': messageCount,
-      'createdAt': Timestamp.fromDate(createdAt),
-      'updatedAt': Timestamp.fromDate(updatedAt),
+      'createdAt': createdAt.millisecondsSinceEpoch,
+      'updatedAt': updatedAt.millisecondsSinceEpoch,
     };
   }
 
   factory Conversation.fromMap(Map<String, dynamic> map) {
     return Conversation(
       id: map['id'] as String,
-      title: map['title'] as String,
+      title: map['title'] as String? ?? '',
       modelId: map['modelId'] as String? ?? 'qwen3-1.7b-q4_k_m',
       messageCount: map['messageCount'] as int? ?? 0,
-      createdAt: (map['createdAt'] as Timestamp).toDate(),
-      updatedAt: (map['updatedAt'] as Timestamp).toDate(),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updatedAt'] as int),
     );
   }
 }
