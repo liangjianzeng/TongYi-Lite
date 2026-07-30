@@ -39,9 +39,10 @@ third_party/llama.cpp/src/llama.cpp                      # generated
 models/*.gguf
 models/*.bin
 
-# === Android SDK tools (large, download separately) ===
-cmdline-tools.zip
-cmdline-tools/
+# === Android build artifacts ===
+android/app/.cxx/
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+android/gradle/wrapper/gradle-wrapper.jar
 
 # === OS ===
 .DS_Store

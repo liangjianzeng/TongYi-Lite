@@ -56,7 +56,7 @@ android {
 }
 
 flutter {
-    source = "../lib"
+    source = "../.."
 }
 
 //llama.cpp doesn't publish to Maven; we build from source via CMake

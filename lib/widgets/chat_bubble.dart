@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+// DateTime(0) is not const-constructible; use a static getter instead.
+final DateTime _epochZero = DateTime.fromMillisecondsSinceEpoch(0);
+
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
   final String content;
@@ -11,7 +14,7 @@ class ChatBubble extends StatelessWidget {
     super.key,
     required this.role,
     required this.content,
-    this.timestamp = const DateTime(0),
+    required this.timestamp,
     this.isStreaming = false,
     this.showAvatar = true,
   });

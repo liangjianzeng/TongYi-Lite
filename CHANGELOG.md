@@ -23,6 +23,25 @@
 
 ---
 
+## [Unreleased]
+
+### 修复
+
+- **Android 构建环境**：Gradle plugin 通过 `includeBuild` 复合构建解析，添加阿里云 Maven 镜像解决 dl.google.com 超时
+- **NDK + CMake**：安装 NDK r27.0.12077973 + CMake 3.31.6，修正 CMakeLists.txt 路径（5级 `../`）和 Vulkan 编译依赖
+- **C++ JNI bridge**：适配 llama.cpp b1017+ 新版 API（`llama_model*` → `llama_vocab*`、`llama_init_from_model`、`llama_token_eos(vocab)` 等），手动实现 temperature + top-p 采样替代不存在的 `llama_sampler_init_simple`
+- **Dart 编译错误**：修复 `ConsumerStateNotifier`（不存在）、`const DateTime(0)`（非法）、`as int? == 1`（运算符优先级）、重复 `ModelConfig` 类冲突等 ~50 个编译错误
+- **Android 资源缺失**：创建 ic_launcher mipmap + Theme.TongYiLite style + colors.xml
+- **Kotlin import**：修复 MainActivity.kt / InferenceService.kt 缺少 Intent/Context import
+
+### 新增
+
+- **设置页 UI**：完整的模型管理界面（卡片式展示、下载进度条、状态芯片、存储信息）
+- **模型下载系统**：Dio + HTTP Range 断点续传 + hf-mirror → ModelScope → HuggingFace 镜像自动回退链
+- **对话持久化**：SQLite (sqflite) 存储对话和消息历史
+
+---
+
 ## [0.1.0] — 2025-07-29
 
 ### 新增

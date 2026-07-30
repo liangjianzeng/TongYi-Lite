@@ -1,3 +1,5 @@
+enum MessageRole { user, assistant }
+
 class ChatMessage {
   final String id;
   final String conversationId;
@@ -24,8 +26,8 @@ class ChatMessage {
       'role': role.name,
       'content': content,
       'imagePath': imagePath,
-      'timestamp': Timestamp.fromDate(timestamp),
-      'isStreaming': isStreaming,
+      'timestamp': timestamp.millisecondsSinceEpoch,
+      'isStreaming': isStreaming ? 1 : 0,
     };
   }
 
@@ -36,8 +38,8 @@ class ChatMessage {
       role: MessageRole.values.firstWhere((e) => e.name == map['role']),
       content: map['content'] as String,
       imagePath: map['imagePath'] as String?,
-      timestamp: (map['timestamp'] as Timestamp).toDate(),
-      isStreaming: map['isStreaming'] as bool? ?? false,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),
+      isStreaming: (map['isStreaming'] as int?) == 1,
     );
   }
 

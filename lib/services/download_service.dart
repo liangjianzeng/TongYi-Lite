@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../models/model_info.dart';
 
 class DownloadService {
@@ -15,7 +16,6 @@ class DownloadService {
   ));
 
   static const int maxConcurrentDownloads = 2;
-  static const int chunkSize = 1024 * 1024;
 
   final Map<String, _ActiveDownload> _activeDownloads = {};
   final Map<String, DateTime> _lastProgressTime = {};
@@ -65,24 +65,28 @@ class DownloadService {
         headers['Range'] = 'bytes=$resumeFrom-';
       }
 
+      final cancelToken = CancelToken();
+      _activeDownloads[model.id] = _ActiveDownload(task: task, cancelToken: cancelToken);
+
       await _dio.download(
         url,
         tempFile.path,
         options: Options(headers: headers),
+        cancelToken: cancelToken,
         onReceiveProgress: (received, total) {
+          if (cancelToken.isCancelled) return;
           task.downloadedBytes = resumeFrom + received;
           if (task.totalBytes == 0 && total > 0) {
             task.totalBytes = total;
           }
 
           final now = DateTime.now();
-          if (_lastProgressTime[model.id] == null ||
-              now.difference(_lastProgressTime[model.id]!).inMilliseconds >= progressInterval.inMilliseconds) {
+          final last = _lastProgressTime[model.id];
+          if (last == null ||
+              now.difference(last).inMilliseconds >= progressInterval.inMilliseconds) {
             _lastProgressTime[model.id] = now;
             onProgress(task);
           }
-
-          if (task.state == DownloadState.paused) return;
         },
       );
 
@@ -93,6 +97,16 @@ class DownloadService {
 
       await tempFile.rename(finalFile.path);
       task.state = DownloadState.completed;
+      task.endTime = DateTime.now();
+      _lastProgressTime.remove(model.id);
+      onProgress(task);
+    } on DioException catch (e) {
+      if (CancelToken.isCancel(e)) {
+        // Paused or cancelled – don't set failed
+        return;
+      }
+      task.state = DownloadState.failed;
+      task.errorMessage = e.toString();
       task.endTime = DateTime.now();
       _lastProgressTime.remove(model.id);
       onProgress(task);
@@ -117,28 +131,24 @@ class DownloadService {
   Future<void> pause(String modelId) async {
     final active = _activeDownloads[modelId];
     if (active != null && active.task.state == DownloadState.downloading) {
-      await _dio.cancelToken(modelId).cancel();
+      active.cancelToken.cancel('Paused by user');
       active.task.state = DownloadState.paused;
     }
   }
 
   Future<void> resume(String modelId) async {
-    final task = _activeDownloads[modelId]?.task;
-    if (task == null || task.state != DownloadState.paused) return;
-
     final model = builtInModels().firstWhere(
       (m) => m.id == modelId,
       orElse: () => throw DownloadException('Model not found.'),
     );
 
-    task.state = DownloadState.downloading;
     await download(model, onProgress: (_) {});
   }
 
   Future<void> cancel(String modelId) async {
     final active = _activeDownloads[modelId];
     if (active != null) {
-      try { await _dio.cancelToken(modelId).cancel(); } catch (_) {}
+      try { active.cancelToken.cancel('Cancelled by user'); } catch (_) {}
       active.task.state = DownloadState.idle;
       _activeDownloads.remove(modelId);
     }
@@ -175,12 +185,6 @@ class DownloadService {
     return null;
   }
 
-  String _formatSize(int bytes) {
-    final mb = bytes / (1024 * 1024);
-    if (mb >= 1024) return '${(mb / 1024).toStringAsFixed(1)} GB';
-    return '${mb.toStringAsFixed(0)} MB';
-  }
-
   Future<Directory> _getModelsDir() async {
     final appDir = await getApplicationDocumentsDirectory();
     return Directory(p.join(appDir.path, 'models'));
@@ -189,7 +193,9 @@ class DownloadService {
 
 class _ActiveDownload {
   final DownloadTask task;
-  _ActiveDownload({required this.task});
+  final CancelToken cancelToken;
+  _ActiveDownload({required this.task, CancelToken? cancelToken})
+      : cancelToken = cancelToken ?? CancelToken();
 }
 
 class DownloadException implements Exception {
