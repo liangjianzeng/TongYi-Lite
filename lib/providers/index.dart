@@ -13,7 +13,8 @@ export 'chat_provider.dart' show
     chatNotifierProvider;
 
 export 'model_provider.dart' show
-    ModelLifecycleState,
+    ModelLifecyclePhase,
+    ModelState,
     ModelManagerNotifier,
     modelManagerProvider;
 

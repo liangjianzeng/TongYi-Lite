@@ -23,6 +23,15 @@ interface InferenceCallback {
 }
 
 /**
+ * Model loading progress log callback.
+ * Receives human-readable status messages from native C++ during model load.
+ */
+interface LoadingLogCallback {
+    /** Called with a loading status message (e.g. "正在加载 GGUF 模型文件..."). */
+    fun onLoadingLog(message: String)
+}
+
+/**
  * Thread-safe wrapper for native inference engine.
  */
 class InferenceEngine(private val context: Context) {
@@ -46,6 +55,7 @@ class InferenceEngine(private val context: Context) {
 
     private external fun nativeInit(): Boolean
     private external fun nativeLoadModel(path: String, nCtx: Int): Boolean
+    private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
     private external fun nativeStop()
@@ -75,15 +85,34 @@ class InferenceEngine(private val context: Context) {
         return initialized
     }
 
-    fun loadModel(modelPath: String, nCtx: Int = DEFAULT_N_CTX): Boolean {
+    fun loadModel(
+        modelPath: String,
+        nCtx: Int = DEFAULT_N_CTX,
+        loadingCallback: LoadingLogCallback? = null
+    ): Boolean {
         return executor.submit<Boolean> {
             val file = File(modelPath)
             if (!file.exists()) {
                 Log.e(TAG, "Model file not found: $modelPath")
+                loadingCallback?.onLoadingLog("模型文件不存在：$modelPath")
                 return@submit false
             }
+
+            // Set the native-side callback before invoking load (static ref in C++)
+            if (loadingCallback != null) {
+                nativeSetLoadingCallback(loadingCallback)
+            } else {
+                nativeSetLoadingCallback(null)
+            }
+
             val ok = nativeLoadModel(modelPath, nCtx)
             Log.i(TAG, "loadModel($modelPath): $ok")
+
+            if (ok) {
+                loadingCallback?.onLoadingLog("模型加载成功 ✓")
+            } else {
+                loadingCallback?.onLoadingLog("模型加载失败，请检查日志")
+            }
             ok
         }.get()
     }
