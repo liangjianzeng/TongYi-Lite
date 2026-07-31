@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:tongyi_lite/providers/chat_provider.dart';
+
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, storageServiceProvider;
+import '../providers/model_provider.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
 
@@ -62,6 +64,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final isGenerating = ref.watch(isGeneratingProvider);
+    final modelState = ref.watch(modelManagerProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -82,6 +85,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
       body: Column(
         children: [
+          // ---- Model status bar ----
+          _buildModelStatusBar(modelState, isGenerating),
+
           Expanded(
             child: _initiallyLoaded
                 ? _buildMessagesList()
@@ -92,6 +98,167 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
     );
   }
+
+  // =========================================================================
+  // Model status bar — shows current model state at top of chat screen
+  // =========================================================================
+
+  Widget _buildModelStatusBar(ModelState modelState, bool isGenerating) {
+    if (modelState.phase == ModelLifecyclePhase.idle && !isGenerating) {
+      return const SizedBox.shrink(); // hide when nothing to show
+    }
+
+    final color = _colorFor(modelState.phaseColor);
+    final generating = isGenerating ? ' · 思考中...' : '';
+
+    Widget trailing;
+    switch (modelState.phase) {
+      case ModelLifecyclePhase.loading:
+        trailing = SizedBox(
+          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2),
+        );
+        break;
+      case ModelLifecyclePhase.loaded:
+        if (!isGenerating) {
+          trailing = TextButton.icon(
+            onPressed: () async {
+              await ref.read(modelManagerProvider.notifier).unloadModel();
+            },
+            icon: const Icon(Icons.close, size: 16),
+            label: const Text('卸载', style: TextStyle(fontSize: 12)),
+          );
+        } else {
+          trailing = _buildPulsingDot();
+        }
+        break;
+      case ModelLifecyclePhase.unloading:
+        trailing = const SizedBox(
+          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2),
+        );
+        break;
+      case ModelLifecyclePhase.error:
+        trailing = TextButton.icon(
+          onPressed: modelState.modelId != null
+              ? () => ref.read(modelManagerProvider.notifier).loadModel(modelState.modelId!)
+              : null,
+          icon: const Icon(Icons.refresh, size: 16),
+          label: const Text('重试', style: TextStyle(fontSize: 12)),
+        );
+        break;
+      case ModelLifecyclePhase.idle:
+        trailing = TextButton.icon(
+          onPressed: () {
+            Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+          },
+          icon: const Icon(Icons.download, size: 16),
+          label: const Text('去加载', style: TextStyle(fontSize: 12)),
+        );
+        break;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: color.withValues(alpha: 0.12),
+      child: Row(
+        children: [
+          _buildPhaseIcon(modelState.phase, isGenerating),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        modelState.modelName != null && modelState.modelName!.isNotEmpty
+                            ? '${modelState.modelName!}$generating'
+                            : (modelState.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中...' : '模型未加载')),
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      ),
+                      if (modelState.phase == ModelLifecyclePhase.loading && modelState.latestLog != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          modelState.latestLog!,
+                          style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if (modelState.phase == ModelLifecyclePhase.error && modelState.errorMessage != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          modelState.errorMessage!,
+                          style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhaseIcon(ModelLifecyclePhase phase, bool isGenerating) {
+    IconData icon;
+    switch (phase) {
+      case ModelLifecyclePhase.idle:
+        icon = Icons.memory_outlined;
+        break;
+      case ModelLifecyclePhase.loading:
+        icon = Icons.sync_alt;
+        break;
+      case ModelLifecyclePhase.loaded:
+        icon = isGenerating ? Icons.auto_awesome : Icons.check_circle;
+        break;
+      case ModelLifecyclePhase.unloading:
+        icon = Icons.sync_disabled;
+        break;
+      case ModelLifecyclePhase.error:
+        icon = Icons.error_outline;
+        break;
+    }
+    return Icon(icon, size: 18);
+  }
+
+  Widget _buildPulsingDot() {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.3, end: 1.0),
+      duration: const Duration(milliseconds: 800),
+      curve: Curves.easeInOut,
+      builder: (context, value, _) => Container(
+        width: 12, height: 12,
+        decoration: BoxDecoration(
+          color: Colors.orange.shade400.withValues(alpha: value),
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+
+  Color _colorFor(String name) {
+    switch (name) {
+      case 'grey': return Colors.grey;
+      case 'blue': return Colors.blue;
+      case 'green': return Colors.green;
+      case 'orange': return Colors.orange;
+      case 'red': return Colors.red;
+      default: return Colors.grey;
+    }
+  }
+
+  // =========================================================================
+  // Chat UI
+  // =========================================================================
 
   Widget _buildMessagesList() {
     final messagesAsync = ref.watch(messagesProvider(_currentConversationId));

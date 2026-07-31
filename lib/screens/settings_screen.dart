@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../models/model_info.dart';
 import '../providers/index.dart';
@@ -13,21 +17,39 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<Map<String, dynamic>> _loadStorageInfo() async {
-    final allModels = await loadModelCatalog();
+    // Scan the disk directly — this ensures ALL .gguf files are shown even if
+    // they're no longer in the catalog (e.g. after a previous version's download).
     final cachedModels = <Map<String, dynamic>>[];
     int totalBytes = 0;
 
-    for (final model in allModels) {
-      final isCached = await ref.read(downloadNotifierProvider.notifier).isModelCached(model.id);
-      if (isCached) {
-        final sizeBytes = await ref.read(modelManagerProvider.notifier).getCachedSize(model.id);
-        cachedModels.add({
-          'name': model.name,
-          'id': model.id,
-          'sizeBytes': sizeBytes,
-        });
-        totalBytes += sizeBytes;
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final modelsDir = Directory('${appDir.path}/models');
+      if (await modelsDir.exists()) {
+        for (final entity in await modelsDir.list().toList()) {
+          if (entity is File && entity.path.endsWith('.gguf')) {
+            final fileName = p.basenameWithoutExtension(entity.path); // e.g. "qwen3-1.7b-q4_k_m"
+            final sizeBytes = await entity.length();
+
+            // Try to find the model name from catalog; fall back to filename if not found.
+            String displayName = fileName;
+            try {
+              final allModels = await loadModelCatalog();
+              final match = allModels.where((m) => m.id == fileName).toList();
+              if (match.isNotEmpty) displayName = match.first.name;
+            } catch (_) {}
+
+            cachedModels.add({
+              'name': displayName,
+              'id': fileName,
+              'sizeBytes': sizeBytes,
+            });
+            totalBytes += sizeBytes;
+          }
+        }
       }
+    } catch (e) {
+      debugPrint('[Settings] Failed to scan storage: $e');
     }
 
     return {
@@ -38,6 +60,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final modelState = ref.watch(modelManagerProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('设置'),
@@ -161,14 +185,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       _buildSectionHeader('🧠 推理引擎'),
                       Consumer(
                         builder: (context, ref, _) {
-                          final lifecycle = ref.watch(modelManagerProvider);
-                          return Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text('状态:', style: TextStyle(fontSize: 14)),
-                              _buildLifecycleChip(lifecycle),
-                            ],
-                          );
+                          return _buildEngineSection(modelState, ref);
                         },
                       ),
                     ],
@@ -181,6 +198,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const SizedBox(height: 32),
         ],
       ),
+    );
+  }
+
+  // -----------------------------------------------------------------------
+  // Engine section — contextual buttons based on model lifecycle state.
+  // Receives ModelState directly from outer ref.watch to avoid notifier access issues.
+  // -----------------------------------------------------------------------
+  Widget _buildEngineSection(ModelState ms, WidgetRef ref) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('状态:', style: const TextStyle(fontSize: 14)),
+            _buildLifecycleChipFromState(ms),
+          ],
+        ),
+        if (ms.modelName != null && ms.modelName!.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('当前模型:', style: const TextStyle(fontSize: 14)),
+              Text(ms.modelName!,
+                  style: const TextStyle(fontWeight: FontWeight.w500)),
+            ],
+          ),
+        ],
+
+        // ---- Contextual action buttons in engine section ----
+        const SizedBox(height: 12),
+        if (ms.isLoaded) ...[
+          OutlinedButton.icon(
+            onPressed: () async {
+              await ref.read(modelManagerProvider.notifier).unloadModel();
+            },
+            icon: const Icon(Icons.close, size: 18),
+            label: const Text('卸载当前模型'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.red.shade700,
+            ),
+          ),
+        ] else if (ms.isError && ms.modelId != null) ...[
+          ElevatedButton.icon(
+            onPressed: () async {
+              await ref.read(modelManagerProvider.notifier).loadModel(ms.modelId!);
+            },
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('重试加载'),
+          ),
+        ] else ...[
+          const SizedBox(height: 4),
+          const Text(
+            '请先在上方选择一个模型进行加载',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ],
+      ],
     );
   }
 
@@ -263,6 +339,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         child: Text('推荐', style: TextStyle(fontSize: 12, color: Colors.blue)),
                       ),
                     ],
+
+                    // ---- In-card lifecycle indicator for cached models ----
+                    if (isCached) ...[
+                      const SizedBox(width: 12),
+                      _buildInCardLifecycleChip(model.id),
+                    ],
                   ],
                 ),
 
@@ -338,6 +420,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Widget _buildActionButtons(ModelConfig model, DownloadTask? task, bool isCached) {
     final activeState = task?.state ?? DownloadState.idle;
+    final manager = ref.read(modelManagerProvider.notifier);
 
     switch (activeState) {
       case DownloadState.downloading:
@@ -365,26 +448,60 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       case DownloadState.completed:
       default:
         if (isCached) {
+          final isLoading = manager.isLoading;
+          final isLoadedHere = manager.modelId == model.id && manager.isLoadedState;
+
           return Row(
             children: [
-              ElevatedButton.icon(
-                onPressed: () async {
-                  final ok = await ref.read(modelManagerProvider.notifier).loadModel(model.id);
-                  if (!mounted) return;
-                  if (ok) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('✅ ${model.name} 已加载到内存')),
-                    );
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('❌ 模型加载失败'), backgroundColor: Colors.red),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.memory, size: 18),
-                label: const Text('加载到内存'),
-              ),
+              // ---- Load / Loading / Loaded button ----
+              if (isLoadedHere) ...[
+                ElevatedButton.icon(
+                  onPressed: null,
+                  icon: const Icon(Icons.check_circle, size: 18),
+                  label: const Text('已加载'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green.shade50,
+                    foregroundColor: Colors.green.shade700,
+                  ),
+                ),
+              ] else if (isLoading) ...[
+                // Show a loading indicator inline while model is being loaded.
+                const SizedBox(
+                  width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: null,
+                  icon: const SizedBox.shrink(),
+                  label: Text('加载中...'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue.shade50,
+                    foregroundColor: Colors.blue.shade700,
+                  ),
+                ),
+              ] else ...[
+                ElevatedButton.icon(
+                  onPressed: manager.isBusy ? null : () => _handleLoadModel(model),
+                  icon: const Icon(Icons.memory, size: 18),
+                  label: const Text('加载到内存'),
+                ),
+              ],
+
               const SizedBox(width: 8),
+
+              // ---- Unload button — only visible when this model is loaded ----
+              if (isLoadedHere) ...[
+                OutlinedButton.icon(
+                  onPressed: manager.isBusy ? null : () async {
+                    await ref.read(modelManagerProvider.notifier).unloadModel();
+                  },
+                  icon: const Icon(Icons.close, size: 18),
+                  label: const Text('卸载'),
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.orange.shade700),
+                ),
+              ],
+
+              // ---- Delete button ----
               OutlinedButton.icon(
                 onPressed: () {
                   ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
@@ -402,6 +519,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             label: const Text('下载'),
           );
         }
+    }
+  }
+
+  /// Centralized model-load handler with proper user feedback.
+  Future<void> _handleLoadModel(ModelConfig model) async {
+    final manager = ref.read(modelManagerProvider.notifier);
+
+    // If a different model is currently loaded, confirm before switching.
+    if (manager.isLoadedState && manager.modelId != model.id) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('切换模型'),
+          content: Text('${model.name} 将替换当前运行的 ${manager.currentModelName}，是否继续？'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('切换')),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    final ok = await manager.loadModel(model.id);
+    if (!mounted) return;
+
+    if (ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('✅ ${model.name} 已加载到内存'), backgroundColor: Colors.green),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('❌ 模型加载失败，请查看上方错误信息'), backgroundColor: Colors.red),
+      );
     }
   }
 
@@ -445,25 +596,70 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  Widget _buildLifecycleChip(ModelLifecycleState lifecycle) {
+  /// Small lifecycle chip inside a model card (for cached models only).
+  Widget _buildInCardLifecycleChip(String modelId) {
+    final manager = ref.watch(modelManagerProvider.notifier);
+
+    if (manager.modelId != modelId) return const SizedBox.shrink();
+
     Color color;
     String label;
-    switch (lifecycle) {
-      case ModelLifecycleState.idle:
+    switch (manager.phase) {
+      case ModelLifecyclePhase.idle:
         color = Colors.grey;
         label = '未加载';
         break;
-      case ModelLifecycleState.loading:
+      case ModelLifecyclePhase.loading:
         color = Colors.blue;
         label = '加载中...';
         break;
-      case ModelLifecycleState.loaded:
+      case ModelLifecyclePhase.loaded:
         color = Colors.green;
         label = '已加载';
         break;
-      case ModelLifecycleState.unloading:
+      case ModelLifecyclePhase.unloading:
         color = Colors.orange;
         label = '卸载中...';
+        break;
+      case ModelLifecyclePhase.error:
+        color = Colors.red;
+        label = '错误';
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(label, style: TextStyle(fontSize: 11, color: color)),
+    );
+  }
+
+  Widget _buildLifecycleChipFromState(ModelState modelState) {
+    Color color;
+    String label;
+    switch (modelState.phase) {
+      case ModelLifecyclePhase.idle:
+        color = Colors.grey;
+        label = '未加载';
+        break;
+      case ModelLifecyclePhase.loading:
+        color = Colors.blue;
+        label = '加载中...';
+        break;
+      case ModelLifecyclePhase.loaded:
+        color = Colors.green;
+        label = '已加载';
+        break;
+      case ModelLifecyclePhase.unloading:
+        color = Colors.orange;
+        label = '卸载中...';
+        break;
+      case ModelLifecyclePhase.error:
+        color = Colors.red;
+        label = '错误';
         break;
     }
 

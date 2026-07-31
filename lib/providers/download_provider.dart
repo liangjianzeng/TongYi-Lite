@@ -3,7 +3,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/model_info.dart';
 import '../services/download_service.dart';
-import '../services/model_manager.dart';
 
 class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   final DownloadService _downloadService;
@@ -34,11 +33,17 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     final existing = state[modelId];
     if (existing == null || existing.state != DownloadState.paused) return;
 
-    if (ModelManager().getModel(modelId) == null) return;
+    // Save the paused progress so we can restore it after download() creates a fresh task.
+    final savedProgress = existing.downloadedBytes;
 
     await _downloadService.resume(modelId, onProgress: (task) {
-        state = {...state, task.modelId: task};
-      });
+      // If this is a resume and the new task's progress is less than what we had,
+      // restore from disk — the .tmp file already contains saved data.
+      if (savedProgress > 0 && task.downloadedBytes < savedProgress) {
+        task = task.copyWith(downloadedBytes: savedProgress);
+      }
+      state = {...state, task.modelId: task};
+    });
   }
 
   Future<void> cancelDownload(String modelId) async {

@@ -229,7 +229,152 @@ class DownloadService {
     final model = ModelManager().getModel(modelId);
     if (model == null) throw DownloadException('Model not found: $modelId');
 
-    await download(model, onProgress: onProgress);
+    // Resume: create a fresh task with state=downloading. The .tmp file on disk
+    // provides the true resume data — we don't need to preserve progress in memory.
+    final task = DownloadTask(
+      modelId: model.id,
+      state: DownloadState.downloading,
+      totalBytes: model.sizeBytes,
+      startTime: DateTime.now(),
+    );
+
+    await _doDownload(model, onProgress: (t) {
+      // For resume, update the caller's task with progress.
+      if (t.downloadedBytes > 0) {
+        task.downloadedBytes = t.downloadedBytes;
+        task.totalBytes = t.totalBytes;
+        task.state = t.state;
+      }
+      onProgress(t);
+    }, isNewTask: false, existingTask: task);
+  }
+
+  /// Internal download logic shared by [download] and [resume].
+  Future<void> _doDownload(
+    ModelConfig model, {
+    required void Function(DownloadTask) onProgress,
+    Duration progressInterval = const Duration(milliseconds: 500),
+    bool isNewTask = true,
+    DownloadTask? existingTask,
+  }) async {
+    if (_activeDownloads.length >= maxConcurrentDownloads) {
+      throw DownloadException('Only one download at a time.');
+    }
+
+    final task = isNewTask
+        ? (existingTask ?? DownloadTask(
+            modelId: model.id,
+            state: DownloadState.downloading,
+            totalBytes: model.sizeBytes,
+            startTime: DateTime.now(),
+          ))
+        : existingTask!; // For resume, caller must provide the task.
+
+    _activeDownloads[model.id] = _ActiveDownload(task: task);
+    if (isNewTask) onProgress(task);
+
+    CancelToken? cancelToken;
+    try {
+      // Step 1: Resolve URL and verify server supports Range requests
+      final hasPartialTmp = await _hasPartialTmp(model.id);
+      _UrlInfo? urlInfo;
+
+      if (!hasPartialTmp) {
+        urlInfo = await _resolveUrl(model.mirrors);
+        if (urlInfo == null) {
+          throw DownloadException('All mirrors unreachable.');
+        }
+      } else {
+        final firstMirror = model.mirrors.first;
+        urlInfo = _UrlInfo(url: firstMirror.url, supportsRange: true);
+        debugPrint('[DownloadService] Resume detected for ${model.id}, skipping HEAD probe');
+      }
+
+      final dir = await _getModelsDir();
+      await dir.create(recursive: true);
+      final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
+      final finalFile = File(p.join(dir.path, model.id + '.gguf'));
+
+      // Step 2: Decide resume point from any existing partial .tmp
+      int downloadedSoFar = 0;
+      final supportsRange = urlInfo.supportsRange;
+
+      if (await tempFile.exists()) {
+        final len = await tempFile.length();
+        if (len >= model.sizeBytes && model.sizeBytes > 0) {
+          // Already complete — just promote and finish
+          await tempFile.rename(finalFile.path);
+          task.state = DownloadState.completed;
+          task.downloadedBytes = model.sizeBytes;
+          task.endTime = DateTime.now();
+          onProgress(task);
+          _activeDownloads.remove(model.id);
+          return;
+        } else if (supportsRange && len > 0) {
+          downloadedSoFar = len;
+          task.downloadedBytes = downloadedSoFar;
+          debugPrint('[DownloadService] Resuming from ${_formatBytes(downloadedSoFar)}');
+          onProgress(task);
+        } else {
+          debugPrint('[DownloadService] No resume possible, restarting fresh');
+          await tempFile.delete();
+          downloadedSoFar = 0;
+        }
+      }
+
+      // Step 3: Download. Use ranged-append when Range + partial file exist;
+      // otherwise a plain single-connection download.
+      cancelToken = CancelToken();
+      _activeDownloads[model.id] = _ActiveDownload(task: task, cancelToken: cancelToken);
+
+      if (supportsRange && downloadedSoFar > 0) {
+        await _downloadRange(
+          urlInfo.url, tempFile, downloadedSoFar, model.sizeBytes,
+          task, cancelToken, onProgress, progressInterval,
+        );
+      } else {
+        await _dio.download(
+          urlInfo.url, tempFile.path,
+          cancelToken: cancelToken,
+          onReceiveProgress: (received, total) {
+            task.downloadedBytes = received;
+            if (task.totalBytes == 0 && total > 0) task.totalBytes = model.sizeBytes;
+            _emitProgress(task, progressInterval, onProgress);
+          },
+        );
+      }
+
+      // Step 4: Verify completeness
+      final actualSize = await tempFile.length();
+      if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.95) {
+        throw DownloadException(
+            'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(model.sizeBytes)}');
+      }
+
+      // Step 5: Promote .tmp to final file
+      await tempFile.rename(finalFile.path);
+      task.state = DownloadState.completed;
+      task.endTime = DateTime.now();
+      _lastProgressTime.remove(model.id);
+      onProgress(task);
+    } catch (e) {
+      if (e is DioException && CancelToken.isCancel(e)) {
+        return; // Paused/cancelled — keep .tmp for resume.
+      }
+      task.state = DownloadState.failed;
+      task.errorMessage = _cleanErrorMessage(e.toString());
+      task.endTime = DateTime.now();
+      _lastProgressTime.remove(model.id);
+      onProgress(task);
+
+      try {
+        final dir = await _getModelsDir();
+        final tmp = File(p.join(dir.path, model.id + '.gguf.tmp'));
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+    } finally {
+      _activeDownloads.remove(model.id);
+    }
   }
 
   /// Check if a partial .tmp file exists for the given model.

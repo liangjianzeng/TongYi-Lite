@@ -4,10 +4,32 @@ import 'package:flutter/services.dart';
 class InferenceService {
   static const _channel = MethodChannel('com.dgxspark.tongyilite/inference');
   static const _tokenChannel = EventChannel('com.dgxspark.tongyilite/tokens');
+  static const _loadingLogChannel = EventChannel('com.dgxspark.tongyilite/loading_logs');
+
+  StreamSubscription<String>? _loadingLogSubscription;
+
+  // Loading log callback — invoked when native pushes a loading progress message.
+  void Function(String? message)? onLoadingLog;
 
   static final InferenceService _instance = InferenceService._();
   factory InferenceService() => _instance;
-  InferenceService._();
+  InferenceService._() {
+    _setupLoadingLogListener();
+  }
+
+  /// Set up the EventChannel listener for native loading progress logs.
+  void _setupLoadingLogListener() {
+    final stream = _loadingLogChannel.receiveBroadcastStream();
+    _loadingLogSubscription = stream.map((event) => event.toString()).listen((message) {
+      onLoadingLog?.call(message);
+    }, onError: (err) {
+      // Silently ignore — channel may not be set up yet during early init.
+    });
+  }
+
+  void dispose() {
+    _loadingLogSubscription?.cancel();
+  }
 
   // ------------------------------------------------------------------
   // Initialization

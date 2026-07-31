@@ -3,14 +3,16 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../services/inference_service.dart';
 import '../services/storage_service.dart';
 import 'shared_providers.dart' show inferenceServiceProvider;
 
-// Re-export for other files that need these types
-export 'model_provider.dart' show ModelManagerNotifier, ModelLifecycleState;
+// Re-export for other files that need these types.
+export 'model_provider.dart' show ModelManagerNotifier, ModelState, ModelLifecyclePhase;
+
+// Import model_managerProvider so ChatNotifier can reference it without circular imports.
+import 'model_provider.dart';
 
 // ---------------------------------------------------------------------------
 // Services (singletons)
@@ -82,37 +84,30 @@ class ChatNotifier extends StateNotifier<bool> {
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
   /// Ensure the correct model is loaded before sending a message.
+  /// Uses [modelManagerProvider] so that loading state is visible in UI.
   Future<bool> ensureModelLoaded(String modelId) async {
-    final isLoaded = await _inference.isLoaded();
-    if (!isLoaded) {
-      return await loadModelFromFile(modelId);
-    }
-    debugPrint('[ChatNotifier] Model already loaded, target: $modelId');
-    return true;
-  }
+    // Delegate to ModelManagerNotifier — it handles unload-previous + state.
+    final manager = _ref.read(modelManagerProvider.notifier);
 
-  /// Load a model from the cached .gguf file on disk.
-  Future<bool> loadModelFromFile(String modelId) async {
-    try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final path = '${appDir.path}/models/${modelId}.gguf';
-      debugPrint('[ChatNotifier] Loading model from: $path');
-      return await _inference.loadModel(path);
-    } catch (e) {
-      debugPrint('[ChatNotifier] loadModelFromFile failed: $e');
-      return false;
+    if (manager.state.isLoaded && manager.currentModelId == modelId) {
+      debugPrint('[ChatNotifier] Model $modelId already loaded');
+      return true;
     }
+
+    // If a different model is loaded, we still go through loadModel which
+    // handles the unload-then-load flow.
+    return await manager.loadModel(modelId);
   }
 
   /// Send a message to the currently loaded model.
-  /// Automatically ensures the correct model is loaded first.
+  /// Automatically ensures the correct model is loaded first via ModelManager.
   Future<String> sendMessage(
     String conversationId,
     String prompt,
   ) async {
     final targetModelId = _ref.read(currentModelIdProvider);
 
-    // Step 1: Ensure model is loaded
+    // Step 1: Ensure model is loaded (via ModelManager for state consistency)
     final ok = await ensureModelLoaded(targetModelId);
     if (!ok) {
       return '[模型加载失败，请在设置中重新下载并加载]';

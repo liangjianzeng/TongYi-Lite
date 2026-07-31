@@ -51,6 +51,19 @@ class MainActivity : FlutterActivity() {
             }
         })
 
+        // Set up the loading log EventChannel for model load progress messages
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/loading_logs"
+        ).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                LoadingLogStream.sink = events
+            }
+            override fun onCancel(arguments: Any?) {
+                LoadingLogStream.sink = null
+            }
+        })
+
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.dgxspark.tongyilite/inference"
@@ -80,10 +93,24 @@ class MainActivity : FlutterActivity() {
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx)
-                mainHandler.post { result.success(ok) }
+                val ok = engine.loadModel(path, nCtx, object : LoadingLogCallback {
+                    override fun onLoadingLog(message: String) {
+                        mainHandler.post {
+                            LoadingLogStream.sink?.success(message)
+                        }
+                    }
+                })
+                // Clear loading logs on completion (whether success or failure)
+                mainHandler.post {
+                    LoadingLogStream.sink?.success(null) // null signals end of batch
+                    result.success(ok)
+                }
             } catch (e: Exception) {
-                mainHandler.post { result.error("LOAD_FAILED", e.message, null) }
+                mainHandler.post {
+                    LoadingLogStream.sink?.success("加载异常: ${e.message}")
+                    LoadingLogStream.sink?.success(null)
+                    result.error("LOAD_FAILED", e.message, null)
+                }
             }
         }.start()
     }
@@ -210,5 +237,13 @@ class MainActivity : FlutterActivity() {
  * Set from Dart via EventChannel setup.
  */
 object TokenStream {
+    var sink: io.flutter.plugin.common.EventChannel.EventSink? = null
+}
+
+/**
+ * Singleton bridge for the loading log EventChannel.
+ * Used to push model-loading progress messages to Dart.
+ */
+object LoadingLogStream {
     var sink: io.flutter.plugin.common.EventChannel.EventSink? = null
 }

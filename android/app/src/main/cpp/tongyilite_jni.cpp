@@ -25,11 +25,17 @@
 #include "common.h"
 
 #define LOG_TAG "TongYiLite"
+static void reportLoadingLog(const char *message);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 // ============================================================================
+// LoadingCallback — C-side callback interface for loading progress logs
+// ============================================================================
+
+// ============================================================================
+static void reportLoadingLog(const char *message);
 // InferenceEngine — wraps model + context + generation
 // ============================================================================
 
@@ -62,6 +68,7 @@ struct InferenceEngine {
         unload();
 
         LOGI("Loading model from: %s", model_path);
+        reportLoadingLog("正在加载 GGUF 模型文件...");
 
         // Model params
         model_params = llama_model_default_params();
@@ -72,10 +79,20 @@ struct InferenceEngine {
         model = llama_model_load_from_file(model_path, model_params);
         if (!model) {
             LOGE("Failed to load model from: %s", model_path);
+            reportLoadingLog("模型文件加载失败，请检查文件是否完整");
             return false;
         }
 
         vocab = llama_model_get_vocab(model);
+
+        const int n_embd  = llama_model_n_embd(model);
+        const int n_layer = llama_model_n_layer(model);
+        const int64_t n_params = llama_model_n_params(model);
+        LOGI("GGUF model loaded. params=%lld, n_embd=%d, n_layer=%d",
+             (long long)n_params, n_embd, n_layer);
+        char buf[256];
+        snprintf(buf, sizeof(buf), "模型文件加载完成 (%.1fM 参数)", n_params / 1'000'000.0);
+        reportLoadingLog(buf);
 
         // Context params
         ctx_params = llama_context_default_params();
@@ -87,11 +104,16 @@ struct InferenceEngine {
         if (n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", n_ctx, trained_ctx);
             ctx_params.n_ctx = trained_ctx;
+            char buf2[128];
+            snprintf(buf2, sizeof(buf2), "上下文已限制为训练最大值 %d", trained_ctx);
+            reportLoadingLog(buf2);
         }
 
+        reportLoadingLog("正在初始化推理上下文...");
         context = llama_init_from_model(model, ctx_params);
         if (!context) {
             LOGE("Failed to create context (OOM?)");
+            reportLoadingLog("创建推理上下文失败（内存不足?）");
             llama_model_free(model);
             model = nullptr;
             return false;
@@ -103,6 +125,9 @@ struct InferenceEngine {
              n_ctx,
              llama_model_n_embd(model),
              llama_model_n_layer(model));
+        char buf3[128];
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", n_ctx);
+        reportLoadingLog(buf3);
         return true;
     }
 
@@ -233,7 +258,7 @@ struct InferenceEngine {
             }
 
             // Weighted sampling from top-p candidates
-            float r = static_cast<float>(std::rand()) / RAND_MAX;
+            float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
             new_token = candidates[keep - 1].id;
             float acc = 0.0f;
             for (size_t i = 0; i < keep; ++i) {
@@ -347,12 +372,50 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeInit(JNIEnv *env, jobject) {
     return JNI_TRUE;
 }
 
+// Global ref for the loading callback object (set via nativeSetLoadingCallback, used during load)
+static jobject g_loading_callback_obj = nullptr;
+
+// Inline helper — calls onLoadingLog() on the Kotlin callback if it is set.
+static void reportLoadingLog(const char *message) {
+    if (!g_loading_callback_obj) return;
+    JNIEnv *env = get_env();
+    if (!env) return;
+    jclass cls = env->GetObjectClass(g_loading_callback_obj);
+    jmethodID mid = env->GetMethodID(cls, "onLoadingLog", "(Ljava/lang/String;)V");
+    jstring jmsg = env->NewStringUTF(message);
+    env->CallVoidMethod(g_loading_callback_obj, mid, jmsg);
+    env->DeleteLocalRef(jmsg);
+    env->DeleteLocalRef(cls);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx
 ) {
     std::string path = jstring_to_std(env, jpath);
-    return g_engine.load(path.c_str(), n_ctx) ? JNI_TRUE : JNI_FALSE;
+    bool ok = g_engine.load(path.c_str(), n_ctx);
+
+    // Cleanup callback ref after load completes (success or failure)
+    if (g_loading_callback_obj) {
+        env->DeleteGlobalRef(g_loading_callback_obj);
+        g_loading_callback_obj = nullptr;
+    }
+
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Called from Kotlin to register the loading callback before invoking nativeLoadModel.
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetLoadingCallback(
+    JNIEnv *env, jobject, jobject jcallback
+) {
+    if (g_loading_callback_obj) {
+        env->DeleteGlobalRef(g_loading_callback_obj);
+        g_loading_callback_obj = nullptr;
+    }
+    if (jcallback != nullptr) {
+        g_loading_callback_obj = env->NewGlobalRef(jcallback);
+    }
 }
 
 JNIEXPORT void JNICALL
