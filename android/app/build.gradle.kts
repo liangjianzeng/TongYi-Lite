@@ -20,17 +20,24 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../key.jks")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs["release"]
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs["debug"]
         }
     }
 
@@ -48,6 +55,16 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.31.6"
+        }
+    }
+
+    // Force Android to extract .so files to /data/app/<pkg>/lib/ on install.
+    // Default (extractNativeLibs=false) keeps .so inside the APK, but Flutter's
+    // custom ClassLoader can't find them via System.loadLibrary(). Setting
+    // useLegacyPackaging=true ensures .so files are extracted and loadable.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 

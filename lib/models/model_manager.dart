@@ -1,12 +1,16 @@
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import '../models/model_info.dart';
 
 /// Manages model caching and local storage.
 class ModelManager {
   static final ModelManager _instance = ModelManager._internal();
   factory ModelManager() => _instance;
   ModelManager._internal();
+
+  /// All built-in available models (read-only list).
+  List<ModelConfig> get allModels => builtInModels();
 
   Future<Directory> _getModelsDir() async {
     final appDir = await getApplicationDocumentsDirectory();
