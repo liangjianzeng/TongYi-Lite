@@ -34,10 +34,10 @@
 |------|------|
 | **目标平台** | Android APK (API 33+) |
 | **推理引擎** | llama.cpp b1017+ (Vulkan GPU / KleidiAI / SME2) |
-| **默认模型** | Qwen3-1.7B-Instruct Q4_K_M (~1.2 GB) |
+| **默认模型** | 以 `assets/models_catalog.json` 中 `recommended:true` 为准（Qwen3.5-4B / Gemma 3 4B / Qwen3-1.7B 等） |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调 (无 HTTP Server) |
-| **模型下载源** | hf-mirror.com → ModelScope → HuggingFace（自动回退） |
+| **模型下载源** | hf-mirror.com → ModelScope（自动回退，见 `assets/models_catalog.json`） |
 
 ---
 
@@ -65,9 +65,10 @@ TongYi-Lite/
 │   ├── ggml/src/ggml-vulkan/       # Vulkan GPU 后端
 │   └── ...
 ├── lib/                              # Flutter Dart 层
-│   ├── main.dart                     # 入口（初始化 JNI + ProviderScope）
+│   ├── main.dart                     # 入口（初始化 JNI + 加载模型目录 + ProviderScope）
 │   ├── models/
-│   │   ├── model_info.dart           # ModelConfig / MirrorEntry / DownloadTask
+│   │   ├── model_info.dart           # ModelConfig / MirrorEntry / DownloadTask（含 fromJson）
+│   │   ├── model_catalog.dart        # 模型目录加载器（读 assets/models_catalog.json / 可选远程）
 │   │   ├── chat_message.dart         # 聊天消息模型
 │   │   └── conversation.dart         # 会话模型
 │   ├── services/
@@ -175,22 +176,62 @@ flutter build appbundle --release
 
 ### 镜像策略（HuggingFace 优先走国内）
 
+> 每个模型的可用镜像写在该模型的 `mirrors` 数组里（见 `assets/models_catalog.json`），
+> App 按数组顺序依次尝试，前一个失败时自动切换下一个源。
+
+当前内置模型的镜像顺序为：
+
 ```
-1. hf-mirror.com     → HuggingFace 国内 CDN（最快）
-2. ModelScope        → 阿里云模型社区（备选）
-3. huggingface.co    → 直连（最后手段）
+1. hf-mirror.com     → HuggingFace 国内 CDN（最快，支持 Range 续传）
+2. ModelScope        → 阿里云模型社区（兜底回退）
 ```
 
-自动检测镜像可用性，失败时无缝切换下一个源。
+如需增加 `huggingface.co` 直连等其它源，只需在对应模型的 `mirrors` 里追加一项即可。
 
-### 支持的模型
+> **多线程断点续传**：hf-mirror.com 基于 `aria2c`（官方 `hfd.sh` 工具）支持多线程（`-x`）+ 断点续传（`-c`）；App 内 Dio 也通过 HTTP `Range` 头实现真正的断点续传（网络中断后从断点继续，不会从头重下）。ModelScope 直链不支持 `Range`，仅作为兜底回退源。
 
-| 模型 | 大小 | 类型 | 最低 RAM |
-|------|------|------|---------|
-| Qwen3-0.6B (Q4_K_M) | 420 MB | text | 500 MB |
-| Qwen3-1.7B (Q4_K_M) | 1.2 GB | text | 1.2 GB |
-| Qwen3-1.7B (Q5_K_M) | 1.5 GB | text | 1.5 GB |
-| Qwen3.5-4B (Q4_K_M) | 2.5 GB | vision | 3.5 GB |
+### 模型目录（配置文件驱动）
+
+> ⚠️ **模型列表不再写死在代码里。** 全部模型定义维护在 **`assets/models_catalog.json`**，
+> 由 `lib/models/model_catalog.dart` 在应用启动时加载（`ModelManager().init()`）。
+> **新增 / 调整 / 下架模型只需修改这个 JSON，无需改代码、无需重新编译。**
+
+**当前内置模型（以 `assets/models_catalog.json` 为准）：**
+
+| 模型 | 大小 | 类型 | 最低 RAM | 镜像 |
+|------|------|------|---------|------|
+| Qwen3-VL-2B (Q4_K_M) | 1.0 GB | vision | 2.0 GB | ModelScope |
+| Qwen3-VL-4B (Q4_K_M) | 2.3 GB | vision | 4.0 GB | ModelScope |
+| Gemma 3 4B (Q4_K_M) | 2.6 GB | vision | 3.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-4B (Q4_K_M) | 2.7 GB | text | 3.5 GB | hf-mirror + ModelScope |
+| Qwen3-0.6B (Q8_0) | 596 MB | text | 1.0 GB | ModelScope |
+| Qwen3-1.7B (Q4_K_M) | 2.3 GB | text | 3.0 GB | ModelScope |
+| Qwen3-4B (Q4_K_M) | 2.3 GB | text | 4.0 GB | ModelScope |
+| Qwen2.5-1.5B (Q4_K_M) | 1.1 GB | text | 1.5 GB | ModelScope |
+| Qwen2.5-0.5B (Q4_K_M) | 468 MB | text | 300 MB | ModelScope |
+| Qwen2.5-3B (Q4_K_M) | 2.0 GB | text | 3.5 GB | ModelScope |
+
+**新增一个模型只需在 JSON 的 `models` 数组追加一项：**
+
+```json
+{
+  "id": "my-model-q4_k_m",
+  "name": "My Model (Q4_K_M)",
+  "type": "text",
+  "mirrors": [
+    { "url": "https://hf-mirror.com/owner/repo/resolve/main/model-Q4_K_M.gguf", "source": "hf-mirror" },
+    { "url": "https://modelscope.cn/api/v1/models/owner/repo/resolve/main/model-Q4_K_M.gguf", "source": "modelscope" }
+  ],
+  "sizeGB": 2.7,
+  "sizeMBDisplay": "2.7 GB",
+  "recommended": false,
+  "minRamMB": 3500,
+  "sha256Hash": null
+}
+```
+
+（可选）把 `lib/models/model_catalog.dart` 里的 `remoteUrl` 指向自有 CDN 上的同名 JSON，
+即可在发版后**热更新模型列表**，连重新打包都不需要。
 
 ### 技术实现
 
@@ -238,13 +279,13 @@ flutter logs | grep TongYiLite
 |---|------|------|------|
 | 1 | **JNI 直调** | ✅ | 无 HTTP Server，高效省内存 |
 | 2 | **CPU 推理** | ✅ | KleidiAI + SME2 加速（Vulkan 不可用时回退） |
-| 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + hf-mirror/ModelScope/HF 镜像自动回退 |
+| 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 
 ### P1 计划 🚧
 
-6. **视觉理解**：Qwen3-VL-3B + mmproj（模型已就绪）
+6. **视觉理解**：Qwen3-VL-2B / 4B（Q4_K_M）已纳入模型目录；mmproj 视觉投影器待建模（当前仅文本/单图输入路径）
 7. **语音识别**：sherpa-onnx (WeNet) 流式 STT
 8. **TTS 播报**：Android TextToSpeech 离线引擎
 9. **Plugin 市场**：热插拔、签名验证、沙箱

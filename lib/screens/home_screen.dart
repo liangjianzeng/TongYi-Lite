@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:tongyi_lite/providers/chat_provider.dart';
-import '../models/chat_message.dart';
-import '../services/inference_service.dart';
-import '../services/storage_service.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
 
@@ -143,7 +140,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 4)],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
       ),
       child: Row(
         children: [
@@ -157,7 +154,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   borderSide: BorderSide.none,
                 ),
                 filled: true,
-                fillColor: Theme.of(context).colorScheme.surfaceVariant,
+                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 suffixIcon: Row(
                   mainAxisSize: MainAxisSize.min,

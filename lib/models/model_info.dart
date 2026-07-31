@@ -1,7 +1,11 @@
 // ============================================================
 // Model metadata, mirror entries, and download task state.
-// All model configurations live here; the UI reads from it.
+// All model configurations live in assets/models_catalog.json
+// and are loaded dynamically via ModelCatalog.load().
 // ============================================================
+
+import 'package:flutter/foundation.dart' show debugPrint;
+import 'model_catalog.dart';
 
 enum ModelType { text, vision }
 
@@ -34,6 +38,20 @@ class MirrorEntry {
     final masked = url.replaceAll(RegExp(r'https://[^/]+'), 'https://***');
     return 'Mirror($source: $masked)';
   }
+
+  factory MirrorEntry.fromJson(Map<String, dynamic> json) {
+    return MirrorEntry(json['url'] as String, json['source'] as String);
+  }
+}
+
+ModelType modelTypeFromJson(String value) {
+  switch (value.toLowerCase()) {
+    case 'vision':
+      return ModelType.vision;
+    case 'text':
+    default:
+      return ModelType.text;
+  }
 }
 
 class ModelConfig {
@@ -64,68 +82,52 @@ class ModelConfig {
 
   @override
   String toString() => 'ModelConfig($id, ${sizeMBDisplay}, type=${modelTypeLabel(type)})';
+
+  factory ModelConfig.fromJson(Map<String, dynamic> json) {
+    final sizeGB = (json['sizeGB'] as num?)?.toDouble() ?? 0.0;
+    return ModelConfig(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      type: modelTypeFromJson(json['type'] as String? ?? 'text'),
+      mirrors: (json['mirrors'] as List)
+          .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      sizeBytes: (sizeGB * 1024 * 1024 * 1024).round(),
+      sizeMBDisplay: json['sizeMBDisplay'] as String? ?? '${sizeGB.toStringAsFixed(1)} GB',
+      recommended: json['recommended'] as bool? ?? false,
+      minRamMB: json['minRamMB'] as int? ?? 0,
+      sha256Hash: json['sha256Hash'] as String?,
+    );
+  }
 }
 
-List<ModelConfig> builtInModels() {
-  return [
-    ModelConfig(
-      id: 'qwen3-1.7b-q4_k_m',
-      name: 'Qwen3-1.7B Instruct (Q4_K_M)',
-      type: ModelType.text,
-      mirrors: [
-        MirrorEntry('https://hf-mirror.com/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf', 'hf-mirror'),
-        MirrorEntry('https://modelscope.cn/guanpengchuan/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf', 'modelscope'),
-        MirrorEntry('https://huggingface.co/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf', 'huggingface'),
-      ],
-      sizeBytes: 1200 * 1024 * 1024,
-      sizeMBDisplay: '1.2 GB',
-      recommended: true,
-      minRamMB: 1200,
-    ),
-    ModelConfig(
-      id: 'qwen3-1.7b-q5_k_m',
-      name: 'Qwen3-1.7B (Q5_K_M)',
-      type: ModelType.text,
-      mirrors: [
-        MirrorEntry('https://hf-mirror.com/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q5_k_m.gguf', 'hf-mirror'),
-        MirrorEntry('https://modelscope.cn/guanpengchuan/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q5_k_m.gguf', 'modelscope'),
-        MirrorEntry('https://huggingface.co/Qwen/Qwen3-1.7B-Instruct-GGUF/resolve/main/qwen3-1.7b-instruct-q5_k_m.gguf', 'huggingface'),
-      ],
-      sizeBytes: 1450 * 1024 * 1024,
-      sizeMBDisplay: '1.5 GB',
-      recommended: false,
-      minRamMB: 1500,
-    ),
-    ModelConfig(
-      id: 'qwen3-0.6b-q4_k_m',
-      name: 'Qwen3-0.6B Instruct (Q4_K_M)',
-      type: ModelType.text,
-      mirrors: [
-        MirrorEntry('https://hf-mirror.com/Qwen/Qwen3-0.6B-Instruct-GGUF/resolve/main/Qwen3-0.6B-Instruct-Q4_K_M.gguf', 'hf-mirror'),
-        MirrorEntry('https://modelscope.cn/guanpengchuan/Qwen3-0.6B-Instruct-GGUF/resolve/main/Qwen3-0.6B-Instruct-Q4_K_M.gguf', 'modelscope'),
-        MirrorEntry('https://huggingface.co/Qwen/Qwen3-0.6B-Instruct-GGUF/resolve/main/Qwen3-0.6B-Instruct-Q4_K_M.gguf', 'huggingface'),
-      ],
-      sizeBytes: 420 * 1024 * 1024,
-      sizeMBDisplay: '420 MB',
-      recommended: true,
-      minRamMB: 500,
-    ),
-    ModelConfig(
-      id: 'qwen3.5-4b-q4_k_m',
-      name: 'Qwen3.5-4B Instruct (Q4_K_M)',
-      type: ModelType.vision,
-      mirrors: [
-        MirrorEntry('https://hf-mirror.com/Qwen/Qwen3.5-4B-Instruct-GGUF/resolve/main/Qwen3.5-4B-Instruct-Q4_K_M.gguf', 'hf-mirror'),
-        MirrorEntry('https://modelscope.cn/guanpengchuan/Qwen3.5-4B-Instruct-GGUF/resolve/main/Qwen3.5-4B-Instruct-Q4_K_M.gguf', 'modelscope'),
-        MirrorEntry('https://huggingface.co/Qwen/Qwen3.5-4B-Instruct-GGUF/resolve/main/Qwen3.5-4B-Instruct-Q4_K_M.gguf', 'huggingface'),
-      ],
-      sizeBytes: 2500 * 1024 * 1024,
-      sizeMBDisplay: '2.5 GB',
-      recommended: true,
-      minRamMB: 3500,
-    ),
-  ];
+// ===================================================================
+// Dynamic model catalog (config-driven, NOT hardcoded)
+// ===================================================================
+
+/// Lazily loaded list of all models from models_catalog.json.
+Future<List<ModelConfig>> loadModelCatalog() async {
+  try {
+    return await ModelCatalog.load();
+  } catch (e) {
+    debugPrint('[ModelInfo] Failed to load model catalog: $e');
+    return [];
+  }
 }
+
+/// Recommended model — the first one with recommended:true, or the smallest.
+Future<ModelConfig?> recommendedModel() async {
+  final models = await loadModelCatalog();
+  if (models.isEmpty) return null;
+  return models.firstWhere(
+    (m) => m.recommended,
+    orElse: () => models.reduce((a, b) => a.sizeBytes < b.sizeBytes ? a : b),
+  );
+}
+
+// ===================================================================
+// Download task state
+// ===================================================================
 
 enum DownloadState { idle, downloading, paused, completed, failed, verifying }
 

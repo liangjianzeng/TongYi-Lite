@@ -3,6 +3,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/model_info.dart';
 import '../services/download_service.dart';
+import '../services/model_manager.dart';
 
 class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   final DownloadService _downloadService;
@@ -33,10 +34,7 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     final existing = state[modelId];
     if (existing == null || existing.state != DownloadState.paused) return;
 
-    final model = builtInModels().firstWhere(
-      (m) => m.id == modelId,
-      orElse: () => throw Exception('Model not found'),
-    );
+    if (ModelManager().getModel(modelId) == null) return;
 
     await _downloadService.resume(modelId);
   }

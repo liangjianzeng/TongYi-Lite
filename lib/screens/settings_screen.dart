@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../models/model_info.dart';
 import '../providers/download_provider.dart';
-import '../services/inference_service.dart';
-import '../services/model_manager.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -13,7 +12,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  final ModelManager _modelManager = ModelManager();
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +26,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _buildSectionHeader('📦 模型管理'),
           const SizedBox(height: 8),
 
-          ..._modelManager.allModels.map((model) => _buildModelCard(model)),
+          FutureBuilder<List<ModelConfig>>(
+            future: loadModelCatalog(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              return Column(
+                children: snapshot.data!
+                    .map((model) => _buildModelCard(model))
+                    .toList(),
+              );
+            },
+          ),
 
           const SizedBox(height: 24),
 
@@ -334,7 +344,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(label, style: TextStyle(color: color, fontSize: 12)),
