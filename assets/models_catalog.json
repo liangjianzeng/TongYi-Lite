@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "description": "TongYi-Lite 端侧模型下载目录。新增/调整模型只需修改本文件，无需改动代码或重新编译。可选：把 ModelCatalog.remoteUrl 指向本 JSON 的自有 CDN 地址即可热更新。",
+  "models": [
+    {
+      "id": "qwen3-vl-2b-q4_k_m",
+      "name": "Qwen3-VL-2B Instruct (Q4_K_M)",
+      "type": "vision",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 1.056,
+      "sizeMBDisplay": "1.0 GB",
+      "recommended": true,
+      "minRamMB": 2048,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3-vl-4b-q4_k_m",
+      "name": "Qwen3-VL-4B Instruct (Q4_K_M)",
+      "type": "vision",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.382,
+      "sizeMBDisplay": "2.3 GB",
+      "recommended": false,
+      "minRamMB": 4096,
+      "sha256Hash": null
+    },
+    {
+      "id": "gemma-3-4b-q4_k_m",
+      "name": "Gemma 3 4B Instruct (Q4_K_M)",
+      "type": "vision",
+      "mirrors": [
+        { "url": "https://hf-mirror.com/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.6,
+      "sizeMBDisplay": "2.6 GB",
+      "recommended": true,
+      "minRamMB": 3072,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3.5-4b-q4_k_m",
+      "name": "Qwen3.5-4B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://hf-mirror.com/lainlives/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.7,
+      "sizeMBDisplay": "2.7 GB",
+      "recommended": true,
+      "minRamMB": 3500,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3-0.6b-q8_0",
+      "name": "Qwen3-0.6B Instruct (Q8_0)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 0.61,
+      "sizeMBDisplay": "596 MB",
+      "recommended": false,
+      "minRamMB": 1024,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3-1.7b-q4_k_m",
+      "name": "Qwen3-1.7B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.382,
+      "sizeMBDisplay": "2.3 GB",
+      "recommended": true,
+      "minRamMB": 3072,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "name": "Qwen3-4B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.382,
+      "sizeMBDisplay": "2.3 GB",
+      "recommended": false,
+      "minRamMB": 4096,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen2.5-1.5b-q4_k_m",
+      "name": "Qwen2.5-1.5B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 1.117,
+      "sizeMBDisplay": "1.1 GB",
+      "recommended": false,
+      "minRamMB": 1500,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen2.5-0.5b-q4_k_m",
+      "name": "Qwen2.5-0.5B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 0.491,
+      "sizeMBDisplay": "468 MB",
+      "recommended": false,
+      "minRamMB": 300,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen2.5-3b-q4_k_m",
+      "name": "Qwen2.5-3B Instruct (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.105,
+      "sizeMBDisplay": "2.0 GB",
+      "recommended": false,
+      "minRamMB": 3500,
+      "sha256Hash": null
+    }
+  ]
+}

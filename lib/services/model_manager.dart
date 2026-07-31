@@ -1,30 +1,45 @@
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import '../models/model_catalog.dart';
 import '../models/model_info.dart';
 
 /// Manages model caching and local storage.
 /// Delegates download logic to DownloadService; this class only handles
 /// file-system queries (isModelCached, getCachedSize, allModels, etc.).
+///
+/// 模型目录由 [ModelCatalog] 从 assets/models_catalog.json（可选远程）加载，
+/// 不再写死在代码里。应用启动时需调用一次 [init()]。
 class ModelManager {
   static final ModelManager _instance = ModelManager._internal();
   factory ModelManager() => _instance;
   ModelManager._internal();
 
-  /// Convenience accessor – mirrors the list in model_info.dart.
-  List<ModelConfig> get allModels => builtInModels();
+  List<ModelConfig> _models = const [];
 
-  /// Get recommended/default model
-  ModelConfig get recommendedModel =>
-      builtInModels().firstWhere((m) => m.recommended);
+  /// 应用启动时调用一次：从配置文件（可选远程）加载模型目录。
+  Future<void> init() async {
+    _models = await ModelCatalog.load();
+  }
 
-  /// Get a model by ID
-  ModelConfig? getModel(String id) {
-    try {
-      return builtInModels().firstWhere((m) => m.id == id);
-    } catch (_) {
-      return null;
+  /// 所有可用模型（加载完成前为空列表）。
+  List<ModelConfig> get allModels => _models;
+
+  /// 取推荐/默认模型。
+  ModelConfig? get recommendedModel {
+    if (_models.isEmpty) return null;
+    for (final m in _models) {
+      if (m.recommended) return m;
     }
+    return _models.first;
+  }
+
+  /// 按 ID 取模型。
+  ModelConfig? getModel(String id) {
+    for (final m in _models) {
+      if (m.id == id) return m;
+    }
+    return null;
   }
 
   Future<Directory> _getModelsDir() async {

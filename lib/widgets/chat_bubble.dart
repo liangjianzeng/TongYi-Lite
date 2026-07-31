@@ -1,8 +1,5 @@
 import 'package:flutter/material.dart';
 
-// DateTime(0) is not const-constructible; use a static getter instead.
-final DateTime _epochZero = DateTime.fromMillisecondsSinceEpoch(0);
-
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
   final String content;
@@ -48,7 +45,7 @@ class ChatBubble extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   margin: const EdgeInsets.symmetric(vertical: 4),
                   decoration: BoxDecoration(
-                    color: _isUser ? theme.colorScheme.primary : theme.colorScheme.surfaceVariant,
+                    color: _isUser ? theme.colorScheme.primary : theme.colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Column(
