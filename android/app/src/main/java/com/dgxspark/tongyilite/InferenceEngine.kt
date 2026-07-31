@@ -30,6 +30,13 @@ class InferenceEngine(private val context: Context) {
     companion object {
         private const val TAG = "InferenceEngine"
         private const val DEFAULT_N_CTX = 4096
+
+        init {
+            // useLegacyPackaging=true in build.gradle.kts ensures .so files
+            // are extracted to /data/app/<pkg>/lib/arm64-v8a/ on install,
+            // making System.loadLibrary() work reliably.
+            System.loadLibrary("tongyilite_jni")
+        }
     }
 
     private val executor = Executors.newSingleThreadExecutor()

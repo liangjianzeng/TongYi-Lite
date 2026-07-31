@@ -11,10 +11,12 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.annotation.NonNull
 import com.dgxspark.tongyilite.service.InferenceService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
@@ -28,25 +30,42 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
 
         engine = InferenceEngine(applicationContext)
-        engine.init()
 
         // Start foreground service to keep inference alive in background
-        InferenceService.start(this)
+        try {
+            InferenceService.start(this)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Could not start foreground service", e)
+        }
+
+        // Set up the token EventChannel for streaming
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/tokens"
+        ).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                TokenStream.sink = events
+            }
+            override fun onCancel(arguments: Any?) {
+                TokenStream.sink = null
+            }
+        })
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.dgxspark.tongyilite/inference"
         ).setMethodCallHandler { call, result ->
             when (call.method) {
-                "loadModel"       -> handleLoadModel(call, result)
-                "unloadModel"     -> handleUnloadModel(result)
-                "isLoaded"        -> handleIsLoaded(result)
-                "completion"      -> handleCompletion(call, result)
-                "stopGeneration"  -> handleStop(result)
-                "benchmark"       -> handleBenchmark(call, result)
-                "getModelInfo"    -> handleGetModelInfo(result)
-                "getMemoryInfo"   -> handleGetMemoryInfo(result)
-                else -> result.notImplemented()
+                "init"          -> { engine.init(); result.success(true) }
+                "loadModel"     -> handleLoadModel(call, result)
+                "unloadModel"   -> handleUnloadModel(result)
+                "isLoaded"      -> handleIsLoaded(result)
+                "completion"    -> handleCompletion(call, result)
+                "stopGeneration"-> handleStop(result)
+                "benchmark"     -> handleBenchmark(call, result)
+                "getModelInfo"  -> handleGetModelInfo(result)
+                "getMemoryInfo" -> handleGetMemoryInfo(result)
+                else            -> result.notImplemented()
             }
         }
     }
@@ -88,7 +107,6 @@ class MainActivity : FlutterActivity() {
         val topP        = call.argument<Double>("topP")?.toFloat() ?: 0.9f
 
         // Get the event sink for streaming tokens
-        // Dart will set up an EventChannel named "com.dgxspark.tongyilite/tokens"
         val sink = TokenStream.sink
 
         // Update foreground notification
@@ -168,14 +186,20 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun updateServiceStatus(status: String) {
-        val intent = Intent(this, InferenceService::class.java)
-        intent.putExtra("status", status)
-        startService(intent)
+        try {
+            val intent = Intent(this, InferenceService::class.java)
+            intent.putExtra("status", status)
+            startService(intent)
+        } catch (e: Exception) {
+            // Service might not be running — ignore
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        engine.destroy()
+        if (this::engine.isInitialized) {
+            engine.destroy()
+        }
         InferenceService.stop(this)
     }
 }

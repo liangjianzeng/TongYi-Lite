@@ -30,7 +30,6 @@ class MirrorEntry {
   const MirrorEntry(this.url, this.source);
 
   @override
-  @override
   String toString() {
     final masked = url.replaceAll(RegExp(r'https://[^/]+'), 'https://***');
     return 'Mirror($source: $masked)';

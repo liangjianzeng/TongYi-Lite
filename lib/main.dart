@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'providers/chat_provider.dart';
 import 'services/inference_service.dart';
 import 'screens/home_screen.dart';
 
