@@ -49,9 +49,21 @@ class DownloadService {
     CancelToken? cancelToken;
     try {
       // Step 1: Resolve URL and verify server supports Range requests
-      final urlInfo = await _resolveUrl(model.mirrors);
-      if (urlInfo == null) {
-        throw DownloadException('All mirrors unreachable.');
+      // Skip HEAD probe for models that already have a partial .tmp (resume case) —
+      // ModelScope CDN rejects HEAD with 403, causing unnecessary failures.
+      final hasPartialTmp = await _hasPartialTmp(model.id);
+      _UrlInfo? urlInfo;
+
+      if (!hasPartialTmp) {
+        urlInfo = await _resolveUrl(model.mirrors);
+        if (urlInfo == null) {
+          throw DownloadException('All mirrors unreachable.');
+        }
+      } else {
+        // Resume: use first mirror URL directly, try Range first, fall back to plain GET
+        final firstMirror = model.mirrors.first;
+        urlInfo = _UrlInfo(url: firstMirror.url, supportsRange: true);
+        debugPrint('[DownloadService] Resume detected for ${model.id}, skipping HEAD probe');
       }
 
       final dir = await _getModelsDir();
@@ -169,6 +181,7 @@ class DownloadService {
       options: Options(
         responseType: ResponseType.stream,
         headers: {'Range': 'bytes=$start-'},
+        receiveTimeout: const Duration(hours: 2),
       ),
       cancelToken: cancelToken,
     );
@@ -212,11 +225,22 @@ class DownloadService {
     }
   }
 
-  Future<void> resume(String modelId) async {
+  Future<void> resume(String modelId, {required void Function(DownloadTask) onProgress}) async {
     final model = ModelManager().getModel(modelId);
     if (model == null) throw DownloadException('Model not found: $modelId');
 
-    await download(model, onProgress: (_) {});
+    await download(model, onProgress: onProgress);
+  }
+
+  /// Check if a partial .tmp file exists for the given model.
+  Future<bool> _hasPartialTmp(String modelId) async {
+    try {
+      final dir = await _getModelsDir();
+      final tmpFile = File(p.join(dir.path, modelId + '.gguf.tmp'));
+      return await tmpFile.exists() && (await tmpFile.length()) > 0;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> cancel(String modelId) async {

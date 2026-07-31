@@ -7,12 +7,15 @@ import 'package:path_provider/path_provider.dart';
 
 import '../services/inference_service.dart';
 import '../services/storage_service.dart';
+import 'shared_providers.dart' show inferenceServiceProvider;
+
+// Re-export for other files that need these types
+export 'model_provider.dart' show ModelManagerNotifier, ModelLifecycleState;
 
 // ---------------------------------------------------------------------------
 // Services (singletons)
 // ---------------------------------------------------------------------------
 
-final inferenceServiceProvider = Provider<InferenceService>((ref) => InferenceService());
 final storageServiceProvider = Provider<StorageService>((ref) => StorageService());
 
 // ---------------------------------------------------------------------------

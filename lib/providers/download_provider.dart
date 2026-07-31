@@ -36,7 +36,9 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
 
     if (ModelManager().getModel(modelId) == null) return;
 
-    await _downloadService.resume(modelId);
+    await _downloadService.resume(modelId, onProgress: (task) {
+        state = {...state, task.modelId: task};
+      });
   }
 
   Future<void> cancelDownload(String modelId) async {
