@@ -129,9 +129,17 @@ class DownloadService {
         );
       }
 
-      // Step 4: Verify completeness (>= 95% to tolerate minor size drift)
+      // Step 4: Verify completeness.
+      // Use HTTP Content-Length as the authoritative size when available,
+      // otherwise fall back to catalog sizeBytes with generous tolerance (98%).
       final actualSize = await tempFile.length();
-      if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.95) {
+      if (urlInfo.contentLength > 0) {
+        // Trust the real HTTP Content-Length — CDN knows its own file size.
+        if (actualSize < urlInfo.contentLength * 0.98) {
+          throw DownloadException(
+              'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(urlInfo.contentLength)}');
+        }
+      } else if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.98) {
         throw DownloadException(
             'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(model.sizeBytes)}');
       }
@@ -344,9 +352,12 @@ class DownloadService {
         );
       }
 
-      // Step 4: Verify completeness
+      // Step 4: Verify completeness.
       final actualSize = await tempFile.length();
-      if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.95) {
+      if (urlInfo.contentLength > 0 && actualSize < urlInfo.contentLength * 0.98) {
+        throw DownloadException(
+            'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(urlInfo.contentLength)}');
+      } else if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.98) {
         throw DownloadException(
             'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(model.sizeBytes)}');
       }
@@ -430,9 +441,15 @@ class DownloadService {
           // Check if server supports Range requests via Accept-Ranges header
           final acceptRanges = response.headers.value('accept-ranges');
           bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-          debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange)');
+          // Extract Content-Length from headers for accurate completeness check
+          final contentLengthHeader = response.headers.value('content-length');
+          int contentLength = 0;
+          if (contentLengthHeader != null) {
+            try { contentLength = int.parse(contentLengthHeader); } catch (_) {}
+          }
+          debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange, Content-Length: $contentLength)');
 
-          return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
+          return _UrlInfo(url: mirror.url, supportsRange: supportsRange, contentLength: contentLength);
         } else {
           debugPrint('[DownloadService] Mirror ${mirror.source} returned ${response.statusCode}, trying GET...');
 
@@ -447,9 +464,14 @@ class DownloadService {
           if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
             final acceptRanges = getResponse.headers.value('accept-ranges');
             bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange)');
+            int contentLength = 0;
+            final clHeader = getResponse.headers.value('content-length');
+            if (clHeader != null) {
+              try { contentLength = int.parse(clHeader); } catch (_) {}
+            }
+            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange, Content-Length: $contentLength)');
 
-            return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
+            return _UrlInfo(url: mirror.url, supportsRange: supportsRange, contentLength: contentLength);
           } else {
             debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
           }
@@ -517,8 +539,9 @@ class DownloadService {
 class _UrlInfo {
   final String url;
   final bool supportsRange;
+  final int contentLength; // HTTP Content-Length (0 if unknown)
 
-  const _UrlInfo({required this.url, required this.supportsRange});
+  const _UrlInfo({required this.url, required this.supportsRange, this.contentLength = 0});
 }
 
 class _ActiveDownload {
