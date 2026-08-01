@@ -66,3 +66,4 @@ key.properties
 *.tar.bz2
 *.7z
 .zcode/
+logcat_output.txt
