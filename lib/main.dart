@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'screens/home_screen.dart';
+import 'services/inference_service.dart';
 import 'services/model_manager.dart';
 
 Future<void> main() async {
@@ -11,10 +12,14 @@ Future<void> main() async {
   // 加载完成后再渲染 UI，保证设置页的模型列表立即可用。
   await ModelManager().init();
 
-  // NOTE: Native engine initialization happens inside InferenceService
-  // singleton on first use — NOT here. Calling native methods at startup
-  // blocks the UI thread and type-mismatches across MethodChannel crash the
-  // app before any widget is rendered.
+  // 初始化原生推理引擎 — 必须在首次使用 llama.cpp API 前调用
+  // llama_backend_init() 是线程安全的，多次调用无副作用
+  try {
+    await InferenceService().initialize();
+    debugPrint('[Main] Native inference engine initialized');
+  } catch (e) {
+    debugPrint('[Main] Failed to initialize native engine: $e');
+  }
 
   runApp(
     const ProviderScope(

@@ -1,10 +1,9 @@
-import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../models/model_info.dart';
 import '../services/inference_service.dart';
+import '../services/model_storage_service.dart';
 import 'shared_providers.dart' show inferenceServiceProvider;
 
 /// Lifecycle phase of the currently loaded model.
@@ -137,6 +136,9 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
   bool get isLoading => state.isLoading;
   bool get isLoadedState => state.isLoaded;
   bool get isErrorState => state.isError;
+  
+  /// Loading logs from native layer (for display in log screen)
+  List<String> get loadingLogs => state.loadingLogs;
 
   /// Access the current lifecycle phase (exposed for UI code that needs it).
   ModelLifecyclePhase get phase => state.phase;
@@ -212,17 +214,43 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         return false;
       }
 
-      // 4. Call native inference engine to load the model.
+      // 4. Warn if this is a vision model (mmproj not yet supported).
+      final config = _lookupModelConfig(modelId);
+      if (config != null && config.type == ModelType.vision) {
+        debugPrint('[ModelManager] WARNING: Vision model $modelId loaded without mmproj — '
+            'image understanding is NOT available. Text-only inference will work.');
+        state = ModelState(
+          phase: ModelLifecyclePhase.loading,
+          modelId: modelId,
+          modelName: displayName,
+          loadingLogs: ['⚠️ 视觉模型：当前仅支持文本推理，图像理解功能暂不可用'],
+        );
+      }
+
+      // 5. Call native inference engine to load the model.
       debugPrint('[ModelManager] Calling loadModel(path=$path)');
       final ok = await _inference.loadModel(path);
 
       if (ok) {
-        state = ModelState.loaded(modelId: modelId, modelName: displayName);
+        // Preserve loading logs so the log screen can still show them after load completes.
+        state = ModelState(
+          phase: ModelLifecyclePhase.loaded,
+          modelId: modelId,
+          modelName: displayName,
+          loadingLogs: List<String>.from(state.loadingLogs),
+        );
         debugPrint('[ModelManager] Loaded: $modelId ($displayName)');
         return true;
       } else {
+        String errorMsg = '模型加载失败（原生层返回 false）';
+        // Provide a more helpful error for common failure modes.
+        if (state.latestLog != null && state.latestLog!.contains('内存')) {
+          errorMsg = '内存不足，无法加载此模型。请关闭其他应用后重试，或选择更小的模型（如 Qwen3-0.6B）。';
+        } else if (config != null && config.type == ModelType.vision) {
+          errorMsg = '视觉模型加载失败。当前版本不支持 mmproj 投影器，建议使用文本模型。';
+        }
         state = ModelState.error(
-          message: '模型加载失败（原生层返回 false）',
+          message: errorMsg,
           modelId: modelId,
           modelName: displayName,
         );
@@ -276,40 +304,18 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
   Future<bool> isModelCached(String modelId) async => await getModelPath(modelId) != null;
 
   Future<String?> getModelPath(String modelId) async {
-    try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final file = File('${appDir.path}/models/$modelId.gguf');
-      return file.existsSync() ? file.path : null;
-    } on Exception catch (_) {
-      return null;
-    }
+    final storage = ModelStorageService();
+    return await storage.getModelPath(modelId);
   }
 
   Future<int> getCachedSize(String modelId) async {
-    try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final file = File('${appDir.path}/models/$modelId.gguf');
-      return file.existsSync() ? await file.length() : 0;
-    } on Exception catch (_) {
-      return 0;
-    }
+    final storage = ModelStorageService();
+    return await storage.getCachedSize(modelId);
   }
 
   Future<int> getTotalCachedSize() async {
-    try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final dir = Directory('${appDir.path}/models');
-      if (!await dir.exists()) return 0;
-      int total = 0;
-      for (final entity in await dir.list().toList()) {
-        if (entity is File && entity.path.endsWith('.gguf')) {
-          total += await entity.length();
-        }
-      }
-      return total;
-    } on Exception catch (_) {
-      return 0;
-    }
+    final storage = ModelStorageService();
+    return await storage.getTotalCachedSize();
   }
 
   /// Look up a model's display name from the cached catalog (best-effort).
@@ -317,6 +323,15 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
     final syncCache = loadModelCatalogSync();
     for (final m in syncCache) {
       if (m.id == modelId) return m.name;
+    }
+    return null;
+  }
+
+  /// Look up full ModelConfig from the cached catalog.
+  static ModelConfig? _lookupModelConfig(String modelId) {
+    final syncCache = loadModelCatalogSync();
+    for (final m in syncCache) {
+      if (m.id == modelId) return m;
     }
     return null;
   }

@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 class InferenceService {
   static const _channel = MethodChannel('com.dgxspark.tongyilite/inference');
   static const _tokenChannel = EventChannel('com.dgxspark.tongyilite/tokens');
   static const _loadingLogChannel = EventChannel('com.dgxspark.tongyilite/loading_logs');
 
-  StreamSubscription<String>? _loadingLogSubscription;
+  StreamSubscription<dynamic>? _loadingLogSubscription;
 
   // Loading log callback — invoked when native pushes a loading progress message.
   void Function(String? message)? onLoadingLog;
@@ -20,10 +21,20 @@ class InferenceService {
   /// Set up the EventChannel listener for native loading progress logs.
   void _setupLoadingLogListener() {
     final stream = _loadingLogChannel.receiveBroadcastStream();
-    _loadingLogSubscription = stream.map((event) => event.toString()).listen((message) {
-      onLoadingLog?.call(message);
+    _loadingLogSubscription = stream.listen((event) {
+      // Handle both String and null events properly
+      if (event == null) {
+        // Null signals end of loading batch - ignore or handle separately
+        debugPrint('[InferenceService] Loading batch complete');
+        return;
+      }
+      final message = event.toString();
+      if (message.isNotEmpty && message != 'null') {
+        onLoadingLog?.call(message);
+      }
     }, onError: (err) {
-      // Silently ignore — channel may not be set up yet during early init.
+      debugPrint('[InferenceService] EventChannel error: $err');
+      onLoadingLog?.call(null); // Signal error
     });
   }
 
@@ -35,25 +46,42 @@ class InferenceService {
   // Initialization
   // ------------------------------------------------------------------
   Future<void> initialize() async {
-    await _channel.invokeMethod('init');
+    debugPrint('[InferenceService] Initializing native engine...');
+    try {
+      final result = await _channel.invokeMethod('init');
+      debugPrint('[InferenceService] Native engine initialized: $result');
+    } catch (e) {
+      debugPrint('[InferenceService] Failed to initialize: $e');
+      rethrow;
+    }
   }
 
   // ------------------------------------------------------------------
   // Model management
   // ------------------------------------------------------------------
   Future<bool> loadModel(String path, {int nCtx = 4096}) async {
-    return await _channel.invokeMethod('loadModel', {
-      'path': path,
-      'nCtx': nCtx,
-    });
+    debugPrint('[InferenceService] Loading model from: $path');
+    try {
+      final result = await _channel.invokeMethod('loadModel', {
+        'path': path,
+        'nCtx': nCtx,
+      });
+      debugPrint('[InferenceService] Model load result: $result');
+      return result == true;
+    } catch (e) {
+      debugPrint('[InferenceService] Failed to load model: $e');
+      rethrow;
+    }
   }
 
   Future<void> unloadModel() async {
+    debugPrint('[InferenceService] Unloading model...');
     await _channel.invokeMethod('unloadModel');
   }
 
   Future<bool> isLoaded() async {
-    return await _channel.invokeMethod('isLoaded');
+    final result = await _channel.invokeMethod('isLoaded');
+    return result == true;
   }
 
   Future<Map<String, dynamic>> getModelInfo() async {
@@ -80,7 +108,9 @@ class InferenceService {
 
     // Set up the token event listener
     final subscription = _tokenChannel.receiveBroadcastStream().listen((event) {
-      controller.add(event as String);
+      if (event != null) {
+        controller.add(event.toString());
+      }
     }, onError: (err) {
       controller.addError(err);
     });
