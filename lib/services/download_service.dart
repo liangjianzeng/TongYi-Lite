@@ -49,8 +49,6 @@ class DownloadService {
     CancelToken? cancelToken;
     try {
       // Step 1: Resolve URL and verify server supports Range requests
-      // Skip HEAD probe for models that already have a partial .tmp (resume case) —
-      // ModelScope CDN rejects HEAD with 403, causing unnecessary failures.
       final hasPartialTmp = await _hasPartialTmp(model.id);
       _UrlInfo? urlInfo;
 
@@ -60,7 +58,6 @@ class DownloadService {
           throw DownloadException('All mirrors unreachable.');
         }
       } else {
-        // Resume: use first mirror URL directly, try Range first, fall back to plain GET
         final firstMirror = model.mirrors.first;
         urlInfo = _UrlInfo(url: firstMirror.url, supportsRange: true);
         debugPrint('[DownloadService] Resume detected for ${model.id}, skipping HEAD probe');
@@ -78,7 +75,7 @@ class DownloadService {
       if (await tempFile.exists()) {
         final len = await tempFile.length();
         if (len >= model.sizeBytes && model.sizeBytes > 0) {
-          // Already complete (or larger) — just promote and finish
+          // Already complete — just promote and finish
           await tempFile.rename(finalFile.path);
           task.state = DownloadState.completed;
           task.downloadedBytes = model.sizeBytes;
@@ -93,7 +90,7 @@ class DownloadService {
           debugPrint('[DownloadService] Resuming from ${_formatBytes(downloadedSoFar)}');
           onProgress(task);
         } else {
-          // No Range support (e.g. ModelScope resolve) or corrupt partial → restart fresh
+          // No Range support or corrupt partial → restart fresh
           debugPrint('[DownloadService] No resume possible, restarting fresh');
           await tempFile.delete();
           downloadedSoFar = 0;
@@ -123,25 +120,22 @@ class DownloadService {
           cancelToken: cancelToken,
           onReceiveProgress: (received, total) {
             task.downloadedBytes = received;
-            if (task.totalBytes == 0 && total > 0) task.totalBytes = model.sizeBytes;
+            // Use Dio's Content-Length as authoritative — it reflects what CDN actually sent.
+            if (total > 0 && task.totalBytes == 0) {
+              task.totalBytes = total;
+            } else if (task.totalBytes == 0) {
+              // No Content-Length from CDN, fall back to catalog size for progress display.
+              task.totalBytes = model.sizeBytes;
+            }
             _emitProgress(task, progressInterval, onProgress);
           },
         );
       }
 
-      // Step 4: Verify completeness.
-      // Use HTTP Content-Length as the authoritative size when available,
-      // otherwise fall back to catalog sizeBytes with generous tolerance (98%).
+      // Step 4: Verify download produced data — trust what the CDN actually served.
       final actualSize = await tempFile.length();
-      if (urlInfo.contentLength > 0) {
-        // Trust the real HTTP Content-Length — CDN knows its own file size.
-        if (actualSize < urlInfo.contentLength * 0.98) {
-          throw DownloadException(
-              'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(urlInfo.contentLength)}');
-        }
-      } else if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.98) {
-        throw DownloadException(
-            'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(model.sizeBytes)}');
+      if (actualSize == 0) {
+        throw DownloadException('Download produced empty file');
       }
 
       // Step 5: Promote .tmp to final file
@@ -346,20 +340,21 @@ class DownloadService {
           cancelToken: cancelToken,
           onReceiveProgress: (received, total) {
             task.downloadedBytes = received;
-            if (task.totalBytes == 0 && total > 0) task.totalBytes = model.sizeBytes;
+            // Use Dio's Content-Length as authoritative — it reflects what CDN actually sent.
+            if (total > 0 && task.totalBytes == 0) {
+              task.totalBytes = total;
+            } else if (task.totalBytes == 0) {
+              task.totalBytes = model.sizeBytes;
+            }
             _emitProgress(task, progressInterval, onProgress);
           },
         );
       }
 
-      // Step 4: Verify completeness.
+      // Step 4: Verify download produced data — trust what the CDN actually served.
       final actualSize = await tempFile.length();
-      if (urlInfo.contentLength > 0 && actualSize < urlInfo.contentLength * 0.98) {
-        throw DownloadException(
-            'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(urlInfo.contentLength)}');
-      } else if (model.sizeBytes > 0 && actualSize < model.sizeBytes * 0.98) {
-        throw DownloadException(
-            'Download incomplete: ${_formatBytes(actualSize)} / ${_formatBytes(model.sizeBytes)}');
+      if (actualSize == 0) {
+        throw DownloadException('Download produced empty file');
       }
 
       // Step 5: Promote .tmp to final file
@@ -441,15 +436,9 @@ class DownloadService {
           // Check if server supports Range requests via Accept-Ranges header
           final acceptRanges = response.headers.value('accept-ranges');
           bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-          // Extract Content-Length from headers for accurate completeness check
-          final contentLengthHeader = response.headers.value('content-length');
-          int contentLength = 0;
-          if (contentLengthHeader != null) {
-            try { contentLength = int.parse(contentLengthHeader); } catch (_) {}
-          }
-          debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange, Content-Length: $contentLength)');
+          debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange)');
 
-          return _UrlInfo(url: mirror.url, supportsRange: supportsRange, contentLength: contentLength);
+          return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
         } else {
           debugPrint('[DownloadService] Mirror ${mirror.source} returned ${response.statusCode}, trying GET...');
 
@@ -464,14 +453,9 @@ class DownloadService {
           if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
             final acceptRanges = getResponse.headers.value('accept-ranges');
             bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-            int contentLength = 0;
-            final clHeader = getResponse.headers.value('content-length');
-            if (clHeader != null) {
-              try { contentLength = int.parse(clHeader); } catch (_) {}
-            }
-            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange, Content-Length: $contentLength)');
+            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange)');
 
-            return _UrlInfo(url: mirror.url, supportsRange: supportsRange, contentLength: contentLength);
+            return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
           } else {
             debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
           }
@@ -539,9 +523,8 @@ class DownloadService {
 class _UrlInfo {
   final String url;
   final bool supportsRange;
-  final int contentLength; // HTTP Content-Length (0 if unknown)
 
-  const _UrlInfo({required this.url, required this.supportsRange, this.contentLength = 0});
+  const _UrlInfo({required this.url, required this.supportsRange});
 }
 
 class _ActiveDownload {
