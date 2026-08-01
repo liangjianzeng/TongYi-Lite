@@ -1,17 +1,48 @@
-import 'dart:io';
-import 'package:path_provider/path_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/model_info.dart';
 import '../services/download_service.dart';
+import '../services/model_storage_service.dart';
 
 class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   final DownloadService _downloadService;
 
   DownloadNotifier(this._downloadService) : super({});
 
+  /// Initialize download state for already cached models (e.g., after scan or restart)
+  Future<void> initCachedModels(List<ModelConfig> models) async {
+    final storage = ModelStorageService();
+    final updatedState = Map<String, DownloadTask>.from(state);
+    
+    for (final model in models) {
+      // Skip if already tracked
+      if (updatedState.containsKey(model.id)) continue;
+      
+      // Check if file exists on disk
+      final isCached = await storage.isModelCached(model.id);
+      if (isCached) {
+        updatedState[model.id] = DownloadTask(
+          modelId: model.id,
+          state: DownloadState.completed,
+          totalBytes: model.sizeBytes,
+          downloadedBytes: model.sizeBytes,
+        );
+      }
+    }
+    
+    state = updatedState;
+  }
+
   Future<void> startDownload(ModelConfig model) async {
     final existing = state[model.id];
     if (existing != null && existing.state == DownloadState.completed) return;
+
+    // Create initial task for tracking
+    final initialTask = DownloadTask(
+      modelId: model.id,
+      state: DownloadState.downloading,
+      totalBytes: model.sizeBytes,
+    );
+    state = {...state, model.id: initialTask};
 
     await _downloadService.download(
       model,
@@ -65,35 +96,25 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     }
   }
 
+  /// Check if model is cached (using persistent storage)
   Future<bool> isModelCached(String modelId) async {
-    final dir = await _getModelsDir();
-    final file = File('${dir.path}/$modelId.gguf');
-    return await file.exists();
+    final storage = ModelStorageService();
+    return await storage.isModelCached(modelId);
   }
 
+  /// Get total size of cached models
   Future<int> getTotalCachedSize() async {
-    final dir = await _getModelsDir();
-    if (!await dir.exists()) return 0;
-    int total = 0;
-    for (final entity in await dir.list().toList()) {
-      if (entity is File && entity.path.endsWith('.gguf')) {
-        total += await entity.length();
-      }
-    }
-    return total;
+    final storage = ModelStorageService();
+    return await storage.getTotalCachedSize();
   }
 
+  /// Get available space (stub - returns fixed value)
   Future<int> getAvailableSpace() async {
     try {
       return 64 * 1024 * 1024 * 1024;
     } catch (_) {
       return 0;
     }
-  }
-
-  Future<Directory> _getModelsDir() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    return Directory('${appDir.path}/models');
   }
 }
 

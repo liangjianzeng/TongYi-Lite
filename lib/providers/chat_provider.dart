@@ -103,8 +103,9 @@ class ChatNotifier extends StateNotifier<bool> {
   /// Automatically ensures the correct model is loaded first via ModelManager.
   Future<String> sendMessage(
     String conversationId,
-    String prompt,
-  ) async {
+    String prompt, {
+    String? imagePath,
+  }) async {
     final targetModelId = _ref.read(currentModelIdProvider);
 
     // Step 1: Ensure model is loaded (via ModelManager for state consistency)
@@ -122,6 +123,7 @@ class ChatNotifier extends StateNotifier<bool> {
         conversationId: conversationId,
         role: MessageRole.user,
         content: prompt,
+        imagePath: imagePath,
       );
       await _storage.saveMessage(userMsg);
 

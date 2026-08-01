@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, storageServiceProvider;
 import '../providers/model_provider.dart';
+import '../services/storage_permission_service.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
 
@@ -18,11 +21,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _textController = TextEditingController();
   String _currentConversationId = '';
   bool _initiallyLoaded = false;
+  
+  // Image picker state
+  String? _selectedImagePath;
+  final ImagePicker _picker = ImagePicker();
 
   @override
   void initState() {
     super.initState();
+    _initStoragePermission();
     _initConversation();
+  }
+
+  Future<void> _initStoragePermission() async {
+    // 延迟一点时间显示权限对话框，避免阻塞启动
+    Future.delayed(const Duration(milliseconds: 500), () async {
+      await StoragePermissionService.checkAndRequestIfNeeded(context);
+    });
   }
 
   Future<void> _initConversation() async {
@@ -41,13 +56,83 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _initiallyLoaded = true;
   }
 
+  /// Pick image from camera or gallery
+  Future<void> _pickImage() async {
+    if (_selectedImagePath != null) {
+      // Clear selected image
+      setState(() => _selectedImagePath = null);
+      return;
+    }
+
+    final source = await showDialog<ImageSource>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择图片来源'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('拍照'),
+              onTap: () async {
+                // Check camera permission before proceeding
+                final hasPermission = await StoragePermissionService.requestCameraPermission();
+                if (!hasPermission) {
+                  Navigator.pop(ctx);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('相机权限被拒绝，请在设置中授予')),
+                    );
+                  }
+                  return;
+                }
+                Navigator.pop(ctx, ImageSource.camera);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('相册'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (source == null) return;
+
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        setState(() => _selectedImagePath = image.path);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('选择图片失败: $e')),
+      );
+    }
+  }
+
+  /// Send message with optional image
   Future<void> _sendMessage() async {
     final text = _textController.text.trim();
-    if (text.isEmpty) return;
+    final imagePath = _selectedImagePath;
+    
+    if (text.isEmpty && imagePath == null) return;
+
+    // Clear input fields
     _textController.clear();
+    setState(() => _selectedImagePath = null);
 
     final notifier = ref.read(chatNotifierProvider.notifier);
-    await notifier.sendMessage(_currentConversationId, text);
+    await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
 
     // Scroll to bottom
     Future.delayed(const Duration(milliseconds: 100), () {
@@ -93,6 +178,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ? _buildMessagesList()
                 : const Center(child: CircularProgressIndicator()),
           ),
+          
+          // Image preview (if selected)
+          if (_selectedImagePath != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.file(
+                      File(_selectedImagePath!),
+                      height: 100,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: Material(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(12),
+                      child: IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white, size: 18),
+                        onPressed: () => setState(() => _selectedImagePath = null),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          
           _buildInputBar(isGenerating),
         ],
       ),
@@ -295,6 +411,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               content: msg.content,
               timestamp: msg.timestamp,
               isStreaming: msg.isStreaming && index == messages.length - 1,
+              imagePath: msg.imagePath,
             );
           },
         );
@@ -327,11 +444,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      icon: const Icon(Icons.image),
-                      tooltip: '图片',
-                      onPressed: isGenerating ? null : () {
-                        // TODO: Image picker for vision
-                      },
+                      icon: Icon(
+                        _selectedImagePath != null ? Icons.check_circle : Icons.image,
+                        color: _selectedImagePath != null ? Colors.green : null,
+                      ),
+                      tooltip: _selectedImagePath != null ? '已选图片，点击清除' : '添加图片',
+                      onPressed: isGenerating ? null : _pickImage,
                     ),
                     IconButton(
                       icon: const Icon(Icons.mic),

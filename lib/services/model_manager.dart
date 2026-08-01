@@ -1,8 +1,8 @@
 import 'dart:io';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+
 import '../models/model_catalog.dart';
 import '../models/model_info.dart';
+import 'model_storage_service.dart';
 
 /// Manages model caching and local storage.
 /// Delegates download logic to DownloadService; this class only handles
@@ -10,6 +10,9 @@ import '../models/model_info.dart';
 ///
 /// 模型目录由 [ModelCatalog] 从 assets/models_catalog.json（可选远程）加载，
 /// 不再写死在代码里。应用启动时需调用一次 [init()]。
+///
+/// **持久化策略**：使用 [ModelStorageService] 管理存储路径，优先使用外部存储，
+/// 确保重新安装 APK 后模型文件不丢失。
 class ModelManager {
   static final ModelManager _instance = ModelManager._internal();
   factory ModelManager() => _instance;
@@ -42,49 +45,40 @@ class ModelManager {
     return null;
   }
 
-  Future<Directory> _getModelsDir() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    return Directory('${appDir.path}/models');
+  /// 获取模型文件的完整路径
+  Future<String?> getModelPath(String modelId) async {
+    try {
+      final storage = ModelStorageService();
+      final path = await storage.getModelPath(modelId);
+      if (File(path).existsSync()) {
+        return path;
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// Check if model file exists locally
   Future<bool> isModelCached(String modelId) async {
-    try {
-      final dir = await _getModelsDir();
-      final file = File(p.join(dir.path, '${modelId}.gguf'));
-      return await file.exists();
-    } catch (_) {
-      return false;
-    }
+    final storage = ModelStorageService();
+    return await storage.isModelCached(modelId);
   }
 
   /// Get local file size if cached
   Future<int> getCachedSize(String modelId) async {
-    try {
-      final dir = await _getModelsDir();
-      final file = File(p.join(dir.path, '${modelId}.gguf'));
-      if (await file.exists()) {
-        return await file.length();
-      }
-    } catch (_) {}
-    return 0;
+    final storage = ModelStorageService();
+    return await storage.getCachedSize(modelId);
   }
 
   /// Check total cached model size in bytes
   Future<int> getTotalCachedSize() async {
-    try {
-      final dir = await _getModelsDir();
-      if (!await dir.exists()) return 0;
-      int total = 0;
-      for (final entity in dir.listSync()) {
-        if (entity is File && entity.path.endsWith('.gguf')) {
-          total += await entity.length();
-        }
-      }
-      return total;
-    } catch (_) {
-      return 0;
-    }
+    final storage = ModelStorageService();
+    return await storage.getTotalCachedSize();
+  }
+
+  /// Scan for existing models on device (for recovery after reinstall)
+  Future<List<String>> scanExistingModels() async {
+    final storage = ModelStorageService();
+    return await storage.scanExistingModels();
   }
 
   /// Check if device has enough memory for a model (stub - uses estimate)
@@ -98,14 +92,8 @@ class ModelManager {
   Future<List<Map<String, dynamic>>> checkAllModels() async {
     final cached = <String>[];
     try {
-      final dir = await _getModelsDir();
-      if (await dir.exists()) {
-        for (final entity in dir.listSync()) {
-          if (entity is File && entity.path.endsWith('.gguf')) {
-            cached.add(p.basenameWithoutExtension(entity.path));
-          }
-        }
-      }
+      final storage = ModelStorageService();
+      cached.addAll(await storage.scanExistingModels());
     } catch (_) {}
 
     return [

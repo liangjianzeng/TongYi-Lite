@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 
 class ChatBubble extends StatelessWidget {
@@ -6,6 +7,7 @@ class ChatBubble extends StatelessWidget {
   final DateTime timestamp;
   final bool isStreaming;
   final bool showAvatar;
+  final String? imagePath;
 
   const ChatBubble({
     super.key,
@@ -14,6 +16,7 @@ class ChatBubble extends StatelessWidget {
     required this.timestamp,
     this.isStreaming = false,
     this.showAvatar = true,
+    this.imagePath,
   });
 
   bool get _isUser => role == 'user';
@@ -51,14 +54,31 @@ class ChatBubble extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        content.isEmpty ? '...' : content,
-                        style: TextStyle(
-                          color: _isUser ? theme.colorScheme.onPrimary : theme.colorScheme.onSurfaceVariant,
-                          fontSize: 15,
-                          height: 1.5,
+                      // Show image if present (user messages only)
+                      if (imagePath != null && imagePath!.isNotEmpty) ...[
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 300, maxHeight: 300),
+                            child: Image.file(
+                              File(imagePath!),
+                              fit: BoxFit.cover,
+                            ),
+                          ),
                         ),
-                      ),
+                        const SizedBox(height: 8),
+                      ],
+                      // Show text content
+                      if (content.isNotEmpty) ...[
+                        Text(
+                          content,
+                          style: TextStyle(
+                            color: _isUser ? theme.colorScheme.onPrimary : theme.colorScheme.onSurfaceVariant,
+                            fontSize: 15,
+                            height: 1.5,
+                          ),
+                        ),
+                      ],
                       if (isStreaming) ...[
                         const SizedBox(height: 4),
                         SizedBox(

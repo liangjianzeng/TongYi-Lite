@@ -90,31 +90,30 @@ class InferenceEngine(private val context: Context) {
         nCtx: Int = DEFAULT_N_CTX,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
-        return executor.submit<Boolean> {
-            val file = File(modelPath)
-            if (!file.exists()) {
-                Log.e(TAG, "Model file not found: $modelPath")
-                loadingCallback?.onLoadingLog("模型文件不存在：$modelPath")
-                return@submit false
-            }
+        val file = File(modelPath)
+        if (!file.exists()) {
+            Log.e(TAG, "Model file not found: $modelPath")
+            loadingCallback?.onLoadingLog("模型文件不存在：$modelPath")
+            return false
+        }
 
-            // Set the native-side callback before invoking load (static ref in C++)
-            if (loadingCallback != null) {
-                nativeSetLoadingCallback(loadingCallback)
-            } else {
-                nativeSetLoadingCallback(null)
-            }
+        // Set the native-side callback before invoking load (static ref in C++)
+        if (loadingCallback != null) {
+            nativeSetLoadingCallback(loadingCallback)
+        } else {
+            nativeSetLoadingCallback(null)
+        }
 
-            val ok = nativeLoadModel(modelPath, nCtx)
-            Log.i(TAG, "loadModel($modelPath): $ok")
+        Log.i(TAG, "loadModel: $modelPath")
+        val ok = nativeLoadModel(modelPath, nCtx)
+        Log.i(TAG, "loadModel result: $ok")
 
-            if (ok) {
-                loadingCallback?.onLoadingLog("模型加载成功 ✓")
-            } else {
-                loadingCallback?.onLoadingLog("模型加载失败，请检查日志")
-            }
-            ok
-        }.get()
+        if (ok) {
+            loadingCallback?.onLoadingLog("模型加载成功 ✓")
+        } else {
+            loadingCallback?.onLoadingLog("模型加载失败，请检查日志")
+        }
+        return ok
     }
 
     fun unloadModel() {

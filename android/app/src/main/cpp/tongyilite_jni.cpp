@@ -13,6 +13,7 @@
 #include <vector>
 #include <mutex>
 #include <thread>
+#include <future>
 #include <condition_variable>
 #include <atomic>
 #include <algorithm>
@@ -62,9 +63,7 @@ struct InferenceEngine {
     int32_t n_gen = 0;
 
     bool load(const char *model_path, int n_ctx = 4096) {
-        std::lock_guard<std::mutex> lock(mtx);
-
-        // Unload previous model if any
+        // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
         LOGI("Loading model from: %s", model_path);
@@ -72,10 +71,14 @@ struct InferenceEngine {
 
         // Model params
         model_params = llama_model_default_params();
-        // mmap for memory efficiency on mobile
-        // Offload all layers to GPU; falls back to CPU if no GPU available
-        model_params.n_gpu_layers = -1;  // -1 = offload all layers to GPU (CPU fallback)
+        // CPU-only inference (Vulkan disabled in CMakeLists).
+        // n_gpu_layers=-1 would try to reserve GPU memory even without a GPU → OOM hang.
+        model_params.n_gpu_layers = 0;
+        // Use direct load instead of mmap — mmap can cause file-lock conflicts on Android.
+        model_params.load_mode = LLAMA_LOAD_MODE_NONE;
 
+        // Use unique_lock so we can unlock before JNI callbacks to prevent deadlock.
+        std::unique_lock<std::mutex> lock(mtx);
         model = llama_model_load_from_file(model_path, model_params);
         if (!model) {
             LOGE("Failed to load model from: %s", model_path);
@@ -90,8 +93,12 @@ struct InferenceEngine {
         const int64_t n_params = llama_model_n_params(model);
         LOGI("GGUF model loaded. params=%lld, n_embd=%d, n_layer=%d",
              (long long)n_params, n_embd, n_layer);
+
         char buf[256];
         snprintf(buf, sizeof(buf), "模型文件加载完成 (%.1fM 参数)", n_params / 1'000'000.0);
+
+        // Release lock before calling reportLoadingLog (JNI callback) to avoid deadlock.
+        lock.unlock();
         reportLoadingLog(buf);
 
         // Context params
@@ -109,11 +116,41 @@ struct InferenceEngine {
             reportLoadingLog(buf2);
         }
 
-        reportLoadingLog("正在初始化推理上下文...");
-        context = llama_init_from_model(model, ctx_params);
+        // llama_init_from_model can hang indefinitely on OOM (no error code returned).
+        // Run it in a separate thread with a timeout to prevent blocking the JNI thread.
+        LOGI("Spawning context-creation thread (timeout=60s)...");
+        reportLoadingLog("正在初始化推理上下文（可能需要30秒）...");
+
+        std::future<llama_context*> future_ctx;
+
+        future_ctx = std::async(std::launch::async, [this]() -> llama_context* {
+            LOGI("Context creation thread started");
+            llama_context *ctx = llama_init_from_model(this->model, this->ctx_params);
+            if (ctx) {
+                LOGI("Context created successfully. n_ctx=%d", llama_n_ctx(ctx));
+                return ctx;
+            } else {
+                LOGE("llama_init_from_model returned nullptr (OOM?)");
+                return nullptr;
+            }
+        });
+
+        auto wait_result = future_ctx.wait_for(std::chrono::seconds(60));
+        if (wait_result == std::future_status::timeout) {
+            LOGE("Context creation timed out after 60s — possible OOM or deadlock");
+            reportLoadingLog("上下文初始化超时（内存不足或设备性能不够）");
+            llama_model_free(model);
+            model = nullptr;
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> ctx_lock(mtx);
+            context = future_ctx.get();
+        }
         if (!context) {
             LOGE("Failed to create context (OOM?)");
-            reportLoadingLog("创建推理上下文失败（内存不足?）");
+            reportLoadingLog("创建推理上下文失败（内存不足? 请尝试更小的模型）");
             llama_model_free(model);
             model = nullptr;
             return false;

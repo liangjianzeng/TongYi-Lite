@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import '../models/model_info.dart';
 import 'model_manager.dart';
+import 'model_storage_service.dart';
 
 class DownloadService {
   static final DownloadService _instance = DownloadService._internal();
@@ -485,8 +485,8 @@ class DownloadService {
   }
 
   Future<Directory> _getModelsDir() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    return Directory(p.join(appDir.path, 'models'));
+    final storage = ModelStorageService();
+    return await storage.getModelsRootDir();
   }
 
   String _formatBytes(int bytes) {
