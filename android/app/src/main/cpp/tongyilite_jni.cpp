@@ -252,6 +252,14 @@ struct InferenceEngine {
 
             // Sample next token using softmax + temperature + top-p
             auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
+            
+            // CRITICAL: Check for nullptr - llama_decode may succeed but not cache all logits
+            if (!logits_arr) {
+                LOGE("llama_get_logits_ith returned nullptr at position %d", prompt_tokens.size() - 1 + n_gen);
+                is_running = false;
+                return "[ERROR: Logit extraction failed]";
+            }
+            
             int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
 
             // Build candidate list from logits
@@ -492,8 +500,9 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
         return env->NewStringUTF("[ERROR: No model loaded]");
     }
 
-    // Save callback object for token streaming
-    g_callback_obj = env->NewGlobalRef(jcallback);
+    // Save callback object for token streaming. Keep a local ref copy so it stays alive
+    // during the entire completion call (avoids GC between the global ref and its use).
+    jobject cb_copy = env->NewLocalRef(jcallback);
 
     std::string prompt = jstring_to_std(env, jprompt);
 
@@ -502,22 +511,51 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
         max_tokens,
         temperature,
         top_p,
-        [&env](const std::string &token) -> bool {
-            if (!g_callback_obj) return true;
-            JNIEnv *local_env = get_env();
-            if (!local_env) return true;
+        [cb_copy](const std::string &token) -> bool {
+            if (!g_jvm || !cb_copy) return true;
 
-            jclass cls = local_env->GetObjectClass(g_callback_obj);
+            // Ensure we have a valid JNIEnv for this thread.
+            JNIEnv *local_env = nullptr;
+            int status = g_jvm->GetEnv(reinterpret_cast<void **>(&local_env), JNI_VERSION_1_6);
+            bool need_detach = false;
+
+            if (status == JNI_EDETACHED) {
+                if (g_jvm->AttachCurrentThread(&local_env, nullptr) != 0) return true;
+                need_detach = true;
+            } else if (status != JNI_OK) {
+                return true;
+            }
+
+            // Use NewGlobalRef on the copy to avoid GC during callback execution.
+            jobject safe_cb = local_env->NewLocalRef(cb_copy);
+            jclass cls = local_env->GetObjectClass(safe_cb);
+            if (!cls) {
+                local_env->DeleteLocalRef(safe_cb);
+                if (need_detach) g_jvm->DetachCurrentThread();
+                return true;
+            }
+
             jmethodID mid = local_env->GetMethodID(cls, "onToken", "(Ljava/lang/String;)Z");
+            if (!mid) {
+                local_env->DeleteLocalRef(safe_cb);
+                local_env->DeleteLocalRef(cls);
+                if (need_detach) g_jvm->DetachCurrentThread();
+                return true;
+            }
+
             jstring jtoken = local_env->NewStringUTF(token.c_str());
-            jboolean should_continue = local_env->CallBooleanMethod(g_callback_obj, mid, jtoken);
+            jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
             local_env->DeleteLocalRef(jtoken);
+            local_env->DeleteLocalRef(safe_cb);
             local_env->DeleteLocalRef(cls);
-            return should_continue;
+
+            if (need_detach) g_jvm->DetachCurrentThread();
+            return (should_continue != JNI_FALSE);
         }
     );
 
-    // Release callback
+    // Release callback refs
+    env->DeleteLocalRef(cb_copy);
     if (g_callback_obj) {
         env->DeleteGlobalRef(g_callback_obj);
         g_callback_obj = nullptr;
