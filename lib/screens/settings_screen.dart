@@ -123,36 +123,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
           const SizedBox(height: 24),
 
-          // ---- 下载中的任务 ----
-          _buildSectionHeader('⬇️ 正在下载', context),
-          Consumer(
-            builder: (context, ref, _) {
-              final tasks = ref.watch(downloadNotifierProvider);
-              final activeTasks = tasks.entries
-                  .where((e) =>
-                      e.value.state == DownloadState.downloading ||
-                      e.value.state == DownloadState.paused)
-                  .toList();
-
-              if (activeTasks.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Center(
-                    child: Text('暂无下载任务', style: TextStyle(color: Colors.grey)),
-                  ),
-                );
-              }
-
-              return Column(
-                children: activeTasks
-                    .map((entry) => _buildActiveDownloadCard(entry.value))
-                    .toList(),
-              );
-            },
-          ),
-
-          const SizedBox(height: 24),
-
           // ---- 存储信息 ----
           _buildSectionHeader('💾 存储空间', context),
           const _StorageInfoWidget(),
@@ -257,47 +227,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
         );
       },
-    );
-  }
-
-  Widget _buildActiveDownloadCard(DownloadTask task) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('正在下载: ${task.modelId}', style: const TextStyle(fontWeight: FontWeight.w500)),
-                  const SizedBox(height: 4),
-                  LinearProgressIndicator(value: task.progress, minHeight: 4),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('${task.downloadedDisplay} / ${task.totalDisplay}', style: const TextStyle(fontSize: 12)),
-                      Text(task.progressPercent, style: const TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              icon: Icon(task.state == DownloadState.downloading ? Icons.pause : Icons.play_arrow),
-              onPressed: () {
-                if (task.state == DownloadState.downloading) {
-                  ref.read(downloadNotifierProvider.notifier).pauseDownload(task.modelId);
-                } else {
-                  ref.read(downloadNotifierProvider.notifier).resumeDownload(task.modelId);
-                }
-              },
-            ),
-          ],
-        ),
-      ),
     );
   }
 
