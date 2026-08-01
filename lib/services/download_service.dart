@@ -31,15 +31,16 @@ class DownloadService {
     ModelConfig model, {
     required void Function(DownloadTask) onProgress,
     Duration progressInterval = const Duration(milliseconds: 500),
+    DownloadTask? existingTask, // Optional task to reuse (e.g., from provider's initialTask)
   }) async {
     if (_activeDownloads.length >= maxConcurrentDownloads) {
       throw DownloadException('Only one download at a time.');
     }
 
-    final task = DownloadTask(
+    final task = existingTask ?? DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
-      totalBytes: model.sizeBytes,
+      totalBytes: 0, // Don't preset — let Dio's Content-Length or catalog size set it.
       startTime: DateTime.now(),
     );
 
@@ -76,6 +77,7 @@ class DownloadService {
         final len = await tempFile.length();
         if (len >= model.sizeBytes && model.sizeBytes > 0) {
           // Already complete — just promote and finish
+          task.totalBytes = model.sizeBytes;
           await tempFile.rename(finalFile.path);
           task.state = DownloadState.completed;
           task.downloadedBytes = model.sizeBytes;
@@ -87,6 +89,7 @@ class DownloadService {
           // Mirror supports Range → resume from the byte we already have
           downloadedSoFar = len;
           task.downloadedBytes = downloadedSoFar;
+          task.totalBytes = model.sizeBytes; // needed for progress display during resume
           debugPrint('[DownloadService] Resuming from ${_formatBytes(downloadedSoFar)}');
           onProgress(task);
         } else {
@@ -114,22 +117,45 @@ class DownloadService {
           progressInterval,
         );
       } else {
-        await _dio.download(
+        // Use catalog size as fallback for progress display.
+        if (task.totalBytes == 0) task.totalBytes = model.sizeBytes;
+
+        final downloadFuture = _dio.download(
           urlInfo.url,
           tempFile.path,
           cancelToken: cancelToken,
           onReceiveProgress: (received, total) {
+            debugPrint('[DownloadService] Dio callback: received=$received total=$total');
+            // Dio callback — use as authoritative if CDN returns Content-Length.
             task.downloadedBytes = received;
-            // Use Dio's Content-Length as authoritative — it reflects what CDN actually sent.
             if (total > 0 && task.totalBytes == 0) {
               task.totalBytes = total;
+              debugPrint('[DownloadService] Using CDN Content-Length: $total bytes');
             } else if (task.totalBytes == 0) {
-              // No Content-Length from CDN, fall back to catalog size for progress display.
               task.totalBytes = model.sizeBytes;
             }
-            _emitProgress(task, progressInterval, onProgress);
           },
         );
+
+        // Poll temp file size as the primary progress source — Dio's callback is unreliable on Android.
+        final ct = cancelToken;
+        final pollTimer = Timer.periodic(progressInterval, (_) async {
+          if (ct?.isCancelled == true) return;
+          try {
+            final fileSize = await tempFile.length();
+            // Only update if we haven't received data from the callback yet.
+            if (task.downloadedBytes == 0 || task.downloadedBytes < fileSize) {
+              task.downloadedBytes = fileSize;
+            }
+            _emitProgress(task, progressInterval, onProgress);
+          } catch (_) {}
+        });
+
+        try {
+          await downloadFuture;
+        } finally {
+          pollTimer.cancel();
+        }
       }
 
       // Step 4: Verify download produced data — trust what the CDN actually served.

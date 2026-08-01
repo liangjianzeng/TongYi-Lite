@@ -36,7 +36,7 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     final existing = state[model.id];
     if (existing != null && existing.state == DownloadState.completed) return;
 
-    // Create initial task for tracking
+    // Create initial task for tracking — pass it to the service so Dio mutates THIS same object.
     final initialTask = DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
@@ -46,6 +46,7 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
 
     await _downloadService.download(
       model,
+      existingTask: initialTask, // <-- reuse the same task object
       onProgress: (task) {
         state = {...state, task.modelId: task};
       },
