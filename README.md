@@ -34,7 +34,7 @@
 |------|------|
 | **目标平台** | Android APK (API 33+) |
 | **推理引擎** | llama.cpp b1017+ (Vulkan GPU / KleidiAI / SME2) |
-| **默认模型** | 以 `assets/models_catalog.json` 中 `recommended:true` 为准（Qwen3.5-4B / Gemma 3 4B / Qwen3-1.7B 等） |
+| **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调 (无 HTTP Server) |
 | **模型下载源** | hf-mirror.com → ModelScope（自动回退，见 `assets/models_catalog.json`） |
@@ -75,13 +75,17 @@ TongYi-Lite/
 │   │   ├── inference_service.dart    # JNI 推理桥接（MethodChannel + EventChannel）
 │   │   ├── download_service.dart     # Dio 下载核心（断点续传 + 镜像回退）
 │   │   ├── model_manager.dart        # 模型缓存 / 内存检测
+│   │   ├── model_storage_service.dart       # 磁盘模型存储管理
+│   │   ├── storage_permission_service.dart  # Android 存储权限申请
 │   │   └── storage_service.dart      # SQLite 持久化（对话/消息）
 │   ├── providers/
 │   │   ├── chat_provider.dart        # Riverpod 聊天状态 + 当前模型选择
-│   │   └── download_provider.dart    # Riverpod 下载任务状态管理
+│   │   ├── download_provider.dart    # Riverpod 下载任务状态管理
+│   │   └── model_provider.dart       # Riverpod ModelState（idle/loading/loaded/unloading/error）
 │   ├── screens/
-│   │   ├── home_screen.dart          # 聊天主页面
-│   │   └── settings_screen.dart      # 设置页（模型选择 + 下载进度）
+│   │   ├── home_screen.dart          # 聊天主页面（含实时模型状态栏 + 推理脉冲动画）
+│   │   ├── settings_screen.dart      # 设置页（模型选择 + 下载进度 + 存储信息磁盘扫描）
+│   │   └── inference_log_screen.dart # 推理日志查看页（加载/卸载/生成过程日志）
 │   └── widgets/
 │       └── chat_bubble.dart          # 消息气泡组件
 ├── docs/                             # 设计文档
@@ -238,7 +242,25 @@ flutter build appbundle --release
 - **Dio** HTTP 客户端 + `onReceiveProgress` 回调实时上报进度
 - **HTTP Range** 头实现断点续传（检查 `.tmp` 文件长度后从断点继续）
 - **Riverpod StateNotifier** 管理下载状态，UI 自动响应更新
-- 最多同时 **2 个并发下载**任务
+- 最多同时 **1 个并发下载**任务
+
+### 模型加载与管理
+
+应用支持完整的模型生命周期管理：
+
+| 状态 | 说明 | UI 表现 |
+|------|------|---------|
+| `idle`（未加载） | 无模型在内存中 | 灰色 "未加载"，聊天界面显示 [去加载] 按钮 |
+| `loading`（加载中） | 正在从磁盘加载到内存 | 蓝色进度环 + 模型名，UI 禁用交互 |
+| `loaded`（已加载） | 模型已在内存中可推理 | 绿色 "已加载"，聊天界面显示 [卸载] 按钮 |
+| `unloading`（卸载中） | 正在释放内存 | 橙色进度环 |
+| `error`（错误） | 加载失败 | 红色错误信息 + [重试] 按钮 |
+
+**单模型约束**：同一时间只允许一个模型在内存中运行，切换或加载新模型时自动卸载旧模型。
+
+**存储信息直接扫描磁盘**：设置页"存储信息"区域直接扫描 `models/` 目录下的所有 `.gguf` 文件，即使模型 ID 不在 catalog JSON 中也能正确显示（避免重装 APK 后已下载模型消失）。
+
+**推理日志**：新增 `inference_log_screen.dart` 查看页，可查看模型加载、卸载、生成的完整过程日志。
 
 ---
 
