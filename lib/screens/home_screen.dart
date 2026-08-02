@@ -324,7 +324,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// Thin progress strip shown below the app bar only during loading / unloading / error.
   /// Hidden when idle and not generating — no space wasted.
   Widget _buildInlineProgress(ModelState ms, bool isGenerating) {
-    if (ms.phase == ModelLifecyclePhase.idle && !isGenerating) {
+    // Only show during loading / unloading / error — idle and loaded states
+    // are handled by the AppBar chip (no space wasted on chat area).
+    if (ms.phase == ModelLifecyclePhase.idle || ms.phase == ModelLifecyclePhase.loaded) {
       return const SizedBox.shrink();
     }
 
@@ -342,31 +344,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             children: [
               if (ms.phase == ModelLifecyclePhase.loading || ms.phase == ModelLifecyclePhase.unloading)
                 SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: color)),
-              if (ms.phase == ModelLifecyclePhase.loaded && isGenerating)
-                _buildPulsingDot(),
-              if (ms.phase != ModelLifecyclePhase.loading && ms.phase != ModelLifecyclePhase.unloading && !(ms.phase == ModelLifecyclePhase.loaded && isGenerating))
-                const SizedBox(width: 16),
               const SizedBox(width: 4),
               Expanded(
                 child: Text(
                   ms.modelName != null && ms.modelName!.isNotEmpty
                       ? '${ms.modelName!}$generating'
-                      : (ms.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中…' : '模型未加载')),
+                      : (isGenerating ? '推理中…' : '模型未加载'),
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
                 ),
               ),
-              if (ms.phase == ModelLifecyclePhase.loaded && !isGenerating)
-                TextButton.icon(
-                  onPressed: () async => await ref.read(modelManagerProvider.notifier).unloadModel(),
-                  icon: const Icon(Icons.close, size: 14),
-                  label: const Text('卸载', style: TextStyle(fontSize: 11)),
-                ),
-              if (ms.phase == ModelLifecyclePhase.idle)
-                TextButton.icon(
-                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
-                  icon: const Icon(Icons.download, size: 14),
-                  label: const Text('去加载', style: TextStyle(fontSize: 11)),
-                ),
             ],
           ),
           // Loading log or error message shown below the status row

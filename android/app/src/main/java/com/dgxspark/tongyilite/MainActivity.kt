@@ -147,7 +147,8 @@ class MainActivity : FlutterActivity() {
                     temperature = temperature,
                     topP = topP,
                     onToken = { token ->
-                        sink?.success(token)
+                        // EventChannel.EventSink must be called from the main thread.
+                        mainHandler.post { sink?.success(token) }
                         true
                     }
                 )
