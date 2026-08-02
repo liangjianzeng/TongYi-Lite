@@ -93,14 +93,16 @@ class ChatNotifier extends StateNotifier<bool> {
   /// Ensure the correct model is loaded before sending a message.
   /// Uses [modelManagerProvider] so that loading state is visible in UI.
   Future<bool> ensureModelLoaded(String modelId) async {
+    debugPrint('[ChatNotifier] ensureModelLoaded called, modelId=$modelId');
     // Delegate to ModelManagerNotifier — it handles unload-previous + state.
     final manager = _ref.read(modelManagerProvider.notifier);
 
     if (manager.state.isLoaded && manager.currentModelId == modelId) {
-      debugPrint('[ChatNotifier] Model $modelId already loaded');
+      debugPrint('[ChatNotifier] Model $modelId already loaded, skipping reload');
       return true;
     }
 
+    debugPrint('[ChatNotifier] Reloading model: $modelId (isLoaded=${manager.state.isLoaded}, currentId=${manager.modelId})');
     // If a different model is loaded, we still go through loadModel which
     // handles the unload-then-load flow.
     return await manager.loadModel(modelId);
@@ -121,6 +123,7 @@ class ChatNotifier extends StateNotifier<bool> {
       return '[模型加载失败，请在设置中重新下载并加载]';
     }
 
+    debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"');
     state = true;
     _ref.read(isGeneratingProvider.notifier).state = true;
 
@@ -133,11 +136,13 @@ class ChatNotifier extends StateNotifier<bool> {
         content: prompt,
         imagePath: imagePath,
       );
+      debugPrint('[ChatNotifier] Saving user message...');
       await _storage.saveMessage(userMsg);
 
       // Step 3: Stream completion from native inference engine
       String fullResponse = '';
       try {
+        debugPrint('[ChatNotifier] Calling native completion...');
         final stream = _inference.completion(
           prompt: prompt,
           maxTokens: 2048,
@@ -145,6 +150,7 @@ class ChatNotifier extends StateNotifier<bool> {
           topP: 0.9,
         );
 
+        debugPrint('[ChatNotifier] Listening to token stream...');
         final buffer = StringBuffer();
         await for (final token in stream) {
           if (!buffer.isEmpty || token.isNotEmpty) {
@@ -152,6 +158,7 @@ class ChatNotifier extends StateNotifier<bool> {
           }
         }
         fullResponse = buffer.toString();
+        debugPrint('[ChatNotifier] Stream done, response="${fullResponse.substring(0, fullResponse.length.clamp(0, 50))}${fullResponse.length > 50 ? "..." : ""}"');
 
         // Step 4: Save assistant message
         final assistantMsg = ChatMessage(
@@ -164,6 +171,7 @@ class ChatNotifier extends StateNotifier<bool> {
 
         return fullResponse;
       } catch (e) {
+        debugPrint('[ChatNotifier] Stream error: $e');
         // Save error message to conversation
         final errMsg = ChatMessage(
           id: (DateTime.now().millisecondsSinceEpoch + 1).toString(),
@@ -175,6 +183,7 @@ class ChatNotifier extends StateNotifier<bool> {
         return fullResponse;
       }
     } finally {
+      debugPrint('[ChatNotifier] sendMessage done, isGenerating=false');
       state = false;
       _ref.read(isGeneratingProvider.notifier).state = false;
     }

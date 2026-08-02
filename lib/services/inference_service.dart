@@ -115,6 +115,7 @@ class InferenceService {
       controller.addError(err);
     });
 
+    debugPrint('[InferenceService] Invoking native completion, prompt="$prompt"');
     // Start inference on native side
     _channel.invokeMethod('completion', {
       'prompt': prompt,
@@ -122,10 +123,12 @@ class InferenceService {
       'temperature': temperature,
       'topP': topP,
     }).then((result) {
+      debugPrint('[InferenceService] Native completion done, result="${result?.toString().substring(0, 50)}..."');
       // Final result (may be empty if streaming used all tokens)
       controller.close();
       subscription.cancel();
     }).catchError((err) {
+      debugPrint('[InferenceService] Native completion error: $err');
       controller.addError(err);
       controller.close();
       subscription.cancel();
