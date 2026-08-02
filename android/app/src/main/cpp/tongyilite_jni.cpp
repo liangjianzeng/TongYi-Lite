@@ -56,8 +56,8 @@ struct InferenceEngine {
     std::atomic<bool> is_running{false};
     std::atomic<bool> should_stop{false};
 
-    // Stats
-    int32_t n_ctx = 0;
+    // Stats — atomic to prevent stale reads from completion() on another thread.
+    std::atomic<int32_t> n_ctx{0};
     double t_prompt_ms = 0;
     double t_gen_ms = 0;
     int32_t n_gen = 0;
@@ -166,25 +166,25 @@ struct InferenceEngine {
         n_ctx = llama_n_ctx(context);
 
         LOGI("Model loaded. n_ctx=%d, n_embd=%d, n_layer=%d",
-             n_ctx,
+             (int)n_ctx.load(),
              llama_model_n_embd(model),
              llama_model_n_layer(model));
         char buf3[128];
-        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", n_ctx);
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", n_ctx.load());
         reportLoadingLog(buf3);
         return true;
     }
 
     void unload() {
-        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, n_ctx, (int)is_running.load());
+        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, (int)n_ctx.load(), (int)is_running.load());
         std::lock_guard<std::mutex> lock(mtx);
-        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
+        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, (int)n_ctx.load());
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         n_ctx = 0;
         is_running = false;
-        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
+        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, (int)n_ctx.load());
     }
 
     bool is_loaded() const {
@@ -227,12 +227,12 @@ struct InferenceEngine {
         std::function<bool(const std::string &)> on_token = nullptr
     ) {
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
-             (void*)model, (void*)context, n_ctx, (int)is_running.load());
+             (void*)model, (void*)context, (int)n_ctx.load(), (int)is_running.load());
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
         LOGI("completion() LOCK ACQUIRED: model=%p context=%p n_ctx=%d",
-             (void*)model, (void*)context, n_ctx);
+             (void*)model, (void*)context, (int)n_ctx.load());
 
         if (!is_loaded()) {
             LOGE("completion() aborted INSIDE LOCK: no model loaded");
@@ -244,7 +244,7 @@ struct InferenceEngine {
             should_stop = false;
 
             LOGI("completion() running: model=%p context=%p n_ctx=%d",
-                 (void*)model, (void*)context, n_ctx);
+                 (void*)model, (void*)context, (int)n_ctx.load());
 
             // 1. Tokenize prompt
             bool add_bos = llama_vocab_get_add_bos(vocab);
@@ -253,13 +253,13 @@ struct InferenceEngine {
             LOGI("Tokenized: %d tokens, add_bos=%d", n_prompt, add_bos);
 
             if (n_ctx <= 0 || context == nullptr) {
-                LOGE("completion() aborted: invalid state n_ctx=%d", n_ctx);
+                LOGE("completion() aborted: invalid state n_ctx=%d", (int)n_ctx.load());
                 is_running = false;
                 return "[ERROR: Invalid context]";
             }
 
             if (n_prompt > n_ctx - 4) {
-                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, n_ctx);
+                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, (int)n_ctx.load());
                 prompt_tokens.resize(n_ctx - 4);
                 n_prompt = (int)prompt_tokens.size();
             }
@@ -535,7 +535,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
     jobject jcallback  // InferenceCallback interface
 ) {
     LOGI("nativeCompletion ENTER: is_loaded=%d model=%p context=%p n_ctx=%d",
-         g_engine.is_loaded(), (void*)g_engine.model, (void*)g_engine.context, g_engine.n_ctx);
+         g_engine.is_loaded(), (void*)g_engine.model, (void*)g_engine.context, (int)g_engine.n_ctx.load());
     if (!g_engine.is_loaded()) {
         LOGE("nativeCompletion ABORT: no model loaded at JNI entry");
         return env->NewStringUTF("[ERROR: No model loaded]");
@@ -674,7 +674,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetModelInfo(JNIEnv *env, job
     snprintf(buf, sizeof(buf),
              "{\"n_params\":%lld,\"n_ctx\":%d,\"n_embd\":%d,\"n_layer\":%d,\"n_vocab\":%d}",
              (long long)llama_model_n_params(g_engine.model),
-             g_engine.n_ctx,
+             (int)g_engine.n_ctx.load(),
              llama_model_n_embd(g_engine.model),
              llama_model_n_layer(g_engine.model),
              llama_vocab_n_tokens(g_engine.vocab));
