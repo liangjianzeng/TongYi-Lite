@@ -224,31 +224,32 @@ struct InferenceEngine {
         // callback: called for each generated token; return false to stop
         std::function<bool(const std::string &)> on_token = nullptr
     ) {
+        // Hold the lock for the ENTIRE duration of completion to prevent unload()
+        // from running concurrently and destroying model/context mid-inference.
+        std::lock_guard<std::mutex> lock(mtx);
+
         if (!is_loaded()) {
-            LOGE("completion() called but no model loaded");
+            LOGE("completion() aborted: no model loaded (race with unload)");
             return "[ERROR: No model loaded]";
         }
 
         try {
-            std::lock_guard<std::mutex> lock(mtx);
             is_running  = true;
             should_stop = false;
 
-            // Debug: verify engine state before proceeding
-            LOGI("completion() start: model=%p context=%p n_ctx=%d is_running=%d",
-                 (void*)model, (void*)context, n_ctx, (int)is_running.load());
+            LOGI("completion() start: model=%p context=%p n_ctx=%d",
+                 (void*)model, (void*)context, n_ctx);
 
             // 1. Tokenize prompt
             bool add_bos = llama_vocab_get_add_bos(vocab);
             prompt_tokens = tokenize(prompt, add_bos);
             n_prompt = (int)prompt_tokens.size();
-            LOGI("Tokenized: %d tokens, add_bos=%d, n_ctx=%d", n_prompt, add_bos, n_ctx);
+            LOGI("Tokenized: %d tokens, add_bos=%d", n_prompt, add_bos);
 
-            // Guard against n_ctx == 0 (should never happen, but be safe)
             if (n_ctx <= 0 || context == nullptr) {
-                LOGE("completion() aborted: invalid context state (n_ctx=%d, context=%p)", n_ctx, (void*)context);
+                LOGE("completion() aborted: invalid state n_ctx=%d", n_ctx);
                 is_running = false;
-                return "[ERROR: Invalid context — model may have been unloaded]";
+                return "[ERROR: Invalid context]";
             }
 
             if (n_prompt > n_ctx - 4) {
@@ -283,18 +284,16 @@ struct InferenceEngine {
             while (n_gen < max_tokens && !should_stop) {
                 llama_token new_token = 0;
 
-                // Sample next token using softmax + temperature + top-p
                 auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
 
                 if (!logits_arr) {
-                    LOGE("llama_get_logits_ith returned nullptr at position %d", prompt_tokens.size() - 1 + n_gen);
+                    LOGE("llama_get_logits_ith nullptr at pos %d", prompt_tokens.size() - 1 + n_gen);
                     is_running = false;
                     return "[ERROR: Logit extraction failed]";
                 }
 
                 int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
 
-                // Build candidate list from logits
                 std::vector<llama_token_data> candidates(n_vocab);
                 for (int32_t i = 0; i < n_vocab; ++i) {
                     candidates[i].id = i;
@@ -302,12 +301,8 @@ struct InferenceEngine {
                     candidates[i].p = 0.0f;
                 }
 
-                // Temperature scaling
-                for (auto &c : candidates) {
-                    c.logit /= temperature;
-                }
+                for (auto &c : candidates) c.logit /= temperature;
 
-                // Top-p sampling: sort by logit descending, keep top cumulative probability
                 std::sort(candidates.begin(), candidates.end(),
                           [](const llama_token_data &a, const llama_token_data &b) {
                               return a.logit > b.logit;
@@ -317,57 +312,44 @@ struct InferenceEngine {
                 size_t keep = n_vocab;
                 for (size_t i = 0; i < n_vocab; ++i) {
                     cumsum += std::exp(candidates[i].logit - candidates[0].logit);
-                    if (cumsum >= top_p) {
-                        keep = i + 1;
-                        break;
-                    }
+                    if (cumsum >= top_p) { keep = i + 1; break; }
                 }
 
-                // Renormalize probabilities for kept tokens
                 float max_logit = candidates[0].logit;
                 float sum_exp = 0.0f;
                 for (size_t i = 0; i < keep; ++i) {
                     candidates[i].p = std::exp(candidates[i].logit - max_logit);
                     sum_exp += candidates[i].p;
                 }
-                for (size_t i = 0; i < keep; ++i) {
-                    candidates[i].p /= sum_exp;
-                }
+                for (size_t i = 0; i < keep; ++i) candidates[i].p /= sum_exp;
 
-                // Weighted sampling from top-p candidates
                 float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
                 new_token = candidates[keep - 1].id;
                 float acc = 0.0f;
                 for (size_t i = 0; i < keep; ++i) {
                     acc += candidates[i].p;
-                    if (r <= acc) {
-                        new_token = candidates[i].id;
-                        break;
-                    }
+                    if (r <= acc) { new_token = candidates[i].id; break; }
                 }
 
                 if (new_token == eos) {
-                    LOGI("EOS reached at gen=%d", n_gen);
+                    LOGI("EOS at gen=%d", n_gen);
                     break;
                 }
 
-                // Convert token to string
                 char buf[256];
                 int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
                 if (n > 0) {
                     std::string piece(buf, n);
                     result += piece;
                     if (on_token && !on_token(piece)) {
-                        LOGI("Generation stopped by callback at gen=%d", n_gen);
+                        LOGI("Stopped by callback at gen=%d", n_gen);
                         break;
                     }
                 }
 
                 n_gen++;
 
-                // Decode the new token at position n_prompt + n_gen - 1
-                // llama_batch_get_one always sets pos=0, which would overwrite KV cache.
-                // Must use manual batch construction with correct position offset.
+                // Decode at correct position to avoid overwriting KV cache
                 t_start = std::chrono::high_resolution_clock::now();
                 llama_batch token_batch = llama_batch_init(1, 0, 1);
                 token_batch.token[0]   = new_token;
@@ -376,7 +358,7 @@ struct InferenceEngine {
                 token_batch.seq_id[0][0]= 0;
                 token_batch.logits[0]  = true;
                 if (llama_decode(context, token_batch) != 0) {
-                    LOGE("llama_decode() failed on generated token #%d", n_gen);
+                    LOGE("llama_decode() failed on gen token #%d", n_gen);
                     llama_batch_free(token_batch);
                     break;
                 }
