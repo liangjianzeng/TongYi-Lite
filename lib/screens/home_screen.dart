@@ -21,7 +21,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _textController = TextEditingController();
   String _currentConversationId = '';
   bool _initiallyLoaded = false;
-  
+
   // Image picker state
   String? _selectedImagePath;
   final ImagePicker _picker = ImagePicker();
@@ -124,7 +124,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _sendMessage() async {
     final text = _textController.text.trim();
     final imagePath = _selectedImagePath;
-    
+
     if (text.isEmpty && imagePath == null) return;
 
     final notifier = ref.read(chatNotifierProvider.notifier);
@@ -163,6 +163,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       appBar: AppBar(
         title: const Text('TongYi-Lite'),
         centerTitle: true,
+        leading: _buildModelStatusChip(modelState, isGenerating),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
@@ -178,15 +179,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
       body: Column(
         children: [
-          // ---- Model status bar ----
-          _buildModelStatusBar(modelState, isGenerating),
+          // ---- Inline model status (only shows loading/unloading/error progress) ----
+          _buildInlineProgress(modelState, isGenerating),
 
           Expanded(
             child: _initiallyLoaded
                 ? _buildMessagesList()
                 : const Center(child: CircularProgressIndicator()),
           ),
-          
+
           // Image preview (if selected)
           if (_selectedImagePath != null)
             Container(
@@ -216,7 +217,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ],
               ),
             ),
-          
+
           _buildInputBar(isGenerating),
         ],
       ),
@@ -224,126 +225,188 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   // =========================================================================
-  // Model status bar — shows current model state at top of chat screen
+  // Model status chip — compact indicator in AppBar leading area (left of title)
+  // Tapping opens a bottom sheet with model name, unload / reload actions
   // =========================================================================
 
-  Widget _buildModelStatusBar(ModelState modelState, bool isGenerating) {
-    if (modelState.phase == ModelLifecyclePhase.idle && !isGenerating) {
-      return const SizedBox.shrink(); // hide when nothing to show
+  Widget _buildModelStatusChip(ModelState ms, bool isGenerating) {
+    final color = _colorFor(ms.phaseColor);
+
+    // Idle + not generating → no chip needed (leading returns null-like empty widget)
+    if (ms.phase == ModelLifecyclePhase.idle && !isGenerating) {
+      return const SizedBox.shrink();
     }
 
-    final color = _colorFor(modelState.phaseColor);
-    final generating = isGenerating ? ' · 思考中...' : '';
-
-    Widget trailing;
-    switch (modelState.phase) {
+    Widget label;
+    IconData chipIcon;
+    switch (ms.phase) {
       case ModelLifecyclePhase.loading:
-        trailing = SizedBox(
-          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2),
-        );
+        chipIcon = Icons.sync_alt;
+        label = const Text('加载中…', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.loaded:
-        if (!isGenerating) {
-          trailing = TextButton.icon(
-            onPressed: () async {
-              await ref.read(modelManagerProvider.notifier).unloadModel();
-            },
-            icon: const Icon(Icons.close, size: 16),
-            label: const Text('卸载', style: TextStyle(fontSize: 12)),
-          );
-        } else {
-          trailing = _buildPulsingDot();
-        }
+        chipIcon = isGenerating ? Icons.auto_awesome : Icons.check_circle;
+        label = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isGenerating) _buildPulsingDot(),
+            const SizedBox(width: 4),
+            Text('模型就绪', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color)),
+          ],
+        );
         break;
       case ModelLifecyclePhase.unloading:
-        trailing = const SizedBox(
-          width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2),
-        );
+        chipIcon = Icons.sync_disabled;
+        label = const Text('卸载中…', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.error:
-        trailing = TextButton.icon(
-          onPressed: modelState.modelId != null
-              ? () => ref.read(modelManagerProvider.notifier).loadModel(modelState.modelId!)
-              : null,
-          icon: const Icon(Icons.refresh, size: 16),
-          label: const Text('重试', style: TextStyle(fontSize: 12)),
-        );
+        chipIcon = Icons.error_outline;
+        label = const Text('加载失败', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.idle:
-        trailing = TextButton.icon(
-          onPressed: () {
-            Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
-          },
-          icon: const Icon(Icons.download, size: 16),
-          label: const Text('去加载', style: TextStyle(fontSize: 12)),
-        );
+        chipIcon = Icons.memory_outlined;
+        label = const Text('未加载', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
     }
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: color.withValues(alpha: 0.12),
-      child: Row(
-        children: [
-          _buildPhaseIcon(modelState.phase, isGenerating),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  modelState.modelName != null && modelState.modelName!.isNotEmpty
-                      ? '${modelState.modelName!}$generating'
-                      : (modelState.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中...' : '模型未加载')),
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                ),
-                if (modelState.phase == ModelLifecyclePhase.loading && modelState.latestLog != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    modelState.latestLog!,
-                    style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                if (modelState.phase == ModelLifecyclePhase.error && modelState.errorMessage != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    modelState.errorMessage!,
-                    style: TextStyle(fontSize: 11, color: Colors.red.shade700),
-                  ),
-                ],
-              ],
-            ),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _showModelStatusPopup(ms, isGenerating),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(chipIcon, size: 16, color: color),
+              const SizedBox(width: 4),
+              label,
+            ],
           ),
-          trailing,
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildPhaseIcon(ModelLifecyclePhase phase, bool isGenerating) {
-    IconData icon;
-    switch (phase) {
-      case ModelLifecyclePhase.idle:
-        icon = Icons.memory_outlined;
-        break;
-      case ModelLifecyclePhase.loading:
-        icon = Icons.sync_alt;
-        break;
-      case ModelLifecyclePhase.loaded:
-        icon = isGenerating ? Icons.auto_awesome : Icons.check_circle;
-        break;
-      case ModelLifecyclePhase.unloading:
-        icon = Icons.sync_disabled;
-        break;
-      case ModelLifecyclePhase.error:
-        icon = Icons.error_outline;
-        break;
+  void _showModelStatusPopup(ModelState ms, bool isGenerating) {
+    final notifier = ref.read(modelManagerProvider.notifier);
+    final modelName = ms.modelName ?? '未知模型';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _ModelStatusSheet(
+        phase: ms.phase,
+        modelName: modelName,
+        errorMessage: ms.errorMessage,
+        latestLog: ms.latestLog,
+        isGenerating: isGenerating,
+        onUnload: () async {
+          Navigator.pop(ctx);
+          await notifier.unloadModel();
+        },
+        onLoad: () async {
+          final id = ms.modelId;
+          if (id != null) {
+            Navigator.pop(ctx);
+            await notifier.loadModel(id);
+          }
+        },
+        onGoToSettings: () {
+          Navigator.pop(ctx);
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+        },
+      ),
+    );
+  }
+
+  /// Thin progress strip shown below the app bar only during loading / unloading / error.
+  /// Hidden when idle and not generating — no space wasted.
+  Widget _buildInlineProgress(ModelState ms, bool isGenerating) {
+    if (ms.phase == ModelLifecyclePhase.idle && !isGenerating) {
+      return const SizedBox.shrink();
     }
-    return Icon(icon, size: 18);
+
+    final color = _colorFor(ms.phaseColor);
+    final generating = isGenerating ? ' · 思考中…' : '';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      color: color.withValues(alpha: 0.10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              if (ms.phase == ModelLifecyclePhase.loading || ms.phase == ModelLifecyclePhase.unloading)
+                SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: color)),
+              if (ms.phase == ModelLifecyclePhase.loaded && isGenerating)
+                _buildPulsingDot(),
+              if (ms.phase != ModelLifecyclePhase.loading && ms.phase != ModelLifecyclePhase.unloading && !(ms.phase == ModelLifecyclePhase.loaded && isGenerating))
+                const SizedBox(width: 16),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  ms.modelName != null && ms.modelName!.isNotEmpty
+                      ? '${ms.modelName!}$generating'
+                      : (ms.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中…' : '模型未加载')),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                ),
+              ),
+              if (ms.phase == ModelLifecyclePhase.loaded && !isGenerating)
+                TextButton.icon(
+                  onPressed: () async => await ref.read(modelManagerProvider.notifier).unloadModel(),
+                  icon: const Icon(Icons.close, size: 14),
+                  label: const Text('卸载', style: TextStyle(fontSize: 11)),
+                ),
+              if (ms.phase == ModelLifecyclePhase.idle)
+                TextButton.icon(
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
+                  icon: const Icon(Icons.download, size: 14),
+                  label: const Text('去加载', style: TextStyle(fontSize: 11)),
+                ),
+            ],
+          ),
+          // Loading log or error message shown below the status row
+          if (ms.phase == ModelLifecyclePhase.loading && ms.latestLog != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                ms.latestLog!,
+                style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          if (ms.phase == ModelLifecyclePhase.error && ms.errorMessage != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      ms.errorMessage!,
+                      style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: ms.modelId != null
+                        ? () => ref.read(modelManagerProvider.notifier).loadModel(ms.modelId!)
+                        : null,
+                    icon: const Icon(Icons.refresh, size: 14),
+                    label: const Text('重试', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildPulsingDot() {
@@ -478,6 +541,194 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 : const Icon(Icons.send),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// Model status bottom sheet widget (outside the State class)
+// =========================================================================
+
+/// Reusable bottom-sheet widget for model status details.
+class _ModelStatusSheet extends StatelessWidget {
+  final ModelLifecyclePhase phase;
+  final String modelName;
+  final String? errorMessage;
+  final String? latestLog;
+  final bool isGenerating;
+  final VoidCallback onUnload;
+  final VoidCallback onLoad;
+  final VoidCallback onGoToSettings;
+
+  const _ModelStatusSheet({
+    required this.phase,
+    required this.modelName,
+    this.errorMessage,
+    this.latestLog,
+    required this.isGenerating,
+    required this.onUnload,
+    required this.onLoad,
+    required this.onGoToSettings,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _sheetColorFor(phase);
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(2)),
+              ),
+              // Title + icon
+              Row(
+                children: [
+                  Icon(_sheetIconFor(phase), size: 28, color: color),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          phase == ModelLifecyclePhase.loaded ? '模型已就绪' : _phaseLabelFor(phase),
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        if (phase == ModelLifecyclePhase.loaded || phase == ModelLifecyclePhase.error)
+                          Text(
+                            modelName,
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (isGenerating) _buildPulsingDotLarge(),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Progress log
+              if (latestLog != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(latestLog!, style: TextStyle(fontSize: 12, color: Colors.blue.shade800)),
+                ),
+              if (latestLog != null) const SizedBox(height: 12),
+              // Error message
+              if (errorMessage != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(errorMessage!, style: TextStyle(fontSize: 12, color: Colors.red.shade800)),
+                ),
+              if (errorMessage != null) const SizedBox(height: 12),
+              // Actions
+              if (phase == ModelLifecyclePhase.loaded && !isGenerating) ...[
+                _sheetButton(context, label: '卸载模型', icon: Icons.close, color: Colors.red, onTap: onUnload),
+                const SizedBox(height: 8),
+              ],
+              if (phase == ModelLifecyclePhase.error) ...[
+                _sheetButton(context, label: '重试加载', icon: Icons.refresh, color: Colors.blue, onTap: onLoad),
+                const SizedBox(height: 8),
+              ],
+              if (phase == ModelLifecyclePhase.idle) ...[
+                _sheetButton(context, label: '去加载模型', icon: Icons.download, color: Colors.green, onTap: onGoToSettings),
+                const SizedBox(height: 8),
+              ],
+              _sheetButton(context, label: '关闭', icon: null, color: null, onTap: () => Navigator.pop(context), isDefault: true),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sheetButton(BuildContext context, {
+    required String label,
+    IconData? icon,
+    Color? color,
+    required VoidCallback onTap,
+    bool isDefault = false,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: onTap,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color ?? Theme.of(context).colorScheme.primaryContainer,
+          foregroundColor: color == null ? null : Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+        icon: icon != null ? Icon(icon, size: 18) : null,
+        label: Text(label),
+      ),
+    );
+  }
+
+  IconData _sheetIconFor(ModelLifecyclePhase phase) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle: return Icons.memory_outlined;
+      case ModelLifecyclePhase.loading: return Icons.sync_alt;
+      case ModelLifecyclePhase.loaded: return Icons.check_circle;
+      case ModelLifecyclePhase.unloading: return Icons.sync_disabled;
+      case ModelLifecyclePhase.error: return Icons.error_outline;
+    }
+  }
+
+  String _phaseLabelFor(ModelLifecyclePhase phase) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle: return '未加载';
+      case ModelLifecyclePhase.loading: return '加载中…';
+      case ModelLifecyclePhase.loaded: return '已加载';
+      case ModelLifecyclePhase.unloading: return '卸载中…';
+      case ModelLifecyclePhase.error: return '加载失败';
+    }
+  }
+
+  Color _sheetColorFor(ModelLifecyclePhase phase) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle: return Colors.grey;
+      case ModelLifecyclePhase.loading: return Colors.blue;
+      case ModelLifecyclePhase.loaded: return Colors.green;
+      case ModelLifecyclePhase.unloading: return Colors.orange;
+      case ModelLifecyclePhase.error: return Colors.red;
+    }
+  }
+
+  Widget _buildPulsingDotLarge() {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.3, end: 1.0),
+      duration: const Duration(milliseconds: 800),
+      curve: Curves.easeInOut,
+      builder: (context, value, _) => Container(
+        width: 14, height: 14,
+        decoration: BoxDecoration(
+          color: Colors.orange.shade400.withValues(alpha: value),
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }
