@@ -35,7 +35,7 @@ class ChatMessage {
     return ChatMessage(
       id: map['id'] as String,
       conversationId: map['conversationId'] as String,
-      role: MessageRole.values.firstWhere((e) => e.name == map['role']),
+      role: MessageRole.values.where((e) => e.name == map['role']).first,
       content: map['content'] as String,
       imagePath: map['imagePath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),

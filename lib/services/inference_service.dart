@@ -8,6 +8,7 @@ class InferenceService {
   static const _loadingLogChannel = EventChannel('com.dgxspark.tongyilite/loading_logs');
 
   StreamSubscription<dynamic>? _loadingLogSubscription;
+  bool _initialized = false;
 
   // Loading log callback — invoked when native pushes a loading progress message.
   void Function(String? message)? onLoadingLog;
@@ -20,6 +21,9 @@ class InferenceService {
 
   /// Set up the EventChannel listener for native loading progress logs.
   void _setupLoadingLogListener() {
+    if (_initialized) return; // already set up (singleton instance)
+    _initialized = true;
+
     final stream = _loadingLogChannel.receiveBroadcastStream();
     _loadingLogSubscription = stream.listen((event) {
       // Handle both String and null events properly
@@ -40,6 +44,7 @@ class InferenceService {
 
   void dispose() {
     _loadingLogSubscription?.cancel();
+    _initialized = false;
   }
 
   // ------------------------------------------------------------------
@@ -165,11 +170,15 @@ class InferenceService {
   Future<Map<String, double>> benchmark({
     String prompt = 'List 5 common fruits.',
     int nRepeats = 3,
-  }) async {
-    final result = await _channel.invokeMethod('benchmark', {
+  }) {
+    final result = _channel.invokeMethod('benchmark', {
       'prompt': prompt,
       'nRepeats': nRepeats,
     });
-    return Map<String, double>.from(result);
+    return result.then((data) => Map<String, double>.from(data));
   }
+
+  // ------------------------------------------------------------------
+  // Dispose (called when app shuts down)
+  // ------------------------------------------------------------------
 }

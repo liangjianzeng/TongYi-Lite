@@ -107,7 +107,7 @@ class StorageService {
     return rows.map((r) => ChatMessage(
       id: r['id'] as String,
       conversationId: r['conversationId'] as String,
-      role: MessageRole.values.firstWhere((e) => e.name == r['role']),
+      role: MessageRole.values.where((e) => e.name == r['role']).first,
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
@@ -146,7 +146,7 @@ class StorageService {
     return rows.map((r) => ChatMessage(
       id: r['id'] as String,
       conversationId: r['conversationId'] as String,
-      role: MessageRole.values.firstWhere((e) => e.name == r['role']),
+      role: MessageRole.values.where((e) => e.name == r['role']).first,
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),

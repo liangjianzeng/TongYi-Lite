@@ -26,7 +26,7 @@ final storageServiceProvider = Provider<StorageService>((ref) => StorageService(
 
 /// Currently selected model ID. Defaults to Qwen2.5-1.5B which is the
 /// recommended balance of quality and memory usage for most phones.
-final currentModelIdProvider = StateProvider<String>((ref) => 'qwen2.5-1.5b-q4_k_m');
+final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3-1.7b-q4_k_m');
 
 // ---------------------------------------------------------------------------
 // Conversations
