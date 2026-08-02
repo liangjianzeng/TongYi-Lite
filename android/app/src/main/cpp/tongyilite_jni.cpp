@@ -101,15 +101,22 @@ struct InferenceEngine {
         lock.unlock();
         reportLoadingLog(buf);
 
-        // Context params
+        // Context params — ensure n_ctx is valid before passing to llama.
         ctx_params = llama_context_default_params();
-        ctx_params.n_ctx = n_ctx;
+
+        const int trained_ctx = llama_model_n_ctx_train(model);
+        int effective_n_ctx = (n_ctx > 0) ? n_ctx : ((trained_ctx > 0) ? trained_ctx : 512);
+
+        if (n_ctx <= 0 || n_ctx != effective_n_ctx) {
+            LOGW("Using effective n_ctx=%d (requested=%d, trained=%d)", effective_n_ctx, n_ctx, trained_ctx);
+        }
+
+        ctx_params.n_ctx = effective_n_ctx;
         ctx_params.n_batch = 512;
         ctx_params.n_ubatch = 256;
 
-        const int trained_ctx = llama_model_n_ctx_train(model);
-        if (n_ctx > trained_ctx) {
-            LOGW("Requested n_ctx=%d > trained=%d, capping.", n_ctx, trained_ctx);
+        if (effective_n_ctx > trained_ctx) {
+            LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, trained_ctx);
             ctx_params.n_ctx = trained_ctx;
             char buf2[128];
             snprintf(buf2, sizeof(buf2), "上下文已限制为训练最大值 %d", trained_ctx);
@@ -209,148 +216,157 @@ struct InferenceEngine {
             return "[ERROR: No model loaded]";
         }
 
-        std::lock_guard<std::mutex> lock(mtx);
-        is_running  = true;
-        should_stop = false;
+        try {
+            std::lock_guard<std::mutex> lock(mtx);
+            is_running  = true;
+            should_stop = false;
 
-        // 1. Tokenize prompt
-        bool add_bos = llama_vocab_get_add_bos(vocab);
-        prompt_tokens = tokenize(prompt, add_bos);
-        n_prompt = (int)prompt_tokens.size();
-
-        if (n_prompt > n_ctx - 4) {
-            LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, n_ctx);
-            prompt_tokens.resize(n_ctx - 4);
+            // 1. Tokenize prompt
+            bool add_bos = llama_vocab_get_add_bos(vocab);
+            prompt_tokens = tokenize(prompt, add_bos);
             n_prompt = (int)prompt_tokens.size();
-        }
 
-        LOGI("Prompt: %d tokens", n_prompt);
+            if (n_prompt > n_ctx - 4) {
+                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, n_ctx);
+                prompt_tokens.resize(n_ctx - 4);
+                n_prompt = (int)prompt_tokens.size();
+            }
 
-        // 2. Batch decode prompt
-        t_prompt_ms = 0;
-        t_gen_ms = 0;
-        n_gen = 0;
+            LOGI("Prompt: %d tokens", n_prompt);
 
-        auto t_start = std::chrono::high_resolution_clock::now();
+            // 2. Batch decode prompt
+            t_prompt_ms = 0;
+            t_gen_ms = 0;
+            n_gen = 0;
 
-        llama_batch batch = llama_batch_get_one(prompt_tokens.data(), n_prompt);
-        if (llama_decode(context, batch) != 0) {
-            LOGE("llama_decode() failed on prompt");
-            is_running = false;
-            return "[ERROR: Prompt decode failed]";
-        }
+            auto t_start = std::chrono::high_resolution_clock::now();
 
-        auto t_end = std::chrono::high_resolution_clock::now();
-        t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-
-        // 3. Auto-generate tokens
-        std::string result;
-        const llama_token eos = llama_vocab_eos(vocab);
-
-        while (n_gen < max_tokens && !should_stop) {
-            llama_token new_token = 0;
-
-            // Sample next token using softmax + temperature + top-p
-            auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
-            
-            // CRITICAL: Check for nullptr - llama_decode may succeed but not cache all logits
-            if (!logits_arr) {
-                LOGE("llama_get_logits_ith returned nullptr at position %d", prompt_tokens.size() - 1 + n_gen);
+            llama_batch batch = llama_batch_get_one(prompt_tokens.data(), n_prompt);
+            if (llama_decode(context, batch) != 0) {
+                LOGE("llama_decode() failed on prompt");
                 is_running = false;
-                return "[ERROR: Logit extraction failed]";
-            }
-            
-            int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
-
-            // Build candidate list from logits
-            std::vector<llama_token_data> candidates(n_vocab);
-            for (int32_t i = 0; i < n_vocab; ++i) {
-                candidates[i].id = i;
-                candidates[i].logit = logits_arr[i];
-                candidates[i].p = 0.0f;
+                return "[ERROR: Prompt decode failed]";
             }
 
-            // Temperature scaling
-            for (auto &c : candidates) {
-                c.logit /= temperature;
-            }
+            auto t_end = std::chrono::high_resolution_clock::now();
+            t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
-            // Top-p sampling: sort by logit descending, keep top cumulative probability
-            std::sort(candidates.begin(), candidates.end(),
-                      [](const llama_token_data &a, const llama_token_data &b) {
-                          return a.logit > b.logit;
-                      });
+            // 3. Auto-generate tokens
+            std::string result;
+            const llama_token eos = llama_vocab_eos(vocab);
 
-            float cumsum = 0.0f;
-            size_t keep = n_vocab;
-            for (size_t i = 0; i < n_vocab; ++i) {
-                cumsum += std::exp(candidates[i].logit - candidates[0].logit);
-                if (cumsum >= top_p) {
-                    keep = i + 1;
+            while (n_gen < max_tokens && !should_stop) {
+                llama_token new_token = 0;
+
+                // Sample next token using softmax + temperature + top-p
+                auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
+
+                if (!logits_arr) {
+                    LOGE("llama_get_logits_ith returned nullptr at position %d", prompt_tokens.size() - 1 + n_gen);
+                    is_running = false;
+                    return "[ERROR: Logit extraction failed]";
+                }
+
+                int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
+
+                // Build candidate list from logits
+                std::vector<llama_token_data> candidates(n_vocab);
+                for (int32_t i = 0; i < n_vocab; ++i) {
+                    candidates[i].id = i;
+                    candidates[i].logit = logits_arr[i];
+                    candidates[i].p = 0.0f;
+                }
+
+                // Temperature scaling
+                for (auto &c : candidates) {
+                    c.logit /= temperature;
+                }
+
+                // Top-p sampling: sort by logit descending, keep top cumulative probability
+                std::sort(candidates.begin(), candidates.end(),
+                          [](const llama_token_data &a, const llama_token_data &b) {
+                              return a.logit > b.logit;
+                          });
+
+                float cumsum = 0.0f;
+                size_t keep = n_vocab;
+                for (size_t i = 0; i < n_vocab; ++i) {
+                    cumsum += std::exp(candidates[i].logit - candidates[0].logit);
+                    if (cumsum >= top_p) {
+                        keep = i + 1;
+                        break;
+                    }
+                }
+
+                // Renormalize probabilities for kept tokens
+                float max_logit = candidates[0].logit;
+                float sum_exp = 0.0f;
+                for (size_t i = 0; i < keep; ++i) {
+                    candidates[i].p = std::exp(candidates[i].logit - max_logit);
+                    sum_exp += candidates[i].p;
+                }
+                for (size_t i = 0; i < keep; ++i) {
+                    candidates[i].p /= sum_exp;
+                }
+
+                // Weighted sampling from top-p candidates
+                float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+                new_token = candidates[keep - 1].id;
+                float acc = 0.0f;
+                for (size_t i = 0; i < keep; ++i) {
+                    acc += candidates[i].p;
+                    if (r <= acc) {
+                        new_token = candidates[i].id;
+                        break;
+                    }
+                }
+
+                if (new_token == eos) {
+                    LOGI("EOS reached at gen=%d", n_gen);
                     break;
                 }
-            }
 
-            // Renormalize probabilities for kept tokens
-            float max_logit = candidates[0].logit;
-            float sum_exp = 0.0f;
-            for (size_t i = 0; i < keep; ++i) {
-                candidates[i].p = std::exp(candidates[i].logit - max_logit);
-                sum_exp += candidates[i].p;
-            }
-            for (size_t i = 0; i < keep; ++i) {
-                candidates[i].p /= sum_exp;
-            }
+                // Convert token to string
+                char buf[256];
+                int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
+                if (n > 0) {
+                    std::string piece(buf, n);
+                    result += piece;
+                    if (on_token && !on_token(piece)) {
+                        LOGI("Generation stopped by callback at gen=%d", n_gen);
+                        break;
+                    }
+                }
 
-            // Weighted sampling from top-p candidates
-            float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
-            new_token = candidates[keep - 1].id;
-            float acc = 0.0f;
-            for (size_t i = 0; i < keep; ++i) {
-                acc += candidates[i].p;
-                if (r <= acc) {
-                    new_token = candidates[i].id;
+                n_gen++;
+
+                // Decode the new token
+                t_start = std::chrono::high_resolution_clock::now();
+                llama_batch token_batch = llama_batch_get_one(&new_token, 1);
+                if (llama_decode(context, token_batch) != 0) {
+                    LOGE("llama_decode() failed on generated token");
                     break;
                 }
+                t_end = std::chrono::high_resolution_clock::now();
+                t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
 
-            if (new_token == eos) {
-                LOGI("EOS reached at gen=%d", n_gen);
-                break;
-            }
+            is_running = false;
 
-            // Convert token to string
-            char buf[256];
-            int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
-            if (n > 0) {
-                std::string piece(buf, n);
-                result += piece;
-                if (on_token && !on_token(piece)) {
-                    LOGI("Generation stopped by callback at gen=%d", n_gen);
-                    break;
-                }
-            }
+            double tok_per_sec = n_gen > 0 ? (n_gen / (t_gen_ms / 1000.0)) : 0.0;
+            LOGI("Generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms)",
+                 n_gen, tok_per_sec, t_prompt_ms, t_gen_ms);
 
-            n_gen++;
-
-            // Decode the new token
-            t_start = std::chrono::high_resolution_clock::now();
-            llama_batch token_batch = llama_batch_get_one(&new_token, 1);
-            if (llama_decode(context, token_batch) != 0) {
-                LOGE("llama_decode() failed on generated token");
-                break;
-            }
-            t_end = std::chrono::high_resolution_clock::now();
-            t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
+            return result;
+        } catch (const std::exception &e) {
+            LOGE("completion() caught C++ exception: %s", e.what());
+            is_running = false;
+            return std::string("[ERROR: ") + e.what() + "]";
+        } catch (...) {
+            LOGE("completion() caught unknown C++ exception");
+            is_running = false;
+            return "[ERROR: Unknown C++ exception]";
         }
-
-        is_running = false;
-
-        double tok_per_sec = n_gen > 0 ? (n_gen / (t_gen_ms / 1000.0)) : 0.0;
-        LOGI("Generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms)",
-             n_gen, tok_per_sec, t_prompt_ms, t_gen_ms);
-
-        return result;
     }
 
     void stop() {
