@@ -127,12 +127,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     
     if (text.isEmpty && imagePath == null) return;
 
-    // Clear input fields
+    final notifier = ref.read(chatNotifierProvider.notifier);
+    try {
+      await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
+    } catch (e) {
+      // Show error feedback — don't clear input so user can retry.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('发送失败: $e', style: const TextStyle(color: Colors.white))),
+      );
+      return;
+    }
+
+    // Only clear after successful send.
     _textController.clear();
     setState(() => _selectedImagePath = null);
-
-    final notifier = ref.read(chatNotifierProvider.notifier);
-    await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
 
     // Scroll to bottom
     Future.delayed(const Duration(milliseconds: 100), () {

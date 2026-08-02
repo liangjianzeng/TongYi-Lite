@@ -361,11 +361,11 @@ struct InferenceEngine {
         } catch (const std::exception &e) {
             LOGE("completion() caught C++ exception: %s", e.what());
             is_running = false;
-            return std::string("[ERROR: ") + e.what() + "]";
+            throw; // Re-throw so JNI layer can propagate to Java as a real exception.
         } catch (...) {
             LOGE("completion() caught unknown C++ exception");
             is_running = false;
-            return "[ERROR: Unknown C++ exception]";
+            throw std::runtime_error("Unknown C++ exception in completion()");
         }
     }
 
@@ -522,55 +522,64 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
 
     std::string prompt = jstring_to_std(env, jprompt);
 
-    std::string result = g_engine.completion(
-        prompt.c_str(),
-        max_tokens,
-        temperature,
-        top_p,
-        [cb_copy](const std::string &token) -> bool {
-            if (!g_jvm || !cb_copy) return true;
+    std::string result;
+    try {
+        result = g_engine.completion(
+            prompt.c_str(),
+            max_tokens,
+            temperature,
+            top_p,
+            [cb_copy](const std::string &token) -> bool {
+                if (!g_jvm || !cb_copy) return true;
 
-            // Ensure we have a valid JNIEnv for this thread.
-            JNIEnv *local_env = nullptr;
-            int status = g_jvm->GetEnv(reinterpret_cast<void **>(&local_env), JNI_VERSION_1_6);
-            bool need_detach = false;
+                // Ensure we have a valid JNIEnv for this thread.
+                JNIEnv *local_env = nullptr;
+                int status = g_jvm->GetEnv(reinterpret_cast<void **>(&local_env), JNI_VERSION_1_6);
+                bool need_detach = false;
 
-            if (status == JNI_EDETACHED) {
-                if (g_jvm->AttachCurrentThread(&local_env, nullptr) != 0) return true;
-                need_detach = true;
-            } else if (status != JNI_OK) {
-                return true;
-            }
+                if (status == JNI_EDETACHED) {
+                    if (g_jvm->AttachCurrentThread(&local_env, nullptr) != 0) return true;
+                    need_detach = true;
+                } else if (status != JNI_OK) {
+                    return true;
+                }
 
-            // Use NewGlobalRef on the copy to avoid GC during callback execution.
-            jobject safe_cb = local_env->NewLocalRef(cb_copy);
-            jclass cls = local_env->GetObjectClass(safe_cb);
-            if (!cls) {
-                local_env->DeleteLocalRef(safe_cb);
-                if (need_detach) g_jvm->DetachCurrentThread();
-                return true;
-            }
+                // Use NewLocalRef on the copy to avoid GC during callback execution.
+                jobject safe_cb = local_env->NewLocalRef(cb_copy);
+                jclass cls = local_env->GetObjectClass(safe_cb);
+                if (!cls) {
+                    local_env->DeleteLocalRef(safe_cb);
+                    if (need_detach) g_jvm->DetachCurrentThread();
+                    return true;
+                }
 
-            jmethodID mid = local_env->GetMethodID(cls, "onToken", "(Ljava/lang/String;)Z");
-            if (!mid) {
+                jmethodID mid = local_env->GetMethodID(cls, "onToken", "(Ljava/lang/String;)Z");
+                if (!mid) {
+                    local_env->DeleteLocalRef(safe_cb);
+                    local_env->DeleteLocalRef(cls);
+                    if (need_detach) g_jvm->DetachCurrentThread();
+                    return true;
+                }
+
+                jstring jtoken = local_env->NewStringUTF(token.c_str());
+                jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
+                local_env->DeleteLocalRef(jtoken);
                 local_env->DeleteLocalRef(safe_cb);
                 local_env->DeleteLocalRef(cls);
+
                 if (need_detach) g_jvm->DetachCurrentThread();
-                return true;
+                return (should_continue != JNI_FALSE);
             }
+        );
+    } catch (const std::exception &e) {
+        LOGE("nativeCompletion caught C++ exception: %s", e.what());
+        result = std::string("[ERROR: ") + e.what() + "]";
+    } catch (...) {
+        LOGE("nativeCompletion caught unknown C++ exception");
+        result = "[ERROR: Unknown C++ exception in completion()]";
+    }
 
-            jstring jtoken = local_env->NewStringUTF(token.c_str());
-            jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
-            local_env->DeleteLocalRef(jtoken);
-            local_env->DeleteLocalRef(safe_cb);
-            local_env->DeleteLocalRef(cls);
-
-            if (need_detach) g_jvm->DetachCurrentThread();
-            return (should_continue != JNI_FALSE);
-        }
-    );
-
-    // Release callback refs
+    // Release callback refs (always, even on error)
     env->DeleteLocalRef(cb_copy);
     if (g_callback_obj) {
         env->DeleteGlobalRef(g_callback_obj);

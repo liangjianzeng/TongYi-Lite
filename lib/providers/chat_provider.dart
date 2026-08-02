@@ -60,10 +60,17 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
 
 final currentConversationProvider = StateProvider<Conversation?>((ref) => null);
 
-final messagesProvider = FutureProvider.autoDispose.family<List<ChatMessage>,
-    String>((ref, convId) async {
+final messagesProvider = StreamProvider.autoDispose.family<List<ChatMessage>,
+    String>((ref, convId) async* {
   final storage = ref.read(storageServiceProvider);
-  return storage.getAllMessages(convId);
+  // Yield the current messages immediately.
+  yield await storage.getAllMessages(convId);
+
+  // Then poll for changes every 500ms to pick up new messages.
+  while (true) {
+    await Future.delayed(const Duration(milliseconds: 500));
+    yield await storage.getAllMessages(convId);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -115,6 +122,7 @@ class ChatNotifier extends StateNotifier<bool> {
     }
 
     state = true;
+    _ref.read(isGeneratingProvider.notifier).state = true;
 
     try {
       // Step 2: Save user message
@@ -168,6 +176,7 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     } finally {
       state = false;
+      _ref.read(isGeneratingProvider.notifier).state = false;
     }
   }
 }
