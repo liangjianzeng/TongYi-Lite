@@ -62,7 +62,7 @@ struct InferenceEngine {
     double t_gen_ms = 0;
     int32_t n_gen = 0;
 
-    bool load(const char *model_path, int n_ctx = 4096) {
+    bool load(const char *model_path, int requested_n_ctx = 4096) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -105,10 +105,10 @@ struct InferenceEngine {
         ctx_params = llama_context_default_params();
 
         const int trained_ctx = llama_model_n_ctx_train(model);
-        int effective_n_ctx = (n_ctx > 0) ? n_ctx : ((trained_ctx > 0) ? trained_ctx : 512);
+        int effective_n_ctx = (requested_n_ctx > 0) ? requested_n_ctx : ((trained_ctx > 0) ? trained_ctx : 512);
 
-        if (n_ctx <= 0 || n_ctx != effective_n_ctx) {
-            LOGW("Using effective n_ctx=%d (requested=%d, trained=%d)", effective_n_ctx, n_ctx, trained_ctx);
+        if (requested_n_ctx <= 0 || requested_n_ctx != effective_n_ctx) {
+            LOGW("Using effective n_ctx=%d (requested=%d, trained=%d)", effective_n_ctx, requested_n_ctx, trained_ctx);
         }
 
         ctx_params.n_ctx = effective_n_ctx;
@@ -116,7 +116,7 @@ struct InferenceEngine {
         ctx_params.n_ubatch = 256;
 
         if (effective_n_ctx > trained_ctx) {
-            LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, trained_ctx);
+            LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
             ctx_params.n_ctx = trained_ctx;
             char buf2[128];
             snprintf(buf2, sizeof(buf2), "上下文已限制为训练最大值 %d", trained_ctx);
@@ -163,28 +163,32 @@ struct InferenceEngine {
             return false;
         }
 
-        n_ctx = llama_n_ctx(context);
+        this->n_ctx.store(static_cast<int32_t>(llama_n_ctx(context)));
 
+        const int ctx_val = static_cast<int>(this->n_ctx.load());
         LOGI("Model loaded. n_ctx=%d, n_embd=%d, n_layer=%d",
-             (int)n_ctx.load(),
+             ctx_val,
              llama_model_n_embd(model),
              llama_model_n_layer(model));
         char buf3[128];
-        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", n_ctx.load());
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", ctx_val);
         reportLoadingLog(buf3);
         return true;
     }
 
     void unload() {
-        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, (int)n_ctx.load(), (int)is_running.load());
+        const int v = static_cast<int>(n_ctx.load());
+        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, v, (int)is_running.load());
         std::lock_guard<std::mutex> lock(mtx);
-        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, (int)n_ctx.load());
+        const int v2 = static_cast<int>(n_ctx.load());
+        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v2);
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         n_ctx = 0;
         is_running = false;
-        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, (int)n_ctx.load());
+        const int v3 = static_cast<int>(n_ctx.load());
+        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v3);
     }
 
     bool is_loaded() const {
@@ -226,13 +230,14 @@ struct InferenceEngine {
         // callback: called for each generated token; return false to stop
         std::function<bool(const std::string &)> on_token = nullptr
     ) {
+        const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
-             (void*)model, (void*)context, (int)n_ctx.load(), (int)is_running.load());
+             (void*)model, (void*)context, ctx_val, (int)is_running.load());
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
         LOGI("completion() LOCK ACQUIRED: model=%p context=%p n_ctx=%d",
-             (void*)model, (void*)context, (int)n_ctx.load());
+             (void*)model, (void*)context, ctx_val);
 
         if (!is_loaded()) {
             LOGE("completion() aborted INSIDE LOCK: no model loaded");
@@ -243,8 +248,9 @@ struct InferenceEngine {
             is_running  = true;
             should_stop = false;
 
+            const int ctx_val2 = static_cast<int>(n_ctx.load());
             LOGI("completion() running: model=%p context=%p n_ctx=%d",
-                 (void*)model, (void*)context, (int)n_ctx.load());
+                 (void*)model, (void*)context, ctx_val2);
 
             // 1. Tokenize prompt
             bool add_bos = llama_vocab_get_add_bos(vocab);
@@ -252,14 +258,14 @@ struct InferenceEngine {
             n_prompt = (int)prompt_tokens.size();
             LOGI("Tokenized: %d tokens, add_bos=%d", n_prompt, add_bos);
 
-            if (n_ctx <= 0 || context == nullptr) {
-                LOGE("completion() aborted: invalid state n_ctx=%d", (int)n_ctx.load());
+            if (ctx_val2 <= 0 || context == nullptr) {
+                LOGE("completion() aborted: invalid state n_ctx=%d", ctx_val2);
                 is_running = false;
                 return "[ERROR: Invalid context]";
             }
 
-            if (n_prompt > n_ctx - 4) {
-                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, (int)n_ctx.load());
+            if (n_prompt > ctx_val2 - 4) {
+                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, ctx_val2);
                 prompt_tokens.resize(n_ctx - 4);
                 n_prompt = (int)prompt_tokens.size();
             }
@@ -293,7 +299,7 @@ struct InferenceEngine {
                 auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
 
                 if (!logits_arr) {
-                    LOGE("llama_get_logits_ith nullptr at pos %d", prompt_tokens.size() - 1 + n_gen);
+                    LOGE("llama_get_logits_ith nullptr at pos %d", (int)(prompt_tokens.size() - 1 + n_gen));
                     is_running = false;
                     return "[ERROR: Logit extraction failed]";
                 }
@@ -534,8 +540,9 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
     jfloat top_p,
     jobject jcallback  // InferenceCallback interface
 ) {
+    const int eng_n_ctx = static_cast<int>(g_engine.n_ctx.load());
     LOGI("nativeCompletion ENTER: is_loaded=%d model=%p context=%p n_ctx=%d",
-         g_engine.is_loaded(), (void*)g_engine.model, (void*)g_engine.context, (int)g_engine.n_ctx.load());
+         g_engine.is_loaded(), (void*)g_engine.model, (void*)g_engine.context, eng_n_ctx);
     if (!g_engine.is_loaded()) {
         LOGE("nativeCompletion ABORT: no model loaded at JNI entry");
         return env->NewStringUTF("[ERROR: No model loaded]");
@@ -671,10 +678,11 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetModelInfo(JNIEnv *env, job
         return env->NewStringUTF("{}");
     }
     char buf[512];
+    const int eng_ctx = static_cast<int>(g_engine.n_ctx.load());
     snprintf(buf, sizeof(buf),
              "{\"n_params\":%lld,\"n_ctx\":%d,\"n_embd\":%d,\"n_layer\":%d,\"n_vocab\":%d}",
              (long long)llama_model_n_params(g_engine.model),
-             (int)g_engine.n_ctx.load(),
+             eng_ctx,
              llama_model_n_embd(g_engine.model),
              llama_model_n_layer(g_engine.model),
              llama_vocab_n_tokens(g_engine.vocab));
