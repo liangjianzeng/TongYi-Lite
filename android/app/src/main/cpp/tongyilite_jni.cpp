@@ -190,13 +190,22 @@ struct InferenceEngine {
     // Tokenize prompt
     // ------------------------------------------------------------------
     std::vector<llama_token> tokenize(const char *text, bool add_bos) {
-        int n_tokens = text == nullptr ? 1 : (int)strlen(text);
-        std::vector<llama_token> tokens(n_tokens + (add_bos ? 1 : 0));
-        int n = llama_tokenize(vocab, text, n_tokens, tokens.data(), tokens.size(), add_bos, true);
+        int n_chars = text == nullptr ? 0 : (int)strlen(text);
+        // Allocate extra space: llama_tokenize may need more than char count for multi-byte chars
+        std::vector<llama_token> tokens(n_chars + 16);
+        int n = llama_tokenize(vocab, text, n_chars, tokens.data(), tokens.size(), add_bos, true);
         if (n < 0) {
-            n = -n;
+            // n is negative: |n| = required buffer size
+            tokens.resize(-n);
+            // Retry with correct size
+            n = llama_tokenize(vocab, text, n_chars, tokens.data(), tokens.size(), add_bos, true);
+        }
+        if (n < 0) {
+            LOGE("tokenize() failed: %d", n);
+            return {};
         }
         tokens.resize(n);
+        LOGI("tokenize(): '%s' -> %d tokens (add_bos=%d)", text, (int)tokens.size(), add_bos);
         return tokens;
     }
 
@@ -340,13 +349,22 @@ struct InferenceEngine {
 
                 n_gen++;
 
-                // Decode the new token
+                // Decode the new token at position n_prompt + n_gen - 1
+                // llama_batch_get_one always sets pos=0, which would overwrite KV cache.
+                // Must use manual batch construction with correct position offset.
                 t_start = std::chrono::high_resolution_clock::now();
-                llama_batch token_batch = llama_batch_get_one(&new_token, 1);
+                llama_batch token_batch = llama_batch_init(1, 0, 1);
+                token_batch.token[0]   = new_token;
+                token_batch.pos[0]     = n_prompt + n_gen - 1;
+                token_batch.n_seq_id[0]= 1;
+                token_batch.seq_id[0][0]= 0;
+                token_batch.logits[0]  = true;
                 if (llama_decode(context, token_batch) != 0) {
-                    LOGE("llama_decode() failed on generated token");
+                    LOGE("llama_decode() failed on generated token #%d", n_gen);
+                    llama_batch_free(token_batch);
                     break;
                 }
+                llama_batch_free(token_batch);
                 t_end = std::chrono::high_resolution_clock::now();
                 t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
