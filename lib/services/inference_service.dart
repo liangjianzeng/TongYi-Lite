@@ -123,7 +123,8 @@ class InferenceService {
       'temperature': temperature,
       'topP': topP,
     }).then((result) {
-      debugPrint('[InferenceService] Native completion done, result="${result?.toString().substring(0, 50)}..."');
+      final resStr = result?.toString() ?? '';
+      debugPrint('[InferenceService] Native completion done, len=${resStr.length}, preview="${resStr.substring(0, resStr.length.clamp(0, 50))}"');
       // Final result (may be empty if streaming used all tokens)
       controller.close();
       subscription.cancel();

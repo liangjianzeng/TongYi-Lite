@@ -158,7 +158,8 @@ class ChatNotifier extends StateNotifier<bool> {
           }
         }
         fullResponse = buffer.toString();
-        debugPrint('[ChatNotifier] Stream done, response="${fullResponse.substring(0, fullResponse.length.clamp(0, 50))}${fullResponse.length > 50 ? "..." : ""}"');
+        final preview = fullResponse.substring(0, fullResponse.length.clamp(0, 50));
+        debugPrint('[ChatNotifier] Stream done, len=${fullResponse.length}, response="$preview${fullResponse.length > 50 ? "..." : ""}"');
 
         // Step 4: Save assistant message
         final assistantMsg = ChatMessage(
