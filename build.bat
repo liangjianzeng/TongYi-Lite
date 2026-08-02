@@ -25,7 +25,7 @@ echo ============================================================
 echo.
 
 :: Step 1: 检查设备
-echo [1/5] 检查连接设备...
+echo [1/6] 检查连接设备...
 for /f "tokens=1" %%d in ('%ADB% devices ^| findstr /v "List\|^$"') do (
     set "DEVICE=%%d"
     goto :device_found
@@ -38,7 +38,7 @@ echo   ✅ 设备: %DEVICE%
 echo.
 
 :: Step 2: 复制 key.properties
-echo [2/5] 部署签名配置...
+echo [2/6] 部署签名配置...
 if not exist "%KEY_SRC%" (
     echo   ❌ key.properties 源文件不存在: %KEY_SRC%
     pause
@@ -48,14 +48,15 @@ copy /y "%KEY_SRC%" "%KEY_DST%" >nul
 echo   ✅ key.properties → %KEY_DST%
 echo.
 
-:: Step 3: 卸载旧版本
-echo [3/5] 清除旧安装...
+:: Step 3: 卸载旧版本（签名不同时必须彻底清除）
+echo [3/6] 清除旧安装...
 %ADB% -s %DEVICE% uninstall %APP_ID% >nul 2>&1
+timeout /t 1 /nobreak >nul
 echo   ✅ 旧版本已清除（或不存在）
 echo.
 
 :: Step 4: 构建 APK
-echo [4/5] 构建 Debug APK ...
+echo [4/6] 构建 Debug APK ...
 %FLUTTER% build apk --debug
 if errorlevel 1 (
     echo   ❌ 构建失败！
@@ -65,9 +66,9 @@ if errorlevel 1 (
 echo   ✅ 构建成功
 echo.
 
-:: Step 5: 安装并打开文件夹
-echo [5/5] 安装到设备...
-%ADB% -s %DEVICE% install -r "build\app\outputs\flutter-apk\app-debug.apk"
+:: Step 5: 安装到设备
+echo [5/6] 安装到设备...
+%ADB% -s %DEVICE% install "build\app\outputs\flutter-apk\app-debug.apk"
 if errorlevel 1 (
     echo   ❌ 安装失败！
     pause
@@ -76,7 +77,8 @@ if errorlevel 1 (
 echo   ✅ 安装成功！
 echo.
 
-:: 打开 APK 所在文件夹
+:: Step 6: 打开 APK 文件夹
+echo [6/6] 打开输出目录...
 set "APK_DIR=%~dp0build\app\outputs\flutter-apk"
 explorer.exe "%APK_DIR%"
 echo 📂 已打开: %APK_DIR%

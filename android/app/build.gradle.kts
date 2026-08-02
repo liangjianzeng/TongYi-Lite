@@ -24,7 +24,7 @@ android {
     }
 
     signingConfigs {
-        create("release") {
+        create("custom") {
             val keyProps = Properties().apply {
                 load(FileInputStream(File(rootDir, "key.properties")))
             }
@@ -39,11 +39,11 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs["release"]
+            signingConfig = signingConfigs["custom"]
         }
         debug {
             isMinifyEnabled = false
-            signingConfig = signingConfigs["debug"]
+            signingConfig = signingConfigs["custom"]
         }
     }
 
