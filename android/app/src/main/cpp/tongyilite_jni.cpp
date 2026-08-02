@@ -177,13 +177,17 @@ struct InferenceEngine {
 
     void unload() {
         std::lock_guard<std::mutex> lock(mtx);
+        LOGI("unload() called: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
+        n_ctx = 0;
+        is_running = false;
     }
 
     bool is_loaded() const {
-        return model != nullptr && context != nullptr;
+        // Must also verify n_ctx > 0 — pointers alone can be stale garbage after unload.
+        return model != nullptr && context != nullptr && n_ctx > 0;
     }
 
     // ------------------------------------------------------------------
@@ -230,10 +234,22 @@ struct InferenceEngine {
             is_running  = true;
             should_stop = false;
 
+            // Debug: verify engine state before proceeding
+            LOGI("completion() start: model=%p context=%p n_ctx=%d is_running=%d",
+                 (void*)model, (void*)context, n_ctx, (int)is_running.load());
+
             // 1. Tokenize prompt
             bool add_bos = llama_vocab_get_add_bos(vocab);
             prompt_tokens = tokenize(prompt, add_bos);
             n_prompt = (int)prompt_tokens.size();
+            LOGI("Tokenized: %d tokens, add_bos=%d, n_ctx=%d", n_prompt, add_bos, n_ctx);
+
+            // Guard against n_ctx == 0 (should never happen, but be safe)
+            if (n_ctx <= 0 || context == nullptr) {
+                LOGE("completion() aborted: invalid context state (n_ctx=%d, context=%p)", n_ctx, (void*)context);
+                is_running = false;
+                return "[ERROR: Invalid context — model may have been unloaded]";
+            }
 
             if (n_prompt > n_ctx - 4) {
                 LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, n_ctx);
