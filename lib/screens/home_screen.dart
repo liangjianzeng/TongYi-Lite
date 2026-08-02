@@ -293,36 +293,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        modelState.modelName != null && modelState.modelName!.isNotEmpty
-                            ? '${modelState.modelName!}$generating'
-                            : (modelState.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中...' : '模型未加载')),
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                      ),
-                      if (modelState.phase == ModelLifecyclePhase.loading && modelState.latestLog != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          modelState.latestLog!,
-                          style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                      if (modelState.phase == ModelLifecyclePhase.error && modelState.errorMessage != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          modelState.errorMessage!,
-                          style: TextStyle(fontSize: 11, color: Colors.red.shade700),
-                        ),
-                      ],
-                    ],
-                  ),
+                Text(
+                  modelState.modelName != null && modelState.modelName!.isNotEmpty
+                      ? '${modelState.modelName!}$generating'
+                      : (modelState.isLoaded ? '模型已就绪$generating' : (isGenerating ? '推理中...' : '模型未加载')),
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
                 ),
+                if (modelState.phase == ModelLifecyclePhase.loading && modelState.latestLog != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    modelState.latestLog!,
+                    style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                if (modelState.phase == ModelLifecyclePhase.error && modelState.errorMessage != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    modelState.errorMessage!,
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                  ),
+                ],
               ],
             ),
           ),

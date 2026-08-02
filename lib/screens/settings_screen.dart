@@ -428,7 +428,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       if (confirm != true) return;
     }
 
+    // Mark generating so the UI reflects loading state across all screens.
+    ref.read(isGeneratingProvider.notifier).state = true;
+
     final ok = await manager.loadModel(model.id);
+
+    // Always reset generating flag when load finishes (success or failure).
+    ref.read(isGeneratingProvider.notifier).state = false;
+
     if (!mounted) return;
 
     if (ok) {
