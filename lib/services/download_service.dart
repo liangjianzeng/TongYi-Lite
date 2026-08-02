@@ -120,42 +120,55 @@ class DownloadService {
         // Use catalog size as fallback for progress display.
         if (task.totalBytes == 0) task.totalBytes = model.sizeBytes;
 
-        final downloadFuture = _dio.download(
+        // Explicit stream-based download with reliable byte-counting progress.
+        // Dio's onReceiveProgress is unreliable on Android; we track bytes ourselves.
+        final response = await _dio.get<ResponseBody>(
           urlInfo.url,
-          tempFile.path,
+          options: Options(
+            responseType: ResponseType.stream,
+            receiveTimeout: const Duration(hours: 2),
+          ),
           cancelToken: cancelToken,
-          onReceiveProgress: (received, total) {
-            debugPrint('[DownloadService] Dio callback: received=$received total=$total');
-            // Dio callback — use as authoritative if CDN returns Content-Length.
-            task.downloadedBytes = received;
-            if (total > 0 && task.totalBytes == 0) {
-              task.totalBytes = total;
-              debugPrint('[DownloadService] Using CDN Content-Length: $total bytes');
-            } else if (task.totalBytes == 0) {
-              task.totalBytes = model.sizeBytes;
-            }
-          },
         );
 
-        // Poll temp file size as the primary progress source — Dio's callback is unreliable on Android.
-        final ct = cancelToken;
-        final pollTimer = Timer.periodic(progressInterval, (_) async {
-          if (ct?.isCancelled == true) return;
-          try {
-            final fileSize = await tempFile.length();
-            // Only update if we haven't received data from the callback yet.
-            if (task.downloadedBytes == 0 || task.downloadedBytes < fileSize) {
-              task.downloadedBytes = fileSize;
-            }
-            _emitProgress(task, progressInterval, onProgress);
-          } catch (_) {}
-        });
+        final body = response.data;
+        if (body == null) throw DownloadException('Empty response body.');
+
+        // Get Content-Length from headers for total size.
+        final headerTotalStr = response.headers.value('content-length');
+        if (headerTotalStr != null) {
+          final headerTotal = int.tryParse(headerTotalStr);
+          if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
+            task.totalBytes = headerTotal;
+            debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
+          }
+        }
+
+        final raf = tempFile.openSync(mode: FileMode.writeOnlyAppend);
+        int received = downloadedSoFar;
+        DateTime? _lastProgressTime;
 
         try {
-          await downloadFuture;
+          await for (final chunk in body.stream) {
+            if (cancelToken?.isCancelled == true) break;
+            await raf.writeFrom(chunk);
+            received += chunk.length;
+            task.downloadedBytes = received;
+
+            // Emit progress at least every 500ms or on each chunk if chunks are small.
+            final now = DateTime.now();
+            if (_lastProgressTime == null ||
+                now.difference(_lastProgressTime!) >= progressInterval) {
+              _lastProgressTime = now;
+              onProgress(task);
+            }
+          }
         } finally {
-          pollTimer.cancel();
+          await raf.close();
         }
+
+        // Final progress emit to ensure completion state is sent.
+        onProgress(task);
       }
 
       // Step 4: Verify download produced data — trust what the CDN actually served.
@@ -361,20 +374,49 @@ class DownloadService {
           task, cancelToken, onProgress, progressInterval,
         );
       } else {
-        await _dio.download(
-          urlInfo.url, tempFile.path,
+        // Explicit stream-based download with reliable byte-counting progress.
+        final response = await _dio.get<ResponseBody>(
+          urlInfo.url,
+          options: Options(
+            responseType: ResponseType.stream,
+            receiveTimeout: const Duration(hours: 2),
+          ),
           cancelToken: cancelToken,
-          onReceiveProgress: (received, total) {
-            task.downloadedBytes = received;
-            // Use Dio's Content-Length as authoritative — it reflects what CDN actually sent.
-            if (total > 0 && task.totalBytes == 0) {
-              task.totalBytes = total;
-            } else if (task.totalBytes == 0) {
-              task.totalBytes = model.sizeBytes;
-            }
-            _emitProgress(task, progressInterval, onProgress);
-          },
         );
+
+        final body = response.data;
+        if (body == null) throw DownloadException('Empty response body.');
+
+        final headerTotalStr = response.headers.value('content-length');
+        if (headerTotalStr != null) {
+          final headerTotal = int.tryParse(headerTotalStr);
+          if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
+            task.totalBytes = headerTotal;
+          }
+        }
+
+        final raf = tempFile.openSync(mode: FileMode.writeOnlyAppend);
+        int received = downloadedSoFar;
+        DateTime? _lastProgressTime;
+
+        try {
+          await for (final chunk in body.stream) {
+            if (cancelToken?.isCancelled == true) break;
+            await raf.writeFrom(chunk);
+            received += chunk.length;
+            task.downloadedBytes = received;
+
+            final now = DateTime.now();
+            if (_lastProgressTime == null ||
+                now.difference(_lastProgressTime!) >= progressInterval) {
+              _lastProgressTime = now;
+              onProgress(task);
+            }
+          }
+        } finally {
+          await raf.close();
+        }
+        onProgress(task);
       }
 
       // Step 4: Verify download produced data — trust what the CDN actually served.
