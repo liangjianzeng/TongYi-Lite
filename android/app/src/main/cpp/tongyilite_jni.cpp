@@ -176,13 +176,15 @@ struct InferenceEngine {
     }
 
     void unload() {
+        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, n_ctx, (int)is_running.load());
         std::lock_guard<std::mutex> lock(mtx);
-        LOGI("unload() called: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
+        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         n_ctx = 0;
         is_running = false;
+        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, n_ctx);
     }
 
     bool is_loaded() const {
@@ -224,12 +226,16 @@ struct InferenceEngine {
         // callback: called for each generated token; return false to stop
         std::function<bool(const std::string &)> on_token = nullptr
     ) {
+        LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
+             (void*)model, (void*)context, n_ctx, (int)is_running.load());
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
+        LOGI("completion() LOCK ACQUIRED: model=%p context=%p n_ctx=%d",
+             (void*)model, (void*)context, n_ctx);
 
         if (!is_loaded()) {
-            LOGE("completion() aborted: no model loaded (race with unload)");
+            LOGE("completion() aborted INSIDE LOCK: no model loaded");
             return "[ERROR: No model loaded]";
         }
 
@@ -237,7 +243,7 @@ struct InferenceEngine {
             is_running  = true;
             should_stop = false;
 
-            LOGI("completion() start: model=%p context=%p n_ctx=%d",
+            LOGI("completion() running: model=%p context=%p n_ctx=%d",
                  (void*)model, (void*)context, n_ctx);
 
             // 1. Tokenize prompt
@@ -528,7 +534,10 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
     jfloat top_p,
     jobject jcallback  // InferenceCallback interface
 ) {
+    LOGI("nativeCompletion ENTER: is_loaded=%d model=%p context=%p n_ctx=%d",
+         g_engine.is_loaded(), (void*)g_engine.model, (void*)g_engine.context, g_engine.n_ctx);
     if (!g_engine.is_loaded()) {
+        LOGE("nativeCompletion ABORT: no model loaded at JNI entry");
         return env->NewStringUTF("[ERROR: No model loaded]");
     }
 
