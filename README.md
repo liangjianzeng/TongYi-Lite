@@ -51,7 +51,8 @@ TongYi-Lite/
 │   │   └── src/main/
 │   │       ├── cpp/
 │   │       │   ├── CMakeLists.txt    # llama.cpp NDK 构建（含 Vulkan）
-│   │       │   └── tongyilite_jni.cpp  # JNI 桥接层（GPU offload -1）
+│   │       │   ├── tongyilite_jni.cpp      # JNI 桥接层（运行时 GPU 检测 + Vulkan offload）
+│   │       │   └── host-toolchain-mingw.cmake  # 主机工具链（vulkan-shaders-gen 用 MinGW-w64）
 │   │       ├── java/com/dgxspark/tongyilite/
 │   │       │   ├── MainActivity.kt           # Flutter + MethodChannel
 │   │       │   ├── InferenceEngine.kt        # Kotlin 推理封装
@@ -127,6 +128,30 @@ export ANDROID_SDK_ROOT=$ANDROID_HOME
 export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.13113456
 export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
 ```
+
+### GPU / Vulkan 加速依赖（可选，但推荐）
+
+Vulkan 后端让 llama.cpp 把模型层卸载到设备 GPU（如骁龙 Adreno / Mali），推理速度通常数倍于纯 CPU。
+这部分 **仅对 `arm64-v8a` 生效**，且只在构建主机满足以下条件时才启用；不满足时自动回退到
+CPU + KleidiAI/SME2，构建本身不会失败。
+
+| 依赖 | 版本 / 路径 | 用途 | 必需 |
+|------|------------|------|------|
+| LunarG Vulkan SDK | `C:/VulkanSDK/1.4.357.0` | 提供 `glslc` 着色器编译器、`SPIRV-Headers` cmake 包、`<vulkan/vulkan.hpp>` C++ 头 | ✅（开 Vulkan 时） |
+| MinGW-w64 (GCC) | `C:/mingw64/bin/{gcc,g++}.exe` | 在 **Windows 构建主机**上编译 `vulkan-shaders-gen` 主机工具（把 `.comp` 着色器预编译成 C++ 头） | ✅（开 Vulkan 时） |
+| Android SDK cmake | `...\cmake\3.22.1\bin\ninja.exe` | 主机子构建的 Ninja 生成器（`CMAKE_MAKE_PROGRAM` 已 pin 到它） | ✅ |
+| NDK Vulkan 桩库 | `${ANDROID_NDK}/.../aarch64-linux-android/${ANDROID_PLATFORM_LEVEL}/libvulkan.so` | 链接阶段用的 Vulkan loader 桩（运行时由系统提供真实实现） | ✅ |
+
+> **为什么需要 MinGW？** ggml-vulkan 用 `ExternalProject_Add` 在构建主机上编一个叫
+> `vulkan-shaders-gen` 的小工具，用 `glslc` 把 compute shader 预编译成 `.comp.h`。主机上需要一份
+> **原生 C++17** 编译器（支持 `<windows.h>` / `<filesystem>` / `<thread>`）。本仓库已附带
+> `host-toolchain-mingw.cmake` 指向 `C:/mingw64` 的 GCC；若你用 MSVC，把该文件里的编译器路径
+> 改成 `cl.exe` 即可。
+>
+> **路径是硬编码的**：`CMakeLists.txt` 与 `host-toolchain-mingw.cmake` 里的 SDK / MinGW / NDK 路径
+> 都是本机（Windows）绝对路径。换机器需同步修改这两处，或改为从环境变量读取。
+>
+> **本机验证环境**：NDK r27.0.12077973、CMake 3.22.1、Vulkan SDK 1.4.357.0、MinGW-w64 GCC 16.x。
 
 ---
 
@@ -276,7 +301,39 @@ flutter logs | grep TongYiLite
 
 ### Vulkan GPU 加速
 
-当设备支持 Vulkan 1.2+ 时，所有模型层自动卸载到 GPU（`n_gpu_layers = -1`），可获得显著的性能提升。Vulkan 不可用时自动回退到 CPU + KleidiAI/SME2 优化。
+构建时若满足上面的依赖，APK 会包含 `libggml-vulkan.so`（内嵌全部预编译 SPIR-V 着色器）。
+**是否在运行时真正用 GPU，由 App 启动时探测决定**，不靠硬编码：
+
+- `tongyilite_jni.cpp` 的 `detect_gpu_layers()` 在加载模型时遍历 ggml 后端注册表
+  （`ggml_backend_dev_count()` / `ggml_backend_dev_get()`），打印每个设备的名称 / 类型 / 显存；
+- 发现 `GGML_BACKEND_DEVICE_TYPE_GPU`（即 Vulkan 后端枚举到了设备）就设 `n_gpu_layers = 999`
+  （全部层卸载到 GPU），否则回落 `0`（纯 CPU 推理）。
+
+这样做的好处：同一个 APK 装在没有 Vulkan 驱动的设备上也不会卡死（以前硬编码 GPU 层数会在
+尝试预留显存时挂起）。
+
+**验证是否真的上了 GPU**（连上设备后）：
+
+```bash
+adb logcat -c
+adb shell am start -n com.dgxspark.tongyilite/.MainActivity
+adb logcat | grep -iE "TongYiLite|ggml_vulkan"
+```
+
+预期看到：
+
+```
+ggml backend devices: N
+  device[0] name=... desc=... type=2 ...   # type=2 即 GPU
+n_gpu_layers = 999                           # 检测到 GPU
+检测到 GPU，启用 Vulkan 加速
+```
+
+若 GPU 显存不足以容纳全部层（多见于小内存设备），把 `999` 调小为部分层数（如 `20`）即可分层卸载。
+
+> **注意**：Vulkan 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里 `GGML_VULKAN` 只在
+> `ANDROID_ABI == arm64-v8a` 时强制 ON）。32 位 / x86 设备仍走 CPU。
+
 
 ---
 
@@ -304,6 +361,7 @@ flutter logs | grep TongYiLite
 | 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
+| 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
 
 ### P1 计划 🚧
 
@@ -311,7 +369,6 @@ flutter logs | grep TongYiLite
 7. **语音识别**：sherpa-onnx (WeNet) 流式 STT
 8. **TTS 播报**：Android TextToSpeech 离线引擎
 9. **Plugin 市场**：热插拔、签名验证、沙箱
-10. **Vulkan GPU 加速**：需安装 LunarG Vulkan SDK（glslc）后可启用
 
 ---
 
@@ -350,11 +407,23 @@ set(PROJECT_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../..)
 </details>
 
 <details>
-<summary><b>Q: CMake 报 Vulkan glslc not found</b></summary>
+<summary><b>Q: 如何启用 / 排查 Vulkan GPU 加速？</b></summary>
 
-Vulkan GPU 加速需要 LunarG Vulkan SDK（含 `glslc` shader compiler）。当前构建已禁用 Vulkan，使用 CPU + KleidiAI/SME2 推理。如需启用 GPU 加速：
-1. 安装 LunarG Vulkan SDK（https://vulkan.lunarg.com）
-2. 取消注释 CMakeLists.txt 中的 `set(GGML_VULKAN ON)`
+Vulkan 后端 **默认已对 arm64-v8a 启用**（只要构建主机满足依赖）。若编译或运行仍走 CPU，按以下排查：
+
+1. **确认 LunarG Vulkan SDK 已安装**到 `C:/VulkanSDK/1.4.357.0`（提供 `glslc` + `SPIRV-Headers` + `<vulkan/vulkan.hpp>`）。可在 PowerShell 验证：
+   ```powershell
+   Test-Path 'C:\VulkanSDK\1.4.357.0\Bin\glslc.exe'
+   Test-Path 'C:\VulkanSDK\1.4.357.0\Include\vulkan\vulkan.hpp'
+   ```
+2. **确认 MinGW-w64 在 `C:/mingw64`**（提供 `gcc.exe` / `g++.exe`）。`vulkan-shaders-gen` 主机工具需要它来预编译着色器。
+3. **改了 CMakeLists / 工具链后必须清 `.cxx` 缓存**，否则 Gradle 判定 up-to-date 不重编：
+   ```powershell
+   Remove-Item -LiteralPath 'android\app\.cxx' -Recurse -Force
+   ```
+4. **运行时确认**：`adb logcat | grep -iE "TongYiLite|ggml_vulkan"`，看 `ggml backend devices` 与 `n_gpu_layers`。若 `n_gpu_layers = 0` 说明设备未枚举到 GPU。
+
+构建主配置成功时会打印 `Vulkan ENABLED (GPU backend) for arm64-v8a` 与 `Vulkan shaders-gen host toolchain -> ...`。
 
 </details>
 
