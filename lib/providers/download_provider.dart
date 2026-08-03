@@ -35,6 +35,16 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   Future<void> startDownload(ModelConfig model) async {
     final existing = state[model.id];
     if (existing != null && existing.state == DownloadState.completed) return;
+    // Don't restart a download that is already active (downloading/paused) here.
+    if (existing != null &&
+        (existing.state == DownloadState.downloading ||
+         existing.state == DownloadState.paused)) {
+      return;
+    }
+    // Only one model may download at a time globally — block a second start so
+    // the service's capacity guard never throws an unhandled exception.
+    final anyActive = state.values.any((t) => t.state == DownloadState.downloading);
+    if (anyActive) return;
 
     // Create initial task for tracking — pass it to the service so Dio mutates THIS same object.
     final initialTask = DownloadTask(
@@ -65,15 +75,9 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     final existing = state[modelId];
     if (existing == null || existing.state != DownloadState.paused) return;
 
-    // Save the paused progress so we can restore it after download() creates a fresh task.
-    final savedProgress = existing.downloadedBytes;
-
+    // The service resumes from the on-disk `.tmp` partial and reports real
+    // progress directly, so no in-memory progress restoration is needed.
     await _downloadService.resume(modelId, onProgress: (task) {
-      // If this is a resume and the new task's progress is less than what we had,
-      // restore from disk — the .tmp file already contains saved data.
-      if (savedProgress > 0 && task.downloadedBytes < savedProgress) {
-        task = task.copyWith(downloadedBytes: savedProgress);
-      }
       state = {...state, task.modelId: task};
     });
   }

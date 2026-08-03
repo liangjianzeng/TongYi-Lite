@@ -19,30 +19,51 @@ class ModelStorageService {
   factory ModelStorageService() => _instance;
   ModelStorageService._internal();
 
-  // 持久化存储路径：公共外部目录（重装 APK 后保留）
-  static const String _externalRootPath = '/sdcard/TongYiLite/models';
-  
+  // 持久化存储文件夹名（重装 APK 后仍保留，因为不在 app-private 目录下）
+  static const String _appFolder = 'TongYiLite';
+
+  /// 解析外部存储卷根下的模型目录。优先用 getExternalStorageDirectory() 推导的真实
+  /// 卷根（如 /storage/emulated/0），回退到传统的 /sdcard 软链，避免硬编码路径在
+  /// 部分机型/Android 版本上失效。
+  Future<String> _resolveExternalModelsDir() async {
+    try {
+      final ext = await getExternalStorageDirectory();
+      if (ext != null) {
+        // ext = /storage/emulated/0/Android/data/<pkg>/files
+        // 向上 4 级到达卷根 /storage/emulated/0
+        var root = ext;
+        for (var i = 0; i < 4 && root.parent.path != root.path; i++) {
+          root = root.parent;
+        }
+        return p.join(root.path, _appFolder, 'models');
+      }
+    } catch (e) {
+      debugPrint('[ModelStorage] Failed to resolve external root: $e');
+    }
+    return p.join('/sdcard', _appFolder, 'models');
+  }
+
   /// 获取模型存储根目录（优先外部存储，回退到内部存储）
   Future<Directory> getModelsRootDir() async {
-    // 1. 先尝试外部存储
-    final externalDir = Directory(_externalRootPath);
+    final externalPath = await _resolveExternalModelsDir();
+    final externalDir = Directory(externalPath);
     try {
       if (!await externalDir.exists()) {
         await externalDir.create(recursive: true);
         debugPrint('[ModelStorage] Created directory: ${externalDir.path}');
       }
-      
+
       // 验证可写性
       final testFile = File(p.join(externalDir.path, '.write_test'));
       await testFile.writeAsString('test');
       await testFile.delete();
-      
+
       debugPrint('[ModelStorage] Using external storage: ${externalDir.path}');
       return externalDir;
     } catch (e) {
       debugPrint('[ModelStorage] Failed to use external storage: $e');
     }
-    
+
     // 2. 回退到内部存储（app_flutter/models）
     return await _getFallbackDir();
   }
@@ -121,27 +142,27 @@ class ModelStorageService {
   Future<List<String>> scanExistingModels() async {
     final cachedIds = <String>{};
 
-    // 1. 扫描外部存储主目录
-    await _scanDirectory(Directory(_externalRootPath), cachedIds);
+    // 1. 扫描外部存储主目录（递归，模型通常直接放这里）
+    final externalPath = await _resolveExternalModelsDir();
+    await _scanDirectory(Directory(externalPath), cachedIds, recursive: true);
 
     // 2. 扫描内部存储（app_flutter/models）- Flutter 默认存储位置
     await _scanDirectory(
       Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'),
       cachedIds,
+      recursive: true,
     );
 
-    // 3. 扫描 Download 目录（用户可能手动放置）
-    await _scanDirectory(Directory('/sdcard/Download'), cachedIds);
+    // 3. 扫描 Download / DCIM 目录（仅顶层，避免递归扫全盘导致极慢/权限异常）
+    await _scanDirectory(Directory('/sdcard/Download'), cachedIds, recursive: false);
+    await _scanDirectory(Directory('/sdcard/DCIM'), cachedIds, recursive: false);
 
-    // 4. 扫描 DCIM 目录
-    await _scanDirectory(Directory('/sdcard/DCIM'), cachedIds);
-
-    // 5. 回退到 applicationDocumentsDirectory
+    // 4. 回退到 applicationDocumentsDirectory
     try {
       final appDir = await getApplicationDocumentsDirectory();
       final internalModels = Directory(p.join(appDir.path, 'models'));
       if (await internalModels.exists()) {
-        await _scanDirectory(internalModels, cachedIds);
+        await _scanDirectory(internalModels, cachedIds, recursive: true);
       }
     } catch (_) {}
 
@@ -149,12 +170,13 @@ class ModelStorageService {
     return cachedIds.toList();
   }
 
-  /// Recursively scan directory for .gguf files
-  Future<void> _scanDirectory(Directory dir, Set<String> cachedIds) async {
+  /// Scan directory for .gguf files. [recursive] 控制是否递归子目录；
+  /// 系统广目录（Download/DCIM）应传 false，避免扫全盘。
+  Future<void> _scanDirectory(Directory dir, Set<String> cachedIds, {bool recursive = true}) async {
     if (!await dir.exists()) return;
     
     try {
-      await for (final entity in dir.list(recursive: true)) {
+      await for (final entity in dir.list(recursive: recursive)) {
         if (entity is File && entity.path.endsWith('.gguf')) {
           final id = p.basenameWithoutExtension(entity.path);
           cachedIds.add(id);
@@ -180,7 +202,7 @@ class ModelStorageService {
   }
 
   /// Get the public storage path for user reference
-  static String getPublicStoragePath() => _externalRootPath;
+  static String getPublicStoragePath() => p.join('/sdcard', _appFolder, 'models');
 }
 
 /// Global singleton access

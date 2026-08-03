@@ -40,13 +40,27 @@ final conversationsProvider =
 
 class ConversationsNotifier extends StateNotifier<List<Conversation>> {
   final StorageService _storage;
+  Completer<void>? _loadCompleter;
   ConversationsNotifier(this._storage) : super([]) {
-    _load();
+    _ensureLoaded();
   }
 
-  Future<void> _load() async {
-    state = await _storage.getAllConversations();
+  /// Load conversations from storage exactly once. Multiple callers can await
+  /// the same future without triggering duplicate queries.
+  Future<void> _ensureLoaded() {
+    if (_loadCompleter == null) {
+      _loadCompleter = Completer<void>();
+      _storage.getAllConversations().then((list) {
+        state = list;
+        _loadCompleter!.complete();
+      }).catchError((e) {
+        _loadCompleter!.completeError(e);
+      });
+    }
+    return _loadCompleter!.future;
   }
+
+  Future<void> ensureLoaded() => _ensureLoaded();
 
   Future<void> create({String title = '新对话'}) async {
     final conv = await _storage.createConversation(title: title);
@@ -153,8 +167,32 @@ class ChatNotifier extends StateNotifier<bool> {
 
       // Step 4: Stream completion from native inference engine (with chatml template)
       String fullResponse = '';
+
+      // Create the assistant message up-front (empty + streaming) so the bubble
+      // appears immediately and grows as tokens arrive — this lets the chat view
+      // follow the stream in real time instead of waiting for the full reply.
+      final assistantId = (DateTime.now().millisecondsSinceEpoch + 1).toString();
+      var assistantMsg = ChatMessage(
+        id: assistantId,
+        conversationId: conversationId,
+        role: MessageRole.assistant,
+        content: '',
+        isStreaming: true,
+      );
+      await _storage.saveMessage(assistantMsg);
+
+      final manager = _ref.read(modelManagerProvider.notifier);
       try {
         debugPrint('[ChatNotifier] Calling completionWithMessages...');
+        manager.appendInferenceLog(
+          '请求 | 提示 ${prompt.length} 字 | 历史 ${messagesForTemplate.length} 条'
+          ' | maxTokens=2048 temp=0.7 topP=0.9${imagePath != null ? ' [带图]' : ''}',
+        );
+
+        final startTime = DateTime.now();
+        var tokenCount = 0;
+        DateTime? firstTokenTime;
+
         final stream = _inference.completionWithMessages(
           prompt: prompt,
           messagesJson: messagesJson,
@@ -164,56 +202,113 @@ class ChatNotifier extends StateNotifier<bool> {
         );
 
         debugPrint('[ChatNotifier] Listening to token stream...');
-        final buffer = StringBuffer();
-        bool inThinking = false;
+        
+        // --- Streaming thinking-tag filter (stateful, token-by-token) ---
+        // `visible` holds the response shown to the user. Anything inside
+        // <think>...</think> is routed to `thinking` and dropped from output.
+        // Tag handling runs as tokens arrive, so we never surface raw
+        // reasoning, and a stream that ends inside an unclosed <thinking> block
+        // simply discards that incomplete block.
+        final visible = StringBuffer();
+        final thinking = StringBuffer();
+        var inThinking = false;
+
+        // Drop a dangling partial thinking-tag fragment at the very end of the
+        // output (e.g. the stream ended mid-token with "<thi" or "</think").
+        String stripDanglingTag(String s) {
+          final lastLt = s.lastIndexOf('<');
+          if (lastLt < 0) return s;
+          final tail = s.substring(lastLt);
+          final partialOpen = '<think>'.startsWith(tail) && tail != '<think>';
+          final partialClose = '</think>'.startsWith(tail) && tail != '</think>';
+          if (partialOpen || partialClose) return s.substring(0, lastLt);
+          return s;
+        }
+
+        var lastStreamSave = DateTime.now();
+
         await for (final token in stream) {
-          if (!buffer.isEmpty || token.isNotEmpty) {
-            buffer.write(token);
+          if (token.isEmpty) continue;
+
+          tokenCount++;
+          firstTokenTime ??= DateTime.now();
+
+          if (inThinking) {
+            thinking.write(token);
+            final closeIdx = thinking.toString().indexOf('</think>');
+            if (closeIdx >= 0) {
+              // Everything after the closing tag becomes visible output.
+              final after =
+                  thinking.toString().substring(closeIdx + '</think>'.length);
+              thinking.clear();
+              visible.write(after);
+              inThinking = false;
+            }
+            // else: still inside thinking — the token is already discarded.
+          } else {
+            visible.write(token);
+            final openIdx = visible.toString().indexOf('<think>');
+            if (openIdx >= 0) {
+              // Keep pre-tag text in `visible`; move the tag + the rest into
+              // `thinking` so subsequent tokens are discarded.
+              final before = visible.toString().substring(0, openIdx);
+              final rest = visible.toString().substring(openIdx);
+              visible.clear();
+              visible.write(before);
+              thinking.write(rest);
+              inThinking = true;
+            }
           }
 
-          // Track <thinking> tags — skip everything until </think> is seen.
-          final text = buffer.toString();
-          if (!inThinking && text.contains('<think>')) {
-            inThinking = true;
-          } else if (inThinking && text.contains('</think>')) {
-            inThinking = false;
+          // Periodically persist the visible (thinking-filtered) content so the
+          // bubble updates live and the UI can scroll to follow the stream.
+          final now = DateTime.now();
+          if (now.difference(lastStreamSave).inMilliseconds >= 150) {
+            lastStreamSave = now;
+            assistantMsg = assistantMsg.copyWith(content: visible.toString());
+            await _storage.saveMessage(assistantMsg);
           }
         }
 
-        // If the stream ended while still inside thinking tags, truncate at </think>.
-        String rawResponse = buffer.toString();
-        final endTagIndex = rawResponse.indexOf('</think>');
-        if (inThinking && endTagIndex >= 0) {
-          rawResponse = rawResponse.substring(endTagIndex + '</think>'.length);
-        } else if (!inThinking) {
-          // Stream finished normally — strip any thinking tags that fully appeared.
-          rawResponse = rawResponse.replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '');
+        // Final pass after the stream ends.
+        final String rawResponse;
+        if (inThinking) {
+          // Stream ended inside an unclosed <thinking> block — drop it entirely.
+          // Text emitted before the tag (already in `visible`) is kept.
+          rawResponse = visible.toString();
+        } else {
+          // Safety net: strip any complete thinking blocks that slipped through
+          // (malformed/overlapping tags), then remove a dangling tag fragment.
+          rawResponse = stripDanglingTag(visible
+              .toString()
+              .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), ''));
         }
 
         fullResponse = rawResponse.trim();
         final preview = fullResponse.substring(0, fullResponse.length.clamp(0, 50));
         debugPrint('[ChatNotifier] Stream done, len=${fullResponse.length}, response="$preview${fullResponse.length > 50 ? "..." : ""}"');
 
-        // Step 5: Save assistant message
-        final assistantMsg = ChatMessage(
-          id: (DateTime.now().millisecondsSinceEpoch + 1).toString(),
-          conversationId: conversationId,
-          role: MessageRole.assistant,
-          content: fullResponse,
+        final totalMs = DateTime.now().difference(startTime).inMilliseconds;
+        final firstTokenMs = firstTokenTime != null
+            ? firstTokenTime.difference(startTime).inMilliseconds
+            : 0;
+        final tokensPerSec = totalMs > 0 ? tokenCount * 1000 / totalMs : 0.0;
+        manager.appendInferenceLog(
+          '响应 | $tokenCount tokens | 首token ${firstTokenMs}ms | 总耗时 ${totalMs}ms'
+          ' | ${tokensPerSec.toStringAsFixed(1)} tok/s | 输出 ${fullResponse.length} 字',
         );
+
+        // Step 5: Persist final assistant message (clear streaming flag).
+        assistantMsg = assistantMsg.copyWith(content: fullResponse, isStreaming: false);
         await _storage.saveMessage(assistantMsg);
 
         return fullResponse;
       } catch (e) {
         debugPrint('[ChatNotifier] Stream error: $e');
-        // Save error message to conversation
-        final errMsg = ChatMessage(
-          id: (DateTime.now().millisecondsSinceEpoch + 1).toString(),
-          conversationId: conversationId,
-          role: MessageRole.assistant,
-          content: '[Error: $e]',
-        );
-        await _storage.saveMessage(errMsg);
+        manager.appendInferenceLog('响应异常 | error=$e');
+        // Update the same streaming message with the error content.
+        assistantMsg = assistantMsg.copyWith(content: '[Error: $e]', isStreaming: false);
+        await _storage.saveMessage(assistantMsg);
         return fullResponse;
       }
     } finally {

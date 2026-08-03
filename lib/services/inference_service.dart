@@ -8,6 +8,7 @@ class InferenceService {
   static const _loadingLogChannel = EventChannel('com.dgxspark.tongyilite/loading_logs');
 
   StreamSubscription<dynamic>? _loadingLogSubscription;
+  StreamSubscription<dynamic>? _currentTokenSubscription;
   bool _initialized = false;
 
   // Loading log callback — invoked when native pushes a loading progress message.
@@ -64,12 +65,20 @@ class InferenceService {
   // ------------------------------------------------------------------
   // Model management
   // ------------------------------------------------------------------
-  Future<bool> loadModel(String path, {int nCtx = 4096}) async {
-    debugPrint('[InferenceService] Loading model from: $path');
+  Future<bool> loadModel(
+    String path, {
+    int nCtx = 4096,
+    bool enableGpu = true,
+    int gpuLayers = 20,
+  }) async {
+    debugPrint('[InferenceService] Loading model from: $path '
+        '(enableGpu=$enableGpu, gpuLayers=$gpuLayers)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
         'nCtx': nCtx,
+        'enableGpu': enableGpu,
+        'gpuLayers': gpuLayers,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;
@@ -111,7 +120,9 @@ class InferenceService {
   }) {
     final controller = StreamController<String>();
 
-    // Set up the token event listener
+    // Set up the token event listener. Cancel any previous subscription so a
+    // new generation doesn't deliver tokens to a stale controller (leak/dup).
+    _currentTokenSubscription?.cancel();
     final subscription = _tokenChannel.receiveBroadcastStream().listen((event) {
       if (event != null) {
         controller.add(event.toString());
@@ -119,6 +130,7 @@ class InferenceService {
     }, onError: (err) {
       controller.addError(err);
     });
+    _currentTokenSubscription = subscription;
 
     debugPrint('[InferenceService] Invoking native completion, prompt="$prompt"');
     // Start inference on native side
@@ -132,12 +144,14 @@ class InferenceService {
       debugPrint('[InferenceService] Native completion done, len=${resStr.length}, preview="${resStr.substring(0, resStr.length.clamp(0, 50))}"');
       // Final result (may be empty if streaming used all tokens)
       controller.close();
-      subscription.cancel();
+      _currentTokenSubscription?.cancel();
+      _currentTokenSubscription = null;
     }).catchError((err) {
       debugPrint('[InferenceService] Native completion error: $err');
       controller.addError(err);
       controller.close();
-      subscription.cancel();
+      _currentTokenSubscription?.cancel();
+      _currentTokenSubscription = null;
     });
 
     return controller.stream;
@@ -157,6 +171,7 @@ class InferenceService {
   }) {
     final controller = StreamController<String>();
 
+    _currentTokenSubscription?.cancel();
     final subscription = _tokenChannel.receiveBroadcastStream().listen((event) {
       if (event != null) {
         controller.add(event.toString());
@@ -164,6 +179,7 @@ class InferenceService {
     }, onError: (err) {
       controller.addError(err);
     });
+    _currentTokenSubscription = subscription;
 
     debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson');
     _channel.invokeMethod('completionWithMessages', {
@@ -176,12 +192,14 @@ class InferenceService {
       final resStr = result?.toString() ?? '';
       debugPrint('[InferenceService] completionWithMessages done, len=${resStr.length}, preview="${resStr.substring(0, resStr.length.clamp(0, 50))}"');
       controller.close();
-      subscription.cancel();
+      _currentTokenSubscription?.cancel();
+      _currentTokenSubscription = null;
     }).catchError((err) {
       debugPrint('[InferenceService] completionWithMessages error: $err');
       controller.addError(err);
       controller.close();
-      subscription.cancel();
+      _currentTokenSubscription?.cancel();
+      _currentTokenSubscription = null;
     });
 
     return controller.stream;
@@ -208,6 +226,9 @@ class InferenceService {
   // Stop / benchmark
   // ------------------------------------------------------------------
   Future<void> stopGeneration() async {
+    // Cancel the token stream so no further tokens reach a closed controller.
+    _currentTokenSubscription?.cancel();
+    _currentTokenSubscription = null;
     await _channel.invokeMethod('stopGeneration');
   }
 

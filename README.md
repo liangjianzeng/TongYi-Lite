@@ -306,11 +306,12 @@ flutter logs | grep TongYiLite
 
 - `tongyilite_jni.cpp` 的 `detect_gpu_layers()` 在加载模型时遍历 ggml 后端注册表
   （`ggml_backend_dev_count()` / `ggml_backend_dev_get()`），打印每个设备的名称 / 类型 / 显存；
-- 发现 `GGML_BACKEND_DEVICE_TYPE_GPU`（即 Vulkan 后端枚举到了设备）就设 `n_gpu_layers = 999`
-  （全部层卸载到 GPU），否则回落 `0`（纯 CPU 推理）。
+- 在「设置 → 推理引擎」标签页有一个 **「启用 GPU 加速」开关（默认开启）** 和 **「GPU 层数」滑块（默认 20）**：
+  - 开关关闭 → 强制纯 CPU（`n_gpu_layers = 0`）；
+  - 开关开启且探测到 GPU 设备 → 按滑块设定的层数卸载（默认 20），否则回落纯 CPU 推理。
+  - 设置经 `MethodChannel → Kotlin → JNI` 透传给原生层，实时生效、重启保留。
 
-这样做的好处：同一个 APK 装在没有 Vulkan 驱动的设备上也不会卡死（以前硬编码 GPU 层数会在
-尝试预留显存时挂起）。
+这样做的好处：同一个 APK 装在没有 Vulkan 驱动的设备上也不会卡死（探测不到 GPU 时自动回落 CPU）。
 
 **验证是否真的上了 GPU**（连上设备后）：
 
@@ -320,16 +321,16 @@ adb shell am start -n com.dgxspark.tongyilite/.MainActivity
 adb logcat | grep -iE "TongYiLite|ggml_vulkan"
 ```
 
-预期看到：
+预期看到（默认开启 GPU、设备有 Vulkan 驱动时）：
 
 ```
 ggml backend devices: N
   device[0] name=... desc=... type=2 ...   # type=2 即 GPU
-n_gpu_layers = 999                           # 检测到 GPU
-检测到 GPU，启用 Vulkan 加速
+n_gpu_layers = 20                           # 使用设置页设定的层数
+检测到 GPU，启用 Vulkan 加速（卸载 20 层）
 ```
 
-若 GPU 显存不足以容纳全部层（多见于小内存设备），把 `999` 调小为部分层数（如 `20`）即可分层卸载。
+若 GPU 显存不足以容纳全部层（多见于小内存设备），在「推理引擎」标签页把 GPU 层数调小（如 `10`）即可分层卸载；或直接关闭「启用 GPU 加速」开关走纯 CPU。
 
 > **注意**：Vulkan 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里 `GGML_VULKAN` 只在
 > `ANDROID_ABI == arm64-v8a` 时强制 ON）。32 位 / x86 设备仍走 CPU。

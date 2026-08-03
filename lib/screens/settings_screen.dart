@@ -14,7 +14,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/model_info.dart';
+import '../models/model_catalog.dart';
 import '../providers/index.dart';
+import '../providers/settings_provider.dart';
 import '../services/model_manager.dart';
 import 'inference_log_screen.dart';
 
@@ -28,11 +30,30 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  late final Future<List<ModelConfig>> _catalogFuture;
+  bool _autoScanned = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _catalogFuture = loadModelCatalog();
+    _tabController.addListener(_onTabChanged);
+    // 默认停在「模型管理」(index 0)，首帧后自动扫描一次本地已有的 .gguf。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_tabController.index == 0) _triggerAutoScan();
+    });
+  }
+
+  void _onTabChanged() {
+    if (_tabController.index == 0) _triggerAutoScan();
+  }
+
+  /// 首次进入「模型管理」时自动扫描本地模型一次，避免每次手工点。
+  void _triggerAutoScan() {
+    if (_autoScanned) return;
+    _autoScanned = true;
+    _scanModels(silent: true);
   }
 
   @override
@@ -77,34 +98,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ---- 模型列表 ----
-          _buildSectionHeader('📦 可用模型', context),
-          const SizedBox(height: 8),
-
-          FutureBuilder<List<ModelConfig>>(
-            future: loadModelCatalog(),
-            builder: (context, snapshot) {
-              if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(32),
-                    child: CircularProgressIndicator(),
-                  ),
-                );
-              }
-              final models = snapshot.data!;
-              return Column(
-                children: models.map((model) => _buildModelCard(model)).toList(),
-              );
-            },
-          ),
-
-          const SizedBox(height: 24),
-
-          // ---- 扫描已有模型 ----
+          // ---- 扫描已有模型（置顶，首次进入自动扫描）----
           Center(
             child: ElevatedButton.icon(
-              onPressed: _scanModels,
+              onPressed: () => _scanModels(),
               icon: const Icon(Icons.search, size: 18),
               label: const Text('扫描已有模型'),
               style: ElevatedButton.styleFrom(
@@ -115,10 +112,51 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const SizedBox(height: 8),
           const Center(
             child: Text(
-              '点击扫描设备上的 .gguf 文件，恢复已下载的模型',
+              '首次进入自动扫描本地模型，也可手动重新扫描',
               style: TextStyle(fontSize: 11, color: Colors.grey),
               textAlign: TextAlign.center,
             ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 模型列表（已缓存优先排序）----
+          _buildSectionHeader('📦 可用模型', context),
+          const SizedBox(height: 8),
+
+          Consumer(
+            builder: (context, ref, _) {
+              final tasks = ref.watch(downloadNotifierProvider);
+              return FutureBuilder<List<ModelConfig>>(
+                future: _catalogFuture,
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                    return const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(32),
+                        child: CircularProgressIndicator(),
+                      ),
+                    );
+                  }
+                  final catalog = snapshot.data!;
+                  final order = <String, int>{};
+                  for (var i = 0; i < catalog.length; i++) order[catalog[i].id] = i;
+                  final models = List<ModelConfig>.from(catalog)
+                    ..sort((a, b) {
+                      final ca = tasks[a.id]?.state == DownloadState.completed;
+                      final cb = tasks[b.id]?.state == DownloadState.completed;
+                      if (ca != cb) return ca ? -1 : 1;
+                      if (a.recommended != b.recommended) {
+                        return a.recommended ? -1 : 1;
+                      }
+                      return (order[a.id] ?? 0).compareTo(order[b.id] ?? 0);
+                    });
+                  return Column(
+                    children: models.map((m) => _buildModelCard(m)).toList(),
+                  );
+                },
+              );
+            },
           ),
 
           const SizedBox(height: 24),
@@ -377,33 +415,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     return '${mb.toStringAsFixed(0)} MB';
   }
 
-  Future<void> _scanModels() async {
+  Future<void> _scanModels({bool silent = false}) async {
     final manager = ModelManager();
     final cachedIds = await manager.scanExistingModels();
 
     if (!mounted) return;
 
     if (cachedIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('未找到已下载的模型文件'), backgroundColor: Colors.orange),
-      );
+      if (!silent) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('未找到已下载的模型文件'), backgroundColor: Colors.orange),
+        );
+      }
       return;
     }
 
     final allModels = await loadModelCatalog();
     final foundModels = allModels.where((m) => cachedIds.contains(m.id)).toList();
-    
+
     if (foundModels.isNotEmpty) {
       await ref.read(downloadNotifierProvider.notifier).initCachedModels(foundModels);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('已恢复 ${foundModels.length} 个模型状态'),
+          content: Text(silent
+              ? '已自动恢复 ${foundModels.length} 个本地模型'
+              : '已恢复 ${foundModels.length} 个模型状态'),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 2),
         ),
       );
-    } else {
+    } else if (!silent) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('找到文件但未匹配到已知模型，请检查模型ID'), backgroundColor: Colors.orange),
       );
@@ -462,12 +504,77 @@ class _InferenceEngineTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final modelState = ref.watch(modelManagerProvider);
+    final gpuSettings = ref.watch(settingsProvider);
+    final gpuNotifier = ref.read(settingsProvider.notifier);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ---- GPU 加速设置卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('⚙️ GPU 加速（Vulkan）', context),
+                  const SizedBox(height: 12),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('启用 GPU 加速'),
+                    subtitle: const Text('关闭后使用纯 CPU 推理；设备无 Vulkan 驱动时自动回落 CPU'),
+                    value: gpuSettings.enableGpu,
+                    onChanged: (v) => gpuNotifier.setEnableGpu(v),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: gpuSettings.gpuLayers.toDouble(),
+                          min: 0,
+                          max: 100,
+                          divisions: 100,
+                          label: '${gpuSettings.gpuLayers}',
+                          onChanged: gpuSettings.enableGpu
+                              ? (v) => gpuNotifier.setGpuLayers(v.round())
+                              : null,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 56,
+                        child: Text(
+                          '${gpuSettings.gpuLayers} 层',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w500,
+                            color: gpuSettings.enableGpu
+                                ? null
+                                : Colors.grey.shade500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  // 关 GPU 时禁用层数设置并给出提示
+                  if (!gpuSettings.enableGpu)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        'GPU 已关闭，层数设置不生效（纯 CPU）',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(

@@ -33,6 +33,15 @@ class DownloadService {
     Duration progressInterval = const Duration(milliseconds: 500),
     DownloadTask? existingTask, // Optional task to reuse (e.g., from provider's initialTask)
   }) async {
+    // ---- Concurrency guard ----
+    final sameModel = _activeDownloads[model.id];
+    if (sameModel != null) {
+      // Already tracked for this model: ignore a duplicate start while it is
+      // still downloading; clear a stale (paused/completed) entry so a resume
+      // or retry can proceed without tripping the capacity guard.
+      if (sameModel.task.state == DownloadState.downloading) return;
+      _activeDownloads.remove(model.id);
+    }
     if (_activeDownloads.length >= maxConcurrentDownloads) {
       throw DownloadException('Only one download at a time.');
     }
@@ -40,7 +49,7 @@ class DownloadService {
     final task = existingTask ?? DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
-      totalBytes: 0, // Don't preset — let Dio's Content-Length or catalog size set it.
+      totalBytes: model.sizeBytes, // preset so progress shows immediately
       startTime: DateTime.now(),
     );
 
@@ -49,19 +58,23 @@ class DownloadService {
 
     CancelToken? cancelToken;
     try {
-      // Step 1: Resolve URL and verify server supports Range requests
+      // ---- Resolve a mirror (and whether it supports HTTP Range) ----
       final hasPartialTmp = await _hasPartialTmp(model.id);
       _UrlInfo? urlInfo;
-
-      if (!hasPartialTmp) {
-        urlInfo = await _resolveUrl(model.mirrors);
+      if (hasPartialTmp) {
+        // Resume REQUIRES a Range-capable mirror.
+        urlInfo = await _resolveUrl(model.mirrors, requireRange: true);
         if (urlInfo == null) {
-          throw DownloadException('All mirrors unreachable.');
+          // No Range-capable mirror reachable — fall back to a plain full
+          // download; the stale partial is discarded by the resume block below.
+          debugPrint('[DownloadService] No Range-capable mirror for resume — will restart fresh');
+          urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
         }
       } else {
-        final firstMirror = model.mirrors.first;
-        urlInfo = _UrlInfo(url: firstMirror.url, supportsRange: true);
-        debugPrint('[DownloadService] Resume detected for ${model.id}, skipping HEAD probe');
+        urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
+      }
+      if (urlInfo == null) {
+        throw DownloadException('All mirrors unreachable.');
       }
 
       final dir = await _getModelsDir();
@@ -270,8 +283,9 @@ class DownloadService {
     final model = ModelManager().getModel(modelId);
     if (model == null) throw DownloadException('Model not found: $modelId');
 
-    // Resume: create a fresh task with state=downloading. The .tmp file on disk
-    // provides the true resume data — we don't need to preserve progress in memory.
+    // Reuse the unified [download] entry point. It detects the existing `.tmp`
+    // partial on disk and resumes from there (the .tmp holds the true resume
+    // data, so we don't need to carry progress in memory).
     final task = DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
@@ -279,176 +293,7 @@ class DownloadService {
       startTime: DateTime.now(),
     );
 
-    await _doDownload(model, onProgress: (t) {
-      // For resume, update the caller's task with progress.
-      if (t.downloadedBytes > 0) {
-        task.downloadedBytes = t.downloadedBytes;
-        task.totalBytes = t.totalBytes;
-        task.state = t.state;
-      }
-      onProgress(t);
-    }, isNewTask: false, existingTask: task);
-  }
-
-  /// Internal download logic shared by [download] and [resume].
-  Future<void> _doDownload(
-    ModelConfig model, {
-    required void Function(DownloadTask) onProgress,
-    Duration progressInterval = const Duration(milliseconds: 500),
-    bool isNewTask = true,
-    DownloadTask? existingTask,
-  }) async {
-    if (_activeDownloads.length >= maxConcurrentDownloads) {
-      throw DownloadException('Only one download at a time.');
-    }
-
-    final task = isNewTask
-        ? (existingTask ?? DownloadTask(
-            modelId: model.id,
-            state: DownloadState.downloading,
-            totalBytes: model.sizeBytes,
-            startTime: DateTime.now(),
-          ))
-        : existingTask!; // For resume, caller must provide the task.
-
-    _activeDownloads[model.id] = _ActiveDownload(task: task);
-    if (isNewTask) onProgress(task);
-
-    CancelToken? cancelToken;
-    try {
-      // Step 1: Resolve URL and verify server supports Range requests
-      final hasPartialTmp = await _hasPartialTmp(model.id);
-      _UrlInfo? urlInfo;
-
-      if (!hasPartialTmp) {
-        urlInfo = await _resolveUrl(model.mirrors);
-        if (urlInfo == null) {
-          throw DownloadException('All mirrors unreachable.');
-        }
-      } else {
-        final firstMirror = model.mirrors.first;
-        urlInfo = _UrlInfo(url: firstMirror.url, supportsRange: true);
-        debugPrint('[DownloadService] Resume detected for ${model.id}, skipping HEAD probe');
-      }
-
-      final dir = await _getModelsDir();
-      await dir.create(recursive: true);
-      final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
-      final finalFile = File(p.join(dir.path, model.id + '.gguf'));
-
-      // Step 2: Decide resume point from any existing partial .tmp
-      int downloadedSoFar = 0;
-      final supportsRange = urlInfo.supportsRange;
-
-      if (await tempFile.exists()) {
-        final len = await tempFile.length();
-        if (len >= model.sizeBytes && model.sizeBytes > 0) {
-          // Already complete — just promote and finish
-          await tempFile.rename(finalFile.path);
-          task.state = DownloadState.completed;
-          task.downloadedBytes = model.sizeBytes;
-          task.endTime = DateTime.now();
-          onProgress(task);
-          _activeDownloads.remove(model.id);
-          return;
-        } else if (supportsRange && len > 0) {
-          downloadedSoFar = len;
-          task.downloadedBytes = downloadedSoFar;
-          debugPrint('[DownloadService] Resuming from ${_formatBytes(downloadedSoFar)}');
-          onProgress(task);
-        } else {
-          debugPrint('[DownloadService] No resume possible, restarting fresh');
-          await tempFile.delete();
-          downloadedSoFar = 0;
-        }
-      }
-
-      // Step 3: Download. Use ranged-append when Range + partial file exist;
-      // otherwise a plain single-connection download.
-      cancelToken = CancelToken();
-      _activeDownloads[model.id] = _ActiveDownload(task: task, cancelToken: cancelToken);
-
-      if (supportsRange && downloadedSoFar > 0) {
-        await _downloadRange(
-          urlInfo.url, tempFile, downloadedSoFar, model.sizeBytes,
-          task, cancelToken, onProgress, progressInterval,
-        );
-      } else {
-        // Explicit stream-based download with reliable byte-counting progress.
-        final response = await _dio.get<ResponseBody>(
-          urlInfo.url,
-          options: Options(
-            responseType: ResponseType.stream,
-            receiveTimeout: const Duration(hours: 2),
-          ),
-          cancelToken: cancelToken,
-        );
-
-        final body = response.data;
-        if (body == null) throw DownloadException('Empty response body.');
-
-        final headerTotalStr = response.headers.value('content-length');
-        if (headerTotalStr != null) {
-          final headerTotal = int.tryParse(headerTotalStr);
-          if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
-            task.totalBytes = headerTotal;
-          }
-        }
-
-        final raf = tempFile.openSync(mode: FileMode.writeOnlyAppend);
-        int received = downloadedSoFar;
-        DateTime? _lastProgressTime;
-
-        try {
-          await for (final chunk in body.stream) {
-            if (cancelToken?.isCancelled == true) break;
-            await raf.writeFrom(chunk);
-            received += chunk.length;
-            task.downloadedBytes = received;
-
-            final now = DateTime.now();
-            if (_lastProgressTime == null ||
-                now.difference(_lastProgressTime!) >= progressInterval) {
-              _lastProgressTime = now;
-              onProgress(task);
-            }
-          }
-        } finally {
-          await raf.close();
-        }
-        onProgress(task);
-      }
-
-      // Step 4: Verify download produced data — trust what the CDN actually served.
-      final actualSize = await tempFile.length();
-      if (actualSize == 0) {
-        throw DownloadException('Download produced empty file');
-      }
-
-      // Step 5: Promote .tmp to final file
-      await tempFile.rename(finalFile.path);
-      task.state = DownloadState.completed;
-      task.endTime = DateTime.now();
-      _lastProgressTime.remove(model.id);
-      onProgress(task);
-    } catch (e) {
-      if (e is DioException && CancelToken.isCancel(e)) {
-        return; // Paused/cancelled — keep .tmp for resume.
-      }
-      task.state = DownloadState.failed;
-      task.errorMessage = _cleanErrorMessage(e.toString());
-      task.endTime = DateTime.now();
-      _lastProgressTime.remove(model.id);
-      onProgress(task);
-
-      try {
-        final dir = await _getModelsDir();
-        final tmp = File(p.join(dir.path, model.id + '.gguf.tmp'));
-        if (await tmp.exists()) await tmp.delete();
-      } catch (_) {}
-    } finally {
-      _activeDownloads.remove(model.id);
-    }
+    await download(model, existingTask: task, onProgress: onProgress);
   }
 
   /// Check if a partial .tmp file exists for the given model.
@@ -488,74 +333,61 @@ class DownloadService {
     if (await tmpFile.exists()) { await tmpFile.delete(); }
   }
 
-  /// Resolve URL and check if server supports Range requests.
-  Future<_UrlInfo?> _resolveUrl(List<MirrorEntry> mirrors) async {
+  /// Resolve a reachable mirror, returning whether it supports HTTP Range.
+  ///
+  /// When [requireRange] is true, a mirror that is reachable but does NOT
+  /// support Range requests is skipped (we keep looking), because the caller
+  /// needs to resume a partial download and must issue a `Range` request.
+  Future<_UrlInfo?> _resolveUrl(List<MirrorEntry> mirrors, {bool requireRange = false}) async {
     for (final mirror in mirrors) {
       debugPrint('[DownloadService] Checking mirror: ${mirror.source}');
-
+      _UrlInfo? info;
       try {
-        // Try HEAD first to check connectivity and support
-        final response = await _dio.head(
-          mirror.url,
-          options: Options(receiveTimeout: const Duration(seconds: 10)),
-        );
-
-        if (response.statusCode == 200 || response.statusCode == 206) {
-          // Check if server supports Range requests via Accept-Ranges header
-          final acceptRanges = response.headers.value('accept-ranges');
-          bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-          debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange)');
-
-          return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
-        } else {
-          debugPrint('[DownloadService] Mirror ${mirror.source} returned ${response.statusCode}, trying GET...');
-
-          // HEAD not supported, try GET to verify the file exists
-          final getResponse = await _dio.get(
-            mirror.url,
-            options: Options(
-              receiveTimeout: const Duration(seconds: 10),
-              responseType: ResponseType.bytes,
-            ),
-          );
-          if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
-            final acceptRanges = getResponse.headers.value('accept-ranges');
-            bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange)');
-
-            return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
-          } else {
-            debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
-          }
-        }
+        info = await _probeMirrorHead(mirror);
       } catch (e) {
-        debugPrint('[DownloadService] Mirror ${mirror.source} error: $e');
-
-        // If HEAD fails, try GET as fallback
+        debugPrint('[DownloadService] Mirror ${mirror.source} HEAD error: $e');
         try {
-          final getResponse = await _dio.get(
-            mirror.url,
-            options: Options(
-              receiveTimeout: const Duration(seconds: 10),
-              responseType: ResponseType.bytes,
-            ),
-          );
-          if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
-            final acceptRanges = getResponse.headers.value('accept-ranges');
-            bool supportsRange = acceptRanges?.toLowerCase() == 'bytes';
-            debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET fallback -> ${getResponse.statusCode}, Range: $supportsRange)');
-
-            return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
-          } else {
-            debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
-          }
+          info = await _probeMirrorGet(mirror);
         } catch (getE) {
           debugPrint('[DownloadService] Mirror ${mirror.source} GET error: $getE');
         }
       }
+      if (info == null) continue;
+      if (requireRange && !info.supportsRange) {
+        debugPrint('[DownloadService] Mirror ${mirror.source} reachable but no Range support, skipping');
+        continue;
+      }
+      return info;
     }
-
     return null; // All mirrors unreachable
+  }
+
+  Future<_UrlInfo?> _probeMirrorHead(MirrorEntry mirror) async {
+    final response = await _dio.head(
+      mirror.url,
+      options: Options(receiveTimeout: const Duration(seconds: 10)),
+    );
+    if (response.statusCode == 200 || response.statusCode == 206) {
+      final supportsRange = response.headers.value('accept-ranges')?.toLowerCase() == 'bytes';
+      debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange)');
+      return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
+    }
+    debugPrint('[DownloadService] Mirror ${mirror.source} HEAD returned ${response.statusCode}, trying GET');
+    return _probeMirrorGet(mirror);
+  }
+
+  Future<_UrlInfo?> _probeMirrorGet(MirrorEntry mirror) async {
+    final getResponse = await _dio.get(
+      mirror.url,
+      options: Options(receiveTimeout: const Duration(seconds: 10), responseType: ResponseType.bytes),
+    );
+    if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
+      final supportsRange = getResponse.headers.value('accept-ranges')?.toLowerCase() == 'bytes';
+      debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange)');
+      return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
+    }
+    debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
+    return null;
   }
 
   Future<Directory> _getModelsDir() async {

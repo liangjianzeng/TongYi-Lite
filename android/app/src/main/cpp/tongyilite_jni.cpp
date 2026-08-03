@@ -62,7 +62,12 @@ static int detect_gpu_layers() {
              (int)type,
              free_mem  / 1048576.0,
              total_mem / 1048576.0);
-        if (type == GGML_BACKEND_DEVICE_TYPE_GPU) {
+        // Accept both discrete GPUs (GGML_BACKEND_DEVICE_TYPE_GPU) and
+        // integrated GPUs (GGML_BACKEND_DEVICE_TYPE_IGPU). On Android the
+        // Vulkan backend enumerates Adreno / Mali as IGPU (type=2), NOT as
+        // GPU (type=1), so only checking GPU used to miss mobile Vulkan.
+        if (type == GGML_BACKEND_DEVICE_TYPE_GPU ||
+            type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
             gpu_found = 1;
         }
     }
@@ -83,6 +88,68 @@ static int detect_gpu_layers() {
 static void reportLoadingLog(const char *message);
 // InferenceEngine — wraps model + context + generation
 // ============================================================================
+
+// ----------------------------------------------------------------------------
+// UTF-8 helpers — keep Java string construction crash-free
+// ----------------------------------------------------------------------------
+// llama.cpp emits token pieces as raw bytes. For bytes >= 0x80 with no matching
+// vocab token it uses "byte-fallback" tokens that produce ONE byte at a time
+// (e.g. a lone 0xBE). Passing such bytes straight to JNI's NewStringUTF() aborts
+// the process ("input is not valid Modified UTF-8: illegal start byte"). We
+// therefore (a) buffer raw bytes across tokens and only forward *complete* UTF-8
+// sequences to the callback, and (b) build Java strings via UTF-16 so any stray
+// byte becomes U+FFFD instead of crashing the app.
+// ----------------------------------------------------------------------------
+static int utf8_seq_len(const std::string &s, size_t pos) {
+    if (pos >= s.size()) return 0;
+    unsigned char c = (unsigned char)s[pos];
+    int len;
+    if      (c < 0x80)       len = 1;
+    else if ((c & 0xE0) == 0xC0) len = 2;
+    else if ((c & 0xF0) == 0xE0) len = 3;
+    else if ((c & 0xF8) == 0xF0) len = 4;
+    else return -1; // invalid lead byte -> consume 1 as replacement
+    if (pos + (size_t)len > s.size()) return 0; // incomplete tail, wait for more
+    for (int k = 1; k < len; k++) {
+        unsigned char cc = (unsigned char)s[pos + k];
+        if ((cc & 0xC0) != 0x80) return -1; // not a continuation byte -> invalid
+    }
+    return len;
+}
+
+static jstring utf8_to_jstring(JNIEnv *env, const std::string &s) {
+    std::u16string u16;
+    size_t i = 0;
+    while (i < s.size()) {
+        int adv = utf8_seq_len(s, i);
+        if (adv <= 0) { u16.push_back(0xFFFD); i++; continue; } // invalid/incomplete -> replacement
+        uint32_t cp = (unsigned char)s[i] &
+                      ((adv == 1) ? 0x7F : (adv == 2) ? 0x1F : (adv == 3) ? 0x0F : 0x07);
+        for (int k = 1; k < adv; k++) {
+            cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        }
+        i += adv;
+        if (cp <= 0xFFFF) {
+            u16.push_back((char16_t)cp);
+        } else {
+            cp -= 0x10000;
+            u16.push_back((char16_t)(0xD800 | (cp >> 10)));
+            u16.push_back((char16_t)(0xDC00 | (cp & 0x3FF)));
+        }
+    }
+    return env->NewString((const jchar *)u16.data(), (jsize)u16.size());
+}
+
+// SentencePiece encodes spaces as U+2581 ("▁"). Render it as a normal ASCII
+// space so output doesn't show a missing-glyph box.
+static void sp_space_to_ascii(std::string &s) {
+    const char sp[3] = { (char)0xE2, (char)0x96, (char)0x81 }; // "▁" UTF-8
+    size_t pos = 0;
+    while ((pos = s.find(sp, pos, 3)) != std::string::npos) {
+        s.replace(pos, 3, " ");
+        pos += 1;
+    }
+}
 
 struct InferenceEngine {
     llama_model *model   = nullptr;
@@ -110,7 +177,8 @@ struct InferenceEngine {
     double t_gen_ms = 0;
     int32_t n_gen = 0;
 
-    bool load(const char *model_path, int requested_n_ctx = 4096) {
+    bool load(const char *model_path, int requested_n_ctx = 4096,
+              bool enable_gpu = true, int gpu_layers = 20) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -119,14 +187,28 @@ struct InferenceEngine {
 
         // Model params
         model_params = llama_model_default_params();
-        // Offload to GPU only when the ggml registry actually reports one
-        // (Vulkan backend + a driver that enumerates a device). Falls back to
-        // 0 = CPU-only otherwise, so the same APK is safe on GPU-less devices.
-        model_params.n_gpu_layers = detect_gpu_layers();
+        // GPU offloading policy (driven by the UI toggle + layer setting):
+        //   - enable_gpu == false           -> pure CPU (n_gpu_layers = 0)
+        //   - enable_gpu == true && GPU found -> offload `gpu_layers` user layers (default 20)
+        //   - enable_gpu == true && no GPU   -> safe CPU fallback (same APK works everywhere)
+        int effective_gpu_layers = 0;
+        if (enable_gpu) {
+            int detected = detect_gpu_layers();
+            if (detected > 0) {
+                effective_gpu_layers = gpu_layers;
+                LOGI("GPU acceleration ON: offloading %d layers (user setting)", effective_gpu_layers);
+                reportLoadingLog(("检测到 GPU，启用 Vulkan 加速（卸载 "
+                                  + std::to_string(effective_gpu_layers) + " 层）").c_str());
+            } else {
+                LOGI("GPU acceleration requested but no GPU backend found -> CPU-only fallback");
+                reportLoadingLog("未检测到 GPU，回落 CPU 推理");
+            }
+        } else {
+            LOGI("GPU acceleration disabled by user -> pure CPU");
+            reportLoadingLog("已关闭 GPU 加速，使用 CPU 推理");
+        }
+        model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
-        reportLoadingLog(model_params.n_gpu_layers > 0
-                             ? "检测到 GPU，启用 Vulkan 加速"
-                             : "未检测到 GPU，使用 CPU 推理");
         // Use direct load instead of mmap — mmap can cause file-lock conflicts on Android.
         model_params.load_mode = LLAMA_LOAD_MODE_NONE;
 
@@ -405,6 +487,8 @@ struct InferenceEngine {
 
             // 3. Auto-generate tokens
             std::string result;
+            std::string gen_utf8_buf;   // raw token bytes; forwarded only as complete UTF-8
+            bool gen_stopped = false;
             const llama_token eos = llama_vocab_eos(vocab);
 
             while (n_gen < max_tokens && !should_stop) {
@@ -463,14 +547,33 @@ struct InferenceEngine {
                 }
 
                 char buf[256];
-                int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
+                // special=false: skip control/special tokens (render nothing) instead
+                // of emitting their literal text, which would show up as garbage.
+                int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, false);
                 if (n > 0) {
-                    std::string piece(buf, n);
-                    result += piece;
-                    if (on_token && !on_token(piece)) {
-                        LOGI("Stopped by callback at gen=%d", n_gen);
-                        break;
+                    gen_utf8_buf.append(buf, n);
+                    // Forward only COMPLETE UTF-8 sequences so a multi-byte
+                    // character is never split across two callback calls (which
+                    // would hand JNI a lone continuation byte and abort). Invalid
+                    // bytes (e.g. a lone continuation byte from byte-fallback) are
+                    // dropped; SentencePiece's "▁" marker is rendered as a space.
+                    size_t consumed = 0;
+                    while (consumed < gen_utf8_buf.size()) {
+                        int adv = utf8_seq_len(gen_utf8_buf, consumed);
+                        if (adv == 0) break;          // incomplete tail; wait for more bytes
+                        if (adv < 0) { consumed += 1; continue; }  // invalid byte -> drop
+                        std::string one = gen_utf8_buf.substr(consumed, adv);
+                        consumed += adv;
+                        sp_space_to_ascii(one);
+                        result += one;
+                        if (on_token && !on_token(one)) {
+                            LOGI("Stopped by callback at gen=%d", n_gen);
+                            gen_stopped = true;
+                            break;
+                        }
                     }
+                    gen_utf8_buf.erase(0, consumed);
+                    if (gen_stopped) break;
                 }
 
                 n_gen++;
@@ -506,9 +609,32 @@ struct InferenceEngine {
                 t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
 
+            // Flush whatever remains. Incomplete trailing bytes at EOS are dropped
+            // (better a missing char than a "�" box); valid sequences are still
+            // forwarded so mid-stream text is never lost.
+            if (!gen_stopped && !gen_utf8_buf.empty()) {
+                size_t consumed = 0;
+                while (consumed < gen_utf8_buf.size()) {
+                    int adv = utf8_seq_len(gen_utf8_buf, consumed);
+                    if (adv <= 0) break;   // incomplete or invalid -> stop, drop rest
+                    std::string one = gen_utf8_buf.substr(consumed, adv);
+                    consumed += adv;
+                    sp_space_to_ascii(one);
+                    result += one;
+                    if (on_token) on_token(one);
+                }
+                gen_utf8_buf.clear();
+            }
+
             is_running = false;
 
             double tok_per_sec = n_gen > 0 ? (n_gen / (t_gen_ms / 1000.0)) : 0.0;
+            {
+                std::string hex;
+                char tmp[4];
+                for (unsigned char c : result) { snprintf(tmp, sizeof(tmp), "%02X ", c); hex += tmp; }
+                LOGI("result hex (%zu bytes): %s", result.size(), hex.c_str());
+            }
             LOGI("Generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms)",
                  n_gen, tok_per_sec, t_prompt_ms, t_gen_ms);
 
@@ -615,10 +741,11 @@ static void reportLoadingLog(const char *message) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
-    JNIEnv *env, jobject, jstring jpath, jint n_ctx
+    JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers
 ) {
     std::string path = jstring_to_std(env, jpath);
-    bool ok = g_engine.load(path.c_str(), n_ctx);
+    bool ok = g_engine.load(path.c_str(), n_ctx,
+                            j_enable_gpu == JNI_TRUE, (int)j_gpu_layers);
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {
@@ -729,7 +856,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
                     return true;
                 }
 
-                jstring jtoken = local_env->NewStringUTF(token.c_str());
+                jstring jtoken = utf8_to_jstring(local_env, token);
                 jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
                 local_env->DeleteLocalRef(jtoken);
                 local_env->DeleteLocalRef(safe_cb);
@@ -754,7 +881,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
         g_callback_obj = nullptr;
     }
 
-    return env->NewStringUTF(result.c_str());
+    return utf8_to_jstring(env, result);
 }
 
 // ============================================================================
@@ -865,7 +992,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
                     if (need_detach) g_jvm->DetachCurrentThread();
                     return true;
                 }
-                jstring jtoken = local_env->NewStringUTF(token.c_str());
+                jstring jtoken = utf8_to_jstring(local_env, token);
                 jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
                 local_env->DeleteLocalRef(jtoken);
                 local_env->DeleteLocalRef(safe_cb);
@@ -890,7 +1017,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     }
 
     LOGI("nativeCompletionWithMessages done, result len=%zu", result.length());
-    return env->NewStringUTF(result.c_str());
+    return utf8_to_jstring(env, result);
 }
 
 // --- Benchmark ---

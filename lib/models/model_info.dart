@@ -5,7 +5,6 @@
 // ============================================================
 
 import 'package:flutter/foundation.dart' show debugPrint;
-import 'model_catalog.dart';
 
 enum ModelType { text, vision }
 
@@ -99,30 +98,6 @@ class ModelConfig {
       sha256Hash: json['sha256Hash'] as String?,
     );
   }
-}
-
-// ===================================================================
-// Dynamic model catalog (config-driven, NOT hardcoded)
-// ===================================================================
-
-/// Lazily loaded list of all models from models_catalog.json.
-Future<List<ModelConfig>> loadModelCatalog() async {
-  try {
-    return await ModelCatalog.load();
-  } catch (e) {
-    debugPrint('[ModelInfo] Failed to load model catalog: $e');
-    return [];
-  }
-}
-
-/// Recommended model — the first one with recommended:true, or the smallest.
-Future<ModelConfig?> recommendedModel() async {
-  final models = await loadModelCatalog();
-  if (models.isEmpty) return null;
-  return models.firstWhere(
-    (m) => m.recommended,
-    orElse: () => models.reduce((a, b) => a.sizeBytes < b.sizeBytes ? a : b),
-  );
 }
 
 // ===================================================================

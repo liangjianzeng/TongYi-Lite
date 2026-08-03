@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, storageServiceProvider;
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider;
 import '../providers/model_provider.dart';
+import '../models/conversation.dart';
 import '../services/storage_permission_service.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
@@ -21,6 +22,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _textController = TextEditingController();
   String _currentConversationId = '';
   bool _initiallyLoaded = false;
+  // When true, the view auto-scrolls to the newest message (bottom in a
+  // reverse ListView). Disabled once the user scrolls up to read history.
+  bool _followStream = true;
 
   // Image picker state
   String? _selectedImagePath;
@@ -29,8 +33,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _initStoragePermission();
     _initConversation();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    _textController.dispose();
+    super.dispose();
+  }
+
+  /// Track whether the user is near the bottom of the (reverse) list so we only
+  /// auto-scroll while they're following the conversation, not when they've
+  /// scrolled up to read history.
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final nearBottom = pos.pixels >= pos.maxScrollExtent - 60;
+    if (nearBottom != _followStream) {
+      setState(() => _followStream = nearBottom);
+    }
   }
 
   Future<void> _initStoragePermission() async {
@@ -41,19 +66,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _initConversation() async {
-    final storage = ref.read(storageServiceProvider);
-    final conversations = await storage.getAllConversations();
+    final notifier = ref.read(conversationsProvider.notifier);
+    // Ensure the list is loaded from storage before deciding whether to seed.
+    await notifier.ensureLoaded();
+    var conversations = ref.read(conversationsProvider);
     if (conversations.isEmpty) {
-      final conv = await storage.createConversation(title: '新对话');
-      setState(() {
-        _currentConversationId = conv.id;
-      });
-    } else {
-      setState(() {
-        _currentConversationId = conversations.first.id;
-      });
+      await notifier.create();
+      conversations = ref.read(conversationsProvider);
     }
-    _initiallyLoaded = true;
+    setState(() {
+      _currentConversationId = conversations.first.id;
+      _initiallyLoaded = true;
+    });
   }
 
   /// Pick image from camera or gallery
@@ -142,7 +166,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _textController.clear();
     setState(() => _selectedImagePath = null);
 
-    // Scroll to top (newest message) — ListView is reverse so maxScrollExtent=0 at the top.
+    // Re-anchor to the newest message. With `reverse: true` the list grows
+    // downward from the input bar, so the newest message sits at the bottom
+    // (maxScrollExtent). Keep following as new content streams in.
+    _followStream = true;
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -160,11 +187,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final modelState = ref.watch(modelManagerProvider);
 
     return Scaffold(
+      drawer: _buildConversationDrawer(),
       appBar: AppBar(
         title: const Text('TongYi-Lite'),
         centerTitle: true,
-        leading: _buildModelStatusChip(modelState, isGenerating),
+        leading: Builder(
+          builder: (ctx) => IconButton(
+            icon: const Icon(Icons.forum_outlined),
+            tooltip: '会话',
+            onPressed: () => Scaffold.of(ctx).openDrawer(),
+          ),
+        ),
         actions: [
+          _buildModelStatusChip(modelState, isGenerating),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: '设置',
@@ -300,7 +335,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         phase: ms.phase,
         modelName: modelName,
         errorMessage: ms.errorMessage,
-        latestLog: ms.latestLog,
+        logs: ms.loadingLogs,
         isGenerating: isGenerating,
         onUnload: () async {
           Navigator.pop(ctx);
@@ -449,6 +484,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         }
 
+        // Keep the newest message in view: auto-scroll to the bottom whenever
+        // messages change while the user is following the conversation. This
+        // makes streaming replies follow in real time instead of requiring a
+        // manual scroll-up to reveal the new content.
+        if (messages.isNotEmpty && _followStream) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_followStream && _scrollController.hasClients) {
+              _scrollController.animateTo(
+                _scrollController.position.maxScrollExtent,
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOut,
+              );
+            }
+          });
+        }
+
         return ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
@@ -460,7 +511,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               role: msg.role.name,
               content: msg.content,
               timestamp: msg.timestamp,
-              isStreaming: msg.isStreaming && index == 0,
+              // Newest message is the last index (messages are ordered oldest→newest).
+              isStreaming: msg.isStreaming && index == messages.length - 1,
               imagePath: msg.imagePath,
             );
           },
@@ -531,6 +583,159 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
     );
   }
+
+  // =========================================================================
+  // Conversation drawer — compact entry for managing (new / switch / delete)
+  // =========================================================================
+
+  Widget _buildConversationDrawer() {
+    final conversations = ref.watch(conversationsProvider);
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.forum, size: 24),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text('会话', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: '新建对话',
+                    onPressed: _newConversation,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: conversations.isEmpty
+                  ? const Center(child: Text('暂无会话', style: TextStyle(color: Colors.grey)))
+                  : ListView.separated(
+                      itemCount: conversations.length,
+                      separatorBuilder: (_i1, _i2) => Divider(height: 1, color: Colors.grey.shade200),
+                      itemBuilder: (ctx, i) {
+                        final c = conversations[i];
+                        return _buildConversationTile(c, c.id == _currentConversationId);
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConversationTile(Conversation c, bool isCurrent) {
+    final updated = _formatTime(c.updatedAt);
+    return ListTile(
+      dense: true,
+      selected: isCurrent,
+      leading: Icon(
+        isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
+        size: 20,
+        color: isCurrent ? Theme.of(context).colorScheme.primary : Colors.grey,
+      ),
+      title: Text(
+        c.title.isEmpty ? '新对话' : c.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontWeight: isCurrent ? FontWeight.w600 : FontWeight.normal),
+      ),
+      subtitle: Text('$updated · ${c.messageCount} 条', style: const TextStyle(fontSize: 12)),
+      onTap: () => _switchConversation(c.id),
+      trailing: IconButton(
+        icon: const Icon(Icons.delete_outline, size: 20),
+        tooltip: '删除',
+        onPressed: () => _confirmDelete(c),
+      ),
+    );
+  }
+
+  /// Create a new conversation and switch to it.
+  Future<void> _newConversation() async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    await notifier.create();
+    final convs = ref.read(conversationsProvider);
+    if (convs.isNotEmpty) {
+      setState(() {
+        _currentConversationId = convs.first.id;
+        _followStream = true;
+        _selectedImagePath = null;
+      });
+    }
+    if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+  }
+
+  /// Switch to an existing conversation (no-op if already current).
+  void _switchConversation(String id) {
+    if (id != _currentConversationId) {
+      setState(() {
+        _currentConversationId = id;
+        _followStream = true;
+        _selectedImagePath = null;
+      });
+    }
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _confirmDelete(Conversation c) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除会话'),
+        content: Text('确定删除「${c.title.isEmpty ? '新对话' : c.title}」吗？\n该会话的所有消息将被永久删除。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _deleteConversation(c.id);
+  }
+
+  Future<void> _deleteConversation(String id) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    await notifier.delete(id);
+    // If we just deleted the active conversation, fall back to another one or
+    // create a fresh one so the chat view is never left empty.
+    if (id == _currentConversationId) {
+      var convs = ref.read(conversationsProvider);
+      if (convs.isEmpty) {
+        await notifier.create();
+        convs = ref.read(conversationsProvider);
+      }
+      setState(() {
+        _currentConversationId = convs.isEmpty ? '' : convs.first.id;
+        _followStream = true;
+        _selectedImagePath = null;
+      });
+    }
+  }
+
+  String _formatTime(DateTime t) {
+    final now = DateTime.now();
+    final diff = now.difference(t);
+    if (diff.inDays == 0) {
+      final h = t.hour.toString().padLeft(2, '0');
+      final m = t.minute.toString().padLeft(2, '0');
+      return '$h:$m';
+    } else if (diff.inDays == 1) {
+      return '昨天';
+    } else if (diff.inDays < 7) {
+      return '${diff.inDays} 天前';
+    }
+    return '${t.month}/${t.day}';
+  }
 }
 
 // =========================================================================
@@ -542,7 +747,7 @@ class _ModelStatusSheet extends StatelessWidget {
   final ModelLifecyclePhase phase;
   final String modelName;
   final String? errorMessage;
-  final String? latestLog;
+  final List<String> logs;
   final bool isGenerating;
   final VoidCallback onUnload;
   final VoidCallback onLoad;
@@ -552,7 +757,7 @@ class _ModelStatusSheet extends StatelessWidget {
     required this.phase,
     required this.modelName,
     this.errorMessage,
-    this.latestLog,
+    this.logs = const [],
     required this.isGenerating,
     required this.onUnload,
     required this.onLoad,
@@ -607,18 +812,25 @@ class _ModelStatusSheet extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
-              // Progress log
-              if (latestLog != null)
+              // Inference / loading logs (scrollable, latest entries at bottom)
+              if (logs.isNotEmpty)
                 Container(
                   width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 160),
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
                     color: Colors.blue.shade50,
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Text(latestLog!, style: TextStyle(fontSize: 12, color: Colors.blue.shade800)),
+                  child: ListView.builder(
+                    itemCount: logs.length,
+                    itemBuilder: (ctx, i) => Text(
+                      logs[i],
+                      style: TextStyle(fontSize: 12, color: Colors.blue.shade800),
+                    ),
+                  ),
                 ),
-              if (latestLog != null) const SizedBox(height: 12),
+              if (logs.isNotEmpty) const SizedBox(height: 12),
               // Error message
               if (errorMessage != null)
                 Container(
