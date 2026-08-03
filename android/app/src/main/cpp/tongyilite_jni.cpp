@@ -20,6 +20,7 @@
 #include <cmath>
 #include <random>
 #include <functional>
+#include <sstream>
 
 // llama.cpp headers
 #include "llama.h"
@@ -50,6 +51,10 @@ struct InferenceEngine {
     // Generation state
     std::vector<llama_token> prompt_tokens;
     int n_prompt = 0;
+
+    // Chat history — maintained across turns for multi-turn conversations.
+    // Each entry is a llama_chat_message with role ("user"/"assistant") and content.
+    std::vector<llama_chat_message> chat_history;
 
     // Control
     std::mutex mtx;
@@ -114,6 +119,10 @@ struct InferenceEngine {
         ctx_params.n_ctx = effective_n_ctx;
         ctx_params.n_batch = 512;
         ctx_params.n_ubatch = 256;
+        // Enable unified KV buffer to avoid MSA strict-slots mode issues.
+        // With n_seq_max=1, kv_unified=true gives the full n_ctx as cell count
+        // without requiring exact slot matching.
+        ctx_params.kv_unified = true;
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -166,8 +175,9 @@ struct InferenceEngine {
         this->n_ctx.store(static_cast<int32_t>(llama_n_ctx(context)));
 
         const int ctx_val = static_cast<int>(this->n_ctx.load());
-        LOGI("Model loaded. n_ctx=%d, n_embd=%d, n_layer=%d",
-             ctx_val,
+        const uint32_t n_ctx_seq = llama_n_ctx_seq(context);
+        LOGI("Model loaded. n_ctx=%d, n_ctx_seq=%u, n_embd=%d, n_layer=%d",
+             ctx_val, n_ctx_seq,
              llama_model_n_embd(model),
              llama_model_n_layer(model));
         char buf3[128];
@@ -228,7 +238,12 @@ struct InferenceEngine {
         float temperature = 0.7f,
         float top_p = 0.9f,
         // callback: called for each generated token; return false to stop
-        std::function<bool(const std::string &)> on_token = nullptr
+        std::function<bool(const std::string &)> on_token = nullptr,
+        // Optional chat history to apply template before tokenization.
+        // If non-empty, the template is applied and 'prompt' is used as the
+        // final user message appended to history.  Empty history falls back
+        // to raw prompt (backward compatible).
+        const std::vector<llama_chat_message> *history = nullptr
     ) {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
@@ -252,9 +267,37 @@ struct InferenceEngine {
             LOGI("completion() running: model=%p context=%p n_ctx=%d",
                  (void*)model, (void*)context, ctx_val2);
 
-            // 1. Tokenize prompt
+            // --- Apply chatml template if history is provided ---
+            std::string formatted_prompt;
+            if (history && !history->empty()) {
+                // Append the current user message to a temporary copy of history
+                llama_chat_message last_msg = { "user", prompt };
+                std::vector<llama_chat_message> chat_vec = *history;
+                chat_vec.push_back(last_msg);
+
+                char buf[16384];
+                int32_t n = llama_chat_apply_template(
+                    "chatml",   // Qwen3 / Gemma-3 both use chatml format
+                    chat_vec.data(),
+                    (size_t)chat_vec.size(),
+                    true,       // add_ass → appends "assistant\n" at the end
+                    buf,
+                    sizeof(buf));
+
+                if (n > 0 && n < (int32_t)sizeof(buf)) {
+                    formatted_prompt = std::string(buf, n);
+                    LOGI("chatml template applied: %d chars, %zu history msgs", n, history->size());
+                } else {
+                    LOGW("llama_chat_apply_template returned %d, falling back to raw prompt", n);
+                    formatted_prompt = prompt;
+                }
+            } else {
+                formatted_prompt = prompt;
+            }
+
+            // 1. Tokenize formatted prompt
             bool add_bos = llama_vocab_get_add_bos(vocab);
-            prompt_tokens = tokenize(prompt, add_bos);
+            prompt_tokens = tokenize(formatted_prompt.c_str(), add_bos);
             n_prompt = (int)prompt_tokens.size();
             LOGI("Tokenized: %d tokens, add_bos=%d", n_prompt, add_bos);
 
@@ -362,15 +405,19 @@ struct InferenceEngine {
                 n_gen++;
 
                 // Decode at correct position to avoid overwriting KV cache
+                const int32_t decode_pos = n_prompt + n_gen - 1;
+                LOGI("gen token #%d: new_token=%d pos=%d n_ctx=%d", n_gen, new_token, decode_pos, (int)n_ctx.load());
                 t_start = std::chrono::high_resolution_clock::now();
                 llama_batch token_batch = llama_batch_init(1, 0, 1);
                 token_batch.token[0]   = new_token;
-                token_batch.pos[0]     = n_prompt + n_gen - 1;
+                token_batch.pos[0]     = decode_pos;
                 token_batch.n_seq_id[0]= 1;
                 token_batch.seq_id[0][0]= 0;
                 token_batch.logits[0]  = true;
-                if (llama_decode(context, token_batch) != 0) {
-                    LOGE("llama_decode() failed on gen token #%d", n_gen);
+                int32_t dec_ret = llama_decode(context, token_batch);
+                if (dec_ret != 0) {
+                    LOGE("llama_decode() failed on gen token #%d: ret=%d pos=%d n_ctx=%u",
+                         n_gen, dec_ret, decode_pos, llama_n_ctx_seq(context));
                     llama_batch_free(token_batch);
                     break;
                 }
@@ -384,6 +431,15 @@ struct InferenceEngine {
             double tok_per_sec = n_gen > 0 ? (n_gen / (t_gen_ms / 1000.0)) : 0.0;
             LOGI("Generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms)",
                  n_gen, tok_per_sec, t_prompt_ms, t_gen_ms);
+
+            // Append user message + assistant response to chat history for next turn.
+            if (history && !history->empty() && !result.empty()) {
+                llama_chat_message user_msg = { "user", prompt };
+                llama_chat_message asst_msg  = { "assistant", result.c_str() };
+                chat_history.push_back(user_msg);
+                chat_history.push_back(asst_msg);
+                LOGI("chat_history updated: %zu messages total", chat_history.size());
+            }
 
             return result;
         } catch (const std::exception &e) {
@@ -618,6 +674,142 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
         g_callback_obj = nullptr;
     }
 
+    return env->NewStringUTF(result.c_str());
+}
+
+// ============================================================================
+// JSON helper — minimal parser for message array from Kotlin side
+// Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+// ============================================================================
+static std::vector<llama_chat_message> parseMessagesJson(JNIEnv *env, jstring jjson) {
+    if (!jjson) return {};
+    std::string json = jstring_to_std(env, jjson);
+    std::vector<llama_chat_message> msgs;
+
+    // Simple state-machine parser: find "role" and "content" pairs
+    size_t i = 0;
+    while (i < json.size()) {
+        // Find next opening brace
+        size_t obj_start = json.find('{', i);
+        if (obj_start == std::string::npos) break;
+        size_t obj_end = json.find('}', obj_start);
+        if (obj_end == std::string::npos) break;
+
+        std::string obj = json.substr(obj_start, obj_end - obj_start + 1);
+        // Extract role
+        auto rpos = obj.find("\"role\"");
+        if (rpos != std::string::npos) {
+            size_t colon = obj.find(':', rpos);
+            size_t q1 = obj.find('"', colon + 1);
+            size_t q2 = obj.find('"', q1 + 1);
+            if (q1 != std::string::npos && q2 != std::string::npos) {
+                std::string role = obj.substr(q1 + 1, q2 - q1 - 1);
+                // Extract content
+                auto cpos = obj.find("\"content\"");
+                if (cpos != std::string::npos) {
+                    size_t ccolon = obj.find(':', cpos);
+                    size_t cq1 = obj.find('"', ccolon + 1);
+                    size_t cq2 = obj.find('"', cq1 + 1);
+                    // Handle escaped quotes in content — find last quote before }
+                    if (cq1 != std::string::npos) {
+                        for (size_t k = cq1 + 1; k < obj.size(); ++k) {
+                            if (obj[k] == '"') {
+                                if (k > 0 && obj[k-1] != '\\') { cq2 = k; break; }
+                            }
+                        }
+                    }
+                    std::string content;
+                    if (cq1 != std::string::npos && cq2 != std::string::npos && cq2 > cq1 + 1) {
+                        content = obj.substr(cq1 + 1, cq2 - cq1 - 1);
+                    }
+                    msgs.push_back({ role.c_str(), content.c_str() });
+                }
+            }
+        }
+        i = obj_end + 1;
+    }
+    return msgs;
+}
+
+// --- Completion with chat history (JSON messages array) ---
+
+JNIEXPORT jstring JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
+    JNIEnv *env, jobject,
+    jstring jprompt,
+    jstring jmessages_json,   // JSON array of {role, content} pairs
+    jint max_tokens,
+    jfloat temperature,
+    jfloat top_p,
+    jobject jcallback
+) {
+    const int eng_n_ctx = static_cast<int>(g_engine.n_ctx.load());
+    LOGI("nativeCompletionWithMessages ENTER: is_loaded=%d n_ctx=%d",
+         g_engine.is_loaded(), eng_n_ctx);
+    if (!g_engine.is_loaded()) {
+        LOGE("nativeCompletionWithMessages ABORT: no model loaded");
+        return env->NewStringUTF("[ERROR: No model loaded]");
+    }
+
+    jobject cb_copy = env->NewLocalRef(jcallback);
+    std::string prompt   = jstring_to_std(env, jprompt);
+    auto history = parseMessagesJson(env, jmessages_json);
+    LOGI("nativeCompletionWithMessages: prompt='%s', %zu history messages", prompt.c_str(), history.size());
+
+    std::string result;
+    try {
+        result = g_engine.completion(
+            prompt.c_str(), max_tokens, temperature, top_p,
+            [cb_copy](const std::string &token) -> bool {
+                if (!g_jvm || !cb_copy) return true;
+                JNIEnv *local_env = nullptr;
+                int status = g_jvm->GetEnv(reinterpret_cast<void **>(&local_env), JNI_VERSION_1_6);
+                bool need_detach = false;
+                if (status == JNI_EDETACHED) {
+                    if (g_jvm->AttachCurrentThread(&local_env, nullptr) != 0) return true;
+                    need_detach = true;
+                } else if (status != JNI_OK) {
+                    return true;
+                }
+                jobject safe_cb = local_env->NewLocalRef(cb_copy);
+                jclass cls = local_env->GetObjectClass(safe_cb);
+                if (!cls) {
+                    local_env->DeleteLocalRef(safe_cb);
+                    if (need_detach) g_jvm->DetachCurrentThread();
+                    return true;
+                }
+                jmethodID mid = local_env->GetMethodID(cls, "onToken", "(Ljava/lang/String;)Z");
+                if (!mid) {
+                    local_env->DeleteLocalRef(safe_cb);
+                    local_env->DeleteLocalRef(cls);
+                    if (need_detach) g_jvm->DetachCurrentThread();
+                    return true;
+                }
+                jstring jtoken = local_env->NewStringUTF(token.c_str());
+                jboolean should_continue = local_env->CallBooleanMethod(safe_cb, mid, jtoken);
+                local_env->DeleteLocalRef(jtoken);
+                local_env->DeleteLocalRef(safe_cb);
+                local_env->DeleteLocalRef(cls);
+                if (need_detach) g_jvm->DetachCurrentThread();
+                return (should_continue != JNI_FALSE);
+            },
+            &history   // pass history to completion() for chatml template application
+        );
+    } catch (const std::exception &e) {
+        LOGE("nativeCompletionWithMessages caught C++ exception: %s", e.what());
+        result = std::string("[ERROR: ") + e.what() + "]";
+    } catch (...) {
+        LOGE("nativeCompletionWithMessages caught unknown C++ exception");
+        result = "[ERROR: Unknown C++ exception in completion()]";
+    }
+
+    env->DeleteLocalRef(cb_copy);
+    if (g_callback_obj) {
+        env->DeleteGlobalRef(g_callback_obj);
+        g_callback_obj = nullptr;
+    }
+
+    LOGI("nativeCompletionWithMessages done, result len=%zu", result.length());
     return env->NewStringUTF(result.c_str());
 }
 

@@ -142,7 +142,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _textController.clear();
     setState(() => _selectedImagePath = null);
 
-    // Scroll to bottom
+    // Scroll to top (newest message) — ListView is reverse so maxScrollExtent=0 at the top.
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -452,6 +452,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
+          reverse: true,
           itemCount: messages.length,
           itemBuilder: (context, index) {
             final msg = messages[index];
@@ -459,7 +460,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               role: msg.role.name,
               content: msg.content,
               timestamp: msg.timestamp,
-              isStreaming: msg.isStreaming && index == messages.length - 1,
+              isStreaming: msg.isStreaming && index == 0,
               imagePath: msg.imagePath,
             );
           },
