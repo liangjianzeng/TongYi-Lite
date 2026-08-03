@@ -23,8 +23,17 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 
+    companion object {
+        const val TAG = "TongYiLite"
+    }
+
     private lateinit var engine: InferenceEngine
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // ---- Debug logging helpers (always visible in Release logcat) ----
+    private fun logI(method: String, message: String) { Log.i(TAG, "[$method] $message") }
+    private fun logW(method: String, message: String, t: Throwable? = null) { Log.w(TAG, "[$method] $message", t) }
+    private fun logE(method: String, message: String, t: Throwable? = null) { Log.e(TAG, "[$method] $message", t) }
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -73,8 +82,9 @@ class MainActivity : FlutterActivity() {
                 "loadModel"     -> handleLoadModel(call, result)
                 "unloadModel"   -> handleUnloadModel(result)
                 "isLoaded"      -> handleIsLoaded(result)
-                "completion"    -> handleCompletion(call, result)
-                "stopGeneration"-> handleStop(result)
+                "completion"              -> handleCompletion(call, result)
+                "completionWithMessages"  -> handleCompletionWithMessages(call, result)
+                "stopGeneration"          -> handleStop(result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
@@ -91,37 +101,63 @@ class MainActivity : FlutterActivity() {
         val path = call.argument<String>("path")!!
         val nCtx = call.argument<Int>("nCtx") ?: 4096
 
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx")
+
         Thread {
             try {
                 val ok = engine.loadModel(path, nCtx, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
+                        logI("onLoadingLog", message)
                         mainHandler.post {
                             LoadingLogStream.sink?.success(message)
                         }
                     }
                 })
+                logI("handleLoadModel", "loadModel result: $ok")
                 // Clear loading logs on completion (whether success or failure)
                 mainHandler.post {
                     LoadingLogStream.sink?.success(null) // null signals end of batch
-                    result.success(ok)
+                    try {
+                        result.success(ok)
+                    } catch (e: Exception) {
+                        logE("handleLoadModel", "result.success failed", e)
+                    }
                 }
             } catch (e: Exception) {
+                logW("handleLoadModel", "loadModel error: ${e.message}", e)
                 mainHandler.post {
                     LoadingLogStream.sink?.success("加载异常: ${e.message}")
                     LoadingLogStream.sink?.success(null)
-                    result.error("LOAD_FAILED", e.message, null)
+                    try {
+                        result.error("LOAD_FAILED", e.message, null)
+                    } catch (e2: Exception) {
+                        logE("handleLoadModel", "result.error failed", e2)
+                    }
                 }
             }
         }.start()
     }
 
     private fun handleUnloadModel(result: MethodChannel.Result) {
+        logI("handleUnloadModel", "")
         engine.unloadModel()
-        result.success(true)
+        mainHandler.post {
+            try {
+                result.success(true)
+            } catch (e: Exception) {
+                logE("handleUnloadModel", "result.success failed", e)
+            }
+        }
     }
 
     private fun handleIsLoaded(result: MethodChannel.Result) {
-        result.success(engine.isLoaded())
+        mainHandler.post {
+            try {
+                result.success(engine.isLoaded())
+            } catch (e: Exception) {
+                logE("handleIsLoaded", "result.success failed", e)
+            }
+        }
     }
 
     /**
@@ -133,14 +169,17 @@ class MainActivity : FlutterActivity() {
         val temperature = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
         val topP        = call.argument<Double>("topP")?.toFloat() ?: 0.9f
 
+        logI("handleCompletion", "prompt=${prompt.take(50)}..., maxTokens=$maxTokens, temp=$temperature, topP=$topP")
+
         // Get the event sink for streaming tokens
         val sink = TokenStream.sink
 
-        // Update foreground notification
+        // Update foreground notification — must be on main thread (may trigger @UiThread code)
         updateServiceStatus("AI 思考中...")
 
         Thread {
             try {
+                logI("handleCompletion", "calling engine.completion() from background thread")
                 val fullText = engine.completion(
                     prompt = prompt,
                     maxTokens = maxTokens,
@@ -152,9 +191,62 @@ class MainActivity : FlutterActivity() {
                         true
                     }
                 )
+                logI("handleCompletion", "completion done, fullText length=${fullText.length}")
+                updateServiceStatus("就绪")
+                // result.success MUST be on main thread (MethodChannel.Result is @UiThread guarded)
+                mainHandler.post {
+                    try {
+                        result.success(fullText)
+                    } catch (e: Exception) {
+                        logE("handleCompletion", "result.success failed", e)
+                    }
+                }
+            } catch (e: Exception) {
+                logW("handleCompletion", "completion error: ${e.message}", e)
+                updateServiceStatus("推理出错")
+                // result.error MUST be on main thread
+                mainHandler.post {
+                    try {
+                        result.error("COMPLETION_ERROR", e.message ?: "Unknown error", null)
+                    } catch (e2: Exception) {
+                        logE("handleCompletion", "result.error failed", e2)
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun handleCompletionWithMessages(call: MethodCall, result: MethodChannel.Result) {
+        val prompt       = call.argument<String>("prompt")!!
+        val messagesJson = call.argument<String>("messagesJson") ?: "[]"
+        val maxTokens    = call.argument<Int>("maxTokens") ?: 2048
+        val temperature  = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
+        val topP         = call.argument<Double>("topP")?.toFloat() ?: 0.9f
+
+        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}")
+
+        val sink = TokenStream.sink
+        updateServiceStatus("AI 思考中...")
+
+        Thread {
+            try {
+                logI("handleCompletionWithMessages", "calling engine.completionWithMessages()")
+                val fullText = engine.completionWithMessages(
+                    prompt = prompt,
+                    messagesJson = messagesJson,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    topP = topP,
+                    onToken = { token ->
+                        mainHandler.post { sink?.success(token) }
+                        true
+                    }
+                )
+                logI("handleCompletionWithMessages", "done, len=${fullText.length}")
                 updateServiceStatus("就绪")
                 mainHandler.post { result.success(fullText) }
             } catch (e: Exception) {
+                logW("handleCompletionWithMessages", "error: ${e.message}", e)
                 updateServiceStatus("推理出错")
                 mainHandler.post { result.error("COMPLETION_ERROR", e.message, null) }
             }
@@ -162,26 +254,47 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleStop(result: MethodChannel.Result) {
+        logI("handleStop", "")
         engine.stopGeneration()
-        result.success(true)
+        mainHandler.post {
+            try {
+                result.success(true)
+            } catch (e: Exception) {
+                logE("handleStop", "result.success failed", e)
+            }
+        }
     }
 
     private fun handleBenchmark(call: MethodCall, result: MethodChannel.Result) {
         val prompt   = call.argument<String>("prompt") ?: "Hello, how are you?"
         val nRepeats = call.argument<Int>("nRepeats") ?: 3
 
+        logI("handleBenchmark", "prompt=${prompt.take(50)}, nRepeats=$nRepeats")
+
         Thread {
             try {
                 val b = engine.benchmark(prompt, nRepeats)
+                logI("handleBenchmark", "result: ${b.tokensPerSecond} tok/s")
                 mainHandler.post {
-                    result.success(mapOf(
-                        "tokensPerSecond" to b.tokensPerSecond,
-                        "promptMs" to b.promptMs,
-                        "generationMs" to b.generationMs
-                    ))
+                    try {
+                        result.success(mapOf(
+                            "tokensPerSecond" to b.tokensPerSecond,
+                            "promptMs" to b.promptMs,
+                            "generationMs" to b.generationMs
+                        ))
+                    } catch (e: Exception) {
+                        logE("handleBenchmark", "result.success failed", e)
+                    }
                 }
             } catch (e: Exception) {
-                mainHandler.post { result.error("BENCHMARK_ERROR", e.message, null) }
+                logW("handleBenchmark", "error: ${e.message}", e)
+                mainHandler.post {
+                    try {
+                        result.error("BENCHMARK_ERROR", e.message, null)
+                    } catch (e2: Exception) {
+                        logE("handleBenchmark", "result.error failed", e2)
+                    }
+                }
             }
         }.start()
     }
@@ -189,28 +302,47 @@ class MainActivity : FlutterActivity() {
     private fun handleGetModelInfo(result: MethodChannel.Result) {
         try {
             val info = engine.getModelInfo()
-            result.success(mapOf(
-                "paramsBillion" to info.paramsBillion,
-                "contextSize" to info.contextSize,
-                "embeddingDim" to info.embeddingDim,
-                "layers" to info.layers,
-                "vocabSize" to info.vocabSize,
-                "fileSizeMB" to info.fileSizeMB,
-                "displayParams" to info.displayParams
-            ))
+            mainHandler.post {
+                try {
+                    result.success(mapOf(
+                        "paramsBillion" to info.paramsBillion,
+                        "contextSize" to info.contextSize,
+                        "embeddingDim" to info.embeddingDim,
+                        "layers" to info.layers,
+                        "vocabSize" to info.vocabSize,
+                        "fileSizeMB" to info.fileSizeMB,
+                        "displayParams" to info.displayParams
+                    ))
+                } catch (e: Exception) {
+                    logE("handleGetModelInfo", "result.success failed", e)
+                }
+            }
         } catch (e: Exception) {
-            result.error("MODEL_INFO_ERROR", e.message, null)
+            logW("handleGetModelInfo", "error: ${e.message}", e)
+            mainHandler.post {
+                try {
+                    result.error("MODEL_INFO_ERROR", e.message, null)
+                } catch (e2: Exception) {
+                    logE("handleGetModelInfo", "result.error failed", e2)
+                }
+            }
         }
     }
 
     private fun handleGetMemoryInfo(result: MethodChannel.Result) {
         val rt = Runtime.getRuntime()
-        result.success(mapOf(
-            "totalMB" to rt.totalMemory() / 1_048_576,
-            "freeMB" to rt.freeMemory() / 1_048_576,
-            "usedMB" to (rt.totalMemory() - rt.freeMemory()) / 1_048_576,
-            "maxMB" to rt.maxMemory() / 1_048_576
-        ))
+        mainHandler.post {
+            try {
+                result.success(mapOf(
+                    "totalMB" to rt.totalMemory() / 1_048_576,
+                    "freeMB" to rt.freeMemory() / 1_048_576,
+                    "usedMB" to (rt.totalMemory() - rt.freeMemory()) / 1_048_576,
+                    "maxMB" to rt.maxMemory() / 1_048_576
+                ))
+            } catch (e: Exception) {
+                logE("handleGetMemoryInfo", "result.success failed", e)
+            }
+        }
     }
 
     private fun updateServiceStatus(status: String) {

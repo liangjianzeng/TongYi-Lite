@@ -101,7 +101,7 @@ class InferenceService {
   }
 
   // ------------------------------------------------------------------
-  // Streaming completion
+  // Streaming completion (raw prompt, no chat template)
   // ------------------------------------------------------------------
   Stream<String> completion({
     required String prompt,
@@ -135,6 +135,50 @@ class InferenceService {
       subscription.cancel();
     }).catchError((err) {
       debugPrint('[InferenceService] Native completion error: $err');
+      controller.addError(err);
+      controller.close();
+      subscription.cancel();
+    });
+
+    return controller.stream;
+  }
+
+  // ------------------------------------------------------------------
+  // Streaming completion with chat history (applies chatml template)
+  // @param messagesJson JSON array of {role, content} for conversation history.
+  //   The [prompt] is appended as the final user message before generation.
+  // ------------------------------------------------------------------
+  Stream<String> completionWithMessages({
+    required String prompt,
+    required String messagesJson,
+    int maxTokens = 2048,
+    double temperature = 0.7,
+    double topP = 0.9,
+  }) {
+    final controller = StreamController<String>();
+
+    final subscription = _tokenChannel.receiveBroadcastStream().listen((event) {
+      if (event != null) {
+        controller.add(event.toString());
+      }
+    }, onError: (err) {
+      controller.addError(err);
+    });
+
+    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson');
+    _channel.invokeMethod('completionWithMessages', {
+      'prompt': prompt,
+      'messagesJson': messagesJson,
+      'maxTokens': maxTokens,
+      'temperature': temperature,
+      'topP': topP,
+    }).then((result) {
+      final resStr = result?.toString() ?? '';
+      debugPrint('[InferenceService] completionWithMessages done, len=${resStr.length}, preview="${resStr.substring(0, resStr.length.clamp(0, 50))}"');
+      controller.close();
+      subscription.cancel();
+    }).catchError((err) {
+      debugPrint('[InferenceService] completionWithMessages error: $err');
       controller.addError(err);
       controller.close();
       subscription.cancel();

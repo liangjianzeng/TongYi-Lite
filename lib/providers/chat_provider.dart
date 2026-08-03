@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/chat_message.dart';
@@ -128,7 +129,7 @@ class ChatNotifier extends StateNotifier<bool> {
     _ref.read(isGeneratingProvider.notifier).state = true;
 
     try {
-      // Step 2: Save user message
+      // Step 2: Save user message first (so it's available in history for template)
       final userMsg = ChatMessage(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         conversationId: conversationId,
@@ -139,12 +140,24 @@ class ChatNotifier extends StateNotifier<bool> {
       debugPrint('[ChatNotifier] Saving user message...');
       await _storage.saveMessage(userMsg);
 
-      // Step 3: Stream completion from native inference engine
+      // Step 3: Build chat history JSON from all messages in this conversation
+      final allMessages = await _storage.getMessages(conversationId, limit: 200);
+      final messagesForTemplate = <Map<String, String>>[];
+      for (final msg in allMessages) {
+        if (msg.content.isNotEmpty) {
+          messagesForTemplate.add({'role': msg.role.name, 'content': msg.content});
+        }
+      }
+      final messagesJson = jsonEncode(messagesForTemplate);
+      debugPrint('[ChatNotifier] Chat history: ${messagesForTemplate.length} msgs, jsonLen=${messagesJson.length}');
+
+      // Step 4: Stream completion from native inference engine (with chatml template)
       String fullResponse = '';
       try {
-        debugPrint('[ChatNotifier] Calling native completion...');
-        final stream = _inference.completion(
+        debugPrint('[ChatNotifier] Calling completionWithMessages...');
+        final stream = _inference.completionWithMessages(
           prompt: prompt,
+          messagesJson: messagesJson,
           maxTokens: 2048,
           temperature: 0.7,
           topP: 0.9,
@@ -152,16 +165,36 @@ class ChatNotifier extends StateNotifier<bool> {
 
         debugPrint('[ChatNotifier] Listening to token stream...');
         final buffer = StringBuffer();
+        bool inThinking = false;
         await for (final token in stream) {
           if (!buffer.isEmpty || token.isNotEmpty) {
             buffer.write(token);
           }
+
+          // Track <thinking> tags — skip everything until </think> is seen.
+          final text = buffer.toString();
+          if (!inThinking && text.contains('<think>')) {
+            inThinking = true;
+          } else if (inThinking && text.contains('</think>')) {
+            inThinking = false;
+          }
         }
-        fullResponse = buffer.toString();
+
+        // If the stream ended while still inside thinking tags, truncate at </think>.
+        String rawResponse = buffer.toString();
+        final endTagIndex = rawResponse.indexOf('</think>');
+        if (inThinking && endTagIndex >= 0) {
+          rawResponse = rawResponse.substring(endTagIndex + '</think>'.length);
+        } else if (!inThinking) {
+          // Stream finished normally — strip any thinking tags that fully appeared.
+          rawResponse = rawResponse.replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '');
+        }
+
+        fullResponse = rawResponse.trim();
         final preview = fullResponse.substring(0, fullResponse.length.clamp(0, 50));
         debugPrint('[ChatNotifier] Stream done, len=${fullResponse.length}, response="$preview${fullResponse.length > 50 ? "..." : ""}"');
 
-        // Step 4: Save assistant message
+        // Step 5: Save assistant message
         final assistantMsg = ChatMessage(
           id: (DateTime.now().millisecondsSinceEpoch + 1).toString(),
           conversationId: conversationId,

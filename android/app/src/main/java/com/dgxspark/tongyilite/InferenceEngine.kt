@@ -68,6 +68,20 @@ class InferenceEngine(private val context: Context) {
         callback: InferenceCallback
     ): String
 
+    /**
+     * Completion with chat history — applies chatml template before tokenization.
+     * @param messagesJson JSON array of {role, content} pairs, e.g.
+     *   '[{"role":"user","content":"hello"}]'
+     */
+    private external fun nativeCompletionWithMessages(
+        prompt: String,
+        messagesJson: String,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        callback: InferenceCallback
+    ): String
+
     private external fun nativeBenchmark(
         prompt: String,
         nRepeats: Int
@@ -149,6 +163,31 @@ class InferenceEngine(private val context: Context) {
             }
         }
         return nativeCompletion(prompt, maxTokens, temperature, topP, callback)
+    }
+
+    /**
+     * Completion with chat history — applies chatml template before tokenization.
+     * @param messagesJson JSON array of {role, content} pairs for conversation history.
+     *   The [prompt] is appended as the final user message before generation.
+     */
+    fun completionWithMessages(
+        prompt: String,
+        messagesJson: String,
+        maxTokens: Int = 2048,
+        temperature: Float = 0.7f,
+        topP: Float = 0.9f,
+        onToken: ((String) -> Boolean)? = null
+    ): String {
+        val callback = if (onToken != null) {
+            object : InferenceCallback {
+                override fun onToken(token: String): Boolean = onToken.invoke(token)
+            }
+        } else {
+            object : InferenceCallback {
+                override fun onToken(token: String): Boolean = true
+            }
+        }
+        return nativeCompletionWithMessages(prompt, messagesJson, maxTokens, temperature, topP, callback)
     }
 
     /**
