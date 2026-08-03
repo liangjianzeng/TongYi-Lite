@@ -416,17 +416,14 @@ struct InferenceEngine {
                     sizeof(buf));
 
                 if (n > 0 && n < (int32_t)sizeof(buf)) {
-                    // For Qwen3 models, replace "assistant\n" with the proper
-                    // <|im_start|>assistant\n<|im_end|>\n<|im_start|>assistant\n
-                    // prefix that triggers chain-of-thought thinking.
-                    std::string prompt_str(buf, n);
-                    std::string assistant_prefix = "assistant\n";
-                    size_t pos = prompt_str.rfind(assistant_prefix);
-                    if (pos != std::string::npos) {
-                        prompt_str.replace(pos, assistant_prefix.length(),
-                            "<|im_start|>assistant\n<|im_end|>\n<|im_start|>assistant\n");
-                    }
-                    formatted_prompt = prompt_str;
+                    // The built-in chatml template with add_ass=true already
+                    // appends "<|im_start|>assistant\n", which is the correct
+                    // generation trigger for Qwen2.5 / Qwen3. Do NOT inject an
+                    // extra "<|im_end|>" here: doing so creates a malformed
+                    // prompt (an empty assistant turn followed by a second
+                    // assistant marker) that drives the model into a degenerate
+                    // loop emitting a single special token (151935) forever.
+                    formatted_prompt = std::string(buf, n);
                     LOGI("chatml template applied: %d chars, %zu history msgs", n, history->size());
                 } else {
                     LOGW("llama_chat_apply_template returned %d, falling back to raw prompt", n);
@@ -441,6 +438,13 @@ struct InferenceEngine {
             prompt_tokens = tokenize(formatted_prompt.c_str(), add_bos);
             n_prompt = (int)prompt_tokens.size();
             LOGI("Tokenized: %d tokens, add_bos=%d", n_prompt, add_bos);
+            // DIAG: dump the actual prompt the model will see (truncated) so we
+            // can confirm the user message really made it into the context.
+            LOGI("formatted_prompt (%zu chars): %.*s%s",
+                 formatted_prompt.size(),
+                 (int)std::min((size_t)500, formatted_prompt.size()),
+                 formatted_prompt.c_str(),
+                 formatted_prompt.size() > 500 ? "..." : "");
 
             if (ctx_val2 <= 0 || context == nullptr) {
                 LOGE("completion() aborted: invalid state n_ctx=%d", ctx_val2);
@@ -494,7 +498,20 @@ struct InferenceEngine {
             while (n_gen < max_tokens && !should_stop) {
                 llama_token new_token = 0;
 
-                auto * logits_arr = llama_get_logits_ith(context, (int)prompt_tokens.size() - 1 + n_gen);
+                // Get logits for the NEXT token.
+                //  - After the prompt decode (n_gen==0): the batch had n_prompt
+                //    tokens and llama_batch_get_one() set logits=true on the LAST
+                //    one, so they are at index n_prompt-1.
+                //  - After each single-token generation decode (n_gen>=1): the
+                //    batch has exactly 1 token, so the logits are at index 0.
+                // llama_get_logits_ith() validates `i` against the size of the
+                // LAST decoded batch; a stale global index (n_prompt-1+n_gen)
+                // therefore aborts the process the moment generation starts,
+                // which crashed the app after the first generated token.
+                const int32_t logits_idx = (n_gen == 0)
+                    ? (int32_t)prompt_tokens.size() - 1
+                    : 0;
+                auto * logits_arr = llama_get_logits_ith(context, logits_idx);
 
                 if (!logits_arr) {
                     LOGE("llama_get_logits_ith nullptr at pos %d", (int)(prompt_tokens.size() - 1 + n_gen));
@@ -518,27 +535,46 @@ struct InferenceEngine {
                               return a.logit > b.logit;
                           });
 
-                float cumsum = 0.0f;
-                size_t keep = n_vocab;
-                for (size_t i = 0; i < n_vocab; ++i) {
-                    cumsum += std::exp(candidates[i].logit - candidates[0].logit);
-                    if (cumsum >= top_p) { keep = i + 1; break; }
+                // DIAG: at the first generation step, dump the top-5 logits so we
+                // can tell whether the model is producing sane logits or garbage
+                // (all-equal / NaN / one special token dominating).
+                if (n_gen == 0) {
+                    LOGI("[DIAG] top5 logits @ gen#0:");
+                    for (int k = 0; k < 5 && k < (int)candidates.size(); ++k) {
+                        LOGI("[DIAG]   #%d id=%d logit=%.4f", k, candidates[k].id, candidates[k].logit);
+                    }
                 }
 
+                // --- Nucleus (top-p) sampling ---
+                // 1) softmax probabilities over the temperature-scaled logits
                 float max_logit = candidates[0].logit;
                 float sum_exp = 0.0f;
-                for (size_t i = 0; i < keep; ++i) {
+                for (size_t i = 0; i < n_vocab; ++i) {
                     candidates[i].p = std::exp(candidates[i].logit - max_logit);
                     sum_exp += candidates[i].p;
                 }
-                for (size_t i = 0; i < keep; ++i) candidates[i].p /= sum_exp;
+                for (size_t i = 0; i < n_vocab; ++i) candidates[i].p /= sum_exp;
 
+                // 2) keep the smallest prefix whose cumulative prob >= top_p
+                float cum_prob = 0.0f;
+                size_t keep = n_vocab;
+                for (size_t i = 0; i < n_vocab; ++i) {
+                    cum_prob += candidates[i].p;
+                    if (cum_prob >= top_p) { keep = i + 1; break; }
+                }
+
+                // 3) sample from the kept set
                 float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
                 new_token = candidates[keep - 1].id;
                 float acc = 0.0f;
                 for (size_t i = 0; i < keep; ++i) {
                     acc += candidates[i].p;
                     if (r <= acc) { new_token = candidates[i].id; break; }
+                }
+
+                if (n_gen == 0) {
+                    LOGI("[DIAG] chosen new_token=%d (r=%.4f, keep=%zu, n_vocab=%d)",
+                         new_token, r, keep, n_vocab);
                 }
 
                 if (new_token == eos) {
@@ -592,6 +628,11 @@ struct InferenceEngine {
                 LOGI("gen token #%d: new_token=%d pos=%d n_ctx=%d", n_gen, new_token, decode_pos, (int)n_ctx.load());
                 t_start = std::chrono::high_resolution_clock::now();
                 llama_batch token_batch = llama_batch_init(1, 0, 1);
+                // CRITICAL: llama_batch_init only allocates buffers; the actual
+                // token count for THIS batch must be set explicitly, otherwise
+                // llama_decode() sees n_tokens=0 and returns -1 (decode fails on
+                // the very first generated token, so generation stops at 1 token).
+                token_batch.n_tokens    = 1;
                 token_batch.token[0]   = new_token;
                 token_batch.pos[0]     = decode_pos;
                 token_batch.n_seq_id[0]= 1;

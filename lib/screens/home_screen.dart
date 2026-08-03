@@ -165,6 +165,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // Only clear after successful send.
     _textController.clear();
     setState(() => _selectedImagePath = null);
+    // Collapse the keyboard after sending so it no longer occupies space.
+    FocusScope.of(context).unfocus();
 
     // Re-anchor to the newest message. With `reverse: true` the list grows
     // downward from the input bar, so the newest message sits at the bottom

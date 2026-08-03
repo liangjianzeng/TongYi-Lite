@@ -27,6 +27,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置上下文大小（KV 缓存窗口）。上限 65536，下限 1。
+  Future<void> setContextSize(int value) async {
+    // 防御性夹紧，避免越界值进入原生层。
+    final clamped = value.clamp(1, 65536);
+    state = state.copyWith(contextSize: clamped);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);

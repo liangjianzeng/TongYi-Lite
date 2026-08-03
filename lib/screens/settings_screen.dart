@@ -575,6 +575,50 @@ class _InferenceEngineTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
+          // ---- 上下文大小设置卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🧩 上下文大小（Context Size）', context),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '模型可记忆的对话长度上限，越大占用内存越多',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: gpuSettings.contextSize.toDouble(),
+                          min: 1024,
+                          max: 65536,
+                          divisions: 63,
+                          label: '${gpuSettings.contextSize}',
+                          onChanged: (v) => gpuNotifier.setContextSize(v.round()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 78,
+                        child: Text(
+                          '${gpuSettings.contextSize} 字',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(
