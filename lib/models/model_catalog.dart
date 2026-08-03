@@ -8,6 +8,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart' show rootBundle;
 
 import 'model_info.dart';
@@ -67,4 +68,24 @@ class ModelCatalog {
     final list = (data['models'] as List).cast<Map<String, dynamic>>();
     return list.map(ModelConfig.fromJson).toList();
   }
+}
+
+/// Lazily loaded list of all models from the catalog (assets JSON or remote).
+Future<List<ModelConfig>> loadModelCatalog() async {
+  try {
+    return await ModelCatalog.load();
+  } catch (e) {
+    debugPrint('[ModelCatalog] Failed to load model catalog: $e');
+    return [];
+  }
+}
+
+/// Recommended model — the first one with recommended:true, or the smallest.
+Future<ModelConfig?> recommendedModel() async {
+  final models = await loadModelCatalog();
+  if (models.isEmpty) return null;
+  return models.firstWhere(
+    (m) => m.recommended,
+    orElse: () => models.reduce((a, b) => a.sizeBytes < b.sizeBytes ? a : b),
+  );
 }

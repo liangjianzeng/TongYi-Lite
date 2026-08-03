@@ -16,8 +16,10 @@
   - 新增 `host-toolchain-mingw.cmake`：在 Windows 构建主机用 MinGW-w64 (GCC) 编译
     `vulkan-shaders-gen` 主机工具（完全静态链接，零 DLL 依赖）
   - `tongyilite_jni.cpp` 新增 `detect_gpu_layers()`：**运行时**探测 ggml 后端注册表，
-    发现 GPU 设备才设 `n_gpu_layers = 999`（全部层卸载），否则回落 `0`（纯 CPU），
-    同一 APK 可在无 Vulkan 驱动的设备上安全运行
+    发现 GPU 设备才启用卸载，否则回落 `0`（纯 CPU），同一 APK 可在无 Vulkan 驱动的设备上安全运行
+  - **推理引擎设置 UI**：设置页「推理引擎」标签页新增「启用 GPU 加速」开关（默认开启）
+    与「GPU 层数」滑块（默认 20）。关闭开关即纯 CPU 推理；开启时把用户设定的层数传给原生层
+    （`enableGpu` / `gpuLayers` 经 MethodChannel → Kotlin → JNI 透传），实现运行时可控的 GPU offload
   - 依赖链 `libggml.so → libggml-vulkan.so → libvulkan.so`（系统运行时提供）
   - CPU 优化（KleidiAI + SME2）作为 Vulkan 不可用时的备选方案
 - **模型下载系统**：完整的模型选择、下载和缓存管理

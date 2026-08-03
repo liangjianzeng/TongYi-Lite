@@ -2,8 +2,10 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/model_info.dart';
+import '../models/model_catalog.dart';
 import '../services/inference_service.dart';
 import '../services/model_storage_service.dart';
+import 'settings_provider.dart';
 import 'shared_providers.dart' show inferenceServiceProvider;
 
 /// Lifecycle phase of the currently loaded model.
@@ -108,9 +110,10 @@ class ModelState {
 
 class ModelManagerNotifier extends StateNotifier<ModelState> {
   final InferenceService _inference;
+  final Ref _ref;
   bool _isBusy = false;
 
-  ModelManagerNotifier(this._inference) : super(const ModelState()) {
+  ModelManagerNotifier(this._inference, this._ref) : super(const ModelState()) {
     // Wire up loading log callback from native layer.
     _inference.onLoadingLog = (message) {
       if (state.isLoading && message != null) {
@@ -142,6 +145,21 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
 
   /// Access the current lifecycle phase (exposed for UI code that needs it).
   ModelLifecyclePhase get phase => state.phase;
+
+  /// Append a line to the inference log panel. Unlike native loading logs,
+  /// this is emitted from Dart-side during model interactions and is allowed
+  /// in any phase (especially [loaded]).
+  void appendInferenceLog(String message) {
+    final currentLogs = List<String>.from(state.loadingLogs);
+    currentLogs.add(message);
+    state = ModelState(
+      phase: state.phase,
+      modelId: state.modelId,
+      modelName: state.modelName,
+      errorMessage: state.errorMessage,
+      loadingLogs: currentLogs,
+    );
+  }
 
   /// ID of the currently loaded model, or null if idle/error. (alias for convenience)
   String? get currentModelId => modelId;
@@ -228,8 +246,15 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       }
 
       // 5. Call native inference engine to load the model.
-      debugPrint('[ModelManager] Calling loadModel(path=$path)');
-      final ok = await _inference.loadModel(path);
+      //    把推理引擎设置（GPU 开关 / 卸载层数）透传给原生层。
+      final gpu = _ref.read(settingsProvider);
+      debugPrint('[ModelManager] Calling loadModel(path=$path, '
+          'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers})');
+      final ok = await _inference.loadModel(
+        path,
+        enableGpu: gpu.enableGpu,
+        gpuLayers: gpu.gpuLayers,
+      );
 
       if (ok) {
         // Preserve loading logs so the log screen can still show them after load completes.
@@ -347,5 +372,5 @@ extension ModelStateExtension on StateNotifierProvider<ModelManagerNotifier, Mod
 /// Provider — declared after the notifier class so the reference resolves.
 final modelManagerProvider = StateNotifierProvider<ModelManagerNotifier, ModelState>((ref) {
   final inference = ref.read(inferenceServiceProvider);
-  return ModelManagerNotifier(inference);
+  return ModelManagerNotifier(inference, ref);
 });
