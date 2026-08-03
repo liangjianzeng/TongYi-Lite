@@ -10,35 +10,30 @@
 
 ### 新增
 
-- **模型下载系统**：完整的模型选择、下载和缓存管理功能
-  - 多镜像源优先（hf-mirror → ModelScope → HuggingFace）
-  - HTTP Range 断点续传，支持网络中断恢复
-  - Riverpod 状态管理 + UI 实时进度展示
-  - SHA256 文件完整性校验
-  - 磁盘空间检测和存储信息展示
-- **Vulkan GPU 加速**：启用 ggml-vulkan 后端，Android 设备 Vulkan 1.2+ 自动启用 GPU 推理
-  - `CMakeLists.txt` 添加 `GGML_VULKAN=ON`，arm64-v8a 自动开启
-  - `tongyilite_jni.cpp` 将 `n_gpu_layers` 从 0 改为 -1（全部层卸载到 GPU）
+- **Vulkan GPU 加速**（端侧 LLM 上 GPU）：arm64-v8a 启用 ggml-vulkan 后端
+  - `CMakeLists.txt` 在 `ANDROID_ABI == arm64-v8a` 时强制 `GGML_VULKAN=ON`，构建主机用
+    LunarG Vulkan SDK（glslc + SPIRV-Headers + `<vulkan/vulkan.hpp>`）预编译着色器
+  - 新增 `host-toolchain-mingw.cmake`：在 Windows 构建主机用 MinGW-w64 (GCC) 编译
+    `vulkan-shaders-gen` 主机工具（完全静态链接，零 DLL 依赖）
+  - `tongyilite_jni.cpp` 新增 `detect_gpu_layers()`：**运行时**探测 ggml 后端注册表，
+    发现 GPU 设备才设 `n_gpu_layers = 999`（全部层卸载），否则回落 `0`（纯 CPU），
+    同一 APK 可在无 Vulkan 驱动的设备上安全运行
+  - 依赖链 `libggml.so → libggml-vulkan.so → libvulkan.so`（系统运行时提供）
   - CPU 优化（KleidiAI + SME2）作为 Vulkan 不可用时的备选方案
-
----
-
-## [Unreleased]
+- **模型下载系统**：完整的模型选择、下载和缓存管理
+  - 多镜像源优先（hf-mirror → ModelScope → HuggingFace），HTTP Range 断点续传
+  - Riverpod 状态管理 + UI 实时进度，SHA256 完整性校验，磁盘空间检测
+- **设置页 UI**：模型管理界面（卡片展示、下载进度、状态芯片、存储信息）
+- **对话持久化**：SQLite (sqflite) 存储对话和消息历史
 
 ### 修复
 
-- **Android 构建环境**：Gradle plugin 通过 `includeBuild` 复合构建解析，添加阿里云 Maven 镜像解决 dl.google.com 超时
-- **NDK + CMake**：安装 NDK r27.0.12077973 + CMake 3.31.6，修正 CMakeLists.txt 路径（5级 `../`）和 Vulkan 编译依赖
-- **C++ JNI bridge**：适配 llama.cpp b1017+ 新版 API（`llama_model*` → `llama_vocab*`、`llama_init_from_model`、`llama_token_eos(vocab)` 等），手动实现 temperature + top-p 采样替代不存在的 `llama_sampler_init_simple`
-- **Dart 编译错误**：修复 `ConsumerStateNotifier`（不存在）、`const DateTime(0)`（非法）、`as int? == 1`（运算符优先级）、重复 `ModelConfig` 类冲突等 ~50 个编译错误
+- **Android 构建环境**：Gradle plugin 通过 `includeBuild` 复合构建解析，阿里云 Maven 镜像解决 dl.google.com 超时
+- **NDK + CMake**：安装 NDK r27.0.12077973 + CMake 3.31.6，修正 CMakeLists.txt 路径（5 级 `../`）与 Vulkan 编译依赖（SPIRV-Headers / Vulkan include / NDK Vulkan 桩库按 minSdk API 级别）
+- **C++ JNI bridge**：适配 llama.cpp b1017+ 新 API（`llama_model*` → `llama_vocab*`、`llama_init_from_model`、`llama_token_eos(vocab)` 等），手动实现 temperature + top-p 采样
+- **Dart 编译错误**：修复 `ConsumerStateNotifier`、`const DateTime(0)`、`as int? == 1` 运算符优先级、重复 `ModelConfig` 类冲突等约 50 个错误
 - **Android 资源缺失**：创建 ic_launcher mipmap + Theme.TongYiLite style + colors.xml
 - **Kotlin import**：修复 MainActivity.kt / InferenceService.kt 缺少 Intent/Context import
-
-### 新增
-
-- **设置页 UI**：完整的模型管理界面（卡片式展示、下载进度条、状态芯片、存储信息）
-- **模型下载系统**：Dio + HTTP Range 断点续传 + hf-mirror → ModelScope → HuggingFace 镜像自动回退链
-- **对话持久化**：SQLite (sqflite) 存储对话和消息历史
 
 ---
 

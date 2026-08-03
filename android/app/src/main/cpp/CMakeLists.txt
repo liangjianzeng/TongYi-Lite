@@ -32,12 +32,81 @@ set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP ON CACHE BOOL "" FORCE)
 set(GGML_KLEIDIAI ON CACHE BOOL "" FORCE)
 
-# Vulkan GPU acceleration requires LunarG SDK (glslc) on build host.
-# Currently disabled to allow building without it.
+# Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
+# C++ compiler on the build machine (to build `vulkan-shaders-gen`).
 option(GGML_VULKAN "ggml: use Vulkan for GPU acceleration" OFF)
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
-    # set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-    message(STATUS "Vulkan disabled (glslc not available)")
+    # Host toolchain is fixed (see host-toolchain-mingw.cmake: MinGW-w64 GCC +
+    # the Android SDK's ninja + fully static linking), so the Vulkan backend
+    # can be enabled for arm64 devices.
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+
+    # Point FindVulkan (glslc) and find_package(SPIRV-Headers) at the LunarG SDK.
+    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
+    set(ENV{VULKAN_SDK} "${_vk_sdk}")
+    # Explicitly hint find_package(SPIRV-Headers) at the SDK config dir so the
+    # Vulkan backend configures reliably regardless of CMAKE_PREFIX_PATH state.
+    set(SPIRV-Headers_DIR "${_vk_sdk}/Lib/cmake/SPIRV-Headers" CACHE PATH "SPIRV-Headers cmake config" FORCE)
+
+    # ggml calls find_package(SPIRV-Headers CONFIG REQUIRED). The Android
+    # toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY, so config packages
+    # living on the Windows host are invisible. Pin the directory directly.
+    # (SPIRV-Headers is header-only and is not actually included by
+    # ggml-vulkan.cpp -- it only needs to satisfy the find_package call.)
+    if(EXISTS "${_vk_sdk}/Lib/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake")
+        set(SPIRV-Headers_DIR "${_vk_sdk}/Lib/cmake/SPIRV-Headers" CACHE PATH "" FORCE)
+        message(STATUS "SPIRV-Headers_DIR -> ${SPIRV-Headers_DIR}")
+    else()
+        message(WARNING "SPIRV-HeadersConfig.cmake not found under ${_vk_sdk}")
+    endif()
+
+    # ggml-vulkan builds `vulkan-shaders-gen` as a host (Windows) tool. The
+    # build host has no MSVC/gcc, so we use the portable MinGW-w64 toolchain.
+    set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
+    if(EXISTS "${_vk_host_tc}")
+        set(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "${_vk_host_tc}" CACHE FILEPATH "Host toolchain for vulkan-shaders-gen" FORCE)
+        message(STATUS "Vulkan shaders-gen host toolchain -> ${_vk_host_tc}")
+    else()
+        message(WARNING "host-toolchain-mingw.cmake missing; ggml may fail to find a host C++ compiler")
+    endif()
+
+    # On Android the Vulkan loader (libvulkan.so) is provided by the OS at
+    # runtime. ggml links `Vulkan::Vulkan`, which FindVulkan would otherwise
+    # resolve to the Windows import lib (vulkan-1.lib) shipped in the LunarG
+    # SDK. That PE/COFF lib cannot be linked by the Android (ELF/lld) linker,
+    # so force the loader to the NDK stub for aarch64.
+    # The NDK sysroot only ships the C header <vulkan/vulkan.h>; the C++
+    # bindings <vulkan/vulkan.hpp> that ggml-vulkan.cpp includes come from the
+    # LunarG SDK. CMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY hides the host SDK
+    # from find_path(), so pin the include dir explicitly. Using the SDK
+    # headers for both .h and .hpp keeps the struct/enum definitions in sync.
+    if(EXISTS "${_vk_sdk}/Include/vulkan/vulkan.hpp")
+        set(Vulkan_INCLUDE_DIR "${_vk_sdk}/Include" CACHE PATH "Vulkan headers (LunarG SDK)" FORCE)
+        message(STATUS "Vulkan_INCLUDE_DIR -> ${Vulkan_INCLUDE_DIR}")
+    else()
+        message(WARNING "vulkan.hpp not found under ${_vk_sdk}/Include")
+    endif()
+
+    if(DEFINED ANDROID_NDK)
+        # Use the stub matching the app's minSdk. The API 24 stub only exports
+        # Vulkan 1.0 entry points, so ggml-vulkan fails to link with
+        # "undefined symbol: vkGetPhysicalDeviceFeatures2" (Vulkan 1.1, API 28+).
+        if(DEFINED ANDROID_PLATFORM_LEVEL)
+            set(_vk_api "${ANDROID_PLATFORM_LEVEL}")
+        else()
+            set(_vk_api 33)
+        endif()
+        set(_vk_stub "${ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/${_vk_api}/libvulkan.so")
+        if(EXISTS "${_vk_stub}")
+            set(Vulkan_LIBRARY "${_vk_stub}" CACHE FILEPATH "Android Vulkan loader stub" FORCE)
+            message(STATUS "Vulkan loader -> ${Vulkan_LIBRARY}")
+        else()
+            message(WARNING "NDK Vulkan stub not found at ${_vk_stub}; linking may fail")
+        endif()
+    else()
+        message(WARNING "ANDROID_NDK not defined; cannot pin Vulkan loader stub")
+    endif()
 endif()
 
 # --------------------------------------------------------------------------

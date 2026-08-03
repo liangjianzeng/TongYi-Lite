@@ -25,12 +25,55 @@
 // llama.cpp headers
 #include "llama.h"
 #include "common.h"
+#include "ggml-backend.h"
 
 #define LOG_TAG "TongYiLite"
 static void reportLoadingLog(const char *message);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// ============================================================================
+// GPU detection
+// ============================================================================
+// Probe the ggml backend registry for a usable GPU device (Vulkan on Android).
+// Returns the number of layers to offload: 0 when no GPU is present, or a
+// large value ("all layers") when one is. Doing this at runtime — instead of
+// hardcoding n_gpu_layers — keeps the same APK working on devices whose driver
+// does not expose Vulkan, where blindly asking for GPU layers used to hang the
+// loader while trying to reserve device memory.
+static int detect_gpu_layers() {
+    const size_t n_dev = ggml_backend_dev_count();
+    LOGI("ggml backend devices: %zu", n_dev);
+
+    int gpu_found = 0;
+    for (size_t i = 0; i < n_dev; i++) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) {
+            continue;
+        }
+        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+        size_t free_mem = 0, total_mem = 0;
+        ggml_backend_dev_memory(dev, &free_mem, &total_mem);
+        LOGI("  device[%zu] name=%s desc=%s type=%d mem=%.0f/%.0f MiB",
+             i,
+             ggml_backend_dev_name(dev)        ? ggml_backend_dev_name(dev)        : "?",
+             ggml_backend_dev_description(dev) ? ggml_backend_dev_description(dev) : "?",
+             (int)type,
+             free_mem  / 1048576.0,
+             total_mem / 1048576.0);
+        if (type == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            gpu_found = 1;
+        }
+    }
+
+    if (!gpu_found) {
+        LOGW("No GPU backend available -> CPU-only inference");
+        return 0;
+    }
+    LOGI("GPU backend available -> offloading all layers");
+    return 999;
+}
 
 // ============================================================================
 // LoadingCallback — C-side callback interface for loading progress logs
@@ -76,9 +119,14 @@ struct InferenceEngine {
 
         // Model params
         model_params = llama_model_default_params();
-        // CPU-only inference (Vulkan disabled in CMakeLists).
-        // n_gpu_layers=-1 would try to reserve GPU memory even without a GPU → OOM hang.
-        model_params.n_gpu_layers = 0;
+        // Offload to GPU only when the ggml registry actually reports one
+        // (Vulkan backend + a driver that enumerates a device). Falls back to
+        // 0 = CPU-only otherwise, so the same APK is safe on GPU-less devices.
+        model_params.n_gpu_layers = detect_gpu_layers();
+        LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
+        reportLoadingLog(model_params.n_gpu_layers > 0
+                             ? "检测到 GPU，启用 Vulkan 加速"
+                             : "未检测到 GPU，使用 CPU 推理");
         // Use direct load instead of mmap — mmap can cause file-lock conflicts on Android.
         model_params.load_mode = LLAMA_LOAD_MODE_NONE;
 
@@ -248,6 +296,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
+        LOGI("===== TongYiLite JNI KV-BUDGET FIX BUILD 20260803 =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -317,10 +366,22 @@ struct InferenceEngine {
                 return "[ERROR: Invalid context]";
             }
 
-            if (n_prompt > ctx_val2 - 4) {
-                LOGW("Prompt (%d tokens) exceeds context (%d), truncating.", n_prompt, ctx_val2);
-                prompt_tokens.resize(n_ctx - 4);
-                n_prompt = (int)prompt_tokens.size();
+            // Reserve room for generation: the prompt must leave at least
+            // `max_tokens` cells free in the KV cache. Otherwise the decode loop
+            // below will push decode_pos past n_ctx and llama.cpp aborts the
+            // whole process (ggml_abort -> abort -> SIGABRT). This is the root
+            // cause of the "send a few chat messages then crash" reports.
+            const int gen_budget = std::max(1, ctx_val2 - max_tokens - 4);
+            if (n_prompt > gen_budget) {
+                LOGW("Prompt (%d tokens) + max_tokens (%d) would exceed context (%d); "
+                     "dropping %d oldest tokens, keeping the most recent context.",
+                     n_prompt, max_tokens, ctx_val2, n_prompt - gen_budget);
+                // Drop the OLDEST tokens. The latest user turn and the assistant
+                // continuation prefix live at the END of the formatted prompt,
+                // so keeping the tail preserves the active conversation.
+                prompt_tokens.erase(prompt_tokens.begin(),
+                                    prompt_tokens.begin() + (n_prompt - gen_budget));
+                n_prompt = gen_budget;
             }
 
             LOGI("Prompt: %d tokens", n_prompt);
@@ -416,6 +477,15 @@ struct InferenceEngine {
 
                 // Decode at correct position to avoid overwriting KV cache
                 const int32_t decode_pos = n_prompt + n_gen - 1;
+                // Belt-and-suspenders: never decode beyond the KV cache, or
+                // llama.cpp aborts the process. (Prompt budgeting above already
+                // guarantees this, but guard against any off-by-one / future
+                // change in n_ctx.)
+                if (decode_pos >= (int32_t)llama_n_ctx(context)) {
+                    LOGW("decode_pos %d >= n_ctx %d, stopping generation to avoid overflow.",
+                         decode_pos, (int)llama_n_ctx(context));
+                    break;
+                }
                 LOGI("gen token #%d: new_token=%d pos=%d n_ctx=%d", n_gen, new_token, decode_pos, (int)n_ctx.load());
                 t_start = std::chrono::high_resolution_clock::now();
                 llama_batch token_batch = llama_batch_init(1, 0, 1);
