@@ -68,5 +68,9 @@ key.properties
 .zcode/
 logcat_output.txt
 
+# 真机调试抓取的 logcat / 诊断日志
+tyl_*.txt
+diag_*.txt
+
 # 本机工作记忆（含本地路径），不进远程
 .workbuddy/memory/

@@ -524,11 +524,13 @@ class _InferenceEngineTab extends ConsumerWidget {
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('启用 GPU 加速'),
-                    subtitle: const Text('关闭后使用纯 CPU 推理；设备无 Vulkan 驱动时自动回落 CPU'),
+                    subtitle: const Text('开启后全量卸载到 GPU（Vulkan）；关闭使用纯 CPU。本设备部分卸载会输出崩坏，故 GPU 模式固定全量卸载'),
                     value: gpuSettings.enableGpu,
                     onChanged: (v) => gpuNotifier.setEnableGpu(v),
                   ),
                   const SizedBox(height: 4),
+                  // 本设备（Adreno 825）部分卸载会导致输出崩坏，GPU 模式固定全量卸载，
+                  // 因此层数滑块在 GPU 开启时禁用，仅作展示。
                   Row(
                     children: [
                       Expanded(
@@ -538,9 +540,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                           max: 100,
                           divisions: 100,
                           label: '${gpuSettings.gpuLayers}',
-                          onChanged: gpuSettings.enableGpu
-                              ? (v) => gpuNotifier.setGpuLayers(v.round())
-                              : null,
+                          onChanged: null,
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -551,23 +551,21 @@ class _InferenceEngineTab extends ConsumerWidget {
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontWeight: FontWeight.w500,
-                            color: gpuSettings.enableGpu
-                                ? null
-                                : Colors.grey.shade500,
+                            color: Colors.grey.shade500,
                           ),
                         ),
                       ),
                     ],
                   ),
-                  // 关 GPU 时禁用层数设置并给出提示
-                  if (!gpuSettings.enableGpu)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(
-                        'GPU 已关闭，层数设置不生效（纯 CPU）',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                      ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      gpuSettings.enableGpu
+                          ? 'GPU 模式为全量卸载（本设备部分卸载会输出崩坏），层数不可调'
+                          : 'GPU 已关闭，层数设置不生效（纯 CPU）',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                     ),
+                  ),
                 ],
               ),
             ),
@@ -858,7 +856,7 @@ class _AboutCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            _AboutRow(label: '版本', value: '0.1.0'),
+            _AboutRow(label: '版本', value: '0.1.1'),
             _AboutRow(label: '推理引擎', value: 'llama.cpp b1017+'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),

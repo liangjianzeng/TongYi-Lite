@@ -241,6 +241,15 @@ class InferenceService {
     }
   }
 
+  /// 清空 KV 缓存，开始全新对话（多轮追加式缓存下，避免旧对话污染新对话）。
+  Future<void> resetContext() async {
+    try {
+      await _channel.invokeMethod('resetContext');
+    } catch (e) {
+      debugPrint('[InferenceService] resetContext failed: $e');
+    }
+  }
+
   Future<Map<String, double>> benchmark({
     String prompt = 'List 5 common fruits.',
     int nRepeats = 3,

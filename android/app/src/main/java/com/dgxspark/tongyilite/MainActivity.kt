@@ -86,6 +86,7 @@ class MainActivity : FlutterActivity() {
                 "completionWithMessages"  -> handleCompletionWithMessages(call, result)
                 "stopGeneration"          -> handleStop(result)
                 "setEnableThinking"       -> handleSetEnableThinking(call, result)
+                "resetContext"            -> handleResetContext(result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
@@ -264,6 +265,18 @@ class MainActivity : FlutterActivity() {
                 result.success(true)
             } catch (e: Exception) {
                 logE("handleStop", "result.success failed", e)
+            }
+        }
+    }
+
+    private fun handleResetContext(result: MethodChannel.Result) {
+        logI("handleResetContext", "")
+        engine.resetContext()
+        mainHandler.post {
+            try {
+                result.success(true)
+            } catch (e: Exception) {
+                logE("handleResetContext", "result.success failed", e)
             }
         }
     }
