@@ -285,7 +285,17 @@ struct InferenceEngine {
                     sizeof(buf));
 
                 if (n > 0 && n < (int32_t)sizeof(buf)) {
-                    formatted_prompt = std::string(buf, n);
+                    // For Qwen3 models, replace "assistant\n" with the proper
+                    // <|im_start|>assistant\n<|im_end|>\n<|im_start|>assistant\n
+                    // prefix that triggers chain-of-thought thinking.
+                    std::string prompt_str(buf, n);
+                    std::string assistant_prefix = "assistant\n";
+                    size_t pos = prompt_str.rfind(assistant_prefix);
+                    if (pos != std::string::npos) {
+                        prompt_str.replace(pos, assistant_prefix.length(),
+                            "<|im_start|>assistant\n<|im_end|>\n<|im_start|>assistant\n");
+                    }
+                    formatted_prompt = prompt_str;
                     LOGI("chatml template applied: %d chars, %zu history msgs", n, history->size());
                 } else {
                     LOGW("llama_chat_apply_template returned %d, falling back to raw prompt", n);
