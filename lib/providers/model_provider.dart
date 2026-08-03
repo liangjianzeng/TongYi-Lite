@@ -266,7 +266,10 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
           modelName: displayName,
           loadingLogs: List<String>.from(state.loadingLogs),
         );
-        debugPrint('[ModelManager] Loaded: $modelId ($displayName)');
+        // 把思考模式开关同步到原生层（原生侧引擎重启后会复位为默认 false）。
+        await _inference.setEnableThinking(gpu.enableThinking);
+        debugPrint('[ModelManager] Loaded: $modelId ($displayName), '
+            'enableThinking=${gpu.enableThinking}');
         return true;
       } else {
         String errorMsg = '模型加载失败（原生层返回 false）';

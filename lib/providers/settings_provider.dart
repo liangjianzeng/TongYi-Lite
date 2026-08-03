@@ -35,6 +35,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置是否允许 Qwen3 思考模式。默认关闭（直接作答）。
+  Future<void> setEnableThinking(bool value) async {
+    state = state.copyWith(enableThinking: value);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);

@@ -21,6 +21,7 @@
 #include <random>
 #include <functional>
 #include <sstream>
+#include <deque>
 
 // llama.cpp headers
 #include "llama.h"
@@ -170,6 +171,9 @@ struct InferenceEngine {
     std::mutex mtx;
     std::atomic<bool> is_running{false};
     std::atomic<bool> should_stop{false};
+    // User toggle: whether Qwen3-style "thinking" (<think>...</think>) is allowed.
+    // Default false -> thinking is suppressed so the model answers directly.
+    std::atomic<bool> enable_thinking{false};
 
     // Stats — atomic to prevent stale reads from completion() on another thread.
     std::atomic<int32_t> n_ctx{0};
@@ -249,6 +253,17 @@ struct InferenceEngine {
         ctx_params.n_ctx = effective_n_ctx;
         ctx_params.n_batch = 512;
         ctx_params.n_ubatch = 256;
+        // Use more worker threads than the conservative default (4). Cap at 8 so we
+        // engage the big cores without over-subscribing big.LITTLE little cores.
+        {
+            unsigned hc = std::thread::hardware_concurrency();
+            int nt = (int)(hc > 0 ? hc : 8);
+            if (nt > 8) nt = 8;
+            if (nt < 4) nt = 4;
+            ctx_params.n_threads = nt;
+            ctx_params.n_threads_batch = nt;
+            LOGI("n_threads = %d (hardware_concurrency=%u)", nt, hc);
+        }
         // Enable unified KV buffer to avoid MSA strict-slots mode issues.
         // With n_seq_max=1, kv_unified=true gives the full n_ctx as cell count
         // without requiring exact slot matching.
@@ -424,6 +439,35 @@ struct InferenceEngine {
                     // assistant marker) that drives the model into a degenerate
                     // loop emitting a single special token (151935) forever.
                     formatted_prompt = std::string(buf, n);
+                    // Qwen3 "thinking" models emit a long <think>...</think> chain
+                    // before the real answer; at on-device speeds that makes the UI
+                    // spin for a very long time. When the user has NOT enabled
+                    // thinking (enable_thinking == false) and the model is
+                    // thinking-capable (its embedded chat template references
+                    // "think"), append an empty think block so the model answers
+                    // directly and stops. If the user enabled thinking, leave the
+                    // prompt as-is so the model reasons first.
+                    // Do NOT rely on llama_model_chat_template() for detection —
+                    // some GGUF exports omit the embedded template (returns nullptr)
+                    // and the empty think block would never be appended. The empty
+                    // think block is the documented Qwen3 no-think trigger and is
+                    // harmless for non-thinking chatml models, so append it whenever
+                    // the user has thinking disabled and the prompt ends with the
+                    // assistant generation marker.
+                    const char *mtmpl = llama_model_chat_template(model, nullptr);
+                    bool supports_think = false;
+                    if (mtmpl) { supports_think = std::string(mtmpl).find("think") != std::string::npos; }
+                    const std::string asst_marker = "assistant\n";  // 10 chars (9 + '\n')
+                    if (!enable_thinking.load() &&
+                        formatted_prompt.size() >= asst_marker.size() &&
+                        formatted_prompt.compare(formatted_prompt.size() - asst_marker.size(),
+                                                 asst_marker.size(), asst_marker) == 0) {
+                        formatted_prompt += "<think>\n\n</think>\n\n";
+                        LOGI("thinking disabled (user toggle, model_think_tpl=%d) -> empty think block appended",
+                             (int)supports_think);
+                    } else if (enable_thinking.load()) {
+                        LOGI("thinking enabled (user toggle) -> model will reason before answering");
+                    }
                     LOGI("chatml template applied: %d chars, %zu history msgs", n, history->size());
                 } else {
                     LOGW("llama_chat_apply_template returned %d, falling back to raw prompt", n);
@@ -445,6 +489,16 @@ struct InferenceEngine {
                  (int)std::min((size_t)500, formatted_prompt.size()),
                  formatted_prompt.c_str(),
                  formatted_prompt.size() > 500 ? "..." : "");
+            // DIAG: hex dump of the first 160 prompt bytes so the exact prompt
+            // content is visible even when it contains non-ASCII (the console
+            // mangles UTF-8, but hex is unambiguous).
+            {
+                std::string phex;
+                char tmp[4];
+                size_t lim = std::min((size_t)160, formatted_prompt.size());
+                for (size_t i = 0; i < lim; ++i) { snprintf(tmp, sizeof(tmp), "%02X ", (unsigned char)formatted_prompt[i]); phex += tmp; }
+                LOGI("prompt hex[0..%zu): %s", lim, phex.c_str());
+            }
 
             if (ctx_val2 <= 0 || context == nullptr) {
                 LOGE("completion() aborted: invalid state n_ctx=%d", ctx_val2);
@@ -471,6 +525,15 @@ struct InferenceEngine {
             }
 
             LOGI("Prompt: %d tokens", n_prompt);
+
+            // Reset the KV cache before every completion. The same llama_context
+            // is reused across turns; without clearing, stale tokens from prior
+            // generations pollute positions and corrupt attention, which can
+            // degrade the model into a degenerate loop after the first token.
+            llama_memory_clear(llama_get_memory(context), true);
+            LOGI("KV cache cleared for new completion");
+            LOGI("eos token id = %d, n_vocab = %d",
+                 (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
 
             // 2. Batch decode prompt
             t_prompt_ms = 0;
@@ -521,19 +584,25 @@ struct InferenceEngine {
 
                 int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
 
+                // Fill candidates with temperature-scaled logits.
                 std::vector<llama_token_data> candidates(n_vocab);
                 for (int32_t i = 0; i < n_vocab; ++i) {
                     candidates[i].id = i;
-                    candidates[i].logit = logits_arr[i];
+                    candidates[i].logit = logits_arr[i] / temperature;
                     candidates[i].p = 0.0f;
                 }
 
-                for (auto &c : candidates) c.logit /= temperature;
-
-                std::sort(candidates.begin(), candidates.end(),
+                // Top-p only ever needs the highest-probability tokens, so partially
+                // sort just the top K instead of the full 150k+ vocab. This turns an
+                // O(n log n) full sort into O(n log K) and shrinks the softmax from n
+                // exp() calls down to K — a large per-token win on-device.
+                const size_t K = std::min((size_t)128, (size_t)n_vocab);
+                std::partial_sort(candidates.begin(), candidates.begin() + K, candidates.end(),
                           [](const llama_token_data &a, const llama_token_data &b) {
                               return a.logit > b.logit;
                           });
+                candidates.resize(K);
+                const int32_t n_cand = (int32_t)K;
 
                 // DIAG: at the first generation step, dump the top-5 logits so we
                 // can tell whether the model is producing sane logits or garbage
@@ -545,22 +614,22 @@ struct InferenceEngine {
                     }
                 }
 
-                // --- Nucleus (top-p) sampling ---
+                // --- Nucleus (top-p) sampling over the top-K candidates ---
                 // 1) softmax probabilities over the temperature-scaled logits
                 float max_logit = candidates[0].logit;
                 float sum_exp = 0.0f;
-                for (size_t i = 0; i < n_vocab; ++i) {
+                for (int32_t i = 0; i < n_cand; ++i) {
                     candidates[i].p = std::exp(candidates[i].logit - max_logit);
                     sum_exp += candidates[i].p;
                 }
-                for (size_t i = 0; i < n_vocab; ++i) candidates[i].p /= sum_exp;
+                for (int32_t i = 0; i < n_cand; ++i) candidates[i].p /= sum_exp;
 
                 // 2) keep the smallest prefix whose cumulative prob >= top_p
                 float cum_prob = 0.0f;
-                size_t keep = n_vocab;
-                for (size_t i = 0; i < n_vocab; ++i) {
+                size_t keep = (size_t)n_cand;
+                for (int32_t i = 0; i < n_cand; ++i) {
                     cum_prob += candidates[i].p;
-                    if (cum_prob >= top_p) { keep = i + 1; break; }
+                    if (cum_prob >= top_p) { keep = (size_t)i + 1; break; }
                 }
 
                 // 3) sample from the kept set
@@ -575,6 +644,17 @@ struct InferenceEngine {
                 if (n_gen == 0) {
                     LOGI("[DIAG] chosen new_token=%d (r=%.4f, keep=%zu, n_vocab=%d)",
                          new_token, r, keep, n_vocab);
+                }
+
+                // DIAG: decode the first few generated tokens to their raw piece
+                // bytes so we can see exactly what the model is emitting (e.g.
+                // whether 151935 is a real character or an empty/padding token).
+                if (n_gen < 6) {
+                    char pbuf[64];
+                    int pn = llama_token_to_piece(vocab, new_token, pbuf, sizeof(pbuf), 0, false);
+                    std::string phex; char tmp[4];
+                    for (int i = 0; i < pn && i < 32; ++i) { snprintf(tmp, sizeof(tmp), "%02X ", (unsigned char)pbuf[i]); phex += tmp; }
+                    LOGI("[DIAG] gen#%d token=%d piece_len=%d piece_hex: %s", n_gen, new_token, pn, phex.c_str());
                 }
 
                 if (new_token == eos) {
@@ -679,14 +759,12 @@ struct InferenceEngine {
             LOGI("Generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms)",
                  n_gen, tok_per_sec, t_prompt_ms, t_gen_ms);
 
-            // Append user message + assistant response to chat history for next turn.
-            if (history && !history->empty() && !result.empty()) {
-                llama_chat_message user_msg = { "user", prompt };
-                llama_chat_message asst_msg  = { "assistant", result.c_str() };
-                chat_history.push_back(user_msg);
-                chat_history.push_back(asst_msg);
-                LOGI("chat_history updated: %zu messages total", chat_history.size());
-            }
+            // NOTE: conversation history is supplied fresh by the Dart side on every
+            // turn (via the messages JSON), so we do not accumulate it natively here.
+            // The previous code stored { role, result.c_str() } into the member
+            // chat_history, but those pointers dangled the moment completion()
+            // returned (result is a local) — and the member was never read for
+            // templating anyway. Removed to avoid the use-after-free.
 
             return result;
         } catch (const std::exception &e) {
@@ -826,6 +904,17 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeStop(JNIEnv *, jobject) {
     g_engine.stop();
 }
 
+// User-facing toggle for Qwen3-style thinking. Called from Dart whenever the
+// setting changes (and once after model load) so completion() knows whether to
+// suppress the <think> chain.
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetEnableThinking(
+    JNIEnv *, jobject, jboolean jenable
+) {
+    g_engine.enable_thinking.store(jenable == JNI_TRUE);
+    LOGI("nativeSetEnableThinking: enable_thinking=%d", (int)g_engine.enable_thinking.load());
+}
+
 JNIEXPORT void JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeDestroy(JNIEnv *, jobject) {
     g_engine.unload();
@@ -929,10 +1018,16 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
 // JSON helper — minimal parser for message array from Kotlin side
 // Format: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
 // ============================================================================
-static std::vector<llama_chat_message> parseMessagesJson(JNIEnv *env, jstring jjson) {
-    if (!jjson) return {};
-    std::string json = jstring_to_std(env, jjson);
+// Parse the JSON messages array into llama_chat_message entries. The role/content
+// strings are moved into `store` (a caller-owned deque) so the const char* pointers
+// handed to llama_chat_message remain valid for the entire completion call.
+// Previously the pointers referenced local std::strings that were destroyed on
+// return -> dangling pointers -> the chat template read freed memory as garbage.
+static std::vector<llama_chat_message> parseMessagesJson(JNIEnv *env, jstring jjson,
+                                                         std::deque<std::string> &store) {
     std::vector<llama_chat_message> msgs;
+    if (!jjson) return msgs;
+    std::string json = jstring_to_std(env, jjson);
 
     // Simple state-machine parser: find "role" and "content" pairs
     size_t i = 0;
@@ -970,7 +1065,14 @@ static std::vector<llama_chat_message> parseMessagesJson(JNIEnv *env, jstring jj
                     if (cq1 != std::string::npos && cq2 != std::string::npos && cq2 > cq1 + 1) {
                         content = obj.substr(cq1 + 1, cq2 - cq1 - 1);
                     }
-                    msgs.push_back({ role.c_str(), content.c_str() });
+                    // Move into the caller-owned backing store so the pointers
+                    // stay alive; deque never invalidates element references on
+                    // push_back, so these c_str() pointers are stable.
+                    store.push_back(std::move(role));
+                    store.push_back(std::move(content));
+                    const std::string &r = store[store.size() - 2];
+                    const std::string &c = store[store.size() - 1];
+                    msgs.push_back({ r.c_str(), c.c_str() });
                 }
             }
         }
@@ -1001,7 +1103,10 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
 
     jobject cb_copy = env->NewLocalRef(jcallback);
     std::string prompt   = jstring_to_std(env, jprompt);
-    auto history = parseMessagesJson(env, jmessages_json);
+    // Backing store for history role/content strings; must outlive the completion
+    // call so the llama_chat_message pointers stay valid.
+    std::deque<std::string> history_store;
+    auto history = parseMessagesJson(env, jmessages_json, history_store);
     LOGI("nativeCompletionWithMessages: prompt='%s', %zu history messages", prompt.c_str(), history.size());
 
     std::string result;
