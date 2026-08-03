@@ -6,6 +6,52 @@
 
 ---
 
+## [0.1.2] — 2026-08-03
+
+### 修复（多轮对话正确性 · 重大）
+
+彻底修复「第一轮正常、第二轮起输出乱码 / 死循环（"魔魔魔…"）/ 空回复 / 只出两个字」的问题。
+真机（Xiaomi onyx，Qwen3-0.6B Q4_K_M）连续三轮对话已验证正常。
+
+- **KV 缓存跨轮残留（根因 1）**：`llama_memory_clear()` 在本版 llama.cpp 上对
+  hybrid/unified 后端是**空操作**，不重置每序列长度计数器；从位置 0 重新解码只是
+  「叠加」在上一轮的陈旧 KV 之上，注意力被污染 → 从第二轮起坍缩为退化循环。
+  改用 `llama_memory_seq_rm(mem, 0, 0, n_ctx)` 真正清空序列 0。
+- **`kv_unified = true` 强制走 hybrid memory（根因 2）**：该路径的 `seq_rm` 只要
+  recurrent 部分不支持就整体返回 `false`，注意力 KV 长度计数清不掉。Qwen3 是纯
+  Transformer，无需 unified，改回 `kv_unified = false`（llama.cpp 官方默认值），
+  经典 KV 的 `seq_rm` 可靠生效。
+- **`decode_pos` off-by-one（根因 3）**：`n_gen++` 原本在计算 `decode_pos` 之前执行，
+  导致每轮生成位置跳格、KV 出现空洞，表现为"每轮只出两个字"。`n_gen++` 挪到
+  `llama_decode()` 之后，保证 `decode_pos = kv_position + n_gen` 连续。
+- **prompt 多 token 批量解码写坏 KV（根因 4）**：13 token 的短 prompt 侥幸正常、
+  33 token 的第二轮 prompt 解码后 logits 被压平（top5 全部落在 12.0~12.6 一条直线，
+  对比正常轮的 42.18 / 38.60 / 35.47）。改为**逐 token 解码 prompt**，与已验证可用的
+  生成循环走同一条单 token 路径。
+- **`llama_batch_get_one()` 返回 pos=nullptr 导致 SIGSEGV**：本版该函数只借用 token
+  指针，`pos / n_seq_id / seq_id / logits` 全为 `nullptr`，手动填充即崩溃。改用
+  `llama_batch_init(n, 0, 1)` 分配真实批次并自行填写各字段。
+- **`llama_get_logits_ith()` 下标越界导致 SIGABRT**：该下标是**相对最近一次 decode 的
+  batch**，不是全局 token 位置。改为逐 token 解码后最后一批只有 1 行，旧代码仍用
+  `n_prompt-1` 取值 → `ggml_abort` 整个进程挂掉（debug 构建下 `GGML_ABORT` 而非
+  `return nullptr`，兜底判断永不生效）。统一改用 `-1`（源码明确支持负下标 =
+  最后一个输出行），与 batch 大小解耦。
+- **消息重复注入**：Dart 侧已把当前消息一并存入历史再整体下发，JNI 侧又 append 了一次
+  → 移除 JNI 的重复拼接。
+
+### 新增
+
+- **`resetContext()` 全链路**：Dart `InferenceService.resetContext()` → MethodChannel →
+  Kotlin `InferenceEngine.nativeResetContext()` → JNI `g_engine.resetContext()`。
+  `ChatNotifier` 记录 `_currentKvConvId`，检测到切换会话时主动清空 KV，避免跨会话污染。
+
+### 变更
+
+- 设置页「GPU 层数」滑块在 GPU 开启时置灰不可调，并说明：本设备（Adreno 825）**部分卸载
+  会输出崩坏**，故 GPU 模式固定为全量卸载。
+
+---
+
 ## [0.1.1] — 2026-08-03
 
 ### 新增

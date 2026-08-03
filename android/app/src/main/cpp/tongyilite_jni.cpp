@@ -181,6 +181,14 @@ struct InferenceEngine {
     double t_gen_ms = 0;
     int32_t n_gen = 0;
 
+    // Persistent KV-cache write cursor. We use the proven com.arm.aichat design:
+    // each turn APPENDS its tokens at monotonically increasing positions into the
+    // SAME context, instead of clearing the cache and re-decoding from 0 every turn.
+    // Clearing + re-decode collides with the hybrid recurrent cache's length tracking
+    // on Adreno and corrupts multi-turn output (degenerate loop on round 2+).
+    // kv_position is reset to 0 only for a brand-new conversation (resetContext()).
+    llama_pos kv_position = 0;
+
     bool load(const char *model_path, int requested_n_ctx = 4096,
               bool enable_gpu = true, int gpu_layers = 20) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
@@ -199,10 +207,17 @@ struct InferenceEngine {
         if (enable_gpu) {
             int detected = detect_gpu_layers();
             if (detected > 0) {
-                effective_gpu_layers = gpu_layers;
-                LOGI("GPU acceleration ON: offloading %d layers (user setting)", effective_gpu_layers);
-                reportLoadingLog(("检测到 GPU，启用 Vulkan 加速（卸载 "
-                                  + std::to_string(effective_gpu_layers) + " 层）").c_str());
+                // Adreno 825 (小米 onyx) + ggml-vulkan: PARTIAL offload
+                // (n_gpu_layers in 1..N-1) corrupts output from the 2nd generated
+                // token onward (collapses to padding token 151935 / 乱码). The cause
+                // is the per-token GPU<->CPU layer boundary plus host KV-cache sync
+                // on this driver. FULL offload (all transformer layers on the GPU,
+                // KV cache also GPU-resident) avoids the boundary and is the working
+                // configuration on this device. Therefore GPU-on == full offload and
+                // the user's layer slider has no effect while GPU is enabled.
+                effective_gpu_layers = 999;
+                LOGI("GPU acceleration ON: FULL offload (all layers) to avoid partial-offload corruption on Adreno");
+                reportLoadingLog("检测到 GPU，启用 Vulkan 全量卸载加速");
             } else {
                 LOGI("GPU acceleration requested but no GPU backend found -> CPU-only fallback");
                 reportLoadingLog("未检测到 GPU，回落 CPU 推理");
@@ -264,10 +279,11 @@ struct InferenceEngine {
             ctx_params.n_threads_batch = nt;
             LOGI("n_threads = %d (hardware_concurrency=%u)", nt, hc);
         }
-        // Enable unified KV buffer to avoid MSA strict-slots mode issues.
-        // With n_seq_max=1, kv_unified=true gives the full n_ctx as cell count
-        // without requiring exact slot matching.
-        ctx_params.kv_unified = true;
+        // Keep the default (non-unified) KV buffer. On this llama.cpp build the
+        // unified buffer interacts badly with per-turn KV clearing; we instead
+        // re-initialize the context from the loaded model every turn (see
+        // completion()), so a unified buffer buys nothing here.
+        ctx_params.kv_unified = false;
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -318,6 +334,7 @@ struct InferenceEngine {
         }
 
         this->n_ctx.store(static_cast<int32_t>(llama_n_ctx(context)));
+        kv_position = 0; // fresh model -> fresh conversation
 
         const int ctx_val = static_cast<int>(this->n_ctx.load());
         const uint32_t n_ctx_seq = llama_n_ctx_seq(context);
@@ -349,6 +366,21 @@ struct InferenceEngine {
     bool is_loaded() const {
         // Must also verify n_ctx > 0 — pointers alone can be stale garbage after unload.
         return model != nullptr && context != nullptr && n_ctx > 0;
+    }
+
+    // Reset the conversation KV cache. Called on model load and when the user starts
+    // a brand-new chat, so the OLD conversation does not bleed into the new one.
+    // NOTE: llama_memory_clear() is a NO-OP on this build's hybrid/unified KV cache
+    // (it does not reset the per-sequence length counter). We MUST use
+    // llama_memory_seq_rm(0, 0, n_ctx) to actually empty sequence 0 and reset its
+    // length, otherwise the next completion decodes on top of stale KV and the model
+    // degenerates from round 2 onward.
+    void resetContext() {
+        if (context != nullptr) {
+            llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)llama_n_ctx(context));
+        }
+        kv_position = 0;
+        LOGI("resetContext(): KV cache cleared (seq_rm), kv_position=0 (new conversation)");
     }
 
     // ------------------------------------------------------------------
@@ -393,7 +425,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI KV-BUDGET FIX BUILD 20260803 =====");
+        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+tok-by-tok+logits(-1) BUILD 20260803f =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -409,6 +441,27 @@ struct InferenceEngine {
             is_running  = true;
             should_stop = false;
 
+            // Multi-turn strategy: KEEP the single context created at load() and
+            // clear its KV cache each turn with llama_memory_seq_rm. On the
+            // non-unified (classic) KV backend (kv_unified=false, set in load())
+            // this reliably empties sequence 0 and resets its length counter,
+            // giving a clean slate every turn. The Dart layer re-sends the full
+            // conversation each turn, so no cross-turn KV bookkeeping is needed.
+            // NOTE: per-turn llama_init_from_model was abandoned — on this build the
+            // re-inited context's KV was NOT pristine for longer (multi-turn)
+            // prompts and produced flat/garbage logits ("coln魔魔魔").
+            if (context == nullptr) {
+                LOGE("completion(): context is null (model not loaded?)");
+                is_running = false;
+                return "[ERROR: Context not initialized]";
+            }
+            if (!llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)ctx_val)) {
+                LOGW("completion(): seq_rm returned false; falling back to llama_memory_clear");
+                llama_memory_clear(llama_get_memory(context), true);
+            }
+            kv_position = 0;
+            LOGI("KV cache cleared (seq_rm) for new completion");
+
             const int ctx_val2 = static_cast<int>(n_ctx.load());
             LOGI("completion() running: model=%p context=%p n_ctx=%d",
                  (void*)model, (void*)context, ctx_val2);
@@ -416,10 +469,13 @@ struct InferenceEngine {
             // --- Apply chatml template if history is provided ---
             std::string formatted_prompt;
             if (history && !history->empty()) {
-                // Append the current user message to a temporary copy of history
-                llama_chat_message last_msg = { "user", prompt };
+                // NOTE: Dart's completionWithMessages already includes the current
+                // user message as the LAST element of messagesJson/history, so we
+                // must NOT append `prompt` again here. Doing so duplicated the
+                // turn-2 prompt ("... user:你会什么, user:你会什么") and corrupted
+                // the chatml template, driving the model into a degenerate loop.
+                // Use the history vector as-is (its last entry is the live prompt).
                 std::vector<llama_chat_message> chat_vec = *history;
-                chat_vec.push_back(last_msg);
 
                 char buf[16384];
                 int32_t n = llama_chat_apply_template(
@@ -526,28 +582,40 @@ struct InferenceEngine {
 
             LOGI("Prompt: %d tokens", n_prompt);
 
-            // Reset the KV cache before every completion. The same llama_context
-            // is reused across turns; without clearing, stale tokens from prior
-            // generations pollute positions and corrupt attention, which can
-            // degrade the model into a degenerate loop after the first token.
-            llama_memory_clear(llama_get_memory(context), true);
-            LOGI("KV cache cleared for new completion");
+            // (KV cache already cleared via llama_memory_seq_rm at the top of completion())
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
 
-            // 2. Batch decode prompt
+            // 2. Decode the prompt ONE TOKEN AT A TIME at positions 0..n_prompt-1.
+            // This uses the exact same single-token decode path as generation (which is
+            // proven working) and avoids any multi-token-batch graph/KV quirk on this
+            // build (the 13-token batch worked but the 33-token batch produced flat,
+            // garbage logits — i.e. the batch path is unreliable here). kv_position
+            // tracks the running write head.
             t_prompt_ms = 0;
             t_gen_ms = 0;
             n_gen = 0;
+            llama_pos cur_pos = 0;
 
             auto t_start = std::chrono::high_resolution_clock::now();
-
-            llama_batch batch = llama_batch_get_one(prompt_tokens.data(), n_prompt);
-            if (llama_decode(context, batch) != 0) {
-                LOGE("llama_decode() failed on prompt");
-                is_running = false;
-                return "[ERROR: Prompt decode failed]";
+            for (int i = 0; i < n_prompt; ++i) {
+                llama_batch tok_batch = llama_batch_init(1, 0, 1);
+                tok_batch.n_tokens     = 1;
+                tok_batch.token[0]     = prompt_tokens[i];
+                tok_batch.pos[0]       = cur_pos;
+                tok_batch.n_seq_id[0]  = 1;
+                tok_batch.seq_id[0][0] = 0;
+                tok_batch.logits[0]    = (i == n_prompt - 1) ? 1 : 0;  // logits only on last
+                if (llama_decode(context, tok_batch) != 0) {
+                    LOGE("llama_decode() failed on prompt token %d (pos=%d)", i, (int)cur_pos);
+                    llama_batch_free(tok_batch);
+                    is_running = false;
+                    return "[ERROR: Prompt decode failed]";
+                }
+                llama_batch_free(tok_batch);
+                cur_pos++;
             }
+            kv_position = cur_pos;   // == n_prompt; generation continues at n_prompt..
 
             auto t_end = std::chrono::high_resolution_clock::now();
             t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -562,22 +630,19 @@ struct InferenceEngine {
                 llama_token new_token = 0;
 
                 // Get logits for the NEXT token.
-                //  - After the prompt decode (n_gen==0): the batch had n_prompt
-                //    tokens and llama_batch_get_one() set logits=true on the LAST
-                //    one, so they are at index n_prompt-1.
-                //  - After each single-token generation decode (n_gen>=1): the
-                //    batch has exactly 1 token, so the logits are at index 0.
-                // llama_get_logits_ith() validates `i` against the size of the
-                // LAST decoded batch; a stale global index (n_prompt-1+n_gen)
-                // therefore aborts the process the moment generation starts,
-                // which crashed the app after the first generated token.
-                const int32_t logits_idx = (n_gen == 0)
-                    ? (int32_t)prompt_tokens.size() - 1
-                    : 0;
-                auto * logits_arr = llama_get_logits_ith(context, logits_idx);
+                // ALWAYS use -1 == "last output row of the most recent decode".
+                // llama_get_logits_ith() resolves `i` against the LAST decoded
+                // batch only (output_resolve_row: negative indices are explicitly
+                // supported and map to n_outputs + i). Any absolute index such as
+                // n_prompt-1 is wrong here because the prompt is decoded one token
+                // at a time, so the final batch holds exactly ONE row -- passing
+                // 12 threw "out of range [0, 1)" and, since this is a debug build
+                // (NDEBUG undefined), llama.cpp turned that into GGML_ABORT ->
+                // abort() -> SIGABRT, taking the whole app down.
+                auto * logits_arr = llama_get_logits_ith(context, -1);
 
                 if (!logits_arr) {
-                    LOGE("llama_get_logits_ith nullptr at pos %d", (int)(prompt_tokens.size() - 1 + n_gen));
+                    LOGE("llama_get_logits_ith(-1) returned nullptr at n_gen=%d", (int)n_gen);
                     is_running = false;
                     return "[ERROR: Logit extraction failed]";
                 }
@@ -692,10 +757,15 @@ struct InferenceEngine {
                     if (gen_stopped) break;
                 }
 
-                n_gen++;
-
-                // Decode at correct position to avoid overwriting KV cache
-                const int32_t decode_pos = n_prompt + n_gen - 1;
+                // Decode at correct position (append after the prompt we just fed).
+                // NOTE: n_gen is still the INDEX of the token we just sampled (it is
+                // incremented AFTER the decode below). So this token belongs at
+                // kv_position + n_gen — e.g. the first generated token goes at
+                // position n_prompt, not n_prompt+1. Incrementing n_gen before the
+                // decode produced a 1-position gap in the KV cache, which made
+                // llama_decode() fail on the very next token (ret=-1) and truncated
+                // every reply to a single token.
+                const int32_t decode_pos = kv_position + n_gen;
                 // Belt-and-suspenders: never decode beyond the KV cache, or
                 // llama.cpp aborts the process. (Prompt budgeting above already
                 // guarantees this, but guard against any off-by-one / future
@@ -726,9 +796,13 @@ struct InferenceEngine {
                     break;
                 }
                 llama_batch_free(token_batch);
+                n_gen++;   // advance AFTER decoding so decode_pos stays contiguous
                 t_end = std::chrono::high_resolution_clock::now();
                 t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
+            // Extend the persistent KV cursor to include this turn's generated tokens
+            // so the NEXT completion continues the conversation seamlessly.
+            kv_position += n_gen;
 
             // Flush whatever remains. Incomplete trailing bytes at EOS are dropped
             // (better a missing char than a "�" box); valid sequences are still
@@ -913,6 +987,15 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetEnableThinking(
 ) {
     g_engine.enable_thinking.store(jenable == JNI_TRUE);
     LOGI("nativeSetEnableThinking: enable_thinking=%d", (int)g_engine.enable_thinking.load());
+}
+
+// Start a brand-new conversation: clear the persistent KV cache so a previous
+// chat does not bleed into the new one (multi-turn append-only caching).
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeResetContext(
+    JNIEnv *, jobject
+) {
+    g_engine.resetContext();
 }
 
 JNIEXPORT void JNICALL

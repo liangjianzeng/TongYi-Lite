@@ -103,6 +103,11 @@ class ChatNotifier extends StateNotifier<bool> {
   final StorageService _storage;
   final Ref _ref;
 
+  /// Which conversation currently occupies the native KV cache. When the user
+  /// switches to a different conversation we must reset the cache so the OLD
+  /// chat doesn't bleed into the new one (multi-turn append-only caching).
+  String? _currentKvConvId;
+
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
   /// Ensure the correct model is loaded before sending a message.
@@ -141,6 +146,16 @@ class ChatNotifier extends StateNotifier<bool> {
     debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"');
     state = true;
     _ref.read(isGeneratingProvider.notifier).state = true;
+
+    // If this is a DIFFERENT conversation than what's in the native KV cache,
+    // reset the cache first so the previous chat does not bleed in. (The KV
+    // cache uses append-only multi-turn caching; a fresh conversation must start
+    // from a clean cache.)
+    if (_currentKvConvId != conversationId) {
+      debugPrint('[ChatNotifier] Conversation changed ($_currentKvConvId -> $conversationId): resetContext()');
+      await _inference.resetContext();
+      _currentKvConvId = conversationId;
+    }
 
     try {
       // Step 2: Save user message first (so it's available in history for template)
@@ -196,7 +211,7 @@ class ChatNotifier extends StateNotifier<bool> {
         final stream = _inference.completionWithMessages(
           prompt: prompt,
           messagesJson: messagesJson,
-          maxTokens: 2048,
+          maxTokens: 1024, // on-device cap: CPU ~0.6 tok/s, 2048 would take too long
           temperature: 0.7,
           topP: 0.9,
         );
