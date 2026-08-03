@@ -30,7 +30,26 @@ endif()
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP ON CACHE BOOL "" FORCE)
-set(GGML_KLEIDIAI ON CACHE BOOL "" FORCE)
+# ggml-cpu KleidiAI optimized kernels. NOTE: in llama.cpp b10176 this is fetched
+# via FetchContent from GitHub at configure time (ggml/src/ggml-cpu/CMakeLists.txt
+# downloads kleidiai-v1.24.0-src.tar.gz). The build sandbox has NO network access,
+# so the download fails and the whole native configure aborts. We keep it OFF here
+# to get a successful -O3 build; the -O3 + dotprod/i8mm path below already delivers
+# the bulk of the speedup. To enable later: vendor the KleidiAI source locally and
+# pass -DFETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD=<path> (do NOT edit the submodule).
+set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+# The Android debug variant compiles with -O0 and no NDEBUG, leaving llama.cpp's
+# quantized matmul kernels unoptimized -> ~0.6 tok/s on a 0.5B model. Force -O3
+# -DNDEBUG for the Debug build type. NDEBUG also makes get_logits_ith return
+# nullptr (not GGML_ABORT) on out-of-range, so the JNI null-check actually works.
+set(CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_DEBUG "-O3 -DNDEBUG" CACHE STRING "" FORCE)
+# Target the device's real microarchitecture so ggml-cpu / KleidiAI can emit
+# dotprod + i8mm kernels instead of the slow armv8-a baseline. This APK only
+# ships to the test device (SM8735 / Adreno 825, Armv9), so the narrower -march
+# is safe. Host vulkan-shaders-gen uses its own MinGW toolchain (ExternalProject)
+# and is unaffected by this flag.
+add_compile_options(-march=armv8.4-a+dotprod+i8mm)
 
 # Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).
