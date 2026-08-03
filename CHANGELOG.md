@@ -6,7 +6,7 @@
 
 ---
 
-## [Unreleased]
+## [0.1.1] — 2026-08-03
 
 ### 新增
 
@@ -36,6 +36,17 @@
 - **Dart 编译错误**：修复 `ConsumerStateNotifier`、`const DateTime(0)`、`as int? == 1` 运算符优先级、重复 `ModelConfig` 类冲突等约 50 个错误
 - **Android 资源缺失**：创建 ic_launcher mipmap + Theme.TongYiLite style + colors.xml
 - **Kotlin import**：修复 MainActivity.kt / InferenceService.kt 缺少 Intent/Context import
+
+### 修复（运行时稳定性 · 重大）
+
+- **推理正确性**：彻底修复大模型"答非所问 / 乱码 / 一直转圈"
+  - 每次生成前 `llama_memory_clear` 清空 KV cache，避免多轮后上下文污染导致 padding token（151935）无限循环
+  - 修复 `parseMessagesJson` 悬垂指针（`llama_chat_message` 只存 `const char*`，改用 `deque<string>` 持有字符串）
+  - 修复 `llama_batch.n_tokens` 漏设（首 token 后 decode 失败）与 `llama_get_logits_ith` 越界（SIGABRT）
+  - 修复 Qwen3 思考模式空思考块注入 off-by-one（`"assistant\n"` 长度 10 误写 11），并新增「思考模式」开关（默认关=直接作答）
+  - 修复 top-p nucleus 采样退化成贪心（cumsum 早停）
+- **GPU 加速默认关闭**：ggml-vulkan 在小米 onyx（Adreno 825）上卸载层数后第 2 个 token 起数值崩坏（已知 GPU 后端数值 bug），故「启用 GPU 加速」默认改为关闭，回退稳定纯 CPU 推理；开关变更需重新加载模型生效
+- **CPU 推理提速**：采样改用 `partial_sort` top-K(K=128) + top-K softmax（替代全词表 sort），显式设置线程数 `min(硬件并发, 8)`
 
 ---
 

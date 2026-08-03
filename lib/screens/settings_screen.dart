@@ -575,6 +575,34 @@ class _InferenceEngineTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
+          // ---- 思考模式设置卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🧠 思考模式（Thinking）', context),
+                  const SizedBox(height: 12),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('启用思考模式'),
+                    subtitle: const Text(
+                        '开启后模型先输出推理过程再给答案（更慢）；关闭则直接作答（更快），仅对 Qwen3 等思考模型生效'),
+                    value: gpuSettings.enableThinking,
+                    onChanged: (v) {
+                      gpuNotifier.setEnableThinking(v);
+                      // 立即同步到原生层，无需重新加载模型。
+                      ref.read(inferenceServiceProvider).setEnableThinking(v);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // ---- 上下文大小设置卡片 ----
           Card(
             child: Padding(

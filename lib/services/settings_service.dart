@@ -13,17 +13,26 @@ class InferenceSettings {
   final int gpuLayers;
   final int contextSize;
 
+  /// 是否允许 Qwen3 思考模式（<think> 链）。默认关闭 = 直接作答，响应更快。
+  final bool enableThinking;
+
   const InferenceSettings({
-    this.enableGpu = true,
+    // 默认纯 CPU：本机（Adreno 825）的 ggml-vulkan 后端对该模型会产生数值崩坏，
+    // 导致输出塌缩成 padding token（无限乱码/转圈）。GPU 卸载在修复前默认关闭，
+    // 避免"设置未持久化/重启回退默认"时落到坏掉的 GPU 路径。
+    this.enableGpu = false,
     this.gpuLayers = 20,
     this.contextSize = 4096,
+    this.enableThinking = false,
   });
 
-  InferenceSettings copyWith({bool? enableGpu, int? gpuLayers, int? contextSize}) {
+  InferenceSettings copyWith(
+      {bool? enableGpu, int? gpuLayers, int? contextSize, bool? enableThinking}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
       contextSize: contextSize ?? this.contextSize,
+      enableThinking: enableThinking ?? this.enableThinking,
     );
   }
 
@@ -31,13 +40,16 @@ class InferenceSettings {
         'enableGpu': enableGpu,
         'gpuLayers': gpuLayers,
         'contextSize': contextSize,
+        'enableThinking': enableThinking,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
     return InferenceSettings(
-      enableGpu: json['enableGpu'] as bool? ?? true,
+      // 缺省/旧文件未存该字段时回落纯 CPU（安全路径，规避坏掉的 Vulkan）。
+      enableGpu: json['enableGpu'] as bool? ?? false,
       gpuLayers: (json['gpuLayers'] as num?)?.toInt() ?? 20,
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
+      enableThinking: json['enableThinking'] as bool? ?? false,
     );
   }
 }

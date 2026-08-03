@@ -232,6 +232,15 @@ class InferenceService {
     await _channel.invokeMethod('stopGeneration');
   }
 
+  /// 设置是否允许 Qwen3 思考模式。false = 直接作答（默认）。
+  Future<void> setEnableThinking(bool enable) async {
+    try {
+      await _channel.invokeMethod('setEnableThinking', {'enable': enable});
+    } catch (e) {
+      debugPrint('[InferenceService] setEnableThinking failed: $e');
+    }
+  }
+
   Future<Map<String, double>> benchmark({
     String prompt = 'List 5 common fruits.',
     int nRepeats = 3,

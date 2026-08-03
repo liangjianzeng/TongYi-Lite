@@ -59,6 +59,7 @@ class InferenceEngine(private val context: Context) {
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
     private external fun nativeStop()
+    private external fun nativeSetEnableThinking(enable: Boolean)
     private external fun nativeDestroy()
     private external fun nativeCompletion(
         prompt: String,
@@ -140,6 +141,11 @@ class InferenceEngine(private val context: Context) {
 
     fun stopGeneration() {
         nativeStop()
+    }
+
+    /** Toggle Qwen3-style "thinking" (<think> chain). false = answer directly. */
+    fun setEnableThinking(enable: Boolean) {
+        nativeSetEnableThinking(enable)
     }
 
     /**
