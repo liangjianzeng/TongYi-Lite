@@ -249,11 +249,13 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       //    把推理引擎设置（GPU 开关 / 卸载层数）透传给原生层。
       final gpu = _ref.read(settingsProvider);
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
-          'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers})');
+          'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
+          'contextSize=${gpu.contextSize})');
       final ok = await _inference.loadModel(
         path,
         enableGpu: gpu.enableGpu,
         gpuLayers: gpu.gpuLayers,
+        nCtx: gpu.contextSize,
       );
 
       if (ok) {

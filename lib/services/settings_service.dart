@@ -4,34 +4,40 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-/// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数）。
+/// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数 + 上下文大小）。
 ///
-/// 默认开启 GPU 加速（移动端有 Vulkan 驱动时自动回落），卸载层数默认 20。
+/// 默认开启 GPU 加速（移动端有 Vulkan 驱动时自动回落），卸载层数默认 20，
+/// 上下文大小默认 4096，最大 65536。
 class InferenceSettings {
   final bool enableGpu;
   final int gpuLayers;
+  final int contextSize;
 
   const InferenceSettings({
     this.enableGpu = true,
     this.gpuLayers = 20,
+    this.contextSize = 4096,
   });
 
-  InferenceSettings copyWith({bool? enableGpu, int? gpuLayers}) {
+  InferenceSettings copyWith({bool? enableGpu, int? gpuLayers, int? contextSize}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
+      contextSize: contextSize ?? this.contextSize,
     );
   }
 
   Map<String, dynamic> toJson() => {
         'enableGpu': enableGpu,
         'gpuLayers': gpuLayers,
+        'contextSize': contextSize,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
     return InferenceSettings(
       enableGpu: json['enableGpu'] as bool? ?? true,
       gpuLayers: (json['gpuLayers'] as num?)?.toInt() ?? 20,
+      contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
     );
   }
 }

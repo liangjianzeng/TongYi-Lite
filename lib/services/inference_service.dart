@@ -72,7 +72,7 @@ class InferenceService {
     int gpuLayers = 20,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
-        '(enableGpu=$enableGpu, gpuLayers=$gpuLayers)');
+        '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
