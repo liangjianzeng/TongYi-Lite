@@ -111,7 +111,7 @@ PID=$("$ADB" shell pidof com.dgxspark.tongyilite | tr -d '\r')
 |---|---|---|
 | applicationId / namespace | `android/app/build.gradle.kts` | `com.dgxspark.tongyilite` |
 | minSdk / targetSdk / compileSdk | 同上 | 33 / 36 / 36 |
-| versionCode / versionName | 同上 | 3 / 0.1.2 |
+| versionCode / versionName | 同上 | 4 / 0.1.3 |
 | ABI | 同上 `ndk.abiFilters` | `arm64-v8a` |
 | KleidiAI | `android/app/src/main/cpp/CMakeLists.txt` | `GGML_CPU_KLEIDIAI=ON` + vendor 路径 |
 | ARM 微架构 | 同上 | `GGML_CPU_ARM_ARCH=armv8.4-a+dotprod+i8mm` |

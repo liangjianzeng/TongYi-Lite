@@ -91,6 +91,7 @@ class InferenceEngine(private val context: Context) {
 
     private external fun nativeGetModelSizeBytes(): Long
     private external fun nativeGetModelInfo(): String
+    private external fun nativeGetLastStats(): String
 
     // --- Public API ---
 
@@ -257,6 +258,9 @@ class InferenceEngine(private val context: Context) {
             fileSizeBytes = nativeGetModelSizeBytes()
         )
     }
+
+    /** Returns JSON {n_gen, t_gen_ms, t_prompt_ms} for the last completed generation. */
+    fun getLastStats(): String = nativeGetLastStats()
 
     fun destroy() {
         executor.submit {

@@ -23,3 +23,8 @@ export 'download_provider.dart' show
     downloadServiceProvider,
     downloadNotifierProvider,
     downloadTaskProvider;
+
+export 'model_display_provider.dart' show
+    ModelDisplayNameNotifier,
+    modelDisplayNameProvider,
+    modelDisplayNameServiceProvider;

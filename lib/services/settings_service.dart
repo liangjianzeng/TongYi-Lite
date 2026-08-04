@@ -6,7 +6,9 @@ import 'package:path_provider/path_provider.dart';
 
 /// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数 + 后端选择 + 上下文大小）。
 ///
-/// 默认开启 GPU 加速（移动端有 Vulkan 驱动时自动回落），卸载层数默认 20，
+/// 默认关闭 GPU 加速（用户可在设置页开启；开启后 auto 优先选 OpenCL，
+/// 与 Vulkan 在 Adreno 825 上实测等效、均无数值崩坏），卸载层数默认 100
+/// （全量卸载；llama.cpp 会自动 clamp 到模型实际层数），
 /// 上下文大小默认 4096，最大 65536。
 class InferenceSettings {
   final bool enableGpu;
@@ -17,17 +19,17 @@ class InferenceSettings {
   final bool enableThinking;
 
   /// GPU 后端选择：'cpu' / 'vulkan' / 'opencl' / 'auto'。
-  /// 默认 'auto'：优先 OpenCL（Vulkan 在 Adreno 825 上对 Q4_K_M 输出崩坏——
-  /// 每个采样 token 塌缩成 padding token 127，空回复；llama.rn 在 Android 上
-  /// 即用 OpenCL 后端，Adreno 700+ 验证可用）。
+  /// 默认 'auto'：优先 OpenCL（Adreno 825 上 OpenCL 驱动高度优化，与 Vulkan
+  /// 实测吞吐几乎等价；两者均经真机验证可正常输出，无数值崩坏）。用户可切到
+  /// Vulkan 对比。llama.rn 在 Android 上即用 OpenCL 后端，Adreno 700+ 可用。
   final String gpuBackend;
 
   const InferenceSettings({
-    // 默认纯 CPU：本机（Adreno 825）的 ggml-vulkan 后端对该模型会产生数值崩坏，
-    // 导致输出塌缩成 padding token（无限乱码/转圈）。GPU 卸载在修复前默认关闭，
-    // 避免"设置未持久化/重启回退默认"时落到坏掉的 GPU 路径。
+    // 默认关闭 GPU：避免"设置未持久化/重启回退默认"时悄悄占用 GPU 内存；
+    // 用户显式开启后，auto 会优先选 OpenCL（与 Vulkan 在 Adreno 825 上等效，
+    // 均经真机验证无数值崩坏）。
     this.enableGpu = false,
-    this.gpuLayers = 20,
+    this.gpuLayers = 100,
     this.contextSize = 4096,
     this.enableThinking = false,
     this.gpuBackend = 'auto',

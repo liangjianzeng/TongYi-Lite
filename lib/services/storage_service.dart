@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/chat_message.dart';
@@ -20,9 +21,20 @@ class StorageService {
     final path = join(await getDatabasesPath(), 'tongyilite.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
+  }
+
+  /// 数据库版本升级迁移。
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // v1 → v2：messages 表新增 inferenceStats 列（回复性能统计 JSON）。
+      await db.execute(
+        "ALTER TABLE messages ADD COLUMN inferenceStats TEXT",
+      );
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -46,6 +58,7 @@ class StorageService {
         imagePath TEXT,
         createdAt INTEGER NOT NULL,
         isStreaming INTEGER DEFAULT 0,
+        inferenceStats TEXT,
         FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
       )
     ''');
@@ -104,15 +117,21 @@ class StorageService {
       orderBy: 'createdAt ASC',
       limit: limit,
     );
-    return rows.map((r) => ChatMessage(
-      id: r['id'] as String,
-      conversationId: r['conversationId'] as String,
-      role: MessageRole.values.where((e) => e.name == r['role']).first,
-      content: r['content'] as String,
-      imagePath: r['imagePath'] as String?,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-      isStreaming: (r['isStreaming'] as int?) == 1,
-    )).toList();
+    return rows.map((r) {
+      final statsJson = r['inferenceStats'] as String?;
+      return ChatMessage(
+        id: r['id'] as String,
+        conversationId: r['conversationId'] as String,
+        role: MessageRole.values.where((e) => e.name == r['role']).first,
+        content: r['content'] as String,
+        imagePath: r['imagePath'] as String?,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
+        isStreaming: (r['isStreaming'] as int?) == 1,
+        inferenceStats: statsJson != null && statsJson.isNotEmpty
+            ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
+            : null,
+      );
+    }).toList();
   }
 
   Future<void> saveMessage(ChatMessage msg) async {
@@ -132,6 +151,9 @@ class StorageService {
       'imagePath': msg.imagePath,
       'createdAt': msg.timestamp.millisecondsSinceEpoch,
       'isStreaming': msg.isStreaming ? 1 : 0,
+      'inferenceStats': msg.inferenceStats != null
+          ? jsonEncode(msg.inferenceStats!.toMap())
+          : null,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
@@ -143,15 +165,21 @@ class StorageService {
       whereArgs: [conversationId],
       orderBy: 'createdAt ASC',
     );
-    return rows.map((r) => ChatMessage(
-      id: r['id'] as String,
-      conversationId: r['conversationId'] as String,
-      role: MessageRole.values.where((e) => e.name == r['role']).first,
-      content: r['content'] as String,
-      imagePath: r['imagePath'] as String?,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-      isStreaming: (r['isStreaming'] as int?) == 1,
-    )).toList();
+    return rows.map((r) {
+      final statsJson = r['inferenceStats'] as String?;
+      return ChatMessage(
+        id: r['id'] as String,
+        conversationId: r['conversationId'] as String,
+        role: MessageRole.values.where((e) => e.name == r['role']).first,
+        content: r['content'] as String,
+        imagePath: r['imagePath'] as String?,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
+        isStreaming: (r['isStreaming'] as int?) == 1,
+        inferenceStats: statsJson != null && statsJson.isNotEmpty
+            ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
+            : null,
+      );
+    }).toList();
   }
 
   Future<void> clearConversation(String conversationId) async {

@@ -211,7 +211,7 @@ class ChatNotifier extends StateNotifier<bool> {
         final stream = _inference.completionWithMessages(
           prompt: prompt,
           messagesJson: messagesJson,
-          maxTokens: 1024, // on-device cap: CPU ~0.6 tok/s, 2048 would take too long
+          maxTokens: 1024, // on-device cap: large token budgets make long runs unbearable
           temperature: 0.7,
           topP: 0.9,
         );
@@ -307,14 +307,34 @@ class ChatNotifier extends StateNotifier<bool> {
         final firstTokenMs = firstTokenTime != null
             ? firstTokenTime.difference(startTime).inMilliseconds
             : 0;
-        final tokensPerSec = totalMs > 0 ? tokenCount * 1000 / totalMs : 0.0;
+
+        // Use the REAL token count + pure generation time from native so the
+        // displayed tok/s matches the native logcat line exactly (Dart used to
+        // count emitted characters over wall-clock time that also included the
+        // prompt prefill, so it always read lower than the native number).
+        Map<String, dynamic> genStats = {};
+        try {
+          genStats = await _inference.getInferenceStats();
+        } catch (_) {}
+        final int realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
+        final double genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+        final tokensPerSec = genMs > 0 ? realTokens * 1000 / genMs : 0.0;
+
         manager.appendInferenceLog(
-          '响应 | $tokenCount tokens | 首token ${firstTokenMs}ms | 总耗时 ${totalMs}ms'
+          '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
           ' | ${tokensPerSec.toStringAsFixed(1)} tok/s | 输出 ${fullResponse.length} 字',
         );
 
         // Step 5: Persist final assistant message (clear streaming flag).
-        assistantMsg = assistantMsg.copyWith(content: fullResponse, isStreaming: false);
+        assistantMsg = assistantMsg.copyWith(
+          content: fullResponse,
+          isStreaming: false,
+          inferenceStats: InferenceStats(
+            firstTokenMs: firstTokenMs,
+            totalMs: totalMs,
+            tokPerSec: tokensPerSec,
+          ),
+        );
         await _storage.saveMessage(assistantMsg);
 
         return fullResponse;

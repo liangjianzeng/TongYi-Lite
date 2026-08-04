@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 
@@ -109,6 +110,20 @@ class InferenceService {
   // ------------------------------------------------------------------
   Future<Map<String, int>> getMemoryInfo() async {
     return await _channel.invokeMethod('getMemoryInfo');
+  }
+
+  /// Returns the last generation's real stats from native: {n_gen, t_gen_ms,
+  /// t_prompt_ms}. n_gen is the true llama.cpp token count and t_gen_ms is the
+  /// pure generation time, so UI tok/s matches the native logcat line exactly.
+  Future<Map<String, dynamic>> getInferenceStats() async {
+    final r = await _channel.invokeMethod('getInferenceStats');
+    if (r == null) return {};
+    if (r is Map) return Map<String, dynamic>.from(r);
+    try {
+      final decoded = jsonDecode(r as String);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return {};
   }
 
   // ------------------------------------------------------------------
