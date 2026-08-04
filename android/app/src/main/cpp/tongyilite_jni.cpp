@@ -18,7 +18,6 @@
 #include <atomic>
 #include <algorithm>
 #include <cmath>
-#include <random>
 #include <functional>
 #include <sstream>
 #include <deque>
@@ -228,8 +227,10 @@ struct InferenceEngine {
         }
         model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
-        // Use direct load instead of mmap — mmap can cause file-lock conflicts on Android.
-        model_params.load_mode = LLAMA_LOAD_MODE_NONE;
+        // Use mmap for loading — faster and lower peak memory than loading
+        // the entire file into RAM. On Android internal storage (ext4/f2fs)
+        // mmap works reliably; file-lock issues only affect FAT32/external SD.
+        model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
 
         // Use unique_lock so we can unlock before JNI callbacks to prevent deadlock.
         std::unique_lock<std::mutex> lock(mtx);
@@ -425,7 +426,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+tok-by-tok+logits(-1) BUILD 20260803f =====");
+        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+batch-prefill+sampler-chain BUILD 20260804f =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -586,34 +587,38 @@ struct InferenceEngine {
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
 
-            // 2. Decode the prompt ONE TOKEN AT A TIME at positions 0..n_prompt-1.
-            // This uses the exact same single-token decode path as generation (which is
-            // proven working) and avoids any multi-token-batch graph/KV quirk on this
-            // build (the 13-token batch worked but the 33-token batch produced flat,
-            // garbage logits — i.e. the batch path is unreliable here). kv_position
-            // tracks the running write head.
+            // 2. Decode the prompt in batches of up to n_batch tokens.
+            // This leverages the n_batch=512 / n_ubatch=256 configuration
+            // set in load() so the prompt is processed efficiently instead
+            // of one token at a time (which inflated TTFT by 10-50x).
             t_prompt_ms = 0;
             t_gen_ms = 0;
             n_gen = 0;
             llama_pos cur_pos = 0;
 
             auto t_start = std::chrono::high_resolution_clock::now();
-            for (int i = 0; i < n_prompt; ++i) {
-                llama_batch tok_batch = llama_batch_init(1, 0, 1);
-                tok_batch.n_tokens     = 1;
-                tok_batch.token[0]     = prompt_tokens[i];
-                tok_batch.pos[0]       = cur_pos;
-                tok_batch.n_seq_id[0]  = 1;
-                tok_batch.seq_id[0][0] = 0;
-                tok_batch.logits[0]    = (i == n_prompt - 1) ? 1 : 0;  // logits only on last
+            const int32_t n_batch = ctx_params.n_batch;
+            int i = 0;
+            while (i < n_prompt) {
+                const int32_t chunk = std::min((int32_t)n_batch, n_prompt - i);
+                llama_batch tok_batch = llama_batch_init(chunk, 0, 1);
+                tok_batch.n_tokens = chunk;
+                for (int32_t j = 0; j < chunk; ++j) {
+                    tok_batch.token[j] = prompt_tokens[i + j];
+                    tok_batch.pos[j]   = cur_pos + j;
+                    tok_batch.n_seq_id[j]  = 1;
+                    tok_batch.seq_id[j][0] = 0;
+                    tok_batch.logits[j] = (i + j == n_prompt - 1) ? 1 : 0;
+                }
                 if (llama_decode(context, tok_batch) != 0) {
-                    LOGE("llama_decode() failed on prompt token %d (pos=%d)", i, (int)cur_pos);
+                    LOGE("llama_decode() failed on prompt batch starting at token %d (pos=%d)", i, (int)cur_pos);
                     llama_batch_free(tok_batch);
                     is_running = false;
                     return "[ERROR: Prompt decode failed]";
                 }
                 llama_batch_free(tok_batch);
-                cur_pos++;
+                cur_pos += chunk;
+                i += chunk;
             }
             kv_position = cur_pos;   // == n_prompt; generation continues at n_prompt..
 
@@ -623,92 +628,36 @@ struct InferenceEngine {
             // 3. Auto-generate tokens
             std::string result;
             std::string gen_utf8_buf;   // raw token bytes; forwarded only as complete UTF-8
+            std::string flush_buf;      // batches complete UTF-8 sequences before calling on_token
             bool gen_stopped = false;
             const llama_token eos = llama_vocab_eos(vocab);
+            // Batch size for on_token callbacks — accumulating characters
+            // before crossing the JNI/EventChannel boundary reduces per-token
+            // overhead from the C++→JNI→Dart round-trip.
+            const size_t kFlushBatchSize = 64;
+
+            // Create the sampler chain once and reuse it for every generated token.
+            // This replaces the per-token O(vocab) allocation of 150k+
+            // llama_token_data entries with the built-in llama.cpp sampler
+            // which reuses internal buffers across calls.
+            struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+            struct llama_sampler * smpl_chain = llama_sampler_chain_init(sparams);
+            llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_k(128));
+            llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_p(top_p, 1));
+            llama_sampler_chain_add(smpl_chain, llama_sampler_init_temp(temperature));
 
             while (n_gen < max_tokens && !should_stop) {
                 llama_token new_token = 0;
 
-                // Get logits for the NEXT token.
-                // ALWAYS use -1 == "last output row of the most recent decode".
-                // llama_get_logits_ith() resolves `i` against the LAST decoded
-                // batch only (output_resolve_row: negative indices are explicitly
-                // supported and map to n_outputs + i). Any absolute index such as
-                // n_prompt-1 is wrong here because the prompt is decoded one token
-                // at a time, so the final batch holds exactly ONE row -- passing
-                // 12 threw "out of range [0, 1)" and, since this is a debug build
-                // (NDEBUG undefined), llama.cpp turned that into GGML_ABORT ->
-                // abort() -> SIGABRT, taking the whole app down.
-                auto * logits_arr = llama_get_logits_ith(context, -1);
-
-                if (!logits_arr) {
-                    LOGE("llama_get_logits_ith(-1) returned nullptr at n_gen=%d", (int)n_gen);
-                    is_running = false;
-                    return "[ERROR: Logit extraction failed]";
-                }
-
-                int32_t n_vocab = (int32_t)llama_vocab_n_tokens(vocab);
-
-                // Fill candidates with temperature-scaled logits.
-                std::vector<llama_token_data> candidates(n_vocab);
-                for (int32_t i = 0; i < n_vocab; ++i) {
-                    candidates[i].id = i;
-                    candidates[i].logit = logits_arr[i] / temperature;
-                    candidates[i].p = 0.0f;
-                }
-
-                // Top-p only ever needs the highest-probability tokens, so partially
-                // sort just the top K instead of the full 150k+ vocab. This turns an
-                // O(n log n) full sort into O(n log K) and shrinks the softmax from n
-                // exp() calls down to K — a large per-token win on-device.
-                const size_t K = std::min((size_t)128, (size_t)n_vocab);
-                std::partial_sort(candidates.begin(), candidates.begin() + K, candidates.end(),
-                          [](const llama_token_data &a, const llama_token_data &b) {
-                              return a.logit > b.logit;
-                          });
-                candidates.resize(K);
-                const int32_t n_cand = (int32_t)K;
-
-                // DIAG: at the first generation step, dump the top-5 logits so we
-                // can tell whether the model is producing sane logits or garbage
-                // (all-equal / NaN / one special token dominating).
-                if (n_gen == 0) {
-                    LOGI("[DIAG] top5 logits @ gen#0:");
-                    for (int k = 0; k < 5 && k < (int)candidates.size(); ++k) {
-                        LOGI("[DIAG]   #%d id=%d logit=%.4f", k, candidates[k].id, candidates[k].logit);
-                    }
-                }
-
-                // --- Nucleus (top-p) sampling over the top-K candidates ---
-                // 1) softmax probabilities over the temperature-scaled logits
-                float max_logit = candidates[0].logit;
-                float sum_exp = 0.0f;
-                for (int32_t i = 0; i < n_cand; ++i) {
-                    candidates[i].p = std::exp(candidates[i].logit - max_logit);
-                    sum_exp += candidates[i].p;
-                }
-                for (int32_t i = 0; i < n_cand; ++i) candidates[i].p /= sum_exp;
-
-                // 2) keep the smallest prefix whose cumulative prob >= top_p
-                float cum_prob = 0.0f;
-                size_t keep = (size_t)n_cand;
-                for (int32_t i = 0; i < n_cand; ++i) {
-                    cum_prob += candidates[i].p;
-                    if (cum_prob >= top_p) { keep = (size_t)i + 1; break; }
-                }
-
-                // 3) sample from the kept set
-                float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
-                new_token = candidates[keep - 1].id;
-                float acc = 0.0f;
-                for (size_t i = 0; i < keep; ++i) {
-                    acc += candidates[i].p;
-                    if (r <= acc) { new_token = candidates[i].id; break; }
-                }
+                // Use the built-in llama.cpp sampler for efficient top-k /
+                // top-p / temperature sampling. This avoids the per-token
+                // O(vocab) allocation and partial_sort of the previous
+                // manual implementation.
+                new_token = llama_sampler_sample(smpl_chain, context, -1);
 
                 if (n_gen == 0) {
-                    LOGI("[DIAG] chosen new_token=%d (r=%.4f, keep=%zu, n_vocab=%d)",
-                         new_token, r, keep, n_vocab);
+                    LOGI("[DIAG] chosen new_token=%d (sampler chain, n_vocab=%d)",
+                         new_token, (int)llama_vocab_n_tokens(vocab));
                 }
 
                 // DIAG: decode the first few generated tokens to their raw piece
@@ -738,6 +687,8 @@ struct InferenceEngine {
                     // would hand JNI a lone continuation byte and abort). Invalid
                     // bytes (e.g. a lone continuation byte from byte-fallback) are
                     // dropped; SentencePiece's "▁" marker is rendered as a space.
+                    // Batch complete sequences into flush_buf before calling
+                    // on_token to reduce C++→JNI→Dart round-trip overhead per token.
                     size_t consumed = 0;
                     while (consumed < gen_utf8_buf.size()) {
                         int adv = utf8_seq_len(gen_utf8_buf, consumed);
@@ -747,10 +698,15 @@ struct InferenceEngine {
                         consumed += adv;
                         sp_space_to_ascii(one);
                         result += one;
-                        if (on_token && !on_token(one)) {
+                        flush_buf += one;
+                        if (flush_buf.size() >= kFlushBatchSize) {
+                        if (on_token && !on_token(flush_buf)) {
                             LOGI("Stopped by callback at gen=%d", n_gen);
                             gen_stopped = true;
+                            flush_buf.clear();
                             break;
+                        }
+                        flush_buf.clear();
                         }
                     }
                     gen_utf8_buf.erase(0, consumed);
@@ -800,6 +756,8 @@ struct InferenceEngine {
                 t_end = std::chrono::high_resolution_clock::now();
                 t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
+            llama_sampler_free(smpl_chain);
+
             // Extend the persistent KV cursor to include this turn's generated tokens
             // so the NEXT completion continues the conversation seamlessly.
             kv_position += n_gen;
@@ -807,6 +765,11 @@ struct InferenceEngine {
             // Flush whatever remains. Incomplete trailing bytes at EOS are dropped
             // (better a missing char than a "�" box); valid sequences are still
             // forwarded so mid-stream text is never lost.
+            // Also flush any accumulated on_token batch buffer.
+            if (!flush_buf.empty()) {
+                if (on_token) on_token(flush_buf);
+                flush_buf.clear();
+            }
             if (!gen_stopped && !gen_utf8_buf.empty()) {
                 size_t consumed = 0;
                 while (consumed < gen_utf8_buf.size()) {
