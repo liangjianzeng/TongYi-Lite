@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import '../models/chat_message.dart';
 
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
@@ -8,6 +10,7 @@ class ChatBubble extends StatelessWidget {
   final bool isStreaming;
   final bool showAvatar;
   final String? imagePath;
+  final InferenceStats? inferenceStats;
 
   const ChatBubble({
     super.key,
@@ -17,6 +20,7 @@ class ChatBubble extends StatelessWidget {
     this.isStreaming = false,
     this.showAvatar = true,
     this.imagePath,
+    this.inferenceStats,
   });
 
   bool get _isUser => role == 'user';
@@ -93,13 +97,57 @@ class ChatBubble extends StatelessWidget {
                     ],
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    _formatTime(timestamp),
-                    style: TextStyle(fontSize: 11, color: Colors.grey),
-                  ),
+                         Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _formatTime(timestamp),
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                    ),
+                    if (!_isUser && inferenceStats != null) ...[
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          _formatStats(inferenceStats!),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey.shade500,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (!_isUser && content.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () async {
+                          await Clipboard.setData(ClipboardData(text: content));
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('已复制回复内容'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(
+                            Icons.content_copy,
+                            size: 15,
+                            color: Colors.grey.shade400,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
+              ),
               ],
             ),
           ),
@@ -122,5 +170,18 @@ class ChatBubble extends StatelessWidget {
       return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     }
     return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// 性能指标：首Tok / 耗时 / 速率。
+  /// 例：'首Tok 1.2s · 耗时 5.3s · 14.5 tok/s'
+  String _formatStats(InferenceStats s) {
+    final first = s.firstTokenMs >= 1000
+        ? '${(s.firstTokenMs / 1000).toStringAsFixed(1)}s'
+        : '${s.firstTokenMs}ms';
+    final total = s.totalMs >= 1000
+        ? '${(s.totalMs / 1000).toStringAsFixed(1)}s'
+        : '${s.totalMs}ms';
+    final rate = s.tokPerSec.toStringAsFixed(1);
+    return '首Tok $first · 耗时 $total · $rate tok/s';
   }
 }

@@ -6,7 +6,7 @@
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-b1017+-red)](https://github.com/ggerganov/llama.cpp)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp） · Vulkan GPU / KleidiAI CPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
+> **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp） · Vulkan / OpenCL GPU 加速 + KleidiAI CPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
 >
 > **数据不出设备，隐私安全无忧。**
 
@@ -33,7 +33,7 @@
 | 维度 | 说明 |
 |------|------|
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b1017+（批量预填充 + 内置采样器 + Vulkan GPU / KleidiAI / SME2） |
+| **推理引擎** | llama.cpp b10176（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI / SME2 CPU） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
@@ -98,6 +98,7 @@ TongYi-Lite/
 │   ├── plugin_architecture.md        # Plugin 插件架构
 │   ├── implementation_plan.md        # 实施方案
 │   ├── mobile_llm_benchmark_report_v2.md  # 移动端 LLM 基准报告
+│   ├── backend_benchmark_2026-08-04.md    # 三后端（Vulkan/OpenCL/CPU）实测专报
 │   ├── BUILD_AND_DEBUG_GUIDE.md      # 编译与调试指南
 │   └── archive/                      # v1 归档文档
 ├── .github/                          # GitHub 项目配置
@@ -257,6 +258,13 @@ flutter build appbundle --release
 | Qwen2.5-1.5B (Q4_K_M) | 1.1 GB | text | 1.5 GB | ModelScope |
 | Qwen2.5-0.5B (Q4_K_M) | 468 MB | text | 300 MB | ModelScope |
 | Qwen2.5-3B (Q4_K_M) | 2.0 GB | text | 3.5 GB | ModelScope |
+| Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6.0 GB | hf-mirror + huggingface |
+| Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10.0 GB | hf-mirror + huggingface |
+
+> 端侧 1-bit / 1.58-bit 量化（Bonsai-27B）：Q1_0（±1，每 128 权重共享 1 个 FP16 scale）与
+> Ternary Q2_0（三值，1.58-bit）。这类超低位模型体积小，但**主分支 llama.cpp CPU/GPU 内核
+> 无专用 1-bit 解码加速**（官方快照依赖 PrismML fork 的 CUDA/Metal 内核），在本机 Adreno 825 +
+> OpenCL 全量卸载实测约 2.7-2.9 tok/s，适合作为大上下文/探索用，日常问答优先选 4B 以下模型。
 
 **新增一个模型只需在 JSON 的 `models` 数组追加一项：**
 
@@ -305,7 +313,9 @@ flutter build appbundle --release
 
 **推理日志**：`inference_log_screen.dart` 查看页展示模型加载、卸载、生成的完整过程日志，并针对每次
 大模型交互记录请求/响应概况与性能指标（提示长度、历史条数、生成 token 数、**首 token 延迟**、
-**tok/s**、总耗时、输出字数），便于排查速度与正确性问题。
+**tok/s**、总耗时、输出字数），便于排查速度与正确性问题。**tok/s 口径已对齐真实值**：JNI 回传
+`n_gen`（llama.cpp 真实 decode token 数，中文 1 汉字≈1.5-2 token）与 `t_gen_ms`（纯生成耗时，不含
+prefill），聊天气泡显示的 tok/s 与 logcat 完全一致。
 
 ---
 
@@ -319,43 +329,49 @@ flutter run -d <device_id>
 flutter logs | grep TongYiLite
 ```
 
-### Vulkan GPU 加速
+### GPU 加速（Vulkan / OpenCL 双后端）
 
-构建时若满足上面的依赖，APK 会包含 `libggml-vulkan.so`（内嵌全部预编译 SPIR-V 着色器）。
-**是否在运行时真正用 GPU，由 App 启动时探测决定**，不靠硬编码：
+构建时若满足上面的依赖，APK 会同时包含 `libggml-vulkan.so`（内嵌预编译 SPIR-V 着色器）与
+`libggml-opencl.so`（附 OpenCL 运行时 dlopen 转发 stub，见下方说明）。
+**是否在运行时真正用 GPU、用哪个后端，由 App 启动时探测 + 用户在设置页选择决定**，不靠硬编码：
 
-- `tongyilite_jni.cpp` 的 `detect_gpu_layers()` 在加载模型时遍历 ggml 后端注册表
-  （`ggml_backend_dev_count()` / `ggml_backend_dev_get()`），打印每个设备的名称 / 类型 / 显存；
+- `tongyilite_jni.cpp` 在加载模型时遍历 ggml 后端注册表（`ggml_backend_dev_count()` /
+  `ggml_backend_dev_get()`），打印每个设备名称 / 类型 / 显存，并按用户所选后端初始化。
 - 在「设置 → 推理引擎」标签页：
-  - **「启用 GPU 加速」开关（默认开启）** 和 **「GPU 层数」滑块（默认 20）**：
+  - **「GPU 加速」开关（默认开启）** 与 **GPU 后端选择（自动 / OpenCL / Vulkan）**：
     - 开关关闭 → 强制纯 CPU（`n_gpu_layers = 0`）；
-    - 开关开启且探测到 GPU 设备 → 按滑块设定的层数卸载（默认 20），否则回落纯 CPU 推理。
+    - 开关开启 → 按所选后端卸载到 GPU（`auto` 优先 OpenCL，探测不到对应后端时回落 CPU）。
+  - **「GPU 层数」滑块（默认 100 = 全量卸载）**：llama.cpp 会按模型实际层数自动 clamp；
+    全量卸载已实测正确且最快（混合 CPU+GPU 部分卸载会引入串行同步，不加速且未验证正确性）。
   - **「上下文大小」滑块（默认 4096，范围 1024~65536）**：控制 KV 缓存按 `n_ctx` 预分配的大小，
     短对话可调小省内存、长对话/长上下文任务调大。
   - 设置经 `MethodChannel → Kotlin → JNI` 透传给原生层，实时生效、重启保留。
 
-这样做的好处：同一个 APK 装在没有 Vulkan 驱动的设备上也不会卡死（探测不到 GPU 时自动回落 CPU）。
+**OpenCL 后端（Adreno 推荐）**：在 Adreno（骁龙 7+ 系）设备上 OpenCL 驱动优化充分，与 Vulkan
+解码吞吐几乎等价（实测 4B/27B 两模型下相差 <2%）。OpenCL 依赖设备 `libOpenCL.so`，通过
+`third_party/opencl-stub/opencl_stub.c` 的 **dlopen 转发 stub** 动态加载：设备无驱动时后端探测到
+0 设备 → 自动回落 CPU，不会因缺少 OpenCL 而崩溃。
 
 **验证是否真的上了 GPU**（连上设备后）：
 
 ```bash
 adb logcat -c
 adb shell am start -n com.dgxspark.tongyilite/.MainActivity
-adb logcat | grep -iE "TongYiLite|ggml_vulkan"
+adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 ```
 
-预期看到（默认开启 GPU、设备有 Vulkan 驱动时）：
+预期看到（默认开启 GPU、设备有对应后端驱动时）：
 
 ```
 ggml backend devices: N
-  device[0] name=... desc=... type=2 ...   # type=2 即 GPU
-n_gpu_layers = 20                           # 使用设置页设定的层数
-检测到 GPU，启用 Vulkan 加速（卸载 20 层）
+  device[0] name=Vulkan0   type=2   # type=2 即 GPU
+  device[1] name=GPUOpenCL type=1
+OpenCL selected
+n_gpu_layers = 100                    # 使用设置页设定的层数（llama.cpp 自动 clamp 到模型层数）
+n_ubatch = 512 (GPU backend)          # GPU 路径放大 prefill batch（CPU 模式为 16，见「已知问题」）
 ```
 
-若 GPU 显存不足以容纳全部层（多见于小内存设备），在「推理引擎」标签页把 GPU 层数调小（如 `10`）即可分层卸载；或直接关闭「启用 GPU 加速」开关走纯 CPU。
-
-> **注意**：Vulkan 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里 `GGML_VULKAN` 只在
+> **注意**：Vulkan/OpenCL 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里两个后端只在
 > `ANDROID_ABI == arm64-v8a` 时强制 ON）。32 位 / x86 设备仍走 CPU。
 
 ### CPU 加速（KleidiAI）
@@ -404,11 +420,11 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 | 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
-| 7 | **批量预填充 + unified KV** | ✅ | prefill 改用大 batch（n_batch=512）+ unified KV 缓存；`n_ubatch=16` 保证多轮正确性（大 ubatch 的量化 GEMM 路径有 bug，见「已知问题」） |
+| 7 | **批量预填充 + unified KV** | ✅ | prefill 用大 batch（n_batch=512）+ unified KV 缓存；**`n_ubatch` 按后端动态**：GPU 路径 512（加速 prefill）、CPU 路径 16（规避 ggml-cpu 量化 GEMM 路径 bug，见「已知问题」） |
 | 8 | **内置采样器** | ✅ | `llama_sampler_chain`：penalties → top_k(128) → top_p → temp → dist，采样后 `llama_sampler_accept` 回喂历史（重复惩罚生效、防退化循环） |
 | 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
 | 10 | **mmap 加载** | ✅ | 模型加载从全量读入 RAM 改为 mmap，降低峰值内存与 OOM 风险 |
-| 11 | **flash attention + 线程策略** | ✅ | flash_attn_type 当前 DISABLED（AUTO 在 CPU 后端会实际启用且多轮乱码，见「已知问题」）；n_threads 按核心数>4 取一半调度，避免 big.LITTLE 小核争抢降频 |
+| 11 | **flash attention + 线程策略** | ✅ | flash_attn_type 当前 DISABLED（AUTO 在 CPU 后端会实际启用且多轮乱码，见「已知问题」）；`n_threads` 按 `/proc/cpuinfo` CPU part 识别大小核拓扑，全大核 SoC 用全部核（如 SM8735 用 8），big.LITTLE 只调度大核 |
 
 ### P1 计划 🚧
 
@@ -435,9 +451,7 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 2. **重复惩罚失效**：采样循环缺 `llama_sampler_accept()`，penalties sampler 的 token 历史
    永远为空 → repeat penalty 永不生效 → 模型陷入退化循环（如 token 9841/57699 反复出现）。
 
-**修复**：`n_ubatch` 调回 `16`（强制走正确的 vec_dot 路径，首 token 延迟略增但输出正确）；
-采样后补 `llama_sampler_accept(smpl_chain, new_token)`。GEMM 路径的底层 bug 需后续在
-ggml-cpu 侧修复后才能恢复大 ubatch。
+**修复**：`n_ubatch` **按后端动态分设**——CPU 路径保留 `16`（强制走正确的 vec_dot 路径，首 token 延迟略增但输出正确），GPU 路径放大到 `512`（prefill 走 GPU kernel，不踩 CPU 量化 GEMM bug，显著提速 prefill）；采样后补 `llama_sampler_accept(smpl_chain, new_token)`。GEMM 路径的底层 bug 需后续在 ggml-cpu 侧修复后才能让 CPU 也恢复大 ubatch。已真机验证：GPU 512 / CPU 16 双路径均正确、多轮无乱码。
 
 ### Flash Attention 陷阱（2026-08-04）
 

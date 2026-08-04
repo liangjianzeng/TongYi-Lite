@@ -12,7 +12,7 @@ class DownloadService {
   factory DownloadService() => _instance;
   DownloadService._internal();
 
-  // Extended timeouts for large model downloads (up to 2GB)
+  // Extended timeouts for large model downloads (up to 2GB+)
   final Dio _dio = Dio(BaseOptions(
     connectTimeout: const Duration(minutes: 3),
     receiveTimeout: const Duration(hours: 2), // Very long timeout for large files
@@ -23,6 +23,10 @@ class DownloadService {
 
   final Map<String, _ActiveDownload> _activeDownloads = {};
   final Map<String, DateTime> _lastProgressTime = {};
+
+  /// 单次下载允许的最大自动重试次数（含首次）。网络抖动/连接被 CDN 中途
+  /// 关闭时，会自动断点续传重试，不必用户手动点「重试」。
+  static const int _maxAttempts = 8;
 
   List<DownloadTask> get activeTasks =>
       _activeDownloads.values.map((d) => d.task).toList();
@@ -56,170 +60,184 @@ class DownloadService {
     _activeDownloads[model.id] = _ActiveDownload(task: task);
     onProgress(task);
 
-    CancelToken? cancelToken;
-    try {
-      // ---- Resolve a mirror (and whether it supports HTTP Range) ----
-      final hasPartialTmp = await _hasPartialTmp(model.id);
-      _UrlInfo? urlInfo;
-      if (hasPartialTmp) {
-        // Resume REQUIRES a Range-capable mirror.
-        urlInfo = await _resolveUrl(model.mirrors, requireRange: true);
-        if (urlInfo == null) {
-          // No Range-capable mirror reachable — fall back to a plain full
-          // download; the stale partial is discarded by the resume block below.
-          debugPrint('[DownloadService] No Range-capable mirror for resume — will restart fresh');
+    final dir = await _getModelsDir();
+    await dir.create(recursive: true);
+    final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
+    final finalFile = File(p.join(dir.path, model.id + '.gguf'));
+
+    // ---- 自动重试循环：连接中断时保留已下载的 .tmp 并断点续传 ----
+    for (int attempt = 1; attempt <= _maxAttempts; attempt++) {
+      final cancelToken = CancelToken();
+      _activeDownloads[model.id] = _ActiveDownload(task: task, cancelToken: cancelToken);
+
+      try {
+        // Step 1: 解析镜像（是否支持 HTTP Range）。
+        // 若磁盘已有部分 .tmp 且长度 > 0，则必须选支持 Range 的镜像才能续传；
+        // 没有这样的镜像时退回「整段重下」并丢弃旧 .tmp。
+        final hasPartial = await tempFile.exists() && (await tempFile.length()) > 0;
+
+        _UrlInfo? urlInfo;
+        bool supportsRange = false;
+        int downloadedSoFar = 0;
+
+        if (hasPartial) {
+          downloadedSoFar = await tempFile.length();
+          task.downloadedBytes = downloadedSoFar;
+          if (model.sizeBytes > 0) task.totalBytes = model.sizeBytes;
+          onProgress(task);
+
+          urlInfo = await _resolveUrl(model.mirrors, requireRange: true);
+          if (urlInfo != null) {
+            supportsRange = true;
+            debugPrint('[DownloadService] Attempt $attempt: resuming '
+                'from ${_formatBytes(downloadedSoFar)} via Range-capable mirror');
+          } else {
+            // 没有支持 Range 的镜像 → 无法续传，整段重下。
+            debugPrint('[DownloadService] Attempt $attempt: no Range mirror, '
+                'restarting fresh');
+            await tempFile.delete();
+            downloadedSoFar = 0;
+            task.downloadedBytes = 0;
+            urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
+          }
+        } else {
           urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
         }
-      } else {
-        urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
-      }
-      if (urlInfo == null) {
-        throw DownloadException('All mirrors unreachable.');
-      }
 
-      final dir = await _getModelsDir();
-      await dir.create(recursive: true);
-      final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
-      final finalFile = File(p.join(dir.path, model.id + '.gguf'));
+        if (urlInfo == null) {
+          throw DownloadException('所有镜像当前不可达，请检查网络后重试。');
+        }
 
-      // Step 2: Decide resume point from any existing partial .tmp
-      int downloadedSoFar = 0;
-      final supportsRange = urlInfo.supportsRange;
-
-      if (await tempFile.exists()) {
-        final len = await tempFile.length();
-        if (len >= model.sizeBytes && model.sizeBytes > 0) {
-          // Already complete — just promote and finish
+        // Step 2: 已完成？直接落到最终文件。
+        if (hasPartial && model.sizeBytes > 0 &&
+            (await tempFile.length()) >= model.sizeBytes) {
           task.totalBytes = model.sizeBytes;
           await tempFile.rename(finalFile.path);
           task.state = DownloadState.completed;
           task.downloadedBytes = model.sizeBytes;
           task.endTime = DateTime.now();
           onProgress(task);
-          _activeDownloads.remove(model.id);
           return;
-        } else if (supportsRange && len > 0) {
-          // Mirror supports Range → resume from the byte we already have
-          downloadedSoFar = len;
-          task.downloadedBytes = downloadedSoFar;
-          task.totalBytes = model.sizeBytes; // needed for progress display during resume
-          debugPrint('[DownloadService] Resuming from ${_formatBytes(downloadedSoFar)}');
-          onProgress(task);
+        }
+
+        // Step 3: 下载主体。支持 Range 且有残留则断点续传，否则整段下载。
+        if (supportsRange && downloadedSoFar > 0) {
+          await _downloadRange(
+            urlInfo.url,
+            tempFile,
+            downloadedSoFar,
+            model.sizeBytes,
+            task,
+            cancelToken,
+            onProgress,
+            progressInterval,
+          );
         } else {
-          // No Range support or corrupt partial → restart fresh
-          debugPrint('[DownloadService] No resume possible, restarting fresh');
-          await tempFile.delete();
-          downloadedSoFar = 0;
-        }
-      }
+          if (task.totalBytes == 0) task.totalBytes = model.sizeBytes;
+          final response = await _dio.get<ResponseBody>(
+            urlInfo.url,
+            options: Options(
+              responseType: ResponseType.stream,
+              receiveTimeout: const Duration(hours: 2),
+            ),
+            cancelToken: cancelToken,
+          );
 
-      // Step 3: Download. Use ranged-append when the mirror supports Range + we have a
-      // partial file (true 断点续传); otherwise a plain single-connection download.
-      cancelToken = CancelToken();
-      _activeDownloads[model.id] = _ActiveDownload(task: task, cancelToken: cancelToken);
+          final body = response.data;
+          if (body == null) throw DownloadException('Empty response body.');
 
-      if (supportsRange && downloadedSoFar > 0) {
-        await _downloadRange(
-          urlInfo.url,
-          tempFile,
-          downloadedSoFar,
-          model.sizeBytes,
-          task,
-          cancelToken,
-          onProgress,
-          progressInterval,
-        );
-      } else {
-        // Use catalog size as fallback for progress display.
-        if (task.totalBytes == 0) task.totalBytes = model.sizeBytes;
-
-        // Explicit stream-based download with reliable byte-counting progress.
-        // Dio's onReceiveProgress is unreliable on Android; we track bytes ourselves.
-        final response = await _dio.get<ResponseBody>(
-          urlInfo.url,
-          options: Options(
-            responseType: ResponseType.stream,
-            receiveTimeout: const Duration(hours: 2),
-          ),
-          cancelToken: cancelToken,
-        );
-
-        final body = response.data;
-        if (body == null) throw DownloadException('Empty response body.');
-
-        // Get Content-Length from headers for total size.
-        final headerTotalStr = response.headers.value('content-length');
-        if (headerTotalStr != null) {
-          final headerTotal = int.tryParse(headerTotalStr);
-          if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
-            task.totalBytes = headerTotal;
-            debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
-          }
-        }
-
-        final raf = tempFile.openSync(mode: FileMode.writeOnlyAppend);
-        int received = downloadedSoFar;
-        DateTime? _lastProgressTime;
-
-        try {
-          await for (final chunk in body.stream) {
-            if (cancelToken?.isCancelled == true) break;
-            await raf.writeFrom(chunk);
-            received += chunk.length;
-            task.downloadedBytes = received;
-
-            // Emit progress at least every 500ms or on each chunk if chunks are small.
-            final now = DateTime.now();
-            if (_lastProgressTime == null ||
-                now.difference(_lastProgressTime!) >= progressInterval) {
-              _lastProgressTime = now;
-              onProgress(task);
+          final headerTotalStr = response.headers.value('content-length');
+          if (headerTotalStr != null) {
+            final headerTotal = int.tryParse(headerTotalStr);
+            if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
+              task.totalBytes = headerTotal;
+              debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
             }
           }
-        } finally {
-          await raf.close();
+
+          final raf = tempFile.openSync(mode: FileMode.writeOnlyAppend);
+          int received = downloadedSoFar;
+          DateTime? lastProgress;
+          try {
+            await for (final chunk in body.stream) {
+              if (cancelToken.isCancelled) break;
+              await raf.writeFrom(chunk);
+              received += chunk.length;
+              task.downloadedBytes = received;
+              final now = DateTime.now();
+              if (lastProgress == null ||
+                  now.difference(lastProgress) >= progressInterval) {
+                lastProgress = now;
+                onProgress(task);
+              }
+            }
+          } finally {
+            await raf.close();
+          }
+          onProgress(task);
         }
 
-        // Final progress emit to ensure completion state is sent.
+        // Step 4: 校验产物非空。
+        final actualSize = await tempFile.length();
+        if (actualSize == 0) {
+          throw DownloadException('Download produced empty file');
+        }
+
+        // Step 5: 提升 .tmp 为最终文件。
+        await tempFile.rename(finalFile.path);
+        task.state = DownloadState.completed;
+        task.endTime = DateTime.now();
+        _lastProgressTime.remove(model.id);
+        onProgress(task);
+        return; // 成功
+      } on DioException catch (e) {
+        // 用户暂停/取消：保留 .tmp 以便后续续传，直接退出（不标记为失败）。
+        if (CancelToken.isCancel(e) || cancelToken.isCancelled) {
+          return;
+        }
+        if (attempt < _maxAttempts) {
+          // 瞬时连接中断：保留 .tmp，短暂停顿后断点续传重试。
+          task.errorMessage = '连接中断，正在自动重试 ($attempt/${_maxAttempts - 1})…';
+          onProgress(task);
+          await Future.delayed(const Duration(seconds: 3));
+          // 若重试等待期间用户点了暂停，则中止重试。
+          if (task.state == DownloadState.paused) return;
+          continue;
+        }
+        await _fail(task, _cleanErrorMessage(e.toString()), model.id, deletePartial: true);
+        onProgress(task);
+      } catch (e) {
+        if (attempt < _maxAttempts) {
+          task.errorMessage = '下载中断，正在自动重试 ($attempt/${_maxAttempts - 1})…';
+          onProgress(task);
+          await Future.delayed(const Duration(seconds: 3));
+          if (task.state == DownloadState.paused) return;
+          continue;
+        }
+        await _fail(task, _cleanErrorMessage(e.toString()), model.id, deletePartial: true);
         onProgress(task);
       }
+    }
+  }
 
-      // Step 4: Verify download produced data — trust what the CDN actually served.
-      final actualSize = await tempFile.length();
-      if (actualSize == 0) {
-        throw DownloadException('Download produced empty file');
-      }
-
-      // Step 5: Promote .tmp to final file
-      await tempFile.rename(finalFile.path);
-      task.state = DownloadState.completed;
-      task.endTime = DateTime.now();
-      _lastProgressTime.remove(model.id);
-      onProgress(task);
-    } catch (e) {
-      if (e is DioException && CancelToken.isCancel(e)) {
-        // Paused/cancelled — keep .tmp so the next run can resume
-        return;
-      }
-      task.state = DownloadState.failed;
-      task.errorMessage = _cleanErrorMessage(e.toString());
-      task.endTime = DateTime.now();
-      _lastProgressTime.remove(model.id);
-      onProgress(task);
-
-      // Remove corrupt .tmp so a retry starts clean
+  /// 标记任务失败并（可选）清理残留 .tmp。
+  Future<void> _fail(DownloadTask task, String message, String modelId, {bool deletePartial = true}) async {
+    task.state = DownloadState.failed;
+    task.errorMessage = message;
+    task.endTime = DateTime.now();
+    _lastProgressTime.remove(modelId);
+    if (deletePartial) {
       try {
         final dir = await _getModelsDir();
-        final tmp = File(p.join(dir.path, model.id + '.gguf.tmp'));
+        final tmp = File(p.join(dir.path, modelId + '.gguf.tmp'));
         if (await tmp.exists()) await tmp.delete();
       } catch (_) {}
-    } finally {
-      _activeDownloads.remove(model.id);
     }
   }
 
   /// Download a byte range [start, ∞) and append to [file]. Correctly implements
   /// resume over mirrors that return 206 (e.g. hf-mirror.com / HuggingFace CDN).
+  /// 若服务器忽略 Range（返回 200）则退回整段写入。
   Future<void> _downloadRange(
     String url,
     File file,
@@ -242,10 +260,14 @@ class DownloadService {
     final body = response.data;
     if (body == null) throw DownloadException('Empty response body on resume.');
 
-    final raf = file.openSync(mode: FileMode.append);
+    // 206 = 部分内容（按 Range 续传）；200 = 服务器忽略 Range，整段重下。
+    final isPartial = response.statusCode == 206;
+    final raf = file.openSync(mode: isPartial ? FileMode.append : FileMode.write);
     try {
-      int received = start;
+      int received = isPartial ? start : 0;
+      if (!isPartial) task.downloadedBytes = 0;
       await for (final chunk in body.stream) {
+        if (cancelToken.isCancelled) break;
         await raf.writeFrom(chunk);
         received += chunk.length;
         task.downloadedBytes = received;
@@ -296,17 +318,6 @@ class DownloadService {
     await download(model, existingTask: task, onProgress: onProgress);
   }
 
-  /// Check if a partial .tmp file exists for the given model.
-  Future<bool> _hasPartialTmp(String modelId) async {
-    try {
-      final dir = await _getModelsDir();
-      final tmpFile = File(p.join(dir.path, modelId + '.gguf.tmp'));
-      return await tmpFile.exists() && (await tmpFile.length()) > 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<void> cancel(String modelId) async {
     final active = _activeDownloads[modelId];
     if (active != null) {
@@ -338,20 +349,13 @@ class DownloadService {
   /// When [requireRange] is true, a mirror that is reachable but does NOT
   /// support Range requests is skipped (we keep looking), because the caller
   /// needs to resume a partial download and must issue a `Range` request.
+  ///
+  /// 探测用一次极小的 `Range: bytes=0-0` 请求完成：既验证可达性，也顺带确认
+  /// Range 支持，避免像旧实现那样用 GET + ResponseType.bytes 把整个多 GB
+  /// 文件拉进内存只为读响应头（Bonsai 27B 等大模型会直接 OOM）。
   Future<_UrlInfo?> _resolveUrl(List<MirrorEntry> mirrors, {bool requireRange = false}) async {
     for (final mirror in mirrors) {
-      debugPrint('[DownloadService] Checking mirror: ${mirror.source}');
-      _UrlInfo? info;
-      try {
-        info = await _probeMirrorHead(mirror);
-      } catch (e) {
-        debugPrint('[DownloadService] Mirror ${mirror.source} HEAD error: $e');
-        try {
-          info = await _probeMirrorGet(mirror);
-        } catch (getE) {
-          debugPrint('[DownloadService] Mirror ${mirror.source} GET error: $getE');
-        }
-      }
+      final info = await _probeMirror(mirror);
       if (info == null) continue;
       if (requireRange && !info.supportsRange) {
         debugPrint('[DownloadService] Mirror ${mirror.source} reachable but no Range support, skipping');
@@ -362,31 +366,35 @@ class DownloadService {
     return null; // All mirrors unreachable
   }
 
-  Future<_UrlInfo?> _probeMirrorHead(MirrorEntry mirror) async {
-    final response = await _dio.head(
-      mirror.url,
-      options: Options(receiveTimeout: const Duration(seconds: 10)),
-    );
-    if (response.statusCode == 200 || response.statusCode == 206) {
-      final supportsRange = response.headers.value('accept-ranges')?.toLowerCase() == 'bytes';
-      debugPrint('[DownloadService] Mirror ${mirror.source} OK (HEAD -> ${response.statusCode}, Range: $supportsRange)');
-      return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
+  /// 用 `Range: bytes=0-0` 探测单个镜像：一次只取 1 字节。
+  /// 返回 206 → 支持 Range；200 → 不支持（整段下载）；其余/异常 → 不可达。
+  Future<_UrlInfo?> _probeMirror(MirrorEntry mirror) async {
+    try {
+      final response = await _dio.get<ResponseBody>(
+        mirror.url,
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: {'Range': 'bytes=0-0'},
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+      _UrlInfo? info;
+      if (response.statusCode == 206) {
+        info = _UrlInfo(url: mirror.url, supportsRange: true);
+      } else if (response.statusCode == 200) {
+        // 服务器忽略了 Range 头 → 仅支持整段下载，无断点续传。
+        info = _UrlInfo(url: mirror.url, supportsRange: false);
+      }
+      // 排空极小的响应体，释放连接。
+      try { await response.data?.stream.drain<void>(); } catch (_) {}
+      if (info != null) {
+        debugPrint('[DownloadService] Mirror ${mirror.source} OK '
+            '(status ${response.statusCode}, Range: ${info.supportsRange})');
+        return info;
+      }
+    } catch (e) {
+      debugPrint('[DownloadService] Mirror ${mirror.source} probe error: $e');
     }
-    debugPrint('[DownloadService] Mirror ${mirror.source} HEAD returned ${response.statusCode}, trying GET');
-    return _probeMirrorGet(mirror);
-  }
-
-  Future<_UrlInfo?> _probeMirrorGet(MirrorEntry mirror) async {
-    final getResponse = await _dio.get(
-      mirror.url,
-      options: Options(receiveTimeout: const Duration(seconds: 10), responseType: ResponseType.bytes),
-    );
-    if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
-      final supportsRange = getResponse.headers.value('accept-ranges')?.toLowerCase() == 'bytes';
-      debugPrint('[DownloadService] Mirror ${mirror.source} OK (GET -> ${getResponse.statusCode}, Range: $supportsRange)');
-      return _UrlInfo(url: mirror.url, supportsRange: supportsRange);
-    }
-    debugPrint('[DownloadService] Mirror ${mirror.source} GET failed: ${getResponse.statusCode}');
     return null;
   }
 
@@ -402,9 +410,10 @@ class DownloadService {
   }
 
   String _cleanErrorMessage(String error) {
-    // Clean up Dio/HTTP exception messages for display
+    // 连接被 CDN 中途关闭 —— 现在已经内置自动断点续传重试，
+    // 只有多次重试仍失败才会走到这里，不再误导用户是「CDN 不支持续传」。
     if (error.contains('Connection closed while receiving data')) {
-      return '连接断开，请重试（CDN不支持断点续传）';
+      return '下载连接多次中断，已自动续传仍失败，请稍后重试';
     }
     if (error.contains('timeout')) {
       return '下载超时，请检查网络连接后重试';

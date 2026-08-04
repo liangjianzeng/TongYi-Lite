@@ -173,6 +173,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   Widget _buildModelCard(ModelConfig model) {
     return Consumer(
       builder: (context, ref, _) {
+        // 监听模型生命周期状态：加载/卸载后会触发卡片重建，刷新"已加载/卸载"按钮。
+        ref.watch(modelManagerProvider);
         final task = ref.watch(downloadTaskProvider(model.id));
         final isCached = task?.state == DownloadState.completed;
 
@@ -201,9 +203,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     Text(modelTypeIcon(model.type)),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        model.name,
-                        style: Theme.of(context).textTheme.titleSmall,
+                      child: _ModelNameField(
+                        modelId: model.id,
+                        defaultName: model.name,
                       ),
                     ),
                     _buildStatusChip(displayState),
@@ -272,6 +274,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   Widget _buildActionButtons(ModelConfig model, DownloadTask? task, bool isCached) {
     final activeState = task?.state ?? DownloadState.idle;
     final manager = ref.read(modelManagerProvider.notifier);
+    final ms = ref.watch(modelManagerProvider);
 
     switch (activeState) {
       case DownloadState.downloading:
@@ -299,8 +302,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       case DownloadState.completed:
       default:
         if (isCached) {
-          final isLoading = manager.isLoading;
-          final isLoadedHere = manager.modelId == model.id && manager.isLoadedState;
+          final isLoading = ms.isLoading;
+          final isLoadedHere = ms.modelId == model.id && ms.isLoaded;
 
           return Row(
             children: [
@@ -340,9 +343,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               // Unload button
               if (isLoadedHere) ...[
                 OutlinedButton.icon(
-                  onPressed: manager.isBusy ? null : () async {
-                    await ref.read(modelManagerProvider.notifier).unloadModel();
-                  },
+                  onPressed: manager.isBusy ? null : () => unloadModelAndNotify(ref, context, model.name),
                   icon: const Icon(Icons.close, size: 18),
                   label: const Text('卸载'),
                   style: OutlinedButton.styleFrom(foregroundColor: Colors.orange.shade700),
@@ -370,6 +371,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     }
   }
 
+  /// 模型状态 chip —— AppBar 右侧紧凑指示。
   Widget _buildStatusChip(DownloadState state) {
     Color color;
     String label;
@@ -455,38 +457,71 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _handleLoadModel(ModelConfig model) async {
     final manager = ref.read(modelManagerProvider.notifier);
+    final isGenerating = ref.read(isGeneratingProvider);
 
+    // 1) 已有一个不同模型在内存中（可能正在推理）→ 友好提醒，确认后再切换。
     if (manager.isLoadedState && manager.modelId != model.id) {
       final confirm = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('切换模型'),
-          content: Text('${model.name} 将替换当前运行的 ${manager.currentModelName}，是否继续？'),
+          title: const Row(
+            children: [
+              Icon(Icons.info_outline, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('已有模型正在运行'),
+            ],
+          ),
+          content: Text(
+            '当前「${manager.currentModelName}」已在内存中'
+            '${isGenerating ? '（正在推理）' : ''}。\n\n'
+            '切换到「${model.name}」会先卸载当前模型，再加载新模型。确定继续吗？',
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('切换')),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('切换模型'),
+            ),
           ],
         ),
       );
       if (confirm != true) return;
     }
 
-    // Mark generating so the UI reflects loading state across all screens.
-    ref.read(isGeneratingProvider.notifier).state = true;
+    // 2) 若正在推理，必须先停止生成，否则卸载模型会令原生引擎崩溃（红屏）。
+    if (ref.read(isGeneratingProvider)) {
+      try {
+        await ref.read(chatNotifierProvider.notifier).stopGeneration();
+      } catch (_) {
+        // 忽略停止异常，继续尝试卸载/加载。
+      }
+      // 给原生层一点时间完成停止流程。
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
 
-    final ok = await manager.loadModel(model.id);
-
-    // The load can take many seconds; if the widget was disposed while
-    // awaiting (user switched tabs), bail before touching ref / context.
     if (!mounted) return;
 
-    // Always reset generating flag when load finishes (success or failure).
-    ref.read(isGeneratingProvider.notifier).state = false;
+    // 3) 弹出「加载中」对话框，实时展示进度（大模型耗时较长，避免用户不知所措）。
+    final loadFuture = manager.loadModel(model.id);
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _ModelLoadProgressDialog(modelName: model.name),
+    );
 
+    final ok = await loadFuture;
+
+    // 加载结束，关闭进度弹窗。
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
     if (!mounted) return;
 
+    // 4) 走原有完成提示路径：成功 / 失败 SnackBar。
     if (ok) {
-      // Sync currentModelIdProvider so chat screen uses the correct model.
       ref.read(currentModelIdProvider.notifier).state = model.id;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('✅ ${model.name} 已加载到内存'), backgroundColor: Colors.green),
@@ -497,6 +532,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       );
     }
   }
+
 }
 
 // =========================================================================
@@ -768,9 +804,7 @@ class _InferenceEngineTab extends ConsumerWidget {
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: modelState.isLoaded
-                      ? () async {
-                          await ref.read(modelManagerProvider.notifier).unloadModel();
-                        }
+                      ? () => unloadModelAndNotify(ref, context, modelState.modelName ?? '当前模型')
                       : null,
                   icon: const Icon(Icons.close),
                   label: const Text('卸载模型'),
@@ -961,7 +995,7 @@ class _AboutCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            _AboutRow(label: '版本', value: '0.1.2'),
+            _AboutRow(label: '版本', value: '0.1.3'),
             _AboutRow(label: '推理引擎', value: 'llama.cpp b1017+'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
@@ -1191,4 +1225,159 @@ class _RecentLogsWidget extends ConsumerWidget {
       ),
     );
   }
+}
+
+// =========================================================================
+// 自定义模型显示名称输入框（可选）
+// =========================================================================
+
+/// 自定义模型显示名称输入框（可选）。
+/// 用 StatefulWidget 持有独立的 TextEditingController，
+/// 使下载进度频繁重建时不会丢失输入焦点/光标。
+/// 模型名内联编辑框（替换原独立「自定义名称」行）。
+/// 直接显示在模型卡片标题位置：有自定义名则显示自定义名，否则显示模型配置名
+/// （不持久化，等同于「未改名」）；点击即可编辑，清空则回落到配置名。
+class _ModelNameField extends ConsumerStatefulWidget {
+  final String modelId;
+  final String defaultName;
+  const _ModelNameField({required this.modelId, required this.defaultName});
+  @override
+  ConsumerState<_ModelNameField> createState() => _ModelNameFieldState();
+}
+
+class _ModelNameFieldState extends ConsumerState<_ModelNameField> {
+  late final TextEditingController _controller;
+  bool _initialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final custom = ref.watch(modelDisplayNameProvider)[widget.modelId];
+    final name = custom ?? '';
+    // 首次构建时把已存自定义名（或回落到配置名）回填；后续不覆盖用户输入。
+    if (!_initialized) {
+      _initialized = true;
+      _controller.text = name.isEmpty ? widget.defaultName : name;
+    }
+    final isCustom = name.isNotEmpty;
+    return TextField(
+      controller: _controller,
+      decoration: InputDecoration(
+        isDense: true,
+        border: InputBorder.none,
+        hintText: widget.defaultName,
+        hintStyle: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w500),
+        suffixIcon: isCustom
+            ? IconButton(
+                icon: const Icon(Icons.clear, size: 16),
+                tooltip: '清除自定义名称，恢复配置名',
+                onPressed: () {
+                  _controller.text = widget.defaultName;
+                  ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
+                },
+              )
+            : null,
+      ),
+      style: Theme.of(context).textTheme.titleSmall,
+      maxLines: 1,
+      onChanged: (v) {
+        final trimmed = v.trim();
+        if (trimmed.isEmpty) {
+          // 清空 → 回落配置名，且不持久化覆盖。
+          _controller.text = widget.defaultName;
+          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
+        } else if (trimmed == widget.defaultName) {
+          // 与配置名相同 → 视为未改名，不存储覆盖。
+          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
+        } else if (trimmed != name) {
+          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, trimmed);
+        }
+      },
+    );
+  }
+}
+
+/// 加载模型时的「加载中」对话框。
+/// 监听 [modelManagerProvider]，实时展示原生层推送的最新加载日志，
+/// 让用户清楚大模型（数 GB）加载的进展，避免误以为卡死。
+class _ModelLoadProgressDialog extends ConsumerWidget {
+  final String modelName;
+  const _ModelLoadProgressDialog({required this.modelName});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ms = ref.watch(modelManagerProvider);
+    final log = ms.latestLog;
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              Text('正在加载模型…', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(modelName, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 12),
+              if (log != null)
+                Container(
+                  width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 120),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: SingleChildScrollView(
+                    child: Text(
+                      log,
+                      style: TextStyle(fontSize: 12, color: Colors.blue.shade800),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 卸载当前已加载模型，并弹出结果提示（成功/失败）。
+/// 顶层函数：设置页（模型卡片 / 推理引擎页）均可调用。
+/// 卸载完成后由 modelManagerProvider 状态变化驱动 UI 刷新（模型卡片、引擎状态卡）。
+Future<void> unloadModelAndNotify(
+  WidgetRef ref,
+  BuildContext context,
+  String modelName,
+) async {
+  final manager = ref.read(modelManagerProvider.notifier);
+  if (manager.isBusy) return;
+
+  final ok = await manager.unloadModel();
+  if (!context.mounted) return;
+
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(ok
+          ? '✅ 已卸载 $modelName，已释放内存'
+          : '❌ 卸载失败，请重试'),
+      backgroundColor: ok ? Colors.green : Colors.red,
+      duration: const Duration(seconds: 2),
+    ),
+  );
 }

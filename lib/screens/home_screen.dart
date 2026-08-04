@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider;
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, modelDisplayNameProvider;
 import '../providers/model_provider.dart';
 import '../models/conversation.dart';
 import '../services/storage_permission_service.dart';
@@ -22,8 +22,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _textController = TextEditingController();
   String _currentConversationId = '';
   bool _initiallyLoaded = false;
-  // When true, the view auto-scrolls to the newest message (bottom in a
-  // reverse ListView). Disabled once the user scrolls up to read history.
+  // When true, the view auto-scrolls to the newest message (bottom of the
+  // list). Disabled once the user scrolls up to read history.
   bool _followStream = true;
 
   // Image picker state
@@ -46,9 +46,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     super.dispose();
   }
 
-  /// Track whether the user is near the bottom of the (reverse) list so we only
-  /// auto-scroll while they're following the conversation, not when they've
-  /// scrolled up to read history.
+  /// Track whether the user is near the bottom of the list (where the newest
+  /// message lives) so we only auto-scroll while they're following the
+  /// conversation, not when they've scrolled up to read history.
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final pos = _scrollController.position;
@@ -170,9 +170,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _textController.clear();
     setState(() => _selectedImagePath = null);
 
-    // Re-anchor to the newest message. With `reverse: true` the list grows
-    // downward from the input bar, so the newest message sits at the bottom
-    // (maxScrollExtent). Keep following as new content streams in.
+    // Re-anchor to the newest message (bottom of the list, at maxScrollExtent).
+    // Keep following as new content streams in.
     _followStream = true;
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
@@ -281,6 +280,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Widget _buildModelStatusChip(ModelState ms, bool isGenerating) {
     final color = _colorFor(ms.phaseColor);
+    // 用户自定义显示名称（模型加载后优先展示，未设置则回落默认状态文案）。
+    final customName = ref.watch(modelDisplayNameProvider)[ms.modelId];
 
     // Idle + not generating → no chip needed (leading returns null-like empty widget)
     if (ms.phase == ModelLifecyclePhase.idle && !isGenerating) {
@@ -301,7 +302,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           children: [
             if (isGenerating) _buildPulsingDot(),
             const SizedBox(width: 4),
-            Text('模型就绪', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color)),
+            Text(
+              customName ?? '模型就绪',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color),
+            ),
           ],
         );
         break;
@@ -354,12 +358,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         isGenerating: isGenerating,
         onUnload: () async {
           Navigator.pop(ctx);
-          await notifier.unloadModel();
+          final ok = await notifier.unloadModel();
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(ok ? '✅ 已卸载模型，已释放内存' : '❌ 卸载失败，请重试'),
+              backgroundColor: ok ? Colors.green : Colors.red,
+              duration: const Duration(seconds: 2),
+            ),
+          );
         },
         onLoad: () async {
           final id = ms.modelId;
           if (id != null) {
             Navigator.pop(ctx);
+            // 若正在推理，先停止生成，避免卸载/重载时原生引擎崩溃（红屏）。
+            if (ref.read(isGeneratingProvider)) {
+              try {
+                await ref.read(chatNotifierProvider.notifier).stopGeneration();
+              } catch (_) {}
+              await Future.delayed(const Duration(milliseconds: 300));
+            }
             await notifier.loadModel(id);
           }
         },
@@ -515,10 +534,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           });
         }
 
+        // 聊天顺序：自上而下 = 最早的在上、最新的在下（messages 即旧→新）。
+        // 无 reverse，maxScrollExtent 即最底部（最新消息）。
         return ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
-          reverse: true,
           itemCount: messages.length,
           itemBuilder: (context, index) {
             final msg = messages[index];
@@ -529,6 +549,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               // Newest message is the last index (messages are ordered oldest→newest).
               isStreaming: msg.isStreaming && index == messages.length - 1,
               imagePath: msg.imagePath,
+              inferenceStats: msg.inferenceStats,
             );
           },
         );

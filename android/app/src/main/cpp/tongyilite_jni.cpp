@@ -21,6 +21,8 @@
 #include <functional>
 #include <sstream>
 #include <deque>
+#include <fstream>
+#include <cstdlib>
 
 // llama.cpp headers
 #include "llama.h"
@@ -78,6 +80,70 @@ static int detect_gpu_layers() {
     }
     LOGI("GPU backend available -> offloading all layers");
     return 999;
+}
+
+// ============================================================================
+// Generation stats — captured at completion time, surfaced to Dart so the UI
+// shows the SAME tokens/sec the native log reports (real llama.cpp token count
+// / pure generation time), not emitted-character count over wall-clock time
+// that also includes prompt prefill. Written by completion(), read by
+// Java_..._nativeGetLastStats().
+// ============================================================================
+struct GenStats {
+    int    n_gen       = 0;   // real llama.cpp decoded tokens (tok/s numerator)
+    double t_gen_ms    = 0;   // pure generation wall time (tok/s denom, excludes prefill)
+    double t_prompt_ms = 0;   // prompt prefill time (diagnostics only)
+};
+static GenStats g_last_stats;
+
+// ============================================================================
+// CPU topology — count big cores for the thread pool
+// ============================================================================
+// Reads /proc/cpuinfo and counts how many cores are "big" (performance) vs
+// "little" (efficiency). Rationale: for inference thread count we want ALL
+// cores when the SoC has no little cluster (e.g. Snapdragon 8s Gen 4 =
+// 1×X4 + 7×A720, all big), but only the big cores when the SoC is big.LITTLE
+// (little cores are slower and cause contention / thermal issues). The old
+// heuristic `nt = hc/2` wasted half the machine on all-big SoCs (measured:
+// 8 cores → 4 threads → 27B Q1_0 CPU 0.8 tok/s, 4B Q4_K_M CPU 6.8 tok/s).
+// ARM Cortex part IDs (from /proc/cpuinfo "CPU part"):
+//   little: A53=0xd03, A55=0xd05, A510=0xd46, A520=0xd80
+//   big:    A72=0xd08, A73=0xd09, A75=0xd40, A76=0xd41, A77=0xd42, A78=0xd44,
+//           A710=0xd47, A715=0xd48, A720=0xd81, A725=0xd4b, X1=0xd45, X2=0xd46,
+//           X3=0xd4a, X4=0xd82, X925=0xd84, X930=0xd85
+// Returns number of big cores, or -1 if /proc/cpuinfo cannot be parsed.
+static int detect_big_core_count() {
+    std::ifstream f("/proc/cpuinfo");
+    if (!f.is_open()) {
+        LOGW("detect_big_core_count: cannot open /proc/cpuinfo");
+        return -1;
+    }
+    int big = 0, little = 0;
+    std::string line;
+    while (std::getline(f, line)) {
+        // "CPU part\t: 0xd81"
+        size_t p = line.find("CPU part");
+        if (p == std::string::npos) continue;
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        unsigned long part = strtoul(line.c_str() + colon + 1, nullptr, 16);
+        switch (part) {
+            case 0xd03: // A53
+            case 0xd05: // A55
+            case 0xd46: // A510
+            case 0xd80: // A520
+                little++;
+                break;
+            default:
+                // Unknown part — treat as big (all cores on modern SoCs are
+                // performance-class; unknown ARMv9 parts are A7xx/X-class).
+                big++;
+                break;
+        }
+    }
+    if (big + little == 0) return -1;
+    LOGI("CPU topology: big=%d little=%d", big, little);
+    return big;
 }
 
 // ============================================================================
@@ -207,14 +273,14 @@ struct InferenceEngine {
         // The backend is selected here by scanning the ggml backend registry for
         // devices of the requested type; llama.cpp then offloads layers only to
         // that backend because we only keep it in the devices list.
-        // NOTE(2026-08-04): the Vulkan backend is numerically CORRUPT on Adreno 825
-        // for Q4_K_M (every sampled token collapses to padding id 127 -> empty
-        // reply), regardless of offload count — verified on-device with
-        // n_gpu_layers=50 (clamped to 25 = full offload). The OpenCL backend
-        // (used by llama.rn on Android, supports Q4_K) is expected to work; the
-        // UI therefore defaults to OpenCL and lets the user switch back to
-        // Vulkan/CPU for comparison. n_gpu_layers matters only for partial
-        // offload on a backend that is not corrupt.
+        // NOTE(2026-08-04, revised): Vulkan was earlier suspected numerically
+        // corrupt on Adreno 825 (padding-token collapse), but on-device retests
+        // with V0.1.3 show Vulkan decodes correctly and at throughput within ~2%
+        // of OpenCL for both 4B (Q4_K_M) and 27B (Q1_0). The earlier collapse
+        // was caused by unrelated pipeline bugs (n_ubatch=512 + missing
+        // llama_sampler_accept), now fixed. OpenCL is still preferred in auto
+        // mode because Adreno's OpenCL driver is highly optimized; Vulkan is a
+        // fully usable alternative the user can select for comparison.
         std::string backend = gpu_backend ? gpu_backend : "auto";
         int effective_gpu_layers = 0;
         bool vulkan_ok = false, opencl_ok = false;
@@ -248,10 +314,10 @@ struct InferenceEngine {
                 reportLoadingLog("已选择 CPU 推理");
             } else if (backend == "vulkan") {
                 if (vulkan_ok) {
-                    // Known-corrupt on this device; keep the warning visible so
-                    // a user who switches here knows what to expect.
-                    LOGW("Vulkan selected — NOTE: corrupt on Adreno 825 (padding-token collapse).");
-                    reportLoadingLog("已选择 Vulkan 后端（注意：本设备 Adreno 825 上输出可能崩坏）");
+                    // Vulkan verified working on Adreno 825 (V0.1.3): correct
+                    // output, throughput within ~2% of OpenCL.
+                    LOGI("Vulkan selected — verified OK on Adreno 825 (Q4_K_M & Q1_0).");
+                    reportLoadingLog("已选择 Vulkan 后端");
                     effective_gpu_layers = gpu_layers;
                 } else {
                     LOGW("Vulkan backend requested but not available -> CPU");
@@ -266,13 +332,13 @@ struct InferenceEngine {
                     LOGW("OpenCL backend requested but not available -> CPU");
                     reportLoadingLog("OpenCL 不可用，回落 CPU");
                 }
-            } else { // auto: prefer OpenCL (Vulkan known-corrupt on Adreno), else Vulkan
+            } else { // auto: prefer OpenCL (well-optimized on Adreno; Vulkan equivalent)
                 if (opencl_ok) {
                     LOGI("auto -> OpenCL");
                     reportLoadingLog("自动选择 OpenCL 后端");
                     effective_gpu_layers = gpu_layers;
                 } else if (vulkan_ok) {
-                    LOGW("auto -> Vulkan (corrupt on Adreno 825; prefer OpenCL if available)");
+                    LOGI("auto -> Vulkan (equivalent to OpenCL on Adreno 825)");
                     reportLoadingLog("自动选择 Vulkan 后端");
                     effective_gpu_layers = gpu_layers;
                 } else {
@@ -338,14 +404,16 @@ struct InferenceEngine {
         // and works fine. We now enable the unified buffer (kv_unified=true) so
         // large batches are correct, and raise both batch sizes to 512.
         ctx_params.n_batch  = 512;
-        // n_ubatch back to 16: with ubatch >= 32, ggml-cpu dispatches to the
-        // quantized GEMM path, which on this build (armv8.4-a+dotprod+i8mm)
-        // produces garbage logits when the prompt exceeds 32 tokens
-        // (verified on-device: turn 1 "你好" 15 tokens OK; turn 2 37-39 tokens
-        // → noise "oother民nedbish枉叶"). With ubatch=16 the mul-mat falls back
-        // to the vec_dot path which is correct. Prefill is slower but correct;
-        // the GEMM corruption needs fixing in ggml-cpu before restoring 512.
-        ctx_params.n_ubatch = 16;
+        // n_ubatch: physical prefill chunk size. On the CPU backend, ubatch >= 32
+        // makes ggml-cpu dispatch to the quantized GEMM path, which on this build
+        // (armv8.4-a+dotprod+i8mm) emits garbage logits when the prompt exceeds 32
+        // tokens (verified on-device: turn 2 → nonsense). ubatch=16 forces the
+        // correct vec_dot path, so CPU mode MUST stay at 16. On the GPU backend
+        // (OpenCL/Vulkan) prefill runs on the GPU kernel and does NOT hit that CPU
+        // GEMM bug, so we raise ubatch to 512 for fast prefill there.
+        ctx_params.n_ubatch = enable_gpu ? 512 : 16;
+        LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
+             enable_gpu ? "GPU" : "CPU");
         // Flash attention: AUTO enables it on backends that support it (e.g. Vulkan
         // GPU on Android). NOTE: on CPU this llama.cpp build also implements
         // FLASH_ATTN_EXT (ggml-cpu/ops.cpp), so AUTO does NOT no-op on CPU — it
@@ -355,17 +423,24 @@ struct InferenceEngine {
         // (turn 1 OK 15 tokens; turn 2: 386 tokens of "rekl bytesRead,}" noise).
         // Use DISABLED until the flash-attn-after-seq_rm state reset is verified.
         ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-        // Thread strategy (matches llama.cpp common.cpp default / llama.rn): use ALL
-        // cores when the device has <= 4, otherwise HALF the cores to avoid
-        // over-subscribing a big.LITTLE cluster (little-core contention / thermal
-        // throttling). Applies to both generation and batch processing.
+        // Thread strategy: use ALL cores on all-big SoCs (e.g. Snapdragon 8s Gen 4
+        // = 1×X4 + 7×A720), or only the big cores on big.LITTLE SoCs (little cores
+        // cause contention / thermal issues). Falls back to all cores if topology
+        // cannot be read. The old `hc/2` heuristic halved throughput on all-big
+        // SoCs (measured: 8 cores → 4 threads). Applies to generation + batch.
         {
             unsigned hc = std::thread::hardware_concurrency();
-            int nt = (hc == 0) ? 4 : (hc > 4 ? (int)(hc / 2) : (int)hc);
+            int big = detect_big_core_count();
+            int nt;
+            if (big > 0) {
+                nt = big; // big.LITTLE → big cores only; all-big → all cores
+            } else {
+                nt = (int)hc; // fallback: all cores
+            }
             if (nt < 1) nt = 1;
             ctx_params.n_threads       = nt;
             ctx_params.n_threads_batch = nt;
-            LOGI("n_threads = %d (hardware_concurrency=%u, half-on-big.LITTLE)", nt, hc);
+            LOGI("n_threads = %d (hardware_concurrency=%u, big=%d)", nt, hc, big);
         }
         // Unified KV buffer: REQUIRED for large-batch prefill to be correct on this
         // build (eliminates the old classic-KV large-batch garbage-logits bug).
@@ -513,7 +588,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI unified-kv+ubatch(16)+no-fa+penalty+accept BUILD 20260804m =====");
+        LOGI("===== TongYiLite JNI unified-kv+ubatch(16)+no-fa+penalty+accept BUILD 20260804 V0.1.3 =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -907,6 +982,10 @@ struct InferenceEngine {
             is_running = false;
 
             double tok_per_sec = n_gen > 0 ? (n_gen / (t_gen_ms / 1000.0)) : 0.0;
+            // Surface real stats to Dart so the UI's tok/s matches this log line.
+            g_last_stats.n_gen       = n_gen;
+            g_last_stats.t_gen_ms    = t_gen_ms;
+            g_last_stats.t_prompt_ms = t_prompt_ms;
             {
                 std::string hex;
                 char tmp[4];
@@ -1333,6 +1412,17 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
 
     LOGI("nativeCompletionWithMessages done, result len=%zu", result.length());
     return utf8_to_jstring(env, result);
+}
+
+// --- Last generation stats (surfaced to Dart for accurate tok/s) ---
+
+JNIEXPORT jstring JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, jobject) {
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f}",
+             g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms);
+    return utf8_to_jstring(env, buf);
 }
 
 // --- Benchmark ---

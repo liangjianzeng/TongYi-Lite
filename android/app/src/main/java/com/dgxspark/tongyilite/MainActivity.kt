@@ -90,6 +90,7 @@ class MainActivity : FlutterActivity() {
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
+                "getInferenceStats" -> handleGetInferenceStats(result)
                 else            -> result.notImplemented()
             }
         }
@@ -371,6 +372,16 @@ class MainActivity : FlutterActivity() {
                 ))
             } catch (e: Exception) {
                 logE("handleGetMemoryInfo", "result.success failed", e)
+            }
+        }
+    }
+
+    private fun handleGetInferenceStats(result: MethodChannel.Result) {
+        mainHandler.post {
+            try {
+                result.success(engine.getLastStats())
+            } catch (e: Exception) {
+                logE("handleGetInferenceStats", "result.success failed", e)
             }
         }
     }
