@@ -65,6 +65,10 @@ TongYi-Lite/
 │   ├── src/                        # 推理引擎源码
 │   ├── ggml/src/ggml-vulkan/       # Vulkan GPU 后端
 │   └── ...
+├── third_party/kleidiai/           # KleidiAI CPU 加速库（vendored, v1.24.0）
+│   └── kai/                        # 手调 matmul/dotprod/i8mm 内核源码
+│                                     (llama.cpp 默认 FetchContent 联网拉取，
+│                                      本项目改为本地 vendored 规避构建期联网)
 ├── lib/                              # Flutter Dart 层
 │   ├── main.dart                     # 入口（初始化 JNI + 加载模型目录 + ProviderScope）
 │   ├── models/
@@ -166,6 +170,20 @@ git submodule update --init --recursive
 ```
 
 > **注意**：首次 `git submodule update` 会从 GitHub 下载 llama.cpp（约 3000+ 文件），需要网络畅通。国内用户建议使用代理。
+
+### 1b. 准备 KleidiAI 源码（CPU 加速必需）
+
+llama.cpp b1017+ 在开启 `GGML_CPU_KLEIDIAI` 时会通过 **FetchContent 联网从 GitHub 下载** KleidiAI
+源码；若构建环境无法访问 GitHub（如 CI 沙箱），配置阶段会直接失败。本项目已改为**本地 vendored**：
+
+```bash
+git clone --depth 1 --branch v1.24.0 \
+    https://github.com/ARM-software/kleidiai \
+    third_party/kleidiai
+```
+
+> 该目录已在 `.gitignore` 中忽略（可从官方仓库重建）。若 `third_party/kleidiai` 缺失，CMake 配置会
+> 以 `FATAL_ERROR` 明确提示这条命令。
 
 ### 2. 获取 Flutter 依赖
 
@@ -285,7 +303,9 @@ flutter build appbundle --release
 
 **存储信息直接扫描磁盘**：设置页"存储信息"区域直接扫描 `models/` 目录下的所有 `.gguf` 文件，即使模型 ID 不在 catalog JSON 中也能正确显示（避免重装 APK 后已下载模型消失）。
 
-**推理日志**：新增 `inference_log_screen.dart` 查看页，可查看模型加载、卸载、生成的完整过程日志。
+**推理日志**：`inference_log_screen.dart` 查看页展示模型加载、卸载、生成的完整过程日志，并针对每次
+大模型交互记录请求/响应概况与性能指标（提示长度、历史条数、生成 token 数、**首 token 延迟**、
+**tok/s**、总耗时、输出字数），便于排查速度与正确性问题。
 
 ---
 
@@ -306,9 +326,12 @@ flutter logs | grep TongYiLite
 
 - `tongyilite_jni.cpp` 的 `detect_gpu_layers()` 在加载模型时遍历 ggml 后端注册表
   （`ggml_backend_dev_count()` / `ggml_backend_dev_get()`），打印每个设备的名称 / 类型 / 显存；
-- 在「设置 → 推理引擎」标签页有一个 **「启用 GPU 加速」开关（默认开启）** 和 **「GPU 层数」滑块（默认 20）**：
-  - 开关关闭 → 强制纯 CPU（`n_gpu_layers = 0`）；
-  - 开关开启且探测到 GPU 设备 → 按滑块设定的层数卸载（默认 20），否则回落纯 CPU 推理。
+- 在「设置 → 推理引擎」标签页：
+  - **「启用 GPU 加速」开关（默认开启）** 和 **「GPU 层数」滑块（默认 20）**：
+    - 开关关闭 → 强制纯 CPU（`n_gpu_layers = 0`）；
+    - 开关开启且探测到 GPU 设备 → 按滑块设定的层数卸载（默认 20），否则回落纯 CPU 推理。
+  - **「上下文大小」滑块（默认 4096，范围 1024~65536）**：控制 KV 缓存按 `n_ctx` 预分配的大小，
+    短对话可调小省内存、长对话/长上下文任务调大。
   - 设置经 `MethodChannel → Kotlin → JNI` 透传给原生层，实时生效、重启保留。
 
 这样做的好处：同一个 APK 装在没有 Vulkan 驱动的设备上也不会卡死（探测不到 GPU 时自动回落 CPU）。
@@ -335,6 +358,24 @@ n_gpu_layers = 20                           # 使用设置页设定的层数
 > **注意**：Vulkan 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里 `GGML_VULKAN` 只在
 > `ANDROID_ABI == arm64-v8a` 时强制 ON）。32 位 / x86 设备仍走 CPU。
 
+### CPU 加速（KleidiAI）
+
+即使不开 GPU，纯 CPU 推理也通过 KleidiAI + 微架构调优保持可用速度：
+
+- **KleidiAI dotprod / i8mm 内核**：`CMakeLists.txt` 通过 `GGML_CPU_ARM_ARCH=armv8.4-a+dotprod+i8mm`
+  让 ggml 为本机 Adreno/Snapdragon 编译 dotprod + i8mm 手调 matmul 内核（这是**正确做法**；直接往
+  `CMAKE_C_FLAGS` 塞 `-march` 不会传到 kai 源文件，会导致内核被静默跳过）。
+- **Debug 构建也强制 `-O3 -DNDEBUG`**：Android debug 变体默认 `-O0` 且无 `NDEBUG`，会让 llama.cpp 的
+  量化 matmul 内核完全失去优化（曾导致 0.5B 模型仅约 0.6 tok/s）。`CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"`
+  修复后大幅提速；`NDEBUG` 附带让越界的 `get_logits_ith` 返回 `nullptr` 而非中止进程。
+
+验证 CPU 内核是否真生效（编译后查 `compile_commands.json`，dotprod/i8mm 计数应 >0）：
+
+```bash
+grep -c "kai_matmul.*dotprod" android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
+grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
+```
+
 
 ---
 
@@ -358,7 +399,7 @@ n_gpu_layers = 20                           # 使用设置页设定的层数
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
 | 1 | **JNI 直调** | ✅ | 无 HTTP Server，高效省内存 |
-| 2 | **CPU 推理** | ✅ | KleidiAI + SME2 加速（Vulkan 不可用时回退） |
+| 2 | **CPU 推理** | ✅ | KleidiAI dotprod/i8mm + 微架构调优（`GGML_CPU_ARM_ARCH` + Debug `-O3`；Vulkan 不可用时回退） |
 | 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
