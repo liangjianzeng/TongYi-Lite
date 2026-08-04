@@ -8,6 +8,21 @@
 
 ## [0.1.2] — 2026-08-03
 
+### 补充修复（2026-08-04 · 真机验证）
+
+- **量化 GEMM 路径计算出错（根因 5）**：`n_ubatch=512` 时，prompt ≥32 tokens 的 prefill
+  进入 ggml-cpu 量化 GEMM 路径产生垃圾 logits（第一轮 15 tokens 走 vec_dot 正常，第二轮
+  37+ tokens 乱码 `oother民nedbish枉叶`）。`n_ubatch` 调回 `16` 强制走正确的 vec_dot 路径
+  （首 token 延迟略增，GEMM bug 待 ggml-cpu 侧修复后恢复）。
+- **重复惩罚失效（根因 6）**：采样循环缺 `llama_sampler_accept()`，penalties 的 token
+  历史永不更新 → repeat penalty 永不生效 → 退化循环（9841/57699 反复、无 EOS）。采样后
+  补 `llama_sampler_accept(smpl_chain, new_token)`。
+- **flash attention CPU 陷阱**：`LLAMA_FLASH_ATTN_TYPE_AUTO` 在 CPU 后端会实际启用
+  （ggml-cpu 实现了 FLASH_ATTN_EXT op），seq_rm 清空 KV 后第二轮 prefill 乱码。当前
+  `DISABLED`，待状态重置验证后恢复。
+- **流式输出块化**：`on_token` 回调批处理从 64 字节（≈21 个 CJK 字符）改为 8 字节
+  （≈2 字），恢复逐字流式观感。
+
 ### 修复（多轮对话正确性 · 重大）
 
 彻底修复「第一轮正常、第二轮起输出乱码 / 死循环（"魔魔魔…"）/ 空回复 / 只出两个字」的问题。
