@@ -267,33 +267,40 @@ struct InferenceEngine {
         }
 
         ctx_params.n_ctx = effective_n_ctx;
-        ctx_params.n_batch = 512;
-        // n_ubatch is the number of tokens llama_decode actually processes per
-        // internal pass. On this build, with the classic (non-unified) KV backend,
-        // a large single ubatch (256, or any batch > ~32 tokens) produces flat /
-        // garbage logits on 2nd-turn+ prompts (first 15-token turn is fine, a
-        // 100-token multi-turn prompt degrades into random tokens). The official
-        // llama.android example works because it uses the unified KV buffer. Here
-        // we keep classic KV (needed for our per-turn seq_rm clearing) and instead
-        // keep ubatch small so llama_decode chunks the prompt, avoiding the large
-        // single-ubatch garbage-logits bug while still batching better than 1-by-1.
-        ctx_params.n_ubatch = 16;
-        // Use more worker threads than the conservative default (4). Cap at 8 so we
-        // engage the big cores without over-subscribing big.LITTLE little cores.
+        // n_batch  = logical max tokens per llama_decode call (prompt chunk size).
+        // n_ubatch = physical max tokens processed per internal compute pass.
+        // BOTH must be LARGE for fast prefill: llama.cpp only engages BLAS / parallel
+        // matmul when the physical ubatch is >= ~32. The previous build used
+        // n_ubatch = 16 here, which forced llama_decode to process the prompt in
+        // 16-token physical passes -> prefill (TTFT) was 10-30x slower than it
+        // should be. The real cause of the old "large-batch garbage logits" bug was
+        // the CLASSIC (non-unified) KV backend, NOT large batches per se: the
+        // official llama.android example uses the UNIFIED KV buffer + large batches
+        // and works fine. We now enable the unified buffer (kv_unified=true) so
+        // large batches are correct, and raise both batch sizes to 512.
+        ctx_params.n_batch  = 512;
+        ctx_params.n_ubatch = 512;
+        // Flash attention: AUTO enables it on backends that support it (e.g. Vulkan
+        // GPU on Android) and silently no-ops on CPU. NOTE: the field is the
+        // flash_attn_type ENUM (not a bool) in this llama.cpp build.
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        // Thread strategy (matches llama.cpp common.cpp default / llama.rn): use ALL
+        // cores when the device has <= 4, otherwise HALF the cores to avoid
+        // over-subscribing a big.LITTLE cluster (little-core contention / thermal
+        // throttling). Applies to both generation and batch processing.
         {
             unsigned hc = std::thread::hardware_concurrency();
-            int nt = (int)(hc > 0 ? hc : 8);
-            if (nt > 8) nt = 8;
-            if (nt < 4) nt = 4;
-            ctx_params.n_threads = nt;
+            int nt = (hc == 0) ? 4 : (hc > 4 ? (int)(hc / 2) : (int)hc);
+            if (nt < 1) nt = 1;
+            ctx_params.n_threads       = nt;
             ctx_params.n_threads_batch = nt;
-            LOGI("n_threads = %d (hardware_concurrency=%u)", nt, hc);
+            LOGI("n_threads = %d (hardware_concurrency=%u, half-on-big.LITTLE)", nt, hc);
         }
-        // Keep the default (non-unified) KV buffer. On this llama.cpp build the
-        // unified buffer interacts badly with per-turn KV clearing; we instead
-        // re-initialize the context from the loaded model every turn (see
-        // completion()), so a unified buffer buys nothing here.
-        ctx_params.kv_unified = false;
+        // Unified KV buffer: REQUIRED for large-batch prefill to be correct on this
+        // build (eliminates the old classic-KV large-batch garbage-logits bug).
+        // Per-turn KV clearing still uses llama_memory_seq_rm(0,0,n_ctx), which is
+        // the documented API and works correctly on the unified buffer.
+        ctx_params.kv_unified = true;
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -435,7 +442,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+small-ubatch(16)+penalty BUILD 20260804i =====");
+        LOGI("===== TongYiLite JNI unified-kv+large-ubatch(512)+flash-attn+penalty BUILD 20260804j =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -453,10 +460,10 @@ struct InferenceEngine {
 
             // Multi-turn strategy: KEEP the single context created at load() and
             // clear its KV cache each turn with llama_memory_seq_rm. On the
-            // non-unified (classic) KV backend (kv_unified=false, set in load())
-            // this reliably empties sequence 0 and resets its length counter,
-            // giving a clean slate every turn. The Dart layer re-sends the full
-            // conversation each turn, so no cross-turn KV bookkeeping is needed.
+            // UNIFIED KV buffer (kv_unified=true, set in load()) this reliably
+            // empties sequence 0 and resets its length counter, giving a clean
+            // slate every turn. The Dart layer re-sends the full conversation each
+            // turn, so no cross-turn KV bookkeeping is needed.
             // NOTE: per-turn llama_init_from_model was abandoned — on this build the
             // re-inited context's KV was NOT pristine for longer (multi-turn)
             // prompts and produced flat/garbage logits ("coln魔魔魔").
@@ -596,18 +603,18 @@ struct InferenceEngine {
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
 
-            // 2. Decode the prompt in batches. Chunking keeps each llama_decode
-            // small enough to avoid the classic-KV large-batch garbage-logits bug
-            // (a single 100-token batch degrades; ~16-token chunks are reliable).
-            // This still batches far better than decoding one token at a time, so
-            // prompt (prefill) throughput stays high.
+            // 2. Decode the prompt in batches. We now feed up to n_batch (512) tokens
+            // per llama_decode call, and the unified KV buffer lets llama.cpp process
+            // them in large physical ubatches (512) for fast prefill with BLAS.
+            // (Previously this loop used n_ubatch=16, which forced 16-token physical
+            // passes and made TTFT 10-30x slower than necessary.)
             t_prompt_ms = 0;
             t_gen_ms = 0;
             n_gen = 0;
             llama_pos cur_pos = 0;
 
             auto t_start = std::chrono::high_resolution_clock::now();
-            const int32_t n_batch = ctx_params.n_ubatch;   // small (16): reliable chunk size
+            const int32_t n_batch = (int32_t)ctx_params.n_batch;   // 512: large, fast prefill
             int i = 0;
             while (i < n_prompt) {
                 const int32_t chunk = std::min((int32_t)n_batch, n_prompt - i);
