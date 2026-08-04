@@ -33,10 +33,10 @@
 | 维度 | 说明 |
 |------|------|
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b1017+ (Vulkan GPU / KleidiAI / SME2) |
+| **推理引擎** | llama.cpp b1017+（批量预填充 + 内置采样器 + Vulkan GPU / KleidiAI / SME2） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏 |
 | **前端框架** | Flutter 3.x (Material3) |
-| **通信方式** | JNI 直调 (无 HTTP Server) |
+| **通信方式** | JNI 直调（批量 EventChannel 回调） |
 | **模型下载源** | hf-mirror.com → ModelScope（自动回退，见 `assets/models_catalog.json`） |
 
 ---
@@ -404,6 +404,10 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 | 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
+| 7 | **批量预填充** | ✅ | Prompt 解码从逐 token 改为 n_batch=512 批量，TTFT 降低 10-50× |
+| 8 | **内置采样器** | ✅ | 用 `llama_sampler_chain`（top_k/top_p/temp）替代手动 O(vocab) 采样，消除每 token 150k+ 堆分配 |
+| 9 | **流式回调批量化** | ✅ | `on_token` 回调每 64 字符批量发送，减少 C++→JNI→Dart 跨语言往返开销 |
+| 10 | **mmap 加载** | ✅ | 模型加载从全量读入 RAM 改为 mmap，降低峰值内存与 OOM 风险 |
 
 ### P1 计划 🚧
 
@@ -502,6 +506,7 @@ echo $ANDROID_HOME
 - 关闭后台应用释放 RAM
 - 设备需 ≥ 4GB RAM 才能流畅运行 1.7B 模型
 - 确保 Vulkan GPU 加速已启用（检查设置页是否显示"已完成"状态）
+- 已优化：批量预填充（TTFT 降低 10-50×）、内置采样器（消除每 token 150k+ 堆分配）、流式回调批量化（减少跨语言往返）、mmap 加载（降低峰值内存）
 
 </details>
 
