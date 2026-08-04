@@ -133,6 +133,34 @@
       "recommended": false,
       "minRamMB": 3500,
       "sha256Hash": null
+    },
+    {
+      "id": "bonsai-27b-q1_0",
+      "name": "Bonsai 27B Instruct (Q1_0 1-bit)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "hf-mirror" },
+        { "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "huggingface" }
+      ],
+      "sizeGB": 3.79,
+      "sizeMBDisplay": "3.8 GB",
+      "recommended": false,
+      "minRamMB": 6144,
+      "sha256Hash": null
+    },
+    {
+      "id": "bonsai-27b-ternary-q2_0",
+      "name": "Bonsai 27B Instruct (Ternary 1.58-bit)",
+      "type": "text",
+      "mirrors": [
+        { "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "hf-mirror" },
+        { "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "huggingface" }
+      ],
+      "sizeGB": 7.17,
+      "sizeMBDisplay": "7.2 GB",
+      "recommended": false,
+      "minRamMB": 10240,
+      "sha256Hash": null
     }
   ]
 }

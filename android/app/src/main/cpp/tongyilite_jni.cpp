@@ -21,6 +21,7 @@
 #include <functional>
 #include <sstream>
 #include <deque>
+#include <sys/stat.h>
 
 // llama.cpp headers
 #include "llama.h"
@@ -313,6 +314,34 @@ struct InferenceEngine {
         // Per-turn KV clearing still uses llama_memory_seq_rm(0,0,n_ctx), which is
         // the documented API and works correctly on the unified buffer.
         ctx_params.kv_unified = true;
+
+        // KV-cache precision: on-device RAM is the binding constraint, and a full
+        // F16 KV cache is wildly oversized for low-bit models. Example: Bonsai-27B
+        // 1-bit needs ~11.6GB @100K ctx with F16 KV but only ~6.8GB with q4_0 KV,
+        // so the 4-bit KV shrink (~4x) is what lets a 27B fit in a phone at all.
+        // Heuristic: bytes-per-param = file_size / n_params. A normal 4-bit+ model
+        // is ~0.5 bytes/param; Q2 is ~0.28; 1-bit ~0.14. When below the ~Q2
+        // threshold (0.40) we switch KV to q4_0. Normal 4-bit+/8-bit models keep
+        // F16 KV (best quality). Robust, requires no fragile GGUF-metadata parsing.
+        {
+            struct stat st {};
+            long long file_bytes = 0;
+            if (stat(model_path, &st) == 0) {
+                file_bytes = (long long)st.st_size;
+            }
+            bool low_bit = false;
+            if (file_bytes > 0 && n_params > 1000000000LL) {
+                const double bytes_per_param = (double)file_bytes / (double)n_params;
+                low_bit = (bytes_per_param < 0.40);   // ~Q2 (2.25 bits) and below
+                LOGI("KV auto: file=%.2fGB params=%.2fB bytes/param=%.3f -> %s",
+                     file_bytes / 1e9, (double)n_params / 1e9, bytes_per_param,
+                     low_bit ? "q4_0 (low-bit model)" : "f16 (default)");
+            } else {
+                LOGI("KV auto: stat failed or small model (<1B params) -> f16 (default)");
+            }
+            ctx_params.type_k = low_bit ? GGML_TYPE_Q4_0 : GGML_TYPE_F16;
+            ctx_params.type_v = low_bit ? GGML_TYPE_Q4_0 : GGML_TYPE_F16;
+        }
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
