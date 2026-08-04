@@ -17,6 +17,7 @@ import '../models/model_info.dart';
 import '../models/model_catalog.dart';
 import '../providers/index.dart';
 import '../providers/settings_provider.dart';
+import '../services/settings_service.dart';
 import '../services/model_manager.dart';
 import 'inference_log_screen.dart';
 
@@ -519,18 +520,72 @@ class _InferenceEngineTab extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('⚙️ GPU 加速（Vulkan）', context),
+                  _buildSectionHeader('⚙️ GPU 加速', context),
                   const SizedBox(height: 12),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('启用 GPU 加速'),
-                    subtitle: const Text('开启后全量卸载到 GPU（Vulkan）；关闭使用纯 CPU。本设备部分卸载会输出崩坏，故 GPU 模式固定全量卸载'),
+                    subtitle: const Text('开启后按所选后端卸载到 GPU；关闭使用纯 CPU'),
                     value: gpuSettings.enableGpu,
                     onChanged: (v) => gpuNotifier.setEnableGpu(v),
                   ),
-                  const SizedBox(height: 4),
-                  // 本设备（Adreno 825）部分卸载会导致输出崩坏，GPU 模式固定全量卸载，
-                  // 因此层数滑块在 GPU 开启时禁用，仅作展示。
+                  const SizedBox(height: 12),
+                  // GPU 后端选择：auto / opencl / vulkan / cpu。
+                  // OpenCL 是 llama.rn 在 Android 上使用的后端（Adreno 700+ 验证可用，
+                  // 支持 Q4_K）；Vulkan 在本设备（Adreno 825）上对 Q4_K_M 输出崩坏
+                  // （全部采样塌缩成 padding token），仅保留作对比。
+                  _buildSectionHeader('GPU 后端', context),
+                  const SizedBox(height: 8),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'auto',
+                        label: Text('自动'),
+                        icon: Icon(Icons.auto_awesome, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: 'opencl',
+                        label: Text('OpenCL'),
+                        icon: Icon(Icons.speed, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: 'vulkan',
+                        label: Text('Vulkan'),
+                        icon: Icon(Icons.view_in_ar, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: 'cpu',
+                        label: Text('CPU'),
+                        icon: Icon(Icons.memory, size: 16),
+                      ),
+                    ],
+                    selected: {gpuSettings.gpuBackend},
+                    onSelectionChanged: gpuSettings.enableGpu
+                        ? (sel) {
+                            final v = sel.first;
+                            if (v != gpuSettings.gpuBackend) {
+                              gpuNotifier.setGpuBackend(v);
+                            }
+                          }
+                        : null,
+                    showSelectedIcon: false,
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    gpuSettings.enableGpu
+                        ? _gpuBackendHint(gpuSettings.gpuBackend)
+                        : 'GPU 已关闭，后端选择不生效（纯 CPU）',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                  const SizedBox(height: 12),
+                  // 层数滑块：Vulkan（本设备已知崩坏）与 CPU 后端固定全量/不生效，
+                  // OpenCL / auto 时允许调（部分卸载是否可用待真机验证）。
                   Row(
                     children: [
                       Expanded(
@@ -540,7 +595,9 @@ class _InferenceEngineTab extends ConsumerWidget {
                           max: 100,
                           divisions: 100,
                           label: '${gpuSettings.gpuLayers}',
-                          onChanged: null,
+                          onChanged: _gpuLayersEditable(gpuSettings)
+                              ? (v) => gpuNotifier.setGpuLayers(v.round())
+                              : null,
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -560,9 +617,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Text(
-                      gpuSettings.enableGpu
-                          ? 'GPU 模式为全量卸载（本设备部分卸载会输出崩坏），层数不可调'
-                          : 'GPU 已关闭，层数设置不生效（纯 CPU）',
+                      _gpuLayersHint(gpuSettings),
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                     ),
                   ),
@@ -798,6 +853,38 @@ class _InferenceEngineTab extends ConsumerWidget {
       ),
       child: Text(label, style: TextStyle(color: color, fontSize: 13)),
     );
+  }
+
+  // ---- GPU 后端辅助 ----
+
+  String _gpuBackendHint(String backend) {
+    switch (backend) {
+      case 'opencl':
+        return 'OpenCL：llama.rn 在 Android 上使用的后端（Adreno 700+ 验证可用，支持 Q4_K）。推荐。';
+      case 'vulkan':
+        return '⚠️ Vulkan：本设备（Adreno 825）上对 Q4_K_M 输出崩坏（采样塌缩成 padding token，空回复），仅作对比。';
+      case 'cpu':
+        return 'CPU：不使用任何 GPU 后端（最稳，较慢）。';
+      default:
+        return '自动：优先 OpenCL（Vulkan 在本设备已知崩坏），无 GPU 时回落 CPU。';
+    }
+  }
+
+  bool _gpuLayersEditable(InferenceSettings s) {
+    if (!s.enableGpu) return false;
+    // Vulkan 本设备已知崩坏（无论层数）；CPU 无意义。其余后端（opencl/auto）允许调层数。
+    return s.gpuBackend == 'opencl' || s.gpuBackend == 'auto';
+  }
+
+  String _gpuLayersHint(InferenceSettings s) {
+    if (!s.enableGpu) return 'GPU 已关闭，层数设置不生效（纯 CPU）';
+    if (_gpuLayersEditable(s)) {
+      return '部分卸载层数可调（0 = 纯 CPU，越大卸载越多；全量 = 999）';
+    }
+    if (s.gpuBackend == 'vulkan') {
+      return 'Vulkan 本设备已知崩坏，层数不可调（建议改用 OpenCL/自动）';
+    }
+    return '当前后端固定，层数不可调';
   }
 
 }

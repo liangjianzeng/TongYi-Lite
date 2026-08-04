@@ -54,7 +54,7 @@ class InferenceEngine(private val context: Context) {
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
-    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int): Boolean
+    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String): Boolean
     private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
@@ -106,6 +106,7 @@ class InferenceEngine(private val context: Context) {
         nCtx: Int = DEFAULT_N_CTX,
         enableGpu: Boolean = true,
         gpuLayers: Int = 20,
+        gpuBackend: String = "auto",
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
         val file = File(modelPath)
@@ -122,8 +123,8 @@ class InferenceEngine(private val context: Context) {
             nativeSetLoadingCallback(null)
         }
 
-        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers)")
-        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers)
+        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend)")
+        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend)
         Log.i(TAG, "loadModel result: $ok")
 
         if (ok) {

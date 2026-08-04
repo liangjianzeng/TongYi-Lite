@@ -34,6 +34,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TongYiLite">
 
+        <!-- OpenCL GPU 后端：设备提供 libOpenCL.so 时加载（覆盖链接期 stub 的弱符号），
+             缺失不影响安装/运行（required=false），回落 CPU。llama.rn 同款声明。 -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

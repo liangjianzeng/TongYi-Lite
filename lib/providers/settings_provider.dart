@@ -27,6 +27,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置 GPU 后端（'cpu' / 'vulkan' / 'opencl' / 'auto'）。
+  Future<void> setGpuBackend(String value) async {
+    const allowed = {'cpu', 'vulkan', 'opencl', 'auto'};
+    if (!allowed.contains(value)) return;
+    state = state.copyWith(gpuBackend: value);
+    await _persist();
+  }
+
   /// 设置上下文大小（KV 缓存窗口）。上限 65536，下限 1。
   Future<void> setContextSize(int value) async {
     // 防御性夹紧，避免越界值进入原生层。

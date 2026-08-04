@@ -140,6 +140,54 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
 endif()
 
 # --------------------------------------------------------------------------
+# OpenCL GPU backend (second GPU path, alongside Vulkan)
+# --------------------------------------------------------------------------
+# The ggml-opencl backend supports Q4_K (incl. Q4_K_M) matmul on contiguous
+# F32 activations with Adreno-optimized kernels (GGML_OPENCL_USE_ADRENO_KERNELS,
+# default ON). llama.rn runs Android GPU offload on this backend (Adreno 700+),
+# while our Vulkan path is numerically corrupt on Adreno 825 — hence both are
+# compiled so the user can pick at runtime.
+option(GGML_OPENCL "ggml: use OpenCL" OFF)
+if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
+    set(GGML_OPENCL ON CACHE BOOL "" FORCE)
+    message(STATUS "OpenCL ENABLED (GPU backend) for arm64-v8a")
+
+    # Android NDK has no OpenCL SDK; vendor the Khronos headers (header-only)
+    # and resolve the loader at runtime (dlopen) like llama.rn does. Pre-seed
+    # the variables find_package(OpenCL) would produce so its REQUIRED call
+    # inside ggml-opencl/CMakeLists.txt succeeds on the Android toolchain
+    # (where CMAKE_FIND_ROOT_PATH_MODE_* hide host packages).
+    set(_ocl_hdr "${PROJECT_ROOT_DIR}/third_party/OpenCL-Headers")
+    # fallback: derive from source dir (cpp -> project root is 4 levels up)
+    if(NOT EXISTS "${_ocl_hdr}/CL/cl.h")
+        set(_ocl_hdr "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/OpenCL-Headers")
+    endif()
+    if(EXISTS "${_ocl_hdr}/CL/cl.h")
+        set(OpenCL_INCLUDE_DIR "${_ocl_hdr}" CACHE PATH "Vendored Khronos OpenCL-Headers" FORCE)
+        set(OpenCL_INCLUDE_DIRS "${_ocl_hdr}" CACHE PATH "Vendored Khronos OpenCL-Headers" FORCE)
+        message(STATUS "OpenCL_INCLUDE_DIR -> ${_ocl_hdr}")
+    else()
+        message(WARNING "OpenCL-Headers not found at ${_ocl_hdr}; OpenCL backend will fail to configure")
+    endif()
+    # On Android the OpenCL loader (libOpenCL.so) is provided by the OS at
+    # runtime; ggml-opencl links ${OpenCL_LIBRARIES} directly against cl*
+    # symbols, so we must satisfy those at link time with our stub library
+    # (the real libOpenCL.so from the device overrides the stub's weak
+    # symbols at load time via <uses-native-library required="false">).
+    # The stub target is created BEFORE add_subdirectory(llama) because
+    # ggml-opencl/CMakeLists.txt does target_link_libraries(... PRIVATE
+    # ${OpenCL_LIBRARIES}) during its own configure step.
+    if(DEFINED ANDROID_NDK)
+        add_subdirectory(${PROJECT_ROOT_DIR}/third_party/opencl-stub ${CMAKE_CURRENT_BINARY_DIR}/opencl-stub)
+        set(OpenCL_LIBRARIES opencl_stub CACHE FILEPATH "OpenCL link-time stub (weak; overridden by device libOpenCL.so)" FORCE)
+        set(OpenCL_LIBRARY opencl_stub CACHE FILEPATH "OpenCL link-time stub (weak; overridden by device libOpenCL.so)" FORCE)
+        message(STATUS "OpenCL_LIBRARIES -> opencl_stub (weak; device libOpenCL.so at runtime)")
+    else()
+        set(OpenCL_LIBRARIES "" CACHE FILEPATH "OpenCL loader (none)" FORCE)
+    endif()
+endif()
+
+# --------------------------------------------------------------------------
 # llmlib: static library from llama.cpp
 # --------------------------------------------------------------------------
 add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
@@ -165,6 +213,7 @@ target_link_libraries(tongyilite_jni
     llama
     android
     log
+    dl
 )
 
 # --------------------------------------------------------------------------
