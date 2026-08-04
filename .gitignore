@@ -77,3 +77,6 @@ diag_*.txt
 
 # KleidiAI 第三方源码（vendored，构建沙箱无 GitHub 需本地存在；可从官方仓库重建）
 third_party/kleidiai/
+
+# Khronos OpenCL-Headers（vendored，Android NDK 无 OpenCL SDK；可从官方仓库重建）
+third_party/OpenCL-Headers/

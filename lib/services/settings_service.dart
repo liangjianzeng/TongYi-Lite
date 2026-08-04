@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-/// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数 + 上下文大小）。
+/// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数 + 后端选择 + 上下文大小）。
 ///
 /// 默认开启 GPU 加速（移动端有 Vulkan 驱动时自动回落），卸载层数默认 20，
 /// 上下文大小默认 4096，最大 65536。
@@ -16,6 +16,12 @@ class InferenceSettings {
   /// 是否允许 Qwen3 思考模式（<think> 链）。默认关闭 = 直接作答，响应更快。
   final bool enableThinking;
 
+  /// GPU 后端选择：'cpu' / 'vulkan' / 'opencl' / 'auto'。
+  /// 默认 'auto'：优先 OpenCL（Vulkan 在 Adreno 825 上对 Q4_K_M 输出崩坏——
+  /// 每个采样 token 塌缩成 padding token 127，空回复；llama.rn 在 Android 上
+  /// 即用 OpenCL 后端，Adreno 700+ 验证可用）。
+  final String gpuBackend;
+
   const InferenceSettings({
     // 默认纯 CPU：本机（Adreno 825）的 ggml-vulkan 后端对该模型会产生数值崩坏，
     // 导致输出塌缩成 padding token（无限乱码/转圈）。GPU 卸载在修复前默认关闭，
@@ -24,15 +30,21 @@ class InferenceSettings {
     this.gpuLayers = 20,
     this.contextSize = 4096,
     this.enableThinking = false,
+    this.gpuBackend = 'auto',
   });
 
   InferenceSettings copyWith(
-      {bool? enableGpu, int? gpuLayers, int? contextSize, bool? enableThinking}) {
+      {bool? enableGpu,
+      int? gpuLayers,
+      int? contextSize,
+      bool? enableThinking,
+      String? gpuBackend}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
       contextSize: contextSize ?? this.contextSize,
       enableThinking: enableThinking ?? this.enableThinking,
+      gpuBackend: gpuBackend ?? this.gpuBackend,
     );
   }
 
@@ -41,6 +53,7 @@ class InferenceSettings {
         'gpuLayers': gpuLayers,
         'contextSize': contextSize,
         'enableThinking': enableThinking,
+        'gpuBackend': gpuBackend,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -50,6 +63,7 @@ class InferenceSettings {
       gpuLayers: (json['gpuLayers'] as num?)?.toInt() ?? 20,
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
       enableThinking: json['enableThinking'] as bool? ?? false,
+      gpuBackend: json['gpuBackend'] as String? ?? 'auto',
     );
   }
 }

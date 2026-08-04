@@ -21,7 +21,6 @@
 #include <functional>
 #include <sstream>
 #include <deque>
-#include <sys/stat.h>
 
 // llama.cpp headers
 #include "llama.h"
@@ -190,7 +189,8 @@ struct InferenceEngine {
     llama_pos kv_position = 0;
 
     bool load(const char *model_path, int requested_n_ctx = 4096,
-              bool enable_gpu = true, int gpu_layers = 20) {
+              bool enable_gpu = true, int gpu_layers = 20,
+              const char *gpu_backend = "auto") {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -200,27 +200,85 @@ struct InferenceEngine {
         // Model params
         model_params = llama_model_default_params();
         // GPU offloading policy (driven by the UI toggle + layer setting):
-        //   - enable_gpu == false           -> pure CPU (n_gpu_layers = 0)
-        //   - enable_gpu == true && GPU found -> offload `gpu_layers` user layers (default 20)
-        //   - enable_gpu == true && no GPU   -> safe CPU fallback (same APK works everywhere)
+        //   - enable_gpu == false                   -> pure CPU (n_gpu_layers = 0)
+        //   - gpu_backend == "cpu"                  -> pure CPU
+        //   - gpu_backend == "vulkan"|"opencl"      -> force that backend (if device present)
+        //   - gpu_backend == "auto" (default)       -> pick first working GPU backend
+        // The backend is selected here by scanning the ggml backend registry for
+        // devices of the requested type; llama.cpp then offloads layers only to
+        // that backend because we only keep it in the devices list.
+        // NOTE(2026-08-04): the Vulkan backend is numerically CORRUPT on Adreno 825
+        // for Q4_K_M (every sampled token collapses to padding id 127 -> empty
+        // reply), regardless of offload count — verified on-device with
+        // n_gpu_layers=50 (clamped to 25 = full offload). The OpenCL backend
+        // (used by llama.rn on Android, supports Q4_K) is expected to work; the
+        // UI therefore defaults to OpenCL and lets the user switch back to
+        // Vulkan/CPU for comparison. n_gpu_layers matters only for partial
+        // offload on a backend that is not corrupt.
+        std::string backend = gpu_backend ? gpu_backend : "auto";
         int effective_gpu_layers = 0;
+        bool vulkan_ok = false, opencl_ok = false;
         if (enable_gpu) {
-            int detected = detect_gpu_layers();
-            if (detected > 0) {
-                // Adreno 825 (小米 onyx) + ggml-vulkan: PARTIAL offload
-                // (n_gpu_layers in 1..N-1) corrupts output from the 2nd generated
-                // token onward (collapses to padding token 151935 / 乱码). The cause
-                // is the per-token GPU<->CPU layer boundary plus host KV-cache sync
-                // on this driver. FULL offload (all transformer layers on the GPU,
-                // KV cache also GPU-resident) avoids the boundary and is the working
-                // configuration on this device. Therefore GPU-on == full offload and
-                // the user's layer slider has no effect while GPU is enabled.
-                effective_gpu_layers = 999;
-                LOGI("GPU acceleration ON: FULL offload (all layers) to avoid partial-offload corruption on Adreno");
-                reportLoadingLog("检测到 GPU，启用 Vulkan 全量卸载加速");
-            } else {
-                LOGI("GPU acceleration requested but no GPU backend found -> CPU-only fallback");
-                reportLoadingLog("未检测到 GPU，回落 CPU 推理");
+            // Probe the registry for backend devices of each type.
+            const size_t n_dev = ggml_backend_dev_count();
+            for (size_t i = 0; i < n_dev; i++) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                if (!dev) continue;
+                const char *dev_name = ggml_backend_dev_name(dev);
+                const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+                if (type != GGML_BACKEND_DEVICE_TYPE_GPU &&
+                    type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                    continue;
+                }
+                LOGI("  gpu dev[%zu] name=%s type=%d", i, dev_name ? dev_name : "?", (int)type);
+                std::string dn = dev_name ? dev_name : "";
+                if (dn.find("Vulkan") != std::string::npos ||
+                    dn.find("vulkan") != std::string::npos) {
+                    vulkan_ok = true;
+                }
+                if (dn.find("OpenCL") != std::string::npos ||
+                    dn.find("opencl") != std::string::npos ||
+                    dn.find("CL") != std::string::npos) {
+                    opencl_ok = true;
+                }
+            }
+
+            if (backend == "cpu") {
+                LOGI("GPU backend forced to CPU");
+                reportLoadingLog("已选择 CPU 推理");
+            } else if (backend == "vulkan") {
+                if (vulkan_ok) {
+                    // Known-corrupt on this device; keep the warning visible so
+                    // a user who switches here knows what to expect.
+                    LOGW("Vulkan selected — NOTE: corrupt on Adreno 825 (padding-token collapse).");
+                    reportLoadingLog("已选择 Vulkan 后端（注意：本设备 Adreno 825 上输出可能崩坏）");
+                    effective_gpu_layers = gpu_layers;
+                } else {
+                    LOGW("Vulkan backend requested but not available -> CPU");
+                    reportLoadingLog("Vulkan 不可用，回落 CPU");
+                }
+            } else if (backend == "opencl") {
+                if (opencl_ok) {
+                    LOGI("OpenCL selected");
+                    reportLoadingLog("已选择 OpenCL 后端");
+                    effective_gpu_layers = gpu_layers;
+                } else {
+                    LOGW("OpenCL backend requested but not available -> CPU");
+                    reportLoadingLog("OpenCL 不可用，回落 CPU");
+                }
+            } else { // auto: prefer OpenCL (Vulkan known-corrupt on Adreno), else Vulkan
+                if (opencl_ok) {
+                    LOGI("auto -> OpenCL");
+                    reportLoadingLog("自动选择 OpenCL 后端");
+                    effective_gpu_layers = gpu_layers;
+                } else if (vulkan_ok) {
+                    LOGW("auto -> Vulkan (corrupt on Adreno 825; prefer OpenCL if available)");
+                    reportLoadingLog("自动选择 Vulkan 后端");
+                    effective_gpu_layers = gpu_layers;
+                } else {
+                    LOGI("auto -> no GPU backend found, CPU fallback");
+                    reportLoadingLog("未检测到可用 GPU 后端，回落 CPU");
+                }
             }
         } else {
             LOGI("GPU acceleration disabled by user -> pure CPU");
@@ -314,34 +372,6 @@ struct InferenceEngine {
         // Per-turn KV clearing still uses llama_memory_seq_rm(0,0,n_ctx), which is
         // the documented API and works correctly on the unified buffer.
         ctx_params.kv_unified = true;
-
-        // KV-cache precision: on-device RAM is the binding constraint, and a full
-        // F16 KV cache is wildly oversized for low-bit models. Example: Bonsai-27B
-        // 1-bit needs ~11.6GB @100K ctx with F16 KV but only ~6.8GB with q4_0 KV,
-        // so the 4-bit KV shrink (~4x) is what lets a 27B fit in a phone at all.
-        // Heuristic: bytes-per-param = file_size / n_params. A normal 4-bit+ model
-        // is ~0.5 bytes/param; Q2 is ~0.28; 1-bit ~0.14. When below the ~Q2
-        // threshold (0.40) we switch KV to q4_0. Normal 4-bit+/8-bit models keep
-        // F16 KV (best quality). Robust, requires no fragile GGUF-metadata parsing.
-        {
-            struct stat st {};
-            long long file_bytes = 0;
-            if (stat(model_path, &st) == 0) {
-                file_bytes = (long long)st.st_size;
-            }
-            bool low_bit = false;
-            if (file_bytes > 0 && n_params > 1000000000LL) {
-                const double bytes_per_param = (double)file_bytes / (double)n_params;
-                low_bit = (bytes_per_param < 0.40);   // ~Q2 (2.25 bits) and below
-                LOGI("KV auto: file=%.2fGB params=%.2fB bytes/param=%.3f -> %s",
-                     file_bytes / 1e9, (double)n_params / 1e9, bytes_per_param,
-                     low_bit ? "q4_0 (low-bit model)" : "f16 (default)");
-            } else {
-                LOGI("KV auto: stat failed or small model (<1B params) -> f16 (default)");
-            }
-            ctx_params.type_k = low_bit ? GGML_TYPE_Q4_0 : GGML_TYPE_F16;
-            ctx_params.type_v = low_bit ? GGML_TYPE_Q4_0 : GGML_TYPE_F16;
-        }
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -987,11 +1017,14 @@ static void reportLoadingLog(const char *message) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
-    JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers
+    JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
+    jstring j_gpu_backend
 ) {
     std::string path = jstring_to_std(env, jpath);
+    std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     bool ok = g_engine.load(path.c_str(), n_ctx,
-                            j_enable_gpu == JNI_TRUE, (int)j_gpu_layers);
+                            j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
+                            gpu_backend.c_str());
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {
