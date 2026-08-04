@@ -74,3 +74,6 @@ diag_*.txt
 
 # 本机工作记忆（含本地路径），不进远程
 .workbuddy/memory/
+
+# KleidiAI 第三方源码（vendored，构建沙箱无 GitHub 需本地存在；可从官方仓库重建）
+third_party/kleidiai/

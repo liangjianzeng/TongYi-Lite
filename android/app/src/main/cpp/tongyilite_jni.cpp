@@ -268,7 +268,16 @@ struct InferenceEngine {
 
         ctx_params.n_ctx = effective_n_ctx;
         ctx_params.n_batch = 512;
-        ctx_params.n_ubatch = 256;
+        // n_ubatch is the number of tokens llama_decode actually processes per
+        // internal pass. On this build, with the classic (non-unified) KV backend,
+        // a large single ubatch (256, or any batch > ~32 tokens) produces flat /
+        // garbage logits on 2nd-turn+ prompts (first 15-token turn is fine, a
+        // 100-token multi-turn prompt degrades into random tokens). The official
+        // llama.android example works because it uses the unified KV buffer. Here
+        // we keep classic KV (needed for our per-turn seq_rm clearing) and instead
+        // keep ubatch small so llama_decode chunks the prompt, avoiding the large
+        // single-ubatch garbage-logits bug while still batching better than 1-by-1.
+        ctx_params.n_ubatch = 16;
         // Use more worker threads than the conservative default (4). Cap at 8 so we
         // engage the big cores without over-subscribing big.LITTLE little cores.
         {
@@ -426,7 +435,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+batch-prefill+sampler-chain BUILD 20260804f =====");
+        LOGI("===== TongYiLite JNI keep-ctx+seq_rm+small-ubatch(16)+penalty BUILD 20260804i =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -587,17 +596,18 @@ struct InferenceEngine {
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
 
-            // 2. Decode the prompt in batches of up to n_batch tokens.
-            // This leverages the n_batch=512 / n_ubatch=256 configuration
-            // set in load() so the prompt is processed efficiently instead
-            // of one token at a time (which inflated TTFT by 10-50x).
+            // 2. Decode the prompt in batches. Chunking keeps each llama_decode
+            // small enough to avoid the classic-KV large-batch garbage-logits bug
+            // (a single 100-token batch degrades; ~16-token chunks are reliable).
+            // This still batches far better than decoding one token at a time, so
+            // prompt (prefill) throughput stays high.
             t_prompt_ms = 0;
             t_gen_ms = 0;
             n_gen = 0;
             llama_pos cur_pos = 0;
 
             auto t_start = std::chrono::high_resolution_clock::now();
-            const int32_t n_batch = ctx_params.n_batch;
+            const int32_t n_batch = ctx_params.n_ubatch;   // small (16): reliable chunk size
             int i = 0;
             while (i < n_prompt) {
                 const int32_t chunk = std::min((int32_t)n_batch, n_prompt - i);
@@ -642,9 +652,27 @@ struct InferenceEngine {
             // which reuses internal buffers across calls.
             struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
             struct llama_sampler * smpl_chain = llama_sampler_chain_init(sparams);
+            llama_sampler_chain_add(smpl_chain, llama_sampler_init_penalties(
+                64,                    // penalty_last_n: penalize the last 64 tokens
+                1.1f,                  // penalty_repeat: 1.0 = disabled, >1 penalizes repeats
+                0.0f,                  // penalty_freq
+                0.0f));                // penalty_present
+            // CRITICAL: repeat penalty is what prevents degenerate repetition loops.
+            // Without it (previous builds), a model that drifts toward one token in a
+            // later turn (e.g. 100893/47384 on a 2nd-turn prompt) would repeat that
+            // token forever, never hitting EOS. The official llama.android example
+            // (ai_chat.cpp) also relies on a penalty-equipped sampler for this reason.
             llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_k(128));
             llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_p(top_p, 1));
             llama_sampler_chain_add(smpl_chain, llama_sampler_init_temp(temperature));
+            // CRITICAL: the chain MUST end with a sampling sampler (dist) that
+            // actually draws the token and sets cur_p.selected. penalties /
+            // top_k / top_p / temp only re-rank or re-weight candidates — without
+            // dist, llama_sampler_sample() hits GGML_ASSERT(cur_p.selected >= 0)
+            // at llama-sampler.cpp:870 and aborts the process (SIGABRT) in debug
+            // builds (verified via tombstone + disassembly). Seed from time so
+            // successive generations differ.
+            llama_sampler_chain_add(smpl_chain, llama_sampler_init_dist((uint32_t)llama_time_us()));
 
             while (n_gen < max_tokens && !should_stop) {
                 llama_token new_token = 0;

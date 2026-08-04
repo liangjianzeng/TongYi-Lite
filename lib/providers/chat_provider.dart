@@ -332,6 +332,14 @@ class ChatNotifier extends StateNotifier<bool> {
       _ref.read(isGeneratingProvider.notifier).state = false;
     }
   }
+
+  /// Stop the current generation: cancels the token stream subscription and
+  /// tells the native engine to set should_stop, which makes the completion
+  /// loop return promptly. The streaming controller then closes, the
+  /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
+  Future<void> stopGeneration() async {
+    await _inference.stopGeneration();
+  }
 }
 
 final chatNotifierProvider = StateNotifierProvider<ChatNotifier, bool>((ref) {

@@ -30,14 +30,19 @@ endif()
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP ON CACHE BOOL "" FORCE)
-# ggml-cpu KleidiAI optimized kernels. NOTE: in llama.cpp b10176 this is fetched
-# via FetchContent from GitHub at configure time (ggml/src/ggml-cpu/CMakeLists.txt
-# downloads kleidiai-v1.24.0-src.tar.gz). The build sandbox has NO network access,
-# so the download fails and the whole native configure aborts. We keep it OFF here
-# to get a successful -O3 build; the -O3 + dotprod/i8mm path below already delivers
-# the bulk of the speedup. To enable later: vendor the KleidiAI source locally and
-# pass -DFETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD=<path> (do NOT edit the submodule).
-set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+# ggml-cpu KleidiAI optimized kernels. llama.cpp b10176 fetches this via
+# FetchContent from GitHub at configure time (ggml/src/ggml-cpu/CMakeLists.txt
+# downloads kleidiai-v1.24.0-src.tar.gz). The build sandbox has no GitHub access,
+# so we VENDOR the source locally (third_party/kleidiai, cloned from the official
+# repo at tag v1.24.0) and point FetchContent at it via
+# FETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD -> no network needed at configure time.
+set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+set(KLEIDIAI_VENDOR_DIR ${PROJECT_ROOT_DIR}/third_party/kleidiai)
+if(NOT EXISTS "${KLEIDIAI_VENDOR_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "KleidiAI source not found at ${KLEIDIAI_VENDOR_DIR}. Run: git clone --depth 1 --branch v1.24.0 https://github.com/ARM-software/kleidiai ${KLEIDIAI_VENDOR_DIR}")
+endif()
+set(FETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD ${KLEIDIAI_VENDOR_DIR} CACHE STRING "" FORCE)
+message(STATUS "KleidiAI vendored source -> ${KLEIDIAI_VENDOR_DIR}")
 # The Android debug variant compiles with -O0 and no NDEBUG, leaving llama.cpp's
 # quantized matmul kernels unoptimized -> ~0.6 tok/s on a 0.5B model. Force -O3
 # -DNDEBUG for the Debug build type. NDEBUG also makes get_logits_ith return
@@ -49,7 +54,13 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O3 -DNDEBUG" CACHE STRING "" FORCE)
 # ships to the test device (SM8735 / Adreno 825, Armv9), so the narrower -march
 # is safe. Host vulkan-shaders-gen uses its own MinGW toolchain (ExternalProject)
 # and is unaffected by this flag.
-add_compile_options(-march=armv8.4-a+dotprod+i8mm)
+#
+# Set via GGML_CPU_ARM_ARCH (NOT a manual -march flag): ggml-cpu's KleidiAI
+# integration reads this to decide whether to compile the +dotprod/+i8mm kernels
+# (ggml/src/ggml-cpu/CMakeLists.txt:169,644-651). Adding -march to CMAKE_C_FLAGS
+# did NOT reach the kai source files, so the dotprod/i8mm kernels were silently
+# skipped even though GGML_USE_CPU_KLEIDIAI was defined.
+set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm CACHE STRING "" FORCE)
 
 # Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).

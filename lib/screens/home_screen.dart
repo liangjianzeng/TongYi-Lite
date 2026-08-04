@@ -151,6 +151,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     if (text.isEmpty && imagePath == null) return;
 
+    // Collapse the keyboard immediately when sending so the chat area expands
+    // to full screen while the reply streams in (don't wait for the reply).
+    FocusScope.of(context).unfocus();
+
     final notifier = ref.read(chatNotifierProvider.notifier);
     try {
       await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
@@ -165,8 +169,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // Only clear after successful send.
     _textController.clear();
     setState(() => _selectedImagePath = null);
-    // Collapse the keyboard after sending so it no longer occupies space.
-    FocusScope.of(context).unfocus();
 
     // Re-anchor to the newest message. With `reverse: true` the list grows
     // downward from the input bar, so the newest message sits at the bottom
@@ -181,6 +183,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         );
       }
     });
+  }
+
+  /// Stop the in-flight reply. Native side sets should_stop, the completion
+  /// loop returns promptly, the token stream closes and isGenerating flips
+  /// back to false (so the button reverts to send mode automatically).
+  Future<void> _stopGeneration() async {
+    try {
+      await ref.read(chatNotifierProvider.notifier).stopGeneration();
+    } catch (e) {
+      debugPrint('[HomeScreen] stopGeneration failed: $e');
+    }
   }
 
   @override
@@ -565,20 +578,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ],
                 ),
               ),
-              onSubmitted: (_) => _sendMessage(),
+              onSubmitted: (_) {
+                // Ignore Enter while a reply is streaming — the send button
+                // has switched to "stop" mode during generation.
+                if (isGenerating) return;
+                _sendMessage();
+              },
               maxLines: null,
             ),
           ),
           const SizedBox(width: 8),
           FloatingActionButton(
-            onPressed: isGenerating ? null : _sendMessage,
+            onPressed: isGenerating ? _stopGeneration : _sendMessage,
             mini: true,
+            tooltip: isGenerating ? '停止回复' : '发送',
             child: isGenerating
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+                ? const Icon(Icons.stop, size: 24)
                 : const Icon(Icons.send),
           ),
         ],
