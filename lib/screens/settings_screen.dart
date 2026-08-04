@@ -476,6 +476,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     final ok = await manager.loadModel(model.id);
 
+    // The load can take many seconds; if the widget was disposed while
+    // awaiting (user switched tabs), bail before touching ref / context.
+    if (!mounted) return;
+
     // Always reset generating flag when load finishes (success or failure).
     ref.read(isGeneratingProvider.notifier).state = false;
 
@@ -520,22 +524,19 @@ class _InferenceEngineTab extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('⚙️ GPU 加速', context),
-                  const SizedBox(height: 12),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('启用 GPU 加速'),
-                    subtitle: const Text('开启后按所选后端卸载到 GPU；关闭使用纯 CPU'),
-                    value: gpuSettings.enableGpu,
-                    onChanged: (v) => gpuNotifier.setEnableGpu(v),
+                  _buildToggleTitle(
+                    'GPU 加速',
+                    gpuSettings.enableGpu,
+                    gpuNotifier.setEnableGpu,
+                    subtitle: '按所选后端卸载计算到 GPU',
                   ),
-                  const SizedBox(height: 12),
-                  // GPU 后端选择：auto / opencl / vulkan / cpu。
-                  // OpenCL 是 llama.rn 在 Android 上使用的后端（Adreno 700+ 验证可用，
-                  // 支持 Q4_K）；Vulkan 在本设备（Adreno 825）上对 Q4_K_M 输出崩坏
-                  // （全部采样塌缩成 padding token），仅保留作对比。
-                  _buildSectionHeader('GPU 后端', context),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 16),
+                  // GPU 后端选择：auto / opencl / vulkan。
+                  // CPU 不单列——关闭 GPU 即纯 CPU，自动模式无 GPU 时也会回落 CPU。
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text('后端', style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
+                  ),
                   SegmentedButton<String>(
                     segments: const [
                       ButtonSegment(
@@ -552,11 +553,6 @@ class _InferenceEngineTab extends ConsumerWidget {
                         value: 'vulkan',
                         label: Text('Vulkan'),
                         icon: Icon(Icons.view_in_ar, size: 16),
-                      ),
-                      ButtonSegment(
-                        value: 'cpu',
-                        label: Text('CPU'),
-                        icon: Icon(Icons.memory, size: 16),
                       ),
                     ],
                     selected: {gpuSettings.gpuBackend},
@@ -580,12 +576,10 @@ class _InferenceEngineTab extends ConsumerWidget {
                   Text(
                     gpuSettings.enableGpu
                         ? _gpuBackendHint(gpuSettings.gpuBackend)
-                        : 'GPU 已关闭，后端选择不生效（纯 CPU）',
+                        : 'GPU 已关闭（纯 CPU）',
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
-                  const SizedBox(height: 12),
-                  // 层数滑块：Vulkan（本设备已知崩坏）与 CPU 后端固定全量/不生效，
-                  // OpenCL / auto 时允许调（部分卸载是否可用待真机验证）。
+                  const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
@@ -635,19 +629,15 @@ class _InferenceEngineTab extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('🧠 思考模式（Thinking）', context),
-                  const SizedBox(height: 12),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('启用思考模式'),
-                    subtitle: const Text(
-                        '开启后模型先输出推理过程再给答案（更慢）；关闭则直接作答（更快），仅对 Qwen3 等思考模型生效'),
-                    value: gpuSettings.enableThinking,
-                    onChanged: (v) {
+                  _buildToggleTitle(
+                    '思考模式',
+                    gpuSettings.enableThinking,
+                    (v) {
                       gpuNotifier.setEnableThinking(v);
                       // 立即同步到原生层，无需重新加载模型。
                       ref.read(inferenceServiceProvider).setEnableThinking(v);
                     },
+                    subtitle: '先输出推理过程再给结论；直接作答更快（仅思考型模型生效）',
                   ),
                 ],
               ),
@@ -860,29 +850,29 @@ class _InferenceEngineTab extends ConsumerWidget {
   String _gpuBackendHint(String backend) {
     switch (backend) {
       case 'opencl':
-        return 'OpenCL：llama.rn 在 Android 上使用的后端（Adreno 700+ 验证可用，支持 Q4_K）。推荐。';
+        return 'OpenCL：推荐后端';
       case 'vulkan':
-        return '⚠️ Vulkan：本设备（Adreno 825）上对 Q4_K_M 输出崩坏（采样塌缩成 padding token，空回复），仅作对比。';
+        return 'Vulkan';
       case 'cpu':
-        return 'CPU：不使用任何 GPU 后端（最稳，较慢）。';
+        return 'CPU：纯 CPU 后端';
       default:
-        return '自动：优先 OpenCL（Vulkan 在本设备已知崩坏），无 GPU 时回落 CPU。';
+        return '自动：优先 OpenCL，无 GPU 时回落 CPU';
     }
   }
 
   bool _gpuLayersEditable(InferenceSettings s) {
     if (!s.enableGpu) return false;
-    // Vulkan 本设备已知崩坏（无论层数）；CPU 无意义。其余后端（opencl/auto）允许调层数。
+    // CPU 无意义；其余后端（opencl/auto）允许调层数，Vulkan 暂不可调。
     return s.gpuBackend == 'opencl' || s.gpuBackend == 'auto';
   }
 
   String _gpuLayersHint(InferenceSettings s) {
-    if (!s.enableGpu) return 'GPU 已关闭，层数设置不生效（纯 CPU）';
+    if (!s.enableGpu) return 'GPU 已关闭（纯 CPU）';
     if (_gpuLayersEditable(s)) {
-      return '部分卸载层数可调（0 = 纯 CPU，越大卸载越多；全量 = 999）';
+      return '0 = 纯 CPU，越大卸载越多（全量 = 999）';
     }
     if (s.gpuBackend == 'vulkan') {
-      return 'Vulkan 本设备已知崩坏，层数不可调（建议改用 OpenCL/自动）';
+      return 'Vulkan 暂不可调层数';
     }
     return '当前后端固定，层数不可调';
   }
@@ -896,6 +886,34 @@ Widget _buildSectionHeader(String title, BuildContext context) {
       title,
       style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
     ),
+  );
+}
+
+/// 标题行内嵌开关：标题 + 右侧 Switch，可选副标题。用于节省卡片纵向空间。
+Widget _buildToggleTitle(
+  String title,
+  bool value,
+  ValueChanged<bool> onChanged, {
+  String? subtitle,
+}) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          Switch(value: value, onChanged: onChanged),
+        ],
+      ),
+      if (subtitle != null) ...[
+        const SizedBox(height: 4),
+        Text(subtitle, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+      ],
+    ],
   );
 }
 
