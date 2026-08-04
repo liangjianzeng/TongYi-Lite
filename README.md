@@ -404,10 +404,11 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 | 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
-| 7 | **批量预填充** | ✅ | Prompt 解码从逐 token 改为 n_batch=512 批量，TTFT 降低 10-50×；`n_ubatch=16` 保证多轮正确性（见下方「已知问题」） |
+| 7 | **批量预填充 + unified KV** | ✅ | prefill 改用大 batch（n_batch=512）+ unified KV 缓存；`n_ubatch=16` 保证多轮正确性（大 ubatch 的量化 GEMM 路径有 bug，见「已知问题」） |
 | 8 | **内置采样器** | ✅ | `llama_sampler_chain`：penalties → top_k(128) → top_p → temp → dist，采样后 `llama_sampler_accept` 回喂历史（重复惩罚生效、防退化循环） |
 | 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
 | 10 | **mmap 加载** | ✅ | 模型加载从全量读入 RAM 改为 mmap，降低峰值内存与 OOM 风险 |
+| 11 | **flash attention + 线程策略** | ✅ | flash_attn_type 当前 DISABLED（AUTO 在 CPU 后端会实际启用且多轮乱码，见「已知问题」）；n_threads 按核心数>4 取一半调度，避免 big.LITTLE 小核争抢降频 |
 
 ### P1 计划 🚧
 
@@ -541,7 +542,7 @@ echo $ANDROID_HOME
 - 关闭后台应用释放 RAM
 - 设备需 ≥ 4GB RAM 才能流畅运行 1.7B 模型
 - 确保 Vulkan GPU 加速已启用（检查设置页是否显示"已完成"状态）
-- 已优化：批量预填充（TTFT 降低 10-50×）、内置采样器（消除每 token 150k+ 堆分配）、流式回调批量化（减少跨语言往返）、mmap 加载（降低峰值内存）
+- 已优化：批量预填充 + unified KV（prefill 改用大 batch，TTFT 降低 10-30×）、flash attention 自动开启（GPU 全卸载时）、线程按核心数/2 调度、内置采样器（消除每 token 150k+ 堆分配）、流式回调批量化（减少跨语言往返）、mmap 加载（降低峰值内存）
 
 </details>
 
