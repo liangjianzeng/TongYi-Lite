@@ -279,11 +279,23 @@ struct InferenceEngine {
         // and works fine. We now enable the unified buffer (kv_unified=true) so
         // large batches are correct, and raise both batch sizes to 512.
         ctx_params.n_batch  = 512;
-        ctx_params.n_ubatch = 512;
+        // n_ubatch back to 16: with ubatch >= 32, ggml-cpu dispatches to the
+        // quantized GEMM path, which on this build (armv8.4-a+dotprod+i8mm)
+        // produces garbage logits when the prompt exceeds 32 tokens
+        // (verified on-device: turn 1 "你好" 15 tokens OK; turn 2 37-39 tokens
+        // → noise "oother民nedbish枉叶"). With ubatch=16 the mul-mat falls back
+        // to the vec_dot path which is correct. Prefill is slower but correct;
+        // the GEMM corruption needs fixing in ggml-cpu before restoring 512.
+        ctx_params.n_ubatch = 16;
         // Flash attention: AUTO enables it on backends that support it (e.g. Vulkan
-        // GPU on Android) and silently no-ops on CPU. NOTE: the field is the
-        // flash_attn_type ENUM (not a bool) in this llama.cpp build.
-        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        // GPU on Android). NOTE: on CPU this llama.cpp build also implements
+        // FLASH_ATTN_EXT (ggml-cpu/ops.cpp), so AUTO does NOT no-op on CPU — it
+        // enables flash attn there too. That combination (unified KV + flash attn +
+        // seq_rm per turn) produced garbage logits from the very first sampled
+        // token on turn 2 (KV reused after seq_rm), verified on-device
+        // (turn 1 OK 15 tokens; turn 2: 386 tokens of "rekl bytesRead,}" noise).
+        // Use DISABLED until the flash-attn-after-seq_rm state reset is verified.
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         // Thread strategy (matches llama.cpp common.cpp default / llama.rn): use ALL
         // cores when the device has <= 4, otherwise HALF the cores to avoid
         // over-subscribing a big.LITTLE cluster (little-core contention / thermal
@@ -442,7 +454,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI unified-kv+large-ubatch(512)+flash-attn+penalty BUILD 20260804j =====");
+        LOGI("===== TongYiLite JNI unified-kv+ubatch(16)+no-fa+penalty+accept BUILD 20260804m =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
@@ -651,7 +663,10 @@ struct InferenceEngine {
             // Batch size for on_token callbacks — accumulating characters
             // before crossing the JNI/EventChannel boundary reduces per-token
             // overhead from the C++→JNI→Dart round-trip.
-            const size_t kFlushBatchSize = 64;
+            // 8 bytes ≈ 2 CJK chars: small enough to feel character-by-character
+            // streaming, big enough to avoid a JNI hop per byte. (64 was too
+            // coarse: ~21 chars per chunk read like block output.)
+            const size_t kFlushBatchSize = 8;
 
             // Create the sampler chain once and reuse it for every generated token.
             // This replaces the per-token O(vocab) allocation of 150k+
@@ -689,6 +704,13 @@ struct InferenceEngine {
                 // O(vocab) allocation and partial_sort of the previous
                 // manual implementation.
                 new_token = llama_sampler_sample(smpl_chain, context, -1);
+                // CRITICAL: feed the sampled token back into the sampler chain.
+                // Without llama_sampler_accept, stateful samplers (penalties /
+                // top_k / dist RNG) never update their internal history, so the
+                // repeat penalty NEVER fires → degenerate repetition loops
+                // (e.g. tokens 9841/57699 repeating forever on turn 2, no EOS).
+                // Matches llama.android ai_chat.cpp: common_sampler_accept().
+                llama_sampler_accept(smpl_chain, new_token);
 
                 if (n_gen == 0) {
                     LOGI("[DIAG] chosen new_token=%d (sampler chain, n_vocab=%d)",
@@ -724,6 +746,10 @@ struct InferenceEngine {
                     // dropped; SentencePiece's "▁" marker is rendered as a space.
                     // Batch complete sequences into flush_buf before calling
                     // on_token to reduce C++→JNI→Dart round-trip overhead per token.
+                    // NOTE: kFlushBatchSize must stay small (<= 8 bytes ≈ 2 CJK chars).
+                    // The previous 64-byte batch (≈21 CJK chars) made streaming
+                    // appear as ~20-char chunks instead of character-by-character,
+                    // which feels non-streaming on a 0.5-2 tok/s on-device model.
                     size_t consumed = 0;
                     while (consumed < gen_utf8_buf.size()) {
                         int adv = utf8_seq_len(gen_utf8_buf, consumed);

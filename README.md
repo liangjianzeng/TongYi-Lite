@@ -404,9 +404,9 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
 | 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
-| 7 | **批量预填充** | ✅ | Prompt 解码从逐 token 改为 n_batch=512 批量，TTFT 降低 10-50× |
-| 8 | **内置采样器** | ✅ | 用 `llama_sampler_chain`（top_k/top_p/temp）替代手动 O(vocab) 采样，消除每 token 150k+ 堆分配 |
-| 9 | **流式回调批量化** | ✅ | `on_token` 回调每 64 字符批量发送，减少 C++→JNI→Dart 跨语言往返开销 |
+| 7 | **批量预填充** | ✅ | Prompt 解码从逐 token 改为 n_batch=512 批量，TTFT 降低 10-50×；`n_ubatch=16` 保证多轮正确性（见下方「已知问题」） |
+| 8 | **内置采样器** | ✅ | `llama_sampler_chain`：penalties → top_k(128) → top_p → temp → dist，采样后 `llama_sampler_accept` 回喂历史（重复惩罚生效、防退化循环） |
+| 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
 | 10 | **mmap 加载** | ✅ | 模型加载从全量读入 RAM 改为 mmap，降低峰值内存与 OOM 风险 |
 
 ### P1 计划 🚧
@@ -415,6 +415,41 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 7. **语音识别**：sherpa-onnx (WeNet) 流式 STT
 8. **TTS 播报**：Android TextToSpeech 离线引擎
 9. **Plugin 市场**：热插拔、签名验证、沙箱
+
+---
+
+## 已知问题与踩坑记录
+
+### 多轮对话第二轮乱码（已修复 · 2026-08-04）
+
+**症状**：第一轮对话（如"你好"）回复正常；第二轮（如"你是谁"，带历史上下文）输出
+`rekl bytesRead,}` / `oother民nedbish枉叶` 等乱码，且生成上百 token 不停（无 EOS）。
+
+**根因**（真机日志 + 反汇编逐步定位）：
+
+1. **量化 GEMM 路径计算出错**：`n_ubatch=512` 时，prompt 超过 32 tokens 的 prefill 会进入
+   ggml-cpu 的量化 GEMM 路径，而该路径在本 build（`armv8.4-a+dotprod+i8mm`）下产生垃圾 logits。
+   第一轮 "你好" 仅 15 tokens（<32，走 vec_dot 路径）所以正常 —— 与 flash attention、KleidiAI
+   均无关（KleidiAI 只支持 Q4_0/Q8_0，本项目模型为 Q4_K_M 不会接管）。
+2. **重复惩罚失效**：采样循环缺 `llama_sampler_accept()`，penalties sampler 的 token 历史
+   永远为空 → repeat penalty 永不生效 → 模型陷入退化循环（如 token 9841/57699 反复出现）。
+
+**修复**：`n_ubatch` 调回 `16`（强制走正确的 vec_dot 路径，首 token 延迟略增但输出正确）；
+采样后补 `llama_sampler_accept(smpl_chain, new_token)`。GEMM 路径的底层 bug 需后续在
+ggml-cpu 侧修复后才能恢复大 ubatch。
+
+### Flash Attention 陷阱（2026-08-04）
+
+`flash_attn_type=LLAMA_FLASH_ATTN_TYPE_AUTO` 在本 build 的 **CPU 后端也会实际启用**（ggml-cpu
+实现了 FLASH_ATTN_EXT op），并非注释所说的"CPU 上静默 no-op"。该组合在 seq_rm 清空 KV 后
+第二轮 prefill 产生垃圾 logits。当前 `DISABLED`，待验证状态重置后可按需恢复。
+
+### 采样器链必须以 dist 收尾（2026-08-04）
+
+`llama_sampler_chain` 只有 top_k/top_p/temp 时，`llama_sampler_sample()` 会命中
+`GGML_ASSERT(cur_p.selected >= 0)` 直接 SIGABRT（debug 构建，`llama-sampler.cpp:870`）。
+链末必须追加 `llama_sampler_init_dist(seed)` 实际抽样并设置 `selected`。
+采样链完整顺序：`penalties → top_k(128) → top_p → temp → dist`。
 
 ---
 
