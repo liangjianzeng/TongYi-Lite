@@ -357,10 +357,11 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
   }
 
   /// Look up a model's display name from the cached catalog (best-effort).
+  /// 返回清理后的名称：去掉括号内的精度/量化说明，界面显示更短。
   static String? _lookupModelName(String modelId) {
     final syncCache = loadModelCatalogSync();
     for (final m in syncCache) {
-      if (m.id == modelId) return m.name;
+      if (m.id == modelId) return cleanModelName(m.name);
     }
     return null;
   }

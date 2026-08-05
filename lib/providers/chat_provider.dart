@@ -25,9 +25,9 @@ final storageServiceProvider = Provider<StorageService>((ref) => StorageService(
 // Model selection — the currently active model ID
 // ---------------------------------------------------------------------------
 
-/// Currently selected model ID. Defaults to Qwen2.5-1.5B which is the
-/// recommended balance of quality and memory usage for most phones.
-final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3-1.7b-q4_k_m');
+/// Currently selected model ID. Defaults to Qwen3.5-2B (MTP) which is the
+/// recommended balance of quality, speed and memory usage for most phones.
+final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3.5-2b-mtp-ud-q4_k_xl');
 
 // ---------------------------------------------------------------------------
 // Conversations

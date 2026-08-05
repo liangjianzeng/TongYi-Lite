@@ -42,7 +42,7 @@ class StorageService {
       CREATE TABLE conversations (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '新对话',
-        modelId TEXT DEFAULT 'qwen3-1.7b-q4_k_m',
+        modelId TEXT DEFAULT 'qwen3.5-2b-mtp-ud-q4_k_xl',
         messageCount INTEGER DEFAULT 0,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
@@ -77,7 +77,7 @@ class StorageService {
     await db.insert('conversations', {
       'id': id,
       'title': title,
-      'modelId': 'qwen3-1.7b-q4_k_m',
+      'modelId': 'qwen3.5-2b-mtp-ud-q4_k_xl',
       'messageCount': 0,
       'createdAt': now,
       'updatedAt': now,
@@ -94,7 +94,7 @@ class StorageService {
     return rows.map((r) => Conversation(
       id: r['id'] as String,
       title: r['title'] as String,
-      modelId: r['modelId'] as String? ?? 'qwen3-1.7b-q4_k_m',
+      modelId: r['modelId'] as String? ?? 'qwen3.5-2b-mtp-ud-q4_k_xl',
       messageCount: r['messageCount'] as int? ?? 0,
       createdAt: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(r['updatedAt'] as int),

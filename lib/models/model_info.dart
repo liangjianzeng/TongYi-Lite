@@ -4,8 +4,6 @@
 // and are loaded dynamically via ModelCatalog.load().
 // ============================================================
 
-import 'package:flutter/foundation.dart' show debugPrint;
-
 enum ModelType { text, vision }
 
 String modelTypeLabel(ModelType type) {
@@ -24,6 +22,15 @@ String modelTypeIcon(ModelType type) {
     case ModelType.vision:
       return '\u{1F5BC}\u{FE0F}'; // 🖼️
   }
+}
+
+/// 去掉模型名里括号内的精度/量化说明（如 "Qwen3.5-0.8B (Q4_K_M MTP)" → "Qwen3.5-0.8B"），
+/// 用于界面显示以缩短长度。仅去掉末尾的括号段；无括号时原样返回。
+String cleanModelName(String name) {
+  final trimmed = name.trim();
+  final match = RegExp(r'\s*\([^()]*\)\s*$').firstMatch(trimmed);
+  if (match == null) return trimmed;
+  return trimmed.substring(0, match.start).trim();
 }
 
 class MirrorEntry {
