@@ -2,7 +2,7 @@
 
 > **测试日期**：2026-08-04
 > **测试设备**：Xiaomi 25053RT47C（Android 16 / API 36，Snapdragon 8 Elite + **Adreno 825**）
-> **App 版本**：V0.1.3（llama.cpp 内置 b10176；推理管线 `flash_attn=DISABLED`、`n_ubatch=16`、`sampler: penalties→top_k(128)→top_p(0.9)→temp(0.8)→dist`、每轮 `llama_sampler_accept`）
+> **App 版本**：V0.1.3（llama.cpp 内置 b10173；推理管线 `flash_attn=DISABLED`、`n_ubatch=16`、`sampler: penalties→top_k(128)→top_p(0.9)→temp(0.8)→dist`、每轮 `llama_sampler_accept`）
 > **测试模型**：`qwen3.5-4b-q4_k_m.gguf`（Qwen3.5-4B，Q4_K_M，params≈4.21B，n_embd=2560，n_layer=32，约 2.5 GB）
 > **上下文**：n_ctx=4096，GPU 层数 n_gpu_layers=100（全卸载）
 

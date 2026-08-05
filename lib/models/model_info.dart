@@ -63,6 +63,7 @@ class ModelConfig {
   final bool recommended;
   final int minRamMB;
   final String? sha256Hash;
+  final bool mtp;
 
   const ModelConfig({
     required this.id,
@@ -74,6 +75,7 @@ class ModelConfig {
     this.recommended = false,
     this.minRamMB = 0,
     this.sha256Hash,
+    this.mtp = false,
   });
 
   String get bestMirrorUrl => mirrors.first.url;
@@ -96,6 +98,7 @@ class ModelConfig {
       recommended: json['recommended'] as bool? ?? false,
       minRamMB: json['minRamMB'] as int? ?? 0,
       sha256Hash: json['sha256Hash'] as String?,
+      mtp: json['mtp'] as bool? ?? false,
     );
   }
 }

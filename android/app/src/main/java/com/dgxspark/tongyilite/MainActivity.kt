@@ -7,6 +7,7 @@
 
 package com.dgxspark.tongyilite
 
+import android.app.ActivityManager
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -361,18 +362,46 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleGetMemoryInfo(result: MethodChannel.Result) {
-        val rt = Runtime.getRuntime()
         mainHandler.post {
             try {
-                result.success(mapOf(
-                    "totalMB" to rt.totalMemory() / 1_048_576,
-                    "freeMB" to rt.freeMemory() / 1_048_576,
-                    "usedMB" to (rt.totalMemory() - rt.freeMemory()) / 1_048_576,
-                    "maxMB" to rt.maxMemory() / 1_048_576
-                ))
+                val am = getSystemService(ActivityManager::class.java)!!
+                val memInfo = ActivityManager.MemoryInfo()
+                am.getMemoryInfo(memInfo)
+                val sysTotalMB = (memInfo.totalMem / 1_048_576).toInt()
+                val sysAvailMB = (memInfo.availMem / 1_048_576).toInt()
+                val sysUsedMB = (sysTotalMB - sysAvailMB).coerceAtLeast(0)
+                // Process resident set size — includes llama.cpp model weights + KV cache
+                // since the engine runs in-process. Best proxy for "llama.cpp memory".
+                val procRssMB = readProcessRssMB()
+                // Model weights (mmap'd .gguf file size; 0 when no model loaded).
+                val modelMB = (engine.getModelSizeBytes() / 1_048_576).toInt()
+                // KV-cache allocation size (0 when no model loaded).
+                val kvCacheMB = (engine.getKvCacheBytes() / 1_048_576).toInt()
+                result.success(
+                    mapOf(
+                        "sysTotalMB" to sysTotalMB,
+                        "sysAvailMB" to sysAvailMB,
+                        "sysUsedMB" to sysUsedMB,
+                        "procRssMB" to procRssMB,
+                        "modelMB" to modelMB,
+                        "kvCacheMB" to kvCacheMB,
+                    ),
+                )
             } catch (e: Exception) {
                 logE("handleGetMemoryInfo", "result.success failed", e)
             }
+        }
+    }
+
+    /** Read VmRSS (resident set size in KB) of this process from /proc/self/status. */
+    private fun readProcessRssMB(): Int {
+        return try {
+            val text = java.io.File("/proc/self/status").readText()
+            val line = text.lineSequence().firstOrNull { it.startsWith("VmRSS:") }
+            val kb = line?.replace(Regex("[^0-9]"), "")?.toLongOrNull() ?: 0L
+            (kb / 1024).toInt()
+        } catch (_: Exception) {
+            0
         }
     }
 

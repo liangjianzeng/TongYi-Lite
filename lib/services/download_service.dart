@@ -65,6 +65,30 @@ class DownloadService {
     final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
     final finalFile = File(p.join(dir.path, model.id + '.gguf'));
 
+    try {
+      await _runDownloadLoop(
+        model, task, tempFile, finalFile, onProgress, progressInterval,
+      );
+    } finally {
+      // CRITICAL: the entry must be dropped no matter how we leave, otherwise
+      // the `maxConcurrentDownloads` guard stays permanently saturated after
+      // the first finished download and every later start throws
+      // "Only one download at a time." — which looked like a dead button.
+      // Exception: a *paused* task keeps its slot so resume() can reuse it.
+      if (task.state != DownloadState.paused) {
+        _activeDownloads.remove(model.id);
+      }
+    }
+  }
+
+  Future<void> _runDownloadLoop(
+    ModelConfig model,
+    DownloadTask task,
+    File tempFile,
+    File finalFile,
+    void Function(DownloadTask) onProgress,
+    Duration progressInterval,
+  ) async {
     // ---- 自动重试循环：连接中断时保留已下载的 .tmp 并断点续传 ----
     for (int attempt = 1; attempt <= _maxAttempts; attempt++) {
       final cancelToken = CancelToken();

@@ -12,6 +12,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
+import '../models/model_info.dart';
 
 /// 模型存储服务 — 统一管理模型文件的存储位置
 class ModelStorageService {
@@ -103,6 +104,35 @@ class ModelStorageService {
     try {
       final path = await getModelPath(modelId);
       return File(path).exists();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 判断模型是否「完整」地缓存在磁盘上 —— 这是「能否当作已缓存 / 可加载」的
+  /// 唯一可靠判据。
+  ///
+  /// 仅检查 `.gguf` 是否存在（[isModelCached]）会漏掉两类故障：
+  ///  ① catalog 里 `sizeBytes` 与实文件不符时，一个被截断/不完整的 `.gguf`
+  ///    仍会被当成已缓存；
+  ///  ② 下载中途暂停/失败若残留 `.gguf` 或 `.gguf.tmp`，会被误判为可加载，
+  ///    用户点击「加载」后因为模型文件不全而直接失败。
+  ///
+  /// 因此要求：`.gguf` 存在、实文件大小 ≥ catalog 预期大小的 99%（catalog 未给
+  /// 大小时退化为仅存在性判断）、且不存在未完成的 `.gguf.tmp` 部分文件。
+  Future<bool> isFullyCached(ModelConfig model) async {
+    try {
+      final dir = await getModelsRootDir();
+      final gguf = File(p.join(dir.path, '${model.id}.gguf'));
+      if (!await gguf.exists()) return false;
+      final size = await gguf.length();
+      if (model.sizeBytes > 0 && size < (model.sizeBytes * 0.99).round()) {
+        return false;
+      }
+      if (await File(p.join(dir.path, '${model.id}.gguf.tmp')).exists()) {
+        return false;
+      }
+      return true;
     } catch (_) {
       return false;
     }

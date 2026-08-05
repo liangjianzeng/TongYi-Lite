@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, modelDisplayNameProvider;
 import '../providers/model_provider.dart';
+import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
 import '../services/storage_permission_service.dart';
 import '../widgets/chat_bubble.dart';
@@ -51,6 +53,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// conversation, not when they've scrolled up to read history.
   void _onScroll() {
     if (!_scrollController.hasClients) return;
+    // While a reply is streaming in, always keep following the bottom. The
+    // auto-scroll animation (animateTo) fires scroll notifications mid-flight;
+    // if we let those intermediate positions flip _followStream off, the
+    // following stops and the incoming assistant message piles up off-screen.
+    // So during generation we pin _followStream = true and ignore position.
+    if (ref.read(isGeneratingProvider)) {
+      if (!_followStream) setState(() => _followStream = true);
+      return;
+    }
     final pos = _scrollController.position;
     final nearBottom = pos.pixels >= pos.maxScrollExtent - 60;
     if (nearBottom != _followStream) {
@@ -156,23 +167,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     FocusScope.of(context).unfocus();
 
     final notifier = ref.read(chatNotifierProvider.notifier);
+    // Turn on "follow the conversation" the instant we send. _sendMessage
+    // awaits the full generation, so if we only enabled following afterwards
+    // the streamed reply would scroll into view only once it finished. This
+    // also covers the case where the user had scrolled up to read history
+    // right before hitting send.
+    _followStream = true;
+    // Clear the input box immediately: the message is already composed in
+    // `text` and is about to be dispatched to the model. Keeping the text in
+    // the box until the whole reply finishes is confusing — it should empty
+    // the moment the message is sent.
+    _textController.clear();
+    setState(() => _selectedImagePath = null);
     try {
       await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
     } catch (e) {
-      // Show error feedback — don't clear input so user can retry.
+      // The send failed before leaving the client — restore the input so the
+      // user can retry. (If it failed mid-generation the message is already
+      // persisted and shown in the chat, so no restore needed there.)
+      _textController.text = text;
+      if (imagePath != null) setState(() => _selectedImagePath = imagePath);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('发送失败: $e', style: const TextStyle(color: Colors.white))),
       );
       return;
     }
 
-    // Only clear after successful send.
-    _textController.clear();
-    setState(() => _selectedImagePath = null);
-
-    // Re-anchor to the newest message (bottom of the list, at maxScrollExtent).
-    // Keep following as new content streams in.
-    _followStream = true;
+    // Safety-net re-anchor once the reply is fully generated. Following was
+    // already active during streaming (set true at send time, pinned while
+    // isGenerating). This guarantees the final message is in view even if the
+    // last streamed chunk arrived between two 500ms list refreshes.
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -303,7 +327,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             if (isGenerating) _buildPulsingDot(),
             const SizedBox(width: 4),
             Text(
-              customName ?? '模型就绪',
+              customName ?? ms.modelName ?? (ms.modelId ?? '模型就绪'),
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color),
             ),
           ],
@@ -345,17 +369,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _showModelStatusPopup(ModelState ms, bool isGenerating) {
     final notifier = ref.read(modelManagerProvider.notifier);
-    final modelName = ms.modelName ?? '未知模型';
+    // Resolve the display name consistently with the chip: user custom name →
+    // loaded modelName (catalog) → modelId → fallback. Avoids "未知模型".
+    final customName = ref.read(modelDisplayNameProvider)[ms.modelId];
+    final modelName = customName ?? ms.modelName ?? (ms.modelId ?? '未知模型');
 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      // Sheet now carries a memory panel + logs + buttons; without
+      // isScrollControlled the default 9/16-screen cap clips the content.
+      isScrollControlled: true,
       builder: (ctx) => _ModelStatusSheet(
         phase: ms.phase,
         modelName: modelName,
         errorMessage: ms.errorMessage,
         logs: ms.loadingLogs,
         isGenerating: isGenerating,
+        ref: ref,
         onUnload: () async {
           Navigator.pop(ctx);
           final ok = await notifier.unloadModel();
@@ -790,6 +821,7 @@ class _ModelStatusSheet extends StatelessWidget {
   final VoidCallback onUnload;
   final VoidCallback onLoad;
   final VoidCallback onGoToSettings;
+  final WidgetRef ref;
 
   const _ModelStatusSheet({
     required this.phase,
@@ -800,6 +832,7 @@ class _ModelStatusSheet extends StatelessWidget {
     required this.onUnload,
     required this.onLoad,
     required this.onGoToSettings,
+    required this.ref,
   });
 
   @override
@@ -811,8 +844,11 @@ class _ModelStatusSheet extends StatelessWidget {
         color: Theme.of(context).colorScheme.surface,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
       ),
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.85,
+      ),
       child: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -849,6 +885,7 @@ class _ModelStatusSheet extends StatelessWidget {
                   if (isGenerating) _buildPulsingDotLarge(),
                 ],
               ),
+              _MemoryPanel(ref: ref),
               const SizedBox(height: 12),
               // Inference / loading logs (scrollable, latest entries at bottom)
               if (logs.isNotEmpty)
@@ -967,6 +1004,228 @@ class _ModelStatusSheet extends StatelessWidget {
           shape: BoxShape.circle,
         ),
       ),
+    );
+  }
+}
+
+/// Live memory-usage panel shown inside the model-status sheet.
+///
+/// Polls [InferenceService.getMemoryInfo] every 2s so the user can watch
+/// system RAM pressure and llama.cpp (in-process) memory while generating.
+/// Colors: green = comfortable, orange = tight, red = critical.
+class _MemoryPanel extends StatefulWidget {
+  final WidgetRef ref;
+  const _MemoryPanel({required this.ref});
+
+  @override
+  State<_MemoryPanel> createState() => _MemoryPanelState();
+}
+
+class _MemoryPanelState extends State<_MemoryPanel> {
+  Map<String, int>? _mem;
+  String? _error;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _refresh());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final m = await widget.ref.read(inferenceServiceProvider).getMemoryInfo();
+      if (!mounted) return;
+      setState(() {
+        _mem = m;
+        _error = m.isEmpty ? '原生端未返回内存数据' : null;
+      });
+    } catch (e) {
+      // Surface the failure instead of spinning forever — a silent catch here
+      // is exactly what hid the earlier type-cast bug.
+      if (mounted && _mem == null) setState(() => _error = '$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_mem == null || _mem!.isEmpty) {
+      return Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(top: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.grey.shade300),
+        ),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 14, height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _error == null ? '读取内存信息…' : '内存信息不可用：$_error',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    final sysTotal = _mem!['sysTotalMB'] ?? 0;
+    final sysAvail = _mem!['sysAvailMB'] ?? 0;
+    final sysUsed = _mem!['sysUsedMB'] ?? 0;
+    final procRss = _mem!['procRssMB'] ?? 0;
+    final modelMB = _mem!['modelMB'] ?? 0;
+    final kvCache = _mem!['kvCacheMB'] ?? 0;
+    final sysAvailPct = sysTotal > 0 ? sysAvail / sysTotal : 0.0;
+    final procPct = sysTotal > 0 ? procRss / sysTotal : 0.0;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.memory, size: 16),
+              const SizedBox(width: 6),
+              Text('内存占用', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade800)),
+              const Spacer(),
+              Text('可用 ${_gb(sysAvail)} GB', style: TextStyle(fontSize: 12, color: _pressureColor(sysAvailPct))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _memBar(
+            label: '系统内存',
+            usedMB: sysUsed,
+            totalMB: sysTotal,
+            pct: sysTotal > 0 ? sysUsed / sysTotal : 0,
+            color: _pressureColor(sysAvailPct),
+          ),
+          const SizedBox(height: 8),
+          _memBar(
+            label: 'App (llama.cpp)',
+            usedMB: procRss,
+            totalMB: sysTotal,
+            pct: procPct,
+            color: _pressureColor(1 - procPct),
+          ),
+          const SizedBox(height: 10),
+          // llama.cpp 自身的内存构成：模型权重 + KV 缓存
+          Row(
+            children: [
+              Expanded(
+                child: _memStat(
+                  '模型权重',
+                  modelMB > 0 ? '${_gb(modelMB)} GB' : '—',
+                  modelMB > 0 ? Colors.indigo : Colors.grey,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _memStat(
+                  'KV 缓存',
+                  kvCache > 0 ? '${_gb(kvCache)} GB' : '—',
+                  kvCache > 0 ? Colors.teal : Colors.grey,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'llama.cpp 合计: ${_gb(modelMB + kvCache)} GB',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _pressureColor(sysTotal > 0 ? 1 - (modelMB + kvCache) / sysTotal : 1),
+                ),
+              ),
+              Text('进程 RSS: ${_gb(procRss)} GB', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _memStat(String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(fontSize: 11, color: color.withValues(alpha: 0.9))),
+          const SizedBox(height: 2),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color)),
+        ],
+      ),
+    );
+  }
+
+  Color _pressureColor(double availPct) {
+    if (availPct >= 0.3) return Colors.green;
+    if (availPct >= 0.1) return Colors.orange;
+    return Colors.red;
+  }
+
+  String _gb(int mb) => (mb / 1024.0).toStringAsFixed(1);
+
+  Widget _memBar({
+    required String label,
+    required int usedMB,
+    required int totalMB,
+    required double pct,
+    required Color color,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 12)),
+            Text('${_gb(usedMB)} / ${_gb(totalMB)} GB', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: pct.clamp(0.0, 1.0),
+            minHeight: 9,
+            valueColor: AlwaysStoppedAnimation(color),
+            backgroundColor: Colors.grey.shade300,
+          ),
+        ),
+      ],
     );
   }
 }

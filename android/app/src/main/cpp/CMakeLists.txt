@@ -190,6 +190,14 @@ endif()
 # --------------------------------------------------------------------------
 # llmlib: static library from llama.cpp
 # --------------------------------------------------------------------------
+# Build the `common` utils library too. It carries the official speculative
+# (MTP/NextN) decoding driver (common/speculative.{h,cpp}) plus the higher-level
+# common_sampler that common_speculative_* depends on. LLAMA_BUILD_COMMON
+# defaults to LLAMA_STANDALONE (OFF when llama.cpp is used as a subdirectory),
+# so we force it ON here. cpp-httplib is vendored under
+# ${LLAMA_CPP_DIR}/vendor/cpp-httplib, so the offline build works without
+# FetchContent hitting the network (same reason KleidiAI is vendored).
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
 
 # --------------------------------------------------------------------------
@@ -211,6 +219,8 @@ target_include_directories(tongyilite_jni PRIVATE
 
 target_link_libraries(tongyilite_jni
     llama
+    llama-common
+    llama-common-base
     android
     log
     dl
