@@ -257,6 +257,17 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
           'enableMtp($modelId)=$mtp)');
+      // 把 MTP 实际启用状态写进推理日志（loadingLogs），让「推理引擎日志」页
+      // 与启动日志都能确认该模型加载时 MTP 是否真的生效——此前只 debugPrint
+      // 到 logcat，App 内查看不到。
+      final mtpLogs = List<String>.from(state.loadingLogs);
+      mtpLogs.add('MTP 加速: ${mtp ? '开启 ✓' : '关闭'}');
+      state = ModelState(
+        phase: ModelLifecyclePhase.loading,
+        modelId: modelId,
+        modelName: displayName,
+        loadingLogs: mtpLogs,
+      );
       final ok = await _inference.loadModel(
         path,
         enableGpu: gpu.enableGpu,

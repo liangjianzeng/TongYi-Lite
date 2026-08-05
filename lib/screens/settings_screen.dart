@@ -222,7 +222,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    _buildStatusChip(displayState),
+                    // 已缓存模型的右上角不再显示无意义的绿「✅」，改为
+                    // 「设为默认加载」勾选；仅已缓存模型可勾选，单选（勾选
+                    // 一个自动取消其他）。未缓存/下载中仍显示状态 chip。
+                    isCached
+                        ? _buildDefaultToggle(model)
+                        : _buildStatusChip(displayState),
                   ],
                 ),
 
@@ -441,7 +446,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
     if (confirmed == true) {
       ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
+      // 若删除的是默认模型，同时清除默认设置，避免启动时指向已不存在的模型。
+      if (ref.read(settingsProvider).defaultModelId == model.id) {
+        await ref.read(settingsProvider.notifier).setDefaultModel(null);
+      }
     }
+  }
+
+  /// 「设为默认加载」勾选框（仅已缓存模型显示在卡片右上角）。
+  ///
+  /// 勾选后该模型成为默认模型并持久化，启动进入首页时自动加载；
+  /// 单选——勾选一个会自动取消其他（defaultModelId 为单一 id）。取消勾选即
+  /// 清除默认设置（传 null）。
+  Widget _buildDefaultToggle(ModelConfig model) {
+    return Consumer(
+      builder: (context, ref, _) {
+        final settings = ref.watch(settingsProvider);
+        final isDefault = settings.defaultModelId == model.id;
+        final primary = Theme.of(context).colorScheme.primary;
+        return InkWell(
+          borderRadius: BorderRadius.circular(4),
+          onTap: () {
+            ref.read(settingsProvider.notifier)
+                .setDefaultModel(isDefault ? null : model.id);
+          },
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Checkbox(
+                value: isDefault,
+                onChanged: (v) {
+                  ref.read(settingsProvider.notifier)
+                      .setDefaultModel(v == true ? model.id : null);
+                },
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+                activeColor: Colors.green,
+              ),
+              Text(
+                '默认',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: isDefault ? FontWeight.w600 : FontWeight.normal,
+                  color: isDefault ? primary : Colors.grey,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// 模型状态 chip —— AppBar 右侧紧凑指示。

@@ -30,6 +30,11 @@ class InferenceSettings {
   /// 互不影响。
   final Map<String, bool> mtpEnabledByModel;
 
+  /// 启动后自动加载的「默认模型」id。null = 未设置。
+  /// 用户在模型管理页对某个已缓存模型勾选「设为默认」后持久化；
+  /// 启动进入首页时若该模型已缓存则自动加载，保证开箱即用。
+  final String? defaultModelId;
+
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
     // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
@@ -40,6 +45,7 @@ class InferenceSettings {
     this.enableThinking = false,
     this.gpuBackend = 'auto',
     Map<String, bool>? mtpEnabledByModel,
+    this.defaultModelId,
   }) : mtpEnabledByModel = mtpEnabledByModel ?? const {};
 
   /// 便捷读取：某个模型是否启用 MTP（未配置视为关闭）。
@@ -51,7 +57,11 @@ class InferenceSettings {
       int? contextSize,
       bool? enableThinking,
       String? gpuBackend,
-      Map<String, bool>? mtpEnabledByModel}) {
+      Map<String, bool>? mtpEnabledByModel,
+      String? defaultModelId,
+      // defaultModelId 为可空 String，无法用 `?? this` 区分「未传」与「清空」，
+      // 故增加显式清空标记，供取消默认模型时使用。
+      bool clearDefaultModel = false}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
@@ -59,6 +69,9 @@ class InferenceSettings {
       enableThinking: enableThinking ?? this.enableThinking,
       gpuBackend: gpuBackend ?? this.gpuBackend,
       mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
+      defaultModelId: clearDefaultModel
+          ? null
+          : defaultModelId ?? this.defaultModelId,
     );
   }
 
@@ -69,6 +82,7 @@ class InferenceSettings {
         'enableThinking': enableThinking,
         'gpuBackend': gpuBackend,
         'mtpEnabledByModel': mtpEnabledByModel,
+        'defaultModelId': defaultModelId,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -83,18 +97,26 @@ class InferenceSettings {
       // 旧版本存的是全局 bool enableMtp：若读到它，则映射为所有支持模型的
       // 默认值，保证老配置不丢。
       mtpEnabledByModel: _migrateLegacyMtp(json),
+      defaultModelId: json['defaultModelId'] as String?,
     );
   }
 
   /// 兼容旧配置：旧字段 `enableMtp`（全局 bool）→ 新的按模型 map。
-  /// 旧值 true 时无法知道用户开了哪个模型，统一不迁移（保持默认全关），
-  /// 由用户重新按模型开启；旧值 false 即默认全关，无需迁移。
+  ///
+  /// 关键修复：文件里若已存在 `mtpEnabledByModel`（当前版本标准格式），
+  /// **必须原样采用**，不能因为缺少顶层 `enableMtp` 字段就整体丢弃——
+  /// 否则每次 reload 都会把用户按模型开启的 MTP 开关清空，导致 MTP 永远不生效。
+  /// 仅当 `mtpEnabledByModel` 缺失（老版本只有全局 `enableMtp:true`）时，
+  /// 因无法定位具体模型而保持默认全关，由用户重新按模型开启。
   static Map<String, bool> _migrateLegacyMtp(Map<String, dynamic> json) {
+    final map = json['mtpEnabledByModel'] as Map<String, dynamic>?;
+    if (map != null) {
+      return map.map((k, v) => MapEntry(k, v as bool? ?? false));
+    }
+    // 仅有旧版全局 enableMtp：true 且未迁移过时，保持默认全关（无法知道开了哪个模型）。
     final legacy = json['enableMtp'] as bool? ?? false;
     if (!legacy) return const {};
-    final map = json['mtpEnabledByModel'] as Map<String, dynamic>?;
-    if (map == null) return const {};
-    return map.map((k, v) => MapEntry(k, v as bool? ?? false));
+    return const {};
   }
 }
 

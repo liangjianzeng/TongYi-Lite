@@ -135,10 +135,12 @@ class DownloadService {
         // Step 2: 已完成？直接落到最终文件。
         if (hasPartial && model.sizeBytes > 0 &&
             (await tempFile.length()) >= model.sizeBytes) {
-          task.totalBytes = model.sizeBytes;
+          // 用实文件大小（可能大于估算的 sizeBytes），进度恒为 100%。
+          final done = await tempFile.length();
+          task.totalBytes = done;
+          task.downloadedBytes = done;
           await tempFile.rename(finalFile.path);
           task.state = DownloadState.completed;
-          task.downloadedBytes = model.sizeBytes;
           task.endTime = DateTime.now();
           onProgress(task);
           return;
@@ -173,7 +175,9 @@ class DownloadService {
           final headerTotalStr = response.headers.value('content-length');
           if (headerTotalStr != null) {
             final headerTotal = int.tryParse(headerTotalStr);
-            if (headerTotal != null && headerTotal > 0 && task.totalBytes == 0) {
+            // 始终以服务器返回的实际 Content-Length 为准（catalog 的 sizeBytes
+            // 只是按 sizeGB 估算，可能偏小，导致进度条超 100%）。
+            if (headerTotal != null && headerTotal > 0) {
               task.totalBytes = headerTotal;
               debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
             }
@@ -198,6 +202,9 @@ class DownloadService {
           } finally {
             await raf.close();
           }
+          // 整段下载结束后，用实际写入字节数作为 totalBytes（与 downloadedBytes
+          // 一致，进度即 100%），不再依赖估算的 sizeBytes。
+          task.totalBytes = received;
           onProgress(task);
         }
 
@@ -209,6 +216,9 @@ class DownloadService {
 
         // Step 5: 提升 .tmp 为最终文件。
         await tempFile.rename(finalFile.path);
+        // 完成态以实文件大小为准，进度恒为 100%。
+        task.downloadedBytes = actualSize;
+        task.totalBytes = actualSize > task.totalBytes ? actualSize : task.totalBytes;
         task.state = DownloadState.completed;
         task.endTime = DateTime.now();
         _lastProgressTime.remove(model.id);
@@ -298,6 +308,8 @@ class DownloadService {
         if (task.totalBytes == 0) task.totalBytes = total;
         _emitProgress(task, progressInterval, onProgress);
       }
+      // 续传结束后用实际累计字节数作为 totalBytes，与 downloadedBytes 一致。
+      task.totalBytes = received;
     } finally {
       await raf.close();
     }

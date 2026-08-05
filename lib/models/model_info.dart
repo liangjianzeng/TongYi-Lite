@@ -146,7 +146,12 @@ class DownloadTask {
     this.endTime,
   });
 
-  double get progress => totalBytes > 0 ? downloadedBytes / totalBytes : 0.0;
+  double get progress => totalBytes > 0
+      // catalog 的 sizeBytes 是按 sizeGB 估算的，实际下载文件可能更大，
+      // downloadedBytes 可能短暂超过 totalBytes —— 进度条必须封顶到 100%，
+      // 避免出现「进度超过 100%」的视觉异常。
+      ? (downloadedBytes / totalBytes).clamp(0.0, 1.0)
+      : 0.0;
   String get progressPercent => '${(progress * 100).toStringAsFixed(1)}%';
 
   String get downloadedDisplay {
