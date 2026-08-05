@@ -204,6 +204,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     const SizedBox(width: 8),
                     Expanded(
                       child: _ModelNameField(
+                        // 按 modelId 绑定独立 State：列表按下载/推荐动态排序重排时，
+                        // 名称输入框跟随其所属模型移动，不会因位置复用而串到别的模型。
+                        key: ValueKey(model.id),
                         modelId: model.id,
                         defaultName: model.name,
                       ),
@@ -1240,7 +1243,7 @@ class _RecentLogsWidget extends ConsumerWidget {
 class _ModelNameField extends ConsumerStatefulWidget {
   final String modelId;
   final String defaultName;
-  const _ModelNameField({required this.modelId, required this.defaultName});
+  const _ModelNameField({super.key, required this.modelId, required this.defaultName});
   @override
   ConsumerState<_ModelNameField> createState() => _ModelNameFieldState();
 }
