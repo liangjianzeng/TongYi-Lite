@@ -13,9 +13,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:uuid/uuid.dart';
+
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
+import '../models/api_model.dart';
 import '../providers/index.dart';
+import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
 import '../services/settings_service.dart';
 import '../services/model_manager.dart';
@@ -44,7 +48,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _catalogFuture = loadModelCatalog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
@@ -86,6 +90,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           controller: _tabController,
           tabs: const [
             Tab(icon: Icon(Icons.storage), text: '模型管理'),
+            Tab(icon: Icon(Icons.cloud), text: 'API 接入'),
             Tab(icon: Icon(Icons.memory), text: '推理引擎'),
             Tab(icon: Icon(Icons.info), text: '关于'),
           ],
@@ -95,6 +100,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         controller: _tabController,
         children: [
           _buildModelManagementTab(),
+          const _ApiTab(),
           const _InferenceEngineTab(),
           const _buildAboutTab(),
         ],
@@ -1450,4 +1456,389 @@ Future<void> unloadModelAndNotify(
       duration: const Duration(seconds: 2),
     ),
   );
+}
+
+// =========================================================================
+// Tab 2: API 接入（OpenAI 兼容远程模型）
+// =========================================================================
+
+class _ApiTab extends ConsumerWidget {
+  const _ApiTab();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final apiModels = settings.apiModels;
+    final activeId = settings.activeApiModelId;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Icon(Icons.cloud_queue,
+                      color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      '本地模型优先：仅当本地模型不可用时，才自动使用下方激活的 API 模型。',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                  child: _buildSectionHeader('已配置的 API 模型', context)),
+              FilledButton.icon(
+                onPressed: () => _showApiModelDialog(context, ref),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('添加'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (apiModels.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(
+                child: Text('尚未配置任何 API 模型',
+                    style: TextStyle(color: Colors.grey)),
+              ),
+            )
+          else
+            for (final cfg in apiModels)
+              _buildApiModelCard(context, ref, cfg, activeId == cfg.id),
+          const SizedBox(height: 20),
+          _buildSectionHeader('当前激活', context),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    '启用 API 接入',
+                    activeId != null,
+                    (v) {
+                      // 打开时激活当前列表首个可用模型；关闭时停用。
+                      ref
+                          .read(settingsProvider.notifier)
+                          .setActiveApiModel(v
+                              ? (activeId ??
+                                  (apiModels.isNotEmpty
+                                      ? apiModels.first.id
+                                      : null))
+                              : null);
+                    },
+                    subtitle: activeId != null
+                        ? '当前激活：${_activeApiName(apiModels, activeId)}'
+                        : '未启用 API，聊天仅使用本地模型',
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApiModelCard(BuildContext context, WidgetRef ref,
+      ApiModelConfig cfg, bool isActive) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.cloud,
+                    size: 20,
+                    color: isActive ? Colors.green : Colors.grey),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(cfg.name,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+                if (isActive)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Text('已激活',
+                        style: TextStyle(fontSize: 11, color: Colors.white)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(cfg.baseUrl,
+                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            Text('模型：${cfg.model}', style: const TextStyle(fontSize: 12)),
+            Text(
+              'temp=${cfg.effectiveTemperature.toStringAsFixed(2)} · '
+              'max_tokens=${cfg.effectiveMaxTokens}',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: isActive
+                      ? OutlinedButton.icon(
+                          onPressed: () => ref
+                              .read(settingsProvider.notifier)
+                              .setActiveApiModel(null),
+                          icon: const Icon(Icons.power_off, size: 16),
+                          label: const Text('停用'),
+                        )
+                      : FilledButton.icon(
+                          onPressed: () => ref
+                              .read(settingsProvider.notifier)
+                              .setActiveApiModel(cfg.id),
+                          icon: const Icon(Icons.play_arrow, size: 16),
+                          label: const Text('激活'),
+                        ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit, size: 20),
+                  tooltip: '编辑',
+                  onPressed: () =>
+                      _showApiModelDialog(context, ref, existing: cfg),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  tooltip: '删除',
+                  onPressed: () => _confirmDeleteApiModel(context, ref, cfg),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteApiModel(BuildContext context, WidgetRef ref,
+      ApiModelConfig cfg) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('删除 API 模型'),
+        content: Text('确定删除「${cfg.name}」吗？删除后其密钥一并移除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      ref.read(settingsProvider.notifier).deleteApiModel(cfg.id);
+    }
+  }
+
+  String? _activeApiName(List<ApiModelConfig> list, String? id) {
+    if (id == null) return null;
+    for (final cfg in list) {
+      if (cfg.id == id) return cfg.name;
+    }
+    return null;
+  }
+
+  void _showApiModelDialog(BuildContext context, WidgetRef ref,
+      {ApiModelConfig? existing}) {
+    showDialog(
+      context: context,
+      builder: (_) =>
+          _ApiModelDialog(existing: existing, isEditing: existing != null),
+    );
+  }
+}
+
+class _ApiModelDialog extends ConsumerStatefulWidget {
+  const _ApiModelDialog({this.existing, required this.isEditing});
+
+  final ApiModelConfig? existing;
+  final bool isEditing;
+
+  @override
+  ConsumerState<_ApiModelDialog> createState() => _ApiModelDialogState();
+}
+
+class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
+  late final TextEditingController _name;
+  late final TextEditingController _baseUrl;
+  late final TextEditingController _apiKey;
+  late final TextEditingController _model;
+  late final TextEditingController _temp;
+  late final TextEditingController _maxTokens;
+
+  String? _testResult;
+  bool _testing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _name = TextEditingController(text: e?.name ?? '');
+    _baseUrl = TextEditingController(text: e?.baseUrl ?? '');
+    _apiKey = TextEditingController(text: e?.apiKey ?? '');
+    _model = TextEditingController(text: e?.model ?? '');
+    _temp = TextEditingController(text: e?.temperature?.toStringAsFixed(2) ?? '');
+    _maxTokens = TextEditingController(text: e?.maxTokens?.toString() ?? '');
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _baseUrl.dispose();
+    _apiKey.dispose();
+    _model.dispose();
+    _temp.dispose();
+    _maxTokens.dispose();
+    super.dispose();
+  }
+
+  ApiModelConfig? _buildConfig() {
+    final name = _name.text.trim();
+    final baseUrl = _baseUrl.text.trim();
+    final model = _model.text.trim();
+    if (name.isEmpty || baseUrl.isEmpty || model.isEmpty) return null;
+    return ApiModelConfig(
+      id: widget.existing?.id ?? Uuid().v4(),
+      name: name,
+      baseUrl: baseUrl,
+      apiKey: _apiKey.text.trim(),
+      model: model,
+      temperature: double.tryParse(_temp.text.trim()),
+      maxTokens: int.tryParse(_maxTokens.text.trim()),
+    );
+  }
+
+  Future<void> _test() async {
+    final cfg = _buildConfig();
+    if (cfg == null) {
+      setState(() => _testResult = '请先填写 名称/baseUrl/模型名');
+      return;
+    }
+    setState(() => _testing = true);
+    final err = await ref.read(openAiServiceProvider).testConnection(cfg);
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _testResult = err == null ? '✅ 连接成功' : '❌ $err';
+    });
+  }
+
+  Future<void> _save() async {
+    final cfg = _buildConfig();
+    if (cfg == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('名称 / baseUrl / 模型名 为必填')),
+      );
+      return;
+    }
+    final notifier = ref.read(settingsProvider.notifier);
+    if (widget.isEditing) {
+      await notifier.updateApiModel(cfg);
+    } else {
+      await notifier.addApiModel(cfg);
+    }
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.isEditing ? '编辑 API 模型' : '添加 API 模型'),
+      scrollable: true,
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(controller: _name, decoration: const InputDecoration(labelText: '显示名称 *')),
+          TextField(
+            controller: _baseUrl,
+            decoration: const InputDecoration(
+              labelText: 'Base URL *',
+              hintText: 'https://api.openai.com/v1 或 http://127.0.0.1:8080/v1',
+            ),
+          ),
+          TextField(
+            controller: _apiKey,
+            decoration: const InputDecoration(
+              labelText: 'API Key',
+              hintText: '可留空（本地服务）',
+            ),
+            obscureText: true,
+          ),
+          TextField(
+            controller: _model,
+            decoration: const InputDecoration(
+              labelText: '模型名 *',
+              hintText: 'gpt-4o / qwen2.5-7b-instruct',
+            ),
+          ),
+          TextField(
+            controller: _temp,
+            keyboardType: TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'temperature（留空=0.7）'),
+          ),
+          TextField(
+            controller: _maxTokens,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'max_tokens（留空=1024）'),
+          ),
+          const SizedBox(height: 12),
+          if (_testResult != null)
+            Text(
+              _testResult!,
+              style: TextStyle(
+                color: _testResult!.startsWith('✅') ? Colors.green : Colors.red,
+              ),
+            ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _testing ? null : _test,
+                  icon: const Icon(Icons.wifi_tethering, size: 16),
+                  label: Text(_testing ? '测试中…' : '测试连接'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: _save, child: const Text('保存')),
+      ],
+    );
+  }
 }

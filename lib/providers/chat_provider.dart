@@ -7,7 +7,9 @@ import '../models/conversation.dart';
 
 import '../services/inference_service.dart';
 import '../services/storage_service.dart';
-import 'shared_providers.dart' show inferenceServiceProvider;
+import 'shared_providers.dart'
+    show inferenceServiceProvider, openAiServiceProvider;
+import 'settings_provider.dart' show settingsProvider;
 
 // Re-export for other files that need these types.
 export 'model_provider.dart' show ModelManagerNotifier, ModelState, ModelLifecyclePhase;
@@ -108,6 +110,9 @@ class ChatNotifier extends StateNotifier<bool> {
   /// chat doesn't bleed into the new one (multi-turn append-only caching).
   String? _currentKvConvId;
 
+  /// 上一轮生成是否走了 API 后备（用于 stopGeneration 分支到 openai 取消）。
+  bool _lastGenWasApi = false;
+
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
   /// Ensure the correct model is loaded before sending a message.
@@ -136,14 +141,35 @@ class ChatNotifier extends StateNotifier<bool> {
     String? imagePath,
   }) async {
     final targetModelId = _ref.read(currentModelIdProvider);
+    final settings = _ref.read(settingsProvider);
+    final activeApi = settings.activeApiModel();
 
-    // Step 1: Ensure model is loaded (via ModelManager for state consistency)
-    final ok = await ensureModelLoaded(targetModelId);
-    if (!ok) {
-      return '[模型加载失败，请在设置中重新下载并加载]';
+    // 尊重用户选择：若用户「不运行本地模型」且「未设置默认模型」，
+    // 则必须直接走 API 接入——绝不再自动去加载本地模型（否则 API 永远不会
+    // 被触发）。仅当用户有本地意图（已加载某模型，或设置了默认模型）时才
+    // 走 local-first：本地可加载则优先本地，本地不可用才回退 API。
+    final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
+    final hasDefault = settings.defaultModelId != null;
+
+    var ok = true;
+    var useApi = false;
+    if (activeApi != null && !hasLocalLoaded && !hasDefault) {
+      useApi = true; // 无本地意图 → 必须走 API
+    } else {
+      // Local-first policy: try the local model first; ONLY when it is
+      // unavailable (not cached / load failed) and an API model is activated
+      // do we fall back to the remote OpenAI-compatible endpoint.
+      ok = await ensureModelLoaded(targetModelId);
+      if (!ok && activeApi != null) {
+        useApi = true; // 本地不可用 → 走 API 后备
+      } else if (!ok) {
+        return '[模型加载失败，请在设置中重新下载并加载]';
+      }
     }
+    _lastGenWasApi = useApi;
 
-    debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"');
+    debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"'
+        ' route=${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
     state = true;
     _ref.read(isGeneratingProvider.notifier).state = true;
 
@@ -208,13 +234,32 @@ class ChatNotifier extends StateNotifier<bool> {
         var tokenCount = 0;
         DateTime? firstTokenTime;
 
-        final stream = _inference.completionWithMessages(
-          prompt: prompt,
-          messagesJson: messagesJson,
-          maxTokens: 1024, // on-device cap: large token budgets make long runs unbearable
-          temperature: 0.7,
-          topP: 0.9,
-        );
+        // Route the completion source: local engine vs OpenAI-compatible API.
+        // Both expose a Stream<String>, so the thinking-filter / persist logic
+        // below consumes them uniformly.
+        final Stream<String> stream;
+        if (useApi) {
+          manager.appendInferenceLog(
+            '请求(API) | ${activeApi!.name} | ${activeApi.model}'
+            ' | 历史 ${messagesForTemplate.length} 条'
+            ' | maxTokens=${activeApi.effectiveMaxTokens}'
+            ' temp=${activeApi.effectiveTemperature}',
+          );
+          stream = _ref.read(openAiServiceProvider).chatCompletion(
+            config: activeApi,
+            messages: messagesForTemplate,
+            temperature: activeApi.effectiveTemperature,
+            maxTokens: activeApi.effectiveMaxTokens,
+          );
+        } else {
+          stream = _inference.completionWithMessages(
+            prompt: prompt,
+            messagesJson: messagesJson,
+            maxTokens: 1024, // on-device cap: large token budgets make long runs unbearable
+            temperature: 0.7,
+            topP: 0.9,
+          );
+        }
 
         debugPrint('[ChatNotifier] Listening to token stream...');
         
@@ -312,13 +357,19 @@ class ChatNotifier extends StateNotifier<bool> {
         // displayed tok/s matches the native logcat line exactly (Dart used to
         // count emitted characters over wall-clock time that also included the
         // prompt prefill, so it always read lower than the native number).
-        Map<String, dynamic> genStats = {};
-        try {
-          genStats = await _inference.getInferenceStats();
-        } catch (_) {}
-        final int realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
-        final double genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
-        final tokensPerSec = genMs > 0 ? realTokens * 1000 / genMs : 0.0;
+        // API 后备路径没有原生 stats，改用 Dart 计数 + 总墙钟估算。
+        int realTokens = tokenCount;
+        double genMs = 0.0;
+        if (!useApi) {
+          Map<String, dynamic> genStats = {};
+          try {
+            genStats = await _inference.getInferenceStats();
+          } catch (_) {}
+          realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
+          genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+        }
+        final tokensPerSec =
+            genMs > 0 ? realTokens * 1000 / genMs : (totalMs > 0 ? realTokens * 1000 / totalMs : 0.0);
 
         manager.appendInferenceLog(
           '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
@@ -354,11 +405,16 @@ class ChatNotifier extends StateNotifier<bool> {
   }
 
   /// Stop the current generation: cancels the token stream subscription and
-  /// tells the native engine to set should_stop, which makes the completion
-  /// loop return promptly. The streaming controller then closes, the
+  /// tells the native engine to set should_stop (or cancels the API SSE
+  /// request for the API fallback path), which makes the completion loop
+  /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
   Future<void> stopGeneration() async {
-    await _inference.stopGeneration();
+    if (_lastGenWasApi) {
+      _ref.read(openAiServiceProvider).stop();
+    } else {
+      await _inference.stopGeneration();
+    }
   }
 }
 
