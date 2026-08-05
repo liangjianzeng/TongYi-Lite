@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)](https://flutter.dev)
 [![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)](https://developer.android.com)
-[![llama.cpp](https://img.shields.io/badge/llama.cpp-b1017+-red)](https://github.com/ggerganov/llama.cpp)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-b10173-red)](https://github.com/ggerganov/llama.cpp)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 > **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp） · Vulkan / OpenCL GPU 加速 + KleidiAI CPU 加速 · 应用内模型下载与管理 · Plugin 热插拔 · 荒野求生游戏化任务
@@ -33,7 +33,7 @@
 | 维度 | 说明 |
 |------|------|
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b10176（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI / SME2 CPU） |
+| **推理引擎** | llama.cpp b10173（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod/i8mm CPU；vendored 提交 f5b9bd3，2026-07-29） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
@@ -61,7 +61,7 @@ TongYi-Lite/
 │   ├── build.gradle.kts
 │   ├── gradle.properties
 │   └── settings.gradle.kts
-├── third_party/llama.cpp/          # llama.cpp 子模块 (b1017+)
+├── third_party/llama.cpp/          # llama.cpp 子模块 (b10173)
 │   ├── src/                        # 推理引擎源码
 │   ├── ggml/src/ggml-vulkan/       # Vulkan GPU 后端
 │   └── ...
@@ -121,8 +121,8 @@ TongYi-Lite/
 |------|---------|------|
 | Flutter SDK | 3.x | Flutter 构建 |
 | Android SDK | 34+ (compileSdk 36) | Android 构建 |
-| Android NDK r29+ | r29 | C++ 原生编译 |
-| CMake 3.31+ | 3.31 | CMakeLists 解析 |
+| Android NDK | r27（本机验证 r27.0.12077973；未显式 pin，取 SDK 默认） | C++ 原生编译 |
+| CMake | 3.22.1 | `CMakeLists.txt` 的 `cmake_minimum_required` + Gradle `externalNativeBuild.cmake.version` |
 | Java JDK 17 | 17 | Gradle/Kotlin |
 
 ### 环境变量
@@ -130,7 +130,7 @@ TongYi-Lite/
 ```bash
 export ANDROID_HOME=$HOME/Library/Android/sdk   # macOS
 export ANDROID_SDK_ROOT=$ANDROID_HOME
-export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.13113456
+export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973
 export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
 ```
 
@@ -138,7 +138,7 @@ export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
 
 Vulkan 后端让 llama.cpp 把模型层卸载到设备 GPU（如骁龙 Adreno / Mali），推理速度通常数倍于纯 CPU。
 这部分 **仅对 `arm64-v8a` 生效**，且只在构建主机满足以下条件时才启用；不满足时自动回退到
-CPU + KleidiAI/SME2，构建本身不会失败。
+CPU + KleidiAI（dotprod/i8mm），构建本身不会失败。
 
 | 依赖 | 版本 / 路径 | 用途 | 必需 |
 |------|------------|------|------|
@@ -146,6 +146,7 @@ CPU + KleidiAI/SME2，构建本身不会失败。
 | MinGW-w64 (GCC) | `C:/mingw64/bin/{gcc,g++}.exe` | 在 **Windows 构建主机**上编译 `vulkan-shaders-gen` 主机工具（把 `.comp` 着色器预编译成 C++ 头） | ✅（开 Vulkan 时） |
 | Android SDK cmake | `...\cmake\3.22.1\bin\ninja.exe` | 主机子构建的 Ninja 生成器（`CMAKE_MAKE_PROGRAM` 已 pin 到它） | ✅ |
 | NDK Vulkan 桩库 | `${ANDROID_NDK}/.../aarch64-linux-android/${ANDROID_PLATFORM_LEVEL}/libvulkan.so` | 链接阶段用的 Vulkan loader 桩（运行时由系统提供真实实现） | ✅ |
+| 设备 Vulkan 运行时 | **Vulkan 1.1+** | Adreno 825 / Mali 等；NDK 链接桩须 **≥ API 28**（Vulkan 1.1 符号 `vkGetPhysicalDeviceFeatures2`，API 24 桩仅导出 1.0 会链接失败） | ✅（运行期） |
 
 > **为什么需要 MinGW？** ggml-vulkan 用 `ExternalProject_Add` 在构建主机上编一个叫
 > `vulkan-shaders-gen` 的小工具，用 `glslc` 把 compute shader 预编译成 `.comp.h`。主机上需要一份
@@ -174,7 +175,7 @@ git submodule update --init --recursive
 
 ### 1b. 准备 KleidiAI 源码（CPU 加速必需）
 
-llama.cpp b1017+ 在开启 `GGML_CPU_KLEIDIAI` 时会通过 **FetchContent 联网从 GitHub 下载** KleidiAI
+llama.cpp b10173 在开启 `GGML_CPU_KLEIDIAI` 时会通过 **FetchContent 联网从 GitHub 下载** KleidiAI
 源码；若构建环境无法访问 GitHub（如 CI 沙箱），配置阶段会直接失败。本项目已改为**本地 vendored**：
 
 ```bash
@@ -264,7 +265,7 @@ flutter build appbundle --release
 > 端侧 1-bit / 1.58-bit 量化（Bonsai-27B）：Q1_0（±1，每 128 权重共享 1 个 FP16 scale）与
 > Ternary Q2_0（三值，1.58-bit）。这类超低位模型体积小，但**主分支 llama.cpp CPU/GPU 内核
 > 无专用 1-bit 解码加速**（官方快照依赖 PrismML fork 的 CUDA/Metal 内核），在本机 Adreno 825 +
-> OpenCL 全量卸载实测约 2.7-2.9 tok/s，适合作为大上下文/探索用，日常问答优先选 4B 以下模型。
+> OpenCL 全量卸载实测约 2.7-2.9 tok/s（Vulkan 2.83 tok/s，两后端等价），适合作为大上下文/探索用，日常问答优先选 4B 以下模型。
 
 **新增一个模型只需在 JSON 的 `models` 数组追加一项：**
 
@@ -352,6 +353,15 @@ flutter logs | grep TongYiLite
 `third_party/opencl-stub/opencl_stub.c` 的 **dlopen 转发 stub** 动态加载：设备无驱动时后端探测到
 0 设备 → 自动回落 CPU，不会因缺少 OpenCL 而崩溃。
 
+**OpenCL 版本 / 依赖要求**（构建与运行）：
+- **构建期**：须本地 vendored 两份依赖——`third_party/OpenCL-Headers`（Khronos 头文件，header-only）
+  与 `third_party/opencl-stub`（仅提供链接期 `cl*` 弱符号桩，运行时由设备 `libOpenCL.so` 覆盖）。
+  Android NDK 不自带 OpenCL SDK，故二者不可省略。
+- **目标 GPU**：`GGML_OPENCL_USE_ADRENO_KERNELS`（默认 ON）为 **Adreno 700+** 提供优化内核；
+  其他 GPU 走通用路径（性能/正确性未经本机验证）。
+- **运行期**：设备须提供 `libOpenCL.so`（经 dlopen 加载）；无驱动则探测到 0 设备 → 自动回落 CPU，不崩溃。
+- 同样**仅 `arm64-v8a` 启用**（见下方注意）。
+
 **验证是否真的上了 GPU**（连上设备后）：
 
 ```bash
@@ -363,13 +373,18 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 预期看到（默认开启 GPU、设备有对应后端驱动时）：
 
 ```
-ggml backend devices: N
-  device[0] name=Vulkan0   type=2   # type=2 即 GPU
-  device[1] name=GPUOpenCL type=1
-OpenCL selected
-n_gpu_layers = 100                    # 使用设置页设定的层数（llama.cpp 自动 clamp 到模型层数）
-n_ubatch = 512 (GPU backend)          # GPU 路径放大 prefill batch（CPU 模式为 16，见「已知问题」）
+ggml backend devices: 2
+  device[0] name=Adreno 825        type=2 mem=.../... MiB   # Vulkan 后端把 Adreno 枚举为 IGPU (type=2)，不是 GPU
+  device[1] name=QUALCOMM Adreno(TM) type=1 mem=.../... MiB   # OpenCL 后端枚举为 GPU (type=1)
+auto -> OpenCL                                          # 默认 auto 优先 OpenCL；手动选 OpenCL 才打印 "OpenCL selected"
+n_gpu_layers = 100                                       # 使用设置页设定的层数（llama.cpp 自动 clamp 到模型层数）
+n_ubatch = 512 (GPU backend)                             # GPU 路径放大 prefill batch（CPU 模式为 16，见「已知问题」）
 ```
+
+> 设备名 / 显存因机型而异，上面是骁龙 8s Gen 4（Adreno 825）的示例。**关键**：Android 上
+> Vulkan 把移动 GPU 枚举为 `IGPU (type=2)`、OpenCL 枚举为 `GPU (type=1)`，与桌面端相反；
+> 后端选择日志取决于设置（`auto` 优先 OpenCL、`vulkan` 打印 `Vulkan selected …`、`opencl`
+> 打印 `OpenCL selected`、两者都无则 `auto -> no GPU backend found, CPU fallback`）。
 
 > **注意**：Vulkan/OpenCL 后端目前 **仅 arm64-v8a** 启用（`CMakeLists.txt` 里两个后端只在
 > `ANDROID_ABI == arm64-v8a` 时强制 ON）。32 位 / x86 设备仍走 CPU。
@@ -384,6 +399,11 @@ n_ubatch = 512 (GPU backend)          # GPU 路径放大 prefill batch（CPU 模
 - **Debug 构建也强制 `-O3 -DNDEBUG`**：Android debug 变体默认 `-O0` 且无 `NDEBUG`，会让 llama.cpp 的
   量化 matmul 内核完全失去优化（曾导致 0.5B 模型仅约 0.6 tok/s）。`CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"`
   修复后大幅提速；`NDEBUG` 附带让越界的 `get_logits_ith` 返回 `nullptr` 而非中止进程。
+- **版本与微架构要求**：KleidiAI 固定 vendored **v1.24.0**——llama.cpp b10173 的 FetchContent 默认拉取
+  `kleidiai-v1.24.0-src.tar.gz`，本项目改为本地 vendored **同一 tag** 以离线构建（版本须与 llama.cpp
+  对应 release 匹配）。其 dotprod/i8mm 内核要求 CPU 具备 **Armv8.4-a + dotprod + i8mm** 特性
+  （X4 / A720 / A520 等 Armv8.4+/Armv9 核心）；不满足时 ggml-cpu 静默回退到通用 NEON，CPU 推理仍可跑但无加速。
+  KleidiAI 内部仅接管 Q4_0/Q8_0 的 matmul 派发，本项目 Q4_K_M 不直连其派发，但仍受益于该路径的 i8mm 加速。
 
 验证 CPU 内核是否真生效（编译后查 `compile_commands.json`，dotprod/i8mm 计数应 >0）：
 
@@ -391,6 +411,31 @@ n_ubatch = 512 (GPU backend)          # GPU 路径放大 prefill batch（CPU 模
 grep -c "kai_matmul.*dotprod" android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
 grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
 ```
+
+### SME2（暂未启用 · 决策记录，2026-08-05）
+
+vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.txt` 支持 `GGML_INTERNAL_SME`
+（设 `ARM_MCPU=armv9.2-a` + `GGML_USE_SME`），并把 **KleidiAI 的 SME/SME2 4-bit 权重 matmul 内核**
+（`qsi4c32p4vlx4` 等，正覆盖本项目的 Q4_K_M）编进多架构变体——**但本构建根本没有走这条路**：
+
+- 本 `CMakeLists.txt` 用 `set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm CACHE STRING "" FORCE)` 把 arch
+  **钉死**，ggml-cpu 直接走 `else` 分支、跳过 SME/SVE 自动探测与多变体编译；
+- 根因是交叉编译：构建主机（Windows/MinGW）用 `check_cxx_source_runs` 探测 aarch64 特性必然失败，
+  故改用显式 arch 传参——SME2 源文件因此在本 build 中是死代码。
+
+**决策：暂不启用 / 实现 SME2。依据：**
+
+1. **当前设备拓扑受限**：骁龙 8s Gen 4（SM8735 / Adreno 825）仅 1 颗 Cortex-X4 大核有 SME2，
+   其余 7 颗 A720 无。ggml 线程池铺满 8 核时，SME2 内核要么因"并非所有核支持"整体回退到 i8mm（等于没加速），
+   要么在 A720 上 SIGILL 崩溃——可用面被极大压缩。
+2. **主推理路径不经 CPU matmul**：默认 `gpuLayers=100` 全量卸载到 GPU（OpenCL/Vulkan），CPU 仅做少量
+   残差。SME2 只能加速纯 CPU fallback 路径，而该路径本就非推荐配置，`dotprod+i8mm` 已够用。
+3. **价值拐点尚未到来**：SME2 的显著收益需等到 **全核 SME2 同构设备**，例如
+   **天玑 9500（Arm Lumex C1，Ultra/Premium/Pro/Nano 全系集成 SME2）** 及后续同构平台。
+   在此之前开启 SME2 需改 `GGML_CPU_ALL_VARIANTS` 交叉编 SME2 汇编内核 + 解决异构核分派，投入高、回报低。
+
+> 结论：保持现状 `dotprod+i8mm`（正确、稳定、已验证）。待目标设备为全核 SME2（如天玑 9500 级）或确需
+> 榨干纯 CPU 推理时，再重开 SME2 这条路。
 
 
 ---
@@ -410,7 +455,7 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 
 ## 架构决策记录
 
-### P0 已实现 ✅（基于 llama.cpp b1017+ 官方示例验证）
+### P0 已实现 ✅（基于 llama.cpp b10173 官方示例验证）
 
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
@@ -419,7 +464,7 @@ grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_command
 | 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
-| 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端 + 运行时 GPU 检测（`detect_gpu_layers`），无 GPU 自动回退 CPU |
+| 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端；实际卸载层数由设置页 gpuLayers 透传（默认 100=全量，llama.cpp 自动 clamp 到模型层数），无 GPU 自动回退 CPU |
 | 7 | **批量预填充 + unified KV** | ✅ | prefill 用大 batch（n_batch=512）+ unified KV 缓存；**`n_ubatch` 按后端动态**：GPU 路径 512（加速 prefill）、CPU 路径 16（规避 ggml-cpu 量化 GEMM 路径 bug，见「已知问题」） |
 | 8 | **内置采样器** | ✅ | `llama_sampler_chain`：penalties → top_k(128) → top_p → temp → dist，采样后 `llama_sampler_accept` 回喂历史（重复惩罚生效、防退化循环） |
 | 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
@@ -526,7 +571,7 @@ Vulkan 后端 **默认已对 arm64-v8a 启用**（只要构建主机满足依赖
 <details>
 <summary><b>Q: JNI 编译报 "unknown type name 'common_chat_templates'" / API 不兼容</b></summary>
 
-llama.cpp b1017+ 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_vocab*`。已适配所有变更：
+llama.cpp b10173 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_vocab*`。已适配所有变更：
 - `llama_new_context_with_model()` → `llama_init_from_model()`
 - `llama_tokenize(model, ...)` → `llama_tokenize(vocab, ...)`
 - `llama_token_eos(model)` → `llama_vocab_eos(vocab)`
@@ -540,7 +585,7 @@ llama.cpp b1017+ 大幅重写了 API，`llama_model*` 相关调用需改用 `lla
 确保已安装以下工具：
 ```bash
 # Android SDK cmdline-tools (含 sdkmanager)
-sdkmanager "ndk;27.0.12077973" "cmake;3.31.6" --install
+sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" --install
 
 # 验证
 echo $ANDROID_NDK_ROOT
@@ -556,7 +601,7 @@ echo $ANDROID_HOME
 - 关闭后台应用释放 RAM
 - 设备需 ≥ 4GB RAM 才能流畅运行 1.7B 模型
 - 确保 Vulkan GPU 加速已启用（检查设置页是否显示"已完成"状态）
-- 已优化：批量预填充 + unified KV（prefill 改用大 batch，TTFT 降低 10-30×）、flash attention 自动开启（GPU 全卸载时）、线程按核心数/2 调度、内置采样器（消除每 token 150k+ 堆分配）、流式回调批量化（减少跨语言往返）、mmap 加载（降低峰值内存）
+- 已优化：批量预填充 + unified KV（n_batch=512；GPU 路径 n_ubatch=512 / CPU 路径 16，长 prompt 下 TTFT 较旧版降 10-30×）、flash attention 当前 DISABLED（AUTO 在 CPU 后端会实际启用且多轮乱码，见「已知问题」）、线程按 CPU 拓扑取核（`detect_big_core_count`：全大核 SoC 用全部核、big.LITTLE 只调度大核；旧"核心数/2"启发式已废弃）、内置采样器（消除每 token 150k+ 堆分配）、流式回调批量化（减少跨语言往返）、mmap 加载（降低峰值内存）
 
 </details>
 
