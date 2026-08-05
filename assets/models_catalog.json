@@ -7,8 +7,14 @@
       "name": "Bonsai 27B Instruct (Q1_0 1-bit)",
       "type": "text",
       "mirrors": [
-        { "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "hf-mirror" },
-        { "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "huggingface" }
+        {
+          "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf",
+          "source": "huggingface"
+        }
       ],
       "sizeGB": 3.79,
       "sizeMBDisplay": "3.8 GB",
@@ -21,8 +27,14 @@
       "name": "Bonsai 27B Instruct (Ternary 1.58-bit)",
       "type": "text",
       "mirrors": [
-        { "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "hf-mirror" },
-        { "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "huggingface" }
+        {
+          "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf",
+          "source": "huggingface"
+        }
       ],
       "sizeGB": 7.17,
       "sizeMBDisplay": "7.2 GB",
@@ -35,8 +47,14 @@
       "name": "Gemma 3 4B Instruct (Q4_K_M)",
       "type": "vision",
       "mirrors": [
-        { "url": "https://hf-mirror.com/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://hf-mirror.com/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 2.6,
       "sizeMBDisplay": "2.6 GB",
@@ -50,8 +68,14 @@
       "type": "text",
       "mtp": true,
       "mirrors": [
-        { "url": "https://hf-mirror.com/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://hf-mirror.com/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 3.11,
       "sizeMBDisplay": "3.1 GB",
@@ -60,50 +84,14 @@
       "sha256Hash": null
     },
     {
-      "id": "qwen3-0.6b-q8_0",
-      "name": "Qwen3-0.6B Instruct (Q8_0)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf", "source": "modelscope" }
-      ],
-      "sizeGB": 0.61,
-      "sizeMBDisplay": "596 MB",
-      "recommended": false,
-      "minRamMB": 1024,
-      "sha256Hash": null
-    },
-    {
-      "id": "qwen3-1.7b-q4_k_m",
-      "name": "Qwen3-1.7B Instruct (Q4_K_M)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf", "source": "modelscope" }
-      ],
-      "sizeGB": 2.382,
-      "sizeMBDisplay": "2.3 GB",
-      "recommended": true,
-      "minRamMB": 3072,
-      "sha256Hash": null
-    },
-    {
-      "id": "qwen3-4b-q4_k_m",
-      "name": "Qwen3-4B Instruct (Q4_K_M)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf", "source": "modelscope" }
-      ],
-      "sizeGB": 2.382,
-      "sizeMBDisplay": "2.3 GB",
-      "recommended": false,
-      "minRamMB": 4096,
-      "sha256Hash": null
-    },
-    {
       "id": "qwen3-vl-2b-q4_k_m",
       "name": "Qwen3-VL-2B Instruct (Q4_K_M)",
       "type": "vision",
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 1.056,
       "sizeMBDisplay": "1.0 GB",
@@ -116,7 +104,10 @@
       "name": "Qwen3-VL-4B Instruct (Q4_K_M)",
       "type": "vision",
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 2.382,
       "sizeMBDisplay": "2.3 GB",
@@ -130,8 +121,14 @@
       "type": "text",
       "mtp": true,
       "mirrors": [
-        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 0.53,
       "sizeMBDisplay": "530 MB",
@@ -140,16 +137,22 @@
       "sha256Hash": null
     },
     {
-      "id": "qwen3.5-2b-mtp-q4_k_m",
-      "name": "Qwen3.5-2B Instruct (Q4_K_M MTP)",
+      "id": "qwen3.5-2b-mtp-ud-q4_k_xl",
+      "name": "Qwen3.5-2B Instruct (MTP UD-Q4_K_XL)",
       "type": "text",
       "mtp": true,
       "mirrors": [
-        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-UD-Q4_K_XL.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-UD-Q4_K_XL.gguf",
+          "source": "modelscope"
+        }
       ],
-      "sizeGB": 1.13,
-      "sizeMBDisplay": "1.1 GB",
+      "sizeGB": 1.29,
+      "sizeMBDisplay": "1.29 GB",
       "recommended": true,
       "minRamMB": 2048,
       "sha256Hash": null
@@ -158,15 +161,42 @@
       "id": "qwen3.5-4b-q4_k_m",
       "name": "Qwen3.5-4B Instruct (Q4_K_M MTP)",
       "type": "text",
-      "mtp": true,
       "mirrors": [
-        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "modelscope" }
+        {
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
       ],
       "sizeGB": 2.4,
       "sizeMBDisplay": "2.4 GB",
       "recommended": true,
       "minRamMB": 3500,
+      "sha256Hash": null,
+      "mtp": true
+    },
+    {
+      "id": "qwen3.5-9b-mtp-ud-iq2_m",
+      "name": "Qwen3.5-9B Instruct (MTP UD-IQ2_M)",
+      "type": "text",
+      "mtp": true,
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-UD-IQ2_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-UD-IQ2_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 3.7,
+      "sizeMBDisplay": "3.7 GB",
+      "recommended": false,
+      "minRamMB": 4096,
       "sha256Hash": null
     }
   ]
