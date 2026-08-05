@@ -265,20 +265,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         child: Text('\u{26A1}MTP', style: TextStyle(fontSize: 12, color: Colors.amber.shade900)),
                       ),
                     ],
-                    // MTP 开关：仅对带 NextN 头的模型显示，用户可在此开启/关闭
+                    // MTP 开关：仅对已缓存的带 NextN 头模型显示，用户可在此开启/关闭
                     // MTP 加速（默认关闭，无需重新编译）。切换即持久化到设置，
-                    // 加载该模型时按此开关决定原生层是否启用 MTP。
+                    // 按模型 id 独立记录；加载该模型时按此开关决定原生层是否启用 MTP。
                     if (model.mtp && isCached) ...[
                       const SizedBox(width: 4),
                       Consumer(
                         builder: (context, ref, _) {
-                          final mtpOn = ref.watch(settingsProvider).enableMtp;
+                          final settings = ref.watch(settingsProvider);
+                          final mtpOn = settings.mtpEnabled(model.id);
                           return Switch(
                             value: mtpOn,
                             onChanged: (v) async {
                               await ref
                                   .read(settingsProvider.notifier)
-                                  .setEnableMtp(v);
+                                  .setEnableMtp(model.id, v);
                             },
                           );
                         },
@@ -396,11 +397,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 ),
               ],
 
-              // Delete button
+              // Delete button — 删除会移除已下载的模型文件（重新下载很费劲），
+              // 必须先弹确认框，避免误删。确认后真正删除。
               OutlinedButton.icon(
-                onPressed: () {
-                  ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
-                },
+                onPressed: () => _confirmDeleteModel(model, context),
                 icon: const Icon(Icons.delete, size: 18),
                 label: const Text('删除'),
                 style: OutlinedButton.styleFrom(foregroundColor: Colors.red.shade700),
@@ -414,6 +414,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             label: const Text('下载'),
           );
         }
+    }
+  }
+
+  /// 删除已缓存模型前先弹确认框，避免误删（模型文件移除后需重新下载）。
+  /// 确认后才真正调用 deleteModel。
+  Future<void> _confirmDeleteModel(ModelConfig model, BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('确认删除模型？'),
+        content: Text(
+          '删除「${model.name}」会移除已下载的模型文件（${_formatSize(model.sizeBytes)}），'
+          '之后需要重新下载才能再用。确定删除吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
     }
   }
 

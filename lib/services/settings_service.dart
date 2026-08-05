@@ -24,10 +24,11 @@ class InferenceSettings {
   /// Vulkan 对比。llama.rn 在 Android 上即用 OpenCL 后端，Adreno 700+ 可用。
   final String gpuBackend;
 
-  /// 是否启用 MTP（多 token 预测）加速。仅对带 NextN 头的模型生效，
-  /// 且默认关闭——MTP 的 draft/verify/process 三次完整前向开销在端侧
-  /// 通常不划算，用户可在模型列表对支持的模型手动开启。
-  final bool enableMtp;
+  /// 是否启用 MTP（多 token 预测）加速，按模型 id 逐个开关（默认全关）。
+  /// 仅对带 NextN 头的模型生效——MTP 的 draft/verify/process 三次完整前向
+  /// 开销在端侧通常不划算，用户可在模型列表对每个支持的模型手动开启，
+  /// 互不影响。
+  final Map<String, bool> mtpEnabledByModel;
 
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
@@ -38,8 +39,11 @@ class InferenceSettings {
     this.contextSize = 4096,
     this.enableThinking = false,
     this.gpuBackend = 'auto',
-    this.enableMtp = false,
-  });
+    Map<String, bool>? mtpEnabledByModel,
+  }) : mtpEnabledByModel = mtpEnabledByModel ?? const {};
+
+  /// 便捷读取：某个模型是否启用 MTP（未配置视为关闭）。
+  bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
 
   InferenceSettings copyWith(
       {bool? enableGpu,
@@ -47,14 +51,14 @@ class InferenceSettings {
       int? contextSize,
       bool? enableThinking,
       String? gpuBackend,
-      bool? enableMtp}) {
+      Map<String, bool>? mtpEnabledByModel}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
       contextSize: contextSize ?? this.contextSize,
       enableThinking: enableThinking ?? this.enableThinking,
       gpuBackend: gpuBackend ?? this.gpuBackend,
-      enableMtp: enableMtp ?? this.enableMtp,
+      mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
     );
   }
 
@@ -64,7 +68,7 @@ class InferenceSettings {
         'contextSize': contextSize,
         'enableThinking': enableThinking,
         'gpuBackend': gpuBackend,
-        'enableMtp': enableMtp,
+        'mtpEnabledByModel': mtpEnabledByModel,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -76,8 +80,21 @@ class InferenceSettings {
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
       enableThinking: json['enableThinking'] as bool? ?? false,
       gpuBackend: json['gpuBackend'] as String? ?? 'auto',
-      enableMtp: json['enableMtp'] as bool? ?? false,
+      // 旧版本存的是全局 bool enableMtp：若读到它，则映射为所有支持模型的
+      // 默认值，保证老配置不丢。
+      mtpEnabledByModel: _migrateLegacyMtp(json),
     );
+  }
+
+  /// 兼容旧配置：旧字段 `enableMtp`（全局 bool）→ 新的按模型 map。
+  /// 旧值 true 时无法知道用户开了哪个模型，统一不迁移（保持默认全关），
+  /// 由用户重新按模型开启；旧值 false 即默认全关，无需迁移。
+  static Map<String, bool> _migrateLegacyMtp(Map<String, dynamic> json) {
+    final legacy = json['enableMtp'] as bool? ?? false;
+    if (!legacy) return const {};
+    final map = json['mtpEnabledByModel'] as Map<String, dynamic>?;
+    if (map == null) return const {};
+    return map.map((k, v) => MapEntry(k, v as bool? ?? false));
   }
 }
 
