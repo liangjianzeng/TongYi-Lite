@@ -39,6 +39,16 @@ third_party/llama.cpp/src/llama.cpp                      # generated
 models/*.gguf
 models/*.bin
 
+# === Debug / analysis artifacts (local only, never commit) ===
+.cache/
+.tmp_screen.png
+*_head.bin
+ui_*.xml
+ui_*.txt
+analyze_gguf.py
+scan_nextn.py
+docs/学习- 不做git提交/
+
 # === Android build artifacts ===
 android/app/.cxx/
 android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
