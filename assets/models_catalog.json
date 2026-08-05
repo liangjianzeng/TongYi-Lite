@@ -1,31 +1,33 @@
 {
   "version": 1,
-  "description": "TongYi-Lite 端侧模型下载目录。新增/调整模型只需修改本文件，无需改动代码或重新编译。可选：把 ModelCatalog.remoteUrl 指向本 JSON 的自有 CDN 地址即可热更新。",
+  "description": "TongYi-Lite 端侧模型下载目录。新增/调整模型只需修改本文件，无需改动代码或重新编译。可选：把 ModelCatalog.remoteUrl 指向本 JSON 的自有 CDN 地址即可热更新。带 \"mtp\": true 的条目支持多 token 预测（Multi-Token Prediction），可由推理引擎启用投机解码加速。",
   "models": [
     {
-      "id": "qwen3-vl-2b-q4_k_m",
-      "name": "Qwen3-VL-2B Instruct (Q4_K_M)",
-      "type": "vision",
+      "id": "bonsai-27b-q1_0",
+      "name": "Bonsai 27B Instruct (Q1_0 1-bit)",
+      "type": "text",
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+        { "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "hf-mirror" },
+        { "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "huggingface" }
       ],
-      "sizeGB": 1.056,
-      "sizeMBDisplay": "1.0 GB",
-      "recommended": true,
-      "minRamMB": 2048,
+      "sizeGB": 3.79,
+      "sizeMBDisplay": "3.8 GB",
+      "recommended": false,
+      "minRamMB": 6144,
       "sha256Hash": null
     },
     {
-      "id": "qwen3-vl-4b-q4_k_m",
-      "name": "Qwen3-VL-4B Instruct (Q4_K_M)",
-      "type": "vision",
+      "id": "bonsai-27b-ternary-q2_0",
+      "name": "Bonsai 27B Instruct (Ternary 1.58-bit)",
+      "type": "text",
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+        { "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "hf-mirror" },
+        { "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "huggingface" }
       ],
-      "sizeGB": 2.382,
-      "sizeMBDisplay": "2.3 GB",
+      "sizeGB": 7.17,
+      "sizeMBDisplay": "7.2 GB",
       "recommended": false,
-      "minRamMB": 4096,
+      "minRamMB": 10240,
       "sha256Hash": null
     },
     {
@@ -43,17 +45,18 @@
       "sha256Hash": null
     },
     {
-      "id": "qwen3.5-4b-q4_k_m",
-      "name": "Qwen3.5-4B Instruct (Q4_K_M)",
+      "id": "gemma-4-e2b-q4_k_m",
+      "name": "Gemma 4 E2B Instruct (Q4_K_M MTP)",
       "type": "text",
+      "mtp": true,
       "mirrors": [
-        { "url": "https://hf-mirror.com/lainlives/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "hf-mirror" },
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "modelscope" }
+        { "url": "https://hf-mirror.com/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf", "source": "modelscope" }
       ],
-      "sizeGB": 2.7,
-      "sizeMBDisplay": "2.7 GB",
+      "sizeGB": 3.11,
+      "sizeMBDisplay": "3.1 GB",
       "recommended": true,
-      "minRamMB": 3500,
+      "minRamMB": 4096,
       "sha256Hash": null
     },
     {
@@ -96,70 +99,74 @@
       "sha256Hash": null
     },
     {
-      "id": "qwen2.5-1.5b-q4_k_m",
-      "name": "Qwen2.5-1.5B Instruct (Q4_K_M)",
-      "type": "text",
+      "id": "qwen3-vl-2b-q4_k_m",
+      "name": "Qwen3-VL-2B Instruct (Q4_K_M)",
+      "type": "vision",
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf", "source": "modelscope" }
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3VL-2B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
       ],
-      "sizeGB": 1.117,
+      "sizeGB": 1.056,
+      "sizeMBDisplay": "1.0 GB",
+      "recommended": true,
+      "minRamMB": 2048,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3-vl-4b-q4_k_m",
+      "name": "Qwen3-VL-4B Instruct (Q4_K_M)",
+      "type": "vision",
+      "mirrors": [
+        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 2.382,
+      "sizeMBDisplay": "2.3 GB",
+      "recommended": false,
+      "minRamMB": 4096,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3.5-0.8b-mtp-q4_k_m",
+      "name": "Qwen3.5-0.8B Instruct (Q4_K_M MTP)",
+      "type": "text",
+      "mtp": true,
+      "mirrors": [
+        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 0.53,
+      "sizeMBDisplay": "530 MB",
+      "recommended": false,
+      "minRamMB": 1024,
+      "sha256Hash": null
+    },
+    {
+      "id": "qwen3.5-2b-mtp-q4_k_m",
+      "name": "Qwen3.5-2B Instruct (Q4_K_M MTP)",
+      "type": "text",
+      "mtp": true,
+      "mirrors": [
+        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", "source": "modelscope" }
+      ],
+      "sizeGB": 1.13,
       "sizeMBDisplay": "1.1 GB",
-      "recommended": false,
-      "minRamMB": 1500,
+      "recommended": true,
+      "minRamMB": 2048,
       "sha256Hash": null
     },
     {
-      "id": "qwen2.5-0.5b-q4_k_m",
-      "name": "Qwen2.5-0.5B Instruct (Q4_K_M)",
+      "id": "qwen3.5-4b-q4_k_m",
+      "name": "Qwen3.5-4B Instruct (Q4_K_M MTP)",
       "type": "text",
+      "mtp": true,
       "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf", "source": "modelscope" }
+        { "url": "https://hf-mirror.com/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "hf-mirror" },
+        { "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "source": "modelscope" }
       ],
-      "sizeGB": 0.491,
-      "sizeMBDisplay": "468 MB",
-      "recommended": false,
-      "minRamMB": 300,
-      "sha256Hash": null
-    },
-    {
-      "id": "qwen2.5-3b-q4_k_m",
-      "name": "Qwen2.5-3B Instruct (Q4_K_M)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://modelscope.cn/api/v1/models/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf", "source": "modelscope" }
-      ],
-      "sizeGB": 2.105,
-      "sizeMBDisplay": "2.0 GB",
-      "recommended": false,
+      "sizeGB": 2.4,
+      "sizeMBDisplay": "2.4 GB",
+      "recommended": true,
       "minRamMB": 3500,
-      "sha256Hash": null
-    },
-    {
-      "id": "bonsai-27b-q1_0",
-      "name": "Bonsai 27B Instruct (Q1_0 1-bit)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "hf-mirror" },
-        { "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf", "source": "huggingface" }
-      ],
-      "sizeGB": 3.79,
-      "sizeMBDisplay": "3.8 GB",
-      "recommended": false,
-      "minRamMB": 6144,
-      "sha256Hash": null
-    },
-    {
-      "id": "bonsai-27b-ternary-q2_0",
-      "name": "Bonsai 27B Instruct (Ternary 1.58-bit)",
-      "type": "text",
-      "mirrors": [
-        { "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "hf-mirror" },
-        { "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf/resolve/main/Ternary-Bonsai-27B-Q2_0.gguf", "source": "huggingface" }
-      ],
-      "sizeGB": 7.17,
-      "sizeMBDisplay": "7.2 GB",
-      "recommended": false,
-      "minRamMB": 10240,
       "sha256Hash": null
     }
   ]

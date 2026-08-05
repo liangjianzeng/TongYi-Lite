@@ -210,7 +210,10 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         await unloadModel();
       }
 
-      // 2. Look up the display name from catalog (best-effort).
+      // 2. Ensure the catalog sync cache is populated (it's loaded lazily and
+      //    was previously never triggered, so modelName was always null → the
+      //    status sheet showed "未知模型"). Then look up the display name.
+      await ModelManagerNotifier.ensureSyncCache();
       String? displayName = _lookupModelName(modelId);
 
       // 3. Set state to loading with empty logs — native will push updates.

@@ -108,8 +108,21 @@ class InferenceService {
   // ------------------------------------------------------------------
   // Memory
   // ------------------------------------------------------------------
+  /// System + process memory snapshot:
+  /// {sysTotalMB, sysAvailMB, sysUsedMB, procRssMB, modelMB}.
+  ///
+  /// NOTE: the platform channel always hands back `Map<Object?, Object?>`.
+  /// Returning it directly as `Map<String, int>` throws a TypeError at runtime
+  /// (which silently broke the memory panel), so convert explicitly.
   Future<Map<String, int>> getMemoryInfo() async {
-    return await _channel.invokeMethod('getMemoryInfo');
+    final r = await _channel.invokeMethod('getMemoryInfo');
+    if (r is! Map) return {};
+    final out = <String, int>{};
+    r.forEach((k, v) {
+      if (k == null) return;
+      if (v is num) out[k.toString()] = v.toInt();
+    });
+    return out;
   }
 
   /// Returns the last generation's real stats from native: {n_gen, t_gen_ms,

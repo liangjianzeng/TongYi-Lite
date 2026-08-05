@@ -1,35 +1,81 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/model_info.dart';
 import '../services/download_service.dart';
-import '../services/model_storage_service.dart';
+import '../services/model_storage_service.dart' show ModelStorageService;
 
 class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   final DownloadService _downloadService;
 
   DownloadNotifier(this._downloadService) : super({});
 
-  /// Initialize download state for already cached models (e.g., after scan or restart)
+  /// Mark the given models as cached.
+  ///
+  /// [models] are the entries a disk scan already proved to exist, so we trust
+  /// that result instead of re-checking `isModelCached` (which only looks at
+  /// the *primary* models dir and would drop files found in Download/DCIM).
+  ///
+  /// IMPORTANT: this used to `continue` whenever `state` already contained the
+  /// id, which meant a stale `failed`/`idle`/cancelled entry could never be
+  /// corrected — the model stayed on the "下载" button forever even though the
+  /// .gguf was sitting on disk. Now only *in-flight* tasks are preserved.
   Future<void> initCachedModels(List<ModelConfig> models) async {
-    final storage = ModelStorageService();
-    final updatedState = Map<String, DownloadTask>.from(state);
-    
+    final updated = Map<String, DownloadTask>.from(state);
+
     for (final model in models) {
-      // Skip if already tracked
-      if (updatedState.containsKey(model.id)) continue;
-      
-      // Check if file exists on disk
-      final isCached = await storage.isModelCached(model.id);
-      if (isCached) {
-        updatedState[model.id] = DownloadTask(
+      final existing = updated[model.id];
+      // Never clobber a running/paused transfer.
+      if (existing != null &&
+          (existing.state == DownloadState.downloading ||
+           existing.state == DownloadState.paused)) {
+        continue;
+      }
+      if (existing != null && existing.state == DownloadState.completed) continue;
+
+      updated[model.id] = DownloadTask(
+        modelId: model.id,
+        state: DownloadState.completed,
+        totalBytes: model.sizeBytes,
+        downloadedBytes: model.sizeBytes,
+      );
+    }
+
+    state = updated;
+  }
+
+  /// Cheap consistency check: for every model already marked `completed`,
+  /// verify the file is still on disk; drop the mark if the user deleted it
+  /// externally. Only does `File.exists()` on known ids — no directory walk —
+  /// so it is safe to call on every screen entry.
+  Future<void> refreshCacheStatus(List<ModelConfig> models) async {
+    final storage = ModelStorageService();
+    final updated = Map<String, DownloadTask>.from(state);
+    var changed = false;
+
+    for (final model in models) {
+      final existing = updated[model.id];
+      if (existing == null) continue;
+      if (existing.state == DownloadState.downloading ||
+          existing.state == DownloadState.paused) {
+        continue;
+      }
+      // Use the full-cache check (file exists AND size matches AND no stray
+      // .tmp) so a truncated/partial `.gguf` is never reported as cached.
+      final onDisk = await storage.isFullyCached(model);
+      if (existing.state == DownloadState.completed && !onDisk) {
+        updated[model.id] = DownloadTask(modelId: model.id);
+        changed = true;
+      } else if (existing.state != DownloadState.completed && onDisk) {
+        updated[model.id] = DownloadTask(
           modelId: model.id,
           state: DownloadState.completed,
           totalBytes: model.sizeBytes,
           downloadedBytes: model.sizeBytes,
         );
+        changed = true;
       }
     }
-    
-    state = updatedState;
+
+    if (changed) state = updated;
   }
 
   Future<void> startDownload(ModelConfig model) async {
@@ -54,13 +100,25 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     );
     state = {...state, model.id: initialTask};
 
-    await _downloadService.download(
-      model,
-      existingTask: initialTask, // <-- reuse the same task object
-      onProgress: (task) {
-        state = {...state, task.modelId: task};
-      },
-    );
+    try {
+      await _downloadService.download(
+        model,
+        existingTask: initialTask, // <-- reuse the same task object
+        onProgress: (task) {
+          state = {...state, task.modelId: task};
+        },
+      );
+    } catch (e) {
+      // Previously the caller never awaited this future, so an exception (e.g.
+      // the capacity guard's "Only one download at a time") vanished into an
+      // unhandled async error and the button just did nothing. Surface it.
+      initialTask.state = DownloadState.failed;
+      initialTask.errorMessage = e is DownloadException ? e.message : '$e';
+      state = {...state, model.id: initialTask};
+    }
+    // Reflect the terminal state one final time (the mutable task object is
+    // shared with the service, so identity-based Map updates need a fresh Map).
+    state = {...state, model.id: initialTask};
   }
 
   Future<void> pauseDownload(String modelId) async {

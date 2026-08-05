@@ -23,10 +23,13 @@
 #include <deque>
 #include <fstream>
 #include <cstdlib>
+#include <sys/stat.h>
 
 // llama.cpp headers
 #include "llama.h"
 #include "common.h"
+#include "speculative.h"   // official MTP/NextN speculative decoding driver
+#include "sampling.h"      // common_sampler / common_sampler_sample_and_accept_n
 #include "ggml-backend.h"
 
 #define LOG_TAG "TongYiLite"
@@ -217,12 +220,37 @@ static void sp_space_to_ascii(std::string &s) {
     }
 }
 
+// Length of the common prefix of two token vectors. Used by cross-turn KV
+// incremental prefill to decide how many KV positions can be kept.
+static int longest_common_prefix(const std::vector<llama_token> &a,
+                                 const std::vector<llama_token> &b) {
+    const size_t n = std::min(a.size(), b.size());
+    size_t i = 0;
+    while (i < n && a[i] == b[i]) ++i;
+    return (int)i;
+}
+
 struct InferenceEngine {
     llama_model *model   = nullptr;
     const struct llama_vocab *vocab = nullptr; // extracted from model for new API
     llama_context *context = nullptr;
+    llama_context *mtp_ctx = nullptr;  // second context running only the NextN/MTP head
     llama_model_params model_params;
     llama_context_params ctx_params;
+
+    // MTP (multi-token prediction) speculative decoding. Enabled at load time iff
+    // the model contains NextN layers (llama_model_n_layer_nextn > 0). The MTP head
+    // drafts several tokens cheaply; the target model then verifies them all in a
+    // single forward pass, so one decode step yields several accepted tokens.
+    bool mtp_enabled = false;
+    int  n_draft_max = 3;   // how many tokens the MTP head drafts per step
+
+    // Cross-turn KV incremental prefill. Instead of wiping the whole KV and
+    // re-prefilling the entire conversation every turn, we keep the common prefix
+    // of the previous turn's prompt and only prefill the newly-added suffix.
+    // prev_prompt_tokens is cached AFTER truncation so it matches the KV exactly.
+    std::vector<llama_token> prev_prompt_tokens; // last turn's full prompt tokens (+gen)
+    bool                     have_prev_kv = false; // KV currently == prev_prompt_tokens
 
     // Generation state
     std::vector<llama_token> prompt_tokens;
@@ -253,6 +281,12 @@ struct InferenceEngine {
     // on Adreno and corrupts multi-turn output (degenerate loop on round 2+).
     // kv_position is reset to 0 only for a brand-new conversation (resetContext()).
     llama_pos kv_position = 0;
+
+    // Actual on-disk size of the loaded .gguf (bytes). The model is mmap'd, so
+    // its resident memory footprint is bounded by this size — a far more honest
+    // number than n_params*sizeof(float), which over-estimates quantized models
+    // by ~8-16x (e.g. a 2.4 GB Q4_K_M reported as 16 GB). 0 when no model loaded.
+    int64_t model_file_size_bytes_ = 0;
 
     bool load(const char *model_path, int requested_n_ctx = 4096,
               bool enable_gpu = true, int gpu_layers = 20,
@@ -366,13 +400,30 @@ struct InferenceEngine {
             return false;
         }
 
+        // Record the real on-disk size for the memory panel (mmap'd weights).
+        {
+            struct stat st{};
+            if (::stat(model_path, &st) == 0) {
+                model_file_size_bytes_ = (int64_t)st.st_size;
+                LOGI("Model file size: %.1f MB", model_file_size_bytes_ / (1024.0 * 1024.0));
+            } else {
+                model_file_size_bytes_ = 0;
+            }
+        }
+
         vocab = llama_model_get_vocab(model);
 
         const int n_embd  = llama_model_n_embd(model);
         const int n_layer = llama_model_n_layer(model);
+        const int n_nextn = llama_model_n_layer_nextn(model); // MTP head depth (0 = none)
         const int64_t n_params = llama_model_n_params(model);
-        LOGI("GGUF model loaded. params=%lld, n_embd=%d, n_layer=%d",
-             (long long)n_params, n_embd, n_layer);
+        LOGI("GGUF model loaded. params=%lld, n_embd=%d, n_layer=%d, n_nextn=%d",
+             (long long)n_params, n_embd, n_layer, n_nextn);
+
+        // MTP is only possible when the model ships NextN (MTP) layers. Probe once
+        // here so both n_rs_seq (below) and the completion() path know whether to
+        // run the speculative driver. Keep mtp_enabled false if no head is present.
+        mtp_enabled = (n_nextn > 0);
 
         char buf[256];
         snprintf(buf, sizeof(buf), "模型文件加载完成 (%.1fM 参数)", n_params / 1'000'000.0);
@@ -448,6 +499,14 @@ struct InferenceEngine {
         // the documented API and works correctly on the unified buffer.
         ctx_params.kv_unified = true;
 
+        // For MTP speculative decoding, partial draft acceptance is rolled back via
+        // the rollback-sequence (RS) mechanism: llama_memory_seq_rm() removes the
+        // unaccepted draft tokens past the commit point without a full state
+        // checkpoint. Reserve enough RS slots for the worst case (all drafts
+        // rejected) so the driver never needs checkpoints. Harmless when mtp_enabled
+        // is false (n_rs_seq=0 leaves the context in the current non-RS layout).
+        ctx_params.n_rs_seq = mtp_enabled ? (n_draft_max + 1) : 0;
+
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
             ctx_params.n_ctx = trained_ctx;
@@ -505,8 +564,41 @@ struct InferenceEngine {
              ctx_val, n_ctx_seq,
              llama_model_n_embd(model),
              llama_model_n_layer(model));
+
+        // MTP: create a second context that runs ONLY the NextN head, reusing the
+        // already-loaded target model. The driver (common_speculative) mirrors the
+        // target hidden states into this context and uses it to draft tokens. See
+        // llama.cpp tools/server/server-context.cpp + common/speculative.cpp for the
+        // canonical setup (ctx_type=LLAMA_CONTEXT_TYPE_MTP, ctx_other=main ctx).
+        if (mtp_enabled) {
+            llama_context_params mtp_params = llama_context_default_params();
+            mtp_params.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
+            mtp_params.ctx_other = context;                       // main target context
+            mtp_params.n_ctx     = (uint32_t)ctx_val;
+            mtp_params.n_batch   = ctx_params.n_batch;            // room for [id_last + drafts]
+            mtp_params.n_ubatch  = ctx_params.n_ubatch;
+            mtp_params.n_rs_seq  = 0;                             // MTP ctx needs no rollback
+            mtp_params.n_threads = ctx_params.n_threads;
+            mtp_params.n_threads_batch = ctx_params.n_threads_batch;
+            mtp_params.kv_unified = true;
+
+            mtp_ctx = llama_init_from_model(model, mtp_params);
+            if (mtp_ctx) {
+                LOGI("MTP context created (n_ctx=%d, n_draft_max=%d). Speculative decoding ON.",
+                     ctx_val, n_draft_max);
+            } else {
+                // Not fatal: fall back to the single-token autoregressive path.
+                mtp_enabled = false;
+                mtp_ctx = nullptr;
+                LOGW("MTP context creation failed (OOM?) -> falling back to plain decoding");
+            }
+        } else {
+            LOGI("Model has no NextN layers -> MTP disabled (plain autoregressive decoding)");
+        }
+
         char buf3[128];
-        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)", ctx_val);
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)%s", ctx_val,
+                 mtp_enabled ? "，MTP 加速已启用" : "");
         reportLoadingLog(buf3);
         return true;
     }
@@ -517,11 +609,16 @@ struct InferenceEngine {
         std::lock_guard<std::mutex> lock(mtx);
         const int v2 = static_cast<int>(n_ctx.load());
         LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v2);
+        if (mtp_ctx)  { llama_free(mtp_ctx);   mtp_ctx = nullptr; }
         if (context)  { llama_free(context);  context = nullptr; }
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
+        mtp_enabled = false;
+        prev_prompt_tokens.clear();
+        have_prev_kv = false;
         n_ctx = 0;
         is_running = false;
+        model_file_size_bytes_ = 0;
         const int v3 = static_cast<int>(n_ctx.load());
         LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v3);
     }
@@ -542,7 +639,12 @@ struct InferenceEngine {
         if (context != nullptr) {
             llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)llama_n_ctx(context));
         }
+        if (mtp_ctx != nullptr) {
+            llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, 0, (llama_pos)llama_n_ctx(mtp_ctx));
+        }
         kv_position = 0;
+        prev_prompt_tokens.clear();
+        have_prev_kv = false;
         LOGI("resetContext(): KV cache cleared (seq_rm), kv_position=0 (new conversation)");
     }
 
@@ -604,12 +706,13 @@ struct InferenceEngine {
             is_running  = true;
             should_stop = false;
 
-            // Multi-turn strategy: KEEP the single context created at load() and
-            // clear its KV cache each turn with llama_memory_seq_rm. On the
-            // UNIFIED KV buffer (kv_unified=true, set in load()) this reliably
-            // empties sequence 0 and resets its length counter, giving a clean
-            // slate every turn. The Dart layer re-sends the full conversation each
-            // turn, so no cross-turn KV bookkeeping is needed.
+            // Multi-turn strategy: KEEP the single context created at load().
+            // KV clearing is now DEFERRED until after tokenization+truncation so
+            // we can do cross-turn INCREMENTAL prefill: keep the common prefix of
+            // the previous turn's prompt (saving the re-prefill of all history)
+            // and only wipe/prefill the newly-added suffix. See the block after
+            // "Prompt: %d tokens" below. When no prefix can be reused we fall back
+            // to the previous full-wipe behavior (llama_memory_seq_rm + clear).
             // NOTE: per-turn llama_init_from_model was abandoned — on this build the
             // re-inited context's KV was NOT pristine for longer (multi-turn)
             // prompts and produced flat/garbage logits ("coln魔魔魔").
@@ -618,12 +721,6 @@ struct InferenceEngine {
                 is_running = false;
                 return "[ERROR: Context not initialized]";
             }
-            if (!llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)ctx_val)) {
-                LOGW("completion(): seq_rm returned false; falling back to llama_memory_clear");
-                llama_memory_clear(llama_get_memory(context), true);
-            }
-            kv_position = 0;
-            LOGI("KV cache cleared (seq_rm) for new completion");
 
             const int ctx_val2 = static_cast<int>(n_ctx.load());
             LOGI("completion() running: model=%p context=%p n_ctx=%d",
@@ -745,9 +842,100 @@ struct InferenceEngine {
 
             LOGI("Prompt: %d tokens", n_prompt);
 
-            // (KV cache already cleared via llama_memory_seq_rm at the top of completion())
+            // ================================================================
+            // Cross-turn KV INCREMENTAL prefill. Compute the common prefix of the
+            // previous turn's cached prompt and this turn's prompt; keep the prefix
+            // KV (double-write to context + mtp_ctx, which share the KV buffer but
+            // maintain separate sequence views) and wipe only the divergent suffix.
+            // When no prefix can be reused we fall back to a full wipe (old behavior).
+            // ================================================================
+            auto full_clear = [&]() {
+                llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)ctx_val2);
+                if (mtp_ctx) llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, 0, (llama_pos)ctx_val2);
+                kv_position = 0;
+                have_prev_kv = false;
+                LOGI("KV full clear for new completion");
+            };
+
+            // Incremental reuse only pays off when a meaningful prefix survives.
+            // In practice the chatml template's assistant trigger ("thinking\n\n response")
+            // diverges from the re-rendered reply right after "<|im_start|>assistant\n",
+            // so the cross-turn LCP rarely spans the whole history (it stops at the last
+            // trigger). We still require a small floor (16) to skip degenerate tiny
+            // prefixes; the unified-KV memory-slot decode failure that a tiny kept
+            // prefix used to trigger (empty replies on alternating turns) is now
+            // handled by the decode-fail -> full-clear retry below, so the floor no
+            // longer needs to be 128. A floor that high silently disabled incremental
+            // prefill on every short/medium conversation (LCP < 128 -> full clear),
+            // which is why multi-turn TTFT never improved.
+            const int MIN_INCREMENTAL_PREFIX = 16;
+            int prefix_len = 0;
+            if (have_prev_kv && !prev_prompt_tokens.empty() && !prompt_tokens.empty()) {
+                prefix_len = longest_common_prefix(prev_prompt_tokens, prompt_tokens);
+                if (prefix_len >= MIN_INCREMENTAL_PREFIX && prefix_len < n_prompt) {
+                    // keep [0, prefix_len), drop [prefix_len, end)
+                    llama_memory_seq_rm(llama_get_memory(context), 0, prefix_len, (llama_pos)ctx_val2);
+                    if (mtp_ctx) llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, prefix_len, (llama_pos)ctx_val2);
+                    kv_position = prefix_len;   // critical: do NOT reset to 0
+                    LOGI("KV incremental: kept prefix=%d, will prefill %d tokens (saved %d)",
+                         prefix_len, n_prompt - prefix_len, prefix_len);
+                } else {
+                    full_clear();
+                }
+            } else {
+                full_clear();
+            }
+
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
+
+            // ================================================================
+            // MTP speculative setup — must run BEFORE prefill so the driver can
+            // mirror the target hidden states into the MTP context during prompt
+            // decoding (common_speculative_process), and so its ctor call to
+            // llama_set_embeddings_nextn(ctx_tgt,...) is in effect for prefill.
+            // ================================================================
+            common_speculative *mtp_spec = nullptr;
+            struct common_sampler *mtp_smpl = nullptr;
+            llama_tokens mtp_prompt_tgt;      // all prompt tokens EXCEPT the last
+            llama_token  mtp_id_last = 0;
+            int mtp_n_past = 0;
+            if (mtp_enabled && n_prompt > 1) {
+                common_params_speculative spec_params;
+                spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+                spec_params.draft.n_max   = n_draft_max;
+                spec_params.draft.n_min   = 1;   // always draft at least one token
+                spec_params.draft.p_min   = 0.0f;
+                spec_params.draft.ctx_tgt = context;
+                spec_params.draft.ctx_dft = mtp_ctx;
+                mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
+                if (!mtp_spec) {
+                    LOGW("MTP spec init failed -> falling back to plain decoding");
+                    mtp_enabled = false;
+                } else {
+                    // Target-side sampler for the verification step. Mirrors the
+                    // raw llama_sampler_chain in the plain path below: repeat
+                    // penalty (critical against repetition loops) + top_k + top_p
+                    // + temperature; common_sampler_init appends the dist sampler.
+                    common_params_sampling sparams;
+                    sparams.seed = (uint32_t)llama_time_us();
+                    sparams.penalty_last_n = 64;
+                    sparams.penalty_repeat = 1.1f;
+                    sparams.penalty_freq   = 0.0f;
+                    sparams.penalty_present= 0.0f;
+                    sparams.top_k = 128;
+                    sparams.top_p = top_p;
+                    sparams.temp  = temperature;
+                    sparams.samplers = { COMMON_SAMPLER_TYPE_PENALTIES,
+                                         COMMON_SAMPLER_TYPE_TOP_K,
+                                         COMMON_SAMPLER_TYPE_TOP_P,
+                                         COMMON_SAMPLER_TYPE_TEMPERATURE };
+                    mtp_smpl = common_sampler_init(model, sparams);
+                    mtp_prompt_tgt.assign(prompt_tokens.begin(), prompt_tokens.end() - 1);
+                    mtp_id_last = prompt_tokens.back();
+                    mtp_n_past  = n_prompt - 1;
+                }
+            }
 
             // 2. Decode the prompt in batches. We now feed up to n_batch (512) tokens
             // per llama_decode call, and the unified KV buffer lets llama.cpp process
@@ -757,33 +945,81 @@ struct InferenceEngine {
             t_prompt_ms = 0;
             t_gen_ms = 0;
             n_gen = 0;
-            llama_pos cur_pos = 0;
+            // With incremental prefill we continue from the kept prefix's end rather
+            // than position 0; otherwise (full clear) this is 0 as before.
+            llama_pos cur_pos = (llama_pos)prefix_len;
 
             auto t_start = std::chrono::high_resolution_clock::now();
             const int32_t n_batch = (int32_t)ctx_params.n_batch;   // 512: large, fast prefill
-            int i = 0;
-            while (i < n_prompt) {
-                const int32_t chunk = std::min((int32_t)n_batch, n_prompt - i);
-                llama_batch tok_batch = llama_batch_init(chunk, 0, 1);
-                tok_batch.n_tokens = chunk;
-                for (int32_t j = 0; j < chunk; ++j) {
-                    tok_batch.token[j] = prompt_tokens[i + j];
-                    tok_batch.pos[j]   = cur_pos + j;
-                    tok_batch.n_seq_id[j]  = 1;
-                    tok_batch.seq_id[j][0] = 0;
-                    tok_batch.logits[j] = (i + j == n_prompt - 1) ? 1 : 0;
-                }
-                if (llama_decode(context, tok_batch) != 0) {
-                    LOGE("llama_decode() failed on prompt batch starting at token %d (pos=%d)", i, (int)cur_pos);
+            int i = prefix_len;   // skip the already-prefilled prefix
+            // Decode the prompt. On the FIRST attempt we may be resuming from a kept
+            // prefix (incremental). If that decode is rejected by the unified KV cache
+            // (memory-slot error — observed as empty replies on alternating turns),
+            // fall back to a full wipe and redo the whole prompt from position 0.
+            // On the MTP path we keep the LAST prompt token OUT of the KV cache:
+            // it is decoded as `id_last` at the start of every speculative iteration
+            // (see speculative-simple.cpp). Prefill therefore fills [prefix_len,
+            // n_prompt-1) and leaves position n_prompt-1 free for id_last. The plain
+            // path prefills the whole prompt as before.
+            const int prefill_end = (mtp_spec != nullptr) ? n_prompt - 1 : n_prompt;
+
+            bool done = false;
+            for (int attempt = 0; attempt < 2 && !done; ++attempt) {
+                bool failed = false;
+                while (i < prefill_end) {
+                    const int32_t chunk = std::min((int32_t)n_batch, prefill_end - i);
+                    llama_batch tok_batch = llama_batch_init(chunk, 0, 1);
+                    tok_batch.n_tokens = chunk;
+                    for (int32_t j = 0; j < chunk; ++j) {
+                        tok_batch.token[j] = prompt_tokens[i + j];
+                        tok_batch.pos[j]   = cur_pos + j;
+                        tok_batch.n_seq_id[j]  = 1;
+                        tok_batch.seq_id[j][0] = 0;
+                        tok_batch.logits[j] = (i + j == prefill_end - 1) ? 1 : 0;
+                    }
+                    if (llama_decode(context, tok_batch) != 0) {
+                        llama_batch_free(tok_batch);
+                        if (attempt == 0 && prefix_len > 0) {
+                            // incremental prefix keep rejected -> full clear and retry once
+                            LOGW("incremental prefill decode failed at token %d (pos=%d) -> full clear retry",
+                                 i, (int)cur_pos);
+                            full_clear();
+                            cur_pos = 0;
+                            i = 0;
+                            failed = true;
+                            break;
+                        }
+                        LOGE("llama_decode() failed on prompt batch starting at token %d (pos=%d)", i, (int)cur_pos);
+                        is_running = false;
+                        have_prev_kv = false;   // KV is now partially populated -> don't trust cache
+                        return "[ERROR: Prompt decode failed]";
+                    }
+                    // MTP: mirror the target hidden states (t_h_nextn) into the MTP
+                    // context so the draft head can predict from the full prompt.
+                    if (mtp_spec) {
+                        if (!common_speculative_process(mtp_spec, tok_batch)) {
+                            LOGE("common_speculative_process() failed on prefill batch %d", i);
+                            llama_batch_free(tok_batch);
+                            is_running = false;
+                            have_prev_kv = false;   // KV may be inconsistent -> don't trust cache
+                            return "[ERROR: MTP process failed]";
+                        }
+                    }
                     llama_batch_free(tok_batch);
-                    is_running = false;
-                    return "[ERROR: Prompt decode failed]";
+                    cur_pos += chunk;
+                    i += chunk;
                 }
-                llama_batch_free(tok_batch);
-                cur_pos += chunk;
-                i += chunk;
+                done = !failed;
             }
-            kv_position = cur_pos;   // == n_prompt; generation continues at n_prompt..
+            // Plain path: == n_prompt (full prompt in KV). MTP path: == n_prompt-1
+            // (last prompt token is left out of the cache; the speculative loop
+            // decodes it as id_last at n_prompt-1 and continues from there).
+            kv_position = cur_pos;
+
+            // MTP: tell the driver the full prompt is now in the target context.
+            if (mtp_spec) {
+                common_speculative_begin(mtp_spec, /*seq_id=*/0, mtp_prompt_tgt);
+            }
 
             auto t_end = std::chrono::high_resolution_clock::now();
             t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -794,6 +1030,11 @@ struct InferenceEngine {
             std::string flush_buf;      // batches complete UTF-8 sequences before calling on_token
             bool gen_stopped = false;
             const llama_token eos = llama_vocab_eos(vocab);
+            // Tokens generated this turn (both the MTP and plain loops append via
+            // the shared emit_token lambda). Written back at turn end so the NEXT
+            // turn's incremental prefill can find the common prefix through the
+            // assistant reply and stop at the new user message.
+            std::vector<llama_token> gen_tokens;
             // Batch size for on_token callbacks — accumulating characters
             // before crossing the JNI/EventChannel boundary reduces per-token
             // overhead from the C++→JNI→Dart round-trip.
@@ -802,7 +1043,157 @@ struct InferenceEngine {
             // coarse: ~21 chars per chunk read like block output.)
             const size_t kFlushBatchSize = 8;
 
-            // Create the sampler chain once and reuse it for every generated token.
+            // Shared token-emit helper (used by the MTP loop; the plain loop below
+            // keeps its own inline copy to stay untouched). Converts a token piece
+            // to text, buffers only COMPLETE UTF-8 sequences (so a multi-byte char
+            // is never split across JNI calls), batches them into flush_buf before
+            // calling on_token, and renders SentencePiece's "▁" as a space. Returns
+            // false if the UI callback asked to stop (user pressed stop).
+            auto emit_token = [&](llama_token tok) -> bool {
+                char buf[256];
+                // special=false: skip control/special tokens (render nothing).
+                int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, false);
+                if (n <= 0) return true;
+                gen_tokens.push_back(tok);   // for the next turn's incremental prefill
+                gen_utf8_buf.append(buf, n);
+                size_t consumed = 0;
+                while (consumed < gen_utf8_buf.size()) {
+                    int adv = utf8_seq_len(gen_utf8_buf, consumed);
+                    if (adv == 0) break;          // incomplete tail; wait for more bytes
+                    if (adv < 0) { consumed += 1; continue; }  // invalid byte -> drop
+                    std::string one = gen_utf8_buf.substr(consumed, adv);
+                    consumed += adv;
+                    sp_space_to_ascii(one);
+                    result += one;
+                    flush_buf += one;
+                    if (flush_buf.size() >= kFlushBatchSize) {
+                        if (on_token && !on_token(flush_buf)) {
+                            gen_stopped = true;
+                            flush_buf.clear();
+                            return false;
+                        }
+                        flush_buf.clear();
+                    }
+                }
+                gen_utf8_buf.erase(0, consumed);
+                return !gen_stopped;
+            };
+
+            if (mtp_spec) {
+                // ============================================================
+                // MTP speculative decoding loop (model has a NextN head)
+                // ============================================================
+                // Each iteration decodes [id_last, draft0..draftN-1] in ONE forward
+                // pass. The MTP head drafts N cheap tokens (common_speculative_draft);
+                // the target model then verifies them all at once, and we accept the
+                // longest matching prefix (common_sampler_sample_and_accept_n).
+                // Rejected drafts are rolled back via the RS mechanism (n_rs_seq on
+                // the main context), so no state checkpoints are needed — this is the
+                // speculative-simple RS path, with the MTP process() hook keeping the
+                // draft context in sync (see llama.cpp server-context.cpp).
+                LOGI("MTP generation start: n_draft_max=%d", n_draft_max);
+                llama_tokens draft;
+                struct llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
+                const llama_seq_id seq_id = 0;
+                t_gen_ms = 0;
+                while (n_gen < max_tokens && !should_stop) {
+                    // 1) generate a fresh draft from the MTP head
+                    if (draft.empty()) {
+                        // Clamp n_max to the remaining KV budget so we never decode
+                        // past n_ctx (same overflow guard as the plain path).
+                        const int n_max = std::max(1, (int)((int32_t)llama_n_ctx(context) - mtp_n_past - 1));
+                        common_speculative_get_draft_params(mtp_spec, seq_id) = {
+                            /*.drafting =*/ true,
+                            /*.n_max    =*/ n_max,
+                            /*.n_past   =*/ mtp_n_past,
+                            /*.id_last  =*/ mtp_id_last,
+                            /*.prompt   =*/ &mtp_prompt_tgt,
+                            /*.result   =*/ &draft,
+                        };
+                        common_speculative_draft(mtp_spec);
+                        LOGI("[MTP] drafted %zu tokens", draft.size());
+                        if (!draft.empty()) {
+                            // Trim the MTP context back to the pre-draft base. The draft
+                            // stage decoded id_last at mtp_n_past plus the draft tokens
+                            // after it; we must wipe ALL of that (>= mtp_n_past) so the
+                            // subsequent common_speculative_process() re-decodes id_last
+                            // at mtp_n_past as a fresh position. Keeping id_last here made
+                            // that re-decode collide with an already-filled KV slot, so
+                            // process() returned false and produced an empty reply.
+                            llama_memory_seq_rm(llama_get_memory(mtp_ctx), seq_id, mtp_n_past, -1);
+                        }
+                    }
+
+                    // 2) evaluate [id_last, draft0..N] on the target model
+                    common_batch_clear(batch_tgt);
+                    common_batch_add(batch_tgt, mtp_id_last, mtp_n_past++, { seq_id }, true);
+                    for (size_t k = 0; k < draft.size(); ++k) {
+                        common_batch_add(batch_tgt, draft[k], mtp_n_past + k, { seq_id }, true);
+                    }
+                    t_start = std::chrono::high_resolution_clock::now();
+                    LOGI("[MTP] verify batch: id_last=%d n_past=%d n_draft=%zu", mtp_id_last, mtp_n_past - 1, draft.size());
+                    const int dec_ret = llama_decode(context, batch_tgt);
+                    t_end = std::chrono::high_resolution_clock::now();
+                    t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
+                    if (dec_ret != 0) {
+                        LOGE("[MTP] llama_decode failed ret=%d at n_past=%d", dec_ret, mtp_n_past - 1);
+                        break;
+                    }
+
+                    // 3) keep the MTP context in sync with the target batch
+                    const bool proc_ok = common_speculative_process(mtp_spec, batch_tgt);
+                    LOGI("[MTP] process ok=%d", (int)proc_ok);
+                    if (!proc_ok) {
+                        LOGE("[MTP] common_speculative_process failed");
+                        break;
+                    }
+
+                    // 4) sample the target logits, accept as many drafts as match
+                    auto ids = common_sampler_sample_and_accept_n(mtp_smpl, context, draft);
+                    LOGI("[MTP] sampled ids.size=%zu draft.size=%zu", ids.size(), draft.size());
+                    if (ids.empty()) break;
+                    common_speculative_accept(mtp_spec, seq_id, (uint16_t)(ids.size() - 1));
+                    LOGI("[MTP] accepted %zu/%zu draft tokens", ids.size() - 1, draft.size());
+
+                    // 5) commit accepted tokens: ids[0] is the new sampled token,
+                    //    ids[1..] are the verified draft tokens.
+                    bool hit_eos = false;
+                    for (size_t k = 0; k < ids.size(); ++k) {
+                        const llama_token tok = ids[k];
+                        if (tok == eos) { hit_eos = true; break; }
+                        if (n_gen >= max_tokens) break;
+                        if (n_gen < 6) {
+                            char pbuf[64];
+                            int pn = llama_token_to_piece(vocab, tok, pbuf, sizeof(pbuf), 0, false);
+                            std::string phex; char tmp[4];
+                            for (int x = 0; x < pn && x < 32; ++x) { snprintf(tmp, sizeof(tmp), "%02X ", (unsigned char)pbuf[x]); phex += tmp; }
+                            LOGI("[MTP] gen#%d token=%d piece_hex: %s", n_gen, tok, phex.c_str());
+                        }
+                        mtp_prompt_tgt.push_back(mtp_id_last);
+                        mtp_id_last = tok;
+                        n_gen++;
+                        if (!emit_token(tok)) { break; }
+                    }
+                    // n_past advances by the number of accepted tokens (ids.size()-1)
+                    // on top of the id_last slot consumed above (mtp_n_past already
+                    // incremented once in the batch add).
+                    mtp_n_past += (int)ids.size() - 1;
+                    draft.clear();
+
+                    // 6) roll back any unaccepted draft tokens (RS) on BOTH contexts
+                    llama_memory_seq_rm(llama_get_memory(context), seq_id, mtp_n_past, -1);
+                    llama_memory_seq_rm(llama_get_memory(mtp_ctx),  seq_id, mtp_n_past, -1);
+
+                    if (hit_eos)  { LOGI("[MTP] EOS at gen=%d", n_gen); break; }
+                    if (gen_stopped) { LOGI("[MTP] stopped by callback at gen=%d", n_gen); break; }
+                }
+                llama_batch_free(batch_tgt);
+                LOGI("MTP generation done: %d tokens", n_gen);
+            } else {
+                // ============================================================
+                // Plain single-token autoregressive loop (no NextN head)
+                // ============================================================
+                // Create the sampler chain once and reuse it for every generated token.
             // This replaces the per-token O(vocab) allocation of 150k+
             // llama_token_data entries with the built-in llama.cpp sampler
             // which reuses internal buffers across calls.
@@ -867,45 +1258,13 @@ struct InferenceEngine {
                     break;
                 }
 
-                char buf[256];
-                // special=false: skip control/special tokens (render nothing) instead
-                // of emitting their literal text, which would show up as garbage.
-                int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, false);
-                if (n > 0) {
-                    gen_utf8_buf.append(buf, n);
-                    // Forward only COMPLETE UTF-8 sequences so a multi-byte
-                    // character is never split across two callback calls (which
-                    // would hand JNI a lone continuation byte and abort). Invalid
-                    // bytes (e.g. a lone continuation byte from byte-fallback) are
-                    // dropped; SentencePiece's "▁" marker is rendered as a space.
-                    // Batch complete sequences into flush_buf before calling
-                    // on_token to reduce C++→JNI→Dart round-trip overhead per token.
-                    // NOTE: kFlushBatchSize must stay small (<= 8 bytes ≈ 2 CJK chars).
-                    // The previous 64-byte batch (≈21 CJK chars) made streaming
-                    // appear as ~20-char chunks instead of character-by-character,
-                    // which feels non-streaming on a 0.5-2 tok/s on-device model.
-                    size_t consumed = 0;
-                    while (consumed < gen_utf8_buf.size()) {
-                        int adv = utf8_seq_len(gen_utf8_buf, consumed);
-                        if (adv == 0) break;          // incomplete tail; wait for more bytes
-                        if (adv < 0) { consumed += 1; continue; }  // invalid byte -> drop
-                        std::string one = gen_utf8_buf.substr(consumed, adv);
-                        consumed += adv;
-                        sp_space_to_ascii(one);
-                        result += one;
-                        flush_buf += one;
-                        if (flush_buf.size() >= kFlushBatchSize) {
-                        if (on_token && !on_token(flush_buf)) {
-                            LOGI("Stopped by callback at gen=%d", n_gen);
-                            gen_stopped = true;
-                            flush_buf.clear();
-                            break;
-                        }
-                        flush_buf.clear();
-                        }
-                    }
-                    gen_utf8_buf.erase(0, consumed);
-                    if (gen_stopped) break;
+                // Emit via the shared helper (also records gen_tokens for the next
+                // turn's incremental prefill). Stops the loop if the UI callback
+                // asked to halt. Same UTF-8 buffering/streaming semantics as the
+                // inline code it replaces (see the emit_token lambda above).
+                if (!emit_token(new_token)) {
+                    gen_stopped = true;
+                    break;
                 }
 
                 // Decode at correct position (append after the prompt we just fed).
@@ -952,6 +1311,11 @@ struct InferenceEngine {
                 t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
             }
             llama_sampler_free(smpl_chain);
+            } // end else (plain loop)
+
+            // Free MTP driver + sampler if the speculative path was set up.
+            if (mtp_smpl) { common_sampler_free(mtp_smpl); mtp_smpl = nullptr; }
+            if (mtp_spec) { common_speculative_free(mtp_spec); mtp_spec = nullptr; }
 
             // Extend the persistent KV cursor to include this turn's generated tokens
             // so the NEXT completion continues the conversation seamlessly.
@@ -1002,6 +1366,18 @@ struct InferenceEngine {
             // returned (result is a local) — and the member was never read for
             // templating anyway. Removed to avoid the use-after-free.
 
+            // Write back the cached prompt for NEXT turn's incremental prefill:
+            // this turn's (post-truncation) prompt + this turn's generated tokens.
+            // The next turn's prompt = template(all history + new user msg), whose
+            // common prefix with this cache stops exactly at the new user message,
+            // so only that suffix needs to be prefilled.
+            prev_prompt_tokens = prompt_tokens;
+            prev_prompt_tokens.insert(prev_prompt_tokens.end(),
+                                      gen_tokens.begin(), gen_tokens.end());
+            have_prev_kv = true;
+            LOGI("Cached prev prompt for incremental prefill: %zu tokens (+%zu gen)",
+                 prompt_tokens.size(), gen_tokens.size());
+
             return result;
         } catch (const std::exception &e) {
             LOGE("completion() caught C++ exception: %s", e.what());
@@ -1022,13 +1398,31 @@ struct InferenceEngine {
     // Memory & device info
     // ------------------------------------------------------------------
     int64_t get_model_size_bytes() const {
+        // Report the real mmap'd file size when known; fall back to the
+        // (heavily over-estimated) params*4 figure only if stat() failed.
+        if (model_file_size_bytes_ > 0) return model_file_size_bytes_;
         if (!model) return 0;
         return llama_model_n_params(model) * sizeof(float); // approximate
     }
 
-    int64_t get_context_size_bytes() const {
-        if (!context) return 0;
-        return (int64_t)llama_state_get_size(context);
+    // KV-cache allocation size (bytes). llama.cpp does not expose a direct
+    // "kv_cache_total_bytes" API in this vendored build, so compute it from
+    // the context/model dimensions. This matches the actual pre-allocated KV
+    // buffer (default f16) and is non-zero as soon as the context is created.
+    int64_t get_kv_cache_bytes() const {
+        if (!model || !context) return 0;
+        const int n_embd    = llama_model_n_embd(model);
+        const int n_head    = llama_model_n_head(model);
+        const int n_head_kv = llama_model_n_head_kv(model);
+        const int n_layer   = llama_model_n_layer(model);
+        const uint32_t n_ctx = llama_n_ctx(context);
+        if (n_head <= 0 || n_ctx == 0) return 0;
+
+        // Head dimension. For GQA, n_head_kv < n_head; for MHA they are equal.
+        const int head_dim = n_embd / n_head;
+        // One layer's K (or V) buffer = n_ctx positions * n_head_kv heads * head_dim * f16.
+        const int64_t kv_per_layer = (int64_t)n_ctx * n_head_kv * head_dim * sizeof(uint16_t);
+        return 2LL * n_layer * kv_per_layer; // K + V
     }
 };
 
@@ -1474,6 +1868,11 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeBenchmark(
 JNIEXPORT jlong JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetModelSizeBytes(JNIEnv *, jobject) {
     return g_engine.get_model_size_bytes();
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetKvCacheBytes(JNIEnv *, jobject) {
+    return g_engine.get_kv_cache_bytes();
 }
 
 JNIEXPORT jstring JNICALL

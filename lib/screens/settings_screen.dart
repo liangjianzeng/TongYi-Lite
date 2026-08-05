@@ -21,6 +21,14 @@ import '../services/settings_service.dart';
 import '../services/model_manager.dart';
 import 'inference_log_screen.dart';
 
+/// App-lifetime guard: the local .gguf scan runs **once per app launch**.
+///
+/// It used to live on `_SettingsScreenState`, but SettingsScreen is pushed as a
+/// route, so every visit created a fresh State and re-triggered a full disk
+/// scan — noisy and slow. Keeping the flag at library scope makes it survive
+/// route disposal while still resetting on process restart.
+bool _appLaunchScanDone = false;
+
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
@@ -32,29 +40,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late final Future<List<ModelConfig>> _catalogFuture;
-  bool _autoScanned = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _catalogFuture = loadModelCatalog();
-    _tabController.addListener(_onTabChanged);
-    // 默认停在「模型管理」(index 0)，首帧后自动扫描一次本地已有的 .gguf。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_tabController.index == 0) _triggerAutoScan();
+      // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
+      // 轻量校验（对已知 id 做 File.exists，无目录遍历、无提示），
+      // 既不打扰用户，又能正确显示「已缓存」。
+      if (_appLaunchScanDone) {
+        _refreshCacheStatus();
+      } else {
+        _appLaunchScanDone = true;
+        _scanModels(silent: true);
+      }
     });
   }
 
-  void _onTabChanged() {
-    if (_tabController.index == 0) _triggerAutoScan();
-  }
-
-  /// 首次进入「模型管理」时自动扫描本地模型一次，避免每次手工点。
-  void _triggerAutoScan() {
-    if (_autoScanned) return;
-    _autoScanned = true;
-    _scanModels(silent: true);
+  /// 轻量缓存状态校验：只对目录内已知 id 的 .gguf 做存在性判断，
+  /// 用于纠正「文件已在磁盘但界面仍显示未下载」以及「文件被外部删除但
+  /// 界面仍显示已缓存」两种不一致。开销极小，可每次进入页面执行。
+  Future<void> _refreshCacheStatus() async {
+    try {
+      final catalog = await _catalogFuture;
+      if (!mounted) return;
+      await ref.read(downloadNotifierProvider.notifier).refreshCacheStatus(catalog);
+    } catch (_) {}
   }
 
   @override
@@ -113,7 +126,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const SizedBox(height: 8),
           const Center(
             child: Text(
-              '首次进入自动扫描本地模型，也可手动重新扫描',
+              'APP 启动后自动扫描一次，下载完成自动更新；需要时可手动重新扫描',
               style: TextStyle(fontSize: 11, color: Colors.grey),
               textAlign: TextAlign.center,
             ),
@@ -241,6 +254,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         child: Text('推荐', style: TextStyle(fontSize: 12, color: Colors.blue)),
                       ),
                     ],
+                    if (model.mtp) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.shade100,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text('\u{26A1}MTP', style: TextStyle(fontSize: 12, color: Colors.amber.shade900)),
+                      ),
+                    ],
                   ],
                 ),
 
@@ -289,14 +313,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
       case DownloadState.paused:
         return OutlinedButton.icon(
-          onPressed: () => ref.read(downloadNotifierProvider.notifier).resumeDownload(model.id),
+          onPressed: () => _resumeDownloadAndRescan(model.id),
           icon: const Icon(Icons.play_arrow, size: 18),
           label: const Text('继续'),
         );
 
       case DownloadState.failed:
         return OutlinedButton.icon(
-          onPressed: () => ref.read(downloadNotifierProvider.notifier).startDownload(model),
+          onPressed: () => _startDownloadAndRescan(model),
           icon: const Icon(Icons.refresh, size: 18),
           label: const Text('重试'),
           style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
@@ -366,7 +390,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           );
         } else {
           return ElevatedButton.icon(
-            onPressed: () => ref.read(downloadNotifierProvider.notifier).startDownload(model),
+            onPressed: () => _startDownloadAndRescan(model),
             icon: const Icon(Icons.download, size: 18),
             label: const Text('下载'),
           );
@@ -421,6 +445,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     return '${mb.toStringAsFixed(0)} MB';
   }
 
+  /// 启动下载，并在下载成功结束后自动补一次静默扫描
+  /// （刷新本地缓存状态 / 文件路径，用户无需手动点扫描）。
+  Future<void> _startDownloadAndRescan(ModelConfig model) async {
+    await ref.read(downloadNotifierProvider.notifier).startDownload(model);
+    if (!mounted) return;
+    final task = ref.read(downloadNotifierProvider)[model.id];
+    if (task?.state == DownloadState.completed) {
+      await _scanModels(silent: true);
+    }
+  }
+
+  /// 断点续传结束后同样补一次静默扫描。
+  Future<void> _resumeDownloadAndRescan(String modelId) async {
+    await ref.read(downloadNotifierProvider.notifier).resumeDownload(modelId);
+    if (!mounted) return;
+    final task = ref.read(downloadNotifierProvider)[modelId];
+    if (task?.state == DownloadState.completed) {
+      await _scanModels(silent: true);
+    }
+  }
+
   Future<void> _scanModels({bool silent = false}) async {
     final manager = ModelManager();
     final cachedIds = await manager.scanExistingModels();
@@ -442,15 +487,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     if (foundModels.isNotEmpty) {
       await ref.read(downloadNotifierProvider.notifier).initCachedModels(foundModels);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(silent
-              ? '已自动恢复 ${foundModels.length} 个本地模型'
-              : '已恢复 ${foundModels.length} 个模型状态'),
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      // 静默扫描（启动首次 / 下载完成）不弹 SnackBar，避免打扰。
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已恢复 ${foundModels.length} 个模型状态'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
     } else if (!silent) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('找到文件但未匹配到已知模型，请检查模型ID'), backgroundColor: Colors.orange),
@@ -567,15 +613,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                     'GPU 加速',
                     gpuSettings.enableGpu,
                     gpuNotifier.setEnableGpu,
-                    subtitle: '按所选后端卸载计算到 GPU',
                   ),
                   const SizedBox(height: 16),
-                  // GPU 后端选择：auto / opencl / vulkan。
-                  // CPU 不单列——关闭 GPU 即纯 CPU，自动模式无 GPU 时也会回落 CPU。
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Text('后端', style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
-                  ),
                   SegmentedButton<String>(
                     segments: const [
                       ButtonSegment(

@@ -90,6 +90,7 @@ class InferenceEngine(private val context: Context) {
     ): DoubleArray  // [tok_per_sec, prompt_ms, gen_ms]
 
     private external fun nativeGetModelSizeBytes(): Long
+    private external fun nativeGetKvCacheBytes(): Long
     private external fun nativeGetModelInfo(): String
     private external fun nativeGetLastStats(): String
 
@@ -261,6 +262,12 @@ class InferenceEngine(private val context: Context) {
 
     /** Returns JSON {n_gen, t_gen_ms, t_prompt_ms} for the last completed generation. */
     fun getLastStats(): String = nativeGetLastStats()
+
+    /** Model weights size in bytes (0 if no model loaded). Useful for UI memory display. */
+    fun getModelSizeBytes(): Long = nativeGetModelSizeBytes()
+
+    /** KV-cache allocation size in bytes (0 when no model loaded). */
+    fun getKvCacheBytes(): Long = nativeGetKvCacheBytes()
 
     fun destroy() {
         executor.submit {
