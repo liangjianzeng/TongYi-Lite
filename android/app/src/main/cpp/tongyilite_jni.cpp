@@ -243,7 +243,18 @@ struct InferenceEngine {
     // drafts several tokens cheaply; the target model then verifies them all in a
     // single forward pass, so one decode step yields several accepted tokens.
     bool mtp_enabled = false;
-    int  n_draft_max = 3;   // how many tokens the MTP head drafts per step
+    int  n_draft_max = 3;   // how many tokens the MTP head drafts per step (upper bound)
+
+    // Adaptive draft budget. Speculative gain hinges on ACCEPTANCE: each iteration
+    // verifies a (1+n_draft)-token batch on the target, which on a compute-bound
+    // model costs ~(1+n_draft) single-token decodes. If the head keeps producing
+    // rejected drafts, that verify cost is pure waste. We track a running acceptance
+    // rate and shrink n_draft (so the verify batch shrinks) when the head is doing
+    // badly — the llama.cpp server does the same "draft only what pays off" idea
+    // (slot.get_n_draft_max + per-slot acceptance stats).
+    float  mtp_accept_sum   = 0;  // accepted draft tokens (running window)
+    float  mtp_draft_sum    = 0;  // drafted tokens (running window)
+    int    mtp_adaptive_max = n_draft_max;
 
     // Cross-turn KV incremental prefill. Instead of wiping the whole KV and
     // re-prefilling the entire conversation every turn, we keep the common prefix
@@ -906,7 +917,14 @@ struct InferenceEngine {
                 spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
                 spec_params.draft.n_max   = n_draft_max;
                 spec_params.draft.n_min   = 1;   // always draft at least one token
-                spec_params.draft.p_min   = 0.0f;
+                // Early-stop drafting once the head's confidence drops below p_min.
+                // The official speculative impl (speculative.cpp draft-mtp) uses this
+                // to avoid spending a verify batch on garbage drafts: at p_min=0 it
+                // ALWAYS drafts n_max tokens even when the head is guessing, which
+                // wastes the target verify forward. A moderate threshold lets us
+                // "draft only high-confidence tokens" — the single biggest lever to
+                // stop the observed negative benefit.
+                spec_params.draft.p_min   = 0.3f;
                 spec_params.draft.ctx_tgt = context;
                 spec_params.draft.ctx_dft = mtp_ctx;
                 mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
@@ -1093,6 +1111,10 @@ struct InferenceEngine {
                 // speculative-simple RS path, with the MTP process() hook keeping the
                 // draft context in sync (see llama.cpp server-context.cpp).
                 LOGI("MTP generation start: n_draft_max=%d", n_draft_max);
+                // Per-completion: reset the adaptive window and start at the full budget.
+                mtp_accept_sum   = 0;
+                mtp_draft_sum    = 0;
+                mtp_adaptive_max = n_draft_max;
                 llama_tokens draft;
                 struct llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
                 const llama_seq_id seq_id = 0;
@@ -1100,9 +1122,21 @@ struct InferenceEngine {
                 while (n_gen < max_tokens && !should_stop) {
                     // 1) generate a fresh draft from the MTP head
                     if (draft.empty()) {
+                        // Adaptive draft budget: shrink n_draft when the head's recent
+                        // acceptance is low so the target verify batch stays small and
+                        // we stop paying for drafts that get rejected. Restore the full
+                        // budget once the head recovers. (See member docs above.)
+                        if (mtp_draft_sum >= 12.0f) {
+                            const float rate = mtp_accept_sum / mtp_draft_sum;
+                            mtp_adaptive_max = (rate >= 0.75f) ? n_draft_max :
+                                               (rate >= 0.50f) ? 2 : 1;
+                            LOGI("[MTP] adaptive n_draft=%d (accept_rate=%.2f)",
+                                 mtp_adaptive_max, rate);
+                        }
                         // Clamp n_max to the remaining KV budget so we never decode
                         // past n_ctx (same overflow guard as the plain path).
-                        const int n_max = std::max(1, (int)((int32_t)llama_n_ctx(context) - mtp_n_past - 1));
+                        const int n_max = std::max(1, std::min(mtp_adaptive_max,
+                            (int)((int32_t)llama_n_ctx(context) - mtp_n_past - 1)));
                         common_speculative_get_draft_params(mtp_spec, seq_id) = {
                             /*.drafting =*/ true,
                             /*.n_max    =*/ n_max,
@@ -1156,6 +1190,11 @@ struct InferenceEngine {
                     common_speculative_accept(mtp_spec, seq_id, (uint16_t)(ids.size() - 1));
                     LOGI("[MTP] accepted %zu/%zu draft tokens", ids.size() - 1, draft.size());
 
+                    // Feed the running acceptance window (draft.size() is captured
+                    // here before the vector is cleared below).
+                    mtp_accept_sum += (float)(ids.size() - 1);
+                    mtp_draft_sum  += (float)draft.size();
+
                     // 5) commit accepted tokens: ids[0] is the new sampled token,
                     //    ids[1..] are the verified draft tokens.
                     bool hit_eos = false;
@@ -1189,7 +1228,11 @@ struct InferenceEngine {
                     if (gen_stopped) { LOGI("[MTP] stopped by callback at gen=%d", n_gen); break; }
                 }
                 llama_batch_free(batch_tgt);
-                LOGI("MTP generation done: %d tokens", n_gen);
+                {
+                    const float rate = (mtp_draft_sum > 0) ? (mtp_accept_sum / mtp_draft_sum) : 0.0f;
+                    LOGI("MTP generation done: %d tokens, accept_rate=%.3f, adaptive_n_draft=%d",
+                         n_gen, rate, mtp_adaptive_max);
+                }
             } else {
                 // ============================================================
                 // Plain single-token autoregressive loop (no NextN head)
