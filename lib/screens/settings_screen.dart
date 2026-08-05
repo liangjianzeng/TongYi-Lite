@@ -265,6 +265,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         child: Text('\u{26A1}MTP', style: TextStyle(fontSize: 12, color: Colors.amber.shade900)),
                       ),
                     ],
+                    // MTP 开关：仅对带 NextN 头的模型显示，用户可在此开启/关闭
+                    // MTP 加速（默认关闭，无需重新编译）。切换即持久化到设置，
+                    // 加载该模型时按此开关决定原生层是否启用 MTP。
+                    if (model.mtp && isCached) ...[
+                      const SizedBox(width: 4),
+                      Consumer(
+                        builder: (context, ref, _) {
+                          final mtpOn = ref.watch(settingsProvider).enableMtp;
+                          return Switch(
+                            value: mtpOn,
+                            onChanged: (v) async {
+                              await ref
+                                  .read(settingsProvider.notifier)
+                                  .setEnableMtp(v);
+                            },
+                          );
+                        },
+                      ),
+                    ],
                   ],
                 ),
 

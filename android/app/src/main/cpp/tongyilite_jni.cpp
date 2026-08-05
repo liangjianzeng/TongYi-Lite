@@ -290,7 +290,7 @@ struct InferenceEngine {
 
     bool load(const char *model_path, int requested_n_ctx = 4096,
               bool enable_gpu = true, int gpu_layers = 20,
-              const char *gpu_backend = "auto") {
+              const char *gpu_backend = "auto", bool enable_mtp = false) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -420,10 +420,11 @@ struct InferenceEngine {
         LOGI("GGUF model loaded. params=%lld, n_embd=%d, n_layer=%d, n_nextn=%d",
              (long long)n_params, n_embd, n_layer, n_nextn);
 
-        // MTP is only possible when the model ships NextN (MTP) layers. Probe once
-        // here so both n_rs_seq (below) and the completion() path know whether to
-        // run the speculative driver. Keep mtp_enabled false if no head is present.
-        mtp_enabled = (n_nextn > 0);
+        // MTP is only possible when the model ships NextN (MTP) layers AND the user
+        // opted in via the UI toggle (enable_mtp). Probe the head once here so both
+        // n_rs_seq (below) and the completion() path know whether to run the
+        // speculative driver. Keep mtp_enabled false if no head or no user opt-in.
+        mtp_enabled = enable_mtp && (n_nextn > 0);
 
         char buf[256];
         snprintf(buf, sizeof(buf), "模型文件加载完成 (%.1fM 参数)", n_params / 1'000'000.0);
@@ -1491,13 +1492,13 @@ static void reportLoadingLog(const char *message) {
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
-    jstring j_gpu_backend
+    jstring j_gpu_backend, jboolean j_enable_mtp
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     bool ok = g_engine.load(path.c_str(), n_ctx,
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
-                            gpu_backend.c_str());
+                            gpu_backend.c_str(), j_enable_mtp == JNI_TRUE);
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {
