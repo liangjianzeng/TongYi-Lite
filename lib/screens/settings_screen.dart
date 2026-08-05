@@ -999,7 +999,7 @@ class _AboutCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             _AboutRow(label: '版本', value: '0.1.3'),
-            _AboutRow(label: '推理引擎', value: 'llama.cpp b1017+'),
+            _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
           ],
@@ -1024,7 +1024,7 @@ class _LicenseCard extends StatelessWidget {
             const SizedBox(height: 8),
             const Text('MIT License'),
             const SizedBox(height: 8),
-            const Text('Copyright (c) 2024 TongYi-Lite Contributors'),
+            const Text('Copyright (c) 2026 TongYi-Lite Contributors'),
             const SizedBox(height: 16),
             const Text(
               '本项目使用 llama.cpp 作为推理引擎，遵循其开源许可协议。',
