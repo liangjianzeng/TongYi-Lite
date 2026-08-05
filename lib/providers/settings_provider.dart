@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/api_model.dart';
 import '../services/settings_service.dart';
 
 /// 持有推理引擎设置（GPU 开关 / 卸载层数），并在变更时持久化到本地文件。
@@ -63,7 +64,59 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   /// 退出 App 不会丢失；启动自动加载逻辑按此 id 加载模型。
   Future<void> setDefaultModel(String? modelId) async {
     if (state.defaultModelId == modelId) return;
-    state = state.copyWith(defaultModelId: modelId);
+    // 传 null 表示取消默认：必须显式置 clearDefaultModel=true，
+    // 否则 copyWith 里的 `defaultModelId ?? this.defaultModelId` 会吞掉 null，
+    // 导致一旦选过就再也无法反选（旧值被保留）。
+    state = state.copyWith(
+        defaultModelId: modelId, clearDefaultModel: modelId == null);
+    await _persist();
+  }
+
+  // ---------------------------------------------------------------
+  // OpenAI 兼容远程模型（API 接入）
+  // ---------------------------------------------------------------
+
+  /// 新增一个 API 模型配置。
+  Future<void> addApiModel(ApiModelConfig config) async {
+    state = state.copyWith(
+      apiModels: [...state.apiModels, config],
+    );
+    await _persist();
+  }
+
+  /// 更新一个已有 API 模型配置（按 id 定位；不存在则忽略）。
+  Future<void> updateApiModel(ApiModelConfig config) async {
+    state = state.copyWith(
+      apiModels: [
+        for (final m in state.apiModels)
+          if (m.id == config.id) config else m,
+      ],
+    );
+    await _persist();
+  }
+
+  /// 删除一个 API 模型配置；若删除的是当前激活模型，自动停用 API。
+  Future<void> deleteApiModel(String id) async {
+    final removedActive = state.activeApiModelId == id;
+    state = state.copyWith(
+      apiModels: state.apiModels.where((m) => m.id != id).toList(),
+      activeApiModelId: removedActive ? null : state.activeApiModelId,
+      clearActiveApiModel: removedActive,
+    );
+    await _persist();
+  }
+
+  /// 激活/停用某个 API 模型。传 null 表示停用（不启用 API 接入）。
+  /// 路由策略：本地模型优先，仅当本地不可用时才走激活的 API。
+  Future<void> setActiveApiModel(String? modelId) async {
+    // 校验：仅允许激活列表内存在的 id（或 null 停用）。
+    if (modelId != null &&
+        !state.apiModels.any((m) => m.id == modelId)) {
+      return;
+    }
+    if (state.activeApiModelId == modelId) return;
+    state = state.copyWith(
+        activeApiModelId: modelId, clearActiveApiModel: modelId == null);
     await _persist();
   }
 

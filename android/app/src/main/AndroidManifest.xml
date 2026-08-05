@@ -32,6 +32,7 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.TongYiLite">
 
         <!-- OpenCL GPU 后端：设备提供 libOpenCL.so 时加载（覆盖链接期 stub 的弱符号），

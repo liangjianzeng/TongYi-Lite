@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../models/api_model.dart';
+
 /// 推理引擎相关的用户设置（GPU 加速开关 + 卸载层数 + 后端选择 + 上下文大小）。
 ///
 /// 默认关闭 GPU 加速（用户可在设置页开启；开启后 auto 优先选 OpenCL，
@@ -35,6 +37,13 @@ class InferenceSettings {
   /// 启动进入首页时若该模型已缓存则自动加载，保证开箱即用。
   final String? defaultModelId;
 
+  /// 已配置的 OpenAI 兼容远程模型列表（可配多个，密钥明文存本地）。
+  final List<ApiModelConfig> apiModels;
+
+  /// 当前激活的 API 模型 id。null = 停用 API 接入（仅用本地模型）。
+  /// 路由策略：本地模型优先，仅当本地模型未加载/加载失败时才走激活的 API。
+  final String? activeApiModelId;
+
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
     // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
@@ -46,10 +55,22 @@ class InferenceSettings {
     this.gpuBackend = 'auto',
     Map<String, bool>? mtpEnabledByModel,
     this.defaultModelId,
-  }) : mtpEnabledByModel = mtpEnabledByModel ?? const {};
+    List<ApiModelConfig>? apiModels,
+    this.activeApiModelId,
+  })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
+        apiModels = apiModels ?? const [];
 
   /// 便捷读取：某个模型是否启用 MTP（未配置视为关闭）。
   bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
+
+  /// 便捷读取：当前激活的 API 模型配置；未激活/不存在返回 null。
+  ApiModelConfig? activeApiModel() {
+    if (activeApiModelId == null) return null;
+    for (final cfg in apiModels) {
+      if (cfg.id == activeApiModelId) return cfg;
+    }
+    return null;
+  }
 
   InferenceSettings copyWith(
       {bool? enableGpu,
@@ -61,7 +82,11 @@ class InferenceSettings {
       String? defaultModelId,
       // defaultModelId 为可空 String，无法用 `?? this` 区分「未传」与「清空」，
       // 故增加显式清空标记，供取消默认模型时使用。
-      bool clearDefaultModel = false}) {
+      bool clearDefaultModel = false,
+      List<ApiModelConfig>? apiModels,
+      String? activeApiModelId,
+      // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」。
+      bool clearActiveApiModel = false}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
@@ -72,6 +97,10 @@ class InferenceSettings {
       defaultModelId: clearDefaultModel
           ? null
           : defaultModelId ?? this.defaultModelId,
+      apiModels: apiModels ?? this.apiModels,
+      activeApiModelId: clearActiveApiModel
+          ? null
+          : activeApiModelId ?? this.activeApiModelId,
     );
   }
 
@@ -83,6 +112,8 @@ class InferenceSettings {
         'gpuBackend': gpuBackend,
         'mtpEnabledByModel': mtpEnabledByModel,
         'defaultModelId': defaultModelId,
+        'apiModels': apiModels.map((m) => m.toJson()).toList(),
+        'activeApiModelId': activeApiModelId,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -98,7 +129,24 @@ class InferenceSettings {
       // 默认值，保证老配置不丢。
       mtpEnabledByModel: _migrateLegacyMtp(json),
       defaultModelId: json['defaultModelId'] as String?,
+      // 旧配置缺这两个字段时默认空列表 + 停用，向后兼容。
+      apiModels: _parseApiModels(json['apiModels']),
+      activeApiModelId: json['activeApiModelId'] as String?,
     );
+  }
+
+  /// 解析 API 模型列表；缺字段/格式非法时返回空列表（不崩）。
+  static List<ApiModelConfig> _parseApiModels(Object? raw) {
+    if (raw is! List) return const [];
+    final list = <ApiModelConfig>[];
+    for (final e in raw) {
+      if (e is Map<String, dynamic>) {
+        list.add(ApiModelConfig.fromJson(e));
+      } else if (e is Map) {
+        list.add(ApiModelConfig.fromJson(Map<String, dynamic>.from(e)));
+      }
+    }
+    return list;
   }
 
   /// 兼容旧配置：旧字段 `enableMtp`（全局 bool）→ 新的按模型 map。
