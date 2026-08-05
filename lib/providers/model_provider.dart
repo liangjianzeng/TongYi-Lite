@@ -246,8 +246,9 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       }
 
       // 5. Call native inference engine to load the model.
-      //    把推理引擎设置（GPU 开关 / 卸载层数 / 后端选择）透传给原生层。
-      final gpu = _ref.read(settingsProvider);
+      //    直接从持久化文件读取设置，避免 settingsProvider 异步 _load 完成前
+      //    读到默认 enableGpu=false，导致启动后直接加载模型时 GPU 未生效。
+      final gpu = await _ref.read(settingsServiceProvider).load();
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize})');

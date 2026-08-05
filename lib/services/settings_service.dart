@@ -25,10 +25,10 @@ class InferenceSettings {
   final String gpuBackend;
 
   const InferenceSettings({
-    // 默认关闭 GPU：避免"设置未持久化/重启回退默认"时悄悄占用 GPU 内存；
-    // 用户显式开启后，auto 会优先选 OpenCL（与 Vulkan 在 Adreno 825 上等效，
-    // 均经真机验证无数值崩坏）。
-    this.enableGpu = false,
+    // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
+    // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
+    // 避免启动后首次加载模型意外落到 CPU。
+    this.enableGpu = true,
     this.gpuLayers = 100,
     this.contextSize = 4096,
     this.enableThinking = false,
@@ -60,8 +60,9 @@ class InferenceSettings {
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
     return InferenceSettings(
-      // 缺省/旧文件未存该字段时回落纯 CPU（安全路径，规避坏掉的 Vulkan）。
-      enableGpu: json['enableGpu'] as bool? ?? false,
+      // 缺省/旧文件未存该字段时默认开启 GPU：auto 后端会在无 GPU 时自动
+      // 回落 CPU，V0.1.3 已验证 Adreno 825 OpenCL/Vulkan 均正常。
+      enableGpu: json['enableGpu'] as bool? ?? true,
       gpuLayers: (json['gpuLayers'] as num?)?.toInt() ?? 20,
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
       enableThinking: json['enableThinking'] as bool? ?? false,
