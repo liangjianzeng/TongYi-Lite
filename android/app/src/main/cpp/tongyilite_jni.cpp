@@ -243,7 +243,12 @@ struct InferenceEngine {
     // drafts several tokens cheaply; the target model then verifies them all in a
     // single forward pass, so one decode step yields several accepted tokens.
     bool mtp_enabled = false;
-    int  n_draft_max = 3;   // how many tokens the MTP head drafts per step (upper bound)
+    int  n_draft_max = 2;   // how many tokens the MTP head drafts per step (upper bound).
+                            // Default 2 (was 3): on compute-bound 4B the verify batch
+                            // (1+n_draft) must be repaid by acceptance a>=n_draft, so a
+                            // smaller budget lowers the break-even point and curbs the
+                            // negative-benefit window; the adaptive logic still drops to
+                            // 1 when the head is doing badly.
 
     // Adaptive draft budget. Speculative gain hinges on ACCEPTANCE: each iteration
     // verifies a (1+n_draft)-token batch on the target, which on a compute-bound
@@ -1175,12 +1180,21 @@ struct InferenceEngine {
                         break;
                     }
 
-                    // 3) keep the MTP context in sync with the target batch
-                    const bool proc_ok = common_speculative_process(mtp_spec, batch_tgt);
-                    LOGI("[MTP] process ok=%d", (int)proc_ok);
-                    if (!proc_ok) {
-                        LOGE("[MTP] common_speculative_process failed");
-                        break;
+                    // 3) keep the MTP context in sync with the target batch. Only when
+                    //    a non-empty draft exists: p_min early-stop can make the head
+                    //    produce an empty draft, and process() would fail because the
+                    //    draft context never decoded anything for this batch. In that
+                    //    case this iteration degrades to a plain single-token step
+                    //    (verify decodes [id_last] alone) and the next loop iteration
+                    //    re-drafts from the trimmed base — same as official speculative
+                    //    empty-draft fallback.
+                    if (!draft.empty()) {
+                        const bool proc_ok = common_speculative_process(mtp_spec, batch_tgt);
+                        LOGI("[MTP] process ok=%d", (int)proc_ok);
+                        if (!proc_ok) {
+                            LOGE("[MTP] common_speculative_process failed");
+                            break;
+                        }
                     }
 
                     // 4) sample the target logits, accept as many drafts as match
