@@ -116,22 +116,22 @@
       "sha256Hash": null
     },
     {
-      "id": "qwen3.5-0.8b-mtp-q4_k_m",
-      "name": "Qwen3.5-0.8B (Q4_K_M MTP)",
+      "id": "qwen3.5-0.8b-mtp-ud-q4_k_xl",
+      "name": "Qwen3.5-0.8B (MTP UD-Q4_K_XL)",
       "type": "text",
       "mtp": true,
       "mirrors": [
         {
-          "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-UD-Q4_K_XL.gguf",
           "source": "hf-mirror"
         },
         {
-          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-UD-Q4_K_XL.gguf",
           "source": "modelscope"
         }
       ],
       "sizeGB": 0.53,
-      "sizeMBDisplay": "530 MB",
+      "sizeMBDisplay": "543 MB",
       "recommended": false,
       "minRamMB": 1024,
       "sha256Hash": null
