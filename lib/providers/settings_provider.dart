@@ -49,6 +49,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置是否启用 MTP（多 token 预测）加速。默认关闭——仅对带 NextN 头的
+  /// 模型生效，用户可在模型列表对支持的模型手动开启。
+  Future<void> setEnableMtp(bool value) async {
+    state = state.copyWith(enableMtp: value);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);

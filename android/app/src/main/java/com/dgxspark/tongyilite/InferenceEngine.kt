@@ -54,7 +54,7 @@ class InferenceEngine(private val context: Context) {
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
-    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String): Boolean
+    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean): Boolean
     private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
@@ -109,6 +109,7 @@ class InferenceEngine(private val context: Context) {
         enableGpu: Boolean = true,
         gpuLayers: Int = 20,
         gpuBackend: String = "auto",
+        enableMtp: Boolean = false,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
         val file = File(modelPath)
@@ -125,8 +126,8 @@ class InferenceEngine(private val context: Context) {
             nativeSetLoadingCallback(null)
         }
 
-        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend)")
-        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend)
+        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp)")
+        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp)
         Log.i(TAG, "loadModel result: $ok")
 
         if (ok) {

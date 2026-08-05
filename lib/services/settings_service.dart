@@ -24,6 +24,11 @@ class InferenceSettings {
   /// Vulkan 对比。llama.rn 在 Android 上即用 OpenCL 后端，Adreno 700+ 可用。
   final String gpuBackend;
 
+  /// 是否启用 MTP（多 token 预测）加速。仅对带 NextN 头的模型生效，
+  /// 且默认关闭——MTP 的 draft/verify/process 三次完整前向开销在端侧
+  /// 通常不划算，用户可在模型列表对支持的模型手动开启。
+  final bool enableMtp;
+
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
     // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
@@ -33,6 +38,7 @@ class InferenceSettings {
     this.contextSize = 4096,
     this.enableThinking = false,
     this.gpuBackend = 'auto',
+    this.enableMtp = false,
   });
 
   InferenceSettings copyWith(
@@ -40,13 +46,15 @@ class InferenceSettings {
       int? gpuLayers,
       int? contextSize,
       bool? enableThinking,
-      String? gpuBackend}) {
+      String? gpuBackend,
+      bool? enableMtp}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
       contextSize: contextSize ?? this.contextSize,
       enableThinking: enableThinking ?? this.enableThinking,
       gpuBackend: gpuBackend ?? this.gpuBackend,
+      enableMtp: enableMtp ?? this.enableMtp,
     );
   }
 
@@ -56,6 +64,7 @@ class InferenceSettings {
         'contextSize': contextSize,
         'enableThinking': enableThinking,
         'gpuBackend': gpuBackend,
+        'enableMtp': enableMtp,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -67,6 +76,7 @@ class InferenceSettings {
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,
       enableThinking: json['enableThinking'] as bool? ?? false,
       gpuBackend: json['gpuBackend'] as String? ?? 'auto',
+      enableMtp: json['enableMtp'] as bool? ?? false,
     );
   }
 }

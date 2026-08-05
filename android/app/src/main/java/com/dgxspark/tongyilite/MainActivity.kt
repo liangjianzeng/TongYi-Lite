@@ -107,12 +107,13 @@ class MainActivity : FlutterActivity() {
         val enableGpu = call.argument<Boolean>("enableGpu") ?: true
         val gpuLayers = call.argument<Int>("gpuLayers") ?: 20
         val gpuBackend = call.argument<String>("gpuBackend") ?: "auto"
+        val enableMtp = call.argument<Boolean>("enableMtp") ?: false
 
-        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend")
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {

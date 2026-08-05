@@ -254,13 +254,15 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       final gpu = await _ref.read(settingsServiceProvider).load();
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
-          'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize})');
+          'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
+          'enableMtp=${gpu.enableMtp})');
       final ok = await _inference.loadModel(
         path,
         enableGpu: gpu.enableGpu,
         gpuLayers: gpu.gpuLayers,
         gpuBackend: gpu.gpuBackend,
         nCtx: gpu.contextSize,
+        enableMtp: gpu.enableMtp,
       );
 
       if (ok) {
