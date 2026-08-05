@@ -4,13 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider;
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider;
 import '../providers/model_provider.dart';
 import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
+import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
+
+/// App-lifetime guard: 启动自动加载默认模型只执行一次。
+/// 放在库作用域，避免首页路由重建时重复触发（与设置页 `_appLaunchScanDone` 同风格）。
+bool _autoLoadDefaultDone = false;
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -38,6 +43,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _scrollController.addListener(_onScroll);
     _initStoragePermission();
     _initConversation();
+    _initAutoLoadDefaultModel();
   }
 
   @override
@@ -89,6 +95,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _currentConversationId = conversations.first.id;
       _initiallyLoaded = true;
     });
+  }
+
+  /// 启动自动加载「默认模型」：用户已在模型管理页勾选某个已缓存模型为默认，
+  /// 每次进入首页时自动把该模型加载进内存。文件缺失/加载失败时静默跳过，
+  /// 不影响首页正常使用。每个 APP 进程仅执行一次。
+  Future<void> _initAutoLoadDefaultModel() async {
+    if (_autoLoadDefaultDone) return;
+    _autoLoadDefaultDone = true;
+
+    // 直接读持久化设置，避免 settingsProvider 异步 _load 未完成时读到默认 null。
+    final settings = await SettingsService().load();
+    final defaultId = settings.defaultModelId;
+    if (defaultId == null || defaultId.isEmpty || !mounted) return;
+
+    final manager = ref.read(modelManagerProvider.notifier);
+    if (manager.isBusy || manager.isLoadedState) return;
+
+    final cached = await manager.isModelCached(defaultId);
+    if (!cached || !mounted) return;
+
+    final ok = await manager.loadModel(defaultId);
+    if (!mounted) return;
+    if (ok) {
+      // 同步当前模型 id，使聊天默认使用该模型。
+      ref.read(currentModelIdProvider.notifier).state = defaultId;
+      manager.appendInferenceLog('启动自动加载默认模型: $defaultId');
+    }
   }
 
   /// Pick image from camera or gallery

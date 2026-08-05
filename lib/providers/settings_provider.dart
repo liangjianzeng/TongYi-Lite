@@ -58,6 +58,15 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置「默认加载」模型。传 null 表示取消默认。
+  /// 持久化到 inference_settings.json（与 MTP 等其他设置同一文件），
+  /// 退出 App 不会丢失；启动自动加载逻辑按此 id 加载模型。
+  Future<void> setDefaultModel(String? modelId) async {
+    if (state.defaultModelId == modelId) return;
+    state = state.copyWith(defaultModelId: modelId);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);
