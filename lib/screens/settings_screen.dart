@@ -153,17 +153,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     );
                   }
                   final catalog = snapshot.data!;
-                  final order = <String, int>{};
-                  for (var i = 0; i < catalog.length; i++) order[catalog[i].id] = i;
+                  // 排序规则：已缓存最优先在前；未下载的按名称首字母排序（A→Z）。
                   final models = List<ModelConfig>.from(catalog)
                     ..sort((a, b) {
                       final ca = tasks[a.id]?.state == DownloadState.completed;
                       final cb = tasks[b.id]?.state == DownloadState.completed;
                       if (ca != cb) return ca ? -1 : 1;
-                      if (a.recommended != b.recommended) {
-                        return a.recommended ? -1 : 1;
-                      }
-                      return (order[a.id] ?? 0).compareTo(order[b.id] ?? 0);
+                      return cleanModelName(a.name)
+                          .toLowerCase()
+                          .compareTo(cleanModelName(b.name).toLowerCase());
                     });
                   return Column(
                     children: models.map((m) => _buildModelCard(m)).toList(),
@@ -215,13 +213,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   children: [
                     Text(modelTypeIcon(model.type)),
                     const SizedBox(width: 8),
+                    // 模型名按系统规则显示：去掉括号内的精度/量化说明，缩短长度。
                     Expanded(
-                      child: _ModelNameField(
-                        // 按 modelId 绑定独立 State：列表按下载/推荐动态排序重排时，
-                        // 名称输入框跟随其所属模型移动，不会因位置复用而串到别的模型。
-                        key: ValueKey(model.id),
-                        modelId: model.id,
-                        defaultName: model.name,
+                      child: Text(
+                        cleanModelName(model.name),
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                     _buildStatusChip(displayState),
@@ -1326,78 +1324,6 @@ class _RecentLogsWidget extends ConsumerWidget {
 /// 使下载进度频繁重建时不会丢失输入焦点/光标。
 /// 模型名内联编辑框（替换原独立「自定义名称」行）。
 /// 直接显示在模型卡片标题位置：有自定义名则显示自定义名，否则显示模型配置名
-/// （不持久化，等同于「未改名」）；点击即可编辑，清空则回落到配置名。
-class _ModelNameField extends ConsumerStatefulWidget {
-  final String modelId;
-  final String defaultName;
-  const _ModelNameField({super.key, required this.modelId, required this.defaultName});
-  @override
-  ConsumerState<_ModelNameField> createState() => _ModelNameFieldState();
-}
-
-class _ModelNameFieldState extends ConsumerState<_ModelNameField> {
-  late final TextEditingController _controller;
-  bool _initialized = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final custom = ref.watch(modelDisplayNameProvider)[widget.modelId];
-    final name = custom ?? '';
-    // 首次构建时把已存自定义名（或回落到配置名）回填；后续不覆盖用户输入。
-    if (!_initialized) {
-      _initialized = true;
-      _controller.text = name.isEmpty ? widget.defaultName : name;
-    }
-    final isCustom = name.isNotEmpty;
-    return TextField(
-      controller: _controller,
-      decoration: InputDecoration(
-        isDense: true,
-        border: InputBorder.none,
-        hintText: widget.defaultName,
-        hintStyle: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w500),
-        suffixIcon: isCustom
-            ? IconButton(
-                icon: const Icon(Icons.clear, size: 16),
-                tooltip: '清除自定义名称，恢复配置名',
-                onPressed: () {
-                  _controller.text = widget.defaultName;
-                  ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
-                },
-              )
-            : null,
-      ),
-      style: Theme.of(context).textTheme.titleSmall,
-      maxLines: 1,
-      onChanged: (v) {
-        final trimmed = v.trim();
-        if (trimmed.isEmpty) {
-          // 清空 → 回落配置名，且不持久化覆盖。
-          _controller.text = widget.defaultName;
-          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
-        } else if (trimmed == widget.defaultName) {
-          // 与配置名相同 → 视为未改名，不存储覆盖。
-          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, '');
-        } else if (trimmed != name) {
-          ref.read(modelDisplayNameProvider.notifier).setName(widget.modelId, trimmed);
-        }
-      },
-    );
-  }
-}
-
 /// 加载模型时的「加载中」对话框。
 /// 监听 [modelManagerProvider]，实时展示原生层推送的最新加载日志，
 /// 让用户清楚大模型（数 GB）加载的进展，避免误以为卡死。

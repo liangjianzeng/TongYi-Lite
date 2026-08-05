@@ -9,7 +9,7 @@ class Conversation {
   Conversation({
     required this.id,
     required this.title,
-    this.modelId = 'qwen3-1.7b-q4_k_m',
+    this.modelId = 'qwen3.5-2b-mtp-ud-q4_k_xl',
     this.messageCount = 0,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -31,7 +31,7 @@ class Conversation {
     return Conversation(
       id: map['id'] as String,
       title: map['title'] as String? ?? '',
-      modelId: map['modelId'] as String? ?? 'qwen3-1.7b-q4_k_m',
+      modelId: map['modelId'] as String? ?? 'qwen3.5-2b-mtp-ud-q4_k_xl',
       messageCount: map['messageCount'] as int? ?? 0,
       createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updatedAt'] as int),

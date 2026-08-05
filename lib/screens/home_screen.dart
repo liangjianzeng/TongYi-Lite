@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, modelDisplayNameProvider;
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider;
 import '../providers/model_provider.dart';
 import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
@@ -304,8 +304,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Widget _buildModelStatusChip(ModelState ms, bool isGenerating) {
     final color = _colorFor(ms.phaseColor);
-    // 用户自定义显示名称（模型加载后优先展示，未设置则回落默认状态文案）。
-    final customName = ref.watch(modelDisplayNameProvider)[ms.modelId];
 
     // Idle + not generating → no chip needed (leading returns null-like empty widget)
     if (ms.phase == ModelLifecyclePhase.idle && !isGenerating) {
@@ -327,7 +325,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             if (isGenerating) _buildPulsingDot(),
             const SizedBox(width: 4),
             Text(
-              customName ?? ms.modelName ?? (ms.modelId ?? '模型就绪'),
+              ms.modelName ?? (ms.modelId ?? '模型就绪'),
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color),
             ),
           ],
@@ -369,10 +367,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _showModelStatusPopup(ModelState ms, bool isGenerating) {
     final notifier = ref.read(modelManagerProvider.notifier);
-    // Resolve the display name consistently with the chip: user custom name →
-    // loaded modelName (catalog) → modelId → fallback. Avoids "未知模型".
-    final customName = ref.read(modelDisplayNameProvider)[ms.modelId];
-    final modelName = customName ?? ms.modelName ?? (ms.modelId ?? '未知模型');
+    // Resolve the display name consistently with the chip: loaded modelName
+    // (catalog, already cleaned) → modelId → fallback. Avoids "未知模型".
+    final modelName = ms.modelName ?? (ms.modelId ?? '未知模型');
 
     showModalBottomSheet(
       context: context,
