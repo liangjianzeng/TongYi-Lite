@@ -6,6 +6,7 @@ import '../models/chat_message.dart';
 import '../models/conversation.dart';
 
 import '../services/inference_service.dart';
+import '../services/openai_service.dart';
 import '../services/storage_service.dart';
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
@@ -73,6 +74,11 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
     await _storage.deleteConversation(id);
     state = state.where((c) => c.id != id).toList();
   }
+
+  /// 用更新后的元信息替换 state 中的对应会话（标题 / 消息条数变化）。
+  void update(Conversation updated) {
+    state = state.map((c) => c.id == updated.id ? updated : c).toList();
+  }
 }
 
 final currentConversationProvider = StateProvider<Conversation?>((ref) => null);
@@ -99,6 +105,11 @@ final isGeneratingProvider = StateProvider<bool>((ref) => false);
 // ---------------------------------------------------------------------------
 // Chat logic — model loading + streaming completion
 // ---------------------------------------------------------------------------
+
+/// 本地原生视觉是否可用。原生层已集成 mtmd（mmproj 投影器 + 图像编码），
+/// 故本地路线按「支持视觉」处理：当前消息图片路径传给原生引擎编码后送入。
+/// 历史带图消息仍只取文本（原生只支持单张当前图），天然安全。
+const bool kLocalVisionSupported = true;
 
 class ChatNotifier extends StateNotifier<bool> {
   final InferenceService _inference;
@@ -194,6 +205,9 @@ class ChatNotifier extends StateNotifier<bool> {
       );
       debugPrint('[ChatNotifier] Saving user message...');
       await _storage.saveMessage(userMsg);
+      // 及时刷新会话元信息：标题（取自首条用户提问）+ 消息条数，让会话列表
+      // 不再是一成不变的「新对话 / 0条」。
+      await _refreshConversationMeta(conversationId);
 
       // Step 3: Build chat history JSON from all messages in this conversation
       final allMessages = await _storage.getMessages(conversationId, limit: 200);
@@ -239,22 +253,43 @@ class ChatNotifier extends StateNotifier<bool> {
         // below consumes them uniformly.
         final Stream<String> stream;
         if (useApi) {
+          // API 路线：按该 API 的视觉能力构建消息。
+          //  - 支持视觉 → 历史/当前带图消息转 content-parts（base64 image_url）；
+          //  - 不支持视觉 → 图片剥离为纯文本（`[图片]` 占位），绝不发送原始图。
+          final apiVision = activeApi!.visionCapable;
+          final apiMessages = await OpenAiService.buildMessages(
+            allMessages,
+            visionCapable: apiVision,
+          );
+          if (imagePath != null && !apiVision) {
+            debugPrint('[ChatNotifier] 当前图片已剥离（该 API 未开启视觉支持）');
+            manager.appendInferenceLog('⚠️ 当前图片已剥离：该 API 模型未开启视觉支持');
+          }
           manager.appendInferenceLog(
-            '请求(API) | ${activeApi!.name} | ${activeApi.model}'
-            ' | 历史 ${messagesForTemplate.length} 条'
+            '请求(API) | ${activeApi.name} | ${activeApi.model}'
+            ' | 历史 ${apiMessages.length} 条'
             ' | maxTokens=${activeApi.effectiveMaxTokens}'
-            ' temp=${activeApi.effectiveTemperature}',
+            ' temp=${activeApi.effectiveTemperature}'
+            ' ${apiVision ? '带图' : '文本'}',
           );
           stream = _ref.read(openAiServiceProvider).chatCompletion(
             config: activeApi,
-            messages: messagesForTemplate,
+            messages: apiMessages,
             temperature: activeApi.effectiveTemperature,
             maxTokens: activeApi.effectiveMaxTokens,
           );
         } else {
+          // 本地路线：原生已集成 mtmd 视觉。当前消息图片路径直接传给原生引擎
+          // （mmproj 已加载则编码送图；未加载则该模型仅文本，原生自动忽略）。
+          // 历史带图消息本就只取文本，天然安全。
+          if (imagePath != null) {
+            debugPrint('[ChatNotifier] 本地路线携带图片: $imagePath');
+            manager.appendInferenceLog('请求 | 携带当前图片');
+          }
           stream = _inference.completionWithMessages(
             prompt: prompt,
             messagesJson: messagesJson,
+            imagePath: imagePath,
             maxTokens: 1024, // on-device cap: large token budgets make long runs unbearable
             temperature: 0.7,
             topP: 0.9,
@@ -387,6 +422,8 @@ class ChatNotifier extends StateNotifier<bool> {
           ),
         );
         await _storage.saveMessage(assistantMsg);
+        // 回复落地后再刷新一次消息条数（流式占位消息已收尾）。
+        await _refreshConversationMeta(conversationId);
 
         return fullResponse;
       } catch (e) {
@@ -405,6 +442,54 @@ class ChatNotifier extends StateNotifier<bool> {
   }
 
   /// Stop the current generation: cancels the token stream subscription and
+  /// 刷新单个会话的元信息（标题 + 消息条数）并写库：
+  /// - 标题：若仍为空/「新对话」，取第一条用户消息（截断到 ~24 字）作标题；
+  /// - 消息条数：按数据库当前消息数重算，让列表「x 条」始终准确。
+  Future<void> _refreshConversationMeta(String conversationId) async {
+    try {
+      final convs = _ref.read(conversationsProvider);
+      Conversation? conv;
+      for (final c in convs) {
+        if (c.id == conversationId) {
+          conv = c;
+          break;
+        }
+      }
+      if (conv == null) return;
+
+      final msgs = await _storage.getAllMessages(conversationId);
+      String? newTitle;
+      if (conv.title.isEmpty || conv.title == '新对话') {
+        for (final m in msgs) {
+          if (m.role == MessageRole.user && m.content.isNotEmpty) {
+            newTitle = m.content.length <= 24
+                ? m.content
+                : '${m.content.substring(0, 24)}…';
+            break;
+          }
+        }
+      }
+
+      if (newTitle != null || msgs.length != conv.messageCount) {
+        await _storage.updateConversation(
+          id: conversationId,
+          title: newTitle,
+          messageCount: msgs.length,
+        );
+        _ref.read(conversationsProvider.notifier).update(Conversation(
+              id: conv.id,
+              title: newTitle ?? conv.title,
+              modelId: conv.modelId,
+              messageCount: msgs.length,
+              createdAt: conv.createdAt,
+              updatedAt: DateTime.now(),
+            ));
+      }
+    } catch (e) {
+      debugPrint('[ChatNotifier] refreshConversationMeta failed: $e');
+    }
+  }
+
   /// tells the native engine to set should_stop (or cancels the API SSE
   /// request for the API fallback path), which makes the completion loop
   /// return promptly. The streaming controller then closes, the

@@ -62,13 +62,48 @@ class DownloadService {
 
     final dir = await _getModelsDir();
     await dir.create(recursive: true);
-    final tempFile = File(p.join(dir.path, model.id + '.gguf.tmp'));
-    final finalFile = File(p.join(dir.path, model.id + '.gguf'));
 
     try {
-      await _runDownloadLoop(
-        model, task, tempFile, finalFile, onProgress, progressInterval,
+      // ---- 主模型 gguf ----
+      // 若主 gguf 已在磁盘且完整（存在、大小达标、无残留 .tmp），则跳过下载，
+      // 直接进入 mmproj 阶段。这样「已下主模型、缺投影器」的视觉模型点「下载」
+      // 时只补下 mmproj，不会把多 GB 的主 gguf 再拉一遍。
+      final ggufTarget = _DownloadTarget(
+        mirrors: model.mirrors, sizeBytes: model.sizeBytes, suffix: '.gguf',
       );
+      final ggufTemp = File(p.join(dir.path, model.id + ggufTarget.suffix + '.tmp'));
+      final ggufFinal = File(p.join(dir.path, model.id + ggufTarget.suffix));
+      final ggufComplete = await ggufFinal.exists() &&
+          !(await ggufTemp.exists()) &&
+          (model.sizeBytes == 0 ||
+           (await ggufFinal.length()) >= (model.sizeBytes * 0.99).round());
+      if (ggufComplete) {
+        debugPrint('[DownloadService] ${model.id} 主 gguf 已完整，跳过主模型下载');
+      } else {
+        await _runDownloadLoop(
+          model, task, ggufTarget, ggufTemp, ggufFinal, onProgress, progressInterval,
+        );
+      }
+
+      // ---- mmproj 投影器（text+mmproj 两文件形态）----
+      // 主模型完成后顺序下载投影器。mmproj 下载失败不删除已下好的主 gguf
+      // （模型仍可文本推理），但整任务标记为失败。
+      final mm = model.mmproj;
+      if (mm != null) {
+        // 进度重置为 mmproj 阶段，避免与主模型体积叠加导致进度错乱。
+        task.totalBytes = mm.sizeBytes;
+        task.downloadedBytes = 0;
+        task.state = DownloadState.downloading;
+        onProgress(task);
+        final mmprojTarget = _DownloadTarget(
+          mirrors: mm.mirrors, sizeBytes: mm.sizeBytes, suffix: '.mmproj',
+        );
+        final mmprojTemp = File(p.join(dir.path, model.id + mmprojTarget.suffix + '.tmp'));
+        final mmprojFinal = File(p.join(dir.path, model.id + mmprojTarget.suffix));
+        await _runDownloadLoop(
+          model, task, mmprojTarget, mmprojTemp, mmprojFinal, onProgress, progressInterval,
+        );
+      }
     } finally {
       // CRITICAL: the entry must be dropped no matter how we leave, otherwise
       // the `maxConcurrentDownloads` guard stays permanently saturated after
@@ -84,6 +119,7 @@ class DownloadService {
   Future<void> _runDownloadLoop(
     ModelConfig model,
     DownloadTask task,
+    _DownloadTarget target,
     File tempFile,
     File finalFile,
     void Function(DownloadTask) onProgress,
@@ -107,10 +143,10 @@ class DownloadService {
         if (hasPartial) {
           downloadedSoFar = await tempFile.length();
           task.downloadedBytes = downloadedSoFar;
-          if (model.sizeBytes > 0) task.totalBytes = model.sizeBytes;
+          if (target.sizeBytes > 0) task.totalBytes = target.sizeBytes;
           onProgress(task);
 
-          urlInfo = await _resolveUrl(model.mirrors, requireRange: true);
+          urlInfo = await _resolveUrl(target.mirrors, requireRange: true);
           if (urlInfo != null) {
             supportsRange = true;
             debugPrint('[DownloadService] Attempt $attempt: resuming '
@@ -122,10 +158,10 @@ class DownloadService {
             await tempFile.delete();
             downloadedSoFar = 0;
             task.downloadedBytes = 0;
-            urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
+            urlInfo = await _resolveUrl(target.mirrors, requireRange: false);
           }
         } else {
-          urlInfo = await _resolveUrl(model.mirrors, requireRange: false);
+          urlInfo = await _resolveUrl(target.mirrors, requireRange: false);
         }
 
         if (urlInfo == null) {
@@ -133,8 +169,8 @@ class DownloadService {
         }
 
         // Step 2: 已完成？直接落到最终文件。
-        if (hasPartial && model.sizeBytes > 0 &&
-            (await tempFile.length()) >= model.sizeBytes) {
+        if (hasPartial && target.sizeBytes > 0 &&
+            (await tempFile.length()) >= target.sizeBytes) {
           // 用实文件大小（可能大于估算的 sizeBytes），进度恒为 100%。
           final done = await tempFile.length();
           task.totalBytes = done;
@@ -152,14 +188,14 @@ class DownloadService {
             urlInfo.url,
             tempFile,
             downloadedSoFar,
-            model.sizeBytes,
+            target.sizeBytes,
             task,
             cancelToken,
             onProgress,
             progressInterval,
           );
         } else {
-          if (task.totalBytes == 0) task.totalBytes = model.sizeBytes;
+          if (task.totalBytes == 0) task.totalBytes = target.sizeBytes;
           final response = await _dio.get<ResponseBody>(
             urlInfo.url,
             options: Options(
@@ -263,8 +299,12 @@ class DownloadService {
     if (deletePartial) {
       try {
         final dir = await _getModelsDir();
-        final tmp = File(p.join(dir.path, modelId + '.gguf.tmp'));
-        if (await tmp.exists()) await tmp.delete();
+        // 同时清理主模型与 mmproj 的残留 .tmp（已重命名的最终文件不删，
+        // 以便 mmproj 失败时主 gguf 仍可文本推理）。
+        for (final suffix in ['.gguf.tmp', '.mmproj.tmp']) {
+          final tmp = File(p.join(dir.path, modelId + suffix));
+          if (await tmp.exists()) await tmp.delete();
+        }
       } catch (_) {}
     }
   }
@@ -364,7 +404,7 @@ class DownloadService {
 
     // Delete ALL files on cancel — no resume possible after explicit cancel
     final dir = await _getModelsDir();
-    for (final suffix in ['.gguf.tmp', '.gguf']) {
+    for (final suffix in ['.gguf.tmp', '.gguf', '.mmproj.tmp', '.mmproj']) {
       final file = File(p.join(dir.path, modelId + suffix));
       if (await file.exists()) {
         try { await file.delete(); } catch (_) {}
@@ -374,10 +414,13 @@ class DownloadService {
 
   Future<void> deleteModel(String modelId) async {
     final dir = await _getModelsDir();
-    final file = File(p.join(dir.path, modelId + '.gguf'));
-    if (await file.exists()) { await file.delete(); }
-    final tmpFile = File(p.join(dir.path, modelId + '.gguf.tmp'));
-    if (await tmpFile.exists()) { await tmpFile.delete(); }
+    // 主模型 + mmproj 投影器一并删除。
+    for (final suffix in ['.gguf', '.gguf.tmp', '.mmproj', '.mmproj.tmp']) {
+      final file = File(p.join(dir.path, modelId + suffix));
+      if (await file.exists()) {
+        try { await file.delete(); } catch (_) {}
+      }
+    }
   }
 
   /// Resolve a reachable mirror, returning whether it supports HTTP Range.
@@ -470,6 +513,19 @@ class _UrlInfo {
   final bool supportsRange;
 
   const _UrlInfo({required this.url, required this.supportsRange});
+}
+
+/// 一次下载目标：主模型 `.gguf` 或 mmproj 投影器 `.mmproj`。
+class _DownloadTarget {
+  final List<MirrorEntry> mirrors;
+  final int sizeBytes;
+  final String suffix;
+
+  const _DownloadTarget({
+    required this.mirrors,
+    required this.sizeBytes,
+    required this.suffix,
+  });
 }
 
 class _ActiveDownload {

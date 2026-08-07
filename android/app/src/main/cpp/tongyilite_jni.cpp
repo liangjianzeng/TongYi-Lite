@@ -32,6 +32,10 @@
 #include "sampling.h"      // common_sampler / common_sampler_sample_and_accept_n
 #include "ggml-backend.h"
 
+// mtmd — llama.cpp mainline vision/multimodal library (mmproj + image encoding)
+#include "mtmd.h"
+#include "mtmd-helper.h"
+
 #define LOG_TAG "TongYiLite"
 static void reportLoadingLog(const char *message);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -238,6 +242,12 @@ struct InferenceEngine {
     llama_model_params model_params;
     llama_context_params ctx_params;
 
+    // Vision: mtmd context for the loaded mmproj (multimodal projector).
+    // null when no mmproj was loaded -> the model is text-only even if its
+    // catalog type is vision. vision_loaded mirrors mmproj != nullptr.
+    mtmd_context *mmproj = nullptr;
+    bool vision_loaded = false;
+
     // MTP (multi-token prediction) speculative decoding. Enabled at load time iff
     // the model contains NextN layers (llama_model_n_layer_nextn > 0). The MTP head
     // drafts several tokens cheaply; the target model then verifies them all in a
@@ -306,7 +316,8 @@ struct InferenceEngine {
 
     bool load(const char *model_path, int requested_n_ctx = 4096,
               bool enable_gpu = true, int gpu_layers = 20,
-              const char *gpu_backend = "auto", bool enable_mtp = false) {
+              const char *gpu_backend = "auto", bool enable_mtp = false,
+              const char *mmproj_path = nullptr) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -613,9 +624,57 @@ struct InferenceEngine {
             LOGI("Model has no NextN layers -> MTP disabled (plain autoregressive decoding)");
         }
 
+        // ------------------------------------------------------------------
+        // Vision: load the mmproj projector via mtmd (if provided).
+        // mtmd_init_from_file needs the already-loaded text model to validate
+        // embedding dims. Failure is NOT fatal: the model falls back to
+        // text-only inference (vision_loaded stays false).
+        // ------------------------------------------------------------------
+        if (mmproj_path && mmproj_path[0] != '\0') {
+            LOGI("Loading mmproj: %s", mmproj_path);
+            reportLoadingLog("正在加载 mmproj 投影器（图像理解）...");
+            mtmd_context_params mparams = mtmd_context_params_default();
+            // MUST stay on CPU: the vision tower's GPU kernels CRASH on Adreno
+            // with SIGSEGV (verified on-device 2026-08-06 — Fatal signal 11,
+            // fault addr 0x0 in the mmproj encode thread). Do NOT set
+            // use_gpu=true; there is no safe op-level fallback that prevents the
+            // segfault. CPU BF16 encoding is slow, so the image is downscaled on
+            // the Dart side and image_max_tokens (below) caps the token count to
+            // keep the encode time bounded.
+            mparams.use_gpu   = false;
+            mparams.n_threads = ctx_params.n_threads;
+            mparams.warmup    = true;
+            // Match the main context's flash-attn setting (disabled) so the
+            // vision tower behaves identically to the text path.
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            // Hard cap on per-image token count (safety net on top of the Dart
+            // side image downscale). The mmproj metadata default allows a huge
+            // image token budget — on-device we measured a single 1920px image
+            // blowing up to ~2717 prompt tokens, which ballooned memory to
+            // 2.6GB and stalled the vision eval (app spins forever then dies).
+            // image_max_tokens only applies to dynamic-resolution vision
+            // models; it is ignored by fixed-size towers, so it's safe to set.
+            mparams.image_max_tokens = 512;
+            mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
+            if (mmproj) {
+                vision_loaded = true;
+                const char *marker = mtmd_get_marker(mmproj);
+                LOGI("mmproj loaded OK (marker=%s)", marker ? marker : "?");
+                reportLoadingLog("mmproj 投影器加载完成 ✓ 支持图像理解");
+            } else {
+                vision_loaded = false;
+                mmproj = nullptr;
+                LOGW("mmproj load FAILED -> text-only inference");
+                reportLoadingLog("mmproj 投影器加载失败，将仅文本推理");
+            }
+        } else {
+            LOGI("No mmproj provided -> text-only model");
+        }
+
         char buf3[128];
-        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)%s", ctx_val,
-                 mtp_enabled ? "，MTP 加速已启用" : "");
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)%s%s", ctx_val,
+                 mtp_enabled ? "，MTP 加速已启用" : "",
+                 vision_loaded ? "，视觉已启用" : "");
         reportLoadingLog(buf3);
         return true;
     }
@@ -628,6 +687,8 @@ struct InferenceEngine {
         LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v2);
         if (mtp_ctx)  { llama_free(mtp_ctx);   mtp_ctx = nullptr; }
         if (context)  { llama_free(context);  context = nullptr; }
+        if (mmproj)   { mtmd_free(mmproj);     mmproj = nullptr; }
+        vision_loaded = false;
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         mtp_enabled = false;
@@ -689,6 +750,216 @@ struct InferenceEngine {
     }
 
     // ------------------------------------------------------------------
+    // Vision completion — self-contained mtmd flow.
+    // 1. Format chatml template, injecting the mmproj media marker into the
+    //    LAST (current) user message so mtmd_tokenize can attach the image.
+    // 2. Decode the image file to an RGB bitmap (mtmd_helper).
+    // 3. mtmd_tokenize -> TEXT/IMAGE chunks.
+    // 4. mtmd_helper_eval_chunks: text chunks -> llama_decode, image chunks ->
+    //    mtmd encode + embedding decode. Tracks n_past into kv_position.
+    // 5. Plain autoregressive generation (MTP is disabled on the vision path).
+    // The text path in completion() is left 100% untouched; this is a separate
+    // branch used only when mmproj is loaded AND an image is provided.
+    // ------------------------------------------------------------------
+    std::string completion_with_vision(
+        const std::vector<llama_chat_message> &history,
+        const char *image_path,
+        int max_tokens,
+        float temperature,
+        float top_p,
+        std::function<bool(const std::string &)> on_token) {
+
+        // 1. Chatml template with the media marker on the last user message.
+        std::vector<llama_chat_message> chat_vec = history;
+        std::string last_with_marker;
+        {
+            const char *marker = mtmd_get_marker(mmproj);
+            const std::string m = (marker && marker[0]) ? std::string(marker) : "<__media__>";
+            last_with_marker = std::string(chat_vec.back().content) + "\n" + m;
+            chat_vec.back().content = last_with_marker.c_str();
+        }
+
+        char buf[16384];
+        int32_t n = llama_chat_apply_template(
+            "chatml", chat_vec.data(), chat_vec.size(), true, buf, sizeof(buf));
+        std::string formatted_prompt;
+        if (n > 0 && n < (int32_t)sizeof(buf)) {
+            formatted_prompt.assign(buf, n);
+            // Qwen3 thinking suppression (same rule as the text path).
+            const char *mtmpl = llama_model_chat_template(model, nullptr);
+            const bool supports_think =
+                mtmpl && std::string(mtmpl).find("think") != std::string::npos;
+            const std::string asst_marker = "assistant\n";
+            if (!enable_thinking.load() &&
+                formatted_prompt.size() >= asst_marker.size() &&
+                formatted_prompt.compare(formatted_prompt.size() - asst_marker.size(),
+                                         asst_marker.size(), asst_marker) == 0) {
+                formatted_prompt += " thinking\n\n response\n\n";
+            }
+        } else {
+            LOGW("vision: chatml template failed (n=%d) -> abort", n);
+            return "[ERROR: 模板生成失败]";
+        }
+        LOGI("vision formatted_prompt (%zu chars): %.*s",
+             formatted_prompt.size(),
+             (int)std::min((size_t)300, formatted_prompt.size()),
+             formatted_prompt.c_str());
+
+        // 2. Decode the image file to a bitmap.
+        struct mtmd_helper_bitmap_wrapper wrap =
+            mtmd_helper_bitmap_init_from_file(mmproj, image_path, /*placeholder=*/false);
+        if (!wrap.bitmap) {
+            LOGW("vision: failed to decode image %s", image_path);
+            return "[ERROR: 图片解码失败]";
+        }
+        mtmd_bitmap *bm = wrap.bitmap;
+
+        // 3. Tokenize text + image into chunks.
+        const bool add_bos = llama_vocab_get_add_bos(vocab);
+        mtmd_input_text text{ formatted_prompt.c_str(), formatted_prompt.size(),
+                              /*add_special=*/add_bos, /*parse_special=*/true };
+        mtmd_input_chunks *chunks = mtmd_input_chunks_init();
+        const mtmd_bitmap *bms[] = { bm };
+        int32_t res = mtmd_tokenize(mmproj, chunks, &text, bms, 1);
+        if (res != 0) {
+            LOGW("vision: mtmd_tokenize failed res=%d", res);
+            mtmd_input_chunks_free(chunks);
+            mtmd_bitmap_free(bm);
+            return "[ERROR: 图像预处理失败]";
+        }
+        const size_t n_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
+        LOGI("vision: %zu chunks, %zu prompt tokens",
+             mtmd_input_chunks_size(chunks), n_prompt_tokens);
+
+        // 4. Full KV clear — vision + token-based incremental prefill don't mix.
+        llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)llama_n_ctx(context));
+        kv_position = 0;
+
+        // 5. Eval all chunks (text -> llama_decode, image -> encode + decode).
+        auto t_start = std::chrono::high_resolution_clock::now();
+        llama_pos n_past = 0;
+        res = mtmd_helper_eval_chunks(mmproj, context, chunks, n_past,
+                                      /*seq_id=*/0,
+                                      (int32_t)ctx_params.n_batch,
+                                      /*logits_last=*/true, &n_past);
+        kv_position = n_past;
+        auto t_end = std::chrono::high_resolution_clock::now();
+        t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        LOGI("vision: eval chunks done, n_past=%lld, prompt %.0fms",
+             (long long)n_past, t_prompt_ms);
+
+        mtmd_input_chunks_free(chunks);
+        mtmd_bitmap_free(bm);
+
+        if (res != 0) {
+            LOGW("vision: mtmd_helper_eval_chunks failed res=%d", res);
+            return "[ERROR: 图像编码失败]";
+        }
+
+        // 6. Plain autoregressive generation (MTP disabled on vision path).
+        std::string result;
+        std::string gen_utf8_buf;
+        std::string flush_buf;
+        bool gen_stopped = false;
+        const llama_token eos = llama_vocab_eos(vocab);
+        std::vector<llama_token> gen_tokens;
+        const size_t kFlushBatchSize = 8;
+        n_gen = 0;
+        t_gen_ms = 0;
+
+        auto emit_token = [&](llama_token tok) -> bool {
+            char tbuf[256];
+            int tn = llama_token_to_piece(vocab, tok, tbuf, sizeof(tbuf), 0, false);
+            if (tn <= 0) return true;
+            gen_tokens.push_back(tok);
+            gen_utf8_buf.append(tbuf, tn);
+            size_t consumed = 0;
+            while (consumed < gen_utf8_buf.size()) {
+                int adv = utf8_seq_len(gen_utf8_buf, consumed);
+                if (adv == 0) break;
+                if (adv < 0) { consumed += 1; continue; }
+                std::string one = gen_utf8_buf.substr(consumed, adv);
+                consumed += adv;
+                sp_space_to_ascii(one);
+                result += one;
+                flush_buf += one;
+                if (flush_buf.size() >= kFlushBatchSize) {
+                    if (on_token && !on_token(flush_buf)) {
+                        gen_stopped = true;
+                        flush_buf.clear();
+                        return false;
+                    }
+                    flush_buf.clear();
+                }
+            }
+            gen_utf8_buf.erase(0, consumed);
+            return !gen_stopped;
+        };
+
+        struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+        struct llama_sampler * smpl_chain = llama_sampler_chain_init(sparams);
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_k(128));
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_p(top_p, 1));
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_temp(temperature));
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_dist((uint32_t)llama_time_us()));
+
+        while (n_gen < max_tokens && !should_stop) {
+            llama_token new_token = llama_sampler_sample(smpl_chain, context, -1);
+            llama_sampler_accept(smpl_chain, new_token);
+            if (new_token == eos) { LOGI("vision: EOS at gen=%d", n_gen); break; }
+            if (!emit_token(new_token)) { gen_stopped = true; break; }
+            const int32_t decode_pos = kv_position + n_gen;
+            if (decode_pos >= (int32_t)llama_n_ctx(context)) {
+                LOGW("vision: decode_pos %d >= n_ctx, stop", decode_pos);
+                break;
+            }
+            auto s2 = std::chrono::high_resolution_clock::now();
+            llama_batch token_batch = llama_batch_init(1, 0, 1);
+            token_batch.n_tokens    = 1;
+            token_batch.token[0]    = new_token;
+            token_batch.pos[0]      = decode_pos;
+            token_batch.n_seq_id[0] = 1;
+            token_batch.seq_id[0][0]= 0;
+            token_batch.logits[0]   = true;
+            int32_t dec_ret = llama_decode(context, token_batch);
+            llama_batch_free(token_batch);
+            if (dec_ret != 0) { LOGE("vision: gen decode failed ret=%d", dec_ret); break; }
+            n_gen++;
+            auto e2 = std::chrono::high_resolution_clock::now();
+            t_gen_ms += std::chrono::duration<double, std::milli>(e2 - s2).count();
+        }
+        llama_sampler_free(smpl_chain);
+
+        kv_position += n_gen;
+
+        if (!flush_buf.empty()) { if (on_token) on_token(flush_buf); flush_buf.clear(); }
+        if (!gen_stopped && !gen_utf8_buf.empty()) {
+            size_t consumed = 0;
+            while (consumed < gen_utf8_buf.size()) {
+                int adv = utf8_seq_len(gen_utf8_buf, consumed);
+                if (adv <= 0) break;
+                std::string one = gen_utf8_buf.substr(consumed, adv);
+                consumed += adv;
+                sp_space_to_ascii(one);
+                result += one;
+                if (on_token) on_token(one);
+            }
+            gen_utf8_buf.clear();
+        }
+
+        // Vision leaves image embeddings in the KV — no clean token prefix for
+        // incremental prefill. Force a full clear on the next turn.
+        have_prev_kv = false;
+        prev_prompt_tokens.clear();
+
+        is_running = false;
+        LOGI("vision generation done: %d tokens, %.1f tok/s", n_gen,
+             t_gen_ms > 0 ? (n_gen * 1000.0 / t_gen_ms) : 0.0);
+        return result;
+    }
+
+    // ------------------------------------------------------------------
     // Synchronous completion (blocking, used by JNI)
     // ------------------------------------------------------------------
     std::string completion(
@@ -702,7 +973,10 @@ struct InferenceEngine {
         // If non-empty, the template is applied and 'prompt' is used as the
         // final user message appended to history.  Empty history falls back
         // to raw prompt (backward compatible).
-        const std::vector<llama_chat_message> *history = nullptr
+        const std::vector<llama_chat_message> *history = nullptr,
+        // Optional on-disk image path for vision (mmproj must be loaded).
+        // When set, completion routes to the mtmd vision path.
+        const char *image_path = nullptr
     ) {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
@@ -717,6 +991,27 @@ struct InferenceEngine {
         if (!is_loaded()) {
             LOGE("completion() aborted INSIDE LOCK: no model loaded");
             return "[ERROR: No model loaded]";
+        }
+
+        // ================================================================
+        // Vision path — mmproj loaded + an image file provided for this turn.
+        // Routes to completion_with_vision() (self-contained mtmd flow).
+        // ================================================================
+        if (mmproj && vision_loaded && image_path && image_path[0] != '\0' &&
+            history && !history->empty()) {
+            is_running = true;
+            should_stop = false;
+            LOGI("vision completion path (mmproj=%p image=%s)", (void*)mmproj, image_path);
+            try {
+                std::string res = completion_with_vision(
+                    *history, image_path, max_tokens, temperature, top_p, on_token);
+                is_running = false;
+                return res;
+            } catch (const std::exception &e) {
+                LOGE("vision completion exception: %s", e.what());
+                is_running = false;
+                return std::string("[ERROR: vision completion failed]");
+            }
         }
 
         try {
@@ -1549,13 +1844,15 @@ static void reportLoadingLog(const char *message) {
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
-    jstring j_gpu_backend, jboolean j_enable_mtp
+    jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
+    std::string mmproj_path = j_mmproj_path ? jstring_to_std(env, j_mmproj_path) : "";
     bool ok = g_engine.load(path.c_str(), n_ctx,
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
-                            gpu_backend.c_str(), j_enable_mtp == JNI_TRUE);
+                            gpu_backend.c_str(), j_enable_mtp == JNI_TRUE,
+                            mmproj_path.c_str());
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {
@@ -1791,11 +2088,12 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     jint max_tokens,
     jfloat temperature,
     jfloat top_p,
-    jobject jcallback
+    jobject jcallback,
+    jstring j_image_path      // optional on-disk image path for vision
 ) {
     const int eng_n_ctx = static_cast<int>(g_engine.n_ctx.load());
-    LOGI("nativeCompletionWithMessages ENTER: is_loaded=%d n_ctx=%d",
-         g_engine.is_loaded(), eng_n_ctx);
+    LOGI("nativeCompletionWithMessages ENTER: is_loaded=%d n_ctx=%d image=%s",
+         g_engine.is_loaded(), eng_n_ctx, j_image_path ? "set" : "null");
     if (!g_engine.is_loaded()) {
         LOGE("nativeCompletionWithMessages ABORT: no model loaded");
         return env->NewStringUTF("[ERROR: No model loaded]");
@@ -1803,6 +2101,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
 
     jobject cb_copy = env->NewLocalRef(jcallback);
     std::string prompt   = jstring_to_std(env, jprompt);
+    std::string image_path = j_image_path ? jstring_to_std(env, j_image_path) : "";
     // Backing store for history role/content strings; must outlive the completion
     // call so the llama_chat_message pointers stay valid.
     std::deque<std::string> history_store;
@@ -1846,7 +2145,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
                 if (need_detach) g_jvm->DetachCurrentThread();
                 return (should_continue != JNI_FALSE);
             },
-            &history   // pass history to completion() for chatml template application
+            &history,   // pass history to completion() for chatml template application
+            image_path.empty() ? nullptr : image_path.c_str()  // vision image path (optional)
         );
     } catch (const std::exception &e) {
         LOGE("nativeCompletionWithMessages caught C++ exception: %s", e.what());

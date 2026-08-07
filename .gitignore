@@ -43,6 +43,9 @@ models/*.bin
 .cache/
 .tmp_screen.png
 *_head.bin
+*.b64
+gguf_*.bin
+screen.png
 ui_*.xml
 ui_*.txt
 analyze_gguf.py

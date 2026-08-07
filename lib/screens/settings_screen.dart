@@ -1,6 +1,6 @@
 // ============================================================
 // Settings Screen — 设置页面（Tab 布局）
-// 
+//
 // Tab 1: 📦 模型管理 - 下载、缓存模型列表
 // Tab 2: 🧠 推理引擎 - 模型加载、日志查看
 // Tab 3: ℹ️ 关于 - 应用信息
@@ -45,6 +45,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TabController _tabController;
   late final Future<List<ModelConfig>> _catalogFuture;
 
+  /// 存储占用信息的重建 tick：任一模型下载完成后自增，迫使 _StorageInfoWidget
+  /// 重新拉取磁盘占用（它用 FutureBuilder 只拉一次）。
+  int _storageTick = 0;
+
   @override
   void initState() {
     super.initState();
@@ -70,7 +74,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     try {
       final catalog = await _catalogFuture;
       if (!mounted) return;
-      await ref.read(downloadNotifierProvider.notifier).refreshCacheStatus(catalog);
+      await ref
+          .read(downloadNotifierProvider.notifier)
+          .refreshCacheStatus(catalog);
     } catch (_) {}
   }
 
@@ -82,6 +88,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   @override
   Widget build(BuildContext context) {
+    // 全局监听下载状态：任一模型下载完成 → 立即整体重扫模型列表 + 刷新存储
+    // 占用，而不是只更新刚完成的那个模型卡片（否则列表排序/存储统计会滞后）。
+    ref.listen<Map<String, DownloadTask>>(downloadNotifierProvider,
+        (prev, next) {
+      bool anyCompleted = false;
+      for (final e in next.entries) {
+        if (e.value.state == DownloadState.completed &&
+            prev?[e.key]?.state != DownloadState.completed) {
+          anyCompleted = true;
+          break;
+        }
+      }
+      if (anyCompleted) {
+        _storageTick++;
+        _scanModels(silent: true);
+      }
+    });
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('设置'),
@@ -125,7 +149,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               icon: const Icon(Icons.search, size: 18),
               label: const Text('扫描已有模型'),
               style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
               ),
             ),
           ),
@@ -181,7 +206,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
           // ---- 存储信息 ----
           _buildSectionHeader('💾 存储空间', context),
-          const _StorageInfoWidget(),
+          // 用 tick 作为 key，下载完成时强制重建以重新读取磁盘占用。
+          _StorageInfoWidget(key: ValueKey(_storageTick)),
         ],
       ),
     );
@@ -208,117 +234,116 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           displayState = DownloadState.idle;
         }
 
+        // 已缓存模型用蓝色描边 + 浅蓝底色，让「已下载」一眼可辨（区别于未下载的灰边卡片）。
         return Card(
           margin: const EdgeInsets.only(bottom: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: isCached
+                ? BorderSide(color: Colors.blue.shade300, width: 1.5)
+                : BorderSide(color: Colors.grey.shade300, width: 1),
+          ),
+          color: isCached ? Colors.blue.shade50.withValues(alpha: 0.4) : null,
+          elevation: isCached ? 1.5 : 0,
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Stack(
               children: [
-                Row(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(modelTypeIcon(model.type)),
-                    const SizedBox(width: 8),
-                    // 模型名按系统规则显示：去掉括号内的精度/量化说明，缩短长度。
-                    Expanded(
-                      child: Text(
-                        cleanModelName(model.name),
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                    Row(
+                      children: [
+                        Text(modelTypeIcon(model.type)),
+                        const SizedBox(width: 8),
+                        // 模型名按系统规则显示：去掉括号内的精度/量化说明，缩短长度。
+                        Flexible(
+                          child: Text(
+                            cleanModelName(model.name),
+                            style: const TextStyle(
+                                fontSize: 15, fontWeight: FontWeight.w600),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        // 总下载体积（主 gguf + mmproj 投影器），紧挨模型名。
+                        Text(
+                          _formatSize(model.totalBytes),
+                          style:
+                              const TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                        // 右侧预留空间，避免右上角固定的默认勾选/状态 chip 遮挡。
+                        const SizedBox(width: 88),
+                      ],
                     ),
-                    // 已缓存模型的右上角不再显示无意义的绿「✅」，改为
-                    // 「设为默认加载」勾选；仅已缓存模型可勾选，单选（勾选
-                    // 一个自动取消其他）。未缓存/下载中仍显示状态 chip。
-                    isCached
-                        ? _buildDefaultToggle(model)
-                        : _buildStatusChip(displayState),
+
+                    const SizedBox(height: 8),
+                    // 特性标记统一为小 chip，Wrap 自动换行防溢出。
+                    // （MTP 加速收益为负，已从 UI 屏蔽；已缓存/推荐为特性标记）
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        // 已缓存标记：已下载一眼可辨。
+                        if (isCached)
+                          _buildModelTag(
+                            icon: '✅',
+                            label: '已缓存',
+                            color: Colors.green,
+                            bg: Colors.green.shade100,
+                          ),
+                        // 特性标签（推荐 / 速度快 等），按目录里 tags 渲染。
+                        for (final tag in model.tags)
+                          _buildModelTag(
+                            icon: _tagStyle(tag).$1,
+                            label: tag,
+                            color: _tagStyle(tag).$2,
+                            bg: _tagStyle(tag).$3,
+                          ),
+                      ],
+                    ),
+
+                    // Progress bar for downloading models
+                    if (task != null &&
+                        task.state == DownloadState.downloading) ...[
+                      const SizedBox(height: 8),
+                      LinearProgressIndicator(
+                          value: task.progress, minHeight: 6),
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                              '${task.downloadedDisplay} / ${task.totalDisplay}',
+                              style: const TextStyle(fontSize: 12)),
+                          Text(task.progressPercent,
+                              style: const TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                    ],
+
+                    // Error message
+                    if (task?.errorMessage != null &&
+                        task!.state == DownloadState.failed) ...[
+                      const SizedBox(height: 8),
+                      Text('错误: ${task.errorMessage}',
+                          style: TextStyle(
+                              color: Colors.red.shade600, fontSize: 12)),
+                    ],
+
+                    const SizedBox(height: 12),
+                    _buildActionButtons(model, task, isCached),
                   ],
                 ),
-
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Text('${modelTypeIcon(model.type)} ${_formatSize(model.sizeBytes)}'),
-                    if (isCached) ...[
-                      const SizedBox(width: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.green.shade100,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text('已缓存', style: TextStyle(fontSize: 12, color: Colors.green)),
-                      ),
-                    ],
-                    if (model.recommended) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade100,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text('推荐', style: TextStyle(fontSize: 12, color: Colors.blue)),
-                      ),
-                    ],
-                    if (model.mtp) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.amber.shade100,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text('\u{26A1}MTP', style: TextStyle(fontSize: 12, color: Colors.amber.shade900)),
-                      ),
-                    ],
-                    // MTP 开关：仅对已缓存的带 NextN 头模型显示，用户可在此开启/关闭
-                    // MTP 加速（默认关闭，无需重新编译）。切换即持久化到设置，
-                    // 按模型 id 独立记录；加载该模型时按此开关决定原生层是否启用 MTP。
-                    if (model.mtp && isCached) ...[
-                      const SizedBox(width: 4),
-                      Consumer(
-                        builder: (context, ref, _) {
-                          final settings = ref.watch(settingsProvider);
-                          final mtpOn = settings.mtpEnabled(model.id);
-                          return Switch(
-                            value: mtpOn,
-                            onChanged: (v) async {
-                              await ref
-                                  .read(settingsProvider.notifier)
-                                  .setEnableMtp(model.id, v);
-                            },
-                          );
-                        },
-                      ),
-                    ],
-                  ],
+                // 右上角固定：已缓存显示「设为默认加载」勾选，否则显示状态 chip。
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: isCached
+                      ? _buildDefaultToggle(model)
+                      : _buildStatusChip(displayState),
                 ),
-
-                // Progress bar for downloading models
-                if (task != null && task.state == DownloadState.downloading) ...[
-                  const SizedBox(height: 8),
-                  LinearProgressIndicator(value: task.progress, minHeight: 6),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('${task.downloadedDisplay} / ${task.totalDisplay}', style: const TextStyle(fontSize: 12)),
-                      Text(task.progressPercent, style: const TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                ],
-
-                // Error message
-                if (task?.errorMessage != null && task!.state == DownloadState.failed) ...[
-                  const SizedBox(height: 8),
-                  Text('错误: ${task.errorMessage}', style: TextStyle(color: Colors.red.shade600, fontSize: 12)),
-                ],
-
-                const SizedBox(height: 12),
-                _buildActionButtons(model, task, isCached),
               ],
             ),
           ),
@@ -327,7 +352,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
   }
 
-  Widget _buildActionButtons(ModelConfig model, DownloadTask? task, bool isCached) {
+  Widget _buildActionButtons(
+      ModelConfig model, DownloadTask? task, bool isCached) {
     final activeState = task?.state ?? DownloadState.idle;
     final manager = ref.read(modelManagerProvider.notifier);
     final ms = ref.watch(modelManagerProvider);
@@ -335,7 +361,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     switch (activeState) {
       case DownloadState.downloading:
         return OutlinedButton.icon(
-          onPressed: () => ref.read(downloadNotifierProvider.notifier).pauseDownload(model.id),
+          onPressed: () => ref
+              .read(downloadNotifierProvider.notifier)
+              .pauseDownload(model.id),
           icon: const Icon(Icons.pause, size: 18),
           label: const Text('暂停'),
         );
@@ -358,7 +386,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       case DownloadState.completed:
       default:
         if (isCached) {
-          final isLoading = ms.isLoading;
+          // 只有「当前正在加载的那一个模型」才显示转圈，其余已缓存模型保持
+          // 「加载到内存」按钮不变 —— 避免点一个模型、全部按钮一起转。
+          final isLoadingHere = ms.isLoading && ms.modelId == model.id;
           final isLoadedHere = ms.modelId == model.id && ms.isLoaded;
 
           return Row(
@@ -374,8 +404,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     foregroundColor: Colors.green.shade700,
                   ),
                 ),
-              ] else if (isLoading) ...[
-                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              ] else if (isLoadingHere) ...[
+                const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
                   onPressed: null,
@@ -388,7 +421,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 ),
               ] else ...[
                 ElevatedButton.icon(
-                  onPressed: manager.isBusy ? null : () => _handleLoadModel(model),
+                  onPressed:
+                      manager.isBusy ? null : () => _handleLoadModel(model),
                   icon: const Icon(Icons.memory, size: 18),
                   label: const Text('加载到内存'),
                 ),
@@ -399,10 +433,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               // Unload button
               if (isLoadedHere) ...[
                 OutlinedButton.icon(
-                  onPressed: manager.isBusy ? null : () => unloadModelAndNotify(ref, context, model.name),
+                  onPressed: manager.isBusy
+                      ? null
+                      : () => unloadModelAndNotify(ref, context, model.name),
                   icon: const Icon(Icons.close, size: 18),
                   label: const Text('卸载'),
-                  style: OutlinedButton.styleFrom(foregroundColor: Colors.orange.shade700),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.orange.shade700),
                 ),
               ],
 
@@ -412,7 +449,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 onPressed: () => _confirmDeleteModel(model, context),
                 icon: const Icon(Icons.delete, size: 18),
                 label: const Text('删除'),
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.red.shade700),
+                style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.red.shade700),
               ),
             ],
           );
@@ -420,7 +458,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           return ElevatedButton.icon(
             onPressed: () => _startDownloadAndRescan(model),
             icon: const Icon(Icons.download, size: 18),
-            label: const Text('下载'),
+            // 视觉模型下载含 mmproj 投影器；若主 gguf 已完整则只补下投影器。
+            label: Text(model.mmproj != null ? '下载(含投影器)' : '下载'),
           );
         }
     }
@@ -428,7 +467,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   /// 删除已缓存模型前先弹确认框，避免误删（模型文件移除后需重新下载）。
   /// 确认后才真正调用 deleteModel。
-  Future<void> _confirmDeleteModel(ModelConfig model, BuildContext context) async {
+  Future<void> _confirmDeleteModel(
+      ModelConfig model, BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -473,7 +513,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         return InkWell(
           borderRadius: BorderRadius.circular(4),
           onTap: () {
-            ref.read(settingsProvider.notifier)
+            ref
+                .read(settingsProvider.notifier)
                 .setDefaultModel(isDefault ? null : model.id);
           },
           child: Row(
@@ -482,7 +523,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               Checkbox(
                 value: isDefault,
                 onChanged: (v) {
-                  ref.read(settingsProvider.notifier)
+                  ref
+                      .read(settingsProvider.notifier)
                       .setDefaultModel(v == true ? model.id : null);
                 },
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -551,25 +593,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     return '${mb.toStringAsFixed(0)} MB';
   }
 
-  /// 启动下载，并在下载成功结束后自动补一次静默扫描
-  /// （刷新本地缓存状态 / 文件路径，用户无需手动点扫描）。
-  Future<void> _startDownloadAndRescan(ModelConfig model) async {
-    await ref.read(downloadNotifierProvider.notifier).startDownload(model);
-    if (!mounted) return;
-    final task = ref.read(downloadNotifierProvider)[model.id];
-    if (task?.state == DownloadState.completed) {
-      await _scanModels(silent: true);
+  /// 统一的特性标记小 chip：图标 + 文字，胶囊圆角，语义配色。
+  /// 用于「投影器 / 推荐 / MTP」等模型特性标记，保证视觉风格一致。
+  Widget _buildModelTag({
+    required String icon,
+    required String label,
+    required Color color,
+    required Color bg,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$icon $label',
+        style: TextStyle(fontSize: 12, color: color),
+      ),
+    );
+  }
+
+  /// 特性标签 → (icon, color, bg) 语义配色。未知标签给默认中性灰，防溢出/未知 tag 崩。
+  (String, Color, Color) _tagStyle(String tag) {
+    switch (tag) {
+      case '推荐':
+        return ('⭐', Colors.blue, Colors.blue.shade100);
+      case '速度快':
+        return ('⚡', Colors.orange, Colors.orange.shade100);
+      default:
+        return ('🏷️', Colors.blueGrey, Colors.blueGrey.shade100);
     }
   }
 
-  /// 断点续传结束后同样补一次静默扫描。
+  /// 启动下载。下载完成的「全局重扫 + 存储刷新」由 build 里的
+  /// downloadNotifierProvider 监听统一处理（任何入口完成都会触发），
+  /// 这里不再重复扫描。
+  Future<void> _startDownloadAndRescan(ModelConfig model) async {
+    await ref.read(downloadNotifierProvider.notifier).startDownload(model);
+  }
+
+  /// 断点续传。同上，完成后的全局重扫由监听统一处理。
   Future<void> _resumeDownloadAndRescan(String modelId) async {
     await ref.read(downloadNotifierProvider.notifier).resumeDownload(modelId);
-    if (!mounted) return;
-    final task = ref.read(downloadNotifierProvider)[modelId];
-    if (task?.state == DownloadState.completed) {
-      await _scanModels(silent: true);
-    }
   }
 
   Future<void> _scanModels({bool silent = false}) async {
@@ -581,17 +647,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     if (cachedIds.isEmpty) {
       if (!silent) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('未找到已下载的模型文件'), backgroundColor: Colors.orange),
+          const SnackBar(
+              content: Text('未找到已下载的模型文件'), backgroundColor: Colors.orange),
         );
       }
       return;
     }
 
     final allModels = await loadModelCatalog();
-    final foundModels = allModels.where((m) => cachedIds.contains(m.id)).toList();
+    final foundModels =
+        allModels.where((m) => cachedIds.contains(m.id)).toList();
 
     if (foundModels.isNotEmpty) {
-      await ref.read(downloadNotifierProvider.notifier).initCachedModels(foundModels);
+      await ref
+          .read(downloadNotifierProvider.notifier)
+          .initCachedModels(foundModels);
 
       // 静默扫描（启动首次 / 下载完成）不弹 SnackBar，避免打扰。
       if (!silent && mounted) {
@@ -605,7 +675,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       }
     } else if (!silent) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('找到文件但未匹配到已知模型，请检查模型ID'), backgroundColor: Colors.orange),
+        const SnackBar(
+            content: Text('找到文件但未匹配到已知模型，请检查模型ID'),
+            backgroundColor: Colors.orange),
       );
     }
   }
@@ -679,15 +751,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     if (ok) {
       ref.read(currentModelIdProvider.notifier).state = model.id;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('✅ ${model.name} 已加载到内存'), backgroundColor: Colors.green),
+        SnackBar(
+            content: Text('✅ ${model.name} 已加载到内存'),
+            backgroundColor: Colors.green),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('❌ 模型加载失败，请查看"推理引擎"标签页的日志'), backgroundColor: Colors.red),
+        const SnackBar(
+            content: Text('❌ 模型加载失败，请查看"推理引擎"标签页的日志'),
+            backgroundColor: Colors.red),
       );
     }
   }
-
 }
 
 // =========================================================================
@@ -796,7 +871,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                     padding: const EdgeInsets.only(top: 4),
                     child: Text(
                       _gpuLayersHint(gpuSettings),
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.grey.shade600),
                     ),
                   ),
                 ],
@@ -853,7 +929,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                           max: 65536,
                           divisions: 63,
                           label: '${gpuSettings.contextSize}',
-                          onChanged: (v) => gpuNotifier.setContextSize(v.round()),
+                          onChanged: (v) =>
+                              gpuNotifier.setContextSize(v.round()),
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -883,37 +960,47 @@ class _InferenceEngineTab extends ConsumerWidget {
                 children: [
                   _buildSectionHeader('🧠 推理引擎状态', context),
                   const SizedBox(height: 12),
-                  
+
                   // Status row
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('当前状态:', style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
+                      Text('当前状态:',
+                          style: TextStyle(
+                              fontSize: 14, color: Colors.grey.shade700)),
                       _buildLifecycleChipFromState(modelState),
                     ],
                   ),
-                  
-                  if (modelState.modelName != null && modelState.modelName!.isNotEmpty) ...[
+
+                  if (modelState.modelName != null &&
+                      modelState.modelName!.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text('当前模型:', style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
-                        Text(modelState.modelName!, style: const TextStyle(fontWeight: FontWeight.w500)),
+                        Text('当前模型:',
+                            style: TextStyle(
+                                fontSize: 14, color: Colors.grey.shade700)),
+                        Text(modelState.modelName!,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w500)),
                       ],
                     ),
                   ],
-                  
-                  if (modelState.errorMessage != null && modelState.errorMessage!.isNotEmpty) ...[
+
+                  if (modelState.errorMessage != null &&
+                      modelState.errorMessage!.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('错误:', style: TextStyle(fontSize: 14, color: Colors.red)),
+                        const Text('错误:',
+                            style: TextStyle(fontSize: 14, color: Colors.red)),
                         Expanded(
                           child: Text(
                             modelState.errorMessage!,
-                            style: const TextStyle(fontSize: 12, color: Colors.red),
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.red),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -930,7 +1017,7 @@ class _InferenceEngineTab extends ConsumerWidget {
           // ---- 操作按钮 ----
           _buildSectionHeader('⚡ 快捷操作', context),
           const SizedBox(height: 8),
-          
+
           Row(
             children: [
               Expanded(
@@ -938,7 +1025,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                   onPressed: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const InferenceLogScreen()),
+                      MaterialPageRoute(
+                          builder: (_) => const InferenceLogScreen()),
                     );
                   },
                   icon: const Icon(Icons.terminal),
@@ -952,7 +1040,8 @@ class _InferenceEngineTab extends ConsumerWidget {
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: modelState.isLoaded
-                      ? () => unloadModelAndNotify(ref, context, modelState.modelName ?? '当前模型')
+                      ? () => unloadModelAndNotify(
+                          ref, context, modelState.modelName ?? '当前模型')
                       : null,
                   icon: const Icon(Icons.close),
                   label: const Text('卸载模型'),
@@ -969,7 +1058,9 @@ class _InferenceEngineTab extends ConsumerWidget {
             const SizedBox(height: 8),
             ElevatedButton.icon(
               onPressed: () async {
-                await ref.read(modelManagerProvider.notifier).loadModel(modelState.modelId!);
+                await ref
+                    .read(modelManagerProvider.notifier)
+                    .loadModel(modelState.modelId!);
               },
               icon: const Icon(Icons.refresh),
               label: const Text('重试加载'),
@@ -981,7 +1072,7 @@ class _InferenceEngineTab extends ConsumerWidget {
           // ---- 最近日志摘要 ----
           _buildSectionHeader('📋 最近日志', context),
           const SizedBox(height: 8),
-          
+
           _RecentLogsWidget(),
         ],
       ),
@@ -1058,7 +1149,6 @@ class _InferenceEngineTab extends ConsumerWidget {
     }
     return '当前后端固定，层数不可调';
   }
-
 }
 
 Widget _buildSectionHeader(String title, BuildContext context) {
@@ -1066,7 +1156,10 @@ Widget _buildSectionHeader(String title, BuildContext context) {
     padding: const EdgeInsets.only(bottom: 8),
     child: Text(
       title,
-      style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+      style: Theme.of(context)
+          .textTheme
+          .titleMedium
+          ?.copyWith(fontWeight: FontWeight.bold),
     ),
   );
 }
@@ -1093,7 +1186,8 @@ Widget _buildToggleTitle(
       ),
       if (subtitle != null) ...[
         const SizedBox(height: 4),
-        Text(subtitle, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        Text(subtitle,
+            style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ],
     ],
   );
@@ -1208,7 +1302,7 @@ class _AboutRow extends StatelessWidget {
 // =========================================================================
 
 class _StorageInfoWidget extends ConsumerWidget {
-  const _StorageInfoWidget();
+  const _StorageInfoWidget({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1216,7 +1310,10 @@ class _StorageInfoWidget extends ConsumerWidget {
       future: _loadStorageInfo(),
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
-          return const Center(child: Padding(padding: EdgeInsets.all(16), child: CircularProgressIndicator()));
+          return const Center(
+              child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator()));
         }
 
         final info = snapshot.data!;
@@ -1230,17 +1327,21 @@ class _StorageInfoWidget extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (cachedModels.isNotEmpty) ...[
-                  Text('已缓存模型 (${_formatSize(totalBytes)}):', style: const TextStyle(fontWeight: FontWeight.w500)),
+                  Text('已缓存模型 (${_formatSize(totalBytes)}):',
+                      style: const TextStyle(fontWeight: FontWeight.w500)),
                   const SizedBox(height: 8),
                   ...(cachedModels as List<Map<String, dynamic>>)
                       .map((m) => Padding(
                             padding: const EdgeInsets.symmetric(vertical: 4),
                             child: Row(
                               children: [
-                                const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                const Icon(Icons.check_circle,
+                                    size: 16, color: Colors.green),
                                 const SizedBox(width: 8),
                                 Expanded(child: Text(m['name'] as String)),
-                                Text(_formatSize(m['sizeBytes'] as int), style: TextStyle(fontSize: 12, color: Colors.grey)),
+                                Text(_formatSize(m['sizeBytes'] as int),
+                                    style: TextStyle(
+                                        fontSize: 12, color: Colors.grey)),
                               ],
                             ),
                           ))
@@ -1250,8 +1351,10 @@ class _StorageInfoWidget extends ConsumerWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text('总占用:', style: TextStyle(fontWeight: FontWeight.w600)),
-                    Text(_formatSize(totalBytes), style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const Text('总占用:',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    Text(_formatSize(totalBytes),
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
@@ -1263,7 +1366,8 @@ class _StorageInfoWidget extends ConsumerWidget {
   }
 
   String _formatSize(int bytes) {
-    if (bytes >= 1024 * 1024 * 1024) return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+    if (bytes >= 1024 * 1024 * 1024)
+      return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
     return '${(bytes / 1024 / 1024).toStringAsFixed(0)} MB';
   }
 
@@ -1287,7 +1391,8 @@ class _StorageInfoWidget extends ConsumerWidget {
               if (match.isNotEmpty) displayName = match.first.name;
             } catch (_) {}
 
-            cachedModels.add({'name': displayName, 'id': fileName, 'sizeBytes': sizeBytes});
+            cachedModels.add(
+                {'name': displayName, 'id': fileName, 'sizeBytes': sizeBytes});
             totalBytes += sizeBytes;
           }
         }
@@ -1315,7 +1420,9 @@ class _RecentLogsWidget extends ConsumerWidget {
     if (logs.isEmpty) {
       return Container(
         padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(8)),
+        decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(8)),
         child: const Center(
           child: Column(
             children: [
@@ -1323,7 +1430,8 @@ class _RecentLogsWidget extends ConsumerWidget {
               SizedBox(height: 8),
               Text('暂无日志', style: TextStyle(color: Colors.grey)),
               SizedBox(height: 4),
-              Text('点击"加载到内存"后开始记录', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              Text('点击"加载到内存"后开始记录',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
             ],
           ),
         ),
@@ -1339,11 +1447,13 @@ class _RecentLogsWidget extends ConsumerWidget {
           final log = logs[index];
           IconData icon;
           Color color;
-          
+
           if (log.contains('✓') || log.contains('成功')) {
             icon = Icons.check_circle;
             color = Colors.green;
-          } else if (log.contains('失败') || log.contains('错误') || log.contains('ERROR')) {
+          } else if (log.contains('失败') ||
+              log.contains('错误') ||
+              log.contains('ERROR')) {
             icon = Icons.error;
             color = Colors.red;
           } else {
@@ -1361,7 +1471,10 @@ class _RecentLogsWidget extends ConsumerWidget {
                 Expanded(
                   child: Text(
                     log,
-                    style: TextStyle(fontSize: 12, color: color.withValues(alpha: 0.9), fontFamily: 'monospace'),
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: color.withValues(alpha: 0.9),
+                        fontFamily: 'monospace'),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -1407,7 +1520,8 @@ class _ModelLoadProgressDialog extends ConsumerWidget {
               const SizedBox(height: 16),
               Text('正在加载模型…', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
-              Text(modelName, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              Text(modelName,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 12),
               if (log != null)
                 Container(
@@ -1421,7 +1535,8 @@ class _ModelLoadProgressDialog extends ConsumerWidget {
                   child: SingleChildScrollView(
                     child: Text(
                       log,
-                      style: TextStyle(fontSize: 12, color: Colors.blue.shade800),
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.blue.shade800),
                     ),
                   ),
                 ),
@@ -1449,9 +1564,7 @@ Future<void> unloadModelAndNotify(
 
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text(ok
-          ? '✅ 已卸载 $modelName，已释放内存'
-          : '❌ 卸载失败，请重试'),
+      content: Text(ok ? '✅ 已卸载 $modelName，已释放内存' : '❌ 卸载失败，请重试'),
       backgroundColor: ok ? Colors.green : Colors.red,
       duration: const Duration(seconds: 2),
     ),
@@ -1497,8 +1610,7 @@ class _ApiTab extends ConsumerWidget {
           const SizedBox(height: 16),
           Row(
             children: [
-              Expanded(
-                  child: _buildSectionHeader('已配置的 API 模型', context)),
+              Expanded(child: _buildSectionHeader('已配置的 API 模型', context)),
               FilledButton.icon(
                 onPressed: () => _showApiModelDialog(context, ref),
                 icon: const Icon(Icons.add, size: 18),
@@ -1511,8 +1623,8 @@ class _ApiTab extends ConsumerWidget {
             const Padding(
               padding: EdgeInsets.all(24),
               child: Center(
-                child: Text('尚未配置任何 API 模型',
-                    style: TextStyle(color: Colors.grey)),
+                child:
+                    Text('尚未配置任何 API 模型', style: TextStyle(color: Colors.grey)),
               ),
             )
           else
@@ -1531,14 +1643,12 @@ class _ApiTab extends ConsumerWidget {
                     activeId != null,
                     (v) {
                       // 打开时激活当前列表首个可用模型；关闭时停用。
-                      ref
-                          .read(settingsProvider.notifier)
-                          .setActiveApiModel(v
-                              ? (activeId ??
-                                  (apiModels.isNotEmpty
-                                      ? apiModels.first.id
-                                      : null))
-                              : null);
+                      ref.read(settingsProvider.notifier).setActiveApiModel(v
+                          ? (activeId ??
+                              (apiModels.isNotEmpty
+                                  ? apiModels.first.id
+                                  : null))
+                          : null);
                     },
                     subtitle: activeId != null
                         ? '当前激活：${_activeApiName(apiModels, activeId)}'
@@ -1553,8 +1663,8 @@ class _ApiTab extends ConsumerWidget {
     );
   }
 
-  Widget _buildApiModelCard(BuildContext context, WidgetRef ref,
-      ApiModelConfig cfg, bool isActive) {
+  Widget _buildApiModelCard(
+      BuildContext context, WidgetRef ref, ApiModelConfig cfg, bool isActive) {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -1565,8 +1675,7 @@ class _ApiTab extends ConsumerWidget {
             Row(
               children: [
                 Icon(Icons.cloud,
-                    size: 20,
-                    color: isActive ? Colors.green : Colors.grey),
+                    size: 20, color: isActive ? Colors.green : Colors.grey),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(cfg.name,
@@ -1634,8 +1743,8 @@ class _ApiTab extends ConsumerWidget {
     );
   }
 
-  Future<void> _confirmDeleteApiModel(BuildContext context, WidgetRef ref,
-      ApiModelConfig cfg) async {
+  Future<void> _confirmDeleteApiModel(
+      BuildContext context, WidgetRef ref, ApiModelConfig cfg) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -1696,6 +1805,7 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
 
   String? _testResult;
   bool _testing = false;
+  bool _visionCapable = false;
 
   @override
   void initState() {
@@ -1705,8 +1815,10 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
     _baseUrl = TextEditingController(text: e?.baseUrl ?? '');
     _apiKey = TextEditingController(text: e?.apiKey ?? '');
     _model = TextEditingController(text: e?.model ?? '');
-    _temp = TextEditingController(text: e?.temperature?.toStringAsFixed(2) ?? '');
+    _temp =
+        TextEditingController(text: e?.temperature?.toStringAsFixed(2) ?? '');
     _maxTokens = TextEditingController(text: e?.maxTokens?.toString() ?? '');
+    _visionCapable = e?.visionCapable ?? false;
   }
 
   @override
@@ -1733,6 +1845,7 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
       model: model,
       temperature: double.tryParse(_temp.text.trim()),
       maxTokens: int.tryParse(_maxTokens.text.trim()),
+      visionCapable: _visionCapable,
     );
   }
 
@@ -1777,7 +1890,9 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          TextField(controller: _name, decoration: const InputDecoration(labelText: '显示名称 *')),
+          TextField(
+              controller: _name,
+              decoration: const InputDecoration(labelText: '显示名称 *')),
           TextField(
             controller: _baseUrl,
             decoration: const InputDecoration(
@@ -1809,6 +1924,12 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
             controller: _maxTokens,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(labelText: 'max_tokens（留空=1024）'),
+          ),
+          SwitchListTile(
+            title: const Text('支持视觉（图片理解）'),
+            subtitle: const Text('开启后，带图消息会以 base64 图片发送给该 API'),
+            value: _visionCapable,
+            onChanged: (v) => setState(() => _visionCapable = v),
           ),
           const SizedBox(height: 12),
           if (_testResult != null)

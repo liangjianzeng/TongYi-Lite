@@ -10,7 +10,8 @@ export 'chat_provider.dart' show
     currentConversationProvider,
     messagesProvider,
     isGeneratingProvider,
-    chatNotifierProvider;
+    chatNotifierProvider,
+    kLocalVisionSupported;
 
 export 'model_provider.dart' show
     ModelLifecyclePhase,
