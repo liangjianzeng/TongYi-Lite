@@ -26,6 +26,8 @@ dependencies:
   permission_handler: ^11.3.1
   # Image picker
   image_picker: ^1.1.2
+  # Open external URLs (About GitHub link)
+  url_launcher: ^6.3.0
 
 
 dev_dependencies:

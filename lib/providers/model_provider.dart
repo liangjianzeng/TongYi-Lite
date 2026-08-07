@@ -244,10 +244,18 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         if (config.mmproj != null) {
           final storage = ModelStorageService();
           mmprojPath = await storage.getMmprojPath(modelId);
-          if (!File(mmprojPath).existsSync()) {
-            debugPrint('[ModelManager] Missing mmproj for $modelId');
+          // 只查 existsSync() 不够：mmproj 若损坏/不完整（例如下载中断残留的
+          // .mmproj.tmp，或体积为 0）仍会 exists → 传给原生 mtmd_init 加载损坏
+          // 文件，视觉推理时崩溃。这里做完整性复核：文件存在、无残留 .tmp、非空。
+          final mmFile = File(mmprojPath);
+          final mmTmp = File('$mmprojPath.tmp');
+          final mmOk = mmFile.existsSync() &&
+              !(await mmTmp.exists()) &&
+              await mmFile.length() > 0;
+          if (!mmOk) {
+            debugPrint('[ModelManager] Missing/broken mmproj for $modelId');
             state = ModelState.error(
-              message: '缺少 mmproj 投影器，请先下载完整模型',
+              message: '缺少或不完整的 mmproj 投影器，请在模型管理页重新下载完整模型',
               modelId: modelId,
               modelName: displayName,
             );

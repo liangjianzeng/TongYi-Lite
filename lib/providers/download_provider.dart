@@ -105,10 +105,10 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
          existing.state == DownloadState.paused)) {
       return;
     }
-    // Only one model may download at a time globally — block a second start so
-    // the service's capacity guard never throws an unhandled exception.
-    final anyActive = state.values.any((t) => t.state == DownloadState.downloading);
-    if (anyActive) return;
+    // 最多同时 2 个模型下载。超过则拒绝本次启动，避免触发服务的容量守卫异常。
+    final activeCount =
+        state.values.where((t) => t.state == DownloadState.downloading).length;
+    if (activeCount >= 2) return;
 
     // Create initial task for tracking — pass it to the service so Dio mutates THIS same object.
     final initialTask = DownloadTask(
