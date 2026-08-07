@@ -634,38 +634,53 @@ struct InferenceEngine {
             LOGI("Loading mmproj: %s", mmproj_path);
             reportLoadingLog("正在加载 mmproj 投影器（图像理解）...");
             mtmd_context_params mparams = mtmd_context_params_default();
-            // MUST stay on CPU: the vision tower's GPU kernels CRASH on Adreno
-            // with SIGSEGV (verified on-device 2026-08-06 — Fatal signal 11,
-            // fault addr 0x0 in the mmproj encode thread). Do NOT set
-            // use_gpu=true; there is no safe op-level fallback that prevents the
-            // segfault. CPU BF16 encoding is slow, so the image is downscaled on
-            // the Dart side and image_max_tokens (below) caps the token count to
-            // keep the encode time bounded.
-            mparams.use_gpu   = false;
+            // 优先 OpenCL GPU 加速视觉编码（Adreno 专项优化，llama.rn 同路径）。
+            //
+            // llama.cpp mtmd 原生支持 GPU 视觉编码（use_gpu=true 为默认值），且本地
+            // 已含 #23800/#25771 的 OpenCL is_causal 修复（见 ggml-opencl.cpp），社区
+            // 已在骁龙 8s Gen3 (Adreno 735) + OpenCL 验证 mmproj 编码 ~50s -> ~12s。
+            //
+            // 历史：vision tower 曾在 Vulkan backend 下 SIGSEGV（fault addr 0x0），
+            // 故旧实现一刀切强制 CPU。但 Vulkan 崩溃 ≠ OpenCL 崩溃，且本地 OpenCL
+            // 已修复输出错乱问题。这里显式用 MTMD_BACKEND_DEVICE 指定 OpenCL
+            // （clip.cpp 读此变量 ggml_backend_init_by_name），避免 init_by_type(GPU)
+            // 落到 Vulkan。
+            mparams.use_gpu   = true;
             mparams.n_threads = ctx_params.n_threads;
             mparams.warmup    = true;
-            // Match the main context's flash-attn setting (disabled) so the
-            // vision tower behaves identically to the text path.
-            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-            // Hard cap on per-image token count (safety net on top of the Dart
-            // side image downscale). The mmproj metadata default allows a huge
-            // image token budget — on-device we measured a single 1920px image
-            // blowing up to ~2717 prompt tokens, which ballooned memory to
-            // 2.6GB and stalled the vision eval (app spins forever then dies).
-            // image_max_tokens only applies to dynamic-resolution vision
-            // models; it is ignored by fixed-size towers, so it's safe to set.
+            // Adreno 上 ViT GPU offload 必须开 flash-attn：关闭会尝试分配 ~9.4GB
+            // 缓冲导致失败（#25771/#23800）。用 AUTO 让 mtmd warmup 探测后启用。
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+            // 硬上限：单图 token 数（配合 Dart 侧图像缩小），控制 GPU 显存预算，
+            // 规避 #23422 类显存不足 NULL 解引用崩溃。
             mparams.image_max_tokens = 512;
+            setenv("MTMD_BACKEND_DEVICE", "OpenCL", 1);
+            LOGI("mmproj: attempting OpenCL GPU encode (flash_attn=AUTO)");
             mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
             if (mmproj) {
                 vision_loaded = true;
                 const char *marker = mtmd_get_marker(mmproj);
-                LOGI("mmproj loaded OK (marker=%s)", marker ? marker : "?");
-                reportLoadingLog("mmproj 投影器加载完成 ✓ 支持图像理解");
+                LOGI("mmproj loaded OK on OpenCL GPU (marker=%s)", marker ? marker : "?");
+                reportLoadingLog("mmproj 投影器加载完成 ✓ 图像理解 (OpenCL GPU 编码)");
             } else {
-                vision_loaded = false;
-                mmproj = nullptr;
-                LOGW("mmproj load FAILED -> text-only inference");
-                reportLoadingLog("mmproj 投影器加载失败，将仅文本推理");
+                // GPU 初始化失败（backend 不可用 / 显存不足返回错误而非崩溃）
+                // → 回退 CPU 编码，避免一刀切丢失视觉能力。
+                LOGW("mmproj OpenCL GPU load FAILED -> retry CPU encode");
+                reportLoadingLog("mmproj GPU 编码不可用，回退 CPU 编码");
+                mparams.use_gpu   = false;
+                mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
+                if (mmproj) {
+                    vision_loaded = true;
+                    const char *marker = mtmd_get_marker(mmproj);
+                    LOGI("mmproj loaded OK on CPU (marker=%s)", marker ? marker : "?");
+                    reportLoadingLog("mmproj 投影器加载完成 ✓ 支持图像理解 (CPU 编码)");
+                } else {
+                    vision_loaded = false;
+                    mmproj = nullptr;
+                    LOGW("mmproj load FAILED -> text-only inference");
+                    reportLoadingLog("mmproj 投影器加载失败，将仅文本推理");
+                }
             }
         } else {
             LOGI("No mmproj provided -> text-only model");
