@@ -54,7 +54,7 @@ class InferenceEngine(private val context: Context) {
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
-    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean): Boolean
+    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean, mmprojPath: String?): Boolean
     private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
@@ -81,7 +81,8 @@ class InferenceEngine(private val context: Context) {
         maxTokens: Int,
         temperature: Float,
         topP: Float,
-        callback: InferenceCallback
+        callback: InferenceCallback,
+        imagePath: String?
     ): String
 
     private external fun nativeBenchmark(
@@ -110,6 +111,7 @@ class InferenceEngine(private val context: Context) {
         gpuLayers: Int = 20,
         gpuBackend: String = "auto",
         enableMtp: Boolean = false,
+        mmprojPath: String? = null,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
         val file = File(modelPath)
@@ -126,8 +128,8 @@ class InferenceEngine(private val context: Context) {
             nativeSetLoadingCallback(null)
         }
 
-        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp)")
-        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp)
+        Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath)")
+        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath)
         Log.i(TAG, "loadModel result: $ok")
 
         if (ok) {
@@ -194,6 +196,7 @@ class InferenceEngine(private val context: Context) {
         maxTokens: Int = 2048,
         temperature: Float = 0.7f,
         topP: Float = 0.9f,
+        imagePath: String? = null,
         onToken: ((String) -> Boolean)? = null
     ): String {
         val callback = if (onToken != null) {
@@ -205,7 +208,7 @@ class InferenceEngine(private val context: Context) {
                 override fun onToken(token: String): Boolean = true
             }
         }
-        return nativeCompletionWithMessages(prompt, messagesJson, maxTokens, temperature, topP, callback)
+        return nativeCompletionWithMessages(prompt, messagesJson, maxTokens, temperature, topP, callback, imagePath)
     }
 
     /**

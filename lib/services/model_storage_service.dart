@@ -99,6 +99,12 @@ class ModelStorageService {
     return p.join(dir.path, '${modelId}.gguf');
   }
 
+  /// 获取 mmproj 投影器文件路径（text+mmproj 两文件形态的视觉模型）。
+  Future<String> getMmprojPath(String modelId) async {
+    final dir = await getModelsRootDir();
+    return p.join(dir.path, '${modelId}.mmproj');
+  }
+
   /// Check if model file exists locally
   Future<bool> isModelCached(String modelId) async {
     try {
@@ -114,12 +120,15 @@ class ModelStorageService {
   ///
   /// 仅检查 `.gguf` 是否存在（[isModelCached]）会漏掉两类故障：
   ///  ① catalog 里 `sizeBytes` 与实文件不符时，一个被截断/不完整的 `.gguf`
-  ///    仍会被当成已缓存；
+  ///   仍会被当成已缓存；
   ///  ② 下载中途暂停/失败若残留 `.gguf` 或 `.gguf.tmp`，会被误判为可加载，
-  ///    用户点击「加载」后因为模型文件不全而直接失败。
+  ///   用户点击「加载」后因为模型文件不全而直接失败。
   ///
   /// 因此要求：`.gguf` 存在、实文件大小 ≥ catalog 预期大小的 99%（catalog 未给
   /// 大小时退化为仅存在性判断）、且不存在未完成的 `.gguf.tmp` 部分文件。
+  ///
+  /// text+mmproj 两文件形态（[ModelConfig.mmproj] 非空）还需 mmproj 文件完整存在，
+  /// 否则视觉模型无法加载（缺投影器）。
   Future<bool> isFullyCached(ModelConfig model) async {
     try {
       final dir = await getModelsRootDir();
@@ -131,6 +140,19 @@ class ModelStorageService {
       }
       if (await File(p.join(dir.path, '${model.id}.gguf.tmp')).exists()) {
         return false;
+      }
+      // mmproj 两文件形态：投影器必须完整存在，否则视为未缓存。
+      final mm = model.mmproj;
+      if (mm != null) {
+        final mmproj = File(p.join(dir.path, '${model.id}.mmproj'));
+        if (!await mmproj.exists()) return false;
+        final mmSize = await mmproj.length();
+        if (mm.sizeBytes > 0 && mmSize < (mm.sizeBytes * 0.99).round()) {
+          return false;
+        }
+        if (await File(p.join(dir.path, '${model.id}.mmproj.tmp')).exists()) {
+          return false;
+        }
       }
       return true;
     } catch (_) {
@@ -158,7 +180,8 @@ class ModelStorageService {
       
       int total = 0;
       await for (final entity in dir.list(recursive: true)) {
-        if (entity is File && entity.path.endsWith('.gguf')) {
+        if (entity is File &&
+            (entity.path.endsWith('.gguf') || entity.path.endsWith('.mmproj'))) {
           total += await entity.length();
         }
       }

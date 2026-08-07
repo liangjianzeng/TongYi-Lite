@@ -19,6 +19,7 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
   /// corrected — the model stayed on the "下载" button forever even though the
   /// .gguf was sitting on disk. Now only *in-flight* tasks are preserved.
   Future<void> initCachedModels(List<ModelConfig> models) async {
+    final storage = ModelStorageService();
     final updated = Map<String, DownloadTask>.from(state);
 
     for (final model in models) {
@@ -30,6 +31,19 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
         continue;
       }
       if (existing != null && existing.state == DownloadState.completed) continue;
+
+      // 视觉模型（text+mmproj 两文件形态）：磁盘扫描只证明了主 .gguf 存在，
+      // 投影器 mmproj 必须也在主存储目录完整存在才能算「已缓存」，否则模型
+      // 加载会因缺投影器失败。这里对 mmproj 模型改用 isFullyCached 复核。
+      if (model.mmproj != null) {
+        final onDisk = await storage.isFullyCached(model);
+        if (!onDisk) {
+          // 主 gguf 已下但缺 mmproj：不标记 completed，界面仍显示下载按钮，
+          // 点击可只补下投影器（download() 会跳过已完整的 gguf）。
+          updated[model.id] = DownloadTask(modelId: model.id);
+          continue;
+        }
+      }
 
       updated[model.id] = DownloadTask(
         modelId: model.id,

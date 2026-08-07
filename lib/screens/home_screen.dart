@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider;
+import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
 import '../providers/model_provider.dart';
+import '../providers/settings_provider.dart' show settingsProvider;
 import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
@@ -36,6 +37,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Image picker state
   String? _selectedImagePath;
   final ImagePicker _picker = ImagePicker();
+
+  // 会话批量选择状态
+  bool _conversationSelectionMode = false;
+  final Set<String> _selectedConversations = {};
 
   @override
   void initState() {
@@ -170,20 +175,48 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (source == null) return;
 
     try {
+      // 端侧视觉：把用户选图先「下采样」再喂模型，而不是原图直喂。
+      // 真机实测：1920px 大图进视觉塔 → 单张图产出 ~2717 个 image token，
+      // 视觉编码内存飙到 2.6GB+，推理卡死（消息一直转圈无输出）后被系统杀掉。
+      // 压到 768px 后 token 数骤减（~300+），编码内存/耗时都大幅下降。
       final XFile? image = await _picker.pickImage(
         source: source,
-        maxWidth: 1920,
-        maxHeight: 1920,
+        maxWidth: 768,
+        maxHeight: 768,
         imageQuality: 85,
       );
 
       if (image != null) {
         setState(() => _selectedImagePath = image.path);
+        _warnIfImageDropped();
       }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('选择图片失败: $e')),
+      );
+    }
+  }
+
+  /// 选图后提示：若当前实际路线不支持视觉，图片仅展示、不会发给模型。
+  /// 仅为提示，不阻止发送；真正的强制门禁在 [ChatNotifier.sendMessage]。
+  void _warnIfImageDropped() {
+    if (!mounted) return;
+    final settings = ref.read(settingsProvider);
+    final activeApi = settings.activeApiModel();
+    final hasLocalLoaded = ref.read(modelManagerProvider).isLoaded;
+    final hasDefault = settings.defaultModelId != null;
+
+    // 与 sendMessage 一致的路由判断：无本地意图且激活了 API → 走 API；
+    // 否则 local-first（本地当前原生视觉未支持，一律不送图）。
+    final useApi = activeApi != null && !hasLocalLoaded && !hasDefault;
+    final visionCapable = useApi
+        ? activeApi.visionCapable
+        : kLocalVisionSupported; // 本地路线：原生视觉未支持 → false
+
+    if (!visionCapable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('⚠️ 当前模型不支持视觉，图片仅展示、不会发送给模型')),
       );
     }
   }
@@ -705,6 +738,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   const Expanded(
                     child: Text('会话', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                   ),
+                  // 批量选择开关：进入多选模式后，点按会话变为勾选而非切换。
+                  IconButton(
+                    icon: Icon(_conversationSelectionMode ? Icons.close : Icons.checklist),
+                    tooltip: _conversationSelectionMode ? '退出批量选择' : '批量选择',
+                    color: _conversationSelectionMode ? Theme.of(context).colorScheme.primary : null,
+                    onPressed: () {
+                      setState(() {
+                        _conversationSelectionMode = !_conversationSelectionMode;
+                        if (!_conversationSelectionMode) _selectedConversations.clear();
+                      });
+                    },
+                  ),
                   IconButton(
                     icon: const Icon(Icons.add),
                     tooltip: '新建对话',
@@ -725,6 +770,32 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       },
                     ),
             ),
+            // 批量选择底部操作栏
+            if (_conversationSelectionMode) ...[
+              const Divider(height: 1),
+              SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Text('已选 ${_selectedConversations.length} 个'),
+                      const Spacer(),
+                      OutlinedButton.icon(
+                        onPressed: _selectedConversations.isEmpty
+                            ? null
+                            : _confirmBulkDelete,
+                        icon: const Icon(Icons.delete_outline, size: 18),
+                        label: Text('删除选中(${_selectedConversations.length})'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red.shade700,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -733,27 +804,45 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Widget _buildConversationTile(Conversation c, bool isCurrent) {
     final updated = _formatTime(c.updatedAt);
+    // 批量选择模式下：勾选框 + 点按切换选中；隐藏单个删除按钮。
+    final selectionMode = _conversationSelectionMode;
+    final selected = _selectedConversations.contains(c.id);
     return ListTile(
       dense: true,
-      selected: isCurrent,
-      leading: Icon(
-        isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
-        size: 20,
-        color: isCurrent ? Theme.of(context).colorScheme.primary : Colors.grey,
-      ),
+      selected: isCurrent && !selectionMode,
+      leading: selectionMode
+          ? Icon(
+              selected ? Icons.check_circle : Icons.circle_outlined,
+              color: selected ? Theme.of(context).colorScheme.primary : Colors.grey.shade400,
+            )
+          : Icon(
+              isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
+              size: 20,
+              color: isCurrent ? Theme.of(context).colorScheme.primary : Colors.grey,
+            ),
       title: Text(
         c.title.isEmpty ? '新对话' : c.title,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontWeight: isCurrent ? FontWeight.w600 : FontWeight.normal),
+        style: TextStyle(fontWeight: isCurrent && !selectionMode ? FontWeight.w600 : FontWeight.normal),
       ),
       subtitle: Text('$updated · ${c.messageCount} 条', style: const TextStyle(fontSize: 12)),
-      onTap: () => _switchConversation(c.id),
-      trailing: IconButton(
-        icon: const Icon(Icons.delete_outline, size: 20),
-        tooltip: '删除',
-        onPressed: () => _confirmDelete(c),
-      ),
+      onTap: selectionMode
+          ? () {
+              setState(() {
+                if (!_selectedConversations.remove(c.id)) {
+                  _selectedConversations.add(c.id);
+                }
+              });
+            }
+          : () => _switchConversation(c.id),
+      trailing: selectionMode
+          ? null
+          : IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              tooltip: '删除',
+              onPressed: () => _confirmDelete(c),
+            ),
     );
   }
 
@@ -800,6 +889,48 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
     );
     if (confirmed == true) await _deleteConversation(c.id);
+  }
+
+  /// 批量删除：先弹确认框，再逐个删除选中的会话。
+  Future<void> _confirmBulkDelete() async {
+    final n = _selectedConversations.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除会话'),
+        content: Text('确定删除选中的 $n 个会话吗？\n每个会话的所有消息将被永久删除。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final notifier = ref.read(conversationsProvider.notifier);
+    for (final id in _selectedConversations.toList()) {
+      await notifier.delete(id);
+    }
+    // 若删到了当前会话，回落到任一剩余会话或新建一个，避免聊天区为空。
+    if (_selectedConversations.contains(_currentConversationId)) {
+      final convs = ref.read(conversationsProvider);
+      if (convs.isEmpty) {
+        await notifier.create();
+      }
+      final list = ref.read(conversationsProvider);
+      setState(() {
+        _currentConversationId = list.isEmpty ? '' : list.first.id;
+        _followStream = true;
+        _selectedImagePath = null;
+      });
+    }
+    setState(() {
+      _selectedConversations.clear();
+      _conversationSelectionMode = false;
+    });
   }
 
   Future<void> _deleteConversation(String id) async {

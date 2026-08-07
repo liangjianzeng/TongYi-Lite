@@ -60,7 +60,8 @@
       "sizeMBDisplay": "2.6 GB",
       "recommended": true,
       "minRamMB": 3072,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": ["推荐"]
     },
     {
       "id": "gemma-4-e2b-q4_k_m",
@@ -81,7 +82,8 @@
       "sizeMBDisplay": "3.1 GB",
       "recommended": true,
       "minRamMB": 4096,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": ["推荐"]
     },
     {
       "id": "qwen3-vl-2b-q4_k_m",
@@ -97,7 +99,8 @@
       "sizeMBDisplay": "1.0 GB",
       "recommended": true,
       "minRamMB": 2048,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": ["推荐"]
     },
     {
       "id": "qwen3-vl-4b-q4_k_m",
@@ -137,6 +140,27 @@
       "sha256Hash": null
     },
     {
+      "id": "qwen3.5-0.8b-mtp-q4_k_m",
+      "name": "Qwen3.5-0.8B (Q4_K_M MTP)",
+      "type": "text",
+      "mtp": true,
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-0.8B-MTP-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 0.53,
+      "sizeMBDisplay": "530 MB",
+      "recommended": false,
+      "minRamMB": 1024,
+      "sha256Hash": null
+    },
+    {
       "id": "qwen3.5-2b-mtp-ud-q4_k_xl",
       "name": "Qwen3.5-2B (MTP UD-Q4_K_XL)",
       "type": "text",
@@ -155,7 +179,8 @@
       "sizeMBDisplay": "1.29 GB",
       "recommended": true,
       "minRamMB": 2048,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": ["推荐"]
     },
     {
       "id": "qwen3.5-4b-q4_k_m",
@@ -176,7 +201,8 @@
       "recommended": true,
       "minRamMB": 3500,
       "sha256Hash": null,
-      "mtp": true
+      "mtp": true,
+      "tags": ["推荐"]
     },
     {
       "id": "qwen3.5-9b-mtp-ud-iq2_m",
@@ -198,6 +224,23 @@
       "recommended": false,
       "minRamMB": 4096,
       "sha256Hash": null
+    },
+    {
+      "id": "lfm2.5-2.6b-q4_k_m",
+      "name": "LFM 2.5 2.6B (Q4_K_M)",
+      "type": "text",
+      "recommended": true,
+      "minRamMB": 2048,
+      "sha256Hash": null,
+      "tags": ["推荐", "速度快"],
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/LiquidAI/LFM2.5-2.6B-GGUF/resolve/main/LFM2.5-2.6B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 1.56,
+      "sizeMBDisplay": "1.6 GB"
     }
   ]
 }

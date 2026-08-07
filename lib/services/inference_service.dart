@@ -73,9 +73,14 @@ class InferenceService {
     int gpuLayers = 20,
     String gpuBackend = 'auto',
     bool enableMtp = false,
+
+    /// 可选的 mmproj 投影器路径（text+mmproj 两文件形态的视觉模型）。
+    /// 原生侧（mtmd）加载该投影器后启用图像理解；null 表示单文件 VL 或文本模型。
+    String? mmprojPath,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
-        '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp)');
+        '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
+        ', mmproj=$mmprojPath)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
@@ -84,6 +89,7 @@ class InferenceService {
         'gpuLayers': gpuLayers,
         'gpuBackend': gpuBackend,
         'enableMtp': enableMtp,
+        'mmprojPath': mmprojPath,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;
@@ -197,6 +203,7 @@ class InferenceService {
   Stream<String> completionWithMessages({
     required String prompt,
     required String messagesJson,
+    String? imagePath,
     int maxTokens = 2048,
     double temperature = 0.7,
     double topP = 0.9,
@@ -213,10 +220,11 @@ class InferenceService {
     });
     _currentTokenSubscription = subscription;
 
-    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson');
+    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson, image=$imagePath');
     _channel.invokeMethod('completionWithMessages', {
       'prompt': prompt,
       'messagesJson': messagesJson,
+      'imagePath': imagePath,
       'maxTokens': maxTokens,
       'temperature': temperature,
       'topP': topP,

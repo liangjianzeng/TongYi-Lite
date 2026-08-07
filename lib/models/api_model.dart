@@ -16,6 +16,9 @@
 /// - [model]   远端模型名（如 `gpt-4o`、`qwen2.5-7b-instruct`）。
 /// - [temperature] 可空的生成温度；null 用全局默认 0.7。
 /// - [maxTokens]   可空的输出上限；null 用全局默认 1024。
+/// - [visionCapable] 该端点是否支持图像理解。由于无法可靠自动探测，由用户在
+///   设置里手动勾选；为 true 时，带图消息会以 OpenAI content-parts 形式
+///   （base64 image_url）发送，否则图片会被剥离为纯文本。
 class ApiModelConfig {
   final String id;
   final String name;
@@ -24,6 +27,7 @@ class ApiModelConfig {
   final String model;
   final double? temperature;
   final int? maxTokens;
+  final bool visionCapable;
 
   const ApiModelConfig({
     required this.id,
@@ -33,6 +37,7 @@ class ApiModelConfig {
     required this.model,
     this.temperature,
     this.maxTokens,
+    this.visionCapable = false,
   });
 
   /// 生效温度：配置值 ?? 0.7。
@@ -48,6 +53,7 @@ class ApiModelConfig {
     String? model,
     double? temperature,
     int? maxTokens,
+    bool? visionCapable,
     bool clearTemperature = false,
     bool clearMaxTokens = false,
   }) {
@@ -60,6 +66,7 @@ class ApiModelConfig {
       temperature:
           clearTemperature ? null : temperature ?? this.temperature,
       maxTokens: clearMaxTokens ? null : maxTokens ?? this.maxTokens,
+      visionCapable: visionCapable ?? this.visionCapable,
     );
   }
 
@@ -71,6 +78,7 @@ class ApiModelConfig {
         'model': model,
         'temperature': temperature,
         'maxTokens': maxTokens,
+        'visionCapable': visionCapable,
       };
 
   factory ApiModelConfig.fromJson(Map<String, dynamic> json) {
@@ -82,6 +90,7 @@ class ApiModelConfig {
       model: json['model'] as String? ?? '',
       temperature: (json['temperature'] as num?)?.toDouble(),
       maxTokens: (json['maxTokens'] as num?)?.toInt(),
+      visionCapable: json['visionCapable'] as bool? ?? false,
     );
   }
 }

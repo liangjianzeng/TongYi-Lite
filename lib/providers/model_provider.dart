@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -235,16 +237,31 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         return false;
       }
 
-      // 4. Warn if this is a vision model (mmproj not yet supported).
+      // 4. 视觉模型：解析 mmproj（text+mmproj 两文件形态需投影器文件）。
       final config = _lookupModelConfig(modelId);
+      String? mmprojPath;
       if (config != null && config.type == ModelType.vision) {
-        debugPrint('[ModelManager] WARNING: Vision model $modelId loaded without mmproj — '
-            'image understanding is NOT available. Text-only inference will work.');
+        if (config.mmproj != null) {
+          final storage = ModelStorageService();
+          mmprojPath = await storage.getMmprojPath(modelId);
+          if (!File(mmprojPath).existsSync()) {
+            debugPrint('[ModelManager] Missing mmproj for $modelId');
+            state = ModelState.error(
+              message: '缺少 mmproj 投影器，请先下载完整模型',
+              modelId: modelId,
+              modelName: displayName,
+            );
+            return false;
+          }
+        }
+        debugPrint('[ModelManager] Vision model $modelId: '
+            '${mmprojPath == null ? '单文件VL' : 'text+mmproj ($mmprojPath)'} — '
+            '原生图像理解已启用。');
         state = ModelState(
           phase: ModelLifecyclePhase.loading,
           modelId: modelId,
           modelName: displayName,
-          loadingLogs: ['⚠️ 视觉模型：当前仅支持文本推理，图像理解功能暂不可用'],
+          loadingLogs: ['🧠 视觉模型：原生图像理解已启用（mmproj）'],
         );
       }
 
@@ -275,6 +292,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         gpuBackend: gpu.gpuBackend,
         nCtx: gpu.contextSize,
         enableMtp: mtp,
+        mmprojPath: mmprojPath, // 预留：原生 vision 重建后启用投影器
       );
 
       if (ok) {
@@ -296,7 +314,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         if (state.latestLog != null && state.latestLog!.contains('内存')) {
           errorMsg = '内存不足，无法加载此模型。请关闭其他应用后重试，或选择更小的模型（如 Qwen3-0.6B）。';
         } else if (config != null && config.type == ModelType.vision) {
-          errorMsg = '视觉模型加载失败。当前版本不支持 mmproj 投影器，建议使用文本模型。';
+          errorMsg = '视觉模型加载失败：mmproj 投影器加载出错，已回退文本推理，请查看加载日志。';
         }
         state = ModelState.error(
           message: errorMsg,

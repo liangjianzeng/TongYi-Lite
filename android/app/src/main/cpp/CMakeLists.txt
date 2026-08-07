@@ -45,10 +45,21 @@ set(FETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD ${KLEIDIAI_VENDOR_DIR} CACHE STRIN
 message(STATUS "KleidiAI vendored source -> ${KLEIDIAI_VENDOR_DIR}")
 # The Android debug variant compiles with -O0 and no NDEBUG, leaving llama.cpp's
 # quantized matmul kernels unoptimized -> ~0.6 tok/s on a 0.5B model. Force -O3
-# -DNDEBUG for the Debug build type. NDEBUG also makes get_logits_ith return
-# nullptr (not GGML_ABORT) on out-of-range, so the JNI null-check actually works.
+# -DNDEBUG. NDEBUG also makes get_logits_ith return nullptr (not GGML_ABORT) on
+# out-of-range, so the JNI null-check actually works.
+#
+# CRITICAL: setting only CMAKE_C_FLAGS_DEBUG is NOT enough. The Android NDK
+# toolchain re-applies its own debug flags (-g) for the Debug config and clobbers
+# that variable (verified: the current build's compile_commands.json shows -march
+# but NO -O3 and NO -DNDEBUG on ggml-cpu / kleidiai sources -> CPU quantized
+# matmul ran unoptimized at ~0.6-1.2 tok/s, i.e. exactly the "all models equally
+# slow / pre-KleidiAI" symptom). Use directory-scoped add_compile_options /
+# add_compile_definitions instead, which the NDK toolchain cannot clobber and
+# which propagate to the llama / ggml-cpu / kleidiai / mtmd subdirectory targets.
 set(CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG" CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_DEBUG "-O3 -DNDEBUG" CACHE STRING "" FORCE)
+add_compile_options(-O3)
+add_compile_definitions(NDEBUG)
 # Target the device's real microarchitecture so ggml-cpu / KleidiAI can emit
 # dotprod + i8mm kernels instead of the slow armv8-a baseline. This APK only
 # ships to the test device (SM8735 / Adreno 825, Armv9), so the narrower -march
@@ -201,6 +212,23 @@ set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
 
 # --------------------------------------------------------------------------
+# mtmd: llama.cpp mainline ships vision/multimodal here. mmproj (multimodal
+# projector) loading + image encoding live in the `mtmd` library, NOT the core
+# `llama` library. Build it as a separate library and link into tongyilite_jni.
+# MTMD_VIDEO auto-disables (LLAMA_SUBPROCESS off) so no ffmpeg is needed.
+# --------------------------------------------------------------------------
+# mtmd/CMakeLists.txt reads ${LLAMA_INSTALL_VERSION} for its VERSION property.
+# That variable is set INSIDE the llama subdirectory scope (llama.cpp CMakeLists
+# line 142), so it is NOT visible here nor in the sibling mtmd subdirectory —
+# without it, set_target_properties(mtmd PROPERTIES VERSION ${...}) fails with
+# "incorrect number of arguments". Define it in our scope before mtmd configures.
+if(NOT DEFINED LLAMA_BUILD_NUMBER)
+    set(LLAMA_BUILD_NUMBER "0")
+endif()
+set(LLAMA_INSTALL_VERSION "0.0.${LLAMA_BUILD_NUMBER}")
+add_subdirectory(${LLAMA_CPP_DIR}/tools/mtmd ${CMAKE_CURRENT_BINARY_DIR}/mtmd)
+
+# --------------------------------------------------------------------------
 # tongyilite_jni: our JNI bridge
 # --------------------------------------------------------------------------
 add_library(tongyilite_jni SHARED
@@ -215,12 +243,14 @@ target_include_directories(tongyilite_jni PRIVATE
     ${LLAMA_CPP_DIR}/common
     ${LLAMA_CPP_DIR}/ggml/include
     ${LLAMA_CPP_DIR}/ggml/src
+    ${LLAMA_CPP_DIR}/tools/mtmd
 )
 
 target_link_libraries(tongyilite_jni
     llama
     llama-common
     llama-common-base
+    mtmd
     android
     log
     dl

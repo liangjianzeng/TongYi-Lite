@@ -106,6 +106,22 @@ class StorageService {
     await db.delete('conversations', where: 'id = ?', whereArgs: [id]);
   }
 
+  /// 更新会话元信息：标题 / 消息条数 / 更新时间。
+  /// 只更新传入的非空字段；updatedAt 始终刷新为当前时间。
+  Future<void> updateConversation({
+    required String id,
+    String? title,
+    int? messageCount,
+  }) async {
+    final db = await database;
+    final updates = <String, dynamic>{
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    };
+    if (title != null) updates['title'] = title;
+    if (messageCount != null) updates['messageCount'] = messageCount;
+    await db.update('conversations', updates, where: 'id = ?', whereArgs: [id]);
+  }
+
   // ----- Messages -----
 
   Future<List<ChatMessage>> getMessages(String conversationId, {int limit = 200}) async {

@@ -60,6 +60,48 @@ ModelType modelTypeFromJson(String value) {
   }
 }
 
+/// 多模态投影器（mmproj）配置 —— 用于「text + mmproj 两文件」形态的视觉模型。
+///
+/// 与 [ModelConfig] 的关系：
+/// - 模型 `mmproj == null` 且 `type == vision` → **单文件自包含 VL**（如 QWEN3），
+///   只需下载/加载主 gguf 一个文件，视觉编码器内置于其中；
+/// - 模型 `mmproj != null` → **text + mmproj 两文件**（如 QWEN3.5），需额外下载/加载
+///   投影器 gguf，主模型才能理解图片。
+///
+/// 原生层按 mmproj 是否存在决定是否加载投影器，两形态共用同一套加载路径。
+class MmprojConfig {
+  final List<MirrorEntry> mirrors;
+  final int sizeBytes;
+  final String sizeMBDisplay;
+  final String? sha256Hash;
+
+  const MmprojConfig({
+    required this.mirrors,
+    required this.sizeBytes,
+    required this.sizeMBDisplay,
+    this.sha256Hash,
+  });
+
+  String get bestMirrorUrl => mirrors.first.url;
+  int get sizeMB => sizeBytes ~/ (1024 * 1024);
+
+  @override
+  String toString() => 'MmprojConfig(${sizeMBDisplay})';
+
+  factory MmprojConfig.fromJson(Map<String, dynamic> json) {
+    // mmproj 文件较小，用 sizeMB（而非主模型的 sizeGB）估算。
+    final sizeMB = (json['sizeMB'] as num?)?.toDouble() ?? 0.0;
+    return MmprojConfig(
+      mirrors: (json['mirrors'] as List)
+          .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      sizeBytes: (sizeMB * 1024 * 1024).round(),
+      sizeMBDisplay: json['sizeMBDisplay'] as String? ?? '${sizeMB.toStringAsFixed(1)} MB',
+      sha256Hash: json['sha256Hash'] as String?,
+    );
+  }
+}
+
 class ModelConfig {
   final String id;
   final String name;
@@ -72,6 +114,12 @@ class ModelConfig {
   final String? sha256Hash;
   final bool mtp;
 
+  /// 特性标签（如 "推荐" / "速度快"），用于 UI 展示的小 chip。
+  final List<String> tags;
+
+  /// 可选的 mmproj 投影器配置。null + type=vision → 单文件自包含 VL。
+  final MmprojConfig? mmproj;
+
   const ModelConfig({
     required this.id,
     required this.name,
@@ -83,13 +131,24 @@ class ModelConfig {
     this.minRamMB = 0,
     this.sha256Hash,
     this.mtp = false,
+    this.tags = const [],
+    this.mmproj,
   });
 
   String get bestMirrorUrl => mirrors.first.url;
   int get sizeMB => sizeBytes ~/ (1024 * 1024);
 
+  /// 该模型是否支持视觉理解（type == vision）。
+  /// 注意：单文件 VL 与 text+mmproj 两文件形态都归入 true，
+  /// 原生层依据 [mmproj] 是否存在决定加载方式。
+  bool get supportsVision => type == ModelType.vision;
+
+  /// 需要 mmproj 的模型，其总下载体积（主 gguf + mmproj）。
+  int get totalBytes => sizeBytes + (mmproj?.sizeBytes ?? 0);
+
   @override
-  String toString() => 'ModelConfig($id, ${sizeMBDisplay}, type=${modelTypeLabel(type)})';
+  String toString() => 'ModelConfig($id, ${sizeMBDisplay}, type=${modelTypeLabel(type)}, '
+      'mmproj=${mmproj == null ? '单文件VL' : '两文件+mmproj'})';
 
   factory ModelConfig.fromJson(Map<String, dynamic> json) {
     final sizeGB = (json['sizeGB'] as num?)?.toDouble() ?? 0.0;
@@ -106,6 +165,11 @@ class ModelConfig {
       minRamMB: json['minRamMB'] as int? ?? 0,
       sha256Hash: json['sha256Hash'] as String?,
       mtp: json['mtp'] as bool? ?? false,
+      tags: (json['tags'] as List?)?.map((e) => e as String).toList() ??
+          const [],
+      mmproj: json['mmproj'] != null
+          ? MmprojConfig.fromJson(json['mmproj'] as Map<String, dynamic>)
+          : null,
     );
   }
 }

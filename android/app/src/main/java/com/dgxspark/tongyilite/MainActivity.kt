@@ -108,12 +108,13 @@ class MainActivity : FlutterActivity() {
         val gpuLayers = call.argument<Int>("gpuLayers") ?: 20
         val gpuBackend = call.argument<String>("gpuBackend") ?: "auto"
         val enableMtp = call.argument<Boolean>("enableMtp") ?: false
+        val mmprojPath = call.argument<String>("mmprojPath")
 
-        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp")
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {
@@ -230,8 +231,9 @@ class MainActivity : FlutterActivity() {
         val maxTokens    = call.argument<Int>("maxTokens") ?: 2048
         val temperature  = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
         val topP         = call.argument<Double>("topP")?.toFloat() ?: 0.9f
+        val imagePath    = call.argument<String>("imagePath")
 
-        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}")
+        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}, image=${imagePath ?: "none"}")
 
         val sink = TokenStream.sink
         updateServiceStatus("AI 思考中...")
@@ -245,6 +247,7 @@ class MainActivity : FlutterActivity() {
                     maxTokens = maxTokens,
                     temperature = temperature,
                     topP = topP,
+                    imagePath = imagePath,
                     onToken = { token ->
                         mainHandler.post { sink?.success(token) }
                         true

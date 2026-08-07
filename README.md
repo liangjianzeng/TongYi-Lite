@@ -184,8 +184,9 @@ git clone --depth 1 --branch v1.24.0 \
     third_party/kleidiai
 ```
 
-> 该目录已在 `.gitignore` 中忽略（可从官方仓库重建）。若 `third_party/kleidiai` 缺失，CMake 配置会
-> 以 `FATAL_ERROR` 明确提示这条命令。
+> ✅ **`third_party/kleidiai` 已直接入库**（连同 `third_party/OpenCL-Headers`），clone 后即可编译，
+> 无需手动 clone。上面这条命令仅用于**更新** KleidiAI 版本时重新 vendor。若目录缺失，CMake 配置会
+> 以 `FATAL_ERROR` 明确提示。
 
 ### 2. 获取 Flutter 依赖
 
@@ -397,8 +398,14 @@ n_ubatch = 512 (GPU backend)                             # GPU 路径放大 pref
   让 ggml 为本机 Adreno/Snapdragon 编译 dotprod + i8mm 手调 matmul 内核（这是**正确做法**；直接往
   `CMAKE_C_FLAGS` 塞 `-march` 不会传到 kai 源文件，会导致内核被静默跳过）。
 - **Debug 构建也强制 `-O3 -DNDEBUG`**：Android debug 变体默认 `-O0` 且无 `NDEBUG`，会让 llama.cpp 的
-  量化 matmul 内核完全失去优化（曾导致 0.5B 模型仅约 0.6 tok/s）。`CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"`
-  修复后大幅提速；`NDEBUG` 附带让越界的 `get_logits_ith` 返回 `nullptr` 而非中止进程。
+  量化 matmul 内核完全失去优化（曾导致 0.5B 模型仅约 0.6 tok/s，0.8B 约 1.2 tok/s）。
+  ⚠️ **坑：仅设 `CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"` 不够**——Android NDK 工具链会在 Debug 配置重新套上
+  自己的 `-g`，**静默顶掉该变量**（实测 2026-08-07：compile_commands 里 180 个 ggml-cpu/kleidiai 源文件
+  只有 `-march`、完全没有 `-O3`/`-DNDEBUG`，全部模型同等降速到 ~1.2 tok/s，即"像没做 KleidiAI"）。
+  **正确做法**：改用 NDK 覆盖不了的目录级 `add_compile_options(-O3)` + `add_compile_definitions(NDEBUG)`，
+  它会传给 llama/ggml-cpu/kleidiai/mtmd 所有子目录目标。`NDEBUG` 附带让越界的 `get_logits_ith` 返回
+  `nullptr` 而非中止进程。改 CMake 后必须清 `.cxx` 全量重建，并核对 compile_commands 同时含
+  `-O3 -DNDEBUG -march`。
 - **版本与微架构要求**：KleidiAI 固定 vendored **v1.24.0**——llama.cpp b10173 的 FetchContent 默认拉取
   `kleidiai-v1.24.0-src.tar.gz`，本项目改为本地 vendored **同一 tag** 以离线构建（版本须与 llama.cpp
   对应 release 匹配）。其 dotprod/i8mm 内核要求 CPU 具备 **Armv8.4-a + dotprod + i8mm** 特性

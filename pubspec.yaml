@@ -1,6 +1,6 @@
 name: tongyi_lite
 description: 端侧离线 AI 智能体
-version: 0.1.3+4
+version: 0.1.4+5
 publish_to: 'none'
 
 environment:

@@ -25,6 +25,22 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 - gradle 守护进程可能持有 `.cxx` 锁导致 `buildCMakeDebug` 偶发失败：`./gradlew.bat --stop` 后重试。
 - 构建/安装前先 `adb devices` 确认设备在线；设备可能因 USB 断开而消失，需等待或重连。
 
+## 关键教训：CMAKE_C_FLAGS_DEBUG 会被 NDK 工具链静默顶掉（CPU 内核失去 -O3 → 全模型变慢）
+
+> **血泪教训（2026-08-07 真机定位）**：`set(CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG")` 看似正确，但
+> **Android NDK 工具链会在 Debug 配置重新套上自己的 `-g`，静默覆盖该变量**，导致 `-O3 -DNDEBUG` 根本没生效。
+> 表现：**所有模型同等降速**（0.8B 1.2 tok/s、2.7B ~1.2），效果像"最早没做 KleidiAI"——因为量化 matmul
+> 内核以默认 `-O0` 编译。此时 KleidiAI 内核虽编进去了（`-march` 有），但没优化级别等于没加速。
+
+**验证铁证**：看 `.cxx/.../compile_commands.json`，若 ggml-cpu/kleidiai 源文件只有 `-march` 而**无 `-O3`、无 `-DNDEBUG`**，即中招。
+
+**正确做法**：改用 NDK 覆盖不了的目录级选项（会传给 llama/ggml-cpu/kleidiai/mtmd 所有子目录目标）：
+```cmake
+add_compile_options(-O3)
+add_compile_definitions(NDEBUG)
+```
+改 CMake 后必须**清 `.cxx` 全量重建**，并核对 compile_commands 同时含 `-O3 -DNDEBUG -march` 才算生效。
+
 ## 关键教训：flutter assemble 输出路径 ≠ gradle 读取路径（Dart 改动"装不进"APK）
 
 > **血泪教训**：改了 Dart 代码后，光 `flutter assemble` + `gradlew assembleDebug -x compileFlutterBuildDebug`，
@@ -58,3 +74,16 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
   先 `input keyevent KEYCODE_WAKEUP` + `KEYCODE_MENU` 唤醒，再 dump 验证界面。
 - Flutter 的 `Switch` 在 uiautomator 里可能不显示为 `android.widget.Switch` 类（可能显示为带
   `checked` 属性的普通 View），别只看 class 名判断开关是否存在。
+
+## 重要：当前模型不支持视觉理解（调试禁用"看图片/截图"）
+
+> **用户不主动喂图；当前驱动模型不支持视觉，无法真正"看"图片/截图。**
+> 一旦任务流程里出现"查看截图/图片"这类依赖视觉的步骤，模型会拿不到任何图像内容，
+> 任务会**彻底僵死**（卡在等图、误判界面等死循环）。
+
+**铁律**：
+- 调试/验证一律走**文本通道**：`uiautomator dump` 的 XML 文本、`adb logcat`、`dumpsys`、
+  文件内容（`cat`/`Read`）等——**绝不依赖截图判读**。
+- 不主动生成、不主动查看 `screen.png` 之类的截图产物；即便存在也不把图像内容当真。
+- 判断 UI 状态只看文本节点/属性（`text`、`content-desc`、`checked`、`bounds`），
+  不要写"打开截图确认一下"这种步骤。
