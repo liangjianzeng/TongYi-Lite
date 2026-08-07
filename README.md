@@ -61,7 +61,7 @@ TongYi-Lite/
 │   ├── build.gradle.kts
 │   ├── gradle.properties
 │   └── settings.gradle.kts
-├── third_party/llama.cpp/          # llama.cpp 子模块 (b10173)
+├── third_party/llama.cpp/          # llama.cpp 源码（b10173，已直接入库，非子模块）
 │   ├── src/                        # 推理引擎源码
 │   ├── ggml/src/ggml-vulkan/       # Vulkan GPU 后端
 │   └── ...
@@ -163,30 +163,24 @@ CPU + KleidiAI（dotprod/i8mm），构建本身不会失败。
 
 ## 构建步骤
 
-### 1. 克隆 + 子模块
+### 1. 克隆仓库
 
 ```bash
 git clone git@github.com:liangjianzeng/TongYi-Lite.git
 cd TongYi-Lite
-git submodule update --init --recursive
 ```
 
-> **注意**：首次 `git submodule update` 会从 GitHub 下载 llama.cpp（约 3000+ 文件），需要网络畅通。国内用户建议使用代理。
+> ✅ **三方依赖已全部直接入库，无需子模块、无需联网下载**：llama.cpp（b10173）、
+> KleidiAI（v1.24.0）、OpenCL-Headers、opencl-stub 源码都提交在 `third_party/` 下，
+> clone 后即可编译，不再需要 `git submodule update --init --recursive`。
 
-### 1b. 准备 KleidiAI 源码（CPU 加速必需）
-
-llama.cpp b10173 在开启 `GGML_CPU_KLEIDIAI` 时会通过 **FetchContent 联网从 GitHub 下载** KleidiAI
-源码；若构建环境无法访问 GitHub（如 CI 沙箱），配置阶段会直接失败。本项目已改为**本地 vendored**：
-
-```bash
-git clone --depth 1 --branch v1.24.0 \
-    https://github.com/ARM-software/kleidiai \
-    third_party/kleidiai
-```
-
-> ✅ **`third_party/kleidiai` 已直接入库**（连同 `third_party/OpenCL-Headers`），clone 后即可编译，
-> 无需手动 clone。上面这条命令仅用于**更新** KleidiAI 版本时重新 vendor。若目录缺失，CMake 配置会
-> 以 `FATAL_ERROR` 明确提示。
+> 以下命令仅用于**更新**某依赖的版本时重新 vendor（日常构建不需要执行）。若目录缺失，CMake
+> 配置会以 `FATAL_ERROR` 明确提示：
+> ```bash
+> git clone --depth 1 --branch v1.24.0 \
+>     https://github.com/ARM-software/kleidiai \
+>     third_party/kleidiai
+> ```
 
 ### 2. 获取 Flutter 依赖
 
@@ -250,18 +244,21 @@ flutter build appbundle --release
 
 | 模型 | 大小 | 类型 | 最低 RAM | 镜像 |
 |------|------|------|---------|------|
+| Qwen3.5-0.8B (MTP UD-Q4_K_XL) | 543 MB | text | 1.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-0.8B (Q4_K_M MTP) | 530 MB | text | 1.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | text | 2.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-4B (Q4_K_M MTP) | 2.4 GB | text | 3.5 GB | hf-mirror + ModelScope |
+| Qwen3.5-9B (MTP UD-IQ2_M) | 3.7 GB | text | 4.0 GB | hf-mirror + ModelScope |
+| LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | text | 2.0 GB | ModelScope |
+| Gemma 3 4B (Q4_K_M) | 2.6 GB | vision | 3.0 GB | hf-mirror + ModelScope |
+| Gemma 4 E2B (Q4_K_M MTP) | 3.1 GB | text | 4.0 GB | hf-mirror + ModelScope |
 | Qwen3-VL-2B (Q4_K_M) | 1.0 GB | vision | 2.0 GB | ModelScope |
 | Qwen3-VL-4B (Q4_K_M) | 2.3 GB | vision | 4.0 GB | ModelScope |
-| Gemma 3 4B (Q4_K_M) | 2.6 GB | vision | 3.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-4B (Q4_K_M) | 2.7 GB | text | 3.5 GB | hf-mirror + ModelScope |
-| Qwen3-0.6B (Q8_0) | 596 MB | text | 1.0 GB | ModelScope |
-| Qwen3-1.7B (Q4_K_M) | 2.3 GB | text | 3.0 GB | ModelScope |
-| Qwen3-4B (Q4_K_M) | 2.3 GB | text | 4.0 GB | ModelScope |
-| Qwen2.5-1.5B (Q4_K_M) | 1.1 GB | text | 1.5 GB | ModelScope |
-| Qwen2.5-0.5B (Q4_K_M) | 468 MB | text | 300 MB | ModelScope |
-| Qwen2.5-3B (Q4_K_M) | 2.0 GB | text | 3.5 GB | ModelScope |
 | Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6.0 GB | hf-mirror + huggingface |
 | Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10.0 GB | hf-mirror + huggingface |
+
+> 带 **MTP** 的模型支持多 token 预测（Multi-Token Prediction），可在设置页为该模型单独开启
+> 投机解码加速。
 
 > 端侧 1-bit / 1.58-bit 量化（Bonsai-27B）：Q1_0（±1，每 128 权重共享 1 个 FP16 scale）与
 > Ternary Q2_0（三值，1.58-bit）。这类超低位模型体积小，但**主分支 llama.cpp CPU/GPU 内核
