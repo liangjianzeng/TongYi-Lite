@@ -44,8 +44,18 @@ class ModelStorageService {
     return p.join('/sdcard', _appFolder, 'models');
   }
 
-  /// 获取模型存储根目录（优先外部存储，回退到内部存储）
-  Future<Directory> getModelsRootDir() async {
+  /// 获取模型存储根目录（优先外部存储，回退到内部存储）。
+  ///
+  /// 目录解析涉及多次异步 IO（外部卷根推导 + 可写性验证），且外部不可写时
+  /// 会回退到内部目录。若每次调用都重新解析，外部/内部切换会导致缓存状态
+  /// 判断跳变（"飘忽"）。因此进程内只解析一次并缓存，保证后续调用返回一致。
+  Future<Directory> getModelsRootDir() {
+    return _rootDirFuture ??= _resolveRootDirOnce();
+  }
+
+  Future<Directory>? _rootDirFuture;
+
+  Future<Directory> _resolveRootDirOnce() async {
     final externalPath = await _resolveExternalModelsDir();
     final externalDir = Directory(externalPath);
     try {
@@ -130,8 +140,32 @@ class ModelStorageService {
   /// text+mmproj 两文件形态（[ModelConfig.mmproj] 非空）还需 mmproj 文件完整存在，
   /// 否则视觉模型无法加载（缺投影器）。
   Future<bool> isFullyCached(ModelConfig model) async {
+    // 多位置查找：全盘扫描（scanExistingModels）能找到 Download/DCIM/内部目录
+    // 里的模型，而轻量校验若只查主目录会漏判 → 同一模型"时好时坏"。
+    // 这里遍历所有候选目录，任一目录内模型完整即视为已缓存。
     try {
-      final dir = await getModelsRootDir();
+      for (final dir in await _allCandidateDirs()) {
+        if (!await dir.exists()) continue;
+        if (await _isFullyCachedIn(dir, model)) return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 判断 [model] 是否「完整」地缓存在目录 [dir] 下。
+  ///
+  /// 仅检查 `.gguf` 是否存在会漏掉两类故障：
+  ///  ① catalog 里 `sizeBytes` 与实文件不符时，一个被截断/不完整的 `.gguf`
+  ///   仍会被当成已缓存；
+  ///  ② 下载中途暂停/失败若残留 `.gguf` 或 `.gguf.tmp`，会被误判为可加载。
+  /// 因此要求：`.gguf` 存在、实文件大小 ≥ catalog 预期大小的 99%（catalog 未给
+  /// 大小时退化为仅存在性判断）、且不存在未完成的 `.gguf.tmp` 部分文件。
+  ///
+  /// text+mmproj 两文件形态（[ModelConfig.mmproj] 非空）还需 mmproj 文件完整存在。
+  Future<bool> _isFullyCachedIn(Directory dir, ModelConfig model) async {
+    try {
       final gguf = File(p.join(dir.path, '${model.id}.gguf'));
       if (!await gguf.exists()) return false;
       final size = await gguf.length();
@@ -158,6 +192,30 @@ class ModelStorageService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// 返回所有可能的模型存储目录（主目录 + 内部 + Download + DCIM + app docs），
+  /// 与 [scanExistingModels] 的扫描范围保持一致，避免"主目录 vs 多位置"矛盾。
+  Future<List<Directory>> _allCandidateDirs() async {
+    final dirs = <Directory>[];
+
+    final externalPath = await _resolveExternalModelsDir();
+    dirs.add(Directory(externalPath));
+
+    // 内部存储（app_flutter/models）
+    dirs.add(Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'));
+
+    // 系统广目录（用户手动放入模型文件）
+    dirs.add(Directory('/sdcard/Download'));
+    dirs.add(Directory('/sdcard/DCIM'));
+
+    // 回退目录（applicationDocumentsDirectory/models）
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      dirs.add(Directory(p.join(appDir.path, 'models')));
+    } catch (_) {}
+
+    return dirs;
   }
 
   /// Get local file size if cached

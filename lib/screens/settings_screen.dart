@@ -218,6 +218,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       builder: (context, ref, _) {
         // 监听模型生命周期状态：加载/卸载后会触发卡片重建，刷新"已加载/卸载"按钮。
         ref.watch(modelManagerProvider);
+        // 全局 MTP 开关状态：决定是否在模型卡片上显示各模型 MTP 开关。
+        final settings = ref.watch(settingsProvider);
         final task = ref.watch(downloadTaskProvider(model.id));
         final isCached = task?.state == DownloadState.completed;
 
@@ -303,6 +305,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                           ),
                       ],
                     ),
+
+                    // MTP 开关：仅当全局 MTP 开关开启且该模型支持 MTP 时显示，
+                    // 用户可按模型逐个配置。端侧 MTP 默认不显示（收益为负）。
+                    if (settings.enableMtpFeature && model.mtp) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'MTP 加速',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          Switch(
+                            value: settings.mtpEnabled(model.id),
+                            onChanged: (v) => ref
+                                .read(settingsProvider.notifier)
+                                .setEnableMtp(model.id, v),
+                          ),
+                        ],
+                      ),
+                    ],
 
                     // Progress bar for downloading models
                     if (task != null &&
@@ -898,6 +921,26 @@ class _InferenceEngineTab extends ConsumerWidget {
                       ref.read(inferenceServiceProvider).setEnableThinking(v);
                     },
                     subtitle: '先输出推理过程再给结论；直接作答更快（仅思考型模型生效）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- MTP 加速全局开关卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    'MTP 加速（端侧推测解码）',
+                    gpuSettings.enableMtpFeature,
+                    gpuNotifier.setEnableMtpFeature,
+                    subtitle: '默认关闭；开启后在模型卡片配置各模型 MTP（仅高端机按需开启）',
                   ),
                 ],
               ),

@@ -32,6 +32,15 @@ class InferenceSettings {
   /// 互不影响。
   final Map<String, bool> mtpEnabledByModel;
 
+  /// 全局 MTP 功能总开关（默认关闭）。用于控制整个 APP 的 MTP 是否
+  /// 「可见可用」：
+  /// - 关闭（默认）：模型卡片不显示各模型的 MTP 开关，加载模型时也强制
+  ///   不启用 MTP（即使某模型曾配置开启）。
+  /// - 开启：模型列表卡片显示各支持 MTP 模型的开关，用户可逐个配置；
+  ///   加载时按 `enableMtpFeature && mtpEnabled(modelId)` 决定是否启用。
+  /// 端侧 MTP 性能差收益差，故默认关闭，仅高端机用户按需打开测试。
+  final bool enableMtpFeature;
+
   /// 启动后自动加载的「默认模型」id。null = 未设置。
   /// 用户在模型管理页对某个已缓存模型勾选「设为默认」后持久化；
   /// 启动进入首页时若该模型已缓存则自动加载，保证开箱即用。
@@ -54,6 +63,7 @@ class InferenceSettings {
     this.enableThinking = false,
     this.gpuBackend = 'auto',
     Map<String, bool>? mtpEnabledByModel,
+    this.enableMtpFeature = false,
     this.defaultModelId,
     List<ApiModelConfig>? apiModels,
     this.activeApiModelId,
@@ -79,6 +89,7 @@ class InferenceSettings {
       bool? enableThinking,
       String? gpuBackend,
       Map<String, bool>? mtpEnabledByModel,
+      bool? enableMtpFeature,
       String? defaultModelId,
       // defaultModelId 为可空 String，无法用 `?? this` 区分「未传」与「清空」，
       // 故增加显式清空标记，供取消默认模型时使用。
@@ -94,6 +105,7 @@ class InferenceSettings {
       enableThinking: enableThinking ?? this.enableThinking,
       gpuBackend: gpuBackend ?? this.gpuBackend,
       mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
+      enableMtpFeature: enableMtpFeature ?? this.enableMtpFeature,
       defaultModelId: clearDefaultModel
           ? null
           : defaultModelId ?? this.defaultModelId,
@@ -111,6 +123,7 @@ class InferenceSettings {
         'enableThinking': enableThinking,
         'gpuBackend': gpuBackend,
         'mtpEnabledByModel': mtpEnabledByModel,
+        'enableMtpFeature': enableMtpFeature,
         'defaultModelId': defaultModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
         'activeApiModelId': activeApiModelId,
@@ -128,6 +141,8 @@ class InferenceSettings {
       // 旧版本存的是全局 bool enableMtp：若读到它，则映射为所有支持模型的
       // 默认值，保证老配置不丢。
       mtpEnabledByModel: _migrateLegacyMtp(json),
+      // 全局 MTP 开关：旧配置无此字段时默认关闭（向后兼容）。
+      enableMtpFeature: json['enableMtpFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
       // 旧配置缺这两个字段时默认空列表 + 停用，向后兼容。
       apiModels: _parseApiModels(json['apiModels']),
