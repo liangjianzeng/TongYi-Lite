@@ -172,8 +172,8 @@ class ChatBubble extends StatelessWidget {
     return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
-  /// 性能指标：首Tok / 耗时 / 速率。
-  /// 例：'首Tok 1.2s · 耗时 5.3s · 14.5 tok/s'
+  /// 性能指标：首Tok / 识图(仅视觉) / 耗时 / 速率。
+  /// 例：'首Tok 1.2s · 识图 3.4s · 耗时 5.3s · 14.5 tok/s'
   String _formatStats(InferenceStats s) {
     final first = s.firstTokenMs >= 1000
         ? '${(s.firstTokenMs / 1000).toStringAsFixed(1)}s'
@@ -182,6 +182,12 @@ class ChatBubble extends StatelessWidget {
         ? '${(s.totalMs / 1000).toStringAsFixed(1)}s'
         : '${s.totalMs}ms';
     final rate = s.tokPerSec.toStringAsFixed(1);
-    return '首Tok $first · 耗时 $total · $rate tok/s';
+    // 视觉回复额外展示「识图时间」（图像编码耗时）。
+    final vision = s.visionMs > 0
+        ? (s.visionMs >= 1000
+            ? ' · 识图 ${(s.visionMs / 1000).toStringAsFixed(1)}s'
+            : ' · 识图 ${s.visionMs}ms')
+        : '';
+    return '首Tok $first$vision · 耗时 $total · $rate tok/s';
   }
 }

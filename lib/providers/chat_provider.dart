@@ -395,6 +395,7 @@ class ChatNotifier extends StateNotifier<bool> {
         // API 后备路径没有原生 stats，改用 Dart 计数 + 总墙钟估算。
         int realTokens = tokenCount;
         double genMs = 0.0;
+        int visionMs = 0;
         if (!useApi) {
           Map<String, dynamic> genStats = {};
           try {
@@ -402,12 +403,14 @@ class ChatNotifier extends StateNotifier<bool> {
           } catch (_) {}
           realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
           genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+          visionMs = (genStats['t_vision_ms'] as num?)?.toInt() ?? 0;
         }
         final tokensPerSec =
             genMs > 0 ? realTokens * 1000 / genMs : (totalMs > 0 ? realTokens * 1000 / totalMs : 0.0);
 
         manager.appendInferenceLog(
-          '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
+          '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms'
+          '${visionMs > 0 ? ' | 识图 ${visionMs}ms' : ''} | 总耗时 ${totalMs}ms'
           ' | ${tokensPerSec.toStringAsFixed(1)} tok/s | 输出 ${fullResponse.length} 字',
         );
 
@@ -419,6 +422,7 @@ class ChatNotifier extends StateNotifier<bool> {
             firstTokenMs: firstTokenMs,
             totalMs: totalMs,
             tokPerSec: tokensPerSec,
+            visionMs: visionMs,
           ),
         );
         await _storage.saveMessage(assistantMsg);

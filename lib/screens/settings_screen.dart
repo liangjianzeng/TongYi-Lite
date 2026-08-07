@@ -1258,6 +1258,11 @@ class _buildAboutTab extends StatelessWidget {
   }
 }
 
+// About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
+// versionName（0.1.5）保持同步。离线沙箱无法下载 package_info_plus 的
+// AGP 依赖，故不引插件动态读取，直接用此常量。
+const _appVersion = '0.1.5';
+
 class _AboutCard extends StatelessWidget {
   const _AboutCard();
 
@@ -1280,7 +1285,7 @@ class _AboutCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            _AboutRow(label: '版本', value: '0.1.3'),
+            _AboutRow(label: '版本', value: _appVersion),
             _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
