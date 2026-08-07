@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/model_info.dart';
@@ -287,6 +288,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        // 视觉能力标签：支持视觉理解 →「识图」，否则 →「文本」。
+                        // 依据目录里 type==vision（含单文件 VL 与 text+mmproj 两文件形态）。
+                        _buildModelTag(
+                          icon: model.type == ModelType.vision ? '🖼️' : '💬',
+                          label: model.type == ModelType.vision ? '识图' : '文本',
+                          color: model.type == ModelType.vision
+                              ? Colors.purple
+                              : Colors.blueGrey,
+                          bg: model.type == ModelType.vision
+                              ? Colors.purple.shade100
+                              : Colors.blueGrey.shade100,
+                        ),
                         // 已缓存标记：已下载一眼可辨。
                         if (isCached)
                           _buildModelTag(
@@ -383,12 +396,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     switch (activeState) {
       case DownloadState.downloading:
-        return OutlinedButton.icon(
-          onPressed: () => ref
-              .read(downloadNotifierProvider.notifier)
-              .pauseDownload(model.id),
-          icon: const Icon(Icons.pause, size: 18),
-          label: const Text('暂停'),
+        // 下载中：暂停 + 删除（删除会取消当前下载并移除已下载的半成品文件，
+        // 必须先弹确认框避免误删；确认后真正取消/清理）。
+        return Row(
+          children: [
+            OutlinedButton.icon(
+              onPressed: () => ref
+                  .read(downloadNotifierProvider.notifier)
+                  .pauseDownload(model.id),
+              icon: const Icon(Icons.pause, size: 18),
+              label: const Text('暂停'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: () => _confirmDeleteDownloading(model, context),
+              icon: const Icon(Icons.delete, size: 18),
+              label: const Text('删除'),
+              style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red.shade700),
+            ),
+          ],
         );
 
       case DownloadState.paused:
@@ -519,6 +546,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       if (ref.read(settingsProvider).defaultModelId == model.id) {
         await ref.read(settingsProvider.notifier).setDefaultModel(null);
       }
+    }
+  }
+
+  /// 删除「下载中」的模型任务：先弹确认框（会丢失已下载的半成品，需重下），
+  /// 确认后取消当前下载并清理主 gguf / mmproj 及其残留 .tmp 文件。
+  Future<void> _confirmDeleteDownloading(
+      ModelConfig model, BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除下载中的模型？'),
+        content: Text(
+          '删除「${model.name}」会取消当前下载，并移除已下载的半成品文件'
+          '（${_formatSize(model.totalBytes)}，含 mmproj 投影器）。\n\n'
+          '之后需要重新下载才能再用。确定删除吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      // cancelDownload 会取消进行中的传输并清理 gguf/mmproj 及其 .tmp。
+      await ref
+          .read(downloadNotifierProvider.notifier)
+          .cancelDownload(model.id);
     }
   }
 
@@ -1263,6 +1324,21 @@ class _buildAboutTab extends StatelessWidget {
 // AGP 依赖，故不引插件动态读取，直接用此常量。
 const _appVersion = '0.1.5';
 
+/// GitHub 项目主页地址（README 介绍与使用说明）。
+const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
+
+/// 通过系统外部浏览器打开 GitHub README 页面。
+Future<void> _openGithub(BuildContext context) async {
+  final uri = Uri.parse(_githubUrl);
+  final launched =
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+  if (!launched && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('无法打开浏览器，请手动访问：$_githubUrl')),
+    );
+  }
+}
+
 class _AboutCard extends StatelessWidget {
   const _AboutCard();
 
@@ -1289,6 +1365,28 @@ class _AboutCard extends StatelessWidget {
             _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
+            const SizedBox(height: 8),
+            const Divider(),
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: () => _openGithub(context),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.open_in_new, size: 18, color: Colors.indigo),
+                  SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      'GitHub 项目主页 · README 介绍与使用说明',
+                      style: TextStyle(
+                        color: Colors.indigo,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),

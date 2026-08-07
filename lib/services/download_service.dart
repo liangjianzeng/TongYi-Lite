@@ -19,7 +19,9 @@ class DownloadService {
     sendTimeout: const Duration(minutes: 5),
   ));
 
-  static const int maxConcurrentDownloads = 1; // Only one at a time to avoid CDN issues
+  // 最多同时下载 2 个模型（CDN 实测可承受）。注意：每个视觉模型内部是「主 gguf
+  // + mmproj」顺序下载，占用同一槽位；故 2 并发 = 最多 2 个模型并行。
+  static const int maxConcurrentDownloads = 2;
 
   final Map<String, _ActiveDownload> _activeDownloads = {};
   final Map<String, DateTime> _lastProgressTime = {};

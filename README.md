@@ -34,7 +34,7 @@
 |------|------|
 | **目标平台** | Android APK (API 33+) |
 | **推理引擎** | llama.cpp b10173（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod/i8mm CPU；vendored 提交 f5b9bd3，2026-07-29） |
-| **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏 |
+| **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏；支持**最多 2 个模型并行下载**、暂停/继续/删除、断点续传 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
 | **模型下载源** | hf-mirror.com → ModelScope（自动回退，见 `assets/models_catalog.json`） |
@@ -216,7 +216,15 @@ flutter build appbundle --release
 2. 在"模型管理"区域选择需要的模型，点击 **[下载]**
 3. 下载过程中可实时查看进度条、百分比和预估剩余时间
 4. 支持 [暂停] / [继续] 操作，网络中断后自动断点续传
-5. 下载完成后点击 **[加载到内存]** 即可在聊天中使用
+5. 下载中可点 **[删除]** 取消任务并移除半成品文件（弹框确认，防误删）
+6. **最多同时下载 2 个模型**（第 3 个会被拒绝）
+7. 下载完成后点击 **[加载到内存]** 即可在聊天中使用
+8. 每个模型卡片带能力标签：**🖼️ 识图**（支持视觉理解）/ **💬 文本**
+
+> **视觉模型下载闭环**：`type=vision` 且带 `mmproj` 的模型（如 Qwen3.5-2B）会先下载主
+> `.gguf`、再自动下载投影器 `.mmproj`，两者都完整才算"已缓存"。若主模型已下、缺投影器，
+> 再次点击 **[下载(含投影器)]** 会跳过完整主模型、只补下投影器。加载前还会校验 mmproj
+> 完整（存在、无残留 `.tmp`、非空），损坏/缺失时提示重新下载完整模型，避免原生加载崩溃。
 
 ### 镜像策略（HuggingFace 优先走国内）
 
@@ -244,18 +252,19 @@ flutter build appbundle --release
 
 | 模型 | 大小 | 类型 | 最低 RAM | 镜像 |
 |------|------|------|---------|------|
-| Qwen3.5-0.8B (MTP UD-Q4_K_XL) | 543 MB | text | 1.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-0.8B (Q4_K_M MTP) | 530 MB | text | 1.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | text | 2.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-0.8B (MTP UD-Q4_K_XL) | 543 MB | vision | 1.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-0.8BN (Q4_0 MTP) | 497 MB | text | 1.0 GB | hf-mirror + ModelScope |
+| Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | vision | 2.0 GB | hf-mirror + ModelScope |
 | Qwen3.5-4B (Q4_K_M MTP) | 2.4 GB | text | 3.5 GB | hf-mirror + ModelScope |
 | Qwen3.5-9B (MTP UD-IQ2_M) | 3.7 GB | text | 4.0 GB | hf-mirror + ModelScope |
 | LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | text | 2.0 GB | ModelScope |
-| Gemma 3 4B (Q4_K_M) | 2.6 GB | vision | 3.0 GB | hf-mirror + ModelScope |
+| Gemma 3 4B (Q4_K_M) | 2.6 GB | text | 3.0 GB | hf-mirror + ModelScope |
 | Gemma 4 E2B (Q4_K_M MTP) | 3.1 GB | text | 4.0 GB | hf-mirror + ModelScope |
-| Qwen3-VL-2B (Q4_K_M) | 1.0 GB | vision | 2.0 GB | ModelScope |
-| Qwen3-VL-4B (Q4_K_M) | 2.3 GB | vision | 4.0 GB | ModelScope |
 | Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6.0 GB | hf-mirror + huggingface |
 | Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10.0 GB | hf-mirror + huggingface |
+
+> 视觉模型（`vision`）含投影器 mmproj：Qwen3.5-0.8B/2B 为 `text + mmproj` 两文件形态，
+> 总下载体积 = 主模型 + 投影器。UI 上的 **🖼️ 识图** 标签即对应此类模型。
 
 > 带 **MTP** 的模型支持多 token 预测（Multi-Token Prediction），可在设置页为该模型单独开启
 > 投机解码加速。
@@ -292,7 +301,8 @@ flutter build appbundle --release
 - **Dio** HTTP 客户端 + `onReceiveProgress` 回调实时上报进度
 - **HTTP Range** 头实现断点续传（检查 `.tmp` 文件长度后从断点继续）
 - **Riverpod StateNotifier** 管理下载状态，UI 自动响应更新
-- 最多同时 **1 个并发下载**任务
+- **最多同时 2 个并发下载**任务（容量守卫 + 界面计数双重限制）
+- 下载中支持 **[暂停]** / **[删除]**：删除会取消当前传输并清理主模型 / mmproj 及其 `.tmp` 残留
 
 ### 模型加载与管理
 
@@ -514,6 +524,18 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 `GGML_ASSERT(cur_p.selected >= 0)` 直接 SIGABRT（debug 构建，`llama-sampler.cpp:870`）。
 链末必须追加 `llama_sampler_init_dist(seed)` 实际抽样并设置 `selected`。
 采样链完整顺序：`penalties → top_k(128) → top_p → temp → dist`。
+
+### 视觉模型 mmproj 缺失/损坏闪退（已修复 · 2026-08-08）
+
+**症状**：下载文本模型后未自动补全视觉投影器 mmproj，加载时提示"缺少 mmproj"后闪退。
+
+**根因**：加载路径只检查 `mmproj` 文件 `existsSync()`，损坏/不完整的投影器（下载中断残留的
+`.mmproj.tmp`、0 字节、或 catalog 估算体积与实际不符导致提前 rename）也会放行进原生
+`mtmd_init_from_file`，视觉推理时崩溃。
+
+**修复**：① 视觉模型下载闭环——主 `.gguf` 与 `.mmproj` 顺序下载，两者完整才算"已缓存"，
+缺投影器时点击 **[下载(含投影器)]** 只补下投影器；② 加载前做完整性复核（存在、无 `.tmp`、
+非空），不合格则优雅提示"缺少或不完整的 mmproj，请重新下载完整模型"，不再闪退。
 
 ---
 
