@@ -80,11 +80,20 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     # Host toolchain is fixed (see host-toolchain-mingw.cmake: MinGW-w64 GCC +
     # the Android SDK's ninja + fully static linking), so the Vulkan backend
     # can be enabled for arm64 devices.
-    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-    message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+    # The LunarG SDK (glslc + vulkan.hpp) and a host C++ compiler (MinGW-w64)
+    # are required to build ggml-vulkan. If either is absent, skip the Vulkan
+    # backend so the build still succeeds (OpenCL + CPU remain); see README.
+    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
+    set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
+    if(EXISTS "${_vk_sdk}/Bin/glslc.exe" AND EXISTS "${_vk_sdk}/Include/vulkan/vulkan.hpp" AND EXISTS "${_vk_host_tc}")
+        set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+        message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+    else()
+        set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+        message(WARNING "Vulkan SDK (${_vk_sdk}) / MinGW host toolchain missing -> Vulkan backend skipped; OpenCL + CPU remain")
+    endif()
 
     # Point FindVulkan (glslc) and find_package(SPIRV-Headers) at the LunarG SDK.
-    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
     set(ENV{VULKAN_SDK} "${_vk_sdk}")
     # Explicitly hint find_package(SPIRV-Headers) at the SDK config dir so the
     # Vulkan backend configures reliably regardless of CMAKE_PREFIX_PATH state.
