@@ -100,6 +100,7 @@ struct GenStats {
     int    n_gen       = 0;   // real llama.cpp decoded tokens (tok/s numerator)
     double t_gen_ms    = 0;   // pure generation wall time (tok/s denom, excludes prefill)
     double t_prompt_ms = 0;   // prompt prefill time (diagnostics only)
+    double t_vision_ms = 0;   // image-encode (vision) wall time, ms — "识图时间"
 };
 static GenStats g_last_stats;
 
@@ -299,6 +300,7 @@ struct InferenceEngine {
     double t_prompt_ms = 0;
     double t_gen_ms = 0;
     int32_t n_gen = 0;
+    double t_vision_ms = 0;   // vision image-encode wall time (识图时间)
 
     // Persistent KV-cache write cursor. We use the proven com.arm.aichat design:
     // each turn APPENDS its tokens at monotonically increasing positions into the
@@ -851,17 +853,33 @@ struct InferenceEngine {
         kv_position = 0;
 
         // 5. Eval all chunks (text -> llama_decode, image -> encode + decode).
+        //    手动遍历 chunks，单独累计「图像编码」(识图) 耗时 t_vision_ms，
+        //    便于 UI 展示识别一张图片花了多久 —— 图像编码是视觉回复的主要耗时。
         auto t_start = std::chrono::high_resolution_clock::now();
+        t_vision_ms = 0.0;
         llama_pos n_past = 0;
-        res = mtmd_helper_eval_chunks(mmproj, context, chunks, n_past,
-                                      /*seq_id=*/0,
-                                      (int32_t)ctx_params.n_batch,
-                                      /*logits_last=*/true, &n_past);
+        {
+            const size_t n_chunks = mtmd_input_chunks_size(chunks);
+            for (size_t i = 0; i < n_chunks; i++) {
+                auto chunk = mtmd_input_chunks_get(chunks, i);
+                const bool chunk_logits_last = (i == n_chunks - 1);
+                auto s = std::chrono::high_resolution_clock::now();
+                res = mtmd_helper_eval_chunk_single(mmproj, context, chunk, n_past,
+                                                    /*seq_id=*/0,
+                                                    (int32_t)ctx_params.n_batch,
+                                                    chunk_logits_last, &n_past);
+                auto e = std::chrono::high_resolution_clock::now();
+                if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                    t_vision_ms += std::chrono::duration<double, std::milli>(e - s).count();
+                }
+                if (res != 0) break;
+            }
+        }
         kv_position = n_past;
         auto t_end = std::chrono::high_resolution_clock::now();
         t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        LOGI("vision: eval chunks done, n_past=%lld, prompt %.0fms",
-             (long long)n_past, t_prompt_ms);
+        LOGI("vision: eval chunks done, n_past=%lld, prompt %.0fms, 识图 %.0fms",
+             (long long)n_past, t_prompt_ms, t_vision_ms);
 
         mtmd_input_chunks_free(chunks);
         mtmd_bitmap_free(bm);
@@ -969,8 +987,16 @@ struct InferenceEngine {
         prev_prompt_tokens.clear();
 
         is_running = false;
-        LOGI("vision generation done: %d tokens, %.1f tok/s", n_gen,
-             t_gen_ms > 0 ? (n_gen * 1000.0 / t_gen_ms) : 0.0);
+
+        // 图片路径也必须回写 g_last_stats，否则 Dart 读到的是上一次（或默认 0）
+        // stats → UI 的 tok/s 一直显示 0.0。
+        g_last_stats.n_gen       = n_gen;
+        g_last_stats.t_gen_ms    = t_gen_ms;
+        g_last_stats.t_prompt_ms = t_prompt_ms;
+        g_last_stats.t_vision_ms = t_vision_ms;
+        LOGI("vision generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms, 识图 %.0fms)",
+             n_gen, t_gen_ms > 0 ? (n_gen * 1000.0 / t_gen_ms) : 0.0,
+             t_prompt_ms, t_gen_ms, t_vision_ms);
         return result;
     }
 
@@ -1718,6 +1744,8 @@ struct InferenceEngine {
             g_last_stats.n_gen       = n_gen;
             g_last_stats.t_gen_ms    = t_gen_ms;
             g_last_stats.t_prompt_ms = t_prompt_ms;
+            // 文本回复无图像编码，识图时间清零避免残留上次视觉回复的值。
+            g_last_stats.t_vision_ms = 0.0;
             {
                 std::string hex;
                 char tmp[4];
@@ -2185,10 +2213,11 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
 
 JNIEXPORT jstring JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, jobject) {
-    char buf[160];
+    char buf[192];
     snprintf(buf, sizeof(buf),
-             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f}",
-             g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms);
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f}",
+             g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms,
+             g_last_stats.t_vision_ms);
     return utf8_to_jstring(env, buf);
 }
 

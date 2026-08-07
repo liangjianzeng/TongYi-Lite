@@ -132,7 +132,7 @@ class InferenceSettings {
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
     return InferenceSettings(
       // 缺省/旧文件未存该字段时默认开启 GPU：auto 后端会在无 GPU 时自动
-      // 回落 CPU，V0.1.3 已验证 Adreno 825 OpenCL/Vulkan 均正常。
+      // 回落 CPU，V0.1.5 已验证 Adreno 825 OpenCL/Vulkan 均正常。
       enableGpu: json['enableGpu'] as bool? ?? true,
       gpuLayers: (json['gpuLayers'] as num?)?.toInt() ?? 100,
       contextSize: (json['contextSize'] as num?)?.toInt() ?? 4096,

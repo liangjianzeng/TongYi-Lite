@@ -5,23 +5,27 @@ class InferenceStats {
   final int firstTokenMs; // 首 token 延迟（发送到首个 token 的时间）
   final int totalMs;      // 总耗时
   final double tokPerSec; // 生成速率（token/秒）
+  final int visionMs;     // 识图时间（图像编码耗时，仅视觉回复 >0）
 
   const InferenceStats({
     required this.firstTokenMs,
     required this.totalMs,
     required this.tokPerSec,
+    this.visionMs = 0,
   });
 
   Map<String, dynamic> toMap() => {
         'firstTokenMs': firstTokenMs,
         'totalMs': totalMs,
         'tokPerSec': tokPerSec,
+        'visionMs': visionMs,
       };
 
   factory InferenceStats.fromMap(Map<String, dynamic> map) => InferenceStats(
         firstTokenMs: (map['firstTokenMs'] as num?)?.toInt() ?? 0,
         totalMs: (map['totalMs'] as num?)?.toInt() ?? 0,
         tokPerSec: (map['tokPerSec'] as num?)?.toDouble() ?? 0,
+        visionMs: (map['visionMs'] as num?)?.toInt() ?? 0,
       );
 }
 

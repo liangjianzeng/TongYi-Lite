@@ -45,7 +45,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-            android:theme="@style/Theme.TongYiLite"
+            android:theme="@style/LaunchTheme"
             android:windowSoftInputMode="adjustResize">
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
