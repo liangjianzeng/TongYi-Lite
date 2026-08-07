@@ -269,7 +269,8 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       //    直接从持久化文件读取设置，避免 settingsProvider 异步 _load 完成前
       //    读到默认 enableGpu=false，导致启动后直接加载模型时 GPU 未生效。
       final gpu = await _ref.read(settingsServiceProvider).load();
-      final mtp = gpu.mtpEnabled(modelId);
+      // 全局 MTP 总开关关闭时，即使某模型曾配置开启也强制不启用（可见可用控制）。
+      final mtp = gpu.enableMtpFeature && gpu.mtpEnabled(modelId);
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
