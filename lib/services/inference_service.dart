@@ -204,6 +204,7 @@ class InferenceService {
     required String prompt,
     required String messagesJson,
     String? imagePath,
+    String? audioPath,
     int maxTokens = 2048,
     double temperature = 0.7,
     double topP = 0.9,
@@ -220,11 +221,12 @@ class InferenceService {
     });
     _currentTokenSubscription = subscription;
 
-    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson, image=$imagePath');
+    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson, image=$imagePath, audio=$audioPath');
     _channel.invokeMethod('completionWithMessages', {
       'prompt': prompt,
       'messagesJson': messagesJson,
       'imagePath': imagePath,
+      'audioPath': audioPath,
       'maxTokens': maxTokens,
       'temperature': temperature,
       'topP': topP,
@@ -287,6 +289,42 @@ class InferenceService {
       await _channel.invokeMethod('resetContext');
     } catch (e) {
       debugPrint('[InferenceService] resetContext failed: $e');
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 语音输入（端侧拾音 + 原生语音理解）
+  // ------------------------------------------------------------------
+
+  /// 当前已加载模型是否支持语音（音频）理解。false 时麦克风按钮应禁用。
+  Future<bool> supportsAudio() async {
+    try {
+      return await _channel.invokeMethod('supportsAudio') == true;
+    } catch (e) {
+      debugPrint('[InferenceService] supportsAudio failed: $e');
+      return false;
+    }
+  }
+
+  /// 开始麦克风拾音（按住说话）。返回 true 表示已开始；原生侧按模型要求的
+  /// 采样率录制 16-bit PCM 单声道。
+  Future<bool> startRecording() async {
+    try {
+      return await _channel.invokeMethod('startRecording') == true;
+    } catch (e) {
+      debugPrint('[InferenceService] startRecording failed: $e');
+      return false;
+    }
+  }
+
+  /// 停止拾音并落盘 WAV 文件。返回 WAV 路径；过短/失败时返回 null。
+  Future<String?> stopRecording() async {
+    try {
+      final path = await _channel.invokeMethod('stopRecording');
+      return path as String?;
+    } catch (e) {
+      debugPrint('[InferenceService] stopRecording failed: $e');
+      return null;
     }
   }
 

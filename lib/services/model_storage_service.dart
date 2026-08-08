@@ -161,9 +161,14 @@ class ModelStorageService {
   ///   仍会被当成已缓存；
   ///  ② 下载中途暂停/失败若残留 `.gguf` 或 `.gguf.tmp`，会被误判为可加载。
   /// 因此要求：`.gguf` 存在、实文件大小 ≥ catalog 预期大小的 99%（catalog 未给
-  /// 大小时退化为仅存在性判断）、且不存在未完成的 `.gguf.tmp` 部分文件。
+  /// 大小时退化为仅存在性判断）。
   ///
   /// text+mmproj 两文件形态（[ModelConfig.mmproj] 非空）还需 mmproj 文件完整存在。
+  ///
+  /// 自愈：当主文件已完整存在时，顺带清理上次中断下载残留的 `.tmp`（如重下时
+  /// 流被截断留下的 `.mmproj.tmp`）。此前「存在 .tmp 即判未缓存」会把一个
+  /// 已完整可用的模型永久误判为「未下载」——点击下载又重复拉取投影器，正是
+  /// 用户反馈的 bug。完整主文件 + 残留 .tmp 时，.tmp 只是过期残留，删掉即可。
   Future<bool> _isFullyCachedIn(Directory dir, ModelConfig model) async {
     try {
       final gguf = File(p.join(dir.path, '${model.id}.gguf'));
@@ -172,9 +177,7 @@ class ModelStorageService {
       if (model.sizeBytes > 0 && size < (model.sizeBytes * 0.99).round()) {
         return false;
       }
-      if (await File(p.join(dir.path, '${model.id}.gguf.tmp')).exists()) {
-        return false;
-      }
+      await _cleanStaleTmp(dir, model.id, '.gguf');
       // mmproj 两文件形态：投影器必须完整存在，否则视为未缓存。
       final mm = model.mmproj;
       if (mm != null) {
@@ -184,14 +187,24 @@ class ModelStorageService {
         if (mm.sizeBytes > 0 && mmSize < (mm.sizeBytes * 0.99).round()) {
           return false;
         }
-        if (await File(p.join(dir.path, '${model.id}.mmproj.tmp')).exists()) {
-          return false;
-        }
+        await _cleanStaleTmp(dir, model.id, '.mmproj');
       }
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  /// 主文件（`.gguf` / `.mmproj`）已完整时，清理上次中断下载残留的对应 `.tmp`。
+  /// 失败静默忽略（尽力而为的自愈），不影响缓存判定结果。
+  Future<void> _cleanStaleTmp(Directory dir, String modelId, String suffix) async {
+    try {
+      final tmp = File(p.join(dir.path, '$modelId$suffix.tmp'));
+      if (await tmp.exists()) {
+        await tmp.delete();
+        debugPrint('[ModelStorage] 清理残留 $suffix.tmp: ${tmp.path}');
+      }
+    } catch (_) {}
   }
 
   /// 返回所有可能的模型存储目录（主目录 + 内部 + Download + DCIM + app docs），

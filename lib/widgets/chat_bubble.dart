@@ -10,6 +10,7 @@ class ChatBubble extends StatelessWidget {
   final bool isStreaming;
   final bool showAvatar;
   final String? imagePath;
+  final String? audioPath;
   final InferenceStats? inferenceStats;
 
   const ChatBubble({
@@ -20,6 +21,7 @@ class ChatBubble extends StatelessWidget {
     this.isStreaming = false,
     this.showAvatar = true,
     this.imagePath,
+    this.audioPath,
     this.inferenceStats,
   });
 
@@ -58,6 +60,30 @@ class ChatBubble extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // 语音消息标记（端侧语音理解）
+                      if (audioPath != null && audioPath!.isNotEmpty) ...[
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.mic,
+                                size: 14,
+                                color: _isUser
+                                    ? theme.colorScheme.onPrimary
+                                    : theme.colorScheme.onSurfaceVariant),
+                            const SizedBox(width: 4),
+                            Text(
+                              '语音',
+                              style: TextStyle(
+                                color: _isUser
+                                    ? theme.colorScheme.onPrimary
+                                    : theme.colorScheme.onSurfaceVariant,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                      ],
                       // Show image if present (user messages only)
                       if (imagePath != null && imagePath!.isNotEmpty) ...[
                         ClipRRect(
@@ -172,8 +198,8 @@ class ChatBubble extends StatelessWidget {
     return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
-  /// 性能指标：首Tok / 识图(仅视觉) / 耗时 / 速率。
-  /// 例：'首Tok 1.2s · 识图 3.4s · 耗时 5.3s · 14.5 tok/s'
+  /// 性能指标：首Tok / 视觉(仅视觉) / 耗时 / 速率。
+  /// 例：'首Tok 1.2s · 视觉 3.4s · 耗时 5.3s · 14.5 tok/s'
   String _formatStats(InferenceStats s) {
     final first = s.firstTokenMs >= 1000
         ? '${(s.firstTokenMs / 1000).toStringAsFixed(1)}s'
@@ -182,12 +208,17 @@ class ChatBubble extends StatelessWidget {
         ? '${(s.totalMs / 1000).toStringAsFixed(1)}s'
         : '${s.totalMs}ms';
     final rate = s.tokPerSec.toStringAsFixed(1);
-    // 视觉回复额外展示「识图时间」（图像编码耗时）。
+    // 视觉回复额外展示「视觉」耗时，语音回复展示「听音」耗时（媒体编码耗时）。
     final vision = s.visionMs > 0
         ? (s.visionMs >= 1000
-            ? ' · 识图 ${(s.visionMs / 1000).toStringAsFixed(1)}s'
-            : ' · 识图 ${s.visionMs}ms')
+            ? ' · 视觉 ${(s.visionMs / 1000).toStringAsFixed(1)}s'
+            : ' · 视觉 ${s.visionMs}ms')
         : '';
-    return '首Tok $first$vision · 耗时 $total · $rate tok/s';
+    final audio = s.audioMs > 0
+        ? (s.audioMs >= 1000
+            ? ' · 听音 ${(s.audioMs / 1000).toStringAsFixed(1)}s'
+            : ' · 听音 ${s.audioMs}ms')
+        : '';
+    return '首Tok $first$vision$audio · 耗时 $total · $rate tok/s';
   }
 }

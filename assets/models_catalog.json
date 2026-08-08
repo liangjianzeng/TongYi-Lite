@@ -40,7 +40,11 @@
       "sizeMBDisplay": "7.2 GB",
       "recommended": false,
       "minRamMB": 10240,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": [
+        "不推荐",
+        "限高端旗舰"
+      ]
     },
     {
       "id": "gemma-3-4b-q4_k_m",
@@ -67,8 +71,8 @@
     },
     {
       "id": "gemma-4-e2b-q4_k_m",
-      "name": "Gemma 4 E2B (Q4_K_M MTP)",
-      "type": "text",
+      "name": "Gemma 4 E2B (Q4_K_M 视觉+语音)",
+      "type": "vision",
       "mtp": true,
       "mirrors": [
         {
@@ -86,8 +90,24 @@
       "minRamMB": 4096,
       "sha256Hash": null,
       "tags": [
-        "推荐"
-      ]
+        "推荐",
+        "视觉+语音"
+      ],
+      "mmproj": {
+        "mirrors": [
+          {
+            "url": "https://hf-mirror.com/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf",
+            "source": "hf-mirror"
+          },
+          {
+            "url": "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf",
+            "source": "huggingface"
+          }
+        ],
+        "sizeMB": 531.6,
+        "sizeMBDisplay": "531 MB",
+        "sha256Hash": null
+      }
     },
     {
       "id": "qwen3.5-0.8b-mtp-ud-q4_k_xl",
@@ -190,8 +210,8 @@
     },
     {
       "id": "qwen3.5-4b-q4_k_m",
-      "name": "Qwen3.5-4B (Q4_K_M MTP)",
-      "type": "text",
+      "name": "Qwen3.5-4B (Q4_K_M MTP 视觉)",
+      "type": "vision",
       "mirrors": [
         {
           "url": "https://hf-mirror.com/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
@@ -209,8 +229,24 @@
       "sha256Hash": null,
       "mtp": true,
       "tags": [
-        "推荐"
-      ]
+        "推荐",
+        "视觉"
+      ],
+      "mmproj": {
+        "mirrors": [
+          {
+            "url": "https://hf-mirror.com/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/mmproj-F16.gguf",
+            "source": "hf-mirror"
+          },
+          {
+            "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/mmproj-F16.gguf",
+            "source": "modelscope"
+          }
+        ],
+        "sizeMB": 641.3,
+        "sizeMBDisplay": "641 MB",
+        "sha256Hash": null
+      }
     },
     {
       "id": "qwen3.5-9b-mtp-ud-iq2_m",
@@ -231,7 +267,11 @@
       "sizeMBDisplay": "3.7 GB",
       "recommended": false,
       "minRamMB": 4096,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": [
+        "不推荐",
+        "限高端旗舰"
+      ]
     },
     {
       "id": "lfm2.5-2.6b-q4_k_m",

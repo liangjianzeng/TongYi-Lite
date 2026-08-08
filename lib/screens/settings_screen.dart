@@ -288,11 +288,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       spacing: 8,
                       runSpacing: 8,
                       children: [
-                        // 视觉能力标签：支持视觉理解 →「识图」，否则 →「文本」。
+                        // 视觉能力标签：支持视觉理解 →「视觉」，否则 →「文本」。
                         // 依据目录里 type==vision（含单文件 VL 与 text+mmproj 两文件形态）。
                         _buildModelTag(
                           icon: model.type == ModelType.vision ? '🖼️' : '💬',
-                          label: model.type == ModelType.vision ? '识图' : '文本',
+                          label: model.type == ModelType.vision ? '视觉' : '文本',
                           color: model.type == ModelType.vision
                               ? Colors.purple
                               : Colors.blueGrey,
@@ -705,6 +705,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         return ('⭐', Colors.blue, Colors.blue.shade100);
       case '速度快':
         return ('⚡', Colors.orange, Colors.orange.shade100);
+      // 不推荐：警示红，提示「体积大/门槛高，普通机型不推荐」。
+      case '不推荐':
+        return ('⚠️', Colors.red, Colors.red.shade100);
+      // 限高端旗舰：金色，提示「需要旗舰级硬件（内存/算力）才带得动」。
+      case '限高端旗舰':
+        return ('👑', Colors.amber.shade800, Colors.amber.shade100);
       default:
         return ('🏷️', Colors.blueGrey, Colors.blueGrey.shade100);
     }
