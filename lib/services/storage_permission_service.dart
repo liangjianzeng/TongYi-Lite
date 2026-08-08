@@ -35,6 +35,13 @@ class StoragePermissionService {
     return status.isGranted;
   }
 
+  /// 请求麦克风权限（语音输入）
+  static Future<bool> requestMicrophonePermission() async {
+    final status = await Permission.microphone.request();
+    debugPrint('[StoragePermission] Microphone permission: $status');
+    return status.isGranted;
+  }
+
   /// 请求外部存储访问权限
   static Future<bool> requestStoragePermission() async {
     if (!Platform.isAndroid) return true;

@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     
+    <!-- 麦克风权限（语音输入 / 端侧语音理解） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    
     <!-- 相机权限 -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />

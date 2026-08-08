@@ -102,9 +102,25 @@ class DownloadService {
         );
         final mmprojTemp = File(p.join(dir.path, model.id + mmprojTarget.suffix + '.tmp'));
         final mmprojFinal = File(p.join(dir.path, model.id + mmprojTarget.suffix));
-        await _runDownloadLoop(
-          model, task, mmprojTarget, mmprojTemp, mmprojFinal, onProgress, progressInterval,
-        );
+        // 与主 gguf 同样的「已完整则跳过」：若 mmproj 已完整存在，直接落完成态，
+        // 不再重复拉取已有投影器（此前缺此检查，点「下载」会无条件重下 mmproj）。
+        final mmprojComplete = await mmprojFinal.exists() &&
+            !(await mmprojTemp.exists()) &&
+            (mm.sizeBytes == 0 ||
+             (await mmprojFinal.length()) >= (mm.sizeBytes * 0.99).round());
+        if (mmprojComplete) {
+          final done = await mmprojFinal.length();
+          debugPrint('[DownloadService] ${model.id} mmproj 已完整，跳过投影器下载');
+          task.totalBytes = done;
+          task.downloadedBytes = done;
+          task.state = DownloadState.completed;
+          task.endTime = DateTime.now();
+          onProgress(task);
+        } else {
+          await _runDownloadLoop(
+            model, task, mmprojTarget, mmprojTemp, mmprojFinal, onProgress, progressInterval,
+          );
+        }
       }
     } finally {
       // CRITICAL: the entry must be dropped no matter how we leave, otherwise
@@ -210,11 +226,12 @@ class DownloadService {
           final body = response.data;
           if (body == null) throw DownloadException('Empty response body.');
 
+          // 服务器返回的实际 Content-Length（catalog 的 sizeBytes 只是估算，可能
+          // 偏小导致进度超 100%，也可能偏大导致完整度误判，因此以服务器为准）。
           final headerTotalStr = response.headers.value('content-length');
+          int? headerTotal;
           if (headerTotalStr != null) {
-            final headerTotal = int.tryParse(headerTotalStr);
-            // 始终以服务器返回的实际 Content-Length 为准（catalog 的 sizeBytes
-            // 只是按 sizeGB 估算，可能偏小，导致进度条超 100%）。
+            headerTotal = int.tryParse(headerTotalStr);
             if (headerTotal != null && headerTotal > 0) {
               task.totalBytes = headerTotal;
               debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
@@ -240,6 +257,17 @@ class DownloadService {
           } finally {
             await raf.close();
           }
+
+          // 完整度校验：若服务器给出 Content-Length 但实际字节数不足，说明连接
+          // 中途被静默截断（无异常直接结束流）。此时绝不能把残缺文件提升为
+          // 最终 .gguf/.mmproj —— 否则缓存发现会把它当成「已缓存」，或尺寸
+          // 不达标被误判「未下载」。抛异常走重试/清理 .tmp 路径。
+          if (headerTotal != null && headerTotal > 0 && received < headerTotal) {
+            throw DownloadException(
+              '下载不完整（${_formatBytes(received)}/${_formatBytes(headerTotal)}），自动续传重试',
+            );
+          }
+
           // 整段下载结束后，用实际写入字节数作为 totalBytes（与 downloadedBytes
           // 一致，进度即 100%），不再依赖估算的 sizeBytes。
           task.totalBytes = received;
@@ -338,6 +366,11 @@ class DownloadService {
 
     // 206 = 部分内容（按 Range 续传）；200 = 服务器忽略 Range，整段重下。
     final isPartial = response.statusCode == 206;
+    // 服务器 Content-Length：206 时是「剩余字节」，整文件应为 start + 该值。
+    final headerTotalStr = response.headers.value('content-length');
+    final headerTotal = int.tryParse(headerTotalStr ?? '');
+    final expectedTotal =
+        (isPartial && headerTotal != null) ? (start + headerTotal) : headerTotal;
     final raf = file.openSync(mode: isPartial ? FileMode.append : FileMode.write);
     try {
       int received = isPartial ? start : 0;
@@ -349,6 +382,13 @@ class DownloadService {
         task.downloadedBytes = received;
         if (task.totalBytes == 0) task.totalBytes = total;
         _emitProgress(task, progressInterval, onProgress);
+      }
+      // 完整度校验：服务器给出 Content-Length 但实际字节不足 → 流被静默截断。
+      // 不提升为最终文件，抛异常走重试/清理路径，避免残缺文件被当「已缓存」。
+      if (expectedTotal != null && expectedTotal > 0 && received < expectedTotal) {
+        throw DownloadException(
+          '续传不完整（${_formatBytes(received)}/${_formatBytes(expectedTotal)}），自动续传重试',
+        );
       }
       // 续传结束后用实际累计字节数作为 totalBytes，与 downloadedBytes 一致。
       task.totalBytes = received;
