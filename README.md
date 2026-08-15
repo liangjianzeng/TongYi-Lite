@@ -34,7 +34,7 @@
 | 维度 | 说明 |
 |------|------|
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b10173（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod/i8mm CPU；vendored 提交 f5b9bd3，2026-07-29） |
+| **推理引擎** | llama.cpp b10173（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod CPU；vendored 提交 f5b9bd3，2026-07-29） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏；支持**最多 2 个模型并行下载**、暂停/继续/删除、断点续传 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
@@ -139,7 +139,7 @@ export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
 
 Vulkan 后端让 llama.cpp 把模型层卸载到设备 GPU（如骁龙 Adreno / Mali），推理速度通常数倍于纯 CPU。
 这部分 **仅对 `arm64-v8a` 生效**，且只在构建主机满足以下条件时才启用；不满足时自动回退到
-CPU + KleidiAI（dotprod/i8mm），构建本身不会失败。
+CPU + KleidiAI（dotprod），构建本身不会失败。
 
 | 依赖 | 版本 / 路径 | 用途 | 必需 |
 |------|------------|------|------|
@@ -222,10 +222,11 @@ flutter build appbundle --release
 7. 下载完成后点击 **[加载到内存]** 即可在聊天中使用
 8. 每个模型卡片带能力标签：**🖼️ 视觉**（支持视觉理解）/ **💬 文本**
 
-> **视觉模型下载闭环**：`type=vision` 且带 `mmproj` 的模型（如 Qwen3.5-2B）会先下载主
-> `.gguf`、再自动下载投影器 `.mmproj`，两者都完整才算"已缓存"。若主模型已下、缺投影器，
-> 再次点击 **[下载(含投影器)]** 会跳过完整主模型、只补下投影器。加载前还会校验 mmproj
-> 完整（存在、无残留 `.tmp`、非空），损坏/缺失时提示重新下载完整模型，避免原生加载崩溃。
+> **视觉模型下载闭环**：`type=vision` 且带 `mmproj` 的模型（Qwen3.5-0.8B/2B/4B、
+> Gemma 4 E2B）会先下载主 `.gguf`、再自动下载投影器 `.mmproj`，两者都完整才算"已缓存"。
+> 若主模型已下、缺投影器，再次点击 **[下载(含投影器)]** 会跳过完整主模型、只补下投影器。
+> 加载前还会校验 mmproj 完整（存在、无残留 `.tmp`、非空），损坏/缺失时提示重新下载完整模型，
+> 避免原生加载崩溃。
 
 ### 镜像策略（HuggingFace 优先走国内）
 
@@ -251,21 +252,26 @@ flutter build appbundle --release
 
 **当前内置模型（以 `assets/models_catalog.json` 为准）：**
 
-| 模型 | 大小 | 类型 | 最低 RAM | 镜像 |
-|------|------|------|---------|------|
-| Qwen3.5-0.8B (MTP UD-Q4_K_XL) | 543 MB | vision | 1.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-0.8BN (Q4_0 MTP) | 497 MB | text | 1.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | vision | 2.0 GB | hf-mirror + ModelScope |
-| Qwen3.5-4B (Q4_K_M MTP) | 2.4 GB | text | 3.5 GB | hf-mirror + ModelScope |
-| Qwen3.5-9B (MTP UD-IQ2_M) | 3.7 GB | text | 4.0 GB | hf-mirror + ModelScope |
-| LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | text | 2.0 GB | ModelScope |
-| Gemma 3 4B (Q4_K_M) | 2.6 GB | text | 3.0 GB | hf-mirror + ModelScope |
-| Gemma 4 E2B (Q4_K_M MTP) | 3.1 GB | text | 4.0 GB | hf-mirror + ModelScope |
-| Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6.0 GB | hf-mirror + huggingface |
-| Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10.0 GB | hf-mirror + huggingface |
+| 模型 | 大小 | 类型 | 最低 RAM | 标签 | 镜像 |
+|------|------|------|---------|------|------|
+| Qwen3.5-0.8B (MTP UD-Q4_K_XL) | 543 MB | vision | 1.0 GB | MTP · 🖼️ 视觉 | hf-mirror + ModelScope |
+| Qwen3.5-0.8BN (Q4_0 MTP) | 497 MB | text | 1.0 GB | MTP · ⚡ CPU 加速 | hf-mirror + ModelScope |
+| Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | vision | 2.0 GB | ⭐ 推荐 · MTP · 🖼️ 视觉 | hf-mirror + ModelScope |
+| Qwen3.5-4B (Q4_K_M MTP 视觉) | 2.4 GB | vision | 3.5 GB | ⭐ 推荐 · MTP · 🖼️ 视觉 | hf-mirror + ModelScope |
+| Qwen3.5-9B (MTP UD-IQ2_M) | 3.7 GB | text | 4.0 GB | MTP · ⚠️ 不推荐 · 👑 限高端旗舰 | hf-mirror + ModelScope |
+| LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | text | 2.0 GB | ⭐ 推荐 · ⚡ 速度快 | ModelScope |
+| Gemma 3 4B (Q4_K_M) | 2.6 GB | text | 3.0 GB | ⭐ 推荐 | hf-mirror + ModelScope |
+| Gemma 4 E2B (Q4_K_M 视觉+语音) | 3.1 GB | vision | 4.0 GB | ⭐ 推荐 · MTP · 🖼️ 视觉 · 🎧 语音 | hf-mirror + ModelScope |
+| Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6.0 GB | 探索用 | hf-mirror + huggingface |
+| Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10.0 GB | ⚠️ 不推荐 · 👑 限高端旗舰 | hf-mirror + huggingface |
 
-> 视觉模型（`vision`）含投影器 mmproj：Qwen3.5-0.8B/2B 为 `text + mmproj` 两文件形态，
+> 视觉模型（`vision`）含投影器 mmproj：Qwen3.5-0.8B/2B/4B 为 `text + mmproj` 两文件形态；
+> Gemma 4 E2B 的 mmproj 还自带 **原生语音编码器**（🎧 语音理解，配合麦克风按住说话拾音）。
 > 总下载体积 = 主模型 + 投影器。UI 上的 **🖼️ 视觉** 标签即对应此类模型。
+
+> **标签语义**：`⭐ 推荐`（绿，官方推荐）、`⚠️ 不推荐`（红，体积/内存要求过高不适合日常）、
+> `👑 限高端旗舰`（金，需大内存旗舰机）、`🖼️ 视觉`、`🎧 语音`、`⚡ CPU 加速`、`⚡ 速度快`、
+> `MTP`（支持多 token 预测投机解码）。
 
 > 带 **MTP** 的模型支持多 token 预测（Multi-Token Prediction），可在设置页为该模型单独开启
 > 投机解码加速。
@@ -433,9 +439,13 @@ n_ubatch = 512 (GPU backend)                             # GPU 路径放大 pref
 
 即使不开 GPU，纯 CPU 推理也通过 KleidiAI + 微架构调优保持可用速度：
 
-- **KleidiAI dotprod / i8mm 内核**：`CMakeLists.txt` 通过 `GGML_CPU_ARM_ARCH=armv8.4-a+dotprod+i8mm`
-  让 ggml 为本机 Adreno/Snapdragon 编译 dotprod + i8mm 手调 matmul 内核（这是**正确做法**；直接往
+- **KleidiAI dotprod 内核**：`CMakeLists.txt` 通过 `GGML_CPU_ARM_ARCH=armv8.2-a+dotprod`
+  让 ggml 为本机 Adreno/Snapdragon 编译 dotprod 手调 matmul 内核（这是**正确做法**；直接往
   `CMAKE_C_FLAGS` 塞 `-march` 不会传到 kai 源文件，会导致内核被静默跳过）。
+  ⚠️ **不要加 `+i8mm`**：天玑 8200 / 920 的 Cortex-A78（ARMv8.2-A）支持 dotprod 但不支持
+  i8mm（需 ARMv8.6-A/ARMv9），在 `armv8.4-a+dotprod+i8mm` 下执行 `i8mm` 指令会 **SIGILL**，
+  崩溃发生在共享的 CPU 加载/repack 路径，表现为"三后端全崩"。已降级为 `armv8.2-a+dotprod`，
+  dotprod 内核仍可用，代价仅是 i8mm 量化内核不可用（性能影响可接受）。
 - **Debug 构建也强制 `-O3 -DNDEBUG`**：Android debug 变体默认 `-O0` 且无 `NDEBUG`，会让 llama.cpp 的
   量化 matmul 内核完全失去优化（曾导致 0.5B 模型仅约 0.6 tok/s，0.8B 约 1.2 tok/s）。
   ⚠️ **坑：仅设 `CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"` 不够**——Android NDK 工具链会在 Debug 配置重新套上
@@ -447,15 +457,15 @@ n_ubatch = 512 (GPU backend)                             # GPU 路径放大 pref
   `-O3 -DNDEBUG -march`。
 - **版本与微架构要求**：KleidiAI 固定 vendored **v1.24.0**——llama.cpp b10173 的 FetchContent 默认拉取
   `kleidiai-v1.24.0-src.tar.gz`，本项目改为本地 vendored **同一 tag** 以离线构建（版本须与 llama.cpp
-  对应 release 匹配）。其 dotprod/i8mm 内核要求 CPU 具备 **Armv8.4-a + dotprod + i8mm** 特性
-  （X4 / A720 / A520 等 Armv8.4+/Armv9 核心）；不满足时 ggml-cpu 静默回退到通用 NEON，CPU 推理仍可跑但无加速。
-  KleidiAI 内部仅接管 Q4_0/Q8_0 的 matmul 派发，本项目 Q4_K_M 不直连其派发，但仍受益于该路径的 i8mm 加速。
+  对应 release 匹配）。其 dotprod 内核要求 CPU 具备 **Armv8.2-a + dotprod** 特性
+  （Cortex-A78 / A720 / X4 / A520 等）；不满足时 ggml-cpu 静默回退到通用 NEON，CPU 推理仍可跑但无加速。
+  KleidiAI 内部仅接管 Q4_0/Q8_0 的 matmul 派发，本项目 Q4_K_M 不直连其派发，但仍受益于该路径的 dotprod 加速。
 
-验证 CPU 内核是否真生效（编译后查 `compile_commands.json`，dotprod/i8mm 计数应 >0）：
+验证 CPU 内核是否真生效（编译后查 `compile_commands.json`，dotprod 计数应 >0、i8mm 为 0）：
 
 ```bash
 grep -c "kai_matmul.*dotprod" android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
-grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json
+grep -c "kai_matmul.*i8mm"    android/app/.cxx/Debug/*/arm64-v8a/compile_commands.json  # 预期 0（已禁用）
 ```
 
 ### SME2（暂未启用 · 决策记录，2026-08-05）
@@ -464,7 +474,7 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 （设 `ARM_MCPU=armv9.2-a` + `GGML_USE_SME`），并把 **KleidiAI 的 SME/SME2 4-bit 权重 matmul 内核**
 （`qsi4c32p4vlx4` 等，正覆盖本项目的 Q4_K_M）编进多架构变体——**但本构建根本没有走这条路**：
 
-- 本 `CMakeLists.txt` 用 `set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm CACHE STRING "" FORCE)` 把 arch
+- 本 `CMakeLists.txt` 用 `set(GGML_CPU_ARM_ARCH armv8.2-a+dotprod CACHE STRING "" FORCE)` 把 arch
   **钉死**，ggml-cpu 直接走 `else` 分支、跳过 SME/SVE 自动探测与多变体编译；
 - 根因是交叉编译：构建主机（Windows/MinGW）用 `check_cxx_source_runs` 探测 aarch64 特性必然失败，
   故改用显式 arch 传参——SME2 源文件因此在本 build 中是死代码。
@@ -472,17 +482,31 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 **决策：暂不启用 / 实现 SME2。依据：**
 
 1. **当前设备拓扑受限**：骁龙 8s Gen 4（SM8735 / Adreno 825）仅 1 颗 Cortex-X4 大核有 SME2，
-   其余 7 颗 A720 无。ggml 线程池铺满 8 核时，SME2 内核要么因"并非所有核支持"整体回退到 i8mm（等于没加速），
+   其余 7 颗 A720 无。ggml 线程池铺满 8 核时，SME2 内核要么因"并非所有核支持"整体回退到 dotprod（等于没加速），
    要么在 A720 上 SIGILL 崩溃——可用面被极大压缩。
 2. **主推理路径不经 CPU matmul**：默认 `gpuLayers=100` 全量卸载到 GPU（OpenCL/Vulkan），CPU 仅做少量
-   残差。SME2 只能加速纯 CPU fallback 路径，而该路径本就非推荐配置，`dotprod+i8mm` 已够用。
+   残差。SME2 只能加速纯 CPU fallback 路径，而该路径本就非推荐配置，`dotprod` 已够用。
 3. **价值拐点尚未到来**：SME2 的显著收益需等到 **全核 SME2 同构设备**，例如
    **天玑 9500（Arm Lumex C1，Ultra/Premium/Pro/Nano 全系集成 SME2）** 及后续同构平台。
    在此之前开启 SME2 需改 `GGML_CPU_ALL_VARIANTS` 交叉编 SME2 汇编内核 + 解决异构核分派，投入高、回报低。
 
-> 结论：保持现状 `dotprod+i8mm`（正确、稳定、已验证）。待目标设备为全核 SME2（如天玑 9500 级）或确需
-> 榨干纯 CPU 推理时，再重开 SME2 这条路。
+> 结论：保持现状 `dotprod`（正确、稳定、已验证；i8mm 已因 Cortex-A78 设备 SIGILL 禁用）。
+> 待目标设备为全核 SME2（如天玑 9500 级）或确需榨干纯 CPU 推理时，再重开 SME2 这条路。
 
+### 麦克风按住说话拾音（语音输入 · 2026-08-08）
+
+聊天输入区支持**按住说话**直接语音输入，模型侧由 mmproj 自带的原生语音编码器理解
+（仅对带 🎧 语音能力的模型开放，如 Gemma 4 E2B）：
+
+- **交互**：长按麦克风按钮录音，松开即发送；UI 带波形动画 + 计时 + 聆听反馈。
+  用 `GestureDetector` + `ValueNotifier` 实现，规避 `Tooltip` 抢占长按手势。
+- **原生链路**：`RECORD_AUDIO` 权限（不足时引导前往系统设置）→ `AudioRecorder.kt`
+  按模型要求的采样率录 **16-bit PCM → 44 字节头 WAV**（缓存目录）→ 走
+  `completion_with_media` 多媒体路径（按魔数自动识别图片/音频）→ 原生编码后回复。
+- **能力门控**：JNI 加载时用 `mtmd_support_audio` / `mtmd_get_audio_sample_rate` 探测
+  mmproj 是否带语音编码器，`supportsAudio` / `audioSampleRate` 透传 Dart；无音频编码器的
+  模型自动禁用麦克风，避免误送音频导致原生崩溃。
+- 音频回复的 **"听音时间"**（`t_audio_ms`，音频编码 wall time）随每次交互一并入日志与统计。
 
 ---
 
@@ -506,7 +530,7 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 | # | 功能 | 状态 | 说明 |
 |---|------|------|------|
 | 1 | **JNI 直调** | ✅ | 无 HTTP Server，高效省内存 |
-| 2 | **CPU 推理** | ✅ | KleidiAI dotprod/i8mm + 微架构调优（`GGML_CPU_ARM_ARCH` + Debug `-O3`；Vulkan 不可用时回退） |
+| 2 | **CPU 推理** | ✅ | KleidiAI dotprod（`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod`）+ 微架构调优 + Debug `-O3`；Vulkan 不可用时回退 |
 | 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
@@ -536,7 +560,7 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 **根因**（真机日志 + 反汇编逐步定位）：
 
 1. **量化 GEMM 路径计算出错**：`n_ubatch=512` 时，prompt 超过 32 tokens 的 prefill 会进入
-   ggml-cpu 的量化 GEMM 路径，而该路径在本 build（`armv8.4-a+dotprod+i8mm`）下产生垃圾 logits。
+   ggml-cpu 的量化 GEMM 路径，而该路径在本 build 下产生垃圾 logits。
    第一轮 "你好" 仅 15 tokens（<32，走 vec_dot 路径）所以正常 —— 与 flash attention、KleidiAI
    均无关（KleidiAI 只支持 Q4_0/Q8_0，本项目模型为 Q4_K_M 不会接管）。
 2. **重复惩罚失效**：采样循环缺 `llama_sampler_accept()`，penalties sampler 的 token 历史
