@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
 import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
 import '../providers/model_provider.dart';
@@ -38,6 +39,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   String? _selectedImagePath;
   final ImagePicker _picker = ImagePicker();
 
+  // 语音拾音（按住说话）状态 —— 用 ValueNotifier 而非 setState 驱动，避免
+  // 录音中重建 GestureDetector 导致「松手」手势丢失（此前重建会杀掉 onLongPressEnd）。
+  final ValueNotifier<bool> _recordingNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<int> _recordingSecondsNotifier = ValueNotifier<int>(0);
+  Timer? _recordingTimer;
+
   // 会话批量选择状态
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
@@ -56,6 +63,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _textController.dispose();
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _recordingNotifier.dispose();
+    _recordingSecondsNotifier.dispose();
     super.dispose();
   }
 
@@ -221,12 +232,112 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  /// Send message with optional image
-  Future<void> _sendMessage() async {
+  // ------------------------------------------------------------------------
+  // 语音拾音（按住说话 → 松手自动发送）
+  // ------------------------------------------------------------------------
+
+  /// 按住麦克风开始拾音。返回是否真正开始（模型支持语音且权限已授予）。
+  Future<bool> _startRecording() async {
+    // 当前模型必须支持语音（mmproj 带音频编码器）。
+    final inference = ref.read(inferenceServiceProvider);
+    final supportsAudio = await inference.supportsAudio();
+    if (!supportsAudio) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⚠️ 当前模型不支持语音理解，请加载 Gemma 4 E2B 模型')),
+        );
+      }
+      return false;
+    }
+    // 麦克风权限（RECORD_AUDIO）。拒绝时给出「前往设置」引导，无需重装。
+    final hasMic = await StoragePermissionService.requestMicrophonePermission();
+    if (!hasMic) {
+      if (mounted) _showMicPermissionDialog();
+      return false;
+    }
+    final ok = await inference.startRecording();
+    if (!ok) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('麦克风启动失败')),
+        );
+      }
+      return false;
+    }
+    // 用 ValueNotifier 驱动 UI，不 setState —— 避免重建 GestureDetector 使松手失效。
+    _recordingNotifier.value = true;
+    _recordingSecondsNotifier.value = 0;
+    _recordingTimer?.cancel();
+    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _recordingSecondsNotifier.value++;
+    });
+    return true;
+  }
+
+  /// 松手/取消停止拾音。send=true 时若录音有效则自动作为语音消息发送。
+  Future<void> _stopRecording({bool send = true}) async {
+    if (!_recordingNotifier.value) return;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _recordingNotifier.value = false;
+
+    final inference = ref.read(inferenceServiceProvider);
+    final audioPath = await inference.stopRecording();
+    if (audioPath == null || audioPath.isEmpty) {
+      if (send && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('录音过短，已放弃')),
+        );
+      }
+      return;
+    }
+    if (send && mounted) {
+      // 松手自动发送：附带当前已输入的文字。
+      await _sendMessage(audioPath: audioPath);
+    }
+  }
+
+  /// 麦克风权限被拒：引导去系统设置授权（无需重装 APK）。
+  void _showMicPermissionDialog() {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('需要麦克风权限'),
+        content: const Text(
+          '语音输入需要「麦克风」权限。\n\n'
+          '不需要重新安装：点击「前往设置」打开本应用权限页，把「麦克风」打开即可。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await openAppSettings();
+            },
+            icon: const Icon(Icons.settings),
+            label: const Text('前往设置'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Send message with optional image / audio
+  Future<void> _sendMessage({String? audioPath}) async {
     final text = _textController.text.trim();
     final imagePath = _selectedImagePath;
 
-    if (text.isEmpty && imagePath == null) return;
+    // 语音消息可仅带音频（无文字）；普通文本/图片必须有内容。
+    if (text.isEmpty && imagePath == null && audioPath == null) return;
+    // 语音消息若附带文字则一并发送；否则提示为空文本（模型仍收到音频）。
+    if (audioPath != null && text.isEmpty) {
+      // 允许：仅语音，无文字。
+    }
 
     // Collapse the keyboard immediately when sending so the chat area expands
     // to full screen while the reply streams in (don't wait for the reply).
@@ -242,11 +353,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // Clear the input box immediately: the message is already composed in
     // `text` and is about to be dispatched to the model. Keeping the text in
     // the box until the whole reply finishes is confusing — it should empty
-    // the moment the message is sent.
+    // the moment the message is sent. 语音消息同样清空输入框（文字已随语音发送）。
     _textController.clear();
     setState(() => _selectedImagePath = null);
     try {
-      await notifier.sendMessage(_currentConversationId, text, imagePath: imagePath);
+      await notifier.sendMessage(_currentConversationId, text,
+          imagePath: imagePath, audioPath: audioPath);
     } catch (e) {
       // The send failed before leaving the client — restore the input so the
       // user can retry. (If it failed mid-generation the message is already
@@ -643,6 +755,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               // Newest message is the last index (messages are ordered oldest→newest).
               isStreaming: msg.isStreaming && index == messages.length - 1,
               imagePath: msg.imagePath,
+              audioPath: msg.audioPath,
               inferenceStats: msg.inferenceStats,
             );
           },
@@ -652,13 +765,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Widget _buildInputBar(bool isGenerating) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
-      ),
-      child: Row(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 录音中：波形动画 + 计时 + 「松手发送」提示（独立 widget，不重建手势区）。
+        _buildRecordingBanner(),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
+          ),
+          child: Row(
         children: [
           Expanded(
             child: TextField(
@@ -683,12 +801,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       tooltip: _selectedImagePath != null ? '已选图片，点击清除' : '添加图片',
                       onPressed: isGenerating ? null : _pickImage,
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.mic),
-                      tooltip: '语音',
-                      onPressed: isGenerating ? null : () {
-                        // TODO: Speech input
+                    // 语音拾音：按住说话 → 松手自动发送（模型原生理解音频）。
+                    // 注意：不要再包 Tooltip —— Tooltip 自身用「长按」弹提示，会抢走
+                    // 录音手势（此前表现为只弹「按住说话」、无任何录制效果）。
+                    // 用 ValueNotifier 驱动图标颜色/波形，避免录音中重建本 GestureDetector。
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onLongPressStart: isGenerating
+                          ? null
+                          : (_) {
+                              _startRecording();
+                            },
+                      onLongPressEnd: isGenerating
+                          ? null
+                          : (_) {
+                              _stopRecording(send: true);
+                            },
+                      onLongPressCancel: () {
+                        // 按住后滑出按钮/被打断 → 放弃并停止录音（不发送）。
+                        if (_recordingNotifier.value) _stopRecording(send: false);
                       },
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: _recordingNotifier,
+                        builder: (_, recording, __) => Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Icon(
+                            recording ? Icons.mic : Icons.mic_none,
+                            color: recording ? Colors.red : null,
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -713,6 +855,47 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ],
       ),
+      ),
+    ],
+    );
+  }
+
+  /// 录音中的横幅：波形动画 + 计时 + 「松手发送」提示。
+  Widget _buildRecordingBanner() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _recordingNotifier,
+      builder: (_, recording, __) {
+        if (!recording) return const SizedBox.shrink();
+        return Material(
+          color: Colors.red.shade50,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                const _RecordingWave(color: Colors.red),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '正在聆听 · 松手发送',
+                    style: TextStyle(color: Colors.red.shade700, fontSize: 13),
+                  ),
+                ),
+                ValueListenableBuilder<int>(
+                  valueListenable: _recordingSecondsNotifier,
+                  builder: (_, seconds, __) => Text(
+                    '${seconds}s',
+                    style: TextStyle(
+                      color: Colors.red.shade700,
+                      fontWeight: FontWeight.bold,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1388,5 +1571,73 @@ class _MemoryPanelState extends State<_MemoryPanel> {
         ),
       ],
     );
+  }
+}
+
+/// 录音中的波形动画：几根竖条按相位起伏，提示用户正在拾音。
+class _RecordingWave extends StatefulWidget {
+  final Color color;
+  const _RecordingWave({required this.color});
+
+  @override
+  State<_RecordingWave> createState() => _RecordingWaveState();
+}
+
+class _RecordingWaveState extends State<_RecordingWave>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  static const int _barCount = 5;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (_, __) {
+        return SizedBox(
+          height: 22,
+          width: 24,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: List.generate(_barCount, (i) {
+              final phase = (_controller.value + i * 0.18) % 1.0;
+              // 相位正弦映射到 0.25~1.0 的高度比例，形成起伏。
+              final h = 0.25 + 0.75 * (0.5 - 0.5 * _cos(phase * 6.2832));
+              return Container(
+                width: 3,
+                height: 22 * h,
+                margin: const EdgeInsets.symmetric(horizontal: 1),
+                decoration: BoxDecoration(
+                  color: widget.color,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              );
+            }),
+          ),
+        );
+      },
+    );
+  }
+
+  double _cos(double x) {
+    // 极简余弦：1 - 2x² (x∈[0,1]) 的近似即可，动画视觉足够。
+    final v = x - (x * x * x) / 6.0 + (x * x * x * x * x) / 120.0;
+    return v;
   }
 }

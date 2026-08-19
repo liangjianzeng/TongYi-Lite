@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 冷启动画面（浅色模式）：跟随系统浅色背景，简约统一；
+     LOGO 与描述由 Flutter 加载页显示（与「关于」页同款）。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+</layer-list>

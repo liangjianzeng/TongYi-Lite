@@ -150,6 +150,7 @@ class ChatNotifier extends StateNotifier<bool> {
     String conversationId,
     String prompt, {
     String? imagePath,
+    String? audioPath,
   }) async {
     final targetModelId = _ref.read(currentModelIdProvider);
     final settings = _ref.read(settingsProvider);
@@ -202,6 +203,7 @@ class ChatNotifier extends StateNotifier<bool> {
         role: MessageRole.user,
         content: prompt,
         imagePath: imagePath,
+        audioPath: audioPath,
       );
       debugPrint('[ChatNotifier] Saving user message...');
       await _storage.saveMessage(userMsg);
@@ -286,10 +288,15 @@ class ChatNotifier extends StateNotifier<bool> {
             debugPrint('[ChatNotifier] 本地路线携带图片: $imagePath');
             manager.appendInferenceLog('请求 | 携带当前图片');
           }
+          if (audioPath != null) {
+            debugPrint('[ChatNotifier] 本地路线携带语音: $audioPath');
+            manager.appendInferenceLog('请求 | 携带语音消息 🎤');
+          }
           stream = _inference.completionWithMessages(
             prompt: prompt,
             messagesJson: messagesJson,
             imagePath: imagePath,
+            audioPath: audioPath,
             maxTokens: 1024, // on-device cap: large token budgets make long runs unbearable
             temperature: 0.7,
             topP: 0.9,
@@ -395,6 +402,8 @@ class ChatNotifier extends StateNotifier<bool> {
         // API 后备路径没有原生 stats，改用 Dart 计数 + 总墙钟估算。
         int realTokens = tokenCount;
         double genMs = 0.0;
+        int visionMs = 0;
+        int audioMs = 0;
         if (!useApi) {
           Map<String, dynamic> genStats = {};
           try {
@@ -402,12 +411,16 @@ class ChatNotifier extends StateNotifier<bool> {
           } catch (_) {}
           realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
           genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+          visionMs = (genStats['t_vision_ms'] as num?)?.toInt() ?? 0;
+          audioMs = (genStats['t_audio_ms'] as num?)?.toInt() ?? 0;
         }
         final tokensPerSec =
             genMs > 0 ? realTokens * 1000 / genMs : (totalMs > 0 ? realTokens * 1000 / totalMs : 0.0);
 
         manager.appendInferenceLog(
-          '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
+          '响应 | $realTokens tokens | 首token ${firstTokenMs}ms | 生成 ${genMs.round()}ms'
+          '${visionMs > 0 ? ' | 视觉 ${visionMs}ms' : ''}'
+          '${audioMs > 0 ? ' | 听音 ${audioMs}ms' : ''} | 总耗时 ${totalMs}ms'
           ' | ${tokensPerSec.toStringAsFixed(1)} tok/s | 输出 ${fullResponse.length} 字',
         );
 
@@ -419,6 +432,8 @@ class ChatNotifier extends StateNotifier<bool> {
             firstTokenMs: firstTokenMs,
             totalMs: totalMs,
             tokPerSec: tokensPerSec,
+            visionMs: visionMs,
+            audioMs: audioMs,
           ),
         );
         await _storage.saveMessage(assistantMsg);

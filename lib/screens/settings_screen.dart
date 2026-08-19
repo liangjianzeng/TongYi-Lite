@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/model_info.dart';
@@ -218,6 +219,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       builder: (context, ref, _) {
         // 监听模型生命周期状态：加载/卸载后会触发卡片重建，刷新"已加载/卸载"按钮。
         ref.watch(modelManagerProvider);
+        // 全局 MTP 开关状态：决定是否在模型卡片上显示各模型 MTP 开关。
+        final settings = ref.watch(settingsProvider);
         final task = ref.watch(downloadTaskProvider(model.id));
         final isCached = task?.state == DownloadState.completed;
 
@@ -285,6 +288,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        // 视觉能力标签：支持视觉理解 →「视觉」，否则 →「文本」。
+                        // 依据目录里 type==vision（含单文件 VL 与 text+mmproj 两文件形态）。
+                        _buildModelTag(
+                          icon: model.type == ModelType.vision ? '🖼️' : '💬',
+                          label: model.type == ModelType.vision ? '视觉' : '文本',
+                          color: model.type == ModelType.vision
+                              ? Colors.purple
+                              : Colors.blueGrey,
+                          bg: model.type == ModelType.vision
+                              ? Colors.purple.shade100
+                              : Colors.blueGrey.shade100,
+                        ),
                         // 已缓存标记：已下载一眼可辨。
                         if (isCached)
                           _buildModelTag(
@@ -303,6 +318,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                           ),
                       ],
                     ),
+
+                    // MTP 开关：仅当全局 MTP 开关开启且该模型支持 MTP 时显示，
+                    // 用户可按模型逐个配置。端侧 MTP 默认不显示（收益为负）。
+                    if (settings.enableMtpFeature && model.mtp) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'MTP 加速',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          Switch(
+                            value: settings.mtpEnabled(model.id),
+                            onChanged: (v) => ref
+                                .read(settingsProvider.notifier)
+                                .setEnableMtp(model.id, v),
+                          ),
+                        ],
+                      ),
+                    ],
 
                     // Progress bar for downloading models
                     if (task != null &&
@@ -360,12 +396,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     switch (activeState) {
       case DownloadState.downloading:
-        return OutlinedButton.icon(
-          onPressed: () => ref
-              .read(downloadNotifierProvider.notifier)
-              .pauseDownload(model.id),
-          icon: const Icon(Icons.pause, size: 18),
-          label: const Text('暂停'),
+        // 下载中：暂停 + 删除（删除会取消当前下载并移除已下载的半成品文件，
+        // 必须先弹确认框避免误删；确认后真正取消/清理）。
+        return Row(
+          children: [
+            OutlinedButton.icon(
+              onPressed: () => ref
+                  .read(downloadNotifierProvider.notifier)
+                  .pauseDownload(model.id),
+              icon: const Icon(Icons.pause, size: 18),
+              label: const Text('暂停'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: () => _confirmDeleteDownloading(model, context),
+              icon: const Icon(Icons.delete, size: 18),
+              label: const Text('删除'),
+              style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red.shade700),
+            ),
+          ],
         );
 
       case DownloadState.paused:
@@ -499,6 +549,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     }
   }
 
+  /// 删除「下载中」的模型任务：先弹确认框（会丢失已下载的半成品，需重下），
+  /// 确认后取消当前下载并清理主 gguf / mmproj 及其残留 .tmp 文件。
+  Future<void> _confirmDeleteDownloading(
+      ModelConfig model, BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除下载中的模型？'),
+        content: Text(
+          '删除「${model.name}」会取消当前下载，并移除已下载的半成品文件'
+          '（${_formatSize(model.totalBytes)}，含 mmproj 投影器）。\n\n'
+          '之后需要重新下载才能再用。确定删除吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      // cancelDownload 会取消进行中的传输并清理 gguf/mmproj 及其 .tmp。
+      await ref
+          .read(downloadNotifierProvider.notifier)
+          .cancelDownload(model.id);
+    }
+  }
+
   /// 「设为默认加载」勾选框（仅已缓存模型显示在卡片右上角）。
   ///
   /// 勾选后该模型成为默认模型并持久化，启动进入首页时自动加载；
@@ -621,6 +705,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         return ('⭐', Colors.blue, Colors.blue.shade100);
       case '速度快':
         return ('⚡', Colors.orange, Colors.orange.shade100);
+      // 不推荐：警示红，提示「体积大/门槛高，普通机型不推荐」。
+      case '不推荐':
+        return ('⚠️', Colors.red, Colors.red.shade100);
+      // 限高端旗舰：金色，提示「需要旗舰级硬件（内存/算力）才带得动」。
+      case '限高端旗舰':
+        return ('👑', Colors.amber.shade800, Colors.amber.shade100);
       default:
         return ('🏷️', Colors.blueGrey, Colors.blueGrey.shade100);
     }
@@ -898,6 +988,26 @@ class _InferenceEngineTab extends ConsumerWidget {
                       ref.read(inferenceServiceProvider).setEnableThinking(v);
                     },
                     subtitle: '先输出推理过程再给结论；直接作答更快（仅思考型模型生效）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- MTP 加速全局开关卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    'MTP 加速（端侧推测解码）',
+                    gpuSettings.enableMtpFeature,
+                    gpuNotifier.setEnableMtpFeature,
+                    subtitle: '默认关闭；开启后在模型卡片配置各模型 MTP（仅高端机按需开启）',
                   ),
                 ],
               ),
@@ -1215,6 +1325,26 @@ class _buildAboutTab extends StatelessWidget {
   }
 }
 
+// About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
+// versionName（0.1.5）保持同步。离线沙箱无法下载 package_info_plus 的
+// AGP 依赖，故不引插件动态读取，直接用此常量。
+const _appVersion = '0.1.5';
+
+/// GitHub 项目主页地址（README 介绍与使用说明）。
+const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
+
+/// 通过系统外部浏览器打开 GitHub README 页面。
+Future<void> _openGithub(BuildContext context) async {
+  final uri = Uri.parse(_githubUrl);
+  final launched =
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+  if (!launched && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('无法打开浏览器，请手动访问：$_githubUrl')),
+    );
+  }
+}
+
 class _AboutCard extends StatelessWidget {
   const _AboutCard();
 
@@ -1237,10 +1367,32 @@ class _AboutCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            _AboutRow(label: '版本', value: '0.1.3'),
+            _AboutRow(label: '版本', value: _appVersion),
             _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
+            const SizedBox(height: 8),
+            const Divider(),
+            const SizedBox(height: 8),
+            InkWell(
+              onTap: () => _openGithub(context),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.open_in_new, size: 18, color: Colors.indigo),
+                  SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      'GitHub 项目主页 · README 介绍与使用说明',
+                      style: TextStyle(
+                        color: Colors.indigo,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),

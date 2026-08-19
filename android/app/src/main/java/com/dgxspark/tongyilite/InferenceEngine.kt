@@ -82,8 +82,15 @@ class InferenceEngine(private val context: Context) {
         temperature: Float,
         topP: Float,
         callback: InferenceCallback,
-        imagePath: String?
+        imagePath: String?,
+        audioPath: String?
     ): String
+
+    /** Whether the currently loaded mmproj ships an audio (speech) encoder. */
+    private external fun nativeSupportsAudio(): Boolean
+
+    /** Required microphone sample rate (Hz) for the loaded model; -1 if no audio. */
+    private external fun nativeGetAudioSampleRate(): Int
 
     private external fun nativeBenchmark(
         prompt: String,
@@ -197,6 +204,7 @@ class InferenceEngine(private val context: Context) {
         temperature: Float = 0.7f,
         topP: Float = 0.9f,
         imagePath: String? = null,
+        audioPath: String? = null,
         onToken: ((String) -> Boolean)? = null
     ): String {
         val callback = if (onToken != null) {
@@ -208,8 +216,14 @@ class InferenceEngine(private val context: Context) {
                 override fun onToken(token: String): Boolean = true
             }
         }
-        return nativeCompletionWithMessages(prompt, messagesJson, maxTokens, temperature, topP, callback, imagePath)
+        return nativeCompletionWithMessages(prompt, messagesJson, maxTokens, temperature, topP, callback, imagePath, audioPath)
     }
+
+    /** Whether the currently loaded mmproj supports speech (audio) input. */
+    fun supportsAudio(): Boolean = nativeSupportsAudio()
+
+    /** Required microphone sample rate (Hz) for the loaded model; -1 if unsupported. */
+    fun getAudioSampleRate(): Int = nativeGetAudioSampleRate()
 
     /**
      * Async completion — runs on executor thread, calls back on same thread.

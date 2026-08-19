@@ -56,10 +56,14 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     state = updated;
   }
 
-  /// Cheap consistency check: for every model already marked `completed`,
-  /// verify the file is still on disk; drop the mark if the user deleted it
-  /// externally. Only does `File.exists()` on known ids — no directory walk —
-  /// so it is safe to call on every screen entry.
+  /// Cheap consistency check: for every model in the catalog, verify the file
+  /// is on disk and reconcile the in-memory state — so a file sitting on disk
+  /// that was never tracked (e.g. dropped after a process kill, or placed
+  /// externally) gets marked `completed` too, and a deleted file loses its mark.
+  ///
+  /// Uses [ModelStorageService.isFullyCached] (multi-directory full-cache check:
+  /// file exists AND size matches AND no stray .tmp), so it is safe to call on
+  /// every screen entry — the UI self-heals without needing a full disk scan.
   Future<void> refreshCacheStatus(List<ModelConfig> models) async {
     final storage = ModelStorageService();
     final updated = Map<String, DownloadTask>.from(state);
@@ -67,18 +71,18 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
 
     for (final model in models) {
       final existing = updated[model.id];
-      if (existing == null) continue;
-      if (existing.state == DownloadState.downloading ||
-          existing.state == DownloadState.paused) {
+      // Never clobber a running/paused transfer.
+      if (existing != null &&
+          (existing.state == DownloadState.downloading ||
+           existing.state == DownloadState.paused)) {
         continue;
       }
-      // Use the full-cache check (file exists AND size matches AND no stray
-      // .tmp) so a truncated/partial `.gguf` is never reported as cached.
       final onDisk = await storage.isFullyCached(model);
-      if (existing.state == DownloadState.completed && !onDisk) {
+      final wasCompleted = existing?.state == DownloadState.completed;
+      if (wasCompleted && !onDisk) {
         updated[model.id] = DownloadTask(modelId: model.id);
         changed = true;
-      } else if (existing.state != DownloadState.completed && onDisk) {
+      } else if (!wasCompleted && onDisk) {
         updated[model.id] = DownloadTask(
           modelId: model.id,
           state: DownloadState.completed,
@@ -101,10 +105,10 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
          existing.state == DownloadState.paused)) {
       return;
     }
-    // Only one model may download at a time globally — block a second start so
-    // the service's capacity guard never throws an unhandled exception.
-    final anyActive = state.values.any((t) => t.state == DownloadState.downloading);
-    if (anyActive) return;
+    // 最多同时 2 个模型下载。超过则拒绝本次启动，避免触发服务的容量守卫异常。
+    final activeCount =
+        state.values.where((t) => t.state == DownloadState.downloading).length;
+    if (activeCount >= 2) return;
 
     // Create initial task for tracking — pass it to the service so Dio mutates THIS same object.
     final initialTask = DownloadTask(

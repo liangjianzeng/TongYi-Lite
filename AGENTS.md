@@ -16,6 +16,9 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 
 ## 构建环境备忘
 
+- **默认打包策略（2026-08-08 起）**：每次构建默认 **debug + release 一起打**，
+  除非用户只点名一个。debug 用于真机安装调试，release 用于生产分发。
+  两者共用 `CN=TongYiLite` 签名。
 - 本项目是 Flutter + NDK(CMake + llama.cpp)。
 - `flutter build apk --debug` 在本机 gradle 启动 `flutter.bat` 会静默失败（Windows/gradle 批处理问题）。
   **workaround**：先 `flutter assemble ... debug_android_application` 生成 kernel/assets，
@@ -24,6 +27,17 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
   "Device or resource busy" / access-denied，需先终止对应进程再删 `.cxx`。
 - gradle 守护进程可能持有 `.cxx` 锁导致 `buildCMakeDebug` 偶发失败：`./gradlew.bat --stop` 后重试。
 - 构建/安装前先 `adb devices` 确认设备在线；设备可能因 USB 断开而消失，需等待或重连。
+
+## APK 签名（重要记忆）
+
+> **正确签名是 `CN=TongYiLite`（O=DGXSpark），不是临时生成的 dev keystore。**
+
+- **签名证书**：`CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN`
+  SHA-256 指纹：`FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
+- **签名文件**：`android/key.jks` + `android/key.properties`（均被 `.gitignore` 排除，不提交远程）。
+  `key.properties`：`storePassword=android` / `keyAlias=androiddebugkey` / `storeFile=../key.jks`
+- **铁律**：覆盖更新安装必须保持同一签名（否则 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。构建时若发现 APK 签名不是 `CN=TongYiLite`（比如变成了临时生成的 `CN=TongYi-Lite Dev`），说明签名文件不对，需核对 `key.jks`。
+- 新环境 clone 后若签名文件缺失：从源工作区拷贝，或用 `keytool -genkey -dname "CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN"` 重新生成并写 `key.properties`。
 
 ## 关键教训：CMAKE_C_FLAGS_DEBUG 会被 NDK 工具链静默顶掉（CPU 内核失去 -O3 → 全模型变慢）
 
@@ -40,6 +54,24 @@ add_compile_options(-O3)
 add_compile_definitions(NDEBUG)
 ```
 改 CMake 后必须**清 `.cxx` 全量重建**，并核对 compile_commands 同时含 `-O3 -DNDEBUG -march` 才算生效。
+
+## 关键教训：Cortex-A78 不支持 i8mm → SIGILL 撞 crashes all backends
+
+> **根因（2026-08-08 真机定位）**：`GGML_CPU_ARM_ARCH` 设为 `armv8.4-a+dotprod+i8mm`，
+> 但天玑 8200 / 天玑 920 的 CPU 大核是 Cortex-A78（ARMv8.2-A），只支持 dotprod，
+> **不支持 i8mm**（需 ARMv8.6-A/ARMv9）。ggml-cpu 的 i8mm kernel 在这些核心上执行
+> `i8mm` 指令 → **SIGILL**，崩溃发生在共享的 CPU 加载/repack 路径，与推理后端无关，
+> 因此"三个后端全崩"。
+
+- **型号确认**：天玑 8200 = 1×A78@3.1GHz + 3×A78 + 4×A55；天玑 920 = 2×A78 + 6×A55。
+  均为 ARMv8.2-A，`+dotprod`，无 `i8mm`。
+- **修复**：`android/app/src/main/cpp/CMakeLists.txt` 中
+  `set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm ...)` → `armv8.2-a+dotprod`。
+  KleidiAI 的 dotprod 内核仍可用，i8mm 量化内核不可用（性能影响可接受）。
+- **验证动作**：清 `.cxx` 全量重编 + 两台天玑三后端（CPU / OpenCL / Vulkan）各跑一遍
+  加载+推理 + 高通 8s Gen 4 回归。
+- **后续观察**：GPU 后端（Mali）的 ADRENA_KERNELS 问题与此修复无关，是独立线路。
+  `n_ubatch=16` 限制在 dotprod 下可试探提回 512，但先验证不崩。
 
 ## 关键教训：flutter assemble 输出路径 ≠ gradle 读取路径（Dart 改动"装不进"APK）
 
