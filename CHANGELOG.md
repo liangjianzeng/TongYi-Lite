@@ -6,6 +6,58 @@
 
 ---
 
+## [0.1.6] — 2026-08-19
+
+### 引擎升级
+
+- **llama.cpp 升级到上游 master**：vendored 从 `f5b9bd3`（b10173，2026-07-29）升级到
+  `fe8156f`（2026-08-19，含 333 个上游 commit）。API 适配：`llama_sampler_init_penalties`
+  新签名（增加 `n_vocab` 参数，JNI 两处调用点已同步）；`LLAMA_INSTALL_VERSION` →
+  `LLAMA_VERSION_BASE`（上游 CMake 变量改名，项目 CMake mtmd 段已适配）。
+
+### 天玑 / Mali Vulkan 崩溃根治（真机验证）
+
+**症状**：天玑（MediaTek Mali-G68）上选 Vulkan 后端，加载模型或首次推理即 SIGSEGV
+（`vulkan::api::QueueSubmit+0`，fault addr 0x0）。Adreno 正常。
+
+**排查过程（逐项排除）**：验证层（APK 内 13MB `libVkLayer_khronos_validation.so`，
+Flutter debug 打包带入，已从打包排除）→ `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT/F16/ASYNC`
+→ `internallySynchronizedQueues` 特性 → 均非根因。
+
+**最终根因**：Mali 驱动的 `vkGetDeviceQueue2`（Vulkan 1.2）返回 dispatch 表为 NULL 的坏
+queue → 首次 `vkQueueSubmit` 崩在 loader trampoline。**改用 Vulkan 1.0 的 `vkGetDeviceQueue`
+修复**（Impeller 同款路径）。
+
+**最终 patch（3 处，仅 ARM vendor 0x13B5 生效，ggml-vulkan.cpp）**：
+1. `ggml_vk_create_queue`：Mali 用 `device.getQueue(family, index)` 替代 `getQueue2`；
+2. `has_internally_synchronized_queues` 在 Mali 强制 false；
+3. `buffer_device_address` 在 Mali 强制 false（驱动上报 true 但 `getBufferAddress` 崩）。
+
+> 注意：**不要**调用 `VULKAN_HPP_DEFAULT_DISPATCHER.init(device)`——Mali 上会把
+> `vkQueueSubmit` 等 loader trampoline 覆盖为 NULL，引入新崩溃（已验证）。
+
+### 其他修复与优化
+
+- **mmproj 视觉编码后端跟随主后端**：原来写死 `MTMD_BACKEND_DEVICE=OpenCL`（Adreno 时代
+  遗留），选 Vulkan 时显示矛盾、天玑上 OpenCL 不可用。现按 `enable_gpu` + `backend` 选择
+  CPU/OpenCL/Vulkan，天玑上正确显示「图像理解 (Vulkan GPU 编码)」。
+- **天玑 OpenCL 设置置灰**：检测到 MediaTek SoC 时，GPU 后端 OpenCL 选项禁用并提示
+  「天玑芯片不支持 OpenCL，优先 Vulkan」（真机实证：天玑 `libOpenCL.so` 仅为 72KB
+  Khronos ICD 加载器空壳，`/vendor/etc/OpenCL/vendors/` 无驱动注册 → 枚举 0 平台）。
+- **标题栏字体调小**：`TongYi-Lite` 标题从默认 AppBar 大字号改为标准大小。
+- **Gradle 16 核并行构建**：`-Xmx8g` + `workers.max=16` + `parallel=true`，NDK 全量重编
+  从 20+ 分钟降到 ~2 分钟。
+- **设备信息通道**：新增 `getDeviceInfo` MethodChannel（暴露 SoC 硬件信息），供设置页
+  按芯片判断 OpenCL 可用性。
+
+### 性能说明（天玑）
+
+- 天玑 900（Mali-G68）Vulkan 解码实测 ~5.7 tok/s（0.8B），约为 CPU 的 1/3——这是
+  **Mali-G68 无矩阵加速单元的硬件天花板**（社区 PR #18493/#27163 佐证，均未合入主线），
+  非软件 bug。大模型（4B+）上 GPU 卸载仍可省内存。
+- 恢复 `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT` 等临时排查开关（非崩溃根因，纯性能杀手）；
+  保留 Mali 实测较稳的路径（BDA / internal-sync 禁用由 vendor 判断自动生效）。
+
 ## [0.1.3] — 2026-08-04
 
 ### 体验优化

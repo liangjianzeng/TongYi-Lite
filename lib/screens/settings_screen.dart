@@ -867,6 +867,17 @@ class _InferenceEngineTab extends ConsumerWidget {
     final modelState = ref.watch(modelManagerProvider);
     final gpuSettings = ref.watch(settingsProvider);
     final gpuNotifier = ref.read(settingsProvider.notifier);
+    // 设备 SoC 信息：天玑（MediaTek）芯片不支持 OpenCL，禁用该后端并提示。
+    final deviceInfo = ref.watch(deviceInfoProvider).valueOrNull ?? const {};
+    final isDimensity = _isDimensitySoC(deviceInfo);
+    // 天玑不支持 OpenCL：若此前选了 opencl 后端，自动切到 Vulkan。
+    if (isDimensity && gpuSettings.gpuBackend == 'opencl') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (gpuSettings.gpuBackend == 'opencl') {
+          gpuNotifier.setGpuBackend('vulkan');
+        }
+      });
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -887,8 +898,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                   ),
                   const SizedBox(height: 16),
                   SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(
+                    segments: [
+                      const ButtonSegment(
                         value: 'auto',
                         label: Text('自动'),
                         icon: Icon(Icons.auto_awesome, size: 16),
@@ -897,8 +908,9 @@ class _InferenceEngineTab extends ConsumerWidget {
                         value: 'opencl',
                         label: Text('OpenCL'),
                         icon: Icon(Icons.speed, size: 16),
+                        enabled: !isDimensity,
                       ),
-                      ButtonSegment(
+                      const ButtonSegment(
                         value: 'vulkan',
                         label: Text('Vulkan'),
                         icon: Icon(Icons.view_in_ar, size: 16),
@@ -923,9 +935,11 @@ class _InferenceEngineTab extends ConsumerWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    gpuSettings.enableGpu
-                        ? _gpuBackendHint(gpuSettings.gpuBackend)
-                        : 'GPU 已关闭（纯 CPU）',
+                    isDimensity
+                        ? '当前设备为天玑（MediaTek）芯片：不支持 OpenCL，GPU 加速请优先使用 Vulkan'
+                        : (gpuSettings.enableGpu
+                            ? _gpuBackendHint(gpuSettings.gpuBackend)
+                            : 'GPU 已关闭（纯 CPU）'),
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                   const SizedBox(height: 16),
@@ -1230,6 +1244,23 @@ class _InferenceEngineTab extends ConsumerWidget {
 
   // ---- GPU 后端辅助 ----
 
+  /// 判断是否为 MediaTek 天玑（Dimensity）SoC。
+  /// 依据：Build.SOC_MANUFACTURER == "MediaTek"（API 31+），
+  /// 或硬件/主板名含 MTK 平台代号（mtxxxx / MTxxxx）。
+  static bool _isDimensitySoC(Map<String, String> info) {
+    final socMfg = (info['socManufacturer'] ?? '').toLowerCase();
+    if (socMfg.contains('mediatek')) return true;
+    final hardware = (info['hardware'] ?? '').toLowerCase();
+    final board = (info['board'] ?? '').toLowerCase();
+    final socModel = (info['socModel'] ?? '').toLowerCase();
+    if (hardware.startsWith('mt') || board.startsWith('mt')) return true;
+    if (socModel.startsWith('mt')) return true;
+    // 平台代号回退：常见天玑平台代号（部分机型 hardware 为 "mt6877" 等）
+    if (RegExp(r'^mt\d{4,5}$').hasMatch(hardware)) return true;
+    if (RegExp(r'^mt\d{4,5}$').hasMatch(board)) return true;
+    return false;
+  }
+
   String _gpuBackendHint(String backend) {
     switch (backend) {
       case 'opencl':
@@ -1326,9 +1357,9 @@ class _buildAboutTab extends StatelessWidget {
 }
 
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
-// versionName（0.1.5）保持同步。离线沙箱无法下载 package_info_plus 的
+// versionName（0.1.6）保持同步。离线沙箱无法下载 package_info_plus 的
 // AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.1.5';
+const _appVersion = '0.1.6';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';

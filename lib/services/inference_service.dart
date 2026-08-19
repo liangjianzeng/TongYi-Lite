@@ -147,6 +147,22 @@ class InferenceService {
     return {};
   }
 
+  /// 获取设备硬件信息（SoC 等），用于按芯片禁用不支持的 GPU 后端。
+  Future<Map<String, String>> getDeviceInfo() async {
+    try {
+      final r = await _channel.invokeMethod('getDeviceInfo');
+      if (r is Map) {
+        return r.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
+      }
+    } catch (e) {
+      debugPrint('[InferenceService] getDeviceInfo failed: $e');
+    }
+    return const {
+      'board': '', 'hardware': '', 'socManufacturer': '', 'socModel': '',
+      'manufacturer': '', 'model': '',
+    };
+  }
+
   // ------------------------------------------------------------------
   // Streaming completion (raw prompt, no chat template)
   // ------------------------------------------------------------------
