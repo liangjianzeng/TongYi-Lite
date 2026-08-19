@@ -100,6 +100,8 @@ struct GenStats {
     int    n_gen       = 0;   // real llama.cpp decoded tokens (tok/s numerator)
     double t_gen_ms    = 0;   // pure generation wall time (tok/s denom, excludes prefill)
     double t_prompt_ms = 0;   // prompt prefill time (diagnostics only)
+    double t_vision_ms = 0;   // image-encode (vision) wall time, ms — "识图时间"
+    double t_audio_ms  = 0;   // audio-encode (speech) wall time, ms — "听音时间"
 };
 static GenStats g_last_stats;
 
@@ -247,6 +249,12 @@ struct InferenceEngine {
     // catalog type is vision. vision_loaded mirrors mmproj != nullptr.
     mtmd_context *mmproj = nullptr;
     bool vision_loaded = false;
+    // Audio: whether the loaded mmproj also ships an audio encoder (Gemma 4 E2B
+    // native speech). Mirrors mtmd_support_audio(mmproj) at load time so the
+    // Dart UI can gate the mic button and the completion path can reject audio
+    // when the current model cannot understand it.
+    bool audio_loaded = false;
+    int  audio_sample_rate = -1;
 
     // MTP (multi-token prediction) speculative decoding. Enabled at load time iff
     // the model contains NextN layers (llama_model_n_layer_nextn > 0). The MTP head
@@ -299,6 +307,8 @@ struct InferenceEngine {
     double t_prompt_ms = 0;
     double t_gen_ms = 0;
     int32_t n_gen = 0;
+    double t_vision_ms = 0;   // vision image-encode wall time (识图时间)
+    double t_audio_ms  = 0;   // audio-encode wall time (听音时间)
 
     // Persistent KV-cache write cursor. We use the proven com.arm.aichat design:
     // each turn APPENDS its tokens at monotonically increasing positions into the
@@ -634,47 +644,71 @@ struct InferenceEngine {
             LOGI("Loading mmproj: %s", mmproj_path);
             reportLoadingLog("正在加载 mmproj 投影器（图像理解）...");
             mtmd_context_params mparams = mtmd_context_params_default();
-            // MUST stay on CPU: the vision tower's GPU kernels CRASH on Adreno
-            // with SIGSEGV (verified on-device 2026-08-06 — Fatal signal 11,
-            // fault addr 0x0 in the mmproj encode thread). Do NOT set
-            // use_gpu=true; there is no safe op-level fallback that prevents the
-            // segfault. CPU BF16 encoding is slow, so the image is downscaled on
-            // the Dart side and image_max_tokens (below) caps the token count to
-            // keep the encode time bounded.
-            mparams.use_gpu   = false;
+            // 优先 OpenCL GPU 加速视觉编码（Adreno 专项优化，llama.rn 同路径）。
+            //
+            // llama.cpp mtmd 原生支持 GPU 视觉编码（use_gpu=true 为默认值），且本地
+            // 已含 #23800/#25771 的 OpenCL is_causal 修复（见 ggml-opencl.cpp），社区
+            // 已在骁龙 8s Gen3 (Adreno 735) + OpenCL 验证 mmproj 编码 ~50s -> ~12s。
+            //
+            // 历史：vision tower 曾在 Vulkan backend 下 SIGSEGV（fault addr 0x0），
+            // 故旧实现一刀切强制 CPU。但 Vulkan 崩溃 ≠ OpenCL 崩溃，且本地 OpenCL
+            // 已修复输出错乱问题。这里显式用 MTMD_BACKEND_DEVICE 指定 OpenCL
+            // （clip.cpp 读此变量 ggml_backend_init_by_name），避免 init_by_type(GPU)
+            // 落到 Vulkan。
+            mparams.use_gpu   = true;
             mparams.n_threads = ctx_params.n_threads;
             mparams.warmup    = true;
-            // Match the main context's flash-attn setting (disabled) so the
-            // vision tower behaves identically to the text path.
-            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-            // Hard cap on per-image token count (safety net on top of the Dart
-            // side image downscale). The mmproj metadata default allows a huge
-            // image token budget — on-device we measured a single 1920px image
-            // blowing up to ~2717 prompt tokens, which ballooned memory to
-            // 2.6GB and stalled the vision eval (app spins forever then dies).
-            // image_max_tokens only applies to dynamic-resolution vision
-            // models; it is ignored by fixed-size towers, so it's safe to set.
+            // Adreno 上 ViT GPU offload 必须开 flash-attn：关闭会尝试分配 ~9.4GB
+            // 缓冲导致失败（#25771/#23800）。用 AUTO 让 mtmd warmup 探测后启用。
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+            // 硬上限：单图 token 数（配合 Dart 侧图像缩小），控制 GPU 显存预算，
+            // 规避 #23422 类显存不足 NULL 解引用崩溃。
             mparams.image_max_tokens = 512;
+            setenv("MTMD_BACKEND_DEVICE", "OpenCL", 1);
+            LOGI("mmproj: attempting OpenCL GPU encode (flash_attn=AUTO)");
             mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
             if (mmproj) {
                 vision_loaded = true;
+                audio_loaded = mtmd_support_audio(mmproj);
+                audio_sample_rate = mtmd_get_audio_sample_rate(mmproj);
                 const char *marker = mtmd_get_marker(mmproj);
-                LOGI("mmproj loaded OK (marker=%s)", marker ? marker : "?");
-                reportLoadingLog("mmproj 投影器加载完成 ✓ 支持图像理解");
+                LOGI("mmproj loaded OK on OpenCL GPU (marker=%s, audio=%d, sr=%d)",
+                     marker ? marker : "?", (int)audio_loaded, audio_sample_rate);
+                reportLoadingLog((std::string("mmproj 投影器加载完成 ✓ 图像理解 (OpenCL GPU 编码)")
+                                 + (audio_loaded ? " + 🎧 语音理解" : "")).c_str());
             } else {
-                vision_loaded = false;
-                mmproj = nullptr;
-                LOGW("mmproj load FAILED -> text-only inference");
-                reportLoadingLog("mmproj 投影器加载失败，将仅文本推理");
+                // GPU 初始化失败（backend 不可用 / 显存不足返回错误而非崩溃）
+                // → 回退 CPU 编码，避免一刀切丢失视觉能力。
+                LOGW("mmproj OpenCL GPU load FAILED -> retry CPU encode");
+                reportLoadingLog("mmproj GPU 编码不可用，回退 CPU 编码");
+                mparams.use_gpu   = false;
+                mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
+                if (mmproj) {
+                    vision_loaded = true;
+                    audio_loaded = mtmd_support_audio(mmproj);
+                    audio_sample_rate = mtmd_get_audio_sample_rate(mmproj);
+                    const char *marker = mtmd_get_marker(mmproj);
+                    LOGI("mmproj loaded OK on CPU (marker=%s, audio=%d, sr=%d)",
+                         marker ? marker : "?", (int)audio_loaded, audio_sample_rate);
+                    reportLoadingLog((std::string("mmproj 投影器加载完成 ✓ 支持图像理解 (CPU 编码)")
+                                     + (audio_loaded ? " + 🎧 语音理解" : "")).c_str());
+                } else {
+                    vision_loaded = false;
+                    mmproj = nullptr;
+                    LOGW("mmproj load FAILED -> text-only inference");
+                    reportLoadingLog("mmproj 投影器加载失败，将仅文本推理");
+                }
             }
         } else {
             LOGI("No mmproj provided -> text-only model");
         }
 
         char buf3[128];
-        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)%s%s", ctx_val,
+        snprintf(buf3, sizeof(buf3), "推理上下文初始化完成 (n_ctx=%d)%s%s%s", ctx_val,
                  mtp_enabled ? "，MTP 加速已启用" : "",
-                 vision_loaded ? "，视觉已启用" : "");
+                 vision_loaded ? "，视觉已启用" : "",
+                 audio_loaded ? "，语音已启用" : "");
         reportLoadingLog(buf3);
         return true;
     }
@@ -689,6 +723,8 @@ struct InferenceEngine {
         if (context)  { llama_free(context);  context = nullptr; }
         if (mmproj)   { mtmd_free(mmproj);     mmproj = nullptr; }
         vision_loaded = false;
+        audio_loaded = false;
+        audio_sample_rate = -1;
         if (model)    { llama_model_free(model); model = nullptr; }
         vocab = nullptr;
         mtp_enabled = false;
@@ -761,9 +797,9 @@ struct InferenceEngine {
     // The text path in completion() is left 100% untouched; this is a separate
     // branch used only when mmproj is loaded AND an image is provided.
     // ------------------------------------------------------------------
-    std::string completion_with_vision(
+    std::string completion_with_media(
         const std::vector<llama_chat_message> &history,
-        const char *image_path,
+        const char *media_path,
         int max_tokens,
         float temperature,
         float top_p,
@@ -805,12 +841,13 @@ struct InferenceEngine {
              (int)std::min((size_t)300, formatted_prompt.size()),
              formatted_prompt.c_str());
 
-        // 2. Decode the image file to a bitmap.
+        // 2. Decode the media file (image OR audio — mtmd_helper auto-detects by
+        //    magic bytes: jpg/png/bmp for images, wav/mp3/flac for audio) to a bitmap.
         struct mtmd_helper_bitmap_wrapper wrap =
-            mtmd_helper_bitmap_init_from_file(mmproj, image_path, /*placeholder=*/false);
+            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false);
         if (!wrap.bitmap) {
-            LOGW("vision: failed to decode image %s", image_path);
-            return "[ERROR: 图片解码失败]";
+            LOGW("vision: failed to decode media %s", media_path);
+            return "[ERROR: 媒体文件解码失败]";
         }
         mtmd_bitmap *bm = wrap.bitmap;
 
@@ -835,18 +872,38 @@ struct InferenceEngine {
         llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)llama_n_ctx(context));
         kv_position = 0;
 
-        // 5. Eval all chunks (text -> llama_decode, image -> encode + decode).
+        // 5. Eval all chunks (text -> llama_decode, media -> encode + decode).
+        //    手动遍历 chunks，单独累计「图像编码」(识图) 与「音频编码」(听音)
+        //    耗时 t_vision_ms / t_audio_ms —— 媒体编码是多媒体回复的主要耗时。
         auto t_start = std::chrono::high_resolution_clock::now();
+        t_vision_ms = 0.0;
+        t_audio_ms  = 0.0;
         llama_pos n_past = 0;
-        res = mtmd_helper_eval_chunks(mmproj, context, chunks, n_past,
-                                      /*seq_id=*/0,
-                                      (int32_t)ctx_params.n_batch,
-                                      /*logits_last=*/true, &n_past);
+        {
+            const size_t n_chunks = mtmd_input_chunks_size(chunks);
+            for (size_t i = 0; i < n_chunks; i++) {
+                auto chunk = mtmd_input_chunks_get(chunks, i);
+                const bool chunk_logits_last = (i == n_chunks - 1);
+                auto s = std::chrono::high_resolution_clock::now();
+                res = mtmd_helper_eval_chunk_single(mmproj, context, chunk, n_past,
+                                                    /*seq_id=*/0,
+                                                    (int32_t)ctx_params.n_batch,
+                                                    chunk_logits_last, &n_past);
+                auto e = std::chrono::high_resolution_clock::now();
+                const auto ctype = mtmd_input_chunk_get_type(chunk);
+                if (ctype == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                    t_vision_ms += std::chrono::duration<double, std::milli>(e - s).count();
+                } else if (ctype == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+                    t_audio_ms += std::chrono::duration<double, std::milli>(e - s).count();
+                }
+                if (res != 0) break;
+            }
+        }
         kv_position = n_past;
         auto t_end = std::chrono::high_resolution_clock::now();
         t_prompt_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        LOGI("vision: eval chunks done, n_past=%lld, prompt %.0fms",
-             (long long)n_past, t_prompt_ms);
+        LOGI("vision: eval chunks done, n_past=%lld, prompt %.0fms, 识图 %.0fms, 听音 %.0fms",
+             (long long)n_past, t_prompt_ms, t_vision_ms, t_audio_ms);
 
         mtmd_input_chunks_free(chunks);
         mtmd_bitmap_free(bm);
@@ -954,8 +1011,17 @@ struct InferenceEngine {
         prev_prompt_tokens.clear();
 
         is_running = false;
-        LOGI("vision generation done: %d tokens, %.1f tok/s", n_gen,
-             t_gen_ms > 0 ? (n_gen * 1000.0 / t_gen_ms) : 0.0);
+
+        // 媒体路径也必须回写 g_last_stats，否则 Dart 读到的是上一次（或默认 0）
+        // stats → UI 的 tok/s 一直显示 0.0。
+        g_last_stats.n_gen       = n_gen;
+        g_last_stats.t_gen_ms    = t_gen_ms;
+        g_last_stats.t_prompt_ms = t_prompt_ms;
+        g_last_stats.t_vision_ms = t_vision_ms;
+        g_last_stats.t_audio_ms  = t_audio_ms;
+        LOGI("vision generation done: %d tokens, %.1f tok/s (prompt %.0fms, gen %.0fms, 识图 %.0fms, 听音 %.0fms)",
+             n_gen, t_gen_ms > 0 ? (n_gen * 1000.0 / t_gen_ms) : 0.0,
+             t_prompt_ms, t_gen_ms, t_vision_ms, t_audio_ms);
         return result;
     }
 
@@ -974,9 +1040,11 @@ struct InferenceEngine {
         // final user message appended to history.  Empty history falls back
         // to raw prompt (backward compatible).
         const std::vector<llama_chat_message> *history = nullptr,
-        // Optional on-disk image path for vision (mmproj must be loaded).
-        // When set, completion routes to the mtmd vision path.
-        const char *image_path = nullptr
+        // Optional on-disk media path (image OR audio, mmproj must be loaded).
+        // When set, completion routes to the mtmd media path. Audio is only
+        // accepted if the loaded mmproj ships an audio encoder (mtmd_support_audio).
+        const char *image_path = nullptr,
+        const char *audio_path = nullptr
     ) {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
@@ -994,23 +1062,35 @@ struct InferenceEngine {
         }
 
         // ================================================================
-        // Vision path — mmproj loaded + an image file provided for this turn.
-        // Routes to completion_with_vision() (self-contained mtmd flow).
+        // Media path — mmproj loaded + a media file (image/audio) this turn.
+        // Routes to completion_with_media() (self-contained mtmd flow).
         // ================================================================
-        if (mmproj && vision_loaded && image_path && image_path[0] != '\0' &&
-            history && !history->empty()) {
+        const char *media_path = nullptr;
+        bool media_is_audio = false;
+        if (audio_path && audio_path[0] != '\0') {
+            if (!audio_loaded) {
+                LOGW("media path: audio requested but mmproj has NO audio encoder -> reject");
+                return "[ERROR: 当前模型不支持语音理解，请加载 Gemma 4 E2B 或开启语音的模型]";
+            }
+            media_path = audio_path;
+            media_is_audio = true;
+        } else if (image_path && image_path[0] != '\0') {
+            media_path = image_path;
+        }
+        if (mmproj && vision_loaded && media_path && history && !history->empty()) {
             is_running = true;
             should_stop = false;
-            LOGI("vision completion path (mmproj=%p image=%s)", (void*)mmproj, image_path);
+            LOGI("media completion path (mmproj=%p %s=%s)", (void*)mmproj,
+                 media_is_audio ? "audio" : "image", media_path);
             try {
-                std::string res = completion_with_vision(
-                    *history, image_path, max_tokens, temperature, top_p, on_token);
+                std::string res = completion_with_media(
+                    *history, media_path, max_tokens, temperature, top_p, on_token);
                 is_running = false;
                 return res;
             } catch (const std::exception &e) {
-                LOGE("vision completion exception: %s", e.what());
+                LOGE("media completion exception: %s", e.what());
                 is_running = false;
-                return std::string("[ERROR: vision completion failed]");
+                return std::string("[ERROR: media completion failed]");
             }
         }
 
@@ -1703,6 +1783,8 @@ struct InferenceEngine {
             g_last_stats.n_gen       = n_gen;
             g_last_stats.t_gen_ms    = t_gen_ms;
             g_last_stats.t_prompt_ms = t_prompt_ms;
+            // 文本回复无图像编码，识图时间清零避免残留上次视觉回复的值。
+            g_last_stats.t_vision_ms = 0.0;
             {
                 std::string hex;
                 char tmp[4];
@@ -2089,11 +2171,13 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     jfloat temperature,
     jfloat top_p,
     jobject jcallback,
-    jstring j_image_path      // optional on-disk image path for vision
+    jstring j_image_path,    // optional on-disk image path for vision
+    jstring j_audio_path     // optional on-disk audio path for speech (Gemma E2B)
 ) {
     const int eng_n_ctx = static_cast<int>(g_engine.n_ctx.load());
-    LOGI("nativeCompletionWithMessages ENTER: is_loaded=%d n_ctx=%d image=%s",
-         g_engine.is_loaded(), eng_n_ctx, j_image_path ? "set" : "null");
+    LOGI("nativeCompletionWithMessages ENTER: is_loaded=%d n_ctx=%d image=%s audio=%s",
+         g_engine.is_loaded(), eng_n_ctx, j_image_path ? "set" : "null",
+         j_audio_path ? "set" : "null");
     if (!g_engine.is_loaded()) {
         LOGE("nativeCompletionWithMessages ABORT: no model loaded");
         return env->NewStringUTF("[ERROR: No model loaded]");
@@ -2102,6 +2186,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     jobject cb_copy = env->NewLocalRef(jcallback);
     std::string prompt   = jstring_to_std(env, jprompt);
     std::string image_path = j_image_path ? jstring_to_std(env, j_image_path) : "";
+    std::string audio_path = j_audio_path ? jstring_to_std(env, j_audio_path) : "";
     // Backing store for history role/content strings; must outlive the completion
     // call so the llama_chat_message pointers stay valid.
     std::deque<std::string> history_store;
@@ -2146,7 +2231,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
                 return (should_continue != JNI_FALSE);
             },
             &history,   // pass history to completion() for chatml template application
-            image_path.empty() ? nullptr : image_path.c_str()  // vision image path (optional)
+            image_path.empty() ? nullptr : image_path.c_str(),  // image path (optional)
+            audio_path.empty() ? nullptr : audio_path.c_str()   // audio path (optional)
         );
     } catch (const std::exception &e) {
         LOGE("nativeCompletionWithMessages caught C++ exception: %s", e.what());
@@ -2166,14 +2252,27 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     return utf8_to_jstring(env, result);
 }
 
+// --- Audio capability (surfaced to Dart so the mic button can be gated) ---
+
+JNIEXPORT jboolean JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSupportsAudio(JNIEnv *env, jobject) {
+    return g_engine.audio_loaded ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetAudioSampleRate(JNIEnv *env, jobject) {
+    return (jint)g_engine.audio_sample_rate;
+}
+
 // --- Last generation stats (surfaced to Dart for accurate tok/s) ---
 
 JNIEXPORT jstring JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, jobject) {
-    char buf[160];
+    char buf[256];
     snprintf(buf, sizeof(buf),
-             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f}",
-             g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms);
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f}",
+             g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms,
+             g_last_stats.t_vision_ms, g_last_stats.t_audio_ms);
     return utf8_to_jstring(env, buf);
 }
 

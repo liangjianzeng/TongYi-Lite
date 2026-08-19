@@ -59,6 +59,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置全局 MTP 功能总开关（默认关闭）。关闭时模型卡片不显示各模型 MTP
+  /// 开关，加载模型也强制不启用；开启后模型卡片显示支持 MTP 模型的开关，
+  /// 用户可逐个配置。
+  Future<void> setEnableMtpFeature(bool value) async {
+    state = state.copyWith(enableMtpFeature: value);
+    await _persist();
+  }
+
   /// 设置「默认加载」模型。传 null 表示取消默认。
   /// 持久化到 inference_settings.json（与 MTP 等其他设置同一文件），
   /// 退出 App 不会丢失；启动自动加载逻辑按此 id 加载模型。

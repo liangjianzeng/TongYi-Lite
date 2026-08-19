@@ -30,6 +30,7 @@ class MainActivity : FlutterActivity() {
 
     private lateinit var engine: InferenceEngine
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var audioRecorder: AudioRecorder? = null
 
     // ---- Debug logging helpers (always visible in Release logcat) ----
     private fun logI(method: String, message: String) { Log.i(TAG, "[$method] $message") }
@@ -85,6 +86,9 @@ class MainActivity : FlutterActivity() {
                 "isLoaded"      -> handleIsLoaded(result)
                 "completion"              -> handleCompletion(call, result)
                 "completionWithMessages"  -> handleCompletionWithMessages(call, result)
+                "startRecording"          -> handleStartRecording(result)
+                "stopRecording"           -> handleStopRecording(result)
+                "supportsAudio"           -> handleSupportsAudio(result)
                 "stopGeneration"          -> handleStop(result)
                 "setEnableThinking"       -> handleSetEnableThinking(call, result)
                 "resetContext"            -> handleResetContext(result)
@@ -232,8 +236,9 @@ class MainActivity : FlutterActivity() {
         val temperature  = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
         val topP         = call.argument<Double>("topP")?.toFloat() ?: 0.9f
         val imagePath    = call.argument<String>("imagePath")
+        val audioPath    = call.argument<String>("audioPath")
 
-        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}, image=${imagePath ?: "none"}")
+        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}, image=${imagePath ?: "none"}, audio=${audioPath ?: "none"}")
 
         val sink = TokenStream.sink
         updateServiceStatus("AI 思考中...")
@@ -248,6 +253,7 @@ class MainActivity : FlutterActivity() {
                     temperature = temperature,
                     topP = topP,
                     imagePath = imagePath,
+                    audioPath = audioPath,
                     onToken = { token ->
                         mainHandler.post { sink?.success(token) }
                         true
@@ -262,6 +268,61 @@ class MainActivity : FlutterActivity() {
                 mainHandler.post { result.error("COMPLETION_ERROR", e.message, null) }
             }
         }.start()
+    }
+
+    /**
+     * Start microphone capture for on-device speech input. The sample rate is
+     * taken from the loaded model's audio encoder; refuses if the current model
+     * has no audio support.
+     */
+    private fun handleStartRecording(result: MethodChannel.Result) {
+        logI("handleStartRecording", "")
+        Thread {
+            try {
+                if (!engine.supportsAudio()) {
+                    mainHandler.post { result.error("NO_AUDIO", "当前模型不支持语音理解", null) }
+                    return@Thread
+                }
+                val sr = engine.getAudioSampleRate().takeIf { it > 0 } ?: 16000
+                val rec = AudioRecorder(applicationContext, sr)
+                val ok = rec.start()
+                if (ok) {
+                    audioRecorder = rec
+                    mainHandler.post { result.success(true) }
+                } else {
+                    mainHandler.post { result.error("RECORD_FAILED", "麦克风启动失败", null) }
+                }
+            } catch (e: Exception) {
+                logW("handleStartRecording", "error: ${e.message}", e)
+                mainHandler.post { result.error("RECORD_ERROR", e.message, null) }
+            }
+        }.start()
+    }
+
+    /** Stop recording and return the WAV file path (null when discarded). */
+    private fun handleStopRecording(result: MethodChannel.Result) {
+        logI("handleStopRecording", "")
+        Thread {
+            try {
+                val path = audioRecorder?.stop()
+                audioRecorder = null
+                logI("handleStopRecording", "path=$path")
+                mainHandler.post { result.success(path) }
+            } catch (e: Exception) {
+                logW("handleStopRecording", "error: ${e.message}", e)
+                mainHandler.post { result.error("STOP_ERROR", e.message, null) }
+            }
+        }.start()
+    }
+
+    private fun handleSupportsAudio(result: MethodChannel.Result) {
+        mainHandler.post {
+            try {
+                result.success(engine.supportsAudio())
+            } catch (e: Exception) {
+                logE("handleSupportsAudio", "error: ${e.message}", e)
+            }
+        }
     }
 
     private fun handleStop(result: MethodChannel.Result) {

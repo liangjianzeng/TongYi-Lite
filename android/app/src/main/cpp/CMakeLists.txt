@@ -67,11 +67,11 @@ add_compile_definitions(NDEBUG)
 # and is unaffected by this flag.
 #
 # Set via GGML_CPU_ARM_ARCH (NOT a manual -march flag): ggml-cpu's KleidiAI
-# integration reads this to decide whether to compile the +dotprod/+i8mm kernels
-# (ggml/src/ggml-cpu/CMakeLists.txt:169,644-651). Adding -march to CMAKE_C_FLAGS
-# did NOT reach the kai source files, so the dotprod/i8mm kernels were silently
-# skipped even though GGML_USE_CPU_KLEIDIAI was defined.
-set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm CACHE STRING "" FORCE)
+# Cortex-A78 (Dimensity 8200/920 等 ARMv8.2-A) 支持 dotprod 但不支持 i8mm
+# （i8mm 需 ARMv8.6-A/ARMv9），在此架构上使用 i8mm 会触发 SIGILL。
+# 降级为 armv8.2-a+dotprod：兼容所有 Cortex-A78 设备，KleidiAI 的 dotprod
+# 内核仍可被编译和使用，代价是 i8mm 量化内核不可用（性能影响可接受）。
+set(GGML_CPU_ARM_ARCH armv8.2-a+dotprod CACHE STRING "" FORCE)
 
 # Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).
@@ -80,11 +80,20 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     # Host toolchain is fixed (see host-toolchain-mingw.cmake: MinGW-w64 GCC +
     # the Android SDK's ninja + fully static linking), so the Vulkan backend
     # can be enabled for arm64 devices.
-    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-    message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+    # The LunarG SDK (glslc + vulkan.hpp) and a host C++ compiler (MinGW-w64)
+    # are required to build ggml-vulkan. If either is absent, skip the Vulkan
+    # backend so the build still succeeds (OpenCL + CPU remain); see README.
+    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
+    set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
+    if(EXISTS "${_vk_sdk}/Bin/glslc.exe" AND EXISTS "${_vk_sdk}/Include/vulkan/vulkan.hpp" AND EXISTS "${_vk_host_tc}")
+        set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+        message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+    else()
+        set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+        message(WARNING "Vulkan SDK (${_vk_sdk}) / MinGW host toolchain missing -> Vulkan backend skipped; OpenCL + CPU remain")
+    endif()
 
     # Point FindVulkan (glslc) and find_package(SPIRV-Headers) at the LunarG SDK.
-    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
     set(ENV{VULKAN_SDK} "${_vk_sdk}")
     # Explicitly hint find_package(SPIRV-Headers) at the SDK config dir so the
     # Vulkan backend configures reliably regardless of CMAKE_PREFIX_PATH state.
