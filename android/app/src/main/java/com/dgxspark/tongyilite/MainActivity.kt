@@ -9,6 +9,7 @@ package com.dgxspark.tongyilite
 
 import android.app.ActivityManager
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -96,6 +97,7 @@ class MainActivity : FlutterActivity() {
                 "getModelInfo"  -> handleGetModelInfo(result)
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
                 "getInferenceStats" -> handleGetInferenceStats(result)
+                "getDeviceInfo" -> handleGetDeviceInfo(result)
                 else            -> result.notImplemented()
             }
         }
@@ -496,6 +498,40 @@ class MainActivity : FlutterActivity() {
             engine.destroy()
         }
         InferenceService.stop(this)
+    }
+
+    /**
+     * Expose device hardware info (SoC) so the UI can gray out backends that
+     * are known to be unsupported on the chip (e.g. OpenCL on MediaTek).
+     */
+    private fun handleGetDeviceInfo(result: MethodChannel.Result) {
+        try {
+            val board = Build.BOARD ?: ""
+            val hardware = Build.HARDWARE ?: ""
+            val socManufacturer = Build.SOC_MANUFACTURER ?: ""
+            val socModel = Build.SOC_MODEL ?: ""
+            val manufacturer = Build.MANUFACTURER ?: ""
+            val model = Build.MODEL ?: ""
+            logI("handleGetDeviceInfo", "board=$board hardware=$hardware socMfg=$socManufacturer soc=$socModel mfg=$manufacturer model=$model")
+            result.success(mapOf(
+                "board" to board,
+                "hardware" to hardware,
+                "socManufacturer" to socManufacturer,
+                "socModel" to socModel,
+                "manufacturer" to manufacturer,
+                "model" to model,
+            ))
+        } catch (e: Exception) {
+            logE("handleGetDeviceInfo", "failed", e)
+            result.success(mapOf(
+                "board" to "",
+                "hardware" to "",
+                "socManufacturer" to "",
+                "socModel" to "",
+                "manufacturer" to "",
+                "model" to "",
+            ))
+        }
     }
 }
 

@@ -33,8 +33,9 @@
 
 | 维度 | 说明 |
 |------|------|
+| **当前版本** | **v0.1.6**（2026-08-19；versionCode 7） |
 | **目标平台** | Android APK (API 33+) |
-| **推理引擎** | llama.cpp b10173（批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod CPU；vendored 提交 f5b9bd3，2026-07-29） |
+| **推理引擎** | llama.cpp 上游 master（vendored `fe8156f`，2026-08-19；批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod CPU；含天玑 Mali Vulkan 崩溃修复，见「GPU 加速」） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏；支持**最多 2 个模型并行下载**、暂停/继续/删除、断点续传 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
@@ -408,6 +409,26 @@ flutter logs | grep TongYiLite
 - **运行期**：设备须提供 `libOpenCL.so`（经 dlopen 加载）；无驱动则探测到 0 设备 → 自动回落 CPU，不崩溃。
 - 同样**仅 `arm64-v8a` 启用**（见下方注意）。
 
+**Vulkan 后端（天玑 Mali 专项修复 · v0.1.6）**：v0.1.6 前在 MediaTek 天玑（Mali-G68 等）
+上选 Vulkan 后端，加载模型或首次推理即 SIGSEGV。真机定位根因：**Mali 驱动的
+`vkGetDeviceQueue2`（Vulkan 1.2）返回 dispatch 表为 NULL 的坏 queue**，首次
+`vkQueueSubmit` 崩在 loader trampoline（`vulkan::api::QueueSubmit+0`）。v0.1.6 在
+`ggml-vulkan.cpp` 内对 **ARM vendor（0x13B5）** 做了 3 处 patch（真机验证通过）：
+改用 Vulkan 1.0 的 `vkGetDeviceQueue` 获取 queue、强制禁用 `internallySynchronizedQueues`
+特性、强制禁用 `buffer_device_address`（驱动上报 true 但 `getBufferAddress` 崩溃）。
+排查中排除的项：APK 内 Vulkan 验证层（Flutter debug 打包带入的 13MB
+`libVkLayer_khronos_validation.so`，已从打包排除）、`GGML_VK_DISABLE_*` 系列开关。
+
+> **天玑上 OpenCL 不可用是硬件生态现实，非 bug**：天玑系统内的 `libOpenCL.so` 仅为 72KB
+> Khronos ICD 加载器空壳（`clGetPlatformIDs` 走 `khrIcdInitialize` 后枚举 0 平台），
+> `/vendor/etc/OpenCL/vendors/` 无任何 Mali 驱动注册——联发科未在 Android 上打包
+> ARM 专有的 Mali OpenCL 驱动（高通 Adreno 则完整打包）。因此设置页在 MediaTek SoC 上
+> 将 OpenCL 选项**置灰禁用**并提示「天玑芯片不支持 OpenCL，优先 Vulkan」。
+
+> **性能提示（天玑）**：Mali-G68 无矩阵加速单元，llama.cpp Vulkan 后端在其上解码约
+> 为 CPU 的 1/3（0.8B 实测 ~5.7 vs ~17 tok/s），属硬件天花板（社区 PR #18493/#27163
+> 佐证，均未合入主线）。GPU 卸载在 4B+ 大模型上仍可显著省内存；日常小模型建议 CPU。
+
 **验证是否真的上了 GPU**（连上设备后）：
 
 ```bash
@@ -534,7 +555,7 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 | 3 | **模型下载系统** | ✅ | Dio + HTTP Range 断点续传 + 镜像自动回退（hf-mirror/ModelScope，见 models_catalog.json） |
 | 4 | **设置页 UI** | ✅ | 模型选择、下载进度、存储信息展示 |
 | 5 | **对话持久化** | ✅ | SQLite (sqflite) 存储对话和消息历史 |
-| 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端；实际卸载层数由设置页 gpuLayers 透传（默认 100=全量，llama.cpp 自动 clamp 到模型层数），无 GPU 自动回退 CPU |
+| 6 | **Vulkan GPU 加速** | ✅ | arm64-v8a 启用 ggml-vulkan 后端；实际卸载层数由设置页 gpuLayers 透传（默认 100=全量，llama.cpp 自动 clamp 到模型层数），无 GPU 自动回退 CPU；**v0.1.6 起含天玑 Mali 专项修复**（`vkGetDeviceQueue2`→`vkGetDeviceQueue` 等 3 处 patch，真机验证不崩） |
 | 7 | **批量预填充 + unified KV** | ✅ | prefill 用大 batch（n_batch=512）+ unified KV 缓存；**`n_ubatch` 按后端动态**：GPU 路径 512（加速 prefill）、CPU 路径 16（规避 ggml-cpu 量化 GEMM 路径 bug，见「已知问题」） |
 | 8 | **内置采样器** | ✅ | `llama_sampler_chain`：penalties → top_k(128) → top_p → temp → dist，采样后 `llama_sampler_accept` 回喂历史（重复惩罚生效、防退化循环） |
 | 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
@@ -543,7 +564,8 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 
 ### P1 计划 🚧
 
-6. **视觉理解**：Qwen3-VL-2B / 4B（Q4_K_M）已纳入模型目录；mmproj 视觉投影器待建模（当前仅文本/单图输入路径）
+6. **视觉理解增强**：mmproj 视觉投影器已支持单图理解（v0.1.3+，编码后端跟随主后端选择，
+   Vulkan/OpenCL/CPU 均可）；待增强：多图理解、视频帧输入
 7. **语音识别**：sherpa-onnx (WeNet) 流式 STT
 8. **TTS 播报**：Android TextToSpeech 离线引擎
 9. **Plugin 市场**：热插拔、签名验证、沙箱

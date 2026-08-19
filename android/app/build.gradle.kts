@@ -15,8 +15,8 @@ android {
         applicationId = "com.dgxspark.tongyilite"
         minSdk = 33
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = 7
+        versionName = "0.1.6"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -71,6 +71,13 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // CRITICAL: exclude the Vulkan validation layer. A stale
+            // libVkLayer_khronos_validation.so got baked into the APK; Android's
+            // Vulkan loader auto-injects ANY layer found in the APK's lib dir as
+            // a global layer, which wraps vkQueueSubmit and crashes on Mali
+            // (MediaTek) drivers at dispatch-table access (fault addr 0x0 in
+            // vulkan::api::QueueSubmit). Flutter/Impeller doesn't need it either.
+            excludes += "lib/arm64-v8a/libVkLayer_khronos_validation.so"
         }
     }
 

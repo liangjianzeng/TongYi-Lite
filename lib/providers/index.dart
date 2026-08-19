@@ -1,7 +1,8 @@
 // Shared provider exports — avoids circular dependencies between chat_provider,
 // model_provider, and download_provider.
 
-export 'shared_providers.dart' show inferenceServiceProvider;
+export 'shared_providers.dart' show
+    inferenceServiceProvider, deviceInfoProvider;
 export 'chat_provider.dart' show
     storageServiceProvider,
     currentModelIdProvider,

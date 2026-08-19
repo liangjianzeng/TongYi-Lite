@@ -423,6 +423,22 @@ struct InferenceEngine {
         }
         model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
+
+        // Pure-CPU path: make sure NO GPU device reaches the llama scheduler.
+        // llama_prepare_model_devices() fills model->devices from the ggml
+        // registry whenever split_mode is LAYER (the default), so on SoCs whose
+        // only GPU backend is Vulkan (e.g. MediaTek Mali: OpenCL unavailable)
+        // the scheduler still registers that Vulkan backend even with
+        // n_gpu_layers=0. sched_reserve() then calls a null backend callback
+        // -> SIGSEGV (observed: fault addr 0x0 in libggml-vulkan.so on Dimensity).
+        // split_mode=NONE + main_gpu=-1 makes llama_prepare_model_devices()
+        // call devices.clear(), so the scheduler is CPU-only.
+        if (effective_gpu_layers == 0) {
+            model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
+            model_params.main_gpu = -1;
+            LOGI("pure-CPU mode: devices cleared (split_mode=NONE, main_gpu=-1)");
+        }
+
         // Use mmap for loading — faster and lower peak memory than loading
         // the entire file into RAM. On Android internal storage (ext4/f2fs)
         // mmap works reliably; file-lock issues only affect FAT32/external SD.
@@ -644,18 +660,26 @@ struct InferenceEngine {
             LOGI("Loading mmproj: %s", mmproj_path);
             reportLoadingLog("正在加载 mmproj 投影器（图像理解）...");
             mtmd_context_params mparams = mtmd_context_params_default();
-            // 优先 OpenCL GPU 加速视觉编码（Adreno 专项优化，llama.rn 同路径）。
-            //
-            // llama.cpp mtmd 原生支持 GPU 视觉编码（use_gpu=true 为默认值），且本地
-            // 已含 #23800/#25771 的 OpenCL is_causal 修复（见 ggml-opencl.cpp），社区
-            // 已在骁龙 8s Gen3 (Adreno 735) + OpenCL 验证 mmproj 编码 ~50s -> ~12s。
+            // 视觉编码后端跟随主推理后端选择（避免"主 Vulkan + 视觉 OpenCL"
+            // 的不一致）：
+            //   - 主后端为 Vulkan  -> MTMD_BACKEND_DEVICE=Vulkan（天玑 Mali 上
+            //     OpenCL 不可用，且旧版强制 OpenCL 会显示矛盾并回退 CPU）
+            //   - 主后端为 OpenCL  -> MTMD_BACKEND_DEVICE=OpenCL（Adreno 专项优化）
+            //   - 主后端为 CPU    -> use_gpu=false（纯 CPU 编码）
             //
             // 历史：vision tower 曾在 Vulkan backend 下 SIGSEGV（fault addr 0x0），
-            // 故旧实现一刀切强制 CPU。但 Vulkan 崩溃 ≠ OpenCL 崩溃，且本地 OpenCL
-            // 已修复输出错乱问题。这里显式用 MTMD_BACKEND_DEVICE 指定 OpenCL
-            // （clip.cpp 读此变量 ggml_backend_init_by_name），避免 init_by_type(GPU)
-            // 落到 Vulkan。
-            mparams.use_gpu   = true;
+            // 故旧实现一刀切强制 OpenCL/CPU。但本版本已修复 ggml-vulkan 的天玑
+            // 崩溃（vkGetDeviceQueue2 -> vkGetDeviceQueue，见 ggml-vulkan.cpp），
+            // Vulkan 视觉编码已可安全使用。
+            std::string mm_backend;
+            if (!enable_gpu) {
+                mm_backend = "CPU";
+            } else if (backend == "opencl") {
+                mm_backend = "OpenCL";
+            } else {
+                mm_backend = "Vulkan";
+            }
+            mparams.use_gpu   = (mm_backend != "CPU");
             mparams.n_threads = ctx_params.n_threads;
             mparams.warmup    = true;
             // Adreno 上 ViT GPU offload 必须开 flash-attn：关闭会尝试分配 ~9.4GB
@@ -664,22 +688,27 @@ struct InferenceEngine {
             // 硬上限：单图 token 数（配合 Dart 侧图像缩小），控制 GPU 显存预算，
             // 规避 #23422 类显存不足 NULL 解引用崩溃。
             mparams.image_max_tokens = 512;
-            setenv("MTMD_BACKEND_DEVICE", "OpenCL", 1);
-            LOGI("mmproj: attempting OpenCL GPU encode (flash_attn=AUTO)");
+            if (mm_backend != "CPU") {
+                setenv("MTMD_BACKEND_DEVICE", mm_backend.c_str(), 1);
+            } else {
+                unsetenv("MTMD_BACKEND_DEVICE");
+            }
+            LOGI("mmproj: attempting %s GPU encode (flash_attn=AUTO)", mm_backend.c_str());
             mmproj = mtmd_init_from_file(mmproj_path, model, mparams);
             if (mmproj) {
                 vision_loaded = true;
                 audio_loaded = mtmd_support_audio(mmproj);
                 audio_sample_rate = mtmd_get_audio_sample_rate(mmproj);
                 const char *marker = mtmd_get_marker(mmproj);
-                LOGI("mmproj loaded OK on OpenCL GPU (marker=%s, audio=%d, sr=%d)",
-                     marker ? marker : "?", (int)audio_loaded, audio_sample_rate);
-                reportLoadingLog((std::string("mmproj 投影器加载完成 ✓ 图像理解 (OpenCL GPU 编码)")
+                LOGI("mmproj loaded OK on %s (marker=%s, audio=%d, sr=%d)",
+                     mm_backend.c_str(), marker ? marker : "?", (int)audio_loaded, audio_sample_rate);
+                reportLoadingLog((std::string("mmproj 投影器加载完成 ✓ 图像理解 (")
+                                 + mm_backend + " GPU 编码)"
                                  + (audio_loaded ? " + 🎧 语音理解" : "")).c_str());
             } else {
                 // GPU 初始化失败（backend 不可用 / 显存不足返回错误而非崩溃）
                 // → 回退 CPU 编码，避免一刀切丢失视觉能力。
-                LOGW("mmproj OpenCL GPU load FAILED -> retry CPU encode");
+                LOGW("mmproj %s GPU load FAILED -> retry CPU encode", mm_backend.c_str());
                 reportLoadingLog("mmproj GPU 编码不可用，回退 CPU 编码");
                 mparams.use_gpu   = false;
                 mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -955,7 +984,7 @@ struct InferenceEngine {
 
         struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
         struct llama_sampler * smpl_chain = llama_sampler_chain_init(sparams);
-        llama_sampler_chain_add(smpl_chain, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+        llama_sampler_chain_add(smpl_chain, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 64, 1.1f, 0.0f, 0.0f));
         llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_k(128));
         llama_sampler_chain_add(smpl_chain, llama_sampler_init_top_p(top_p, 1));
         llama_sampler_chain_add(smpl_chain, llama_sampler_init_temp(temperature));
@@ -1633,6 +1662,7 @@ struct InferenceEngine {
             struct llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
             struct llama_sampler * smpl_chain = llama_sampler_chain_init(sparams);
             llama_sampler_chain_add(smpl_chain, llama_sampler_init_penalties(
+                llama_vocab_n_tokens(vocab), // n_vocab: vocab size for penalty normalization
                 64,                    // penalty_last_n: penalize the last 64 tokens
                 1.1f,                  // penalty_repeat: 1.0 = disabled, >1 penalizes repeats
                 0.0f,                  // penalty_freq
@@ -1931,6 +1961,21 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     std::string mmproj_path = j_mmproj_path ? jstring_to_std(env, j_mmproj_path) : "";
+
+    // Mali（天玑/麒麟等 ARM GPU）驱动的 Vulkan 后端对部分 compute 特性
+    // dispatch 有缺陷（社区已知：llama.cpp #16881、Gio #274、ppsspp #17426）：
+    //   - bufferDeviceAddress 上报 true 但 vkGetBufferDeviceAddress 调用崩（已在 ggml-vulkan 内禁用）
+    //   - integer dot product / FP16 shader 首次 submit 时驱动内部空指针崩溃
+    // Mali（天玑）驱动的真实崩溃根因是 vkGetDeviceQueue2 返回坏 queue（已在
+    // ggml-vulkan 内改用 vkGetDeviceQueue 修复），与 FP16/integer-dot 无关。
+    // 崩溃修复后不再禁用任何特性——Mali-G68（天玑 900）的 FP16 是量化
+    // matmul 的加速路径，禁用会掉到 FP32 慢路径（实测 tok/s 只有 CPU 1/3）。
+    // PR #18493 的"强制 FP32"结论仅针对 Mali G720 架构，不适用于本机。
+    if (gpu_backend == "vulkan") {
+        // 无额外禁用：全部特性走默认路径（integer-dot/FP16/async 均开启）
+        LOGI("vulkan backend: all features enabled (no Mali-safe disables)");
+    }
+
     bool ok = g_engine.load(path.c_str(), n_ctx,
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
                             gpu_backend.c_str(), j_enable_mtp == JNI_TRUE,

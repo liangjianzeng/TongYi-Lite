@@ -405,7 +405,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return Scaffold(
       drawer: _buildConversationDrawer(),
       appBar: AppBar(
-        title: const Text('TongYi-Lite'),
+        title: const Text(
+          'TongYi-Lite',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
+        ),
         centerTitle: true,
         leading: Builder(
           builder: (ctx) => IconButton(

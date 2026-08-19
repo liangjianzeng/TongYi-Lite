@@ -226,15 +226,18 @@ add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama)
 # `llama` library. Build it as a separate library and link into tongyilite_jni.
 # MTMD_VIDEO auto-disables (LLAMA_SUBPROCESS off) so no ffmpeg is needed.
 # --------------------------------------------------------------------------
-# mtmd/CMakeLists.txt reads ${LLAMA_INSTALL_VERSION} for its VERSION property.
+# mtmd/CMakeLists.txt reads ${LLAMA_VERSION_BASE} for its VERSION property.
 # That variable is set INSIDE the llama subdirectory scope (llama.cpp CMakeLists
-# line 142), so it is NOT visible here nor in the sibling mtmd subdirectory —
+# lines 6-9), so it is NOT visible here nor in the sibling mtmd subdirectory —
 # without it, set_target_properties(mtmd PROPERTIES VERSION ${...}) fails with
 # "incorrect number of arguments". Define it in our scope before mtmd configures.
 if(NOT DEFINED LLAMA_BUILD_NUMBER)
     set(LLAMA_BUILD_NUMBER "0")
 endif()
-set(LLAMA_INSTALL_VERSION "0.0.${LLAMA_BUILD_NUMBER}")
+set(LLAMA_VERSION_MAJOR "0")
+set(LLAMA_VERSION_MINOR "1")
+set(LLAMA_VERSION_PATCH "2")
+set(LLAMA_VERSION_BASE "${LLAMA_VERSION_MAJOR}.${LLAMA_VERSION_MINOR}.${LLAMA_VERSION_PATCH}")
 add_subdirectory(${LLAMA_CPP_DIR}/tools/mtmd ${CMAKE_CURRENT_BINARY_DIR}/mtmd)
 
 # --------------------------------------------------------------------------
