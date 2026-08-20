@@ -489,7 +489,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   icon: const Icon(Icons.close, size: 18),
                   label: const Text('卸载'),
                   style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.orange.shade700),
+                      backgroundColor: Colors.red.shade700,
+                      foregroundColor: Colors.white),
                 ),
               ],
 
@@ -892,7 +893,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildToggleTitle(
-                    'GPU 加速',
+                    '⚙️ GPU 加速',
                     gpuSettings.enableGpu,
                     gpuNotifier.setEnableGpu,
                   ),
@@ -994,7 +995,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildToggleTitle(
-                    '思考模式',
+                    '🧠 思考模式',
                     gpuSettings.enableThinking,
                     (v) {
                       gpuNotifier.setEnableThinking(v);
@@ -1018,7 +1019,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildToggleTitle(
-                    'MTP 加速（端侧推测解码）',
+                    '🚀 MTP 加速（端侧推测解码）',
                     gpuSettings.enableMtpFeature,
                     gpuNotifier.setEnableMtpFeature,
                     subtitle: '默认关闭；开启后在模型卡片配置各模型 MTP（仅高端机按需开启）',
@@ -1170,7 +1171,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                   icon: const Icon(Icons.close),
                   label: const Text('卸载模型'),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red.shade700,
+                    backgroundColor: Colors.red.shade700,
+                    foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                   ),
                 ),
@@ -1318,10 +1320,15 @@ Widget _buildToggleTitle(
       Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            title,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
+          const SizedBox(width: 8),
           Switch(value: value, onChanged: onChanged),
         ],
       ),

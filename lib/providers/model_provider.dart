@@ -345,6 +345,16 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       return false;
     } finally {
       _isBusy = false;
+      // _isBusy 不在 ModelState 里：复位为 false 不会自动通知 UI 重建，
+      // 导致「卸载 / 加载到内存」等按钮停留在禁用态（模型加载完成后
+      // 按钮"显示但不可点击"）。复制当前状态触发一次重建，恢复可用。
+      state = ModelState(
+        phase: state.phase,
+        modelId: state.modelId,
+        modelName: state.modelName,
+        errorMessage: state.errorMessage,
+        loadingLogs: List<String>.from(state.loadingLogs),
+      );
     }
   }
 
@@ -371,6 +381,15 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       return false;
     } finally {
       _isBusy = false;
+      // 同 loadModel：_isBusy 复位不在 ModelState 里，复制当前状态触发
+      // 重建，让「加载到内存」等按钮从禁用态恢复。
+      state = ModelState(
+        phase: state.phase,
+        modelId: state.modelId,
+        modelName: state.modelName,
+        errorMessage: state.errorMessage,
+        loadingLogs: List<String>.from(state.loadingLogs),
+      );
     }
   }
 
