@@ -21,14 +21,12 @@ class InferenceLogScreen extends ConsumerWidget {
         title: const Text('推理引擎日志'),
         centerTitle: true,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => ref.invalidate(modelManagerProvider), // Trigger rebuild
-            tooltip: '刷新',
-          ),
+          // 清空日志：只清展示层列表。此前是空实现按钮；也不要用
+          // ref.invalidate(modelManagerProvider) 充当"刷新"——那会把 notifier
+          // 重建复位为 idle，让已加载的模型在 UI 上显示成"未加载"。
           IconButton(
             icon: const Icon(Icons.delete_sweep),
-            onPressed: () {},
+            onPressed: () => ref.read(modelManagerProvider.notifier).clearLogs(),
             tooltip: '清空日志',
           ),
         ],

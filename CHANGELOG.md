@@ -6,6 +6,32 @@
 
 ---
 
+## [Unreleased] — 2026-09-01
+
+### 修复（代码质量评估 P0 隐患加固）
+
+- **消息 role 反序列化崩溃**：`MessageRole.values...first` 三处直接抛 `StateError`——历史脏数据
+  或将来新增 role（如 system）会让整个会话列表/消息读取崩溃。新增 `messageRoleFromName()`
+  安全解析（未知 role 回落 user），`ChatMessage.fromMap` 与 SQLite 行映射统一替换。
+- **语音消息 audioPath 持久化**：模型字段存在但 messages 表无该列，语音消息重进会话后
+  「语音」标记全部丢失。数据库 **v2→v3** 迁移补列（`ALTER TABLE messages ADD COLUMN audioPath`），
+  `saveMessage` 写入、行映射读取；顺带把 getMessages/getAllMessages 两份重复行映射收敛为
+  `_mapMessageRow`。
+- **原生消息 JSON 解析器重写**：`parseMessagesJson` 原用 `find('}')` 截取对象——内容含
+  `{`/`}`（贴代码/JSON）被截成空内容、`\n`/`\"` 不解码（多行提问以字面量 `\n` 喂给模型）、
+  结尾转义反斜杠的内容丢失。重写为结构化解析 + 完整 JSON 字符串解码（`\uXXXX` 含代理对
+  → UTF-8）；宿主机编译 + 11 个行为用例全过（覆盖三个旧失效场景）。
+- **设置写入原子化**：`SettingsService.save` / `ModelDisplayNameService.save` 改为
+  先写 `.tmp` 再 rename——崩溃/断电不再留半截 JSON 导致用户配置静默回默认。
+- **假数据 stub 移除**：`getAvailableSpace`（恒 64GB）、`hasEnoughMemory`（恒 true）、
+  `checkAllModels`（假 5120MB 空闲）均无消费者，删除；「清空日志」按钮空实现改为真实清空
+  （`ModelManagerNotifier.clearLogs()`）。
+- **日志页「刷新」按钮移除**：原实现 `ref.invalidate(modelManagerProvider)` 会重建 notifier
+  并把状态复位为 idle，让已加载的模型在 UI 上显示「未加载」。
+- **死代码/过期注释清理**：`g_callback_obj`（从未赋值 + 两处无效 DeleteGlobalRef）、
+  `reportLoadingLog` 重复前置声明、`ModelStateExtension`（调用即抛 UnimplementedError）、
+  `_migrateLegacyMtp` 同分支冗余、model_provider 过期 vision 注释。
+
 ## [0.1.6] — 2026-08-19
 
 ### 引擎升级

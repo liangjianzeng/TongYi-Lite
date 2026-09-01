@@ -615,6 +615,22 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 缺投影器时点击 **[下载(含投影器)]** 只补下投影器；② 加载前做完整性复核（存在、无 `.tmp`、
 非空），不合格则优雅提示"缺少或不完整的 mmproj，请重新下载完整模型"，不再闪退。
 
+### 代码质量加固：解析与存储健壮性（已修复 · 2026-09-01）
+
+对代码质量评估出的 P0 隐患做了专项加固（完整清单见 CHANGELOG「Unreleased」）：
+
+- **消息 role 反序列化**：未知 role 回落 user，不再因一条脏消息让会话列表崩溃
+  （`messageRoleFromName`，替换三处 `.first` 直取）。
+- **SQLite v3**：messages 表新增 `audioPath` 列（语音消息标记持久化），v2→v3 自动迁移、
+  新装直接建列；getMessages/getAllMessages 行映射收敛为 `_mapMessageRow` 一份。
+- **原生消息 JSON 解析**：`parseMessagesJson` 重写为结构化解析——历史/提问内容含大括号
+  （贴代码/JSON）、转义引号、多行、`\uXXXX`（含代理对）均按 JSON 规范解码，不再被截成
+  空内容或以字面量 `\n` 喂给模型。
+- **设置原子写入**：设置 JSON 与自定义模型名先写 `.tmp` 再 rename，崩溃/断电不再丢配置。
+- **假数据 stub 与死代码移除**：固定 64GB「可用空间」等无消费者 stub 删除；推理日志页
+  「清空日志」真实可用、「刷新」按钮移除（原 `ref.invalidate` 会把已加载模型复位显示为
+  「未加载」）。
+
 ---
 
 ## 常见问题

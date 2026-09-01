@@ -160,7 +160,6 @@ static int detect_big_core_count() {
 // ============================================================================
 
 // ============================================================================
-static void reportLoadingLog(const char *message);
 // InferenceEngine — wraps model + context + generation
 // ============================================================================
 
@@ -1896,7 +1895,6 @@ struct InferenceEngine {
 // ============================================================================
 static InferenceEngine g_engine;
 static JavaVM *g_jvm = nullptr;
-static jobject g_callback_obj = nullptr;
 
 // ============================================================================
 // JNI Helpers
@@ -2130,10 +2128,6 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
 
     // Release callback refs (always, even on error)
     env->DeleteLocalRef(cb_copy);
-    if (g_callback_obj) {
-        env->DeleteGlobalRef(g_callback_obj);
-        g_callback_obj = nullptr;
-    }
 
     return utf8_to_jstring(env, result);
 }
@@ -2147,60 +2141,166 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletion(
 // handed to llama_chat_message remain valid for the entire completion call.
 // Previously the pointers referenced local std::strings that were destroyed on
 // return -> dangling pointers -> the chat template read freed memory as garbage.
+// Minimal JSON helpers for parseMessagesJson.
+
+static void json_skip_ws(const std::string &s, size_t &i) {
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++i;
+        else break;
+    }
+}
+
+// Parse a JSON string literal starting at s[i] == '"', decoding escapes
+// (\" \\ \/ \b \f \n \r \t \uXXXX incl. surrogate pairs) into UTF-8 bytes.
+// Returns false on malformed input; on success i points past the closing quote.
+static bool json_parse_string(const std::string &s, size_t &i, std::string &out) {
+    if (i >= s.size() || s[i] != '"') return false;
+    ++i;
+    out.clear();
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == '"') { ++i; return true; }
+        if (c != '\\') { out += c; ++i; continue; }
+
+        ++i;
+        if (i >= s.size()) return false;
+        char e = s[i++];
+        switch (e) {
+            case '"':  out += '"';  break;
+            case '\\': out += '\\'; break;
+            case '/':  out += '/';  break;
+            case 'b':  out += '\b'; break;
+            case 'f':  out += '\f'; break;
+            case 'n':  out += '\n'; break;
+            case 'r':  out += '\r'; break;
+            case 't':  out += '\t'; break;
+            case 'u': {
+                if (i + 4 > s.size()) return false;
+                unsigned int cp = 0;
+                for (int k = 0; k < 4; ++k) {
+                    char h = s[i + (size_t)k];
+                    unsigned int v;
+                    if (h >= '0' && h <= '9')      v = (unsigned int)(h - '0');
+                    else if (h >= 'a' && h <= 'f') v = (unsigned int)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') v = (unsigned int)(h - 'A' + 10);
+                    else return false;
+                    cp = (cp << 4) | v;
+                }
+                i += 4;
+                // Surrogate pair: high surrogate followed by \uDCxx-\uDFFF —
+                // combine into one code point before UTF-8 encoding.
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= s.size() &&
+                    s[i] == '\\' && s[i + 1] == 'u') {
+                    unsigned int lo = 0;
+                    bool ok = true;
+                    for (int k = 0; k < 4; ++k) {
+                        char h = s[i + 2 + (size_t)k];
+                        unsigned int v;
+                        if (h >= '0' && h <= '9')      v = (unsigned int)(h - '0');
+                        else if (h >= 'a' && h <= 'f') v = (unsigned int)(h - 'a' + 10);
+                        else if (h >= 'A' && h <= 'F') v = (unsigned int)(h - 'A' + 10);
+                        else { ok = false; break; }
+                        lo = (lo << 4) | v;
+                    }
+                    if (ok && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                        i += 6; // consume the low surrogate's \uXXXX
+                    }
+                }
+                if (cp < 0x80) {
+                    out += (char) cp;
+                } else if (cp < 0x800) {
+                    out += (char)(0xC0 | (cp >> 6));
+                    out += (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                    out += (char)(0xE0 | (cp >> 12));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                } else {
+                    out += (char)(0xF0 | (cp >> 18));
+                    out += (char)(0x80 | ((cp >> 12) & 0x3F));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                }
+                break;
+            }
+            default: return false;
+        }
+    }
+    return false; // unterminated string literal
+}
+
 static std::vector<llama_chat_message> parseMessagesJson(JNIEnv *env, jstring jjson,
                                                          std::deque<std::string> &store) {
     std::vector<llama_chat_message> msgs;
     if (!jjson) return msgs;
     std::string json = jstring_to_std(env, jjson);
 
-    // Simple state-machine parser: find "role" and "content" pairs
+    // Structural parser for [{"role":"...","content":"..."}, ...]. The previous
+    // find('}')-based extractor silently emptied any message whose content
+    // contained '{'/'}' (pasted code/JSON), left \n and \" escapes undecoded so
+    // multi-line prompts reached the model as literal "\n", and mis-detected
+    // quotes preceded by a backslash. Object boundaries are now tracked
+    // structurally and strings are decoded per the JSON spec. On any malformed
+    // input we return whatever was parsed so far instead of guessing.
     size_t i = 0;
-    while (i < json.size()) {
-        // Find next opening brace
-        size_t obj_start = json.find('{', i);
-        if (obj_start == std::string::npos) break;
-        size_t obj_end = json.find('}', obj_start);
-        if (obj_end == std::string::npos) break;
+    json_skip_ws(json, i);
+    if (i >= json.size() || json[i] != '[') return msgs;
+    ++i;
 
-        std::string obj = json.substr(obj_start, obj_end - obj_start + 1);
-        // Extract role
-        auto rpos = obj.find("\"role\"");
-        if (rpos != std::string::npos) {
-            size_t colon = obj.find(':', rpos);
-            size_t q1 = obj.find('"', colon + 1);
-            size_t q2 = obj.find('"', q1 + 1);
-            if (q1 != std::string::npos && q2 != std::string::npos) {
-                std::string role = obj.substr(q1 + 1, q2 - q1 - 1);
-                // Extract content
-                auto cpos = obj.find("\"content\"");
-                if (cpos != std::string::npos) {
-                    size_t ccolon = obj.find(':', cpos);
-                    size_t cq1 = obj.find('"', ccolon + 1);
-                    size_t cq2 = obj.find('"', cq1 + 1);
-                    // Handle escaped quotes in content — find last quote before }
-                    if (cq1 != std::string::npos) {
-                        for (size_t k = cq1 + 1; k < obj.size(); ++k) {
-                            if (obj[k] == '"') {
-                                if (k > 0 && obj[k-1] != '\\') { cq2 = k; break; }
-                            }
-                        }
-                    }
-                    std::string content;
-                    if (cq1 != std::string::npos && cq2 != std::string::npos && cq2 > cq1 + 1) {
-                        content = obj.substr(cq1 + 1, cq2 - cq1 - 1);
-                    }
-                    // Move into the caller-owned backing store so the pointers
-                    // stay alive; deque never invalidates element references on
-                    // push_back, so these c_str() pointers are stable.
-                    store.push_back(std::move(role));
-                    store.push_back(std::move(content));
-                    const std::string &r = store[store.size() - 2];
-                    const std::string &c = store[store.size() - 1];
-                    msgs.push_back({ r.c_str(), c.c_str() });
-                }
+    while (true) {
+        json_skip_ws(json, i);
+        if (i >= json.size() || json[i] == ']') break;
+        if (json[i] != '{') return msgs; // unexpected token: keep what we have
+        ++i;
+
+        std::string role, content;
+        bool have_role = false;
+
+        json_skip_ws(json, i);
+        if (i < json.size() && json[i] == '}') {
+            ++i; // empty object
+        } else {
+            while (true) {
+                json_skip_ws(json, i);
+                std::string key;
+                if (!json_parse_string(json, i, key)) return msgs;
+                json_skip_ws(json, i);
+                if (i >= json.size() || json[i] != ':') return msgs;
+                ++i;
+                json_skip_ws(json, i);
+                if (i >= json.size()) return msgs;
+                // role/content must be strings; the Dart producer
+                // (chat_provider messagesForTemplate) never emits other types.
+                if (json[i] != '"') return msgs;
+                std::string value;
+                if (!json_parse_string(json, i, value)) return msgs;
+                if (key == "role") { role = std::move(value); have_role = true; }
+                else if (key == "content") { content = std::move(value); }
+
+                json_skip_ws(json, i);
+                if (i < json.size() && json[i] == ',') { ++i; continue; }
+                if (i < json.size() && json[i] == '}') { ++i; break; }
+                return msgs;
             }
         }
-        i = obj_end + 1;
+
+        if (have_role) {
+            // Move into the caller-owned backing store so the pointers
+            // stay alive; deque never invalidates element references on
+            // push_back, so these c_str() pointers are stable.
+            store.push_back(std::move(role));
+            store.push_back(std::move(content));
+            const std::string &r = store[store.size() - 2];
+            const std::string &c = store[store.size() - 1];
+            msgs.push_back({ r.c_str(), c.c_str() });
+        }
+
+        json_skip_ws(json, i);
+        if (i < json.size() && json[i] == ',') { ++i; continue; }
+        if (i >= json.size() || json[i] == ']') break;
+        return msgs;
     }
     return msgs;
 }
@@ -2288,10 +2388,6 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeCompletionWithMessages(
     }
 
     env->DeleteLocalRef(cb_copy);
-    if (g_callback_obj) {
-        env->DeleteGlobalRef(g_callback_obj);
-        g_callback_obj = nullptr;
-    }
 
     LOGI("nativeCompletionWithMessages done, result len=%zu", result.length());
     return utf8_to_jstring(env, result);

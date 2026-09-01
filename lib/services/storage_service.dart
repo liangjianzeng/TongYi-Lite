@@ -21,7 +21,7 @@ class StorageService {
     final path = join(await getDatabasesPath(), 'tongyilite.db');
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -33,6 +33,14 @@ class StorageService {
       // v1 → v2：messages 表新增 inferenceStats 列（回复性能统计 JSON）。
       await db.execute(
         "ALTER TABLE messages ADD COLUMN inferenceStats TEXT",
+      );
+    }
+    if (oldVersion < 3) {
+      // v2 → v3：messages 表新增 audioPath 列（语音消息的录音文件路径）。
+      // 此前模型里有 audioPath 字段但表里没有该列，语音消息重进会话后
+      // 「语音」标记全部丢失。
+      await db.execute(
+        "ALTER TABLE messages ADD COLUMN audioPath TEXT",
       );
     }
   }
@@ -56,6 +64,7 @@ class StorageService {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         imagePath TEXT,
+        audioPath TEXT,
         createdAt INTEGER NOT NULL,
         isStreaming INTEGER DEFAULT 0,
         inferenceStats TEXT,
@@ -124,6 +133,25 @@ class StorageService {
 
   // ----- Messages -----
 
+  /// messages 行 → ChatMessage 的统一映射（getMessages / getAllMessages 共用，
+  /// 避免两份映射各自漂移——此前 audioPath 缺列、role 崩溃就是漂移的产物）。
+  ChatMessage _mapMessageRow(Map<dynamic, dynamic> r) {
+    final statsJson = r['inferenceStats'] as String?;
+    return ChatMessage(
+      id: r['id'] as String,
+      conversationId: r['conversationId'] as String,
+      role: messageRoleFromName(r['role']),
+      content: r['content'] as String,
+      imagePath: r['imagePath'] as String?,
+      audioPath: r['audioPath'] as String?,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
+      isStreaming: (r['isStreaming'] as int?) == 1,
+      inferenceStats: statsJson != null && statsJson.isNotEmpty
+          ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
+          : null,
+    );
+  }
+
   Future<List<ChatMessage>> getMessages(String conversationId, {int limit = 200}) async {
     final db = await database;
     final rows = await db.query(
@@ -133,21 +161,7 @@ class StorageService {
       orderBy: 'createdAt ASC',
       limit: limit,
     );
-    return rows.map((r) {
-      final statsJson = r['inferenceStats'] as String?;
-      return ChatMessage(
-        id: r['id'] as String,
-        conversationId: r['conversationId'] as String,
-        role: MessageRole.values.where((e) => e.name == r['role']).first,
-        content: r['content'] as String,
-        imagePath: r['imagePath'] as String?,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-        isStreaming: (r['isStreaming'] as int?) == 1,
-        inferenceStats: statsJson != null && statsJson.isNotEmpty
-            ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
-            : null,
-      );
-    }).toList();
+    return rows.map(_mapMessageRow).toList();
   }
 
   Future<void> saveMessage(ChatMessage msg) async {
@@ -165,6 +179,7 @@ class StorageService {
       'role': msg.role.name,
       'content': msg.content,
       'imagePath': msg.imagePath,
+      'audioPath': msg.audioPath,
       'createdAt': msg.timestamp.millisecondsSinceEpoch,
       'isStreaming': msg.isStreaming ? 1 : 0,
       'inferenceStats': msg.inferenceStats != null
@@ -181,21 +196,7 @@ class StorageService {
       whereArgs: [conversationId],
       orderBy: 'createdAt ASC',
     );
-    return rows.map((r) {
-      final statsJson = r['inferenceStats'] as String?;
-      return ChatMessage(
-        id: r['id'] as String,
-        conversationId: r['conversationId'] as String,
-        role: MessageRole.values.where((e) => e.name == r['role']).first,
-        content: r['content'] as String,
-        imagePath: r['imagePath'] as String?,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
-        isStreaming: (r['isStreaming'] as int?) == 1,
-        inferenceStats: statsJson != null && statsJson.isNotEmpty
-            ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
-            : null,
-      );
-    }).toList();
+    return rows.map(_mapMessageRow).toList();
   }
 
   Future<void> clearConversation(String conversationId) async {

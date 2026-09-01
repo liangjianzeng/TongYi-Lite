@@ -1,5 +1,13 @@
 enum MessageRole { user, assistant }
 
+/// 解析消息 role：未知值（历史脏数据、将来新增的 role 如 system）回落为
+/// user。此前多处用 `.first` 直接反序列化——一条脏消息就能让整个会话
+/// 列表/消息读取抛 StateError 崩溃。
+MessageRole messageRoleFromName(Object? name) {
+  if (name == MessageRole.assistant.name) return MessageRole.assistant;
+  return MessageRole.user;
+}
+
 /// 单次回复的性能统计（仅 assistant 消息有）。
 class InferenceStats {
   final int firstTokenMs; // 首 token 延迟（发送到首个 token 的时间）
@@ -75,7 +83,7 @@ class ChatMessage {
     return ChatMessage(
       id: map['id'] as String,
       conversationId: map['conversationId'] as String,
-      role: MessageRole.values.where((e) => e.name == map['role']).first,
+      role: messageRoleFromName(map['role']),
       content: map['content'] as String,
       imagePath: map['imagePath'] as String?,
       audioPath: map['audioPath'] as String?,
