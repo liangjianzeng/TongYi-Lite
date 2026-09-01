@@ -163,6 +163,19 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
     );
   }
 
+  /// 清空推理日志列表（仅清展示层；原生后续日志仍会继续追加）。
+  /// 注意：不要用 ref.invalidate(modelManagerProvider) 来"刷新"——那会重建
+  /// notifier 并把状态复位为 idle，让已加载模型在 UI 上显示成"未加载"。
+  void clearLogs() {
+    state = ModelState(
+      phase: state.phase,
+      modelId: state.modelId,
+      modelName: state.modelName,
+      errorMessage: state.errorMessage,
+      loadingLogs: const [],
+    );
+  }
+
   /// ID of the currently loaded model, or null if idle/error. (alias for convenience)
   String? get currentModelId => modelId;
 
@@ -301,7 +314,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         gpuBackend: gpu.gpuBackend,
         nCtx: gpu.contextSize,
         enableMtp: mtp,
-        mmprojPath: mmprojPath, // 预留：原生 vision 重建后启用投影器
+        mmprojPath: mmprojPath, // null = 单文件自包含 VL；两文件形态由原生 mtmd_init 加载
       );
 
       if (ok) {
@@ -431,13 +444,6 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
     }
     return null;
   }
-}
-
-/// Extension to read model-manager state from the provider without needing
-/// `.notifier` — avoids `AlwaysAliveRefreshable<T>` type issues in UI code.
-extension ModelStateExtension on StateNotifierProvider<ModelManagerNotifier, ModelState> {
-  /// Read the current [ModelState] directly (no notifier access).
-  ModelState get state => throw UnimplementedError('Use ref.watch(provider) instead.');
 }
 
 /// Provider — declared after the notifier class so the reference resolves.

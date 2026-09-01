@@ -176,9 +176,8 @@ class InferenceSettings {
     if (map != null) {
       return map.map((k, v) => MapEntry(k, v as bool? ?? false));
     }
-    // 仅有旧版全局 enableMtp：true 且未迁移过时，保持默认全关（无法知道开了哪个模型）。
-    final legacy = json['enableMtp'] as bool? ?? false;
-    if (!legacy) return const {};
+    // 仅有旧版全局 enableMtp 时保持默认全关：无法定位具体模型（不迁移为开，
+    // 见 AGENTS.md 约定），由用户在模型列表重新逐个开启。
     return const {};
   }
 }
@@ -211,9 +210,14 @@ class SettingsService {
   }
 
   /// 写入设置。失败时抛出异常由调用方处理。
+  ///
+  /// 原子写入：先写 `.tmp` 再 rename。此前直接 writeAsString，崩溃/断电时
+  /// 可能留下半截 JSON——load 全部回落默认值，用户配置静默丢失。rename 在
+  /// 同目录上是原子操作，损坏面收敛为「完整旧文件或完整新文件」。
   Future<void> save(InferenceSettings settings) async {
     final path = await _resolvePath();
-    final file = File(path);
-    await file.writeAsString(jsonEncode(settings.toJson()));
+    final tmp = File('$path.tmp');
+    await tmp.writeAsString(jsonEncode(settings.toJson()));
+    await tmp.rename(path);
   }
 }

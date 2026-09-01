@@ -188,15 +188,6 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     final storage = ModelStorageService();
     return await storage.getTotalCachedSize();
   }
-
-  /// Get available space (stub - returns fixed value)
-  Future<int> getAvailableSpace() async {
-    try {
-      return 64 * 1024 * 1024 * 1024;
-    } catch (_) {
-      return 0;
-    }
-  }
 }
 
 final downloadServiceProvider = Provider<DownloadService>((ref) => DownloadService());

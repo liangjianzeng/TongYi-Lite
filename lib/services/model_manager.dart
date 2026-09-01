@@ -81,23 +81,4 @@ class ModelManager {
     return await storage.scanExistingModels();
   }
 
-  /// Check if device has enough memory for a model (stub - uses estimate)
-  Future<bool> hasEnoughMemory(int minRamMB) async {
-    // In production, this would query native side via JNI.
-    // For now, assume sufficient RAM (>2GB available).
-    return true;
-  }
-
-  /// Check all models and return recommendations (stub)
-  Future<List<Map<String, dynamic>>> checkAllModels() async {
-    final cached = <String>[];
-    try {
-      final storage = ModelStorageService();
-      cached.addAll(await storage.scanExistingModels());
-    } catch (_) {}
-
-    return [
-      {'cached': cached, 'freeMB': 5120, 'totalMB': 8192},
-    ];
-  }
 }

@@ -32,8 +32,13 @@ class ModelDisplayNameService {
   }
 
   /// 写入全部自定义名称。失败时抛出异常由调用方处理。
+  ///
+  /// 原子写入（与 SettingsService.save 同一策略）：先写 `.tmp` 再 rename，
+  /// 避免崩溃/断电留下半截 JSON 导致自定义名称全部丢失。
   Future<void> save(Map<String, String> map) async {
-    final file = File(await _resolvePath());
-    await file.writeAsString(jsonEncode(map));
+    final path = await _resolvePath();
+    final tmp = File('$path.tmp');
+    await tmp.writeAsString(jsonEncode(map));
+    await tmp.rename(path);
   }
 }
