@@ -33,6 +33,7 @@ captures/
 # === Native / llama.cpp ===
 third_party/llama.cpp/build/
 third_party/llama.cpp/.git/                    # vendored 目录内部 git 库，绝不入库
+third_party/llama.cpp.b10176/                  # 旧版回滚备份（160MB），仅本地保留，绝不入库
 third_party/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.c  # generated
 third_party/llama.cpp/src/llama.cpp                      # generated
 

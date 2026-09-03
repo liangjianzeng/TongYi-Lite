@@ -53,7 +53,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _catalogFuture = loadModelCatalog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
@@ -117,6 +117,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             Tab(icon: Icon(Icons.storage), text: '模型管理'),
             Tab(icon: Icon(Icons.cloud), text: 'API 接入'),
             Tab(icon: Icon(Icons.memory), text: '推理引擎'),
+            Tab(icon: Icon(Icons.smart_toy), text: '智能体'),
             Tab(icon: Icon(Icons.info), text: '关于'),
           ],
         ),
@@ -127,6 +128,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           _buildModelManagementTab(),
           const _ApiTab(),
           const _InferenceEngineTab(),
+          const _AgentTab(),
           const _buildAboutTab(),
         ],
       ),
@@ -1342,7 +1344,399 @@ Widget _buildToggleTitle(
 }
 
 // =========================================================================
-// Tab 3: 关于
+// Tab 4: 智能体（Agent）
+// =========================================================================
+
+class _AgentTab extends ConsumerWidget {
+  const _AgentTab();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ---- 驱动模型选择卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🤖 驱动模型', context),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '指定智能体由哪个模型驱动：端侧本地模型或 API 接入模型',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildAgentModelSelector(context, ref, settings),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 智能体模式总开关 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: _buildToggleTitle(
+                '🤖 智能体模式',
+                settings.agentEnabled,
+                notifier.setAgentEnabled,
+                subtitle: '开启后模型可调用工具完成任务；关闭 = 普通聊天',
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 工具循环参数 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🔁 工具循环', context),
+                  const SizedBox(height: 8),
+                  _buildSliderRow(
+                    label: '循环轮次上限',
+                    value: settings.agentMaxRounds,
+                    min: 1,
+                    max: 20,
+                    divisions: 19,
+                    display: '${settings.agentMaxRounds} 轮',
+                    onChanged: (v) => notifier.setAgentMaxRounds(v),
+                    hint: '工具调用最多执行几轮（端侧速度有限，默认 5 轮）',
+                  ),
+                  _buildSliderRow(
+                    label: '每轮生成预算',
+                    value: settings.agentTokensPerRound,
+                    min: 128,
+                    max: 2048,
+                    divisions: 48,
+                    display: '${settings.agentTokensPerRound} token',
+                    onChanged: (v) => notifier.setAgentTokensPerRound(v),
+                    hint: '每轮模型生成的 token 上限（默认 512）',
+                  ),
+                  _buildSliderRow(
+                    label: '工具执行超时',
+                    value: settings.agentToolTimeoutMs,
+                    min: 1000,
+                    max: 60000,
+                    divisions: 59,
+                    display: _formatTimeout(settings.agentToolTimeoutMs),
+                    onChanged: (v) => notifier.setAgentToolTimeoutMs(v),
+                    hint: '单个工具执行超时，防止卡死整个循环（默认 15 秒）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 智能体上下文长度 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('📏 智能体上下文', context),
+                  const SizedBox(height: 8),
+                  _buildSliderRow(
+                    label: '上下文长度',
+                    value: settings.agentNctx,
+                    min: 1024,
+                    max: 65536,
+                    divisions: 63,
+                    display: '${settings.agentNctx} token',
+                    onChanged: (v) => notifier.setAgentNctx(v),
+                    hint: '智能体模式的 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 能力开关 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    '🛠️ 并行工具调用',
+                    settings.agentAllowParallelTools,
+                    notifier.setAgentAllowParallelTools,
+                    subtitle: '预留能力：一次调用多个工具（默认关闭）',
+                  ),
+                  const Divider(height: 24),
+                  _buildToggleTitle(
+                    '🌐 联网搜索',
+                    settings.webSearchEnabled,
+                    notifier.setWebSearchEnabled,
+                    subtitle: '允许智能体调用网络搜索（默认关闭，端侧不联网）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 内置工具说明 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🧰 内置工具', context),
+                  const SizedBox(height: 8),
+                  Text(
+                    '当前已内置：\n'
+                    '• get_time —— 返回当前时间/日期\n'
+                    '• calculator —— 安全计算（白名单求值，禁 eval）\n'
+                    '• todo_write / todo_list —— 待办清单\n'
+                    '• note_take / note_list —— 便签\n'
+                    '• unit_converter —— 单位换算\n'
+                    '• memory_set / memory_get —— 长期记忆\n'
+                    '• read_file / write_file / edit_file —— 读写编辑工作区文件\n'
+                    '• list_files / search_text —— 文件查找与内容搜索\n'
+                    '• shell_exec —— 设备 shell 命令执行\n'
+                    '• web_search / get_weather —— 联网搜索与天气（联网开关开启后可用）',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- 工具配置（用户可选开关）----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('⚙️ 工具配置', context),
+                  const SizedBox(height: 4),
+                  Text(
+                    '核心工具（时间/计算/待办/便签/换算/记忆/文件读写）恒可用；'
+                    '以下高级工具按需开启：',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                  const SizedBox(height: 4),
+                  SwitchListTile(
+                    title: const Text('🔍 联网搜索（web_search + get_weather）',
+                        style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('联网查资料/天气，需网络', style: TextStyle(fontSize: 12)),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: settings.webSearchEnabled,
+                    onChanged: (v) => ref.read(settingsProvider.notifier).setWebSearchEnabled(v),
+                  ),
+                  SwitchListTile(
+                    title: const Text('🖥️ Shell 执行（shell_exec）',
+                        style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('在设备上执行 shell 命令（app 权限内，能力延伸）',
+                        style: TextStyle(fontSize: 12)),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: settings.agentShellEnabled,
+                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentShellEnabled(v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 驱动模型选择器：显示当前选择，点击弹出选择对话框。
+  Widget _buildAgentModelSelector(
+      BuildContext context, WidgetRef ref, InferenceSettings settings) {
+    final String currentLabel;
+    if (settings.agentModelSource == null) {
+      currentLabel = '跟随默认（本地优先，API 兜底）';
+    } else if (settings.agentModelSource == 'local') {
+      currentLabel = '本地：${settings.agentModelId}';
+    } else {
+      currentLabel = 'API：${settings.agentModelId}';
+    }
+
+    return InkWell(
+      onTap: () => _pickAgentModel(context, ref, settings),
+      borderRadius: BorderRadius.circular(8),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          suffixIcon: Icon(Icons.arrow_drop_down),
+        ),
+        child: Text(currentLabel, style: const TextStyle(fontSize: 13)),
+      ),
+    );
+  }
+
+  /// 弹出「选择智能体驱动模型」对话框：跟随默认 / 本地模型 / API 模型。
+  Future<void> _pickAgentModel(
+      BuildContext context, WidgetRef ref, InferenceSettings settings) async {
+    final catalog = await loadModelCatalog();
+    if (!context.mounted) return;
+    final notifier = ref.read(settingsProvider.notifier);
+    final apiModels = settings.apiModels;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('选择智能体驱动模型'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.auto_awesome),
+                title: const Text('跟随默认'),
+                subtitle: const Text('本地优先，API 兜底'),
+                selected: settings.agentModelSource == null,
+                onTap: () {
+                  Navigator.pop(dialogContext);
+                  notifier.setAgentModel(null, null);
+                },
+              ),
+              const Divider(height: 24),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 4),
+                child: Text('本地模型',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+              for (final m in catalog)
+                ListTile(
+                  leading: const Icon(Icons.storage),
+                  title: Text(cleanModelName(m.name),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(m.id,
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  selected: settings.agentModelSource == 'local' &&
+                      settings.agentModelId == m.id,
+                  onTap: () {
+                    Navigator.pop(dialogContext);
+                    notifier.setAgentModel('local', m.id);
+                  },
+                ),
+              if (apiModels.isNotEmpty) ...[
+                const Divider(height: 24),
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 4),
+                  child: Text('API 接入模型',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+                for (final cfg in apiModels)
+                  ListTile(
+                    leading: const Icon(Icons.cloud),
+                    title: Text(cfg.name.isEmpty ? cfg.model : cfg.name,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(cfg.id,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    selected: settings.agentModelSource == 'api' &&
+                        settings.agentModelId == cfg.id,
+                    onTap: () {
+                      Navigator.pop(dialogContext);
+                      notifier.setAgentModel('api', cfg.id);
+                    },
+                  ),
+              ] else
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('暂无 API 模型，请先在「API 接入」配置',
+                      style: TextStyle(color: Colors.grey)),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消')),
+        ],
+      ),
+    );
+  }
+}
+
+/// 通用「标签 + 滑块 + 当前值 + 提示」行，用于设置页数值型配置。
+Widget _buildSliderRow({
+  required String label,
+  required int value,
+  required int min,
+  required int max,
+  required int divisions,
+  required String display,
+  required ValueChanged<int> onChanged,
+  String? hint,
+}) {
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(label, style: const TextStyle(fontSize: 13)),
+            ),
+            Text(display,
+                style: const TextStyle(
+                    fontWeight: FontWeight.w500, fontSize: 13)),
+          ],
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: Slider(
+                value: value.toDouble(),
+                min: min.toDouble(),
+                max: max.toDouble(),
+                divisions: divisions,
+                label: '$value',
+                onChanged: (v) => onChanged(v.round()),
+              ),
+            ),
+          ],
+        ),
+        if (hint != null)
+          Text(hint, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+      ],
+    ),
+  );
+}
+
+/// 毫秒 → 可读时长（如 15000 → "15 秒"）。
+String _formatTimeout(int ms) {
+  if (ms < 1000) return '$ms 毫秒';
+  if (ms % 1000 == 0) return '${ms ~/ 1000} 秒';
+  return '${(ms / 1000).toStringAsFixed(1)} 秒';
+}
+
+// =========================================================================
+// Tab 5: 关于
 // =========================================================================
 
 class _buildAboutTab extends StatelessWidget {

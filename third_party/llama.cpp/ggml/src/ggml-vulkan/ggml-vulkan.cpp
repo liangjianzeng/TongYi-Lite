@@ -962,7 +962,6 @@ struct vk_device_struct {
     vk_pipeline pipeline_cpy_f32_quant[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_quant_f32[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_transpose_16, pipeline_cpy_transpose_32;
-    vk_pipeline pipeline_cpy_transpose_02_16, pipeline_cpy_transpose_02_32;
     // [src0 0=fp32,1=fp16][dst]
     vk_pipeline pipeline_set_rows_i32[2][GGML_TYPE_COUNT];
     vk_pipeline pipeline_set_rows_i64[2][GGML_TYPE_COUNT];
@@ -1645,7 +1644,6 @@ struct vk_op_rope_push_constants {
     uint32_t rope_mode;
     uint32_t nrows;
     uint32_t n_dims;
-    uint32_t n_offs;
     float freq_scale;
     float freq_base;
     float ext_factor;
@@ -3301,16 +3299,7 @@ static std::unique_ptr<vk_queue> ggml_vk_create_queue(vk_device& device, uint32_
         h = std::make_shared<vk_queue_handle_synchronized>();
     }
 
-    // Use the Vulkan 1.0 vkGetDeviceQueue on ARM Mali: the driver's
-    // vkGetDeviceQueue2 (Vulkan 1.2) has been observed on MediaTek SoCs to
-    // return a queue whose dispatch table is NULL, so the first vkQueueSubmit
-    // crashes inside the loader trampoline at address 0x0. The 1.0 path fills
-    // the dispatch table correctly (this is also what Flutter/Impeller uses).
-    if (device->vendor_id == 0x13B5 /* VK_VENDOR_ID_ARM */) {
-        h->queue = device->device.getQueue(queue_family_index, queue_index);
-    } else {
-        h->queue = device->device.getQueue2(queue_info2);
-    }
+    h->queue = device->device.getQueue2(queue_info2);
     h->device = device;
     q->handle = h;
 
@@ -5536,8 +5525,6 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_32, "cpy_transpose_32", cpy_transpose_32_len, cpy_transpose_32_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_16, "cpy_transpose_16", cpy_transpose_16_len, cpy_transpose_16_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_02_32, "cpy_transpose_02_32", cpy_transpose_02_32_len, cpy_transpose_02_32_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_02_16, "cpy_transpose_02_16", cpy_transpose_02_16_len, cpy_transpose_02_16_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_quant[GGML_TYPE_Q1_0], "cpy_f32_q1_0", cpy_f32_q1_0_len, cpy_f32_q1_0_data, "main", 2, sizeof(vk_op_unary_push_constants), {32, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_quant[GGML_TYPE_Q2_0], "cpy_f32_q2_0", cpy_f32_q2_0_len, cpy_f32_q2_0_data, "main", 2, sizeof(vk_op_unary_push_constants), {32, 1, 1}, {}, 1);
@@ -6650,14 +6637,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
 
         device->device_fault = device->device_fault && fault_features.deviceFault;
 
-        // Mali (ARM) drivers on MediaTek SoCs have been observed to report
-        // VK_KHR_synchronization2::internallySynchronizedQueues but return a
-        // broken VkQueue from vkGetDeviceQueue2 when the flag is set — the
-        // queue's dispatch table ends up NULL and the first vkQueueSubmit
-        // crashes inside the loader trampoline at address 0x0. Force the flag
-        // off on ARM so getQueue2() returns a normally-dispatched queue.
-        device->has_internally_synchronized_queues = internally_synchronized_queues_features.internallySynchronizedQueues &&
-                                                     device->vendor_id != 0x13B5 /* VK_VENDOR_ID_ARM */;
+        device->has_internally_synchronized_queues = internally_synchronized_queues_features.internallySynchronizedQueues;
 
         // Build queue create infos only after querying whether internally synchronized queues are enabled.
         // getQueue2() later uses the same flag, so creation/retrieval must stay consistent.
@@ -6697,22 +6677,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
 
         device->shader_int64 = device_features2.features.shaderInt64;
         device->buffer_device_address = vk12_features.bufferDeviceAddress;
-        // Defensive fallback for mobile drivers (notably ARM Mali on MediaTek
-        // SoCs): they report bufferDeviceAddress=true (Vulkan 1.2 core feature)
-        // but their ICD never implements vkGetBufferDeviceAddress — the Android
-        // loader hands out a non-NULL trampoline for core commands, so checking
-        // the dispatcher pointer is NOT enough: calling getBufferAddress()
-        // still crashes at address 0x0 inside the driver. Disable BDA outright
-        // on ARM (Mali, vendor id 0x13B5). BDA is only needed by a few ops
-        // (im2col/rope_glu variants); the rest of the backend keeps working.
-        // NOTE: do NOT call VULKAN_HPP_DEFAULT_DISPATCHER.init(device) here —
-        // on Mali that overwrites loader trampolines (e.g. vkQueueSubmit) with
-        // NULLs returned by vkGetDeviceProcAddr and crashes on the first submit.
-        if (device->vendor_id == 0x13B5 /* VK_VENDOR_ID_ARM */ ||
-            (device->buffer_device_address && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetBufferDeviceAddress == nullptr)) {
-            device->buffer_device_address = false;
-            GGML_LOG_WARN("ggml_vulkan: bufferDeviceAddress unavailable on this device (vendor 0x%x); disabling BDA\n", device->vendor_id);
-        }
         device->vulkan_memory_model = vk12_features.vulkanMemoryModel;
 
         if (device->subgroup_size_control) {
@@ -8964,18 +8928,6 @@ static vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx, const
             return ctx->device->pipeline_cpy_transpose_32;
         } else if (ggml_type_size(to) == 2) {
             return ctx->device->pipeline_cpy_transpose_16;
-        }
-    }
-
-    // Same, for a 0<->2 swap: src dim2 is the innermost dimension.
-    bool transpose02 = dst && !contig && src->nb[2] == ggml_type_size(to) &&
-                       ggml_is_contiguous(dst) && ggml_are_same_shape(dst, src);
-
-    if (transpose02 && src->type == to) {
-        if (ggml_type_size(to) == 4) {
-            return ctx->device->pipeline_cpy_transpose_02_32;
-        } else if (ggml_type_size(to) == 2) {
-            return ctx->device->pipeline_cpy_transpose_02_16;
         }
     }
 
@@ -12240,16 +12192,7 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
                 elements = { ne, 1, 1 };
             }
 
-            if (pipeline == ctx->device->pipeline_cpy_transpose_02_32 ||
-                pipeline == ctx->device->pipeline_cpy_transpose_02_16) {
-                // 32x32 tiles over dims 0 and 2; dim1 and dim3 are the batch
-                elements[0] = (uint32_t)CEIL_DIV(dst->ne[0], 32);
-                elements[1] = (uint32_t)CEIL_DIV(dst->ne[2], 32);
-                elements[2] = (uint32_t)(dst->ne[1]*dst->ne[3]);
-                elements[0] = std::min(elements[0], ctx->device->properties.limits.maxComputeWorkGroupCount[0]);
-                elements[1] = std::min(elements[1], ctx->device->properties.limits.maxComputeWorkGroupCount[1]);
-                elements[2] = std::min(elements[2], ctx->device->properties.limits.maxComputeWorkGroupCount[2]);
-            } else if (pipeline == ctx->device->pipeline_cpy_transpose_32 ||
+            if (pipeline == ctx->device->pipeline_cpy_transpose_32 ||
                 pipeline == ctx->device->pipeline_cpy_transpose_16) {
                 // 32x32 tiles
                 elements[0] = (uint32_t)CEIL_DIV(dst->ne[0], 32);
@@ -13177,7 +13120,6 @@ static uint32_t ggml_vk_rms_partials_size(ggml_backend_vk_context * ctx, const g
 static vk_op_rope_push_constants ggml_vk_make_rope_constants(const ggml_tensor *dst, const ggml_tensor *src0, const bool has_ff, bool backprop, const uint32_t set_rows_stride) {
     const int n_dims        = ((const int32_t *) dst->op_params)[1];
     const int mode          = ((const int32_t *) dst->op_params)[2];
-    const int n_offs        = ((const int32_t *) dst->op_params)[15];
     // const int n_ctx         = ((const int32_t *) dst->op_params)[3];
     const int n_ctx_orig    = ((const int32_t *) dst->op_params)[4];
     const float freq_base   = ((const float *)   dst->op_params)[5];
@@ -13207,7 +13149,7 @@ static vk_op_rope_push_constants ggml_vk_make_rope_constants(const ggml_tensor *
     uint32_t nb13 = dst->nb[3] / ggml_type_size(dst->type);
 
     vk_op_rope_push_constants rope {
-        (uint32_t)mode, (uint32_t)ggml_nrows(src0), (uint32_t)n_dims, (uint32_t)n_offs, freq_scale,
+        (uint32_t)mode, (uint32_t)ggml_nrows(src0), (uint32_t)n_dims, freq_scale,
         freq_base, ext_factor, attn_factor, {corr_dims[0], corr_dims[1]}, theta_scale, has_ff,
         { sections[0], sections[1], sections[2], sections[3] }, is_imrope, backprop, set_rows_stride,
 
@@ -19252,10 +19194,6 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 } else {
                     tensor_clone = ggml_rope_ext_back(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
                 }
-            }
-            const int n_offs = ((int32_t *) tensor->op_params)[15];
-            if (n_offs != 0) {
-                tensor_clone = ggml_rope_set_offset(tensor_clone, n_offs);
             }
         } else if (tensor->op == GGML_OP_UNARY) {
             switch (ggml_get_unary_op(tensor)) {

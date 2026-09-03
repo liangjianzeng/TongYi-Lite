@@ -27,6 +27,12 @@ class ChatBubble extends StatelessWidget {
 
   bool get _isUser => role == 'user';
 
+  /// 工具活动消息（🔧 前缀，智能体模式工具轮）。
+  bool get _isToolActivity => !_isUser && content.startsWith('🔧');
+
+  /// 思考中占位（内容为空 + 流式中 → 显示「思考中…」指示器）。
+  bool get _isThinkingPlaceholder => !_isUser && isStreaming && content.isEmpty;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -51,10 +57,17 @@ class ChatBubble extends StatelessWidget {
               children: [
                 Container(
                   constraints: const BoxConstraints(maxWidth: 600),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: _isToolActivity ? 8 : 12,
+                  ),
                   margin: const EdgeInsets.symmetric(vertical: 4),
                   decoration: BoxDecoration(
-                    color: _isUser ? theme.colorScheme.primary : theme.colorScheme.surfaceContainerHighest,
+                    color: _isUser
+                        ? theme.colorScheme.primary
+                        : (_isToolActivity
+                            ? theme.colorScheme.tertiaryContainer.withValues(alpha: 0.5)
+                            : theme.colorScheme.surfaceContainerHighest),
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Column(
@@ -98,27 +111,78 @@ class ChatBubble extends StatelessWidget {
                         ),
                         const SizedBox(height: 8),
                       ],
-                      // Show text content
-                      if (content.isNotEmpty) ...[
-                        Text(
-                          content,
-                          style: TextStyle(
-                            color: _isUser ? theme.colorScheme.onPrimary : theme.colorScheme.onSurfaceVariant,
-                            fontSize: 15,
-                            height: 1.5,
-                          ),
+                      // 工具活动消息：紧凑文本 + 工具图标（不暴露原始 JSON）。
+                      if (_isToolActivity) ...[
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.construction,
+                              size: 13,
+                              color: theme.colorScheme.onTertiaryContainer,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                content,
+                                style: TextStyle(
+                                  color: theme.colorScheme.onTertiaryContainer,
+                                  fontSize: 13,
+                                  height: 1.4,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                      if (isStreaming) ...[
-                        const SizedBox(height: 4),
-                        SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: _isUser ? Colors.white : theme.colorScheme.primary,
+                      ] else ...[
+                        // 思考中占位：空内容 + 流式 → 显示「思考中…」。
+                        if (_isThinkingPlaceholder) ...[
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                width: 12,
+                                height: 12,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '思考中…',
+                                style: TextStyle(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  fontSize: 13,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
+                        ] else if (content.isNotEmpty) ...[
+                          Text(
+                            content,
+                            style: TextStyle(
+                              color: _isUser
+                                  ? theme.colorScheme.onPrimary
+                                  : theme.colorScheme.onSurfaceVariant,
+                              fontSize: 15,
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
+                        if (isStreaming && !_isThinkingPlaceholder) ...[
+                          const SizedBox(height: 4),
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: _isUser ? Colors.white : theme.colorScheme.primary,
+                            ),
+                          ),
+                        ],
                       ],
                     ],
                   ),
