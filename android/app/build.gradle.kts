@@ -1,10 +1,24 @@
 import java.util.Properties
 import java.io.FileInputStream
+import com.chaquo.python.ChaquopyExtension
+
+// Kotlin DSL 脚本编译需要 Chaquopy 类型（否则 `python {}` Unresolved reference）。
+buildscript {
+    repositories {
+        maven { url = uri("https://maven.chaquo.com/maven/") }
+        google()
+    }
+    dependencies {
+        classpath("com.chaquo.python:gradle:16.1.0")
+    }
+}
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
+    // Chaquopy：Android 嵌入式 CPython（python_exec 工具运行时）
+    id("com.chaquo.python")
 }
 
 android {
@@ -83,6 +97,21 @@ android {
 
     // JNI libs from llama.cpp pre-build
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+}
+
+// Chaquopy：python_exec 工具运行时。首期不装第三方库（标准库足够），
+// 避免构建网络依赖；后续按需在 pip 块声明（requests/numpy 等）。
+// Kotlin DSL 下 `python {}` accessor 不可静态解析；Chaquopy 注册的扩展名是
+// `chaquopy`（defaultConfig 内配置 Python 运行时），改用显式扩展配置。
+extensions.configure<ChaquopyExtension>("chaquopy") {
+    defaultConfig {
+        // 主机 Python 用于构建时交叉编译标准库：构建命令把 Python 加入 PATH，
+        // 此处用 "python"（跨机兼容；其他机器只要 PATH 里有 python 即可）。
+        buildPython("python")
+        pip {
+            // 不声明任何依赖：CPython 标准库即可跑脚本（json/re/urllib 等）。
+        }
+    }
 }
 
 flutter {

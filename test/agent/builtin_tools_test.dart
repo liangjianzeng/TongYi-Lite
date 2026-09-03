@@ -73,4 +73,33 @@ void main() {
       expect(result.content, contains('括号不匹配'));
     });
   });
+
+  group('沙箱升级字段声明（对照 DSH 升级通道）', () {
+    test('read_file 声明 sandbox_permissions 与 justification', () {
+      final props = createReadFileTool().parameters['properties'] as Map;
+      expect(props['sandbox_permissions'], isNotNull);
+      expect(props['justification'], isNotNull);
+    });
+
+    test('shell_exec 声明升级字段且必填 command', () {
+      final tool = createShellExecTool();
+      final props = tool.parameters['properties'] as Map;
+      expect(props['sandbox_permissions'], isNotNull);
+      expect(props['justification'], isNotNull);
+      expect(tool.parameters['required'], contains('command'));
+    });
+
+    test('python_exec 声明升级字段且必填 script', () {
+      final tool = createPythonExecTool();
+      final props = tool.parameters['properties'] as Map;
+      expect(props['sandbox_permissions'], isNotNull);
+      expect(props['justification'], isNotNull);
+      expect(tool.parameters['required'], contains('script'));
+    });
+
+    test('get_time 不声明升级字段', () {
+      final props = createGetTimeTool().parameters['properties'] as Map;
+      expect(props['sandbox_permissions'], isNull);
+    });
+  });
 }

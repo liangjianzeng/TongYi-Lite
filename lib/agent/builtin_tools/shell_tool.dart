@@ -8,6 +8,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../sandbox.dart';
 import '../tool_definition.dart';
 
 /// 命令超时。
@@ -21,18 +22,22 @@ ToolDefinition createShellExecTool() {
     name: 'shell_exec',
     description:
         '在设备上执行 shell 命令（sh -c，app 权限内）。'
-        '可访问工作区文件、运行普通命令。输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。',
-    parameters: {
+        '可访问工作区文件、运行普通命令。输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。'
+        '被沙箱拒绝且确需访问公共目录/完整文件系统时，带 sandbox_permissions 请求用户批准。',
+    parameters: withEscalationFields({
       'type': 'object',
       'properties': {
         'command': {'type': 'string', 'description': '要执行的 shell 命令'},
       },
       'required': ['command'],
-    },
+    }),
     timeout: kShellTimeout,
     execute: (args) async {
       final command = (args['command'] as String?)?.trim() ?? '';
       if (command.isEmpty) return ToolResult.error('缺少 command 参数');
+      // 沙箱模式（workspace-write 默认；danger-full-access 为审批后生效）——
+      // Android 上 sh 进程始终以 app 权限运行，完整访问依赖 All-Files-Access。
+      final mode = effectiveModeOf(args);
       try {
         final result = await Process.run('sh', ['-c', command],
             stdoutEncoding: utf8, stderrEncoding: utf8);
@@ -52,7 +57,7 @@ ToolDefinition createShellExecTool() {
             : output;
 
         return ToolResult(
-          content: 'exit=${exitCode}${truncated.isNotEmpty ? '\n$truncated' : '（无输出）'}',
+          content: 'exit=${exitCode}[sandbox: ${mode.value}]${truncated.isNotEmpty ? '\n$truncated' : '（无输出）'}',
         );
       } on ProcessException catch (e) {
         return ToolResult.error('命令执行失败：${e.message}');

@@ -20,6 +20,7 @@ export 'file_tools.dart'
 export 'get_time.dart' show createGetTimeTool;
 export 'memory_tool.dart' show createMemoryGetTool, createMemorySetTool;
 export 'note_tool.dart' show createNoteListTool, createNoteTakeTool, resetNoteStore;
+export 'python_tool.dart' show createPythonExecTool;
 export 'shell_tool.dart' show createShellExecTool;
 export 'todo_tool.dart' show createTodoListTool, createTodoWriteTool, resetTodoStore;
 export 'unit_converter_tool.dart' show createUnitConverterTool;
@@ -32,6 +33,7 @@ import 'file_tools.dart';
 import 'get_time.dart';
 import 'memory_tool.dart';
 import 'note_tool.dart';
+import 'python_tool.dart';
 import 'shell_tool.dart';
 import 'todo_tool.dart';
 import 'unit_converter_tool.dart';
@@ -61,6 +63,7 @@ const List<String> kOptionalToolNames = [
   'web_search',
   'get_weather',
   'shell_exec',
+  'python_exec',
 ];
 
 /// 创建全部内置工具（全量；接入层按配置过滤启用集）。
@@ -82,4 +85,5 @@ List<ToolDefinition> createBuiltinTools() => [
       createWebSearchTool(),
       createGetWeatherTool(),
       createShellExecTool(),
+      createPythonExecTool(),
     ];

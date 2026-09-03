@@ -210,6 +210,18 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// python_exec 工具开关。
+  Future<void> setAgentPythonEnabled(bool value) async {
+    state = state.copyWith(agentPythonEnabled: value);
+    await _persist();
+  }
+
+  /// 沙箱完整文件访问授权（danger-full-access 前置）。
+  Future<void> setAgentFullFileAccess(bool value) async {
+    state = state.copyWith(agentFullFileAccess: value);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);

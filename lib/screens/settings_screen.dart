@@ -1516,6 +1516,7 @@ class _AgentTab extends ConsumerWidget {
                     '• read_file / write_file / edit_file —— 读写编辑工作区文件\n'
                     '• list_files / search_text —— 文件查找与内容搜索\n'
                     '• shell_exec —— 设备 shell 命令执行\n'
+                    '• python_exec —— 嵌入式 Python 脚本执行\n'
                     '• web_search / get_weather —— 联网搜索与天气（联网开关开启后可用）',
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
@@ -1559,6 +1560,26 @@ class _AgentTab extends ConsumerWidget {
                     dense: true,
                     value: settings.agentShellEnabled,
                     onChanged: (v) => ref.read(settingsProvider.notifier).setAgentShellEnabled(v),
+                  ),
+                  SwitchListTile(
+                    title: const Text('🐍 Python 执行（python_exec）',
+                        style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('嵌入式 CPython 跑脚本（计算/数据处理/文件/网络）',
+                        style: TextStyle(fontSize: 12)),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: settings.agentPythonEnabled,
+                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentPythonEnabled(v),
+                  ),
+                  SwitchListTile(
+                    title: const Text('📂 完整文件访问授权',
+                        style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('允许智能体经你逐次批准访问公共目录/完整文件系统（All-Files-Access，默认关）',
+                        style: TextStyle(fontSize: 12)),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: settings.agentFullFileAccess,
+                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentFullFileAccess(v),
                   ),
                 ],
               ),
