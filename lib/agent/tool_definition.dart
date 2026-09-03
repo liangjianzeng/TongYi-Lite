@@ -55,13 +55,19 @@ List<String> validateRequiredArguments(
     final name = key.toString();
     final value = args[name];
     String? usage;
+    String? type;
     if (props is Map && props[name] is Map) {
       usage = (props[name] as Map)['description']?.toString();
+      type = (props[name] as Map)['type']?.toString();
     }
+    // 类型提示让模型补全时一次填对（如 command: string）。
+    final typeHint = type != null ? '<$type>' : '';
     if (value == null) {
-      violations.add('缺少必填参数 $name${usage != null ? '（$usage）' : ''}');
+      violations.add(
+          '缺少必填参数 $name$typeHint${usage != null ? '（$usage）' : ''}');
     } else if (value is String && value.trim().isEmpty) {
-      violations.add('必填参数 $name 不能为空${usage != null ? '（$usage）' : ''}');
+      violations.add(
+          '必填参数 $name$typeHint 不能为空${usage != null ? '（$usage）' : ''}');
     }
   }
   return violations;

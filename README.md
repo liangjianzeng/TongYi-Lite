@@ -33,13 +33,14 @@
 
 | 维度 | 说明 |
 |------|------|
-| **当前版本** | **v0.1.6**（2026-08-19；versionCode 7） |
+| **当前版本** | **v0.2.0**（2026-09-04；versionCode 8） |
 | **目标平台** | Android APK (API 33+) |
 | **推理引擎** | llama.cpp 上游 master（vendored `fe8156f`，2026-08-19；批量预填充 + 内置采样器 + **Vulkan/OpenCL 双 GPU 后端** + KleidiAI dotprod CPU；含天玑 Mali Vulkan 崩溃修复，见「GPU 加速」） |
 | **模型管理** | Riverpod ModelState（idle/loading/loaded/unloading/error），单模型约束，聊天界面实时状态栏；支持**最多 2 个模型并行下载**、暂停/继续/删除、断点续传 |
 | **前端框架** | Flutter 3.x (Material3) |
 | **通信方式** | JNI 直调（批量 EventChannel 回调） |
 | **模型下载源** | hf-mirror.com → ModelScope（自动回退，见 `assets/models_catalog.json`） |
+| **Agent 智能体** | 工具循环（调用 → 结果回填 → 回答）：13 个内置工具，含 **shell_exec（shell 命令）** 与 **python_exec（嵌入式 CPython 3.11，Chaquopy 17）**；文件读写/计算/待办/记忆/联网（天气/搜索）；沙箱隔离 + 危险操作逐次审批；每轮生成预算可配（最大 16k token） |
 
 ---
 
@@ -86,12 +87,19 @@ TongYi-Lite/
 │   │   ├── storage_permission_service.dart  # Android 存储权限申请
 │   │   └── storage_service.dart      # SQLite 持久化（对话/消息）
 │   ├── providers/
-│   │   ├── chat_provider.dart        # Riverpod 聊天状态 + 当前模型选择
+│   │   ├── chat_provider.dart        # Riverpod 聊天状态 + 当前模型选择（含 Agent 循环编排）
 │   │   ├── download_provider.dart    # Riverpod 下载任务状态管理
 │   │   └── model_provider.dart       # Riverpod ModelState（idle/loading/loaded/unloading/error）
+│   ├── agent/
+│   │   ├── agent_loop.dart           # Agent 工具循环（调用→回填→回答）
+│   │   ├── agent_prompt.dart         # 系统提示分段组装（工具规则）
+│   │   ├── tool_registry.dart        # 工具注册表（按模型过滤）
+│   │   ├── tool_definition.dart      # 工具定义 + 必填参数校验
+│   │   ├── protocol/                 # 工具呈现协议（prompt-json XML）
+│   │   └── builtin_tools/            # 内置工具（shell_exec/python_exec/联网/文件/待办等）
 │   ├── screens/
 │   │   ├── home_screen.dart          # 聊天主页面（含实时模型状态栏 + 推理脉冲动画）
-│   │   ├── settings_screen.dart      # 设置页（模型选择 + 下载进度 + 存储信息磁盘扫描）
+│   │   ├── settings_screen.dart      # 设置页（模型选择 + 下载进度 + 工具循环 + 沙箱审批）
 │   │   └── inference_log_screen.dart # 推理日志查看页（加载/卸载/生成过程日志）
 │   └── widgets/
 │       └── chat_bubble.dart          # 消息气泡组件
@@ -544,6 +552,42 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 
 ---
 
+## Agent 智能体（工具调用）
+
+内置工具型智能体循环：模型按需调用工具 → 工具真实执行并回填结果 → 模型根据结果组织最终回答（绝不假装执行）。
+
+### 内置工具一览
+
+| 工具 | 说明 | 必填参数 |
+|------|------|---------|
+| `get_time` | 当前时间/日期 | 无 |
+| `get_weather` | 指定城市天气（Open-Meteo：地理编码 + 预报，国内可达） | `city: string` |
+| `web_search` | 联网搜索（Bing RSS 主源 + DuckDuckGo 兜底） | `query: string` |
+| `calculator` | 数学表达式精确计算 | `expression: string` |
+| `unit_converter` | 单位换算 | `value: number` |
+| `todo_write` / `note_take` / `memory_set` | 待办 / 便签 / 记忆 | 按工具定义 |
+| `read_file` / `write_file` / `edit_file` | 工作区文件读写 | `path: string` 等 |
+| `shell_exec` | 执行 shell 命令（app 沙盒内） | `command: string` |
+| `python_exec` | 执行 Python 脚本（嵌入式 CPython） | `script: string` |
+
+### 运行时与安全
+
+- **python_exec**：Chaquopy 17.0 嵌入式 CPython **3.11**（`libpython3.11.so` 随 APK 打包），
+  `agent_runner.py` 在 app 权限内 exec 脚本，捕获 stdout/stderr/异常，超时（默认 15s）兜底。
+- **沙箱**：文件/命令类工具默认在 app workspace 沙盒内运行；确需访问公共目录时，模型在调用中携带
+  `sandbox_permissions=danger-full-access` + `justification`（一句话理由），弹窗逐次审批，被拒不绕过。
+- **联网**：国内可达源优先——天气走 Open-Meteo（无密钥）、搜索走 Bing RSS（`cn.bing.com`），
+  DuckDuckGo 仅作兜底。
+- **参数约束**：工具清单渲染必填参数（含类型，如 `command: string`），首次调用须一次性给全；
+  缺失时原生校验拦截并回填具体缺失项，避免无效调用浪费算力。
+
+### 配置项（设置 → 工具循环）
+
+- 循环轮次上限（默认 5 轮）、每轮生成预算（默认 512 token，**最大 16k**）、工具执行超时；
+- 按模型开关 `python_exec` / `shell_exec` 等工具（默认启用）。
+
+---
+
 ## 架构决策记录
 
 ### P0 已实现 ✅（基于 llama.cpp b10173 官方示例验证）
@@ -561,6 +605,7 @@ vendored 代码里 **SME2 内核确实存在且可用**：`ggml-cpu/CMakeLists.t
 | 9 | **流式回调批量化** | ✅ | `on_token` 回调按 8 字节（≈2 个 CJK 字符）批量发送，兼顾逐字流式观感与 JNI 往返开销 |
 | 10 | **mmap 加载** | ✅ | 模型加载从全量读入 RAM 改为 mmap，降低峰值内存与 OOM 风险 |
 | 11 | **flash attention + 线程策略** | ✅ | flash_attn_type 当前 DISABLED（AUTO 在 CPU 后端会实际启用且多轮乱码，见「已知问题」）；`n_threads` 按 `/proc/cpuinfo` CPU part 识别大小核拓扑，全大核 SoC 用全部核（如 SM8735 用 8），big.LITTLE 只调度大核 |
+| 12 | **Agent 智能体工具循环** | ✅ | 13 个内置工具 + 工具清单渲染（必填参数含类型）+ 原生参数校验回填；shell_exec（shell 命令）/ python_exec（Chaquopy 17 嵌入式 CPython 3.11）；沙箱隔离 + danger-full-access 逐次审批；每轮预算 512~16384 可配 |
 
 ### P1 计划 🚧
 

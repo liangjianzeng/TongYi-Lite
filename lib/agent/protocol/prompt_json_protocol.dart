@@ -188,11 +188,21 @@ class PromptJsonProtocol implements ToolProtocol {
     return props is Map && props['sandbox_permissions'] != null;
   }
 
-  /// 生成必填参数提示（对照 DSH schema 呈现）：`（必填: command）`。
+  /// 生成必填参数提示（对照 DSH schema 呈现）：`（必填: command: string）`。
+  /// 带类型让模型首次调用就能填对（根治「只调工具不带参数」）。
   String _requiredParamsHint(ToolDefinition tool) {
     final required = tool.parameters['required'];
     if (required is! List || required.isEmpty) return '';
-    return '（必填: ${required.map((r) => r.toString()).join(', ')})';
+    final props = tool.parameters['properties'];
+    final parts = required.map((r) {
+      final name = r.toString();
+      if (props is Map && props[name] is Map) {
+        final type = (props[name] as Map)['type']?.toString();
+        if (type != null) return '$name: $type';
+      }
+      return name;
+    }).toList();
+    return '（必填: ${parts.join(', ')}）';
   }
 
   /// 解码 XML 工具参数值：以 `[`/`{` 开头且以 `]`/`}` 结尾的字符串按 JSON 解析

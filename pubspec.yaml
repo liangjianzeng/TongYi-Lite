@@ -1,10 +1,10 @@
 name: tongyi_lite
 description: 端侧离线 AI 智能体
-# 版本号以 android/app/build.gradle.kts (versionName=0.1.6 / versionCode=7) 为准，
+# 版本号以 android/app/build.gradle.kts (versionName=0.2.0 / versionCode=8) 为准，
 # 此处同步保持一致，About 页版本号运行时从安装包读取（package_info_plus）。
 # 注意：About 页版本号是 Dart 常量（settings_screen.dart），与 gradle 同步；
 # 离线沙箱无法下载 package_info_plus 的 AGP 依赖，故不引插件读取。
-version: 0.1.6+7
+version: 0.2.0+8
 publish_to: 'none'
 
 environment:
