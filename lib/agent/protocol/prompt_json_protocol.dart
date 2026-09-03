@@ -27,6 +27,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '不要先回答再补调用）：\n'
       '无参数：<tool_call>get_time</tool_call>\n'
       '带参数：<tool_call>web_search<arg_key>query<arg_value>今天天气</tool_call>\n'
+      '数组参数：<tool_call>todo_write<arg_key>todos<arg_value>[{"content": "明天开会", "status": "todo"}]</tool_call>\n'
+      '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
@@ -151,7 +153,7 @@ class PromptJsonProtocol implements ToolProtocol {
         .toList();
     final arguments = <String, dynamic>{};
     for (var i = 0; i < keys.length && i < values.length; i++) {
-      arguments[keys[i]] = values[i];
+      arguments[keys[i]] = _decodeXmlArgValue(values[i]);
     }
 
     return (
@@ -163,6 +165,21 @@ class PromptJsonProtocol implements ToolProtocol {
         arguments: arguments,
       ),
     );
+  }
+
+  /// 解码 XML 工具参数值：以 `[`/`{` 开头且以 `]`/`}` 结尾的字符串按 JSON 解析
+  /// （数组/对象参数，如 todo_write 的 todos），解析失败保留原字符串。
+  dynamic _decodeXmlArgValue(String raw) {
+    final trimmed = raw.trim();
+    if ((trimmed.startsWith('[') || trimmed.startsWith('{')) &&
+        (trimmed.endsWith(']') || trimmed.endsWith('}'))) {
+      try {
+        return jsonDecode(trimmed);
+      } catch (_) {
+        return raw;
+      }
+    }
+    return raw;
   }
 
   /// 提取文本中第一个完整的 JSON 对象。

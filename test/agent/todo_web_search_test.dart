@@ -60,6 +60,22 @@ void main() {
       expect(result.isError, isTrue);
       expect(result.content, contains('不能为空'));
     });
+
+    test('todos 为 JSON 字符串（XML 协议形态）→ 同样可写入', () async {
+      final result = await createTodoWriteTool().execute({
+        'todos': '[{"content": "明天开会", "status": "todo"}]',
+      });
+      expect(result.isError, isFalse);
+      expect(result.content, contains('1. [todo] 明天开会'));
+    });
+
+    test('todos 为非法 JSON 字符串 → 错误', () async {
+      final result = await createTodoWriteTool().execute({
+        'todos': '不是合法数组',
+      });
+      expect(result.isError, isTrue);
+      expect(result.content, contains('todos'));
+    });
   });
 
   group('web_search 工具', () {

@@ -4,6 +4,8 @@
 /// `todo_list` 只读当前清单（供模型规划下一步）。进程内共享，重启清零。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../tool_definition.dart';
@@ -58,12 +60,25 @@ ToolDefinition createTodoWriteTool() {
     },
     execute: (args) async {
       final raw = args['todos'];
-      if (raw is! List) {
+      // 兼容 List 与 JSON 字符串两种形态（XML 协议值可能以字符串到达）。
+      List? parsed;
+      if (raw is List) {
+        parsed = raw;
+      } else if (raw is String) {
+        final trimmed = raw.trim();
+        if (trimmed.isNotEmpty && trimmed.startsWith('[')) {
+          try {
+            final decoded = jsonDecode(trimmed);
+            if (decoded is List) parsed = decoded;
+          } catch (_) {}
+        }
+      }
+      if (parsed == null) {
         return ToolResult.error('缺少 todos 参数（应为任务数组）');
       }
       final items = <Map<String, String>>[];
       try {
-        for (final e in raw) {
+        for (final e in parsed) {
           if (e is Map<String, dynamic>) {
             items.add(_cleanItem(e));
           } else if (e is Map) {
