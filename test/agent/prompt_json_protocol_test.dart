@@ -56,6 +56,18 @@ void main() {
       expect(outcome.text, '让我查询一下请稍等');
     });
 
+    test('XML 数组参数（todos）解析为 List', () async {
+      const text =
+          '<tool_call>todo_write<arg_key>todos<arg_value>[{"content": "明天开会", "status": "todo"}]</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      final call = outcome.toolCalls.single;
+      expect(call.name, 'todo_write');
+      expect(call.arguments?['todos'], isA<List>());
+      expect(call.arguments?['todos'][0]['content'], '明天开会');
+    });
+
     test('带参数的工具调用', () async {
       const text =
           '{"tool_call": {"name": "calculator", "arguments": {"expression": "12*7+3"}}}';

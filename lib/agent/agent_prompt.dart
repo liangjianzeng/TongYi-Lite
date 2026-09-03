@@ -35,11 +35,13 @@ String buildSystemPrompt({
     '   - 计算/换算 → 调用 calculator / unit_converter\n'
     '   - 待办/便签/记忆 → 调用 todo_write / note_take / memory_set\n'
     '   - 读写工作区文件 → 调用 read_file / write_file / edit_file\n'
-    '2. 调用工具时只输出一个 JSON 对象（见下方格式），'
-    '不要输出思考过程、不要输出多余文字、不要先回答再"补充"调用。\n'
-    '3. 收到工具结果后，根据真实结果组织最终回答；'
+    '2. 调用工具时只输出一个工具调用块（格式见下方），'
+    '不要思考过程、不要多余文字、不要先回答再"补充"调用。\n'
+    '3. 带参数工具必须给出全部必填参数（如 web_search 必须带 query）；'
+    '参数遗漏会导致工具执行失败。\n'
+    '4. 收到工具结果后，根据真实结果组织最终回答；'
     '若工具不可用或失败，如实告知用户。\n'
-    '4. 不需要工具时直接回答用户。',
+    '5. 不需要工具时直接回答用户。',
     if (toolSection.isNotEmpty) toolSection,
   ];
   return sections.join('\n\n');
