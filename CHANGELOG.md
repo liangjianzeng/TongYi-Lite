@@ -8,6 +8,23 @@
 
 ## [Unreleased] — 2026-09-01
 
+### 新增：端侧 Agent Lite 智能体
+
+- **Agent 循环（参照 DSH agent-loop step() 简化）**：模型 ↔ 工具多轮交互，轮次上限可配置（默认 5），
+  工具结果以 user 角色消息回填后再生成，直到无工具调用返回最终回答。
+- **协议可插拔**：`ToolProtocol` 抽象 + 按 `EngineCapabilities` 自动选协议；本地/API 首版统一走
+  prompt-JSON/XML 文本协议（`PromptJsonProtocol` 双格式解析），原生 tools 留待能力探测后新增 adapter。
+- **工具注册表**：分层（全局/按模型/用户）动态注册/注销、按模型可见性渲染清单；内置
+  get_time/calculator/todo_write/todo_list/web_search/note/memory/shell/file/unit/weather 等工具。
+- **设置页「智能体」Tab**：驱动模型选择（本地/API/跟随默认）、总开关、循环轮次/每轮预算/工具超时/
+  智能体上下文/并行工具/联网搜索全部可调并持久化（按模型 `agentToolsByModel`）。
+- **流式处理 `AgentStreamProcessor`**：思考块过滤（HTML/Qwen 双风格，含 Qwen3.5 不带 ing 的 ` think`）
+  + XML/JSON 工具调用块增量隐藏。
+- **llama.cpp fork 升级**：`third_party/llama.cpp` 换为 XHToken 官方 fork（`spark2_5` 架构 +
+  function-calling），NDK 全量重建成功；旧版 b10176 仅本地备份不入库。
+- 修复真机工具遵循率问题：提示语规则段与 XML 协议口径一致、强调必填参数、XML 数组参数解码、
+  todo_write 兼容 JSON 字符串形态。**94 项单测全绿。**
+
 ### 修复（代码质量评估 P0 隐患加固）
 
 - **消息 role 反序列化崩溃**：`MessageRole.values...first` 三处直接抛 `StateError`——历史脏数据
