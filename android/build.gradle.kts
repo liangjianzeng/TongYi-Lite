@@ -12,7 +12,7 @@ buildscript {
     }
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.0")
-        classpath("com.chaquo.python:gradle:16.1.0")
+        classpath("com.chaquo.python:gradle:17.0.0")
     }
 }
 

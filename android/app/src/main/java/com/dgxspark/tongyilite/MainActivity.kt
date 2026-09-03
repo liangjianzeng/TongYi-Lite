@@ -15,6 +15,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.annotation.NonNull
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import com.dgxspark.tongyilite.service.InferenceService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -126,17 +128,40 @@ class MainActivity : FlutterActivity() {
     // python_exec：单线程池执行脚本（串行防 GIL 争用），超时由 Future.get 兜底。
     private val pythonExecutor = Executors.newSingleThreadExecutor()
 
+    /**
+     * 确保 Chaquopy 已显式启动：文档要求 Android 上必须
+     * `Python.start(AndroidPlatform(context))`，仅靠 getInstance() 的
+     * GenericPlatform 无法加载 Android 运行时（assets/abi 路径）。
+     * start 只能调用一次；context 为 Activity/Service/Application。
+     */
+    private fun ensurePythonStarted(context: android.content.Context): String? {
+        try {
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(context))
+            }
+            return null // 无错误
+        } catch (e: Exception) {
+            logW("ensurePythonStarted", "start failed: ${e.message}", e)
+            return "启动失败：${e.message}"
+        }
+    }
+
     private fun handlePythonAvailable(result: MethodChannel.Result) {
-        // 仅探测 Chaquopy 是否已初始化（getModule 会触发 Python 启动）。
+        // 返回 String："ok" = 可用；其他为具体错误（透传给 Dart 便于排查）。
         Thread {
-            val available = try {
-                val py = com.chaquo.python.Python.getInstance()
-                py.getModule("agent_runner") != null
+            val probe = try {
+                val startErr = ensurePythonStarted(this)
+                if (startErr != null) {
+                    startErr
+                } else {
+                    val py = Python.getInstance()
+                    if (py.getModule("agent_runner") != null) "ok" else "模块 agent_runner 加载失败"
+                }
             } catch (e: Exception) {
                 logW("handlePythonAvailable", "python unavailable: ${e.message}", e)
-                false
+                "初始化异常：${e.message}"
             }
-            runOnMain { result.success(available) }
+            runOnMain { result.success(probe) }
         }.start()
     }
 
@@ -149,9 +174,13 @@ class MainActivity : FlutterActivity() {
         val timeoutSec = call.argument<Number>("timeoutSec")?.toLong() ?: 15L
         logI("handleRunPythonScript", "script=${script.take(64)}..., timeout=${timeoutSec}s")
 
-        // 脚本执行在线程池（不阻塞 UI）；Chaquopy 初始化也在该线程（getModule）。
+        // 脚本执行在线程池（不阻塞 UI）；先显式 start（幂等），再加载模块。
         val future = pythonExecutor.submit<Map<String, Any?>> {
-            val py = com.chaquo.python.Python.getInstance()
+            val startErr = ensurePythonStarted(this)
+            if (startErr != null) {
+                return@submit mapOf("ok" to false, "stdout" to "", "stderr" to "", "error" to startErr)
+            }
+            val py = Python.getInstance()
             val module = py.getModule("agent_runner")
             val raw = module.callAttr("run_script", script).toString()
             val json = JSONObject(raw)
