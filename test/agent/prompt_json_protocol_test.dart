@@ -134,6 +134,18 @@ void main() {
         parameters: const {'type': 'object', 'properties': {}},
         execute: (args) async => const ToolResult(content: 'ok'),
       ));
+      registry.register(ToolDefinition(
+        name: 'shell_exec',
+        description: '执行 shell 命令',
+        parameters: {
+          'type': 'object',
+          'properties': {
+            'command': {'type': 'string', 'description': '要执行的命令'},
+          },
+          'required': ['command'],
+        },
+        execute: (args) async => const ToolResult(content: 'ok'),
+      ));
 
       final section = protocol.buildToolSection(registry);
       expect(section, contains('[可用工具]'));
@@ -144,8 +156,11 @@ void main() {
       // 遵循率更高；解析器双格式兼容 JSON+XML）。
       expect(section, contains('<tool_call>'));
       expect(section, contains('<arg_key>'));
-      // 工具清单为文本格式：`- get_time: 返回当前时间`（贴近小模型训练分布）。
+      // 工具清单为文本格式：`- name: description`（贴近小模型训练分布）。
       expect(section, contains('- get_time: 返回当前时间'));
+      // 带必填参数的工具呈现参数名提示（对照 DSH schema 呈现），
+      // 让模型知道必须给出哪些参数——根治「只调工具不带参数」。
+      expect(section, contains('- shell_exec: 执行 shell 命令（必填: command)'));
     });
 
     test('按模型渲染工具清单：受限模型不注入不可见工具', () {

@@ -34,6 +34,39 @@ class ToolCall {
   });
 }
 
+/// 校验工具参数（对照 DSH `validateArgs`）：执行前统一检查必填字段，
+/// 返回可读违规列表（空表示通过）。错误信息明确列出缺失参数名与用途，
+/// 便于模型理解并补全参数后重试——这是「shell_exec 永远缺参数」的根治层。
+///
+/// 规则：
+/// - `required` 中声明的字段必须存在；
+/// - 字符串必填参数不允许空串（trim 后为空视为缺失）；
+/// - 其余类型只做存在性检查（工具自身做值域校验）。
+List<String> validateRequiredArguments(
+  Map<String, dynamic> args,
+  Map<String, dynamic> schema,
+) {
+  final violations = <String>[];
+  final required = schema['required'];
+  if (required is! List || required.isEmpty) return violations;
+
+  final props = schema['properties'];
+  for (final key in required) {
+    final name = key.toString();
+    final value = args[name];
+    String? usage;
+    if (props is Map && props[name] is Map) {
+      usage = (props[name] as Map)['description']?.toString();
+    }
+    if (value == null) {
+      violations.add('缺少必填参数 $name${usage != null ? '（$usage）' : ''}');
+    } else if (value is String && value.trim().isEmpty) {
+      violations.add('必填参数 $name 不能为空${usage != null ? '（$usage）' : ''}');
+    }
+  }
+  return violations;
+}
+
 /// 一个可注册的工具（参照 DSH `ToolDefinition`）。
 class ToolDefinition {
   /// 工具名（必须唯一）。

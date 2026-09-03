@@ -184,6 +184,14 @@ Future<ToolResult> _executeTool(
   }
 
   final args = call.arguments ?? const <String, dynamic>{};
+
+  // 执行前统一必填校验（对照 DSH validateArgs）：缺参数时给出明确引导，
+  // 回填给模型补全参数后重试，而不是直接执行失败。
+  final violations = validateRequiredArguments(args, tool.parameters);
+  if (violations.isNotEmpty) {
+    return ToolResult.error('工具 "${call.name}" 参数不完整：${violations.join('；')}。请补全参数后重试');
+  }
+
   final Future<ToolResult> future;
   try {
     future = tool.execute(args);
