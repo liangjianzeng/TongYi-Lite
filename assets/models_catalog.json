@@ -292,6 +292,85 @@
       ],
       "sizeGB": 1.56,
       "sizeMBDisplay": "1.6 GB"
+    },
+    {
+      "id": "spark-x2.5-4b-q4_k_m",
+      "name": "Spark-X2.5 4B (Q4_K_M 智能体)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/abenzerps/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/abenzerps/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q4_K_M.gguf",
+          "source": "huggingface"
+        }
+      ],
+      "sizeGB": 2.42,
+      "sizeMBDisplay": "2.4 GB",
+      "recommended": true,
+      "minRamMB": 4096,
+      "sha256Hash": null,
+      "tags": [
+        "推荐",
+        "智能体",
+        "百万上下文"
+      ],
+      "agentCapabilities": {
+        "nativeToolCall": true,
+        "maxContextTokens": 1000000,
+        "recommendedNctx": 32768,
+        "toolTemplate": "spark-native",
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
+      "id": "hunyuan-4b-q4_k_m",
+      "name": "腾讯 Hunyuan 4B (Q4_K_M 智能体)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/bartowski/tencent_Hunyuan-4B-Instruct-GGUF/resolve/main/tencent_Hunyuan-4B-Instruct-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://hf-mirror.com/F-urkan/Hunyuan-4B-Instruct-Q4_K_M-GGUF/resolve/main/hunyuan-4b-instruct-q4_k_m.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 2.43,
+      "sizeMBDisplay": "2.4 GB",
+      "recommended": true,
+      "minRamMB": 4096,
+      "sha256Hash": null,
+      "tags": [
+        "推荐",
+        "智能体",
+        "256K上下文"
+      ],
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 262144,
+        "recommendedNctx": 16384,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
     }
   ]
 }

@@ -1,15 +1,10 @@
 /**
- * Explicit store initialization, run once and shared by every caller.
+ * Explicit store initialization, called once from the root layout.
  *
  * Order matters: migrations run first because they rename and rewrite
  * localStorage keys, so every store that reads localStorage initializes
  * only after they complete. Constructors and module-level side effects
  * stay empty so import order can no longer change startup behavior.
- *
- * The returned promise resolves once the persisted state is in memory, which
- * route loads await before reading settings: they run ahead of the root layout
- * script. The conversation list loads in the background, awaited by the chat
- * page that renders it.
  */
 
 // direct imports, not via the barrel, to avoid circular deps
@@ -21,20 +16,19 @@ import { versionStore } from './version.svelte';
 import { browser } from '$app/environment';
 import { MigrationService } from '$lib/services/migration.service';
 
-let startup: Promise<void> | null = null;
+let started = false;
 
-export function initStores(): Promise<void> {
-	if (!browser) return Promise.resolve();
+export async function initStores(): Promise<void> {
+	if (!browser || started) return;
 
-	startup ??= (async () => {
-		await MigrationService.runAllMigrations();
+	started = true;
 
-		settingsStore.initialize();
-		permissionsStore.initialize();
-		toolsStore.initialize();
-		void versionStore.initialize();
-		void conversationsStore.init();
-	})();
+	await MigrationService.runAllMigrations();
 
-	return startup;
+	settingsStore.initialize();
+	permissionsStore.initialize();
+	toolsStore.initialize();
+	void versionStore.initialize();
+
+	await conversationsStore.init();
 }

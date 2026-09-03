@@ -5,9 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 
+import '../agent/agent.dart';
+import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/openai_service.dart';
+import '../services/settings_service.dart';
 import '../services/storage_service.dart';
+import 'agent_stream_processor.dart';
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
@@ -152,8 +156,14 @@ class ChatNotifier extends StateNotifier<bool> {
     String? imagePath,
     String? audioPath,
   }) async {
-    final targetModelId = _ref.read(currentModelIdProvider);
+    // 智能体模式：走工具循环（无工具时单轮直答，与普通聊天一致）。
     final settings = _ref.read(settingsProvider);
+    if (settings.agentEnabled) {
+      return _sendAgentMessage(conversationId, prompt,
+          imagePath: imagePath, audioPath: audioPath);
+    }
+
+    final targetModelId = _ref.read(currentModelIdProvider);
     final activeApi = settings.activeApiModel();
 
     // 尊重用户选择：若用户「不运行本地模型」且「未设置默认模型」，
@@ -211,11 +221,12 @@ class ChatNotifier extends StateNotifier<bool> {
       // 不再是一成不变的「新对话 / 0条」。
       await _refreshConversationMeta(conversationId);
 
-      // Step 3: Build chat history JSON from all messages in this conversation
+      // Step 3: Build chat history JSON from all messages in this conversation.
+      // 排除智能体工具活动消息（🔧 前缀）—— 它们仅用于 UI 展示，不入模型上下文。
       final allMessages = await _storage.getMessages(conversationId, limit: 200);
       final messagesForTemplate = <Map<String, String>>[];
       for (final msg in allMessages) {
-        if (msg.content.isNotEmpty) {
+        if (msg.content.isNotEmpty && !_isToolActivityMessage(msg)) {
           messagesForTemplate.add({'role': msg.role.name, 'content': msg.content});
         }
       }
@@ -456,6 +467,308 @@ class ChatNotifier extends StateNotifier<bool> {
     }
   }
 
+  /// 智能体模式发送消息：路由（本地/API）→ agent 循环 → 最终回答持久化。
+  ///
+  /// 工具轮的过程消息（🔧 提示）会持久化供 UI 展示；循环内部的历史
+  /// （含工具结果回填）不落库，避免污染存储。
+  Future<String> _sendAgentMessage(
+    String conversationId,
+    String prompt, {
+    String? imagePath,
+    String? audioPath,
+  }) async {
+    final settings = _ref.read(settingsProvider);
+    final agentSource = settings.agentModelSource;
+    final agentModelId = settings.agentModelId;
+
+    var useApi = false;
+    ApiModelConfig? activeApi;
+    var targetModelId = _ref.read(currentModelIdProvider);
+
+    if (agentSource == 'api') {
+      // 用户指定 API 模型驱动智能体。
+      for (final m in settings.apiModels) {
+        if (m.id == agentModelId) {
+          activeApi = m;
+          break;
+        }
+      }
+      if (activeApi == null) {
+        return '[智能体配置的 API 模型不存在，请在设置中重新选择]';
+      }
+      useApi = true;
+    } else if (agentSource == 'local') {
+      // 用户指定本地模型驱动智能体。
+      targetModelId = agentModelId ?? targetModelId;
+      final ok = await ensureModelLoaded(targetModelId);
+      if (!ok) {
+        return '[模型加载失败，请在设置中重新下载并加载]';
+      }
+      useApi = false;
+    } else {
+      // 跟随默认：沿用现有路由策略（本地优先，API 兜底）。
+      final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
+      final hasDefault = settings.defaultModelId != null;
+      if (settings.activeApiModel() != null && !hasLocalLoaded && !hasDefault) {
+        useApi = true;
+        activeApi = settings.activeApiModel();
+      } else {
+        final ok = await ensureModelLoaded(targetModelId);
+        if (!ok) {
+          final fallback = settings.activeApiModel();
+          if (fallback != null) {
+            useApi = true;
+            activeApi = fallback;
+          } else {
+            return '[模型加载失败，请在设置中重新下载并加载]';
+          }
+        }
+      }
+    }
+
+    _lastGenWasApi = useApi;
+    debugPrint('[ChatNotifier] agent route=${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
+
+    state = true;
+    _ref.read(isGeneratingProvider.notifier).state = true;
+
+    // 会话切换时重置原生 KV 缓存（沿用现有策略）。
+    if (_currentKvConvId != conversationId) {
+      debugPrint('[ChatNotifier] agent conversation changed: resetContext()');
+      await _inference.resetContext();
+      _currentKvConvId = conversationId;
+    }
+
+    try {
+      // 历史：先读存储（不含当前 userMsg），runAgent 会追加 userPrompt。
+      // 若在保存 userMsg 之后再读，history 会与 userPrompt 重复。
+      // 同时排除智能体工具活动消息（🔧 前缀），避免污染模型上下文。
+      final allMessages = await _storage.getMessages(conversationId, limit: 200);
+      final history = <Map<String, String>>[];
+      for (final msg in allMessages) {
+        if (msg.content.isNotEmpty && !_isToolActivityMessage(msg)) {
+          history.add({'role': msg.role.name, 'content': msg.content});
+        }
+      }
+
+      // 保存用户消息（UI 立即可见）。
+      final userMsg = ChatMessage(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        conversationId: conversationId,
+        role: MessageRole.user,
+        content: prompt,
+        imagePath: imagePath,
+        audioPath: audioPath,
+      );
+      await _storage.saveMessage(userMsg);
+      await _refreshConversationMeta(conversationId);
+
+      // Agent 配置（默认值已在设置层夹紧）。
+      final config = AgentConfig(
+        maxRounds: settings.agentMaxRounds,
+        maxTokensPerRound: settings.agentTokensPerRound,
+        toolTimeout: Duration(milliseconds: settings.agentToolTimeoutMs),
+        allowParallelTools: settings.agentAllowParallelTools,
+      );
+
+      // 注册表：内置 + 配置启用的工具，按模型过滤。
+      final registry = _buildAgentRegistry(settings, targetModelId);
+
+      // 协议：当前本地/API 均无原生工具调用 → prompt-JSON 兜底协议。
+      final protocol = PromptJsonProtocol();
+
+      // 工具活动会话：工具轮消息创建/更新由 streamFn 与 onToolActivity 共享。
+      final session = _AgentActivitySession(
+        conversationId: conversationId,
+        storage: _storage,
+      );
+
+      // 流式回调：消费本地/API 流 → 处理器 → 更新 UI → 解析工具调用。
+      final streamFn = _agentStreamFn(
+        conversationId: conversationId,
+        useApi: useApi,
+        activeApi: activeApi,
+        targetModelId: targetModelId,
+        session: session,
+        imagePath: imagePath,
+        audioPath: audioPath,
+      );
+
+      // 系统提示：身份 + 工具指引 + 工具清单（协议渲染）→ 注入为首条 system 消息。
+      final systemPrompt = buildSystemPrompt(
+        modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
+        registry: registry,
+        protocol: protocol,
+        modelId: targetModelId,
+      );
+
+      // 运行 agent 循环（工具执行/结果回填/轮次上限均由循环处理）。
+      final result = await runAgent(
+        history: history,
+        userPrompt: prompt,
+        registry: registry,
+        protocol: protocol,
+        streamFn: streamFn,
+        modelId: targetModelId,
+        config: config,
+        systemPrompt: systemPrompt,
+        onToolActivity: session.update,
+      );
+
+      debugPrint('[ChatNotifier] agent done: ${result.toolCallCount} tools, '
+          'answer len=${result.answer.length}');
+
+      // 最终回答已在 streamFn 里持久化；这里返回 answer（无工具 = 单轮直答文本）。
+      return result.answer;
+    } finally {
+      debugPrint('[ChatNotifier] agent sendMessage done, isGenerating=false');
+      state = false;
+      _ref.read(isGeneratingProvider.notifier).state = false;
+    }
+  }
+
+  /// 构建 agent 工具注册表：全量内置工具 → 联网类按配置移除 → 按模型过滤。
+  ///
+  /// 核心工具（get_time/calculator/todo/note/unit_converter/memory/文件类）
+  /// 默认全启用；联网类（web_search/get_weather）由 [settings.webSearchEnabled]
+  /// 控制；shell_exec 默认启用（端侧能力向强扩展，不做自我设限）。
+  ToolRegistry _buildAgentRegistry(
+      InferenceSettings settings, String modelId) {
+    final registry = ToolRegistry();
+    for (final tool in createBuiltinTools()) {
+      registry.register(tool);
+    }
+
+    // 联网类工具（web_search/get_weather）：配置关闭时不可见。
+    if (!settings.webSearchEnabled) {
+      registry.unregister('web_search');
+      registry.unregister('get_weather');
+    }
+
+    // shell 执行：用户设置关闭时不可见（默认开启，能力不设限）。
+    if (!settings.agentShellEnabled) {
+      registry.unregister('shell_exec');
+    }
+
+    // 按模型工具启用（设置层配置；空 = 不限制，全部可见）。
+    final modelTools = settings.agentToolsFor(modelId);
+    if (modelTools.isNotEmpty) {
+      registry.restrictModel(modelId, allow: modelTools.toSet());
+    }
+    return registry;
+  }
+
+  /// 构建 agent 循环的流式回调：消费本地/API token 流 → 处理器过滤 →
+  /// 更新 assistantMsg 流式占位 → 流结束解析工具调用。
+  ///
+  /// 每轮创建独立的 assistant 消息（工具轮占位复用为工具活动消息）：
+  /// - 工具轮：空占位（思考/JSON 隐藏）→ 「🔧 正在调用：xxx」→
+  ///   onToolActivity 逐步更新为「🔧 工具名 ✓ 结果摘要」；
+  /// - 最终轮：空占位 → 可见文本（思考过滤 + JSON 隐藏后）。
+  ///
+  /// [session] 与 onToolActivity 共享，用于跨轮更新工具活动消息。
+  AgentStreamFn _agentStreamFn({
+    required String conversationId,
+    required bool useApi,
+    required ApiModelConfig? activeApi,
+    required String targetModelId,
+    required _AgentActivitySession session,
+    String? imagePath,
+    String? audioPath,
+  }) {
+    var round = 0;
+    return (messages, protocol, config) async {
+      round++;
+      final isFirst = round == 1;
+
+      // ---- 构建本轮流（本地 / API）----
+      final Stream<String> sourceStream;
+      if (useApi) {
+        final apiMessages = <Map<String, dynamic>>[
+          for (final m in messages)
+            {'role': m['role'], 'content': m['content']},
+        ];
+        sourceStream = _ref.read(openAiServiceProvider).chatCompletion(
+          config: activeApi!,
+          messages: apiMessages,
+          temperature: activeApi.effectiveTemperature,
+          maxTokens: config.maxTokensPerRound,
+        );
+      } else {
+        // 原生层约定：messagesJson 的最后一个元素即「当前用户消息」（含工具结果
+        // 回填），prompt 参数会被忽略（追加会重复）。因此整体传入、prompt 留空。
+        final msgs = messages.toList();
+        final historyJson = jsonEncode(msgs);
+        sourceStream = _inference.completionWithMessages(
+          prompt: '',
+          messagesJson: historyJson,
+          imagePath: isFirst ? imagePath : null,
+          audioPath: isFirst ? audioPath : null,
+          maxTokens: config.maxTokensPerRound,
+          temperature: 0.7,
+          topP: 0.9,
+        );
+      }
+
+      // ---- 本轮流式占位消息（工具轮复用为工具活动消息）----
+      final assistantId =
+          (DateTime.now().millisecondsSinceEpoch + round).toString();
+      var assistantMsg = ChatMessage(
+        id: assistantId,
+        conversationId: conversationId,
+        role: MessageRole.assistant,
+        content: '',
+        isStreaming: true,
+      );
+      await _storage.saveMessage(assistantMsg);
+      // 让活动会话指向本轮消息，onToolActivity 更新它。
+      session.attach(assistantMsg);
+
+      // ---- 消费流：处理器过滤 + 周期持久化 ----
+      final processor = AgentStreamProcessor();
+      final rawBuffer = StringBuffer();
+      var lastSave = DateTime.now();
+
+      await for (final token in sourceStream) {
+        if (token.isEmpty) continue;
+        rawBuffer.write(token);
+        processor.add(token);
+        final now = DateTime.now();
+        if (now.difference(lastSave).inMilliseconds >= 150) {
+          lastSave = now;
+          assistantMsg = assistantMsg.copyWith(content: processor.visibleText);
+          await _storage.saveMessage(assistantMsg);
+        }
+      }
+
+      // ---- 流结束：收尾（未闭合 XML/JSON 恢复为普通文本）→ 解析工具调用 ----
+      processor.finish();
+      final outcome =
+          await protocol.parseStream(Stream<String>.value(rawBuffer.toString()));
+
+      if (outcome.hasToolCalls) {
+        // 工具轮：占位 → 工具活动消息（后续由 onToolActivity 更新结果）。
+        final names = outcome.toolCalls.map((c) => c.name).join('、');
+        assistantMsg = assistantMsg.copyWith(
+          content: '🔧 正在调用：$names',
+          isStreaming: true,
+        );
+        await _storage.saveMessage(assistantMsg);
+      } else {
+        // 最终轮：可见文本（思考过滤 + JSON 隐藏后）。
+        final finalText = processor.visibleText.trim();
+        assistantMsg = assistantMsg.copyWith(
+          content: finalText,
+          isStreaming: false,
+        );
+        await _storage.saveMessage(assistantMsg);
+      }
+
+      // 工具结果回填由 runAgent 负责（messages.add），本回调只管流。
+      return outcome;
+    };
+  }
+
   /// Stop the current generation: cancels the token stream subscription and
   /// 刷新单个会话的元信息（标题 + 消息条数）并写库：
   /// - 标题：若仍为空/「新对话」，取第一条用户消息（截断到 ~24 字）作标题；
@@ -507,6 +820,11 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// tells the native engine to set should_stop (or cancels the API SSE
   /// request for the API fallback path), which makes the completion loop
+  /// 是否为智能体工具活动消息（🔧 前缀）。此类消息仅用于 UI 展示，
+  /// 不入模型上下文（history 构建时排除）。
+  static bool _isToolActivityMessage(ChatMessage msg) =>
+      msg.role == MessageRole.assistant && msg.content.startsWith('🔧');
+
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
   Future<void> stopGeneration() async {
@@ -516,6 +834,56 @@ class ChatNotifier extends StateNotifier<bool> {
       await _inference.stopGeneration();
     }
   }
+}
+
+/// 工具活动会话：跨轮管理「工具活动消息」（🔧 正在调用 → 结果摘要）。
+///
+/// streamFn 每轮创建占位消息后 attach 到本会话；runAgent 的 onToolActivity
+/// 回调调用 [update]，把占位逐步更新为工具活动文本。工具轮消息不进入历史
+/// （history 在循环前构建），仅用于 UI 展示。
+class _AgentActivitySession {
+  final String conversationId;
+  final StorageService storage;
+
+  /// 当前轮消息（streamFn attach；onToolActivity 更新）。
+  ChatMessage? current;
+
+  _AgentActivitySession({
+    required this.conversationId,
+    required this.storage,
+  });
+
+  /// streamFn 每轮创建占位消息后调用，让后续活动更新落到该消息。
+  void attach(ChatMessage msg) {
+    current = msg;
+  }
+
+  /// 更新活动消息（executing → done/failed）。
+  Future<void> update(ToolActivity activity) async {
+    final msg = current;
+    if (msg == null) return;
+    if (activity.status == 'executing') {
+      current = msg.copyWith(
+        content: '🔧 正在调用 ${activity.name}…',
+        isStreaming: true,
+      );
+    } else {
+      final mark = activity.isFailed ? '⚠️' : '✓';
+      final summary = _summarizeToolResult(activity.result);
+      current = msg.copyWith(
+        content: '🔧 ${activity.name} $mark$summary',
+        isStreaming: false,
+      );
+    }
+    await storage.saveMessage(current!);
+  }
+}
+
+/// 工具结果摘要：多行/长文本压缩为单行，截断到 ~60 字符（UI 展示用）。
+String _summarizeToolResult(String? result) {
+  if (result == null || result.isEmpty) return '';
+  final oneLine = result.replaceAll('\n', ' ').trim();
+  return oneLine.length <= 60 ? oneLine : '${oneLine.substring(0, 57)}…';
 }
 
 final chatNotifierProvider = StateNotifierProvider<ChatNotifier, bool>((ref) {

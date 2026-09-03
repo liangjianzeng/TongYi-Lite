@@ -727,9 +727,7 @@ struct mtmd_helper_video {
 
         LOG_DBG("%s: frame %d read OK\n", __func__, current_frame);
         current_frame++;
-        mtmd_bitmap * frame = mtmd_bitmap_init(info.width, info.height, frame_buf.data());
-        mtmd_bitmap_set_mergeable(frame, true);
-        return frame;
+        return mtmd_bitmap_init(info.width, info.height, frame_buf.data());
     }
 
     int32_t read_next(mtmd_bitmap ** out_bitmap, char ** out_text) {

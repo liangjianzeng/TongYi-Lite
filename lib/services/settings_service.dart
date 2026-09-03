@@ -53,6 +53,53 @@ class InferenceSettings {
   /// 路由策略：本地模型优先，仅当本地模型未加载/加载失败时才走激活的 API。
   final String? activeApiModelId;
 
+  // ---------------------------------------------------------------
+  // 智能体（Agent）配置
+  // ---------------------------------------------------------------
+
+  /// 智能体模式总开关。默认开启：无工具时一轮直答（与普通聊天一致），
+  /// 有工具调用时进入工具循环。关闭 = 完全走普通聊天路径。
+  final bool agentEnabled;
+
+  /// 智能体驱动模型来源：'local'（本地端侧模型）/ 'api'（API 接入模型）。
+  /// null = 跟随默认路由（本地优先，API 兜底）。
+  final String? agentModelSource;
+
+  /// 智能体驱动模型 id（对应本地模型目录 id 或 API 模型配置 id）。
+  /// 与 [agentModelSource] 成对使用；source 为 null 时忽略。
+  final String? agentModelId;
+
+  /// 智能体模式的上下文长度（n_ctx）。独立于普通聊天的 [contextSize]：
+  /// 工具循环需要额外空间容纳「工具调用 + 结果回填」历史。
+  final int agentNctx;
+
+  /// 工具循环轮次上限（1~20）。默认 5：端侧速度有限，轮次过多体验差。
+  final int agentMaxRounds;
+
+  /// 每轮生成的 token 预算。默认 512：足够输出一次工具调用 JSON 或一段回答。
+  final int agentTokensPerRound;
+
+  /// 单工具执行超时（毫秒）。默认 15s：防止工具卡死拖住整个循环。
+  final int agentToolTimeoutMs;
+
+  /// 是否允许并行工具调用（预留能力，默认关闭）。
+  final bool agentAllowParallelTools;
+
+  /// 联网搜索工具总开关（默认关闭：端侧默认不联网）。
+  final bool webSearchEnabled;
+
+  /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限；
+  /// 用户可在设置中关闭）。
+  final bool agentShellEnabled;
+
+  /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
+  /// 目录声明的默认工具集（agentDefaults.enabledTools）。
+  final Map<String, List<String>> agentToolsByModel;
+
+  /// 按模型的 agent 配置覆盖：`{modelId: {maxRounds, tokensPerRound, nctx}}`。
+  /// 覆盖全局默认值（模型目录 agentDefaults 合并到用户设置）。
+  final Map<String, Map<String, dynamic>> agentByModel;
+
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
     // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
@@ -67,11 +114,35 @@ class InferenceSettings {
     this.defaultModelId,
     List<ApiModelConfig>? apiModels,
     this.activeApiModelId,
+    // ---- 智能体（Agent）----
+    this.agentEnabled = true,
+    this.agentModelSource,
+    this.agentModelId,
+    this.agentNctx = 8192,
+    this.agentMaxRounds = 5,
+    this.agentTokensPerRound = 512,
+    this.agentToolTimeoutMs = 15000,
+    this.agentAllowParallelTools = false,
+    this.webSearchEnabled = false,
+    this.agentShellEnabled = true,
+    Map<String, List<String>>? agentToolsByModel,
+    Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
-        apiModels = apiModels ?? const [];
+        apiModels = apiModels ?? const [],
+        agentToolsByModel = agentToolsByModel ?? const {},
+        agentByModel = agentByModel ?? const {};
 
   /// 便捷读取：某个模型是否启用 MTP（未配置视为关闭）。
   bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
+
+  /// 便捷读取：某个模型启用的工具清单。空列表 = 跟随该模型目录声明的
+  /// agentDefaults.enabledTools（目录合并逻辑在 agent 接入层）。
+  List<String> agentToolsFor(String modelId) =>
+      agentToolsByModel[modelId] ?? const [];
+
+  /// 便捷读取：某个模型的 agent 配置覆盖（未配置返回 null）。
+  Map<String, dynamic>? agentConfigFor(String modelId) =>
+      agentByModel[modelId];
 
   /// 便捷读取：当前激活的 API 模型配置；未激活/不存在返回 null。
   ApiModelConfig? activeApiModel() {
@@ -97,7 +168,22 @@ class InferenceSettings {
       List<ApiModelConfig>? apiModels,
       String? activeApiModelId,
       // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」。
-      bool clearActiveApiModel = false}) {
+      bool clearActiveApiModel = false,
+      // ---- 智能体（Agent）----
+      bool? agentEnabled,
+      String? agentModelSource,
+      String? agentModelId,
+      // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」。
+      bool clearAgentModel = false,
+      int? agentNctx,
+      int? agentMaxRounds,
+      int? agentTokensPerRound,
+      int? agentToolTimeoutMs,
+      bool? agentAllowParallelTools,
+      bool? webSearchEnabled,
+      bool? agentShellEnabled,
+      Map<String, List<String>>? agentToolsByModel,
+      Map<String, Map<String, dynamic>>? agentByModel}) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
@@ -113,6 +199,23 @@ class InferenceSettings {
       activeApiModelId: clearActiveApiModel
           ? null
           : activeApiModelId ?? this.activeApiModelId,
+      agentEnabled: agentEnabled ?? this.agentEnabled,
+      agentModelSource: clearAgentModel
+          ? null
+          : agentModelSource ?? this.agentModelSource,
+      agentModelId: clearAgentModel
+          ? null
+          : agentModelId ?? this.agentModelId,
+      agentNctx: agentNctx ?? this.agentNctx,
+      agentMaxRounds: agentMaxRounds ?? this.agentMaxRounds,
+      agentTokensPerRound: agentTokensPerRound ?? this.agentTokensPerRound,
+      agentToolTimeoutMs: agentToolTimeoutMs ?? this.agentToolTimeoutMs,
+      agentAllowParallelTools:
+          agentAllowParallelTools ?? this.agentAllowParallelTools,
+      webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
+      agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
+      agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
+      agentByModel: agentByModel ?? this.agentByModel,
     );
   }
 
@@ -127,6 +230,19 @@ class InferenceSettings {
         'defaultModelId': defaultModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
         'activeApiModelId': activeApiModelId,
+        // ---- 智能体（Agent）----
+        'agentEnabled': agentEnabled,
+        'agentModelSource': agentModelSource,
+        'agentModelId': agentModelId,
+        'agentNctx': agentNctx,
+        'agentMaxRounds': agentMaxRounds,
+        'agentTokensPerRound': agentTokensPerRound,
+        'agentToolTimeoutMs': agentToolTimeoutMs,
+        'agentAllowParallelTools': agentAllowParallelTools,
+        'webSearchEnabled': webSearchEnabled,
+        'agentShellEnabled': agentShellEnabled,
+        'agentToolsByModel': agentToolsByModel,
+        'agentByModel': agentByModel,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -147,7 +263,49 @@ class InferenceSettings {
       // 旧配置缺这两个字段时默认空列表 + 停用，向后兼容。
       apiModels: _parseApiModels(json['apiModels']),
       activeApiModelId: json['activeApiModelId'] as String?,
+      // 智能体（Agent）：旧配置缺字段时用默认值，向后兼容。
+      agentEnabled: json['agentEnabled'] as bool? ?? true,
+      agentModelSource: json['agentModelSource'] as String?,
+      agentModelId: json['agentModelId'] as String?,
+      agentNctx: (json['agentNctx'] as num?)?.toInt() ?? 8192,
+      agentMaxRounds: (json['agentMaxRounds'] as num?)?.toInt() ?? 5,
+      agentTokensPerRound:
+          (json['agentTokensPerRound'] as num?)?.toInt() ?? 512,
+      agentToolTimeoutMs:
+          (json['agentToolTimeoutMs'] as num?)?.toInt() ?? 15000,
+      agentAllowParallelTools:
+          json['agentAllowParallelTools'] as bool? ?? false,
+      webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
+      agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
+      agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
+      agentByModel: _parseAgentByModel(json['agentByModel']),
     );
+  }
+
+  /// 解析按模型工具清单：`{modelId: [toolName]}`。格式非法时返回空 map（不崩）。
+  static Map<String, List<String>> _parseAgentTools(Object? raw) {
+    if (raw is! Map) return const {};
+    final result = <String, List<String>>{};
+    raw.forEach((k, v) {
+      if (v is List) {
+        result[k.toString()] =
+            v.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
+      }
+    });
+    return result;
+  }
+
+  /// 解析按模型 agent 配置：`{modelId: {maxRounds, tokensPerRound, nctx}}`。
+  /// 格式非法时返回空 map（不崩）。
+  static Map<String, Map<String, dynamic>> _parseAgentByModel(Object? raw) {
+    if (raw is! Map) return const {};
+    final result = <String, Map<String, dynamic>>{};
+    raw.forEach((k, v) {
+      if (v is Map) {
+        result[k.toString()] = Map<String, dynamic>.from(v);
+      }
+    });
+    return result;
   }
 
   /// 解析 API 模型列表；缺字段/格式非法时返回空列表（不崩）。

@@ -1,0 +1,64 @@
+/// shell 执行工具 —— 对齐 DSH 的 pwsh/shell 能力。
+///
+/// 通过 dart:io Process 在应用进程内执行 `sh -c`，命令以 app 权限运行
+/// （可访问沙盒工作区与普通用户命令），输出截断 + 超时保护。
+/// 默认不注册（设置开启后挂载），避免端侧模型误用危险命令。
+library;
+
+import 'dart:convert';
+import 'dart:io';
+
+import '../tool_definition.dart';
+
+/// 命令超时。
+const Duration kShellTimeout = Duration(seconds: 10);
+
+/// 输出截断上限（字符）。
+const int kShellOutputLimit = 4000;
+
+ToolDefinition createShellExecTool() {
+  return ToolDefinition(
+    name: 'shell_exec',
+    description:
+        '在设备上执行 shell 命令（sh -c，app 权限内）。'
+        '可访问工作区文件、运行普通命令。输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'command': {'type': 'string', 'description': '要执行的 shell 命令'},
+      },
+      'required': ['command'],
+    },
+    timeout: kShellTimeout,
+    execute: (args) async {
+      final command = (args['command'] as String?)?.trim() ?? '';
+      if (command.isEmpty) return ToolResult.error('缺少 command 参数');
+      try {
+        final result = await Process.run('sh', ['-c', command],
+            stdoutEncoding: utf8, stderrEncoding: utf8);
+        final stdout = (result.stdout as String?) ?? '';
+        final stderr = (result.stderr as String?) ?? '';
+        final exitCode = result.exitCode;
+
+        final buffer = StringBuffer();
+        if (stdout.isNotEmpty) buffer.write(stdout);
+        if (stderr.isNotEmpty) {
+          if (buffer.isNotEmpty && !buffer.toString().endsWith('\n')) buffer.write('\n');
+          buffer.write('[stderr] $stderr');
+        }
+        final output = buffer.toString().trim();
+        final truncated = output.length > kShellOutputLimit
+            ? '${output.substring(0, kShellOutputLimit)}\n…（已截断）'
+            : output;
+
+        return ToolResult(
+          content: 'exit=${exitCode}${truncated.isNotEmpty ? '\n$truncated' : '（无输出）'}',
+        );
+      } on ProcessException catch (e) {
+        return ToolResult.error('命令执行失败：${e.message}');
+      } catch (e) {
+        return ToolResult.error('命令执行失败：$e');
+      }
+    },
+  );
+}

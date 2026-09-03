@@ -128,6 +128,88 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  // ---------------------------------------------------------------
+  // 智能体（Agent）
+  // ---------------------------------------------------------------
+
+  /// 智能体模式总开关。
+  Future<void> setAgentEnabled(bool value) async {
+    state = state.copyWith(agentEnabled: value);
+    await _persist();
+  }
+
+  /// 指定/取消智能体驱动模型。
+  /// - source='local' → [modelId] 为本地模型目录 id；
+  /// - source='api' → [modelId] 为 API 模型配置 id；
+  /// - 传 (null, null) 表示取消指定，跟随默认路由（本地优先，API 兜底）。
+  Future<void> setAgentModel(String? source, String? modelId) async {
+    if (source == null && modelId == null) {
+      // 取消指定：必须显式 clearAgentModel=true，否则 copyWith 吞掉 null。
+      if (state.agentModelId == null) return;
+      state = state.copyWith(clearAgentModel: true);
+      await _persist();
+      return;
+    }
+    if (source != 'local' && source != 'api') return;
+    if (modelId == null || modelId.isEmpty) return;
+    // API 模型必须存在于配置列表内，否则拒绝。
+    if (source == 'api' && !state.apiModels.any((m) => m.id == modelId)) {
+      return;
+    }
+    if (state.agentModelSource == source && state.agentModelId == modelId) {
+      return;
+    }
+    state = state.copyWith(
+        agentModelSource: source, agentModelId: modelId);
+    await _persist();
+  }
+
+  /// 智能体模式上下文长度（n_ctx）。夹紧到 1~65536。
+  Future<void> setAgentNctx(int value) async {
+    final clamped = value.clamp(1, 65536);
+    state = state.copyWith(agentNctx: clamped);
+    await _persist();
+  }
+
+  /// 工具循环轮次上限（1~20）。
+  Future<void> setAgentMaxRounds(int value) async {
+    final clamped = value.clamp(1, 20);
+    state = state.copyWith(agentMaxRounds: clamped);
+    await _persist();
+  }
+
+  /// 每轮生成 token 预算（128~2048）。
+  Future<void> setAgentTokensPerRound(int value) async {
+    final clamped = value.clamp(128, 2048);
+    state = state.copyWith(agentTokensPerRound: clamped);
+    await _persist();
+  }
+
+  /// 单工具执行超时（毫秒，1s~120s）。
+  Future<void> setAgentToolTimeoutMs(int value) async {
+    final clamped = value.clamp(1000, 120000);
+    state = state.copyWith(agentToolTimeoutMs: clamped);
+    await _persist();
+  }
+
+  /// 并行工具调用（预留能力）。
+  Future<void> setAgentAllowParallelTools(bool value) async {
+    state = state.copyWith(agentAllowParallelTools: value);
+    await _persist();
+  }
+
+  /// 联网搜索工具总开关。
+  Future<void> setWebSearchEnabled(bool value) async {
+    state = state.copyWith(webSearchEnabled: value);
+    await _persist();
+  }
+
+  /// shell 执行工具开关。
+  Future<void> setAgentShellEnabled(bool value) async {
+    state = state.copyWith(agentShellEnabled: value);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);
