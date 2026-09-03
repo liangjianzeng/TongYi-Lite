@@ -53,11 +53,13 @@ ToolDefinition createPythonExecTool() {
           ((args['timeoutSec'] as num?)?.toInt() ?? 15).clamp(1, 60);
 
       try {
+        // isAvailable 返回 String："ok" = 可用；其他为原生透传的具体错误。
         final available = await kPythonChannel
-            .invokeMethod<bool>('isAvailable')
-            .timeout(kPythonTimeout, onTimeout: () => false);
-        if (available != true) {
-          return ToolResult.error('Python 运行时未集成（本机未启用 python_exec）');
+            .invokeMethod<String>('isAvailable')
+            .timeout(kPythonTimeout, onTimeout: () => '探测超时');
+        if (available != 'ok') {
+          return ToolResult.error(
+              'Python 运行时不可用${available == null || available.isEmpty ? '' : '：$available'}');
         }
         // runScript 返回处理后的输出文本（原生侧已合并 stdout/stderr、
         // 区分成功/失败；失败走 PlatformException）。

@@ -178,9 +178,9 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 每轮生成 token 预算（128~2048）。
+  /// 每轮生成 token 预算（128~16384，16k 上限按需配置）。
   Future<void> setAgentTokensPerRound(int value) async {
-    final clamped = value.clamp(128, 2048);
+    final clamped = value.clamp(128, 16384);
     state = state.copyWith(agentTokensPerRound: clamped);
     await _persist();
   }

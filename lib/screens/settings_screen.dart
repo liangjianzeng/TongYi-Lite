@@ -1420,11 +1420,13 @@ class _AgentTab extends ConsumerWidget {
                     label: '每轮生成预算',
                     value: settings.agentTokensPerRound,
                     min: 128,
-                    max: 2048,
-                    divisions: 48,
-                    display: '${settings.agentTokensPerRound} token',
+                    max: 16384,
+                    divisions: 127,
+                    display: settings.agentTokensPerRound >= 1024
+                        ? '${settings.agentTokensPerRound ~/ 1024}k token'
+                        : '${settings.agentTokensPerRound} token',
                     onChanged: (v) => notifier.setAgentTokensPerRound(v),
-                    hint: '每轮模型生成的 token 上限（默认 512）',
+                    hint: '每轮模型生成的 token 上限（默认 512；最大 16k，按需配置）',
                   ),
                   _buildSliderRow(
                     label: '工具执行超时',

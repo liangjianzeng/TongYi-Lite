@@ -9,7 +9,7 @@ buildscript {
         google()
     }
     dependencies {
-        classpath("com.chaquo.python:gradle:16.1.0")
+        classpath("com.chaquo.python:gradle:17.0.0")
     }
 }
 
@@ -105,6 +105,8 @@ android {
 // `chaquopy`（defaultConfig 内配置 Python 运行时），改用显式扩展配置。
 extensions.configure<ChaquopyExtension>("chaquopy") {
     defaultConfig {
+        // 17.x 默认 3.10；显式 3.11 以匹配主机 buildPython（3.11，版本必须一致）。
+        version = "3.11"
         // 主机 Python 用于构建时交叉编译标准库：构建命令把 Python 加入 PATH，
         // 此处用 "python"（跨机兼容；其他机器只要 PATH 里有 python 即可）。
         buildPython("python")
