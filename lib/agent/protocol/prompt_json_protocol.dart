@@ -51,7 +51,9 @@ class PromptJsonProtocol implements ToolProtocol {
     for (final tool in tools) {
       // 文本格式（贴近端侧模型训练分布）：`- name: description`，
       // 而非完整 JSON Schema（小模型更易理解）。
-      lines.add('- ${tool.name}: ${tool.description}');
+      // 关键：列出必填参数名（对照 DSH 的 schema 呈现），
+      // 让模型知道带参数工具必须给出哪些参数——根治「只调工具不带参数」。
+      lines.add('- ${tool.name}: ${tool.description}${_requiredParamsHint(tool)}');
     }
     lines.add('');
     lines.add('[工具调用协议]');
@@ -165,6 +167,13 @@ class PromptJsonProtocol implements ToolProtocol {
         arguments: arguments,
       ),
     );
+  }
+
+  /// 生成必填参数提示（对照 DSH schema 呈现）：`（必填: command）`。
+  String _requiredParamsHint(ToolDefinition tool) {
+    final required = tool.parameters['required'];
+    if (required is! List || required.isEmpty) return '';
+    return '（必填: ${required.map((r) => r.toString()).join(', ')})';
   }
 
   /// 解码 XML 工具参数值：以 `[`/`{` 开头且以 `]`/`}` 结尾的字符串按 JSON 解析

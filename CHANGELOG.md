@@ -22,8 +22,11 @@
   + XML/JSON 工具调用块增量隐藏。
 - **llama.cpp fork 升级**：`third_party/llama.cpp` 换为 XHToken 官方 fork（`spark2_5` 架构 +
   function-calling），NDK 全量重建成功；旧版 b10176 仅本地备份不入库。
+- **根治工具调用"缺参数"**（对照 DSH `defineTool/validateArgs` 落地）：工具执行前统一必填校验，
+  错误信息明确列出缺失参数名与用途并回填"补全后重试"；工具清单渲染带必填参数提示
+  （如 `shell_exec（必填: command）`），让模型知道带参数工具必须给出哪些参数。
 - 修复真机工具遵循率问题：提示语规则段与 XML 协议口径一致、强调必填参数、XML 数组参数解码、
-  todo_write 兼容 JSON 字符串形态。**94 项单测全绿。**
+  todo_write 兼容 JSON 字符串形态。**101 项单测全绿。**
 
 ### 修复（代码质量评估 P0 隐患加固）
 

@@ -278,6 +278,32 @@ void main() {
       expect(result.answer, contains('轮次上限 3'));
     });
 
+    test('必填参数缺失 → 执行前校验拦截，回填错误引导模型补全', () async {
+      final registry = buildRegistry();
+      // shell_exec 带必填 command，但模型只调工具不带参数（真机复现的场景）。
+      final fake = FakeAgentStream([
+        StreamOutcome(text: '', toolCalls: [callOf('shell_exec')]),
+        const StreamOutcome(text: '补全后重试。'),
+      ]);
+
+      final result = await runAgent(
+        history: [],
+        userPrompt: '执行 ls',
+        registry: registry,
+        protocol: PromptJsonProtocol(),
+        streamFn: fake.call,
+        modelId: 'test-model',
+      );
+
+      expect(result.toolCallCount, 1);
+      expect(result.answer, '补全后重试。');
+      // 第二轮收到的历史里，工具结果消息含明确的缺失参数引导。
+      final feedback = fake.captured[1][1]['content'] ?? '';
+      expect(feedback, contains('shell_exec'));
+      expect(feedback, contains('缺少必填参数 command'));
+      expect(feedback, contains('补全参数后重试'));
+    });
+
     test('模型不可见工具 → 视为未知工具（分层校验）', () async {
       final registry = buildRegistry();
       registry.restrictModel('locked-model', allow: {'get_time'});
