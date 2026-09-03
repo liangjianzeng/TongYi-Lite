@@ -653,6 +653,11 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.unregister('shell_exec');
     }
 
+    // python_exec：用户设置关闭时不可见（默认开启；无 Chaquopy 时工具优雅降级）。
+    if (!settings.agentPythonEnabled) {
+      registry.unregister('python_exec');
+    }
+
     // 按模型工具启用（设置层配置；空 = 不限制，全部可见）。
     final modelTools = settings.agentToolsFor(modelId);
     if (modelTools.isNotEmpty) {
