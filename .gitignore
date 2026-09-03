@@ -94,3 +94,4 @@ diag_*.txt
 # 保证其他开发机 clone 后即可编译（构建沙箱无 GitHub 无法走 FetchContent/子模块拉取）。
 # 若日后需更新，从官方仓库重新 vendor 后提交即可：ARM-software/kleidiai v1.24.0、
 # KhronosGroup/OpenCL-Headers（Android NDK 无 OpenCL SDK，需本地 headers）。
+third_party/llama.cpp.b10176/
