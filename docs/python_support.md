@@ -1,7 +1,13 @@
-# 端侧 Python 支持方案（python_exec 工具）
+# 端侧 Python 支持（python_exec 工具）
 
 > 目标：对齐 DSH 的脚本/编程能力，让智能体在端侧执行 Python 脚本，
 > 能力向更强方向延伸（计算、数据处理、文件、网络等），不自我设限。
+>
+> **状态：已实现（2026-09-04）。** 集成 Chaquopy 16.1.0（嵌入式 CPython），
+> python_exec 工具经 MethodChannel 调用 agent_runner.py 执行脚本。
+> 沙箱升级体系（对照 DSH escalation.ts）同步落地：文件/命令类工具带
+> `sandbox_permissions` + `justification` 请求完整文件系统访问，执行前经
+> 用户确认框逐次批准（设置页「完整文件访问授权」开关为前置）。
 
 ## 方案选型：Chaquopy（Android 嵌入式 CPython）
 

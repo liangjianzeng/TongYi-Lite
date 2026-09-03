@@ -12,6 +12,7 @@ import '../services/openai_service.dart';
 import '../services/settings_service.dart';
 import '../services/storage_service.dart';
 import 'agent_stream_processor.dart';
+import 'agent_approval.dart' show sandboxApproverProvider;
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
@@ -613,6 +614,8 @@ class ChatNotifier extends StateNotifier<bool> {
         config: config,
         systemPrompt: systemPrompt,
         onToolActivity: session.update,
+        // 沙箱升级审批：UI 注入的确认框通道（未注入时 fail-closed）。
+        sandboxApprover: _ref.read(sandboxApproverProvider),
       );
 
       debugPrint('[ChatNotifier] agent done: ${result.toolCallCount} tools, '

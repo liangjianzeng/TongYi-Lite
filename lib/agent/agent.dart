@@ -4,6 +4,7 @@ library;
 export 'agent_loop.dart';
 export 'agent_prompt.dart';
 export 'capability.dart';
+export 'sandbox.dart';
 export 'tool_definition.dart';
 export 'tool_registry.dart';
 

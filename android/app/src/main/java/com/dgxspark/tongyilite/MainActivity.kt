@@ -21,6 +21,10 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import org.json.JSONObject
 
 
 class MainActivity : FlutterActivity() {
@@ -101,11 +105,102 @@ class MainActivity : FlutterActivity() {
                 else            -> result.notImplemented()
             }
         }
+
+        // python_exec：Chaquopy 脚本执行桥（独立通道，与推理解耦）。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/python"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isAvailable" -> handlePythonAvailable(result)
+                "runScript"   -> handleRunPythonScript(call, result)
+                else         -> result.notImplemented()
+            }
+        }
     }
 
     // ------------------------------------------------------------------
     // MethodChannel handlers
     // ------------------------------------------------------------------
+
+    // python_exec：单线程池执行脚本（串行防 GIL 争用），超时由 Future.get 兜底。
+    private val pythonExecutor = Executors.newSingleThreadExecutor()
+
+    private fun handlePythonAvailable(result: MethodChannel.Result) {
+        // 仅探测 Chaquopy 是否已初始化（getModule 会触发 Python 启动）。
+        Thread {
+            val available = try {
+                val py = com.chaquo.python.Python.getInstance()
+                py.getModule("agent_runner") != null
+            } catch (e: Exception) {
+                logW("handlePythonAvailable", "python unavailable: ${e.message}", e)
+                false
+            }
+            runOnMain { result.success(available) }
+        }.start()
+    }
+
+    private fun handleRunPythonScript(call: MethodCall, result: MethodChannel.Result) {
+        val script = call.argument<String>("script")?.trim().orEmpty()
+        if (script.isEmpty()) {
+            result.error("NO_SCRIPT", "缺少 script 参数", null)
+            return
+        }
+        val timeoutSec = call.argument<Number>("timeoutSec")?.toLong() ?: 15L
+        logI("handleRunPythonScript", "script=${script.take(64)}..., timeout=${timeoutSec}s")
+
+        // 脚本执行在线程池（不阻塞 UI）；Chaquopy 初始化也在该线程（getModule）。
+        val future = pythonExecutor.submit<Map<String, Any?>> {
+            val py = com.chaquo.python.Python.getInstance()
+            val module = py.getModule("agent_runner")
+            val raw = module.callAttr("run_script", script).toString()
+            val json = JSONObject(raw)
+            mapOf(
+                "ok" to json.optBoolean("ok", false),
+                "stdout" to json.optString("stdout"),
+                "stderr" to json.optString("stderr"),
+                "error" to json.optString("error", ""),
+            )
+        }
+        // 独立等待线程：future.get 带超时（不阻塞主线程），结果回主线程。
+        Thread {
+            try {
+                val output = future.get(timeoutSec, TimeUnit.SECONDS)
+                val ok = output["ok"] as Boolean
+                val stdout = output["stdout"] as String
+                val stderr = output["stderr"] as String
+                val error = output["error"] as String
+                val content = if (ok) {
+                    val sb = StringBuilder(stdout)
+                    if (stderr.isNotEmpty()) {
+                        if (sb.isNotEmpty() && !sb.toString().endsWith("\n")) sb.append("\n")
+                        sb.append("[stderr] ").append(stderr)
+                    }
+                    sb.toString().trim()
+                } else {
+                    error.ifEmpty { "脚本执行失败" }
+                }
+                runOnMain {
+                    if (ok) {
+                        result.success(content)
+                    } else {
+                        result.error("SCRIPT_ERROR", content, null)
+                    }
+                }
+            } catch (te: TimeoutException) {
+                // 超时：Dart 侧立即拿到错误；线程池任务继续运行直至自行结束。
+                runOnMain { result.error("SCRIPT_TIMEOUT", "脚本执行超时（${timeoutSec}s）", null) }
+            } catch (e: Exception) {
+                logW("handleRunPythonScript", "python error: ${e.message}", e)
+                runOnMain { result.error("PYTHON_ERROR", "Python 执行失败：${e.message}", null) }
+            }
+        }.start()
+    }
+
+    /** 在主线程执行回调（MethodChannel.Result 需 @UiThread）。 */
+    private fun runOnMain(block: () -> Unit) {
+        mainHandler.post { block() }
+    }
 
     private fun handleLoadModel(call: MethodCall, result: MethodChannel.Result) {
         val path = call.argument<String>("path")!!

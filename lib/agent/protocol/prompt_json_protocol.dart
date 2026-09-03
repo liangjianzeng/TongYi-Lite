@@ -55,6 +55,19 @@ class PromptJsonProtocol implements ToolProtocol {
       // 让模型知道带参数工具必须给出哪些参数——根治「只调工具不带参数」。
       lines.add('- ${tool.name}: ${tool.description}${_requiredParamsHint(tool)}');
     }
+
+    // 沙箱升级说明（对照 DSH bashDescription）：带升级能力的工具默认在
+    // workspace 沙盒内运行；确需完整文件系统访问时请求用户批准。
+    if (tools.any(_hasEscalation)) {
+      lines.add('');
+      lines.add('[沙箱说明]');
+      lines.add('文件/命令类工具默认在 app workspace 沙盒内运行。'
+          '确需访问公共目录/完整文件系统时，在调用中带 '
+          '<arg_key>sandbox_permissions<arg_value>danger-full-access</arg_value> '
+          '和 <arg_key>justification<arg_value>一句话理由</arg_value> '
+          '请求用户批准；批准后仅本次调用生效。被拒时不要偷偷绕过，先解释或放弃。');
+    }
+
     lines.add('');
     lines.add('[工具调用协议]');
     lines.add(kProtocolInstruction);
@@ -167,6 +180,12 @@ class PromptJsonProtocol implements ToolProtocol {
         arguments: arguments,
       ),
     );
+  }
+
+  /// 工具是否声明了沙箱升级能力（含 `sandbox_permissions` 字段）。
+  bool _hasEscalation(ToolDefinition tool) {
+    final props = tool.parameters['properties'];
+    return props is Map && props['sandbox_permissions'] != null;
   }
 
   /// 生成必填参数提示（对照 DSH schema 呈现）：`（必填: command）`。

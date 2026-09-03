@@ -5,6 +5,7 @@
 library;
 
 import 'protocol/tool_protocol.dart';
+import 'sandbox.dart';
 import 'tool_definition.dart';
 import 'tool_registry.dart';
 
@@ -90,6 +91,8 @@ class AgentRunResult {
 ///
 /// [history] 现有对话历史（`{role, content}`，不含本轮用户消息）；
 /// [userPrompt] 本轮用户消息；[modelId] 用于工具可见性校验。
+/// [sandboxApprover] 沙箱升级审批通道（对照 DSH approval seam）：
+/// 注入后，模型带 `sandbox_permissions` 调用的升级请求会在执行前转用户确认。
 Future<AgentRunResult> runAgent({
   required List<Map<String, String>> history,
   required String userPrompt,
@@ -100,6 +103,7 @@ Future<AgentRunResult> runAgent({
   AgentConfig config = const AgentConfig(),
   String? systemPrompt,
   AgentToolActivityCallback? onToolActivity,
+  AgentSandboxApprover? sandboxApprover,
 }) async {
   final messages = <Map<String, String>>[
     if (systemPrompt != null && systemPrompt.isNotEmpty)
@@ -130,7 +134,8 @@ Future<AgentRunResult> runAgent({
       }
 
       final result = await _executeTool(
-        registry, call, modelId, config.toolTimeout);
+        registry, call, modelId, config.toolTimeout,
+        sandboxApprover: sandboxApprover);
       toolCallCount++;
       activities.add('${call.name} → ${result.isError ? '失败' : '成功'}');
 
@@ -166,12 +171,18 @@ Future<AgentRunResult> runAgent({
 /// 1. execute 同步 throw（非 async 实现）→ try-catch；
 /// 2. execute 返回的 Future 异步错误 → `.then(onError:)`；
 /// 3. timeout 超时 / 链路错误 → 外层 catch 兜底。
+///
+/// 沙箱升级（对照 DSH approveEscalation）：模型带 `sandbox_permissions` +
+/// `justification` 调用时，执行前先经 [sandboxApprover] 转用户确认；
+/// 批准后把生效模式以内部键 [kSandboxModeArgKey] 传给工具执行体，
+/// 拒绝则返回明确错误（模型可解释或放弃），不执行任何命令。
 Future<ToolResult> _executeTool(
   ToolRegistry registry,
   ToolCall call,
   String modelId,
-  Duration timeout,
-) async {
+  Duration timeout, {
+  AgentSandboxApprover? sandboxApprover,
+}) async {
   final ToolDefinition? tool;
   try {
     tool = registry.lookup(call.name, modelId: modelId);
@@ -183,13 +194,41 @@ Future<ToolResult> _executeTool(
     return ToolResult.error('未知工具 "${call.name}"（当前模型不可用）');
   }
 
-  final args = call.arguments ?? const <String, dynamic>{};
+  final rawArgs = call.arguments ?? const <String, dynamic>{};
 
   // 执行前统一必填校验（对照 DSH validateArgs）：缺参数时给出明确引导，
   // 回填给模型补全参数后重试，而不是直接执行失败。
-  final violations = validateRequiredArguments(args, tool.parameters);
+  final violations = validateRequiredArguments(rawArgs, tool.parameters);
   if (violations.isNotEmpty) {
     return ToolResult.error('工具 "${call.name}" 参数不完整：${violations.join('；')}。请补全参数后重试');
+  }
+
+  // 沙箱升级审批（对照 DSH approveEscalation）：解析并校验升级请求，
+  // 执行前经用户确认通道；批准后本次调用以完整模式执行。
+  final Map<String, dynamic> args;
+  try {
+    final escalation = extractEscalation(rawArgs);
+    if (escalation != null) {
+      if (!escalation.isStrictlyWider) {
+        return ToolResult.error('沙箱升级到 "${escalation.requestedMode.value}" 并不比当前模式更宽');
+      }
+      if (sandboxApprover == null) {
+        return ToolResult.error('沙箱升级需要审批通道，但当前未注入（接入层未提供审批）');
+      }
+      final granted = await sandboxApprover(escalation, call.name);
+      if (!granted) {
+        return ToolResult.error('用户拒绝了沙箱升级到 "${escalation.requestedMode.value}"');
+      }
+    }
+    // 剔除升级参数，把生效模式以内部键传给工具执行体。
+    args = <String, dynamic>{...rawArgs}
+      ..remove('sandbox_permissions')
+      ..remove('justification');
+    if (escalation != null) {
+      args[kSandboxModeArgKey] = escalation.requestedMode.value;
+    }
+  } on FormatException catch (e) {
+    return ToolResult.error('工具 "${call.name}" 沙箱升级参数无效：${e.message}');
   }
 
   final Future<ToolResult> future;

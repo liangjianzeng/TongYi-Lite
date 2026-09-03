@@ -378,12 +378,22 @@ XML（`<tool_call>name<arg_key>k<arg_value>v</tool_call>`），解析失败优�
     - 真机端到端复验**待设备在线后执行**（新 APK 已含全部修复）。
     验证通过后，能力探测/原生工具模板（`toolTemplate: spark-native`）作为 Phase 4 后续演进。
 
-## 12.5 Python 脚本支持（能力延伸）
+## 12.5 Python 脚本支持（能力延伸）✅ 已实现
 
-> 方案见 `docs/python_support.md`：集成 Chaquopy（Android 嵌入式 CPython + pip），
-> `python_exec` 工具经 MethodChannel 调用 Python 运行时执行脚本。
-> 与 shell_exec 互补：Python 是沙盒内高级脚本，shell 是命令直通；均默认开启、可设关。
-> 待 fork/工具调用真机验证后作为独立阶段落地（避免并行改动互相干扰）。
+> 集成 Chaquopy 16.1.0（Android 嵌入式 CPython + pip），`python_exec` 工具经
+> MethodChannel（`com.dgxspark.tongyilite/python`）调用 `agent_runner.py` 执行脚本；
+> 无运行时优雅降级为明确错误。设置页可关（与 shell_exec 同「脚本执行」组）。
+> 与 shell_exec 互补：Python 是沙盒内高级脚本，shell 是命令直通；均默认开启。
+
+## 12.6 沙箱授权体系（对照 DSH escalation）✅ 已实现
+
+> **严格更宽阶梯**：`workspace-write`（默认，app workspace 沙盒）→
+> `danger-full-access`（app 权限内完整文件系统，含公共目录）。
+> 模型带 `sandbox_permissions` + `justification` 请求升级 → agent 循环执行前经
+> 用户确认框逐次批准（allowed-once）；设置页「完整文件访问授权」为前置开关
+> （依赖 MANAGE_EXTERNAL_STORAGE / All-Files-Access，已在 manifest 声明）。
+> 拒绝/升级标记与 DSH 同一套文案：`[sandbox: file access denied under ...]`、
+> `[sandbox: escalation available ...]`。
 
 ## 12. 验收标准
 

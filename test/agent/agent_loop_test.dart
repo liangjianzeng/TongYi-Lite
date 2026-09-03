@@ -324,5 +324,132 @@ void main() {
       expect(result.activities, ['calculator → 失败']);
       expect(fake.captured[1][1]['content'], contains('当前模型不可用'));
     });
+
+    test('沙箱升级：模型请求完整访问 → 审批批准后工具执行（对照 DSH approveEscalation）',
+        () async {
+      final registry = buildRegistry();
+      final fake = FakeAgentStream([
+        StreamOutcome(text: '', toolCalls: [
+          callOf('shell_exec', args: {
+            'command': 'ls /sdcard',
+            'sandbox_permissions': 'danger-full-access',
+            'justification': '需要列出公共目录',
+          }),
+        ]),
+        const StreamOutcome(text: '完成。'),
+      ]);
+      final approvals = <String>[];
+      AgentSandboxApprover? approver = (escalation, toolName) async {
+        approvals.add('$toolName:${escalation.requestedMode.value}:${escalation.justification}');
+        return true; // 用户批准
+      };
+
+      final result = await runAgent(
+        history: [],
+        userPrompt: '看下公共目录',
+        registry: registry,
+        protocol: PromptJsonProtocol(),
+        streamFn: fake.call,
+        modelId: 'test-model',
+        sandboxApprover: approver,
+      );
+
+      expect(result.toolCallCount, 1);
+      // 审批通道收到请求：工具名 + 目标模式 + 理由。
+      expect(approvals.length, 1);
+      expect(approvals.first, contains('shell_exec'));
+      expect(approvals.first, contains('danger-full-access'));
+      expect(approvals.first, contains('公共目录'));
+      // 批准后工具被调度执行（命令以内部键传递生效模式；
+      // 测试环境无 sh，执行结果成败不影响审批流程验证）。
+      expect(result.activities.first, startsWith('shell_exec →'));
+    });
+
+    test('沙箱升级：用户拒绝 → 工具不执行，回填拒绝错误', () async {
+      final registry = buildRegistry();
+      final fake = FakeAgentStream([
+        StreamOutcome(text: '', toolCalls: [
+          callOf('shell_exec', args: {
+            'command': 'rm /sdcard/x',
+            'sandbox_permissions': 'danger-full-access',
+            'justification': '需要删除公共文件',
+          }),
+        ]),
+        const StreamOutcome(text: '好。'),
+      ]);
+
+      final result = await runAgent(
+        history: [],
+        userPrompt: '删文件',
+        registry: registry,
+        protocol: PromptJsonProtocol(),
+        streamFn: fake.call,
+        modelId: 'test-model',
+        sandboxApprover: (escalation, toolName) async => false,
+      );
+
+      expect(result.toolCallCount, 1);
+      expect(result.activities.first, contains('shell_exec → 失败'));
+      // 回填消息明确告知拒绝（模型可解释/放弃）。
+      final feedback = fake.captured[1][1]['content'] ?? '';
+      expect(feedback, contains('拒绝'));
+      expect(feedback, contains('danger-full-access'));
+    });
+
+    test('沙箱升级：无审批通道 → fail-closed（对照 DSH 无 approval service）', () async {
+      final registry = buildRegistry();
+      final fake = FakeAgentStream([
+        StreamOutcome(text: '', toolCalls: [
+          callOf('shell_exec', args: {
+            'command': 'ls /sdcard',
+            'sandbox_permissions': 'danger-full-access',
+            'justification': '要读公共目录',
+          }),
+        ]),
+        const StreamOutcome(text: '算了。'),
+      ]);
+
+      // 不注入 approver（默认 null）→ 升级请求被拒绝且不执行命令。
+      final result = await runAgent(
+        history: [],
+        userPrompt: '读公共目录',
+        registry: registry,
+        protocol: PromptJsonProtocol(),
+        streamFn: fake.call,
+        modelId: 'test-model',
+      );
+
+      expect(result.toolCallCount, 1);
+      final feedback = fake.captured[1][1]['content'] ?? '';
+      expect(feedback, contains('审批通道'));
+    });
+
+    test('沙箱升级：justification 缺失 → 参数无效错误', () async {
+      final registry = buildRegistry();
+      final fake = FakeAgentStream([
+        StreamOutcome(text: '', toolCalls: [
+          callOf('shell_exec', args: {
+            'command': 'ls /sdcard',
+            'sandbox_permissions': 'danger-full-access',
+            // 模型只给 sandbox_permissions 不给理由（对照 DSH 校验）。
+          }),
+        ]),
+        const StreamOutcome(text: '好。'),
+      ]);
+
+      final result = await runAgent(
+        history: [],
+        userPrompt: '读公共目录',
+        registry: registry,
+        protocol: PromptJsonProtocol(),
+        streamFn: fake.call,
+        modelId: 'test-model',
+        sandboxApprover: (escalation, toolName) async => true,
+      );
+
+      expect(result.toolCallCount, 1);
+      final feedback = fake.captured[1][1]['content'] ?? '';
+      expect(feedback, contains('沙箱升级参数无效'));
+    });
   });
 }

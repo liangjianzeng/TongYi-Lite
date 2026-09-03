@@ -92,6 +92,15 @@ class InferenceSettings {
   /// 用户可在设置中关闭）。
   final bool agentShellEnabled;
 
+  /// python_exec 工具开关（默认开启：嵌入式 CPython，脚本能力向强扩展；
+  /// 未集成 Chaquopy 时工具优雅降级为明确错误）。
+  final bool agentPythonEnabled;
+
+  /// 沙箱完整文件系统授权（对照 DSH danger-full-access）：开启后允许
+  /// 智能体经用户逐次审批访问公共目录/完整文件系统（依赖
+  /// MANAGE_EXTERNAL_STORAGE / All-Files-Access）。
+  final bool agentFullFileAccess;
+
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
   /// 目录声明的默认工具集（agentDefaults.enabledTools）。
   final Map<String, List<String>> agentToolsByModel;
@@ -125,6 +134,8 @@ class InferenceSettings {
     this.agentAllowParallelTools = false,
     this.webSearchEnabled = false,
     this.agentShellEnabled = true,
+    this.agentPythonEnabled = true,
+    this.agentFullFileAccess = false,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -182,6 +193,8 @@ class InferenceSettings {
       bool? agentAllowParallelTools,
       bool? webSearchEnabled,
       bool? agentShellEnabled,
+      bool? agentPythonEnabled,
+      bool? agentFullFileAccess,
       Map<String, List<String>>? agentToolsByModel,
       Map<String, Map<String, dynamic>>? agentByModel}) {
     return InferenceSettings(
@@ -214,6 +227,9 @@ class InferenceSettings {
           agentAllowParallelTools ?? this.agentAllowParallelTools,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
+      agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
+      agentFullFileAccess:
+          agentFullFileAccess ?? this.agentFullFileAccess,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
     );
@@ -277,6 +293,8 @@ class InferenceSettings {
           json['agentAllowParallelTools'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
+      agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
+      agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );

@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../sandbox.dart';
 import '../tool_definition.dart';
 
 /// 单次读文件的最大字节（保护上下文预算）。
@@ -28,9 +29,21 @@ Future<Directory> _workspaceDir() async {
   return dir;
 }
 
-/// 规范化路径并确保落在沙盒内（防 `../` 逃逸）。
-Future<String> _resolveSafePath(String rawPath) async {
+/// 规范化路径并按沙箱模式限定作用域（对照 DSH fs 沙箱）。
+///
+/// - [SandboxMode.workspaceWrite]（默认）：相对路径解析到 workspace 内，
+///   防 `../` 逃逸（现有策略）；
+/// - [SandboxMode.dangerFullAccess]（用户批准后）：绝对路径直接使用
+///   （如 `/sdcard/...`、`/storage/emulated/0/...`，依赖 All-Files-Access），
+///   相对路径仍解析到 workspace。
+Future<String> _resolveSafePath(String rawPath, {SandboxMode? mode}) async {
   final workspace = await _workspaceDir();
+  if (mode == SandboxMode.dangerFullAccess) {
+    final trimmed = rawPath.trim();
+    if (p.isAbsolute(trimmed)) {
+      return p.normalize(trimmed);
+    }
+  }
   final resolved = p.normalize(p.join(workspace.path, rawPath));
   final workspaceNorm = p.normalize(workspace.path);
   if (!p.equals(resolved, workspaceNorm) &&
@@ -40,24 +53,30 @@ Future<String> _resolveSafePath(String rawPath) async {
   return resolved;
 }
 
+/// 追加升级字段到工具 schema（共享实现见 sandbox.dart）。
+Map<String, dynamic> _withEscalation(Map<String, dynamic> parameters) =>
+    withEscalationFields(parameters);
+
 /// 读文件：返回内容（截断到 [kReadFileLimit]）。
 ToolDefinition createReadFileTool() {
   return ToolDefinition(
     name: 'read_file',
     description:
-        '读取工作区内文本文件内容。path 为相对 workspace 的路径（如 "notes/draft.txt"）。',
-    parameters: {
+        '读取工作区内文本文件内容。path 为相对 workspace 的路径（如 "notes/draft.txt"）；'
+        '需要读取公共目录（/sdcard 等）时带 sandbox_permissions 请求完整访问。',
+    parameters: _withEscalation({
       'type': 'object',
       'properties': {
-        'path': {'type': 'string', 'description': '相对 workspace 的文件路径'},
+        'path': {'type': 'string', 'description': '相对 workspace 的文件路径，或绝对路径'},
       },
       'required': ['path'],
-    },
+    }),
     execute: (args) async {
       final rawPath = (args['path'] as String?)?.trim() ?? '';
       if (rawPath.isEmpty) return ToolResult.error('缺少 path 参数');
       try {
-        final path = await _resolveSafePath(rawPath);
+        final path = await _resolveSafePath(rawPath,
+            mode: effectiveModeOf(args));
         final file = File(path);
         if (!await file.exists()) return ToolResult.error('文件不存在：$rawPath');
         final len = await file.length();
@@ -81,15 +100,17 @@ ToolDefinition createReadFileTool() {
 ToolDefinition createWriteFileTool() {
   return ToolDefinition(
     name: 'write_file',
-    description: '覆盖写入文本到工作区文件（目录自动创建）。',
-    parameters: {
+    description:
+        '覆盖写入文本到工作区文件（目录自动创建）；需要写公共目录（/sdcard 等）时'
+        '带 sandbox_permissions 请求完整访问。',
+    parameters: _withEscalation({
       'type': 'object',
       'properties': {
-        'path': {'type': 'string', 'description': '相对 workspace 的文件路径'},
+        'path': {'type': 'string', 'description': '相对 workspace 的文件路径，或绝对路径'},
         'content': {'type': 'string', 'description': '完整文件内容'},
       },
       'required': ['path', 'content'],
-    },
+    }),
     execute: (args) async {
       final rawPath = (args['path'] as String?)?.trim() ?? '';
       final content = (args['content'] as String?) ?? '';
@@ -99,7 +120,8 @@ ToolDefinition createWriteFileTool() {
         return ToolResult.error('内容过大（>${kWriteFileLimit ~/ 1024}KB）');
       }
       try {
-        final path = await _resolveSafePath(rawPath);
+        final path = await _resolveSafePath(rawPath,
+            mode: effectiveModeOf(args));
         await File(path).parent.create(recursive: true);
         await File(path).writeAsString(content, flush: true);
         return ToolResult(content: '已写入 $rawPath（${content.length} 字符）');
@@ -115,16 +137,17 @@ ToolDefinition createEditFileTool() {
   return ToolDefinition(
     name: 'edit_file',
     description:
-        '替换工作区文件中的文本（oldString 必须唯一，出现多次会报错）。',
-    parameters: {
+        '替换工作区文件中的文本（oldString 必须唯一，出现多次会报错）；'
+        '编辑公共目录文件时带 sandbox_permissions 请求完整访问。',
+    parameters: _withEscalation({
       'type': 'object',
       'properties': {
-        'path': {'type': 'string', 'description': '相对 workspace 的文件路径'},
+        'path': {'type': 'string', 'description': '相对 workspace 的文件路径，或绝对路径'},
         'oldString': {'type': 'string', 'description': '被替换的原文'},
         'newString': {'type': 'string', 'description': '替换后的文本'},
       },
       'required': ['path', 'oldString', 'newString'],
-    },
+    }),
     execute: (args) async {
       final rawPath = (args['path'] as String?)?.trim() ?? '';
       final oldString = (args['oldString'] as String?) ?? '';
@@ -132,7 +155,8 @@ ToolDefinition createEditFileTool() {
       if (rawPath.isEmpty) return ToolResult.error('缺少 path 参数');
       if (oldString.isEmpty) return ToolResult.error('oldString 为空');
       try {
-        final path = await _resolveSafePath(rawPath);
+        final path = await _resolveSafePath(rawPath,
+            mode: effectiveModeOf(args));
         final file = File(path);
         if (!await file.exists()) return ToolResult.error('文件不存在：$rawPath');
         final content = await file.readAsString();
