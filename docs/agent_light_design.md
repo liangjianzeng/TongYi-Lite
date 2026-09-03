@@ -368,8 +368,14 @@ XML（`<tool_call>name<arg_key>k<arg_value>v</tool_call>`），解析失败优�
 11. **工具调用双格式解析**：Spark-X2.5 真机实测输出 llama.cpp 原生
     `<tool_call>name<arg_key>k<arg_value>v</tool_call>` XML 格式（非提示词约定的 JSON）。
     `PromptJsonProtocol` 已扩展同时支持 JSON + XML；`AgentStreamProcessor` 流式隐藏 XML 块；
-    `finish()` 收尾恢复未闭合块为普通文本。89 单测全绿。
+    `finish()` 收尾恢复未闭合块为普通文本。**94 单测全绿。**
 12. **待验证**：真机 Spark-X2.5 工具调用端到端（web_search → 工具执行 → 结果回填 → 最终回答）。
+    - 真机会话（2026-09-03）已跑通：模型输出 `<tool_call>web_search</tool_call>` XML、
+      agent 循环执行并把结果回填（工具活动消息进会话）。发现两处遵循率问题：
+      ① web_search 调用漏带 `query` 参数；② todo 请求未实际调用 `todo_write`（模型仅文字回答）。
+    - 已修：提示语规则段与 XML 协议口径一致、强调必填参数、新增数组参数示例；
+      XML 解析器对数组/对象参数 JSON 解码（todo_write 的 todos）；todo_write 兼容 JSON 字符串形态。
+    - 真机端到端复验**待设备在线后执行**（新 APK 已含全部修复）。
     验证通过后，能力探测/原生工具模板（`toolTemplate: spark-native`）作为 Phase 4 后续演进。
 
 ## 12.5 Python 脚本支持（能力延伸）
