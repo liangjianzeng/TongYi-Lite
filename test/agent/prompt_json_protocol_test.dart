@@ -160,7 +160,8 @@ void main() {
       expect(section, contains('- get_time: 返回当前时间'));
       // 带必填参数的工具呈现参数名提示（对照 DSH schema 呈现），
       // 让模型知道必须给出哪些参数——根治「只调工具不带参数」。
-      expect(section, contains('- shell_exec: 执行 shell 命令（必填: command)'));
+      expect(section,
+          contains('- shell_exec: 执行 shell 命令（必填: command: string）'));
     });
 
     test('按模型渲染工具清单：受限模型不注入不可见工具', () {
