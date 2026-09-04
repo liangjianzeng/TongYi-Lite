@@ -4,9 +4,13 @@
   "models": [
     {
       "id": "bonsai-27b-q1_0",
-      "name": "Bonsai 27B (Q1_0 1-bit)",
+      "name": "Bonsai 27B (Q1_0 智能体 + dspark 加速)",
       "type": "text",
       "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/prism-ml/Bonsai-27B-gguf/resolve/master/Bonsai-27B-Q1_0.gguf",
+          "source": "modelscope"
+        },
         {
           "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-Q1_0.gguf",
           "source": "hf-mirror"
@@ -18,9 +22,46 @@
       ],
       "sizeGB": 3.79,
       "sizeMBDisplay": "3.8 GB",
-      "recommended": false,
+      "recommended": true,
       "minRamMB": 6144,
-      "sha256Hash": null
+      "sha256Hash": null,
+      "tags": [
+        "推荐",
+        "智能体",
+        "dspark加速"
+      ],
+      "dspark": {
+        "sizeMB": 1700,
+        "sizeMBDisplay": "1.7 GB",
+        "mirrors": [
+          {
+            "url": "https://modelscope.cn/models/prism-ml/Bonsai-27B-gguf/resolve/master/Bonsai-27B-dspark-Q4_1.gguf",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-dspark-Q4_1.gguf",
+            "source": "hf-mirror"
+          },
+          {
+            "url": "https://huggingface.co/prism-ml/Bonsai-27B-gguf/resolve/main/Bonsai-27B-dspark-Q4_1.gguf",
+            "source": "huggingface"
+          }
+        ]
+      },
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 128000,
+        "recommendedNctx": 32768,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
     },
     {
       "id": "bonsai-27b-ternary-q2_0",
@@ -274,6 +315,27 @@
       ]
     },
     {
+      "id": "ornith-1.5-9b-mtp-iq2_m",
+      "name": "Ornith-1.5-9B (MTP IQ2_M)",
+      "type": "text",
+      "mtp": true,
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/protoLabsAI/Ornith-1.5-9B-MTP-GGUF/resolve/main/Ornith-1.5-9B-MTP-IQ2_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 3.87,
+      "sizeMBDisplay": "3.87 GB",
+      "recommended": false,
+      "minRamMB": 4096,
+      "sha256Hash": "6a6b51d37b2d40acaf4171f35364fbba78ba025fe2c7e6d60b65e2a85082a135",
+      "tags": [
+        "不推荐",
+        "限高端旗舰"
+      ]
+    },
+    {
       "id": "lfm2.5-2.6b-q4_k_m",
       "name": "LFM 2.5 2.6B (Q4_K_M)",
       "type": "text",
@@ -334,32 +396,71 @@
       }
     },
     {
-      "id": "hunyuan-4b-q4_k_m",
-      "name": "腾讯 Hunyuan 4B (Q4_K_M 智能体)",
+      "id": "lfm2.5-8b-a1b-ud-iq3_xxs",
+      "name": "LFM 2.5 8B-A1B (UD-IQ3_XXS 智能体)",
       "type": "text",
       "mirrors": [
         {
-          "url": "https://hf-mirror.com/bartowski/tencent_Hunyuan-4B-Instruct-GGUF/resolve/main/tencent_Hunyuan-4B-Instruct-Q4_K_M.gguf",
-          "source": "hf-mirror"
+          "url": "https://modelscope.cn/api/v1/models/unsloth/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-UD-IQ3_XXS.gguf",
+          "source": "modelscope"
         },
         {
-          "url": "https://hf-mirror.com/F-urkan/Hunyuan-4B-Instruct-Q4_K_M-GGUF/resolve/main/hunyuan-4b-instruct-q4_k_m.gguf",
+          "url": "https://hf-mirror.com/unsloth/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-UD-IQ3_XXS.gguf",
           "source": "hf-mirror"
         }
       ],
-      "sizeGB": 2.43,
-      "sizeMBDisplay": "2.4 GB",
+      "sizeGB": 3.05,
+      "sizeMBDisplay": "3.1 GB",
       "recommended": true,
       "minRamMB": 4096,
       "sha256Hash": null,
       "tags": [
         "推荐",
         "智能体",
-        "256K上下文"
+        "MoE 高效"
       ],
       "agentCapabilities": {
         "nativeToolCall": false,
-        "maxContextTokens": 262144,
+        "maxContextTokens": 128000,
+        "recommendedNctx": 32768,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
+      "id": "bonsai-8b-q1_0",
+      "name": "Bonsai-8B (Q1_0 智能体)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/prism-ml/Bonsai-8B-gguf/resolve/master/Bonsai-8B-Q1_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B-Q1_0.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 1.16,
+      "sizeMBDisplay": "1.2 GB",
+      "recommended": true,
+      "minRamMB": 2048,
+      "sha256Hash": null,
+      "tags": [
+        "推荐",
+        "智能体",
+        "轻量"
+      ],
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 128000,
         "recommendedNctx": 16384,
         "mtpSupported": false
       },
