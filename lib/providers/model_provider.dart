@@ -320,6 +320,15 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       // 日志」页与启动日志都能确认该模型加载时投机加速是否真的生效——此前只
       // debugPrint 到 logcat，App 内查看不到。
       final mtpLogs = List<String>.from(state.loadingLogs);
+      // 把模型实际加载的绝对路径作为第一条日志输出，方便在「推理日志」页直接看到
+      // 模型从哪个目录加载（外部存储 vs 内部 vs app-docs），定位缓存位置。
+      mtpLogs.insert(0, '模型加载地址: $path');
+      if (mmprojPath != null) {
+        mtpLogs.insert(1, '投影器地址: $mmprojPath');
+      }
+      if (draftPath != null) {
+        mtpLogs.insert(1, '投机草稿地址: $draftPath');
+      }
       if (mtp) {
         mtpLogs.add('MTP 加速: 开启 ✓');
       } else if (draftPath != null) {

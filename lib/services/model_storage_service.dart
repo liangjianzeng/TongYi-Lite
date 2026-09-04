@@ -177,20 +177,15 @@ class ModelStorageService {
   /// 用户反馈的 bug。完整主文件 + 残留 .tmp 时，.tmp 只是过期残留，删掉即可。
   Future<bool> _isFullyCachedIn(Directory dir, ModelConfig model) async {
     try {
-      final gguf = File(p.join(dir.path, '${model.id}.gguf'));
-      if (!await gguf.exists()) return false;
-      final size = await gguf.length();
-      if (model.sizeBytes > 0 && size < (model.sizeBytes * 0.99).round()) {
+      // 完成判定：文件存在、非空、无残留 .tmp 即完整（不再按 catalog 估算大小卡百分比）。
+      if (!await _isCompleteFile(File(p.join(dir.path, '${model.id}.gguf')))) {
         return false;
       }
       await _cleanStaleTmp(dir, model.id, '.gguf');
       // mmproj 两文件形态：投影器必须完整存在，否则视为未缓存。
       final mm = model.mmproj;
       if (mm != null) {
-        final mmproj = File(p.join(dir.path, '${model.id}.mmproj'));
-        if (!await mmproj.exists()) return false;
-        final mmSize = await mmproj.length();
-        if (mm.sizeBytes > 0 && mmSize < (mm.sizeBytes * 0.99).round()) {
+        if (!await _isCompleteFile(File(p.join(dir.path, '${model.id}.mmproj')))) {
           return false;
         }
         await _cleanStaleTmp(dir, model.id, '.mmproj');
@@ -198,14 +193,26 @@ class ModelStorageService {
       // dspark 投机草稿头：必须完整存在，否则投机加速无法启用。
       final ds = model.dspark;
       if (ds != null) {
-        final dspark = File(p.join(dir.path, '${model.id}.dspark.gguf'));
-        if (!await dspark.exists()) return false;
-        final dsSize = await dspark.length();
-        if (ds.sizeBytes > 0 && dsSize < (ds.sizeBytes * 0.99).round()) {
+        if (!await _isCompleteFile(
+            File(p.join(dir.path, '${model.id}.dspark.gguf')))) {
           return false;
         }
         await _cleanStaleTmp(dir, model.id, '.dspark.gguf');
       }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 完成判定：文件存在、非空、无残留 `.tmp` 即完整。
+  /// 不再按 catalog 估算大小卡百分比——下载中断残留 `.tmp` 会被识别为不完整。
+  Future<bool> _isCompleteFile(File file) async {
+    try {
+      if (!await file.exists()) return false;
+      if (await file.length() == 0) return false;
+      final tmp = File('${file.path}.tmp');
+      if (await tmp.exists()) return false;
       return true;
     } catch (_) {
       return false;
