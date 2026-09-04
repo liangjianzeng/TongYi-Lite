@@ -6,7 +6,7 @@
 
 ---
 
-## [Unreleased] — 2026-09-01
+## [0.2.0] — 2026-09-04
 
 ### 新增：端侧 Agent Lite 智能体
 
@@ -28,9 +28,9 @@
 - 修复真机工具遵循率问题：提示语规则段与 XML 协议口径一致、强调必填参数、XML 数组参数解码、
   todo_write 兼容 JSON 字符串形态。**101 项单测全绿。**
 
-### 新增：端侧 Python 执行（python_exec，Chaquopy 16.1.0）
+### 新增：端侧 Python 执行（python_exec，Chaquopy 17.0.0 / CPython 3.11）
 
-- **嵌入式 CPython 3.8**：Chaquopy 集成，APK 内嵌 `libpython3.8.so` + 标准库（stdlib .imy），
+- **嵌入式 CPython 3.11**：Chaquopy 17.0.0 集成，APK 内嵌 `libpython3.11.so` + 标准库（stdlib .imy），
   `agent_runner.py` 经 MethodChannel（`com.dgxspark.tongyilite/python`）执行脚本，
   15s 超时 / 4KB 输出截断；无运行时优雅降级为明确错误，不影响其他工具。
 - **沙箱授权体系（对照 DSH escalation）**：严格更宽阶梯 `workspace-write` →
