@@ -71,6 +71,11 @@ flutter run -d <device_id>
 > **真机覆盖安装铁律**：始终 `adb install -r app-debug.apk`（`-r` 覆盖更新，保留已下载的端侧模型缓存）；
 > **绝不先卸载再装**（卸载会清掉模型缓存）。设备被 `INSTALL_FAILED_USER_RESTRICTED` 拒绝时加 `-t`。
 
+> **本机（开发机）快速构建必读**：每次构建都很久很难？根因与解法、增量/全量耗时分解、flutter SDK
+> 补丁记录见 [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md)。核心两条：先
+> `set PATHEXT=.EXE;.COM;.BAT;.CMD;...`（本机 PATHEXT 异常导致 PATH 查找全失效），
+> 再走「flutter assemble → 同步 assets → gradle `-x compileFlutterBuild*`」增量路径（约 2 分钟）。
+
 <details>
 <summary><b>Windows 下 debug APK 装不进最新 Dart？</b></summary>
 
@@ -82,6 +87,8 @@ flutter assemble -o build/flutter-assemble --define=BuildMode=debug --define=Tar
 xcopy /E /I build\flutter-assemble\flutter_assets\ build\app\intermediates\flutter\debug\flutter_assets\
 cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 ```
+
+> 若工具链报「找不到 git / gen_snapshot」等 PATH 相关错误，先执行 `set PATHEXT=.EXE;.COM;.BAT;.CMD;.VBS;.JS;.WSF;.MSC`。
 
 </details>
 
@@ -397,6 +404,7 @@ llama.cpp 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_voca
 
 - [`docs/architecture_design_v2.md`](docs/architecture_design_v2.md) — 架构设计 v2
 - [`docs/BUILD_AND_DEBUG_GUIDE.md`](docs/BUILD_AND_DEBUG_GUIDE.md) — 编译与调试指南
+- [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md) — 本机打包构建环境备忘（快速构建）
 - [`docs/backend_benchmark_2026-08-04.md`](docs/backend_benchmark_2026-08-04.md) — 三后端实测专报
 - [`docs/agent_light_design.md`](docs/agent_light_design.md) — Agent Lite 设计
 

@@ -44,6 +44,7 @@ models/*.bin
 # === Debug / analysis artifacts (local only, never commit) ===
 .cache/
 .tmp_screen.png
+*.tmpdir/
 *_head.bin
 *.b64
 gguf_*.bin
