@@ -109,16 +109,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('设置'),
+        // 标题字号收敛（默认 20 偏大），标题栏整体压扁，给正文留更多空间。
+        title: const Text('设置', style: TextStyle(fontSize: 18)),
         centerTitle: true,
+        toolbarHeight: 46,
         bottom: TabBar(
           controller: _tabController,
+          // 窄屏可横向滑动，避免「TAB 字未能露出」被裁切。
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          // 小图标 + 小字号，减少标题栏占用的纵向空间。
+          iconSize: 18,
+          indicatorWeight: 2,
+          labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 12),
           tabs: const [
-            Tab(icon: Icon(Icons.storage), text: '模型管理'),
-            Tab(icon: Icon(Icons.cloud), text: 'API 接入'),
-            Tab(icon: Icon(Icons.memory), text: '推理引擎'),
-            Tab(icon: Icon(Icons.smart_toy), text: '智能体'),
-            Tab(icon: Icon(Icons.info), text: '关于'),
+            Tab(icon: Icon(Icons.storage, size: 18), text: '模型管理'),
+            Tab(icon: Icon(Icons.cloud, size: 18), text: 'API 接入'),
+            Tab(icon: Icon(Icons.memory, size: 18), text: '推理引擎'),
+            Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
+            Tab(icon: Icon(Icons.info, size: 18), text: '关于'),
           ],
         ),
       ),

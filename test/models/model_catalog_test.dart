@@ -9,7 +9,7 @@ void main() {
   test('目录可加载且含新增智能体模型', () async {
     final models = await ModelCatalog.load();
 
-    expect(models.length, 13);
+    expect(models.length, 14);
 
     final spark = models.firstWhere((m) => m.id == 'spark-x2.5-4b-q4_k_m');
     expect(spark.name, contains('Spark-X2.5 4B'));

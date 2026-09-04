@@ -353,7 +353,21 @@
         }
       ],
       "sizeGB": 1.56,
-      "sizeMBDisplay": "1.6 GB"
+      "sizeMBDisplay": "1.6 GB",
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 128000,
+        "recommendedNctx": 16384,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
     },
     {
       "id": "spark-x2.5-4b-q4_k_m",
