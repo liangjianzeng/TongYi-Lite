@@ -122,6 +122,39 @@ class DownloadService {
           );
         }
       }
+
+      // ---- dspark 投机草稿头（模型目录声明时）----
+      // 主模型 + mmproj 完成后顺序下载草稿头。dspark 下载失败不删除已下好的
+      // 主 gguf（模型仍可推理，仅无投机加速），但整任务标记为失败。
+      final ds = model.dspark;
+      if (ds != null) {
+        task.totalBytes = ds.sizeBytes;
+        task.downloadedBytes = 0;
+        task.state = DownloadState.downloading;
+        onProgress(task);
+        final dsparkTarget = _DownloadTarget(
+          mirrors: ds.mirrors, sizeBytes: ds.sizeBytes, suffix: '.dspark.gguf',
+        );
+        final dsparkTemp = File(p.join(dir.path, model.id + dsparkTarget.suffix + '.tmp'));
+        final dsparkFinal = File(p.join(dir.path, model.id + dsparkTarget.suffix));
+        final dsparkComplete = await dsparkFinal.exists() &&
+            !(await dsparkTemp.exists()) &&
+            (ds.sizeBytes == 0 ||
+             (await dsparkFinal.length()) >= (ds.sizeBytes * 0.99).round());
+        if (dsparkComplete) {
+          final done = await dsparkFinal.length();
+          debugPrint('[DownloadService] ${model.id} dspark 已完整，跳过草稿头下载');
+          task.totalBytes = done;
+          task.downloadedBytes = done;
+          task.state = DownloadState.completed;
+          task.endTime = DateTime.now();
+          onProgress(task);
+        } else {
+          await _runDownloadLoop(
+            model, task, dsparkTarget, dsparkTemp, dsparkFinal, onProgress, progressInterval,
+          );
+        }
+      }
     } finally {
       // CRITICAL: the entry must be dropped no matter how we leave, otherwise
       // the `maxConcurrentDownloads` guard stays permanently saturated after

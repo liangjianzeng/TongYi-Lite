@@ -240,6 +240,9 @@ struct InferenceEngine {
     const struct llama_vocab *vocab = nullptr; // extracted from model for new API
     llama_context *context = nullptr;
     llama_context *mtp_ctx = nullptr;  // second context running only the NextN/MTP head
+    llama_model *draft_model = nullptr; // dspark draft model (independent GGUF head)
+    llama_context *dspark_ctx = nullptr; // draft context for DFlash/DSpark speculative
+    bool dspark_enabled = false;        // dspark head loaded and usable
     llama_model_params model_params;
     llama_context_params ctx_params;
 
@@ -326,7 +329,8 @@ struct InferenceEngine {
     bool load(const char *model_path, int requested_n_ctx = 4096,
               bool enable_gpu = true, int gpu_layers = 20,
               const char *gpu_backend = "auto", bool enable_mtp = false,
-              const char *mmproj_path = nullptr) {
+              const char *mmproj_path = nullptr,
+              const char *draft_path = nullptr) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -650,6 +654,49 @@ struct InferenceEngine {
         }
 
         // ------------------------------------------------------------------
+        // DSpark speculative decoding: load an independent draft model (e.g.
+        // Bonsai-27B-dspark-Q4_1.gguf, a DFlash + Markov head). The draft ctx
+        // uses the DEFAULT context type (only MTP needs the special type); the
+        // common_speculative driver mirrors target hidden states into it.
+        // Failure is NOT fatal: falls back to MTP or plain decoding.
+        // ------------------------------------------------------------------
+        if (mtp_enabled) {
+            LOGI("MTP enabled -> dspark draft head ignored (mutually exclusive)");
+        } else if (draft_path && draft_path[0] != '\0') {
+            LOGI("Loading dspark draft model: %s", draft_path);
+            reportLoadingLog("正在加载投机草稿模型（dspark 加速）...");
+            llama_model_params draft_params = llama_model_default_params();
+            // Draft model runs on CPU (tiny head; offload wastes memory).
+            draft_params.n_gpu_layers = 0;
+            draft_model = llama_model_load_from_file(draft_path, draft_params);
+            if (!draft_model) {
+                LOGE("Failed to load dspark draft model -> dspark disabled");
+                draft_model = nullptr;
+            } else {
+                llama_context_params dspark_params = llama_context_default_params();
+                dspark_params.ctx_other = context;          // mirror target hidden states
+                dspark_params.n_ctx     = (uint32_t)ctx_val;
+                dspark_params.n_batch   = ctx_params.n_batch;
+                dspark_params.n_ubatch  = ctx_params.n_ubatch;
+                dspark_params.n_rs_seq  = 0;
+                dspark_params.n_threads = ctx_params.n_threads;
+                dspark_params.n_threads_batch = ctx_params.n_threads_batch;
+                dspark_params.kv_unified = true;
+                dspark_ctx = llama_init_from_model(draft_model, dspark_params);
+                if (!dspark_ctx) {
+                    LOGE("Failed to create dspark draft context -> dspark disabled");
+                    llama_model_free(draft_model);
+                    draft_model = nullptr;
+                } else {
+                    dspark_enabled = true;
+                    LOGI("DSpark draft context created (n_ctx=%d). Speculative decoding ON.", ctx_val);
+                }
+            }
+        } else {
+            LOGI("No dspark draft path -> dspark disabled");
+        }
+
+        // ------------------------------------------------------------------
         // Vision: load the mmproj projector via mtmd (if provided).
         // mtmd_init_from_file needs the already-loaded text model to validate
         // embedding dims. Failure is NOT fatal: the model falls back to
@@ -748,14 +795,17 @@ struct InferenceEngine {
         const int v2 = static_cast<int>(n_ctx.load());
         LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v2);
         if (mtp_ctx)  { llama_free(mtp_ctx);   mtp_ctx = nullptr; }
+        if (dspark_ctx) { llama_free(dspark_ctx); dspark_ctx = nullptr; }
         if (context)  { llama_free(context);  context = nullptr; }
         if (mmproj)   { mtmd_free(mmproj);     mmproj = nullptr; }
         vision_loaded = false;
         audio_loaded = false;
         audio_sample_rate = -1;
-        if (model)    { llama_model_free(model); model = nullptr; }
+        if (model)        { llama_model_free(model);        model = nullptr; }
+        if (draft_model)  { llama_model_free(draft_model);  draft_model = nullptr; }
         vocab = nullptr;
         mtp_enabled = false;
+        dspark_enabled = false;
         prev_prompt_tokens.clear();
         have_prev_kv = false;
         n_ctx = 0;
@@ -1320,9 +1370,15 @@ struct InferenceEngine {
             llama_tokens mtp_prompt_tgt;      // all prompt tokens EXCEPT the last
             llama_token  mtp_id_last = 0;
             int mtp_n_past = 0;
-            if (mtp_enabled && n_prompt > 1) {
+            if ((mtp_enabled || dspark_enabled) && n_prompt > 1) {
                 common_params_speculative spec_params;
-                spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+                // MTP: head lives inside the target model; DSpark: independent
+                // draft model (DFlash + Markov head). Mutually exclusive at load.
+                if (mtp_enabled) {
+                    spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+                } else {
+                    spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK };
+                }
                 spec_params.draft.n_max   = n_draft_max;
                 spec_params.draft.n_min   = 1;   // always draft at least one token
                 // Early-stop drafting once the head's confidence drops below p_min.
@@ -1334,7 +1390,7 @@ struct InferenceEngine {
                 // stop the observed negative benefit.
                 spec_params.draft.p_min   = 0.3f;
                 spec_params.draft.ctx_tgt = context;
-                spec_params.draft.ctx_dft = mtp_ctx;
+                spec_params.draft.ctx_dft = mtp_enabled ? mtp_ctx : dspark_ctx;
                 mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
                 if (!mtp_spec) {
                     LOGW("MTP spec init failed -> falling back to plain decoding");
@@ -1954,11 +2010,13 @@ static void reportLoadingLog(const char *message) {
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
-    jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path
+    jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path,
+    jstring j_draft_path
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     std::string mmproj_path = j_mmproj_path ? jstring_to_std(env, j_mmproj_path) : "";
+    std::string draft_path = j_draft_path ? jstring_to_std(env, j_draft_path) : "";
 
     // Mali（天玑/麒麟等 ARM GPU）驱动的 Vulkan 后端对部分 compute 特性
     // dispatch 有缺陷（社区已知：llama.cpp #16881、Gio #274、ppsspp #17426）：
@@ -1977,7 +2035,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     bool ok = g_engine.load(path.c_str(), n_ctx,
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
                             gpu_backend.c_str(), j_enable_mtp == JNI_TRUE,
-                            mmproj_path.c_str());
+                            mmproj_path.c_str(), draft_path.c_str());
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {

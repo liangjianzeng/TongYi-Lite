@@ -297,15 +297,36 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       final gpu = await _ref.read(settingsServiceProvider).load();
       // 全局 MTP 总开关关闭时，即使某模型曾配置开启也强制不启用（可见可用控制）。
       final mtp = gpu.enableMtpFeature && gpu.mtpEnabled(modelId);
+      // dspark 投机草稿头：模型目录声明且文件完整时自动带上（MTP 启用时忽略，
+      // 原生层二选一互斥）。
+      String? draftPath;
+      final dsparkConfig = config?.dspark;
+      if (dsparkConfig != null && !mtp) {
+        final storage = ModelStorageService();
+        final dsparkFile = await storage.getDsparkPath(modelId);
+        if (File(dsparkFile).existsSync()) {
+          final dsSize = await File(dsparkFile).length();
+          if (dsSize > 0 &&
+              dsSize >= (dsparkConfig.sizeBytes * 0.99).round()) {
+            draftPath = dsparkFile;
+          }
+        }
+      }
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
-          'enableMtp($modelId)=$mtp)');
-      // 把 MTP 实际启用状态写进推理日志（loadingLogs），让「推理引擎日志」页
-      // 与启动日志都能确认该模型加载时 MTP 是否真的生效——此前只 debugPrint
-      // 到 logcat，App 内查看不到。
+          'enableMtp($modelId)=$mtp, draft=$draftPath)');
+      // 把 MTP/dspark 实际启用状态写进推理日志（loadingLogs），让「推理引擎
+      // 日志」页与启动日志都能确认该模型加载时投机加速是否真的生效——此前只
+      // debugPrint 到 logcat，App 内查看不到。
       final mtpLogs = List<String>.from(state.loadingLogs);
-      mtpLogs.add('MTP 加速: ${mtp ? '开启 ✓' : '关闭'}');
+      if (mtp) {
+        mtpLogs.add('MTP 加速: 开启 ✓');
+      } else if (draftPath != null) {
+        mtpLogs.add('dspark 投机加速: 开启 ✓');
+      } else {
+        mtpLogs.add('投机加速: 关闭（无草稿模型）');
+      }
       state = ModelState(
         phase: ModelLifecyclePhase.loading,
         modelId: modelId,
@@ -320,6 +341,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         nCtx: gpu.contextSize,
         enableMtp: mtp,
         mmprojPath: mmprojPath, // null = 单文件自包含 VL；两文件形态由原生 mtmd_init 加载
+        draftPath: draftPath,
       );
 
       if (ok) {

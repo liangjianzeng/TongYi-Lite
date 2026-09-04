@@ -30,6 +30,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '数组参数：<tool_call>todo_write<arg_key>todos<arg_value>[{"content": "明天开会", "status": "todo"}]</tool_call>\n'
       '键值规则：一个 <arg_key>键名</arg_key> 后面必须紧跟 <arg_value>值</arg_value>，'
       '先键后值、一个键配一个值，值不要放进 arg_key。\n'
+      '或用 JSON 对象：{"name": "web_search", "arguments": {"query": "今天天气"}}\n'
+      '两种格式都会被正确解析，按你擅长的输出。\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
@@ -111,6 +113,7 @@ class PromptJsonProtocol implements ToolProtocol {
     }
 
     if (decoded is Map<String, dynamic>) {
+      // 格式 1：{"tool_call": {"name": ..., "arguments": {...}}}（提示词约定）。
       final toolCall = decoded['tool_call'];
       if (toolCall is Map<String, dynamic>) {
         final name = toolCall['name'];
@@ -127,6 +130,15 @@ class PromptJsonProtocol implements ToolProtocol {
             ],
           );
         }
+      }
+
+      // 格式 2：顶层 {"name": ..., "arguments": {...}}（OpenAI/LFM 风格）。
+      final topLevel = _decodeJsonToolCall(json);
+      if (topLevel != null) {
+        return StreamOutcome(
+          text: before + after,
+          toolCalls: [topLevel],
+        );
       }
     }
 
@@ -160,6 +172,24 @@ class PromptJsonProtocol implements ToolProtocol {
     }
 
     final body = text.substring(open + openTag.length, bodyEnd);
+    final trimmed = body.trim();
+
+    // JSON-in-XML：`<tool_call>{"name": ..., "arguments": {...}}</tool_call>`
+    // （Qwen/LFM 系 chat template 训练分布：函数调用为 XML 标签内嵌 JSON
+    // 对象，而非 <arg_key> 标签）。LFM2.5 等模型原生输出这种格式。
+    if (trimmed.startsWith('{')) {
+      final jsonCall = _decodeJsonToolCall(trimmed);
+      if (jsonCall != null) {
+        return (
+          before: text.substring(0, open),
+          after: altClosed
+              ? text.substring(bodyEnd)
+              : text.substring(close + closeTag.length),
+          call: jsonCall,
+        );
+      }
+      // JSON 解析失败 → 落到下方 XML 解析（容错）。
+    }
 
     // 工具名：到第一个 <arg_key> 或 <arg_value> 之前。
     final nameMatch = RegExp(r'^\s*([^<\s]+)').firstMatch(body);
@@ -207,6 +237,27 @@ class PromptJsonProtocol implements ToolProtocol {
       return name;
     }).toList();
     return '（必填: ${parts.join(', ')}）';
+  }
+
+  /// 解码 JSON 对象形式的工具调用：`{"name": ..., "arguments": {...}}`。
+  /// 用于 `<tool_call>{...}</tool_call>`（Qwen/LFM 系）与顶层 JSON 对象。
+  /// 结构不符（缺 name / name 非字符串）返回 null。
+  ToolCall? _decodeJsonToolCall(String jsonText) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(jsonText);
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! Map<String, dynamic>) return null;
+    final name = decoded['name'];
+    if (name is! String || name.isEmpty) return null;
+    final args = decoded['arguments'];
+    return ToolCall(
+      id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
+      name: name,
+      arguments: args is Map<String, dynamic> ? args : null,
+    );
   }
 
   /// 顺序解析 XML 参数对（容错坏格式）。
