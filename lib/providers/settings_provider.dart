@@ -222,6 +222,25 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 是否默认加载视觉投影器（mmproj）。
+  Future<void> setAutoLoadMmproj(bool value) async {
+    state = state.copyWith(autoLoadMmproj: value);
+    await _persist();
+  }
+
+  /// GPU/CPU 占用率监控呈现开关。
+  Future<void> setShowResourceMonitor(bool value) async {
+    state = state.copyWith(showResourceMonitor: value);
+    await _persist();
+  }
+
+  /// 占用率采样周期（秒，0~30；0 = 仅推理时采样）。
+  Future<void> setResourceSampleIntervalSec(int value) async {
+    final clamped = value.clamp(0, 30);
+    state = state.copyWith(resourceSampleIntervalSec: clamped);
+    await _persist();
+  }
+
   Future<void> _persist() async {
     try {
       await _service.save(state);

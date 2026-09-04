@@ -23,6 +23,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -104,6 +105,7 @@ class MainActivity : FlutterActivity() {
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
                 "getInferenceStats" -> handleGetInferenceStats(result)
                 "getDeviceInfo" -> handleGetDeviceInfo(result)
+                "getResourceUsage" -> handleGetResourceUsage(result)
                 else            -> result.notImplemented()
             }
         }
@@ -656,6 +658,69 @@ class MainActivity : FlutterActivity() {
                 "model" to "",
             ))
         }
+    }
+
+    /**
+     * GPU/CPU 占用率采样（模型状态栏底部双色线）。
+     * 返回 {cpuUsage: Double, gpuUsage: Double?}（gpu 读不到时 null）。
+     */
+    private fun handleGetResourceUsage(result: MethodChannel.Result) {
+        // 读 /proc/stat 需两次采样间隔（sleep 80ms），放后台线程不阻塞 UI。
+        Thread {
+            val cpu = readGlobalCpuUsage()
+            val gpu = readGpuUsage()
+            runOnMain { result.success(mapOf("cpuUsage" to cpu, "gpuUsage" to gpu)) }
+        }.start()
+    }
+
+    /** 全局 CPU 占用率（%）：两次读 /proc/stat（间隔 80ms）算 busy/total。 */
+    private fun readGlobalCpuUsage(): Double {
+        val a = readCpuStat()
+        try { Thread.sleep(80) } catch (_: InterruptedException) { return 0.0 }
+        val b = readCpuStat()
+        if (a.size < 5 || b.size < 5 || b.size != a.size) return 0.0
+        var totalA = 0L; var totalB = 0L
+        for (i in a.indices) { totalA += a[i]; totalB += b[i] }
+        // 索引 3=idle，4=iowait（iowait 也视为空闲）。
+        val idleA = a[3] + a[4]; val idleB = b[3] + b[4]
+        val totalDelta = totalB - totalA
+        if (totalDelta <= 0) return 0.0
+        val busyDelta = totalDelta - (idleB - idleA)
+        return (busyDelta * 100.0 / totalDelta).coerceIn(0.0, 100.0)
+    }
+
+    private fun readCpuStat(): LongArray {
+        return try {
+            val line = File("/proc/stat").readLines().firstOrNull() ?: return LongArray(0)
+            val parts = line.split(" ")
+            parts.filter { it.isNotEmpty() && it != "cpu" }
+                .map { it.toLong() }
+                .toLongArray()
+        } catch (_: Exception) {
+            LongArray(0)
+        }
+    }
+
+    /** 读 GPU 占用率（%）：Adreno/Mali 常见 sysfs 路径，尽力而为；不可读返回 null。 */
+    private fun readGpuUsage(): Double? {
+        val paths = listOf(
+            "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+            "/sys/class/kgsl/kgsl-3d0/gpu_busy",
+            "/sys/kernel/gpu/gpu_busy",
+        )
+        for (p in paths) {
+            try {
+                val f = File(p)
+                if (!f.exists()) continue
+                val s = f.readText().trim()
+                if (s.isEmpty()) continue
+                val v = s.replace(Regex("[^0-9.]+"), "").toDoubleOrNull() ?: continue
+                return v.coerceIn(0.0, 100.0)
+            } catch (_: Exception) {
+                continue
+            }
+        }
+        return null
     }
 }
 

@@ -118,7 +118,7 @@ List<String> _parseRssItems(String xml) {
       final lines = <String>[];
       if (title.isNotEmpty) lines.add(title);
       if (desc.isNotEmpty) lines.add(desc);
-      if (link != null && link.isNotEmpty) lines.add('来源：$link');
+      if (link.isNotEmpty) lines.add('来源：$link');
       items.add(lines.join('\n'));
     }
   }
