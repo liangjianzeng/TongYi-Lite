@@ -44,6 +44,7 @@ class PromptJsonProtocol implements ToolProtocol {
       '带参数：{"name": "web_search", "arguments": {"query": "今天天气"}}\n'
       '数组参数：{"name": "todo_write", "arguments": {"todos": [{"content": "明天开会", "status": "todo"}]}}\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
+      '绝对不要输出 [get_time()] 这类函数签名文本——那样不会被当作工具调用，任务会失败。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
@@ -112,7 +113,17 @@ class PromptJsonProtocol implements ToolProtocol {
       );
     }
 
-    // 2) JSON 格式（提示词约定的主格式）。
+    // 2) [tool_name(arg)] 函数签名式调用（LFM 等模型退化输出，
+    //    如 [get_time()]、[web_search("今天天气")]）。
+    final bracketCall = _matchBracketCall(text);
+    if (bracketCall != null) {
+      return StreamOutcome(
+        text: bracketCall.before + bracketCall.after,
+        toolCalls: [bracketCall.call],
+      );
+    }
+
+    // 3) JSON 格式（提示词约定的主格式）。
     final extracted = _extractFirstJsonObject(text);
     if (extracted == null) return StreamOutcome(text: text);
 
@@ -258,6 +269,49 @@ class PromptJsonProtocol implements ToolProtocol {
       return name;
     }).toList();
     return '（必填: ${parts.join(', ')}）';
+  }
+
+  /// 签名式单参工具的命名参数映射：`[web_search("x")]` → {query: "x"}。
+  static const Map<String, String> _bracketArgKeys = {
+    'web_search': 'query',
+    'get_weather': 'location',
+    'calculator': 'expression',
+  };
+
+  /// 匹配 [tool_name(arg)] 函数签名式调用（LFM 等模型退化输出，如
+  /// `[get_time()]`、`[web_search("今天天气")]`）。无参数 → 空参数调用；
+  /// 单参数 → 按映射表对应命名参数；多参数/未知工具不解析（避免错误执行）。
+  ({String before, String after, ToolCall call})? _matchBracketCall(String text) {
+    final re = RegExp(r'\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*\]');
+    final m = re.firstMatch(text);
+    if (m == null) return null;
+    final name = m.group(1)!.trim();
+    if (name.isEmpty) return null;
+    final argsStr = m.group(2)!.trim();
+    Map<String, dynamic>? arguments;
+    if (argsStr.isNotEmpty) {
+      // 逗号分隔多个参数 → 无法可靠映射命名参数，不解析（避免错误执行）。
+      if (argsStr.contains(',')) return null;
+      final key = _bracketArgKeys[name];
+      if (key == null) return null; // 未知工具参数名映射 → 不解析
+      final value = argsStr.trim();
+      // 去掉首尾引号（单/双引号）。
+      final unquoted = value.length >= 2 &&
+              ((value.startsWith('"') && value.endsWith('"')) ||
+                  (value.startsWith("'") && value.endsWith("'")))
+          ? value.substring(1, value.length - 1)
+          : value;
+      arguments = {key: unquoted};
+    }
+    return (
+      before: text.substring(0, m.start),
+      after: text.substring(m.end),
+      call: ToolCall(
+        id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
+        name: name,
+        arguments: arguments,
+      ),
+    );
   }
 
   /// 解码 JSON 对象形式的工具调用：`{"name": ..., "arguments": {...}}`。
