@@ -15,6 +15,15 @@ void main() {
       expect(s.agentToolTimeoutMs, 15000);
       expect(s.agentAllowParallelTools, isFalse);
       expect(s.webSearchEnabled, isFalse);
+      expect(s.agentShellEnabled, isTrue);
+      expect(s.agentPythonEnabled, isTrue);
+      expect(s.agentFullFileAccess, isFalse);
+      // 长期记忆默认关闭（跨会话记忆可能积累偶发错误）。
+      expect(s.agentMemoryEnabled, isFalse);
+      // 推理引擎扩展：投影器默认加载、监控默认开启、采样默认 0（仅推理时）。
+      expect(s.autoLoadMmproj, isTrue);
+      expect(s.showResourceMonitor, isTrue);
+      expect(s.resourceSampleIntervalSec, 0);
       expect(s.agentToolsByModel, isEmpty);
       expect(s.agentByModel, isEmpty);
     });
@@ -41,6 +50,7 @@ void main() {
         agentShellEnabled: false,
         agentPythonEnabled: false,
         agentFullFileAccess: true,
+        agentMemoryEnabled: true,
         autoLoadMmproj: false,
         showResourceMonitor: false,
         resourceSampleIntervalSec: 10,
@@ -65,6 +75,7 @@ void main() {
       expect(restored.agentShellEnabled, isFalse);
       expect(restored.agentPythonEnabled, isFalse);
       expect(restored.agentFullFileAccess, isTrue);
+      expect(restored.agentMemoryEnabled, isTrue);
       expect(restored.autoLoadMmproj, isFalse);
       expect(restored.showResourceMonitor, isFalse);
       expect(restored.resourceSampleIntervalSec, 10);

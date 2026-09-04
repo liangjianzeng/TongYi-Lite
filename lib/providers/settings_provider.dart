@@ -222,6 +222,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 长期记忆开关（默认关闭：跨会话记忆可能积累偶发错误）。
+  Future<void> setAgentMemoryEnabled(bool value) async {
+    state = state.copyWith(agentMemoryEnabled: value);
+    await _persist();
+  }
+
   /// 是否默认加载视觉投影器（mmproj）。
   Future<void> setAutoLoadMmproj(bool value) async {
     state = state.copyWith(autoLoadMmproj: value);
