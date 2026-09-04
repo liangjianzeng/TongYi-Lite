@@ -156,7 +156,7 @@ class InferenceSettings {
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
     this.showResourceMonitor = true,
-    this.resourceSampleIntervalSec = 0,
+    this.resourceSampleIntervalSec = 1,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -341,7 +341,7 @@ class InferenceSettings {
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
       showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
       resourceSampleIntervalSec:
-          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 0,
+          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 1,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );
