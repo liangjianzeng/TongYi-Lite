@@ -112,8 +112,8 @@ class InferenceSettings {
   /// 推理引擎：GPU/CPU 占用率监控呈现（模型状态栏底部双色线）。默认开启。
   final bool showResourceMonitor;
 
-  /// 占用率采样周期（秒），0~30。默认 0：仅推理时事件驱动采样（空闲不采样，
-  /// 省电）；>0：每隔 N 秒周期性采样（空闲也更新线条）。
+  /// 占用率采样周期（秒），0~30。默认 1：周期性采样（空闲也更新线条，
+  /// 打开监控即可看到实时占比）；0：仅推理时采样（空闲不采样，省电）。
   final int resourceSampleIntervalSec;
 
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
@@ -156,7 +156,7 @@ class InferenceSettings {
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
     this.showResourceMonitor = true,
-    this.resourceSampleIntervalSec = 1,
+    this.resourceSampleIntervalSec = 0,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -341,7 +341,7 @@ class InferenceSettings {
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
       showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
       resourceSampleIntervalSec:
-          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 1,
+          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 0,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );

@@ -22,8 +22,9 @@ ToolDefinition createShellExecTool() {
     name: 'shell_exec',
     description:
         '在设备上执行 shell 命令（sh -c，app 权限内）。'
-        '可访问工作区文件、运行普通命令。输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。'
-        '被沙箱拒绝且确需访问公共目录/完整文件系统时，带 sandbox_permissions 请求用户批准。',
+        '可访问工作区文件、运行普通命令（如 cat/free/ps/top/df、查看 /proc 信息等）。'
+        '输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。'
+        '命令以 app 权限运行，不依赖 root；需要完整文件系统访问时带 sandbox_permissions 请求用户批准。',
     parameters: withEscalationFields({
       'type': 'object',
       'properties': {
@@ -56,8 +57,10 @@ ToolDefinition createShellExecTool() {
             ? '${output.substring(0, kShellOutputLimit)}\n…（已截断）'
             : output;
 
+        // 注意：不输出 [sandbox: ...] 标记——模型常误读为"被沙箱拒绝"而
+        // 放弃执行；实际 sh 命令始终以 app 权限运行，成功/失败只看 exit code。
         return ToolResult(
-          content: 'exit=${exitCode}[sandbox: ${mode.value}]${truncated.isNotEmpty ? '\n$truncated' : '（无输出）'}',
+          content: 'exit=${exitCode}${truncated.isNotEmpty ? '\n$truncated' : '（无输出）'}',
         );
       } on ProcessException catch (e) {
         return ToolResult.error('命令执行失败：${e.message}');

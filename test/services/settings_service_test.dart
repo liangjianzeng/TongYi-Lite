@@ -20,10 +20,11 @@ void main() {
       expect(s.agentFullFileAccess, isFalse);
       // 长期记忆默认关闭（跨会话记忆可能积累偶发错误）。
       expect(s.agentMemoryEnabled, isFalse);
-      // 推理引擎扩展：投影器默认加载、监控默认开启、采样默认 0（仅推理时）。
+      // 推理引擎扩展：投影器默认加载、监控默认开启、采样默认 1 秒（周期性，
+      // 打开监控即可看到实时占比）。
       expect(s.autoLoadMmproj, isTrue);
       expect(s.showResourceMonitor, isTrue);
-      expect(s.resourceSampleIntervalSec, 0);
+      expect(s.resourceSampleIntervalSec, 1);
       expect(s.agentToolsByModel, isEmpty);
       expect(s.agentByModel, isEmpty);
     });

@@ -417,9 +417,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return Scaffold(
       drawer: _buildConversationDrawer(),
       appBar: AppBar(
+        // 紧凑标题栏：44px（默认 56），给主屏幕更多呈现空间。
+        toolbarHeight: 44,
         title: const Text(
           'TongYi-Lite',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
         ),
         centerTitle: true,
         leading: Builder(
@@ -738,19 +740,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 双色线监控条：蓝=GPU、紫=CPU，各占满屏宽，宽度 = 占用率%。
+  /// 高度 4px（紧凑，不挤占聊天区）。
   Widget _buildResourceMonitor() {
     final settings = ref.watch(settingsProvider);
     if (!settings.showResourceMonitor) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
-      height: 8,
+      height: 4,
       color: const Color(0x11000000),
       padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 1),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           _buildMonitorLine(color: const Color(0xFF2196F3), usage: _gpuUsage),
-          const SizedBox(height: 2),
+          const SizedBox(height: 1),
           _buildMonitorLine(color: const Color(0xFF9C27B0), usage: _cpuUsage),
         ],
       ),
@@ -763,8 +766,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       final w = maxW * (usage / 100).clamp(0.0, 1.0);
       return Stack(
         children: [
-          Container(height: 1.5, width: maxW, color: color.withValues(alpha: 0.15)),
-          Container(height: 1.5, width: w, color: color),
+          Container(height: 1, width: maxW, color: color.withValues(alpha: 0.15)),
+          Container(height: 1, width: w, color: color),
         ],
       );
     });
