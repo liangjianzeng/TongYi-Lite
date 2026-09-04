@@ -79,6 +79,24 @@ void main() {
       expect(outcome.toolCalls.single.arguments?['query'], '今天天气');
     });
 
+    test('[tool_name()] 签名式调用（LFM 退化输出）：无参数', () async {
+      const text = '[get_time()]';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+      expect(outcome.toolCalls.single.arguments, isNull);
+    });
+
+    test('[tool_name("arg")] 签名式调用：单参数映射到命名参数', () async {
+      const text = '[web_search("今天天气")]';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], '今天天气');
+    });
+
     test('顶层 JSON 对象（OpenAI/LFM 风格，无 tool_call 包裹）', () async {
       const text =
           '{"name": "get_weather", "arguments": {"location": "武汉"}}';
