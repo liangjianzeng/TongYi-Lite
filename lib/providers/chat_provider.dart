@@ -658,6 +658,13 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.unregister('python_exec');
     }
 
+    // 长期记忆：默认关闭（跨会话记忆可能积累偶发错误）；开启后才暴露
+    // memory_set/memory_get，模型才能写入/读取持久化记忆。
+    if (!settings.agentMemoryEnabled) {
+      registry.unregister('memory_set');
+      registry.unregister('memory_get');
+    }
+
     // 按模型工具启用（设置层配置；空 = 不限制，全部可见）。
     final modelTools = settings.agentToolsFor(modelId);
     if (modelTools.isNotEmpty) {
@@ -688,6 +695,11 @@ class ChatNotifier extends StateNotifier<bool> {
     return (messages, protocol, config) async {
       round++;
       final isFirst = round == 1;
+
+      // 本轮性能统计（Agent 每轮独立计时，附加到本轮 assistant 消息）。
+      final roundStart = DateTime.now();
+      DateTime? firstTokenTime;
+      var tokenCount = 0;
 
       // ---- 构建本轮流（本地 / API）----
       final Stream<String> sourceStream;
@@ -739,6 +751,8 @@ class ChatNotifier extends StateNotifier<bool> {
 
       await for (final token in sourceStream) {
         if (token.isEmpty) continue;
+        firstTokenTime ??= DateTime.now();
+        tokenCount++;
         rawBuffer.write(token);
         processor.add(token);
         final now = DateTime.now();
@@ -754,12 +768,48 @@ class ChatNotifier extends StateNotifier<bool> {
       final outcome =
           await protocol.parseStream(Stream<String>.value(rawBuffer.toString()));
 
+      // ---- 本轮性能统计（同普通聊天：原生真实 token 数 + 纯生成耗时）----
+      final totalMs = DateTime.now().difference(roundStart).inMilliseconds;
+      final firstTokenMs = firstTokenTime != null
+          ? firstTokenTime.difference(roundStart).inMilliseconds
+          : 0;
+      int realTokens = tokenCount;
+      double genMs = 0.0;
+      int visionMs = 0;
+      int audioMs = 0;
+      if (!useApi) {
+        Map<String, dynamic> genStats = {};
+        try {
+          genStats = await _inference.getInferenceStats();
+        } catch (_) {}
+        realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
+        genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+        visionMs = (genStats['t_vision_ms'] as num?)?.toInt() ?? 0;
+        audioMs = (genStats['t_audio_ms'] as num?)?.toInt() ?? 0;
+      }
+      final tokensPerSec = genMs > 0
+          ? realTokens * 1000 / genMs
+          : (totalMs > 0 ? realTokens * 1000 / totalMs : 0.0);
+      final roundStats = InferenceStats(
+        firstTokenMs: firstTokenMs,
+        totalMs: totalMs,
+        tokPerSec: tokensPerSec,
+        visionMs: visionMs,
+        audioMs: audioMs,
+      );
+      _ref.read(modelManagerProvider.notifier).appendInferenceLog(
+        'Agent 轮 $round | $realTokens tokens | 首token ${firstTokenMs}ms'
+        ' | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
+        ' | ${tokensPerSec.toStringAsFixed(1)} tok/s',
+      );
+
       if (outcome.hasToolCalls) {
         // 工具轮：占位 → 工具活动消息（后续由 onToolActivity 更新结果）。
         final names = outcome.toolCalls.map((c) => c.name).join('、');
         assistantMsg = assistantMsg.copyWith(
           content: '🔧 正在调用：$names',
           isStreaming: true,
+          inferenceStats: roundStats,
         );
         await _storage.saveMessage(assistantMsg);
       } else {
@@ -768,6 +818,7 @@ class ChatNotifier extends StateNotifier<bool> {
         assistantMsg = assistantMsg.copyWith(
           content: finalText,
           isStreaming: false,
+          inferenceStats: roundStats,
         );
         await _storage.saveMessage(assistantMsg);
       }

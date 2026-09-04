@@ -101,6 +101,10 @@ class InferenceSettings {
   /// MANAGE_EXTERNAL_STORAGE / All-Files-Access）。
   final bool agentFullFileAccess;
 
+  /// 长期记忆开关（memory_set/memory_get）。默认**关闭**：跨会话持久化
+  /// 的记忆可能积累偶发错误（不同模型/情况误写），开启后由用户显式配置。
+  final bool agentMemoryEnabled;
+
   /// 推理引擎：是否默认加载视觉投影器（mmproj）。默认 true（针对有投影器的
   /// 模型）；关闭后视觉模型仅文本推理，不加载投影器。
   final bool autoLoadMmproj;
@@ -147,6 +151,8 @@ class InferenceSettings {
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
+    // 长期记忆默认关闭（跨会话记忆可能积累偶发错误，默认不启用）。
+    this.agentMemoryEnabled = false,
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
     this.showResourceMonitor = true,
@@ -210,6 +216,7 @@ class InferenceSettings {
       bool? agentShellEnabled,
       bool? agentPythonEnabled,
       bool? agentFullFileAccess,
+      bool? agentMemoryEnabled,
       // ---- 推理引擎 ----
       bool? autoLoadMmproj,
       bool? showResourceMonitor,
@@ -249,6 +256,7 @@ class InferenceSettings {
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess:
           agentFullFileAccess ?? this.agentFullFileAccess,
+      agentMemoryEnabled: agentMemoryEnabled ?? this.agentMemoryEnabled,
       autoLoadMmproj: autoLoadMmproj ?? this.autoLoadMmproj,
       showResourceMonitor: showResourceMonitor ?? this.showResourceMonitor,
       resourceSampleIntervalSec:
@@ -284,6 +292,7 @@ class InferenceSettings {
         // 保存后读回会静默丢配置（默认值兜底）。
         'agentPythonEnabled': agentPythonEnabled,
         'agentFullFileAccess': agentFullFileAccess,
+        'agentMemoryEnabled': agentMemoryEnabled,
         // ---- 推理引擎 ----
         'autoLoadMmproj': autoLoadMmproj,
         'showResourceMonitor': showResourceMonitor,
@@ -326,6 +335,8 @@ class InferenceSettings {
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
+      // 长期记忆默认关闭（旧配置缺字段时向后兼容）。
+      agentMemoryEnabled: json['agentMemoryEnabled'] as bool? ?? false,
       // 推理引擎扩展：旧配置缺字段时用默认值（投影器默认加载、监控默认开启）。
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
       showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
