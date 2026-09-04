@@ -235,6 +235,10 @@ class DownloadTask {
   DownloadState state;
   int downloadedBytes;
   int totalBytes;
+
+  /// 当前下载阶段（主模型 / 投影器 / 加速头），多文件模型用于 UI 展示。
+  /// null = 单文件模型或未开始。
+  String? stage;
   String? errorMessage;
   DateTime? startTime;
   DateTime? endTime;
@@ -244,6 +248,7 @@ class DownloadTask {
     this.state = DownloadState.idle,
     this.downloadedBytes = 0,
     this.totalBytes = 0,
+    this.stage,
     this.errorMessage,
     this.startTime,
     this.endTime,
@@ -273,6 +278,7 @@ class DownloadTask {
     DownloadState? state,
     int? downloadedBytes,
     int? totalBytes,
+    String? stage,
     String? errorMessage,
     DateTime? startTime,
     DateTime? endTime,
@@ -282,6 +288,7 @@ class DownloadTask {
       state: state ?? this.state,
       downloadedBytes: downloadedBytes ?? this.downloadedBytes,
       totalBytes: totalBytes ?? this.totalBytes,
+      stage: stage ?? this.stage,
       errorMessage: errorMessage ?? this.errorMessage,
       startTime: startTime ?? this.startTime,
       endTime: endTime ?? this.endTime,
