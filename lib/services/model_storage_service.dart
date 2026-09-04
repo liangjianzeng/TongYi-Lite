@@ -115,6 +115,12 @@ class ModelStorageService {
     return p.join(dir.path, '${modelId}.mmproj');
   }
 
+  /// 获取 dspark 投机草稿头文件路径（独立 GGUF，如 Bonsai-27B-dspark-Q4_1）。
+  Future<String> getDsparkPath(String modelId) async {
+    final dir = await getModelsRootDir();
+    return p.join(dir.path, '${modelId}.dspark.gguf');
+  }
+
   /// Check if model file exists locally
   Future<bool> isModelCached(String modelId) async {
     try {
@@ -188,6 +194,17 @@ class ModelStorageService {
           return false;
         }
         await _cleanStaleTmp(dir, model.id, '.mmproj');
+      }
+      // dspark 投机草稿头：必须完整存在，否则投机加速无法启用。
+      final ds = model.dspark;
+      if (ds != null) {
+        final dspark = File(p.join(dir.path, '${model.id}.dspark.gguf'));
+        if (!await dspark.exists()) return false;
+        final dsSize = await dspark.length();
+        if (ds.sizeBytes > 0 && dsSize < (ds.sizeBytes * 0.99).round()) {
+          return false;
+        }
+        await _cleanStaleTmp(dir, model.id, '.dspark.gguf');
       }
       return true;
     } catch (_) {

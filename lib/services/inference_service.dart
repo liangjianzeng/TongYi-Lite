@@ -77,10 +77,14 @@ class InferenceService {
     /// 可选的 mmproj 投影器路径（text+mmproj 两文件形态的视觉模型）。
     /// 原生侧（mtmd）加载该投影器后启用图像理解；null 表示单文件 VL 或文本模型。
     String? mmprojPath,
+
+    /// 可选的 dspark 投机解码草稿模型路径（如 Bonsai-27B-dspark-Q4_1.gguf）。
+    /// 原生侧加载后启用 DFlash/DSpark 投机加速；null 表示不启用。
+    String? draftPath,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
         '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
-        ', mmproj=$mmprojPath)');
+        ', mmproj=$mmprojPath, draft=$draftPath)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
@@ -90,6 +94,7 @@ class InferenceService {
         'gpuBackend': gpuBackend,
         'enableMtp': enableMtp,
         'mmprojPath': mmprojPath,
+        'draftPath': draftPath,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;

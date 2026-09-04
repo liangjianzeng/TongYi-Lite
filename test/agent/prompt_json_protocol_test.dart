@@ -68,6 +68,27 @@ void main() {
       expect(outcome.toolCalls.single.arguments?['query'], 'AI news today');
     });
 
+    test('XML 标签内嵌 JSON 对象（Qwen/LFM 系训练分布）', () async {
+      // LFM2.5 等模型的 chat template：<tool_call> 标签内是 JSON 对象。
+      const text =
+          '<tool_call>{"name": "web_search", "arguments": {"query": "今天天气"}}</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], '今天天气');
+    });
+
+    test('顶层 JSON 对象（OpenAI/LFM 风格，无 tool_call 包裹）', () async {
+      const text =
+          '{"name": "get_weather", "arguments": {"location": "武汉"}}';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_weather');
+      expect(outcome.toolCalls.single.arguments?['location'], '武汉');
+    });
+
     test('XML 块前后文本保留', () async {
       const text =
           '让我查询一下<tool_call>web_search<arg_key>q<arg_value>天气</tool_call>请稍等';

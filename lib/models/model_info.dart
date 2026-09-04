@@ -102,6 +102,37 @@ class MmprojConfig {
   }
 }
 
+/// dspark 投机解码草稿头配置（如 Bonsai-27B-dspark-Q4_1.gguf，DFlash + Markov
+/// head）。存在时加载主模型会自动带上草稿模型做投机加速；null 表示无草稿头。
+class DsparkConfig {
+  final List<MirrorEntry> mirrors;
+  final int sizeBytes;
+  final String sizeMBDisplay;
+
+  const DsparkConfig({
+    required this.mirrors,
+    required this.sizeBytes,
+    required this.sizeMBDisplay,
+  });
+
+  String get bestMirrorUrl => mirrors.first.url;
+  int get sizeMB => sizeBytes ~/ (1024 * 1024);
+
+  @override
+  String toString() => 'DsparkConfig(${sizeMBDisplay})';
+
+  factory DsparkConfig.fromJson(Map<String, dynamic> json) {
+    final sizeMB = (json['sizeMB'] as num?)?.toDouble() ?? 0.0;
+    return DsparkConfig(
+      mirrors: (json['mirrors'] as List)
+          .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      sizeBytes: (sizeMB * 1024 * 1024).round(),
+      sizeMBDisplay: json['sizeMBDisplay'] as String? ?? '${sizeMB.toStringAsFixed(1)} MB',
+    );
+  }
+}
+
 class ModelConfig {
   final String id;
   final String name;
@@ -120,6 +151,9 @@ class ModelConfig {
   /// 可选的 mmproj 投影器配置。null + type=vision → 单文件自包含 VL。
   final MmprojConfig? mmproj;
 
+  /// 可选的 dspark 投机草稿头配置。null → 无投机草稿模型。
+  final DsparkConfig? dspark;
+
   const ModelConfig({
     required this.id,
     required this.name,
@@ -133,6 +167,7 @@ class ModelConfig {
     this.mtp = false,
     this.tags = const [],
     this.mmproj,
+    this.dspark,
   });
 
   String get bestMirrorUrl => mirrors.first.url;
@@ -143,8 +178,9 @@ class ModelConfig {
   /// 原生层依据 [mmproj] 是否存在决定加载方式。
   bool get supportsVision => type == ModelType.vision;
 
-  /// 需要 mmproj 的模型，其总下载体积（主 gguf + mmproj）。
-  int get totalBytes => sizeBytes + (mmproj?.sizeBytes ?? 0);
+  /// 需要 mmproj/dspark 的模型，其总下载体积（主 gguf + mmproj + dspark）。
+  int get totalBytes =>
+      sizeBytes + (mmproj?.sizeBytes ?? 0) + (dspark?.sizeBytes ?? 0);
 
   @override
   String toString() => 'ModelConfig($id, ${sizeMBDisplay}, type=${modelTypeLabel(type)}, '
@@ -169,6 +205,9 @@ class ModelConfig {
           const [],
       mmproj: json['mmproj'] != null
           ? MmprojConfig.fromJson(json['mmproj'] as Map<String, dynamic>)
+          : null,
+      dspark: json['dspark'] != null
+          ? DsparkConfig.fromJson(json['dspark'] as Map<String, dynamic>)
           : null,
     );
   }
