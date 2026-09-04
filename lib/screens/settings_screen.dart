@@ -119,7 +119,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           isScrollable: true,
           tabAlignment: TabAlignment.start,
           // 小图标 + 小字号，减少标题栏占用的纵向空间。
-          iconSize: 18,
           indicatorWeight: 2,
           labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
           unselectedLabelStyle: const TextStyle(fontSize: 12),

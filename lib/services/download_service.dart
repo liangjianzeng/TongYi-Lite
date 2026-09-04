@@ -75,10 +75,11 @@ class DownloadService {
       );
       final ggufTemp = File(p.join(dir.path, model.id + ggufTarget.suffix + '.tmp'));
       final ggufFinal = File(p.join(dir.path, model.id + ggufTarget.suffix));
+      // 完成判定：存在、无残留 .tmp、非空即完整。catalog 估算大小不可靠（常比实际大），
+      // 不再用它卡百分比（与 isFullyCached 一致，a6dc05d 已让下载循环信任 CDN）。
       final ggufComplete = await ggufFinal.exists() &&
           !(await ggufTemp.exists()) &&
-          (model.sizeBytes == 0 ||
-           (await ggufFinal.length()) >= (model.sizeBytes * 0.99).round());
+          (await ggufFinal.length()) > 0;
       if (ggufComplete) {
         debugPrint('[DownloadService] ${model.id} 主 gguf 已完整，跳过主模型下载');
       } else {
@@ -106,8 +107,7 @@ class DownloadService {
         // 不再重复拉取已有投影器（此前缺此检查，点「下载」会无条件重下 mmproj）。
         final mmprojComplete = await mmprojFinal.exists() &&
             !(await mmprojTemp.exists()) &&
-            (mm.sizeBytes == 0 ||
-             (await mmprojFinal.length()) >= (mm.sizeBytes * 0.99).round());
+            (await mmprojFinal.length()) > 0;
         if (mmprojComplete) {
           final done = await mmprojFinal.length();
           debugPrint('[DownloadService] ${model.id} mmproj 已完整，跳过投影器下载');
@@ -139,8 +139,7 @@ class DownloadService {
         final dsparkFinal = File(p.join(dir.path, model.id + dsparkTarget.suffix));
         final dsparkComplete = await dsparkFinal.exists() &&
             !(await dsparkTemp.exists()) &&
-            (ds.sizeBytes == 0 ||
-             (await dsparkFinal.length()) >= (ds.sizeBytes * 0.99).round());
+            (await dsparkFinal.length()) > 0;
         if (dsparkComplete) {
           final done = await dsparkFinal.length();
           debugPrint('[DownloadService] ${model.id} dspark 已完整，跳过草稿头下载');
