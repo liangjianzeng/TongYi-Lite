@@ -147,6 +147,23 @@ class InferenceService {
     return {};
   }
 
+  /// GPU/CPU 占用率采样（模型状态栏底部双色线）。
+  /// 返回 {cpuUsage: double, gpuUsage: double?}（gpu 读不到时 null）。
+  Future<({double cpu, double? gpu})> getResourceUsage() async {
+    try {
+      final r = await _channel.invokeMethod('getResourceUsage');
+      if (r is Map) {
+        final cpu = (r['cpuUsage'] as num?)?.toDouble() ?? 0.0;
+        final gpuRaw = r['gpuUsage'];
+        final gpu = gpuRaw is num ? gpuRaw.toDouble() : null;
+        return (cpu: cpu, gpu: gpu);
+      }
+    } catch (e) {
+      debugPrint('[InferenceService] getResourceUsage failed: $e');
+    }
+    return (cpu: 0.0, gpu: null);
+  }
+
   /// 获取设备硬件信息（SoC 等），用于按芯片禁用不支持的 GPU 后端。
   Future<Map<String, String>> getDeviceInfo() async {
     try {

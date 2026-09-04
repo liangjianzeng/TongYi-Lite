@@ -28,6 +28,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '无参数：<tool_call>get_time</tool_call>\n'
       '带参数：<tool_call>web_search<arg_key>query<arg_value>今天天气</tool_call>\n'
       '数组参数：<tool_call>todo_write<arg_key>todos<arg_value>[{"content": "明天开会", "status": "todo"}]</tool_call>\n'
+      '键值规则：一个 <arg_key>键名</arg_key> 后面必须紧跟 <arg_value>值</arg_value>，'
+      '先键后值、一个键配一个值，值不要放进 arg_key。\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
@@ -141,10 +143,23 @@ class PromptJsonProtocol implements ToolProtocol {
     const closeTag = '</tool_call>';
     final open = text.indexOf(openTag);
     if (open < 0) return null;
-    final close = text.indexOf(closeTag, open + openTag.length);
-    if (close < 0) return null; // 未闭合 → 不解析（避免误判为普通文本）
 
-    final body = text.substring(open + openTag.length, close);
+    final close = text.indexOf(closeTag, open + openTag.length);
+    var bodyEnd = close;
+    var altClosed = false;
+    if (close < 0) {
+      // 坏格式兼容：模型常漏 `</tool_call>`，以最后一个 `</arg_value>` /
+      // `</arg_key>` 收尾（如 `<tool_call>web_search<arg_key>query<arg_key>
+      // AI news today</arg_value></arg_key>`）。无任何闭合标签则不解析。
+      final lastValue = text.lastIndexOf('</arg_value>');
+      final lastKey = text.lastIndexOf('</arg_key>');
+      final altEnd = lastValue > lastKey ? lastValue : lastKey;
+      if (altEnd < open + openTag.length) return null;
+      bodyEnd = altEnd;
+      altClosed = true;
+    }
+
+    final body = text.substring(open + openTag.length, bodyEnd);
 
     // 工具名：到第一个 <arg_key> 或 <arg_value> 之前。
     final nameMatch = RegExp(r'^\s*([^<\s]+)').firstMatch(body);
@@ -152,28 +167,17 @@ class PromptJsonProtocol implements ToolProtocol {
     final name = nameMatch.group(1)!.trim();
     if (name.isEmpty) return null;
 
-    // 参数对：独立提取 <arg_key>KEY 与 <arg_value>VALUE 再按序配对
-    // （兼容闭合标签与半开标签两种变体）。
-    final keyRe = RegExp(r'<arg_key>\s*([^<]+)');
-    final valueRe = RegExp(r'<arg_value>\s*([^<]+)');
-    final keys = keyRe
-        .allMatches(body)
-        .map((m) => m.group(1)!.trim())
-        .where((k) => k.isNotEmpty)
-        .toList();
-    final values = valueRe
-        .allMatches(body)
-        .map((m) => m.group(1)!.trim())
-        .where((v) => v.isNotEmpty)
-        .toList();
-    final arguments = <String, dynamic>{};
-    for (var i = 0; i < keys.length && i < values.length; i++) {
-      arguments[keys[i]] = _decodeXmlArgValue(values[i]);
-    }
+    // 参数对：顺序扫描 <arg_key>/<arg_value>，兼容闭合/半开标签，并**容错
+    // 坏格式**——模型常见错误是把值文本直接塞进 <arg_key>（如
+    // `<arg_key>query<arg_key>AI news today</arg_value>`），此时把第二个
+    // <arg_key> 的文本当作 value 配对给前面的 key，一次调用即可成功。
+    final arguments = _parseXmlArgs(body);
 
     return (
       before: text.substring(0, open),
-      after: text.substring(close + closeTag.length),
+      after: altClosed
+          ? text.substring(bodyEnd) // 坏格式：闭合标签之后的残留文本
+          : text.substring(close + closeTag.length),
       call: ToolCall(
         id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
         name: name,
@@ -203,6 +207,49 @@ class PromptJsonProtocol implements ToolProtocol {
       return name;
     }).toList();
     return '（必填: ${parts.join(', ')}）';
+  }
+
+  /// 顺序解析 XML 参数对（容错坏格式）。
+  ///
+  /// 正常：`<arg_key>key<arg_value>value` 或带闭合标签；
+  /// 坏格式：`<arg_key>key<arg_key>value文本</arg_value>`（值误塞进 key 标签）
+  /// → 第二个 <arg_key> 的文本被配对给 pendingKey。
+  /// 孤立 value（key 缺失）忽略；残留 pendingKey（有 key 无 value）丢弃。
+  Map<String, dynamic> _parseXmlArgs(String body) {
+    final args = <String, dynamic>{};
+    final tagRe = RegExp(r'<(arg_key|arg_value)>');
+    final tags = tagRe.allMatches(body).toList();
+    if (tags.isEmpty) return args;
+
+    String? pendingKey;
+    for (var i = 0; i < tags.length; i++) {
+      final tag = tags[i].group(1)!;
+      final valueStart = tags[i].end;
+      // 标签后的文本：到下一个 '<'（含闭合标签）为止。
+      final nextLt = body.indexOf('<', valueStart);
+      final end = nextLt < 0 ? body.length : nextLt;
+      final text = body.substring(valueStart, end).trim();
+      if (text.isEmpty) continue;
+
+      if (tag == 'arg_key') {
+        if (pendingKey != null) {
+          // 连续 arg_key（无中间 arg_value）= 坏格式：当前文本是值，
+          // 配对给 pendingKey（如 `<arg_key>query<arg_key>AI news today</arg_value>`）。
+          args[pendingKey] = _decodeXmlArgValue(text);
+          pendingKey = null;
+        } else {
+          // 正常：文本是 key。
+          pendingKey = text;
+        }
+      } else {
+        // arg_value：文本是值，配对给 pendingKey；孤立 value 忽略。
+        if (pendingKey != null) {
+          args[pendingKey] = _decodeXmlArgValue(text);
+          pendingKey = null;
+        }
+      }
+    }
+    return args;
   }
 
   /// 解码 XML 工具参数值：以 `[`/`{` 开头且以 `]`/`}` 结尾的字符串按 JSON 解析

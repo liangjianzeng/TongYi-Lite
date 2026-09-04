@@ -1078,6 +1078,67 @@ class _InferenceEngineTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
+          // ---- 推理引擎扩展设置卡片（视觉投影器 / 资源监控）----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🧠 推理引擎扩展', context),
+                  const SizedBox(height: 12),
+                  _buildToggleTitle(
+                    '🖼️ 默认加载视觉投影器',
+                    gpuSettings.autoLoadMmproj,
+                    gpuNotifier.setAutoLoadMmproj,
+                    subtitle: '针对有投影器（mmproj）的视觉模型；关闭后仅文本推理',
+                  ),
+                  const SizedBox(height: 16),
+                  _buildToggleTitle(
+                    '📊 GPU/CPU 占用率监控',
+                    gpuSettings.showResourceMonitor,
+                    gpuNotifier.setShowResourceMonitor,
+                    subtitle: '模型状态栏底部双色线：蓝=GPU、紫=CPU',
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: gpuSettings.resourceSampleIntervalSec.toDouble(),
+                          min: 0,
+                          max: 30,
+                          divisions: 30,
+                          label: '${gpuSettings.resourceSampleIntervalSec} 秒',
+                          onChanged: (v) => gpuNotifier
+                              .setResourceSampleIntervalSec(v.round()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 78,
+                        child: Text(
+                          gpuSettings.resourceSampleIntervalSec == 0
+                              ? '推理时'
+                              : '${gpuSettings.resourceSampleIntervalSec}s',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '采样周期：0 秒 = 仅推理时采样（空闲不采样省电）；>0 = 周期性采样',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(

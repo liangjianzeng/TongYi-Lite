@@ -251,9 +251,14 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       }
 
       // 4. 视觉模型：解析 mmproj（text+mmproj 两文件形态需投影器文件）。
+      //    设置「默认加载视觉投影器」关闭时跳过投影器，仅文本推理。
       final config = _lookupModelConfig(modelId);
       String? mmprojPath;
-      if (config != null && config.type == ModelType.vision) {
+      final autoMmproj =
+          (await _ref.read(settingsServiceProvider).load()).autoLoadMmproj;
+      if (config != null &&
+          config.type == ModelType.vision &&
+          autoMmproj) {
         if (config.mmproj != null) {
           final storage = ModelStorageService();
           mmprojPath = await storage.getMmprojPath(modelId);

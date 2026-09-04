@@ -101,6 +101,17 @@ class InferenceSettings {
   /// MANAGE_EXTERNAL_STORAGE / All-Files-Access）。
   final bool agentFullFileAccess;
 
+  /// 推理引擎：是否默认加载视觉投影器（mmproj）。默认 true（针对有投影器的
+  /// 模型）；关闭后视觉模型仅文本推理，不加载投影器。
+  final bool autoLoadMmproj;
+
+  /// 推理引擎：GPU/CPU 占用率监控呈现（模型状态栏底部双色线）。默认开启。
+  final bool showResourceMonitor;
+
+  /// 占用率采样周期（秒），0~30。默认 0：仅推理时事件驱动采样（空闲不采样，
+  /// 省电）；>0：每隔 N 秒周期性采样（空闲也更新线条）。
+  final int resourceSampleIntervalSec;
+
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
   /// 目录声明的默认工具集（agentDefaults.enabledTools）。
   final Map<String, List<String>> agentToolsByModel;
@@ -136,6 +147,10 @@ class InferenceSettings {
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
+    // ---- 推理引擎 ----
+    this.autoLoadMmproj = true,
+    this.showResourceMonitor = true,
+    this.resourceSampleIntervalSec = 0,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -195,6 +210,10 @@ class InferenceSettings {
       bool? agentShellEnabled,
       bool? agentPythonEnabled,
       bool? agentFullFileAccess,
+      // ---- 推理引擎 ----
+      bool? autoLoadMmproj,
+      bool? showResourceMonitor,
+      int? resourceSampleIntervalSec,
       Map<String, List<String>>? agentToolsByModel,
       Map<String, Map<String, dynamic>>? agentByModel}) {
     return InferenceSettings(
@@ -230,6 +249,10 @@ class InferenceSettings {
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess:
           agentFullFileAccess ?? this.agentFullFileAccess,
+      autoLoadMmproj: autoLoadMmproj ?? this.autoLoadMmproj,
+      showResourceMonitor: showResourceMonitor ?? this.showResourceMonitor,
+      resourceSampleIntervalSec:
+          resourceSampleIntervalSec ?? this.resourceSampleIntervalSec,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
     );
@@ -257,6 +280,14 @@ class InferenceSettings {
         'agentAllowParallelTools': agentAllowParallelTools,
         'webSearchEnabled': webSearchEnabled,
         'agentShellEnabled': agentShellEnabled,
+        // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson，
+        // 保存后读回会静默丢配置（默认值兜底）。
+        'agentPythonEnabled': agentPythonEnabled,
+        'agentFullFileAccess': agentFullFileAccess,
+        // ---- 推理引擎 ----
+        'autoLoadMmproj': autoLoadMmproj,
+        'showResourceMonitor': showResourceMonitor,
+        'resourceSampleIntervalSec': resourceSampleIntervalSec,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
       };
@@ -295,6 +326,11 @@ class InferenceSettings {
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
+      // 推理引擎扩展：旧配置缺字段时用默认值（投影器默认加载、监控默认开启）。
+      autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
+      showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
+      resourceSampleIntervalSec:
+          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 0,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );

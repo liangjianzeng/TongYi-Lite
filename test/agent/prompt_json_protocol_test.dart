@@ -46,6 +46,28 @@ void main() {
       expect(outcome.text, '<tool_call>get_time');
     });
 
+    test('XML 坏格式（值误塞进 arg_key）容错配对', () async {
+      const text =
+          '<tool_call>web_search<arg_key>query<arg_key>AI news today</arg_value></tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], 'AI news today');
+    });
+
+    test('XML 坏格式（漏 </tool_call>，以 </arg_key> 收尾）容错解析', () async {
+      // 真机实测模型坏格式：<tool_call>web_search<arg_key>query<arg_key>
+      // AI news today</arg_value></arg_key>（无 </tool_call> 闭合）。
+      const text =
+          '<tool_call>web_search<arg_key>query<arg_key>AI news today</arg_value></arg_key>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], 'AI news today');
+    });
+
     test('XML 块前后文本保留', () async {
       const text =
           '让我查询一下<tool_call>web_search<arg_key>q<arg_value>天气</tool_call>请稍等';

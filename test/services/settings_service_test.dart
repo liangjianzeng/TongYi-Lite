@@ -38,6 +38,12 @@ void main() {
         agentToolTimeoutMs: 30000,
         agentAllowParallelTools: true,
         webSearchEnabled: true,
+        agentShellEnabled: false,
+        agentPythonEnabled: false,
+        agentFullFileAccess: true,
+        autoLoadMmproj: false,
+        showResourceMonitor: false,
+        resourceSampleIntervalSec: 10,
         agentToolsByModel: {
           'spark-x2.5-4b-q4_k_m': ['get_time', 'calculator'],
         },
@@ -56,6 +62,12 @@ void main() {
       expect(restored.agentToolTimeoutMs, 30000);
       expect(restored.agentAllowParallelTools, isTrue);
       expect(restored.webSearchEnabled, isTrue);
+      expect(restored.agentShellEnabled, isFalse);
+      expect(restored.agentPythonEnabled, isFalse);
+      expect(restored.agentFullFileAccess, isTrue);
+      expect(restored.autoLoadMmproj, isFalse);
+      expect(restored.showResourceMonitor, isFalse);
+      expect(restored.resourceSampleIntervalSec, 10);
       expect(restored.agentToolsFor('spark-x2.5-4b-q4_k_m'),
           ['get_time', 'calculator']);
       expect(restored.agentConfigFor('spark-x2.5-4b-q4_k_m'),

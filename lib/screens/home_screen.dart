@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart' show openAppSettings
 import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
 import '../providers/model_provider.dart';
 import '../providers/settings_provider.dart' show settingsProvider;
+import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
@@ -49,6 +50,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
 
+  // GPU/CPU 占用率监控（模型状态栏底部双色线）
+  Timer? _sampleTimer;
+  double _gpuUsage = 0.0;
+  double _cpuUsage = 0.0;
+  /// 当前采样模式：-1=停止，0=仅推理时采样（500ms），N>0=周期性采样（N 秒）。
+  int _samplingMode = -1;
+
   @override
   void initState() {
     super.initState();
@@ -67,6 +75,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _recordingTimer = null;
     _recordingNotifier.dispose();
     _recordingSecondsNotifier.dispose();
+    _stopResourceSampling();
     super.dispose();
   }
 
@@ -402,6 +411,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final isGenerating = ref.watch(isGeneratingProvider);
     final modelState = ref.watch(modelManagerProvider);
 
+    // 每次 build 同步采样 Timer（幂等）：按监控开关/采样周期启停。
+    _syncResourceSampling(isGenerating);
+
     return Scaffold(
       drawer: _buildConversationDrawer(),
       appBar: AppBar(
@@ -435,6 +447,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           // ---- Inline model status (only shows loading/unloading/error progress) ----
           _buildInlineProgress(modelState, isGenerating),
+          // ---- GPU/CPU 占用率监控条（蓝=GPU、紫=CPU）----
+          _buildResourceMonitor(),
 
           Expanded(
             child: _initiallyLoaded
@@ -671,6 +685,89 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
     );
+  }
+
+  // =========================================================================
+  // GPU/CPU 占用率监控条（模型状态栏底部，蓝=GPU / 紫=CPU，宽=屏宽）
+  // =========================================================================
+
+  /// 按当前设置同步采样 Timer（每次 build 调用，幂等）：
+  /// - 监控关闭 → 停止采样；
+  /// - 采样周期 >0 → 周期性采样（空闲也更新）；
+  /// - 采样周期 =0 → 仅推理时采样（500ms，空闲不采样省电）。
+  void _syncResourceSampling(bool isGenerating) {
+    final settings = ref.read(settingsProvider);
+    if (!settings.showResourceMonitor) {
+      _stopResourceSampling();
+      return;
+    }
+    final interval = settings.resourceSampleIntervalSec;
+    if (interval > 0) {
+      if (_samplingMode != interval) {
+        _stopResourceSampling();
+        _sampleTimer = Timer.periodic(Duration(seconds: interval),
+            (_) => _sampleResourceOnce());
+        _samplingMode = interval;
+      }
+    } else {
+      final want = isGenerating;
+      if (want && _samplingMode != 0) {
+        _stopResourceSampling();
+        _sampleTimer = Timer.periodic(const Duration(milliseconds: 500),
+            (_) => _sampleResourceOnce());
+        _samplingMode = 0;
+      } else if (!want && _samplingMode == 0) {
+        _stopResourceSampling();
+      }
+    }
+  }
+
+  void _stopResourceSampling() {
+    _sampleTimer?.cancel();
+    _sampleTimer = null;
+    _samplingMode = -1;
+  }
+
+  Future<void> _sampleResourceOnce() async {
+    final r = await InferenceService().getResourceUsage();
+    if (!mounted) return;
+    setState(() {
+      _gpuUsage = r.gpu ?? 0.0;
+      _cpuUsage = r.cpu;
+    });
+  }
+
+  /// 双色线监控条：蓝=GPU、紫=CPU，各占满屏宽，宽度 = 占用率%。
+  Widget _buildResourceMonitor() {
+    final settings = ref.watch(settingsProvider);
+    if (!settings.showResourceMonitor) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      height: 8,
+      color: const Color(0x11000000),
+      padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 1),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _buildMonitorLine(color: const Color(0xFF2196F3), usage: _gpuUsage),
+          const SizedBox(height: 2),
+          _buildMonitorLine(color: const Color(0xFF9C27B0), usage: _cpuUsage),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMonitorLine({required Color color, required double usage}) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final maxW = constraints.maxWidth;
+      final w = maxW * (usage / 100).clamp(0.0, 1.0);
+      return Stack(
+        children: [
+          Container(height: 1.5, width: maxW, color: color.withValues(alpha: 0.15)),
+          Container(height: 1.5, width: w, color: color),
+        ],
+      );
+    });
   }
 
   Widget _buildPulsingDot() {
