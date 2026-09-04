@@ -30,8 +30,19 @@ class PromptJsonProtocol implements ToolProtocol {
       '数组参数：<tool_call>todo_write<arg_key>todos<arg_value>[{"content": "明天开会", "status": "todo"}]</tool_call>\n'
       '键值规则：一个 <arg_key>键名</arg_key> 后面必须紧跟 <arg_value>值</arg_value>，'
       '先键后值、一个键配一个值，值不要放进 arg_key。\n'
-      '或用 JSON 对象：{"name": "web_search", "arguments": {"query": "今天天气"}}\n'
-      '两种格式都会被正确解析，按你擅长的输出。\n'
+      '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
+      '收到工具结果后，根据真实结果组织最终回答。'
+      '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
+
+  /// LFM 系模型指令：JSON 对象格式（<tool_call> 内嵌 JSON 是 Qwen/LFM 系
+  /// chat template 训练分布，小模型对 XML <arg_key> 标签遵循度差，常直接
+  /// 输出普通文本导致工具不执行）。
+  static const String kProtocolInstructionJson =
+      '当你要调用工具时，输出以下 JSON 格式（不要任何多余文字、不要思考过程、'
+      '不要先回答再补调用）：\n'
+      '无参数：{"name": "get_time", "arguments": {}}\n'
+      '带参数：{"name": "web_search", "arguments": {"query": "今天天气"}}\n'
+      '数组参数：{"name": "todo_write", "arguments": {"todos": [{"content": "明天开会", "status": "todo"}]}}\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
@@ -74,7 +85,9 @@ class PromptJsonProtocol implements ToolProtocol {
 
     lines.add('');
     lines.add('[工具调用协议]');
-    lines.add(kProtocolInstruction);
+    // LFM 系（Qwen/LiquidAI 训练分布）主推 JSON 格式；spark/qwen 等主推
+    // XML <arg_key> 格式（各自贴近训练分布，模型遵循度更高）。
+    lines.add(_instructionFor(modelId));
     return lines.join('\n');
   }
 
@@ -214,6 +227,14 @@ class PromptJsonProtocol implements ToolProtocol {
         arguments: arguments,
       ),
     );
+  }
+
+  /// 按模型选择指令：LFM 系（id 以 lfm 开头）用 JSON 风格，其余用 XML 风格。
+  String _instructionFor(String modelId) {
+    if (modelId.toLowerCase().startsWith('lfm')) {
+      return kProtocolInstructionJson;
+    }
+    return kProtocolInstruction;
   }
 
   /// 工具是否声明了沙箱升级能力（含 `sandbox_permissions` 字段）。
