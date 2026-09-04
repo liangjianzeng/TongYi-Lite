@@ -52,10 +52,15 @@ class DownloadService {
       throw DownloadException('Only one download at a time.');
     }
 
+    // 多文件模型（主 gguf + mmproj + dspark）：进度按总字节累计显示，
+    // 避免阶段切换时进度「重头」（此前每阶段把 downloadedBytes 重置为 0）。
+    final totalAll = model.sizeBytes +
+        (model.mmproj?.sizeBytes ?? 0) +
+        (model.dspark?.sizeBytes ?? 0);
     final task = existingTask ?? DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
-      totalBytes: model.sizeBytes, // preset so progress shows immediately
+      totalBytes: totalAll > 0 ? totalAll : model.sizeBytes,
       startTime: DateTime.now(),
     );
 
@@ -80,11 +85,13 @@ class DownloadService {
       final ggufComplete = await ggufFinal.exists() &&
           !(await ggufTemp.exists()) &&
           (await ggufFinal.length()) > 0;
+      task.stage = '主模型';
       if (ggufComplete) {
         debugPrint('[DownloadService] ${model.id} 主 gguf 已完整，跳过主模型下载');
       } else {
         await _runDownloadLoop(
           model, task, ggufTarget, ggufTemp, ggufFinal, onProgress, progressInterval,
+          baseBytes: 0,
         );
       }
 
@@ -93,9 +100,9 @@ class DownloadService {
       // （模型仍可文本推理），但整任务标记为失败。
       final mm = model.mmproj;
       if (mm != null) {
-        // 进度重置为 mmproj 阶段，避免与主模型体积叠加导致进度错乱。
-        task.totalBytes = mm.sizeBytes;
-        task.downloadedBytes = 0;
+        // 进度累计：从主模型已完成字节起，不再重置（否则 UI 显示「重头」）。
+        final mmBase = await ggufFinal.length();
+        task.stage = '投影器';
         task.state = DownloadState.downloading;
         onProgress(task);
         final mmprojTarget = _DownloadTarget(
@@ -111,14 +118,14 @@ class DownloadService {
         if (mmprojComplete) {
           final done = await mmprojFinal.length();
           debugPrint('[DownloadService] ${model.id} mmproj 已完整，跳过投影器下载');
-          task.totalBytes = done;
-          task.downloadedBytes = done;
+          task.downloadedBytes = mmBase + done;
           task.state = DownloadState.completed;
           task.endTime = DateTime.now();
           onProgress(task);
         } else {
           await _runDownloadLoop(
             model, task, mmprojTarget, mmprojTemp, mmprojFinal, onProgress, progressInterval,
+            baseBytes: mmBase,
           );
         }
       }
@@ -128,8 +135,13 @@ class DownloadService {
       // 主 gguf（模型仍可推理，仅无投机加速），但整任务标记为失败。
       final ds = model.dspark;
       if (ds != null) {
-        task.totalBytes = ds.sizeBytes;
-        task.downloadedBytes = 0;
+        // 进度累计：从主 + mmproj 已完成字节起。
+        var dsBase = await ggufFinal.length();
+        if (mm != null) {
+          final mmprojDone = File(p.join(dir.path, model.id + '.mmproj'));
+          if (await mmprojDone.exists()) dsBase += await mmprojDone.length();
+        }
+        task.stage = '加速头';
         task.state = DownloadState.downloading;
         onProgress(task);
         final dsparkTarget = _DownloadTarget(
@@ -143,14 +155,14 @@ class DownloadService {
         if (dsparkComplete) {
           final done = await dsparkFinal.length();
           debugPrint('[DownloadService] ${model.id} dspark 已完整，跳过草稿头下载');
-          task.totalBytes = done;
-          task.downloadedBytes = done;
+          task.downloadedBytes = dsBase + done;
           task.state = DownloadState.completed;
           task.endTime = DateTime.now();
           onProgress(task);
         } else {
           await _runDownloadLoop(
             model, task, dsparkTarget, dsparkTemp, dsparkFinal, onProgress, progressInterval,
+            baseBytes: dsBase,
           );
         }
       }
@@ -174,6 +186,7 @@ class DownloadService {
     File finalFile,
     void Function(DownloadTask) onProgress,
     Duration progressInterval,
+    {int baseBytes = 0}
   ) async {
     // ---- 自动重试循环：连接中断时保留已下载的 .tmp 并断点续传 ----
     for (int attempt = 1; attempt <= _maxAttempts; attempt++) {
@@ -192,7 +205,7 @@ class DownloadService {
 
         if (hasPartial) {
           downloadedSoFar = await tempFile.length();
-          task.downloadedBytes = downloadedSoFar;
+          task.downloadedBytes = baseBytes + downloadedSoFar;
           if (target.sizeBytes > 0) task.totalBytes = target.sizeBytes;
           onProgress(task);
 
@@ -207,7 +220,7 @@ class DownloadService {
                 'restarting fresh');
             await tempFile.delete();
             downloadedSoFar = 0;
-            task.downloadedBytes = 0;
+            task.downloadedBytes = baseBytes;
             urlInfo = await _resolveUrl(target.mirrors, requireRange: false);
           }
         } else {
@@ -223,8 +236,7 @@ class DownloadService {
             (await tempFile.length()) >= target.sizeBytes) {
           // 用实文件大小（可能大于估算的 sizeBytes），进度恒为 100%。
           final done = await tempFile.length();
-          task.totalBytes = done;
-          task.downloadedBytes = done;
+          task.downloadedBytes = baseBytes + done;
           await tempFile.rename(finalFile.path);
           task.state = DownloadState.completed;
           task.endTime = DateTime.now();
@@ -265,7 +277,9 @@ class DownloadService {
           if (headerTotalStr != null) {
             headerTotal = int.tryParse(headerTotalStr);
             if (headerTotal != null && headerTotal > 0) {
-              task.totalBytes = headerTotal;
+              // 单文件模型（baseBytes==0）用服务器大小校准 totalBytes；多文件
+              // 模型保持 download() 预设的总字节（进度连续不重头）。
+              if (baseBytes == 0) task.totalBytes = headerTotal;
               debugPrint('[DownloadService] Using Content-Length from headers: $headerTotal bytes');
             }
           }
@@ -278,7 +292,7 @@ class DownloadService {
               if (cancelToken.isCancelled) break;
               await raf.writeFrom(chunk);
               received += chunk.length;
-              task.downloadedBytes = received;
+              task.downloadedBytes = baseBytes + received;
               final now = DateTime.now();
               if (lastProgress == null ||
                   now.difference(lastProgress) >= progressInterval) {
@@ -300,9 +314,8 @@ class DownloadService {
             );
           }
 
-          // 整段下载结束后，用实际写入字节数作为 totalBytes（与 downloadedBytes
-          // 一致，进度即 100%），不再依赖估算的 sizeBytes。
-          task.totalBytes = received;
+          // 整段下载结束后，单文件模型用实际写入字节数校准 totalBytes。
+          if (baseBytes == 0) task.totalBytes = baseBytes + received;
           onProgress(task);
         }
 
@@ -314,8 +327,8 @@ class DownloadService {
 
         // Step 5: 提升 .tmp 为最终文件。
         await tempFile.rename(finalFile.path);
-        // 完成态以实文件大小为准，进度恒为 100%。
-        task.downloadedBytes = actualSize;
+        // 完成态以实文件大小为准（累计到 baseBytes），进度恒为 100%。
+        task.downloadedBytes = baseBytes + actualSize;
         task.totalBytes = actualSize > task.totalBytes ? actualSize : task.totalBytes;
         task.state = DownloadState.completed;
         task.endTime = DateTime.now();

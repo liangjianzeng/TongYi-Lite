@@ -355,6 +355,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     if (task != null &&
                         task.state == DownloadState.downloading) ...[
                       const SizedBox(height: 8),
+                      // 多文件模型（含 mmproj/dspark）显示当前下载阶段，
+                      // 进度按总字节累计（阶段切换不再「重头」）。
+                      if (task.stage != null)
+                        Text('正在下载 ${task.stage}',
+                            style: const TextStyle(fontSize: 12)),
                       LinearProgressIndicator(
                           value: task.progress, minHeight: 6),
                       const SizedBox(height: 4),
