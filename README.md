@@ -299,7 +299,9 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 **v0.2.0 下载**（release 签名 `CN=TongYiLite`）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.2.0.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.0.apk)
-> `SHA-256: 652245B5093C4DB535380EB77821EAD5AD9773FF62FBF3ECCBD2B8616722B4B9`
+> `SHA-256: FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
+
+> ⚠️ 2026-09-05 重新发布：修正为 `CN=TongYiLite` 官方签名证书（原 `652245B5…` 非官方证书）。
 
 **v0.2.0 详细变更**（2026-09-04）：
 
