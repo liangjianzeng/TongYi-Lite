@@ -503,6 +503,7 @@ struct InferenceEngine {
         // ------------------------------------------------------------------
         if (mtp_enabled) {
             LOGI("MTP enabled -> dspark draft head ignored (mutually exclusive)");
+            reportLoadingLog("MTP 已启用 → dspark 草稿头被忽略（二者互斥，MTP 优先）");
         } else if (draft_path && draft_path[0] != '\0') {
             LOGI("Loading dspark draft model: %s", draft_path);
             reportLoadingLog("正在加载投机草稿模型（dspark 加速）...");
@@ -536,9 +537,14 @@ struct InferenceEngine {
                 n_draft_max = dspark_block_size;
                 LOGI("DSpark draft model loaded (block_size=%d) -> n_draft_max=%d",
                      dspark_block_size, n_draft_max);
+                char dlog[64] = {};
+                snprintf(dlog, sizeof(dlog), "dspark 草稿模型加载完成 (block_size=%d) → n_draft_max=%d",
+                         dspark_block_size, n_draft_max);
+                reportLoadingLog(dlog);
             }
         } else {
             LOGI("No dspark draft path -> dspark disabled");
+            reportLoadingLog("无 dspark 草稿路径 → dspark 投机解码未启用");
         }
 
         // Context params — ensure n_ctx is valid before passing to llama.
@@ -735,6 +741,10 @@ struct InferenceEngine {
             } else {
                 dspark_enabled = true;
                 LOGI("DSpark draft context created (n_ctx=%d). Speculative decoding ON.", ctx_val);
+                char slog[64] = {};
+                snprintf(slog, sizeof(slog), "dspark 投机解码: 开启 ✓ (block_size=%d, n_ctx=%d)",
+                         dspark_block_size, ctx_val);
+                reportLoadingLog(slog);
             }
         } else {
             LOGI("No dspark draft path -> dspark disabled");
@@ -1445,9 +1455,11 @@ struct InferenceEngine {
                 mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
                 if (!mtp_spec) {
                     LOGW("Speculative init failed -> falling back to plain decoding");
+                    reportLoadingLog("投机解码初始化失败 → 回退普通推理");
                     mtp_enabled = false;
                     dspark_enabled = false;
                 } else {
+                    reportLoadingLog(mtp_enabled ? "投机解码已接上草稿引擎 (MTP)" : "投机解码已接上草稿引擎 (dspark)");
                     // Target-side sampler for the verification step. Mirrors the
                     // raw llama_sampler_chain in the plain path below: repeat
                     // penalty (critical against repetition loops) + top_k + top_p
