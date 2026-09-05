@@ -298,18 +298,32 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       // 全局 MTP 总开关关闭时，即使某模型曾配置开启也强制不启用（可见可用控制）。
       final mtp = gpu.enableMtpFeature && gpu.mtpEnabled(modelId);
       // dspark 投机草稿头：全局开关 + 该模型开关都开启、目录声明且文件完整时
-      // 才带上（MTP 启用时忽略，原生层二选一互斥）。
+      // 才带上（MTP 启用时忽略，原生层二选一互斥）。任一环节不满足时给出
+      // 明确原因写进推理日志，避免静默失败（此前用户开了开关却看不到生效）。
       String? draftPath;
+      String? draftSkipReason;
       final dsparkConfig = config?.dspark;
-      final dsparkOn =
-          gpu.enableDsparkFeature && gpu.dsparkEnabled(modelId);
-      if (dsparkConfig != null && dsparkOn && !mtp) {
+      if (dsparkConfig == null) {
+        draftSkipReason = '该模型目录未声明 dspark 草稿头';
+      } else if (mtp) {
+        draftSkipReason = 'MTP 已启用（与 dspark 互斥，原生层二选一）';
+      } else if (!gpu.enableDsparkFeature) {
+        draftSkipReason = '全局 dspark 开关未开启（设置→推理引擎→⚡dspark 加速）';
+      } else if (!gpu.dsparkEnabled(modelId)) {
+        draftSkipReason = '该模型 dspark 开关未开启（模型列表卡片）';
+      } else {
         final storage = ModelStorageService();
         final dsparkFile = await storage.getDsparkPath(modelId);
-        if (File(dsparkFile).existsSync()) {
+        if (!File(dsparkFile).existsSync()) {
+          draftSkipReason = '草稿文件不存在（${dsparkFile}）';
+        } else {
           final dsSize = await File(dsparkFile).length();
-          if (dsSize > 0 &&
-              dsSize >= (dsparkConfig.sizeBytes * 0.99).round()) {
+          if (dsSize <= 0 ||
+              dsSize < (dsparkConfig.sizeBytes * 0.99).round()) {
+            final dsMb = (dsSize / (1024 * 1024)).toStringAsFixed(0);
+            draftSkipReason =
+                '草稿文件不完整（${dsMb}MB < 声明 ${dsparkConfig.sizeMB}MB）';
+          } else {
             draftPath = dsparkFile;
           }
         }
@@ -317,7 +331,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       debugPrint('[ModelManager] Calling loadModel(path=$path, '
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
-          'enableMtp($modelId)=$mtp, draft=$draftPath)');
+          'enableMtp($modelId)=$mtp, draft=$draftPath, skip=$draftSkipReason)');
       // 把 MTP/dspark 实际启用状态写进推理日志（loadingLogs），让「推理引擎
       // 日志」页与启动日志都能确认该模型加载时投机加速是否真的生效——此前只
       // debugPrint 到 logcat，App 内查看不到。
@@ -336,7 +350,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       } else if (draftPath != null) {
         mtpLogs.add('dspark 投机加速: 开启 ✓');
       } else {
-        mtpLogs.add('投机加速: 关闭（无草稿模型）');
+        mtpLogs.add('投机加速: 关闭 — $draftSkipReason');
       }
       state = ModelState(
         phase: ModelLifecyclePhase.loading,
