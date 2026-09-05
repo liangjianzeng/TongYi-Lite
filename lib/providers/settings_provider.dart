@@ -67,6 +67,23 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置某个模型是否启用 dspark 投机加速。按模型 id 独立开关，互不影响
+  /// ——仅对目录声明了草稿头（dspark config）且文件已下载完整的模型生效。
+  Future<void> setEnableDspark(String modelId, bool value) async {
+    final updated = Map<String, bool>.from(state.dsparkEnabledByModel);
+    updated[modelId] = value;
+    state = state.copyWith(dsparkEnabledByModel: updated);
+    await _persist();
+  }
+
+  /// 设置全局 dspark 功能总开关（默认关闭）。关闭时模型卡片不显示各模型
+  /// dspark 开关，加载模型也强制不启用；开启后模型卡片显示声明了草稿头的
+  /// 模型的 dspark 开关，用户可逐个配置。
+  Future<void> setEnableDsparkFeature(bool value) async {
+    state = state.copyWith(enableDsparkFeature: value);
+    await _persist();
+  }
+
   /// 设置「默认加载」模型。传 null 表示取消默认。
   /// 持久化到 inference_settings.json（与 MTP 等其他设置同一文件），
   /// 退出 App 不会丢失；启动自动加载逻辑按此 id 加载模型。

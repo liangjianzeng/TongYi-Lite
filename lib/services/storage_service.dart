@@ -27,15 +27,22 @@ class StorageService {
     );
   }
 
-  /// 数据库版本升级迁移。
+  /// 数据库版本升级迁移。**幂等**：先读 messages 现有列，缺哪列补哪列，
+  /// 避免库状态不一致（列已存在但 user_version 落后）时 ALTER 撞上
+  /// 「duplicate column name」崩溃——那种崩溃会把整个会话库打成不可打开，
+  /// 表现为发送失败 + 会话列表全空，而数据其实还在库里。
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
+    // PRAGMA table_info 返回现有列名；table 名是常量，无需参数化。
+    final cols = await db.rawQuery('PRAGMA table_info(messages)');
+    final names = cols.map((c) => c['name'] as String).toSet();
+
+    if (oldVersion < 2 && !names.contains('inferenceStats')) {
       // v1 → v2：messages 表新增 inferenceStats 列（回复性能统计 JSON）。
       await db.execute(
         "ALTER TABLE messages ADD COLUMN inferenceStats TEXT",
       );
     }
-    if (oldVersion < 3) {
+    if (oldVersion < 3 && !names.contains('audioPath')) {
       // v2 → v3：messages 表新增 audioPath 列（语音消息的录音文件路径）。
       // 此前模型里有 audioPath 字段但表里没有该列，语音消息重进会话后
       // 「语音」标记全部丢失。
