@@ -296,6 +296,11 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 | v0.1.1 | 2026-08-03 | Vulkan GPU 加速（arm64-v8a）、模型下载系统、设置页 UI、对话 SQLite 持久化 |
 | v0.1.0 | 2025-07-29 | 端侧 LLM 推理引擎（llama.cpp）、Flutter Material3 前端、架构设计文档 v2 |
 
+**v0.2.0 下载**（release 签名 `CN=TongYiLite`）：
+
+> [⬇️ 下载 `TongYi-Lite-v0.2.0.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.0.apk)
+> `SHA-256: 652245B5093C4DB535380EB77821EAD5AD9773FF62FBF3ECCBD2B8616722B4B9`
+
 **v0.2.0 详细变更**（2026-09-04）：
 
 - **Agent Lite 智能体**：模型 ↔ 工具多轮交互（轮次上限可配，默认 5），工具结果以 user 角色回填后再生成；
