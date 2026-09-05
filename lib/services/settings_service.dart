@@ -41,6 +41,22 @@ class InferenceSettings {
   /// 端侧 MTP 性能差收益差，故默认关闭，仅高端机用户按需打开测试。
   final bool enableMtpFeature;
 
+  /// 是否启用 dspark 投机加速，按模型 id 逐个开关（默认全关）。
+  /// 仅对目录声明 dspark 草稿头（config.dspark）且草稿文件已下载完整的模型
+  /// 生效——与 MTP 互斥（原生层二选一），互不影响。
+  final Map<String, bool> dsparkEnabledByModel;
+
+  /// 全局 dspark 功能总开关（默认关闭）。用于控制整个 APP 的 dspark 是否
+  /// 「可见可用」：
+  /// - 关闭（默认）：模型卡片不显示各模型的 dspark 开关，加载模型时也强制
+  ///   不启用（即使某模型曾配置开启）。
+  /// - 开启：模型列表卡片显示声明了草稿头模型的 dspark 开关，用户可逐个
+  ///   配置；加载时按 `enableDsparkFeature && dsparkEnabled(modelId)` 决定
+  ///   是否带上草稿模型。
+  /// 端侧 Q1_0 等低比特模型上 dspark 收益有限（验证批摊不动权重读取，
+  /// 净吞吐≈基线甚至更低），故默认关闭，按需开启。
+  final bool enableDsparkFeature;
+
   /// 启动后自动加载的「默认模型」id。null = 未设置。
   /// 用户在模型管理页对某个已缓存模型勾选「设为默认」后持久化；
   /// 启动进入首页时若该模型已缓存则自动加载，保证开箱即用。
@@ -135,6 +151,8 @@ class InferenceSettings {
     this.gpuBackend = 'auto',
     Map<String, bool>? mtpEnabledByModel,
     this.enableMtpFeature = false,
+    Map<String, bool>? dsparkEnabledByModel,
+    this.enableDsparkFeature = false,
     this.defaultModelId,
     List<ApiModelConfig>? apiModels,
     this.activeApiModelId,
@@ -160,12 +178,16 @@ class InferenceSettings {
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
+        dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
         agentByModel = agentByModel ?? const {};
 
   /// 便捷读取：某个模型是否启用 MTP（未配置视为关闭）。
   bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
+
+  /// 便捷读取：某个模型是否启用 dspark（未配置视为关闭）。
+  bool dsparkEnabled(String modelId) => dsparkEnabledByModel[modelId] ?? false;
 
   /// 便捷读取：某个模型启用的工具清单。空列表 = 跟随该模型目录声明的
   /// agentDefaults.enabledTools（目录合并逻辑在 agent 接入层）。
@@ -193,6 +215,8 @@ class InferenceSettings {
       String? gpuBackend,
       Map<String, bool>? mtpEnabledByModel,
       bool? enableMtpFeature,
+      Map<String, bool>? dsparkEnabledByModel,
+      bool? enableDsparkFeature,
       String? defaultModelId,
       // defaultModelId 为可空 String，无法用 `?? this` 区分「未传」与「清空」，
       // 故增加显式清空标记，供取消默认模型时使用。
@@ -231,6 +255,9 @@ class InferenceSettings {
       gpuBackend: gpuBackend ?? this.gpuBackend,
       mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
       enableMtpFeature: enableMtpFeature ?? this.enableMtpFeature,
+      dsparkEnabledByModel:
+          dsparkEnabledByModel ?? this.dsparkEnabledByModel,
+      enableDsparkFeature: enableDsparkFeature ?? this.enableDsparkFeature,
       defaultModelId: clearDefaultModel
           ? null
           : defaultModelId ?? this.defaultModelId,
@@ -274,6 +301,8 @@ class InferenceSettings {
         'gpuBackend': gpuBackend,
         'mtpEnabledByModel': mtpEnabledByModel,
         'enableMtpFeature': enableMtpFeature,
+        'dsparkEnabledByModel': dsparkEnabledByModel,
+        'enableDsparkFeature': enableDsparkFeature,
         'defaultModelId': defaultModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
         'activeApiModelId': activeApiModelId,
@@ -315,6 +344,9 @@ class InferenceSettings {
       mtpEnabledByModel: _migrateLegacyMtp(json),
       // 全局 MTP 开关：旧配置无此字段时默认关闭（向后兼容）。
       enableMtpFeature: json['enableMtpFeature'] as bool? ?? false,
+      // dspark：按模型 map + 全局开关，旧配置无此字段时默认全关（向后兼容）。
+      dsparkEnabledByModel: _parseBoolMap(json['dsparkEnabledByModel']),
+      enableDsparkFeature: json['enableDsparkFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
       // 旧配置缺这两个字段时默认空列表 + 停用，向后兼容。
       apiModels: _parseApiModels(json['apiModels']),
@@ -394,6 +426,12 @@ class InferenceSettings {
   /// 否则每次 reload 都会把用户按模型开启的 MTP 开关清空，导致 MTP 永远不生效。
   /// 仅当 `mtpEnabledByModel` 缺失（老版本只有全局 `enableMtp:true`）时，
   /// 因无法定位具体模型而保持默认全关，由用户重新按模型开启。
+  /// 解析按模型 bool map（如 dsparkEnabledByModel）；格式非法时返回空 map。
+  static Map<String, bool> _parseBoolMap(Object? raw) {
+    if (raw is! Map) return const {};
+    return raw.map((k, v) => MapEntry(k.toString(), v as bool? ?? false));
+  }
+
   static Map<String, bool> _migrateLegacyMtp(Map<String, dynamic> json) {
     final map = json['mtpEnabledByModel'] as Map<String, dynamic>?;
     if (map != null) {

@@ -351,6 +351,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       ),
                     ],
 
+                    // dspark 开关：仅当全局 dspark 开关开启且该模型声明了草稿头
+                    // 时显示，用户可按模型逐个配置。
+                    if (settings.enableDsparkFeature && model.dspark != null) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'dspark 加速',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          Switch(
+                            value: settings.dsparkEnabled(model.id),
+                            onChanged: (v) => ref
+                                .read(settingsProvider.notifier)
+                                .setEnableDspark(model.id, v),
+                          ),
+                        ],
+                      ),
+                    ],
+
                     // Progress bar for downloading models
                     if (task != null &&
                         task.state == DownloadState.downloading) ...[
@@ -1039,6 +1060,26 @@ class _InferenceEngineTab extends ConsumerWidget {
                     gpuSettings.enableMtpFeature,
                     gpuNotifier.setEnableMtpFeature,
                     subtitle: '默认关闭；开启后在模型卡片配置各模型 MTP（仅高端机按需开启）',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ---- dspark 加速全局开关卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    '⚡ dspark 加速（整块投机解码）',
+                    gpuSettings.enableDsparkFeature,
+                    gpuNotifier.setEnableDsparkFeature,
+                    subtitle: '默认关闭；开启后在模型卡片配置各模型 dspark（Q1_0 低比特模型收益有限）',
                   ),
                 ],
               ),

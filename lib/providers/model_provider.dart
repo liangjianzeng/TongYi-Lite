@@ -297,11 +297,13 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       final gpu = await _ref.read(settingsServiceProvider).load();
       // 全局 MTP 总开关关闭时，即使某模型曾配置开启也强制不启用（可见可用控制）。
       final mtp = gpu.enableMtpFeature && gpu.mtpEnabled(modelId);
-      // dspark 投机草稿头：模型目录声明且文件完整时自动带上（MTP 启用时忽略，
-      // 原生层二选一互斥）。
+      // dspark 投机草稿头：全局开关 + 该模型开关都开启、目录声明且文件完整时
+      // 才带上（MTP 启用时忽略，原生层二选一互斥）。
       String? draftPath;
       final dsparkConfig = config?.dspark;
-      if (dsparkConfig != null && !mtp) {
+      final dsparkOn =
+          gpu.enableDsparkFeature && gpu.dsparkEnabled(modelId);
+      if (dsparkConfig != null && dsparkOn && !mtp) {
         final storage = ModelStorageService();
         final dsparkFile = await storage.getDsparkPath(modelId);
         if (File(dsparkFile).existsSync()) {

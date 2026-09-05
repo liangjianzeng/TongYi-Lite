@@ -243,6 +243,7 @@ struct InferenceEngine {
     llama_model *draft_model = nullptr; // dspark draft model (independent GGUF head)
     llama_context *dspark_ctx = nullptr; // draft context for DFlash/DSpark speculative
     bool dspark_enabled = false;        // dspark head loaded and usable
+    int  dspark_block_size = 16;        // trained DSpark noise-block size (dflash.block_size)
     llama_model_params model_params;
     llama_context_params ctx_params;
 
@@ -489,6 +490,57 @@ struct InferenceEngine {
         lock.unlock();
         reportLoadingLog(buf);
 
+        // ------------------------------------------------------------------
+        // DSpark speculative decoding: load the independent draft model (e.g.
+        // Bonsai-27B-dspark-Q4_1.gguf, a DFlash + Markov head) BEFORE the main
+        // context is created, so we can read its trained noise-block size and
+        // reserve enough RS rollback slots on the target context. Bonsai is
+        // DSV4 arch: llama_kv_cache_dsv4::seq_rm() silently FAILS when
+        // n_rs_seq=0 (rejected drafts are never removed), so the speculative
+        // verify keeps decoding over stale compressed state -> acceptance
+        // collapses and the path pays draft cost for ~zero gain. Mutually
+        // exclusive with MTP (first branch wins).
+        // ------------------------------------------------------------------
+        if (mtp_enabled) {
+            LOGI("MTP enabled -> dspark draft head ignored (mutually exclusive)");
+        } else if (draft_path && draft_path[0] != '\0') {
+            LOGI("Loading dspark draft model: %s", draft_path);
+            reportLoadingLog("正在加载投机草稿模型（dspark 加速）...");
+            llama_model_params draft_params = llama_model_default_params();
+            // Offload the draft head to the SAME backend as the target: DSpark
+            // pays a draft forward + feature-injection (process) through the
+            // head on EVERY iteration, so leaving it on CPU adds ~1s of CPU
+            // work per iteration through the ~1.7GB Q4_1 head — that cost
+            // cancels the GPU verify-batch gain (measured: no net speedup).
+            // Match the target's offload policy; a pure-CPU target keeps the
+            // draft on CPU too (n_gpu_layers=0).
+            draft_params.n_gpu_layers = effective_gpu_layers;
+            draft_model = llama_model_load_from_file(draft_path, draft_params);
+            if (!draft_model) {
+                LOGE("Failed to load dspark draft model -> dspark disabled");
+            } else {
+                // Read the trained block size (default 16, same fallback as
+                // common_speculative_impl_draft_dflash in speculative.cpp).
+                char bbuf[32] = {};
+                dspark_block_size = 16;
+                if (llama_model_meta_val_str(draft_model, "dflash.block_size", bbuf, sizeof(bbuf)) >= 0) {
+                    dspark_block_size = std::atoi(bbuf);
+                }
+                if (dspark_block_size < 1) {
+                    dspark_block_size = 16;
+                }
+                // DSpark drafts a WHOLE noise block per forward pass. With a tiny
+                // n_draft (the old 2) the draft decode is not amortized over the
+                // block, so on a bandwidth-bound 27B target the speculative path
+                // nets ~zero gain. Use the full trained block.
+                n_draft_max = dspark_block_size;
+                LOGI("DSpark draft model loaded (block_size=%d) -> n_draft_max=%d",
+                     dspark_block_size, n_draft_max);
+            }
+        } else {
+            LOGI("No dspark draft path -> dspark disabled");
+        }
+
         // Context params — ensure n_ctx is valid before passing to llama.
         ctx_params = llama_context_default_params();
 
@@ -556,13 +608,14 @@ struct InferenceEngine {
         // the documented API and works correctly on the unified buffer.
         ctx_params.kv_unified = true;
 
-        // For MTP speculative decoding, partial draft acceptance is rolled back via
-        // the rollback-sequence (RS) mechanism: llama_memory_seq_rm() removes the
-        // unaccepted draft tokens past the commit point without a full state
-        // checkpoint. Reserve enough RS slots for the worst case (all drafts
-        // rejected) so the driver never needs checkpoints. Harmless when mtp_enabled
-        // is false (n_rs_seq=0 leaves the context in the current non-RS layout).
-        ctx_params.n_rs_seq = mtp_enabled ? (n_draft_max + 1) : 0;
+        // For speculative decoding (MTP or DSpark), partial draft acceptance is
+        // rolled back via the rollback-sequence (RS) mechanism: llama_memory_seq_rm()
+        // removes the unaccepted draft tokens past the commit point. DSV4 (Bonsai)
+        // and hybrid archs REQUIRE n_rs_seq > 0 here - their seq_rm() returns false
+        // without RS slots, so rejected drafts are never removed and the next verify
+        // decodes over stale compressed state. Reserve enough RS slots for the worst
+        // case (all drafts rejected); harmless when no speculative path is active.
+        ctx_params.n_rs_seq = (mtp_enabled || draft_model != nullptr) ? (n_draft_max + 1) : 0;
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -654,43 +707,34 @@ struct InferenceEngine {
         }
 
         // ------------------------------------------------------------------
-        // DSpark speculative decoding: load an independent draft model (e.g.
-        // Bonsai-27B-dspark-Q4_1.gguf, a DFlash + Markov head). The draft ctx
-        // uses the DEFAULT context type (only MTP needs the special type); the
+        // DSpark: create the draft context from the ALREADY-LOADED draft model
+        // (the model was loaded before the main context so n_rs_seq could be
+        // sized correctly; see the load section above). The draft ctx uses the
+        // DEFAULT context type (only MTP needs the special type); the
         // common_speculative driver mirrors target hidden states into it.
         // Failure is NOT fatal: falls back to MTP or plain decoding.
         // ------------------------------------------------------------------
         if (mtp_enabled) {
             LOGI("MTP enabled -> dspark draft head ignored (mutually exclusive)");
-        } else if (draft_path && draft_path[0] != '\0') {
-            LOGI("Loading dspark draft model: %s", draft_path);
-            reportLoadingLog("正在加载投机草稿模型（dspark 加速）...");
-            llama_model_params draft_params = llama_model_default_params();
-            // Draft model runs on CPU (tiny head; offload wastes memory).
-            draft_params.n_gpu_layers = 0;
-            draft_model = llama_model_load_from_file(draft_path, draft_params);
-            if (!draft_model) {
-                LOGE("Failed to load dspark draft model -> dspark disabled");
+        } else if (draft_model) {
+            LOGI("Creating dspark draft context (block_size=%d)", dspark_block_size);
+            llama_context_params dspark_params = llama_context_default_params();
+            dspark_params.ctx_other = context;          // mirror target hidden states
+            dspark_params.n_ctx     = (uint32_t)ctx_val;
+            dspark_params.n_batch   = ctx_params.n_batch;
+            dspark_params.n_ubatch  = ctx_params.n_ubatch;
+            dspark_params.n_rs_seq  = 0;
+            dspark_params.n_threads = ctx_params.n_threads;
+            dspark_params.n_threads_batch = ctx_params.n_threads_batch;
+            dspark_params.kv_unified = true;
+            dspark_ctx = llama_init_from_model(draft_model, dspark_params);
+            if (!dspark_ctx) {
+                LOGE("Failed to create dspark draft context -> dspark disabled");
+                llama_model_free(draft_model);
                 draft_model = nullptr;
             } else {
-                llama_context_params dspark_params = llama_context_default_params();
-                dspark_params.ctx_other = context;          // mirror target hidden states
-                dspark_params.n_ctx     = (uint32_t)ctx_val;
-                dspark_params.n_batch   = ctx_params.n_batch;
-                dspark_params.n_ubatch  = ctx_params.n_ubatch;
-                dspark_params.n_rs_seq  = 0;
-                dspark_params.n_threads = ctx_params.n_threads;
-                dspark_params.n_threads_batch = ctx_params.n_threads_batch;
-                dspark_params.kv_unified = true;
-                dspark_ctx = llama_init_from_model(draft_model, dspark_params);
-                if (!dspark_ctx) {
-                    LOGE("Failed to create dspark draft context -> dspark disabled");
-                    llama_model_free(draft_model);
-                    draft_model = nullptr;
-                } else {
-                    dspark_enabled = true;
-                    LOGI("DSpark draft context created (n_ctx=%d). Speculative decoding ON.", ctx_val);
-                }
+                dspark_enabled = true;
+                LOGI("DSpark draft context created (n_ctx=%d). Speculative decoding ON.", ctx_val);
             }
         } else {
             LOGI("No dspark draft path -> dspark disabled");
@@ -833,6 +877,9 @@ struct InferenceEngine {
         }
         if (mtp_ctx != nullptr) {
             llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, 0, (llama_pos)llama_n_ctx(mtp_ctx));
+        }
+        if (dspark_ctx != nullptr) {
+            llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, 0, (llama_pos)llama_n_ctx(dspark_ctx));
         }
         kv_position = 0;
         prev_prompt_tokens.clear();
@@ -1321,7 +1368,8 @@ struct InferenceEngine {
             // ================================================================
             auto full_clear = [&]() {
                 llama_memory_seq_rm(llama_get_memory(context), 0, 0, (llama_pos)ctx_val2);
-                if (mtp_ctx) llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, 0, (llama_pos)ctx_val2);
+                if (mtp_ctx)    llama_memory_seq_rm(llama_get_memory(mtp_ctx),    0, 0, (llama_pos)ctx_val2);
+                if (dspark_ctx) llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, 0, (llama_pos)ctx_val2);
                 kv_position = 0;
                 have_prev_kv = false;
                 LOGI("KV full clear for new completion");
@@ -1345,7 +1393,8 @@ struct InferenceEngine {
                 if (prefix_len >= MIN_INCREMENTAL_PREFIX && prefix_len < n_prompt) {
                     // keep [0, prefix_len), drop [prefix_len, end)
                     llama_memory_seq_rm(llama_get_memory(context), 0, prefix_len, (llama_pos)ctx_val2);
-                    if (mtp_ctx) llama_memory_seq_rm(llama_get_memory(mtp_ctx), 0, prefix_len, (llama_pos)ctx_val2);
+                    if (mtp_ctx)    llama_memory_seq_rm(llama_get_memory(mtp_ctx),    0, prefix_len, (llama_pos)ctx_val2);
+                    if (dspark_ctx) llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, prefix_len, (llama_pos)ctx_val2);
                     kv_position = prefix_len;   // critical: do NOT reset to 0
                     LOGI("KV incremental: kept prefix=%d, will prefill %d tokens (saved %d)",
                          prefix_len, n_prompt - prefix_len, prefix_len);
@@ -1381,20 +1430,23 @@ struct InferenceEngine {
                 }
                 spec_params.draft.n_max   = n_draft_max;
                 spec_params.draft.n_min   = 1;   // always draft at least one token
-                // Early-stop drafting once the head's confidence drops below p_min.
-                // The official speculative impl (speculative.cpp draft-mtp) uses this
-                // to avoid spending a verify batch on garbage drafts: at p_min=0 it
-                // ALWAYS drafts n_max tokens even when the head is guessing, which
-                // wastes the target verify forward. A moderate threshold lets us
-                // "draft only high-confidence tokens" — the single biggest lever to
-                // stop the observed negative benefit.
-                spec_params.draft.p_min   = 0.3f;
+                // p_min semantics differ between the two drivers:
+                // - MTP (draft-mtp): early-stop drafting once confidence drops, so we
+                //   avoid spending a verify batch on garbage drafts (per-token draft
+                //   cost is real, so 0.3 is the biggest lever against negative gain).
+                // - DSpark (draft-dspark): the WHOLE noise block is decoded in one
+                //   forward pass regardless of p_min, so truncation only shortens the
+                //   draft (fewer verified tokens per fixed-cost forward) without
+                //   saving the forward itself -> keep 0 (draft the full block and let
+                //   the target verification decide acceptance).
+                spec_params.draft.p_min   = mtp_enabled ? 0.3f : 0.0f;
                 spec_params.draft.ctx_tgt = context;
                 spec_params.draft.ctx_dft = mtp_enabled ? mtp_ctx : dspark_ctx;
                 mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
                 if (!mtp_spec) {
-                    LOGW("MTP spec init failed -> falling back to plain decoding");
+                    LOGW("Speculative init failed -> falling back to plain decoding");
                     mtp_enabled = false;
+                    dspark_enabled = false;
                 } else {
                     // Target-side sampler for the verification step. Mirrors the
                     // raw llama_sampler_chain in the plain path below: repeat
@@ -1579,6 +1631,9 @@ struct InferenceEngine {
                 mtp_accept_sum   = 0;
                 mtp_draft_sum    = 0;
                 mtp_adaptive_max = n_draft_max;
+                // Draft context that must be kept in sync with the target batch:
+                // the MTP head ctx, or the independent dspark draft ctx.
+                llama_context * dft_ctx = mtp_enabled ? mtp_ctx : dspark_ctx;
                 llama_tokens draft;
                 struct llama_batch batch_tgt = llama_batch_init(llama_n_batch(context), 0, 1);
                 const llama_seq_id seq_id = 0;
@@ -1592,8 +1647,21 @@ struct InferenceEngine {
                         // budget once the head recovers. (See member docs above.)
                         if (mtp_draft_sum >= 12.0f) {
                             const float rate = mtp_accept_sum / mtp_draft_sum;
-                            mtp_adaptive_max = (rate >= 0.75f) ? n_draft_max :
-                                               (rate >= 0.50f) ? 2 : 1;
+                            if (mtp_enabled) {
+                                // MTP drafts cheaply per token: shrink hard at low
+                                // acceptance (verify batch must be repaid).
+                                mtp_adaptive_max = (rate >= 0.75f) ? n_draft_max :
+                                                   (rate >= 0.50f) ? 2 : 1;
+                            } else {
+                                // DSpark decodes the WHOLE noise block per draft
+                                // forward regardless of the kept length (the forward
+                                // cost is fixed), so shrinking only trims the verify
+                                // batch. Keep the block full until acceptance really
+                                // collapses, then halve the verify batch instead of
+                                // throwing away the paid forward.
+                                mtp_adaptive_max = (rate >= 0.35f) ? n_draft_max :
+                                                   (rate >= 0.20f) ? std::max(2, n_draft_max / 2) : 1;
+                            }
                             LOGI("[MTP] adaptive n_draft=%d (accept_rate=%.2f)",
                                  mtp_adaptive_max, rate);
                         }
@@ -1612,14 +1680,15 @@ struct InferenceEngine {
                         common_speculative_draft(mtp_spec);
                         LOGI("[MTP] drafted %zu tokens", draft.size());
                         if (!draft.empty()) {
-                            // Trim the MTP context back to the pre-draft base. The draft
-                            // stage decoded id_last at mtp_n_past plus the draft tokens
-                            // after it; we must wipe ALL of that (>= mtp_n_past) so the
-                            // subsequent common_speculative_process() re-decodes id_last
-                            // at mtp_n_past as a fresh position. Keeping id_last here made
-                            // that re-decode collide with an already-filled KV slot, so
-                            // process() returned false and produced an empty reply.
-                            llama_memory_seq_rm(llama_get_memory(mtp_ctx), seq_id, mtp_n_past, -1);
+                            // Trim the draft context back to the pre-draft base. The
+                            // draft stage decoded id_last at mtp_n_past plus the draft
+                            // tokens after it; we must wipe ALL of that (>= mtp_n_past)
+                            // so the subsequent common_speculative_process() re-decodes
+                            // id_last at mtp_n_past as a fresh position. Keeping id_last
+                            // here made that re-decode collide with an already-filled KV
+                            // slot, so process() returned false and produced an empty
+                            // reply.
+                            llama_memory_seq_rm(llama_get_memory(dft_ctx), seq_id, mtp_n_past, -1);
                         }
                     }
 
@@ -1695,7 +1764,7 @@ struct InferenceEngine {
 
                     // 6) roll back any unaccepted draft tokens (RS) on BOTH contexts
                     llama_memory_seq_rm(llama_get_memory(context), seq_id, mtp_n_past, -1);
-                    llama_memory_seq_rm(llama_get_memory(mtp_ctx),  seq_id, mtp_n_past, -1);
+                    llama_memory_seq_rm(llama_get_memory(dft_ctx),  seq_id, mtp_n_past, -1);
 
                     if (hit_eos)  { LOGI("[MTP] EOS at gen=%d", n_gen); break; }
                     if (gen_stopped) { LOGI("[MTP] stopped by callback at gen=%d", n_gen); break; }
