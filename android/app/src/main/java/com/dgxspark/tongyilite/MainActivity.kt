@@ -174,7 +174,10 @@ class MainActivity : FlutterActivity() {
             return
         }
         val timeoutSec = call.argument<Number>("timeoutSec")?.toLong() ?: 15L
-        logI("handleRunPythonScript", "script=${script.take(64)}..., timeout=${timeoutSec}s")
+        // stdin：一次性批次输入（对齐 DSH）。提供时交给 agent_runner 接成 sys.stdin，
+        // 脚本内 input() 可读到；不提供则 input() 收到 EOF。
+        val stdinInput = call.argument<String>("stdin")
+        logI("handleRunPythonScript", "script=${script.take(64)}..., timeout=${timeoutSec}s, stdin=${stdinInput?.length ?: 0}")
 
         // 脚本执行在线程池（不阻塞 UI）；先显式 start（幂等），再加载模块。
         val future = pythonExecutor.submit<Map<String, Any?>> {
@@ -184,7 +187,7 @@ class MainActivity : FlutterActivity() {
             }
             val py = Python.getInstance()
             val module = py.getModule("agent_runner")
-            val raw = module.callAttr("run_script", script).toString()
+            val raw = module.callAttr("run_script", script, stdinInput).toString()
             val json = JSONObject(raw)
             mapOf(
                 "ok" to json.optBoolean("ok", false),

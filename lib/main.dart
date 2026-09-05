@@ -32,11 +32,12 @@ Future<void> main() async {
               context: navigator.context,
               barrierDismissible: false,
               builder: (ctx) => AlertDialog(
-                title: const Text('智能体请求完整文件系统访问'),
+                title: const Text('智能体请求访问公共目录'),
                 content: Text(
                   '工具：$toolName\n'
-                  '目标模式：${escalation.requestedMode.value}\n'
                   '理由：${escalation.justification}\n\n'
+                  '应用已具备访问公共目录（/sdcard 等）的权限；'
+                  '系统目录（/data 等）需 root，应用无法授予。'
                   '批准后仅本次调用生效。',
                   style: const TextStyle(fontSize: 13),
                 ),

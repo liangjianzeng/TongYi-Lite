@@ -28,6 +28,16 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 - gradle 守护进程可能持有 `.cxx` 锁导致 `buildCMakeDebug` 偶发失败：`./gradlew.bat --stop` 后重试。
 - 构建/安装前先 `adb devices` 确认设备在线；设备可能因 USB 断开而消失，需等待或重连。
 
+## APK 构建产物地址（打包必记）
+
+> **每次构建后，把 APK 输出目录地址写进这条备忘**，方便用户直接找包。
+
+- **APK 输出目录**：`build\app\outputs\flutter-apk\`（Windows 绝对路径
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`）。
+- debug 包：`app-debug.apk`（真机调试，`adb install -r` 覆盖安装）。
+- release 包：`app-release.apk`（生产分发）。
+- 构建后**必须**列出该目录的 APK 名/大小/时间，并把目录地址发给用户。
+
 ## APK 签名（重要记忆）
 
 > **正确签名是 `CN=TongYiLite`（O=DGXSpark），不是临时生成的 dev keystore。**
@@ -119,3 +129,34 @@ add_compile_definitions(NDEBUG)
 - 不主动生成、不主动查看 `screen.png` 之类的截图产物；即便存在也不把图像内容当真。
 - 判断 UI 状态只看文本节点/属性（`text`、`content-desc`、`checked`、`bounds`），
   不要写"打开截图确认一下"这种步骤。
+
+## 重要：通过 DSH Phone 把 APK 下发到手机的触发机制（2026-09-05 实测可行）
+
+> **背景**：用户在手机上用 `E:\DTXY\DSH-Phone` 这个 App 通过 SSH 隧道连回本机，
+> 想在手机上直接下载刚打包的 APK。DSH Phone 的"资源下载"能力链路：
+>
+> - 手机 webview 注入 `artifactBridgeJs`，监听 DSH Web UI 里**成果（artifact）点击**；
+> - 只有当 Web UI 里出现**产物按钮（file-mention chip，`title` 存远端路径、
+>   带 `.apk` 后缀 → 归类为 resource 走下载）**时，手机才会触发 SFTP 隧道下载；
+> - 该产物按钮由 **`write` 工具调用（带 `file_path`）** 触发，**不是** gradle 编译产物。
+
+**为什么之前触发不了**：APK 是 `gradle` 编译出来的，不是通过 `write` 工具调用产生的，
+所以 Web UI 里**没有它的产物按钮** → 手机点不到、下不了。
+**只有 `write` 工具产出的文件，才会被 Web UI 渲染成可点击的产物/资源按钮。**
+
+**正确做法（让手机能下载）：**
+1. 先确认手机 SSH 连的是哪台主机（`E:\DTXY\DSH-Phone\lib\tunnel_service.dart` 里配的 host）；
+2. 用 **`write` 工具调用**把 APK 写到**手机所连主机上的某个路径**（不是直接给路径）；
+3. 这样 Web UI 会把它渲染成产物按钮，手机一点就走 SFTP 隧道下载（`download_manager.dart`）。
+
+**让输出更高概率触发下载的优化建议（针对 DSH Phone）：**
+- 凡是可能下发的二进制（apk/zip/图片等），**一律走 `write` 工具写到一个明确路径**，
+  不要只给路径文本或 `file://` 链接——只有 `write` 才会被识别为产物。
+- `write` 的 `file_path` 用**带后缀的完整路径**（`.apk` 等），确保命中
+  `artifact_recognizer.dart` 的 `resourceSuffixes`（`.apk/.zip/.png/.pdf` 等）。
+- 若担心路径被 chips 隐藏，`write` 后在回复里**显式写出该完整路径**，
+  配合 `webview_bridges.dart` 的 `findMentionPath` / `collectProducedDirs` 兜底解析。
+- 大文件注意 `maxDownloadBytes = 256MB`、`maxRemoteReadBytes = 8MB` 上限，
+  APK 一般没问题；超上限需换用 `download_manager` 的断点续传流程。
+- 手机侧需开启"资源下载"开关（`config.dart` 的 `resourceDownloadEnabled`，默认开），
+  且 SSH 隧道已连上对应主机。

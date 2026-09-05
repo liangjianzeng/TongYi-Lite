@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 
 import '../agent/agent.dart';
+import '../agent/web_search/web_search_provider.dart';
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/openai_service.dart';
@@ -129,6 +131,11 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 上一轮生成是否走了 API 后备（用于 stopGeneration 分支到 openai 取消）。
   bool _lastGenWasApi = false;
 
+  /// 用户是否主动点过「停止」。用户主动停止时 API 侧会抛
+  /// `DioException [request cancelled]`，属正常停止信号而非错误——
+  /// 此标记用于区分二者，避免把「用户停止」误报成「发送失败」。
+  bool _userCancelled = false;
+
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
   /// Ensure the correct model is loaded before sending a message.
@@ -190,6 +197,7 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     }
     _lastGenWasApi = useApi;
+    _userCancelled = false;
 
     debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"'
         ' route=${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
@@ -316,7 +324,10 @@ class ChatNotifier extends StateNotifier<bool> {
         }
 
         debugPrint('[ChatNotifier] Listening to token stream...');
-        
+        // 过滤「用户主动停止」产生的 DioException：点停止时 API 会抛
+        // [request cancelled]，属正常停止信号，静默丢弃而非当成发送失败。
+        final tokenStream = _suppressUserCancelled(stream);
+
         // --- Streaming thinking-tag filter (stateful, token-by-token) ---
         // `visible` holds the response shown to the user. Anything inside
         // <think>...</think> is routed to `thinking` and dropped from output.
@@ -341,7 +352,7 @@ class ChatNotifier extends StateNotifier<bool> {
 
         var lastStreamSave = DateTime.now();
 
-        await for (final token in stream) {
+        await for (final token in tokenStream) {
           if (token.isEmpty) continue;
 
           tokenCount++;
@@ -642,6 +653,10 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.register(tool);
     }
 
+    // 联网搜索：把当前 SearXNG provider 注册到接缝（对齐 DSH ctx.web 的可插拔
+    // 搜索能力）。web_search 工具只接接缝、不写死搜索源；替换搜索源无需改工具。
+    applySearXNGProviderFromSettings(settings);
+
     // 联网类工具（web_search/get_weather）：配置关闭时不可见。
     if (!settings.webSearchEnabled) {
       registry.unregister('web_search');
@@ -749,7 +764,7 @@ class ChatNotifier extends StateNotifier<bool> {
       final rawBuffer = StringBuffer();
       var lastSave = DateTime.now();
 
-      await for (final token in sourceStream) {
+      await for (final token in _suppressUserCancelled(sourceStream)) {
         if (token.isEmpty) continue;
         firstTokenTime ??= DateTime.now();
         tokenCount++;
@@ -887,10 +902,27 @@ class ChatNotifier extends StateNotifier<bool> {
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
   Future<void> stopGeneration() async {
+    // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
+    // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
+    _userCancelled = true;
     if (_lastGenWasApi) {
       _ref.read(openAiServiceProvider).stop();
     } else {
       await _inference.stopGeneration();
+    }
+  }
+
+  /// 过滤掉「用户主动停止」产生的 [DioException] 取消异常。
+  /// 用户点停止时 API 会抛 `request cancelled`，属正常停止信号；仅在此情况
+  /// 下静默丢弃，否则原样重抛由调用方兜底（真实网络/服务端错误仍会上报）。
+  Stream<String> _suppressUserCancelled(Stream<String> source) async* {
+    try {
+      await for (final token in source) {
+        yield token;
+      }
+    } on DioException {
+      if (_userCancelled) return;
+      rethrow;
     }
   }
 }

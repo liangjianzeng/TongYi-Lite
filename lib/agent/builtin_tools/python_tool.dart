@@ -36,11 +36,15 @@ ToolDefinition createPythonExecTool() {
     description:
         '在设备上执行 Python 脚本（嵌入式 CPython，app 权限内）。'
         '可做计算/数据处理/文件/网络。输出截断到 ${kPythonOutputLimit} 字符，超时 ${kPythonTimeout.inSeconds}s。'
+        'stdin 不支持交互式输入：它是"一次性喂入并关闭"的批次输入——脚本需要 input() 读取时，'
+        '必须用 stdin 参数把输入一并传进来（不传则脚本内 input() 会立即收到 EOF 而退出）。'
+        '纯算术运算请直接用 calculator 工具，不要写 Python 去算。'
         '确需访问公共目录时带 sandbox_permissions 请求用户批准。',
     parameters: withEscalationFields({
       'type': 'object',
       'properties': {
         'script': {'type': 'string', 'description': '要执行的 Python 脚本'},
+        'stdin': {'type': 'string', 'description': '喂给脚本 stdin 的输入（input() 用；不填则 input() 收 EOF'},
         'timeoutSec': {'type': 'number', 'description': '超时秒数（默认 15）'},
       },
       'required': ['script'],
@@ -51,6 +55,8 @@ ToolDefinition createPythonExecTool() {
       if (script.isEmpty) return ToolResult.error('缺少 script 参数');
       final timeoutSec =
           ((args['timeoutSec'] as num?)?.toInt() ?? 15).clamp(1, 60);
+      // stdin：仅当非空时传入（空串会让 input() 立即 EOF，故用 null 表示不传）。
+      final stdin = (args['stdin'] as String?)?.trim();
 
       try {
         // isAvailable 返回 String："ok" = 可用；其他为原生透传的具体错误。
@@ -62,10 +68,14 @@ ToolDefinition createPythonExecTool() {
               'Python 运行时不可用${available == null || available.isEmpty ? '' : '：$available'}');
         }
         // runScript 返回处理后的输出文本（原生侧已合并 stdout/stderr、
-        // 区分成功/失败；失败走 PlatformException）。
+        // 区分成功/失败；失败走 PlatformException）。stdin 一并透传给 agent_runner。
+        final argsMap = <String, dynamic>{'script': script, 'timeoutSec': timeoutSec};
+        if (stdin != null && stdin.isNotEmpty) {
+          argsMap['stdin'] = stdin;
+        }
         final content = await kPythonChannel.invokeMethod<String>(
           'runScript',
-          {'script': script, 'timeoutSec': timeoutSec},
+          argsMap,
         );
         final output = content?.trim() ?? '';
         final truncated = output.length > kPythonOutputLimit
