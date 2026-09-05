@@ -98,3 +98,7 @@ diag_*.txt
 # 若日后需更新，从官方仓库重新 vendor 后提交即可：ARM-software/kleidiai v1.24.0、
 # KhronosGroup/OpenCL-Headers（Android NDK 无 OpenCL SDK，需本地 headers）。
 third_party/llama.cpp.b10176/
+
+# 本次构建产物 + 临时 Gradle home（不进入仓库）
+_build_log/
+android/.gradle-home/
