@@ -24,11 +24,13 @@ ToolDefinition createShellExecTool() {
         '在设备上执行 shell 命令（sh -c，app 权限内）。'
         '可访问工作区文件、运行普通命令（如 cat/free/ps/top/df、查看 /proc 信息等）。'
         '输出截断到 ${kShellOutputLimit} 字符，超时 ${kShellTimeout.inSeconds}s。'
+        'stdin 不支持交互：它是"一次性喂入并关闭"的批次输入——命令需要读取输入时用 stdin 参数一并传进来（不传则命令读不到输入）。'
         '命令以 app 权限运行，不依赖 root；需要完整文件系统访问时带 sandbox_permissions 请求用户批准。',
     parameters: withEscalationFields({
       'type': 'object',
       'properties': {
         'command': {'type': 'string', 'description': '要执行的 shell 命令'},
+        'stdin': {'type': 'string', 'description': '喂给命令 stdin 的输入（一次性批次，喂完即关闭；不填则不写）'},
       },
       'required': ['command'],
     }),
@@ -40,11 +42,21 @@ ToolDefinition createShellExecTool() {
       // Android 上 sh 进程始终以 app 权限运行，完整访问依赖 All-Files-Access。
       final mode = effectiveModeOf(args);
       try {
-        final result = await Process.run('sh', ['-c', command],
-            stdoutEncoding: utf8, stderrEncoding: utf8);
-        final stdout = (result.stdout as String?) ?? '';
-        final stderr = (result.stderr as String?) ?? '';
-        final exitCode = result.exitCode;
+        // stdin：一次性批次输入（对齐 DSH）。喂入后关闭；不传则不写。
+        final stdinInput = (args['stdin'] as String?)?.trim();
+        final process = await Process.start('sh', ['-c', command]);
+        // 先同时拉取 stdout/stderr 流，避免单向等待导致标准错误缓冲区写满而死锁。
+        // Process.start 无 stdoutEncoding 参数，需手动用 utf8.decoder 解码字节流。
+        final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+        final stderrFuture = process.stderr.transform(utf8.decoder).join();
+        final exitFuture = process.exitCode;
+        if (stdinInput != null && stdinInput.isNotEmpty) {
+          process.stdin.write(stdinInput);
+          await process.stdin.close();
+        }
+        final stdout = await stdoutFuture;
+        final stderr = await stderrFuture;
+        final exitCode = await exitFuture;
 
         final buffer = StringBuffer();
         if (stdout.isNotEmpty) buffer.write(stdout);

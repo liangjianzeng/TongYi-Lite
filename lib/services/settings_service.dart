@@ -101,8 +101,27 @@ class InferenceSettings {
   /// 是否允许并行工具调用（预留能力，默认关闭）。
   final bool agentAllowParallelTools;
 
-  /// 联网搜索工具总开关（默认关闭：端侧默认不联网）。
+  /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）。
   final bool webSearchEnabled;
+
+  /// 联网搜索 SearXNG provider 的自建实例地址（对齐 DSH 默认值）。
+  /// 默认 `http://127.0.0.1:8080`；私有实例需配 apiKey 并以 Bearer 发送。
+  final String webSearchSearXngBaseUrl;
+
+  /// SearXNG 实例的 API key（私有实例才需要；空 = 无需密钥）。
+  final String? webSearchSearXngApiKey;
+
+  /// 单次 SearXNG 搜索最多返回来源条数（对齐 DSH 默认 8）。
+  final int webSearchSearXngMaxResults;
+
+  /// 单次 SearXNG 搜索超时毫秒（默认 15s，与端侧工具超时对齐）。
+  final int webSearchSearXngTimeoutMs;
+
+  /// SearXNG 搜索语言（如 "zh-CN"）；空 = 不指定。
+  final String? webSearchSearXngLanguage;
+
+  /// SearXNG 搜索分类（如 "general","news"）；空 = 不指定。
+  final String? webSearchSearXngCategories;
 
   /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限；
   /// 用户可在设置中关闭）。
@@ -166,6 +185,12 @@ class InferenceSettings {
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
     this.webSearchEnabled = false,
+    this.webSearchSearXngBaseUrl = 'http://127.0.0.1:8080',
+    this.webSearchSearXngApiKey,
+    this.webSearchSearXngMaxResults = 8,
+    this.webSearchSearXngTimeoutMs = 15000,
+    this.webSearchSearXngLanguage,
+    this.webSearchSearXngCategories,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -237,6 +262,12 @@ class InferenceSettings {
       int? agentToolTimeoutMs,
       bool? agentAllowParallelTools,
       bool? webSearchEnabled,
+      String? webSearchSearXngBaseUrl,
+      String? webSearchSearXngApiKey,
+      int? webSearchSearXngMaxResults,
+      int? webSearchSearXngTimeoutMs,
+      String? webSearchSearXngLanguage,
+      String? webSearchSearXngCategories,
       bool? agentShellEnabled,
       bool? agentPythonEnabled,
       bool? agentFullFileAccess,
@@ -279,6 +310,18 @@ class InferenceSettings {
       agentAllowParallelTools:
           agentAllowParallelTools ?? this.agentAllowParallelTools,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
+      webSearchSearXngBaseUrl:
+          webSearchSearXngBaseUrl ?? this.webSearchSearXngBaseUrl,
+      webSearchSearXngApiKey:
+          webSearchSearXngApiKey ?? this.webSearchSearXngApiKey,
+      webSearchSearXngMaxResults:
+          webSearchSearXngMaxResults ?? this.webSearchSearXngMaxResults,
+      webSearchSearXngTimeoutMs:
+          webSearchSearXngTimeoutMs ?? this.webSearchSearXngTimeoutMs,
+      webSearchSearXngLanguage:
+          webSearchSearXngLanguage ?? this.webSearchSearXngLanguage,
+      webSearchSearXngCategories:
+          webSearchSearXngCategories ?? this.webSearchSearXngCategories,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess:
@@ -316,6 +359,12 @@ class InferenceSettings {
         'agentToolTimeoutMs': agentToolTimeoutMs,
         'agentAllowParallelTools': agentAllowParallelTools,
         'webSearchEnabled': webSearchEnabled,
+        'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
+        'webSearchSearXngApiKey': webSearchSearXngApiKey,
+        'webSearchSearXngMaxResults': webSearchSearXngMaxResults,
+        'webSearchSearXngTimeoutMs': webSearchSearXngTimeoutMs,
+        'webSearchSearXngLanguage': webSearchSearXngLanguage,
+        'webSearchSearXngCategories': webSearchSearXngCategories,
         'agentShellEnabled': agentShellEnabled,
         // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson，
         // 保存后读回会静默丢配置（默认值兜底）。
@@ -364,6 +413,18 @@ class InferenceSettings {
       agentAllowParallelTools:
           json['agentAllowParallelTools'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
+      // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）。
+      webSearchSearXngBaseUrl:
+          json['webSearchSearXngBaseUrl'] as String? ?? 'http://127.0.0.1:8080',
+      webSearchSearXngApiKey: json['webSearchSearXngApiKey'] as String?,
+      webSearchSearXngMaxResults:
+          (json['webSearchSearXngMaxResults'] as num?)?.toInt() ?? 8,
+      webSearchSearXngTimeoutMs:
+          (json['webSearchSearXngTimeoutMs'] as num?)?.toInt() ?? 15000,
+      webSearchSearXngLanguage:
+          json['webSearchSearXngLanguage'] as String?,
+      webSearchSearXngCategories:
+          json['webSearchSearXngCategories'] as String?,
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,

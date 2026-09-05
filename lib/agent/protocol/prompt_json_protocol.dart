@@ -1,4 +1,4 @@
-/// prompt-JSON/XML 文本协议 —— 当前本地引擎的兜底工具协议。
+﻿/// prompt-JSON/XML 文本协议 —— 当前本地引擎的兜底工具协议。
 ///
 /// 原理：把工具清单 + 调用协议注入系统提示，要求模型输出工具调用块：
 /// - JSON：`{"tool_call": {"name": "get_time", "arguments": {}}}`
@@ -77,7 +77,7 @@ class PromptJsonProtocol implements ToolProtocol {
     if (tools.any(_hasEscalation)) {
       lines.add('');
       lines.add('[沙箱说明]');
-      lines.add('文件/命令类工具默认在 app workspace 沙盒内运行。'
+      lines.add('文件/命令类工具默认在 app workspace 沙盒内运行，'
           '确需访问公共目录/完整文件系统时，在调用中带 '
           '<arg_key>sandbox_permissions<arg_value>danger-full-access</arg_value> '
           '和 <arg_key>justification<arg_value>一句话理由</arg_value> '
