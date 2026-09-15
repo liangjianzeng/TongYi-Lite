@@ -2,7 +2,7 @@ import java.util.Properties
 import java.io.FileInputStream
 import com.chaquo.python.ChaquopyExtension
 
-// Kotlin DSL 脚本编译需要 Chaquopy 类型（否则 `python {}` Unresolved reference）。
+// Kotlin DSL 鑴氭湰缂栬瘧闇€瑕?Chaquopy 绫诲瀷锛堝惁鍒?`python {}` Unresolved reference锛夈€?
 buildscript {
     repositories {
         maven { url = uri("https://maven.chaquo.com/maven/") }
@@ -17,7 +17,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
-    // Chaquopy：Android 嵌入式 CPython（python_exec 工具运行时）
+    // Chaquopy锛欰ndroid 宓屽叆寮?CPython锛坧ython_exec 宸ュ叿杩愯鏃讹級
     id("com.chaquo.python")
 }
 
@@ -99,19 +99,19 @@ android {
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
 }
 
-// Chaquopy：python_exec 工具运行时。首期不装第三方库（标准库足够），
-// 避免构建网络依赖；后续按需在 pip 块声明（requests/numpy 等）。
-// Kotlin DSL 下 `python {}` accessor 不可静态解析；Chaquopy 注册的扩展名是
-// `chaquopy`（defaultConfig 内配置 Python 运行时），改用显式扩展配置。
+// Chaquopy锛歱ython_exec 宸ュ叿杩愯鏃躲€傞鏈熶笉瑁呯涓夋柟搴擄紙鏍囧噯搴撹冻澶燂級锛?
+// 閬垮厤鏋勫缓缃戠粶渚濊禆锛涘悗缁寜闇€鍦?pip 鍧楀０鏄庯紙requests/numpy 绛夛級銆?
+// Kotlin DSL 涓?`python {}` accessor 涓嶅彲闈欐€佽В鏋愶紱Chaquopy 娉ㄥ唽鐨勬墿灞曞悕鏄?
+// `chaquopy`锛坉efaultConfig 鍐呴厤缃?Python 杩愯鏃讹級锛屾敼鐢ㄦ樉寮忔墿灞曢厤缃€?
 extensions.configure<ChaquopyExtension>("chaquopy") {
     defaultConfig {
-        // 17.x 默认 3.10；显式 3.11 以匹配主机 buildPython（3.11，版本必须一致）。
+        // 17.x 榛樿 3.10锛涙樉寮?3.11 浠ュ尮閰嶄富鏈?buildPython锛?.11锛岀増鏈繀椤讳竴鑷达級銆?
         version = "3.11"
-        // 主机 Python 用于构建时交叉编译标准库：构建命令把 Python 加入 PATH，
-        // 此处用 "python"（跨机兼容；其他机器只要 PATH 里有 python 即可）。
+        // 涓绘満 Python 鐢ㄤ簬鏋勫缓鏃朵氦鍙夌紪璇戞爣鍑嗗簱锛氭瀯寤哄懡浠ゆ妸 Python 鍔犲叆 PATH锛?
+        // 姝ゅ鐢?"python"锛堣法鏈哄吋瀹癸紱鍏朵粬鏈哄櫒鍙 PATH 閲屾湁 python 鍗冲彲锛夈€?
         buildPython("python")
         pip {
-            // 不声明任何依赖：CPython 标准库即可跑脚本（json/re/urllib 等）。
+            // 涓嶅０鏄庝换浣曚緷璧栵細CPython 鏍囧噯搴撳嵆鍙窇鑴氭湰锛坖son/re/urllib 绛夛級銆?
         }
     }
 }
@@ -119,5 +119,4 @@ extensions.configure<ChaquopyExtension>("chaquopy") {
 flutter {
     source = "../.."
 }
-
 //llama.cpp doesn't publish to Maven; we build from source via CMake
