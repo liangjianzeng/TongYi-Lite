@@ -486,6 +486,110 @@
           "calculator"
         ]
       }
+    },
+    {
+      "id": "neohorse-1-4b",
+      "name": "NeoHorse-1 4B (Q4_K_M 智能体)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/TokenRhythm/NeoHorse-1-4B-GGUF/resolve/main/NeoHorse-1-4B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/TokenRhythm/NeoHorse-1-4B-GGUF/resolve/main/NeoHorse-1-4B-Q4_K_M.gguf",
+          "source": "huggingface"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/TokenRhythm/NeoHorse-1-4B-GGUF/resolve/main/NeoHorse-1-4B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 2.52,
+      "sizeMBDisplay": "2.5 GB",
+      "recommended": true,
+      "minRamMB": 4096,
+      "sha256Hash": "7da8ac6219b0aaa21b58cb26c1ec6826b478449215a3b0448742e1cda60fa2b4",
+      "tags": [
+        "推荐",
+        "智能体"
+      ],
+      "agentCapabilities": {
+        "nativeToolCall": true,
+        "maxContextTokens": 262144,
+        "recommendedNctx": 32768,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 512,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
+      "id": "agents-a1-4b",
+      "name": "Agents-A1 4B (Q4_K_M 智能体+视觉)",
+      "type": "vision",
+      "mirrors": [
+        {
+          "url": "https://hf-mirror.com/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
+          "source": "huggingface"
+        },
+        {
+          "url": "https://modelscope.cn/api/v1/models/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
+          "source": "modelscope"
+        }
+      ],
+      "sizeGB": 2.52,
+      "sizeMBDisplay": "2.5 GB",
+      "recommended": true,
+      "minRamMB": 4096,
+      "sha256Hash": "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+      "tags": [
+        "推荐",
+        "智能体",
+        "视觉"
+      ],
+      "mmproj": {
+        "mirrors": [
+          {
+            "url": "https://hf-mirror.com/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
+            "source": "hf-mirror"
+          },
+          {
+            "url": "https://huggingface.co/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
+            "source": "huggingface"
+          },
+          {
+            "url": "https://modelscope.cn/api/v1/models/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
+            "source": "modelscope"
+          }
+        ],
+        "sizeMB": 641.3,
+        "sizeMBDisplay": "641 MB",
+        "sha256Hash": "254145e7e03e9e8d3120813fac8033ffa04e411eb6d70a198833504935681084"
+      },
+      "agentCapabilities": {
+        "nativeToolCall": true,
+        "maxContextTokens": 262144,
+        "recommendedNctx": 32768,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 512,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
     }
   ]
 }

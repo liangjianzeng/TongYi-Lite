@@ -23,6 +23,8 @@
 #include <deque>
 #include <fstream>
 #include <cstdlib>
+#include <cstdio>
+#include <cstdarg>
 #include <sys/stat.h>
 
 // llama.cpp headers
@@ -38,6 +40,7 @@
 
 #define LOG_TAG "TongYiLite"
 static void reportLoadingLog(const char *message);
+static void reportSpecLog(const char *fmt, ...);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -1638,7 +1641,9 @@ struct InferenceEngine {
                 // the main context), so no state checkpoints are needed — this is the
                 // speculative-simple RS path, with the MTP process() hook keeping the
                 // draft context in sync (see llama.cpp server-context.cpp).
-                LOGI("MTP generation start: n_draft_max=%d", n_draft_max);
+                const char *driver_tag = mtp_enabled ? "MTP" : "dspark";
+                LOGI("%s generation start: n_draft_max=%d", driver_tag, n_draft_max);
+                reportSpecLog("%s generation start: n_draft_max=%d", driver_tag, n_draft_max);
                 // Per-completion: reset the adaptive window and start at the full budget.
                 mtp_accept_sum   = 0;
                 mtp_draft_sum    = 0;
@@ -1674,7 +1679,7 @@ struct InferenceEngine {
                                 mtp_adaptive_max = (rate >= 0.35f) ? n_draft_max :
                                                    (rate >= 0.20f) ? std::max(2, n_draft_max / 2) : 1;
                             }
-                            LOGI("[MTP] adaptive n_draft=%d (accept_rate=%.2f)",
+                            LOGI("[%s] adaptive n_draft=%d (accept_rate=%.2f)", driver_tag,
                                  mtp_adaptive_max, rate);
                         }
                         // Clamp n_max to the remaining KV budget so we never decode
@@ -1690,7 +1695,8 @@ struct InferenceEngine {
                             /*.result   =*/ &draft,
                         };
                         common_speculative_draft(mtp_spec);
-                        LOGI("[MTP] drafted %zu tokens", draft.size());
+                        LOGI("[%s] drafted %zu tokens", driver_tag, draft.size());
+                        reportSpecLog("[%s] drafted %zu tokens", driver_tag, draft.size());
                         if (!draft.empty()) {
                             // Trim the draft context back to the pre-draft base. The
                             // draft stage decoded id_last at mtp_n_past plus the draft
@@ -1711,12 +1717,12 @@ struct InferenceEngine {
                         common_batch_add(batch_tgt, draft[k], mtp_n_past + k, { seq_id }, true);
                     }
                     t_start = std::chrono::high_resolution_clock::now();
-                    LOGI("[MTP] verify batch: id_last=%d n_past=%d n_draft=%zu", mtp_id_last, mtp_n_past - 1, draft.size());
+                    LOGI("[%s] verify batch: id_last=%d n_past=%d n_draft=%zu", driver_tag, mtp_id_last, mtp_n_past - 1, draft.size());
                     const int dec_ret = llama_decode(context, batch_tgt);
                     t_end = std::chrono::high_resolution_clock::now();
                     t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
                     if (dec_ret != 0) {
-                        LOGE("[MTP] llama_decode failed ret=%d at n_past=%d", dec_ret, mtp_n_past - 1);
+                        LOGE("[%s] llama_decode failed ret=%d at n_past=%d", driver_tag, dec_ret, mtp_n_past - 1);
                         break;
                     }
 
@@ -1730,19 +1736,20 @@ struct InferenceEngine {
                     //    empty-draft fallback.
                     if (!draft.empty()) {
                         const bool proc_ok = common_speculative_process(mtp_spec, batch_tgt);
-                        LOGI("[MTP] process ok=%d", (int)proc_ok);
+                        LOGI("[%s] process ok=%d", driver_tag, (int)proc_ok);
                         if (!proc_ok) {
-                            LOGE("[MTP] common_speculative_process failed");
+                            LOGE("[%s] common_speculative_process failed", driver_tag);
                             break;
                         }
                     }
 
                     // 4) sample the target logits, accept as many drafts as match
                     auto ids = common_sampler_sample_and_accept_n(mtp_smpl, context, draft);
-                    LOGI("[MTP] sampled ids.size=%zu draft.size=%zu", ids.size(), draft.size());
+                    LOGI("[%s] sampled ids.size=%zu draft.size=%zu", driver_tag, ids.size(), draft.size());
                     if (ids.empty()) break;
                     common_speculative_accept(mtp_spec, seq_id, (uint16_t)(ids.size() - 1));
-                    LOGI("[MTP] accepted %zu/%zu draft tokens", ids.size() - 1, draft.size());
+                    LOGI("[%s] accepted %zu/%zu draft tokens", driver_tag, ids.size() - 1, draft.size());
+                    reportSpecLog("[%s] accepted %zu/%zu draft tokens", driver_tag, ids.size() - 1, draft.size());
 
                     // Feed the running acceptance window (draft.size() is captured
                     // here before the vector is cleared below).
@@ -1761,7 +1768,7 @@ struct InferenceEngine {
                             int pn = llama_token_to_piece(vocab, tok, pbuf, sizeof(pbuf), 0, false);
                             std::string phex; char tmp[4];
                             for (int x = 0; x < pn && x < 32; ++x) { snprintf(tmp, sizeof(tmp), "%02X ", (unsigned char)pbuf[x]); phex += tmp; }
-                            LOGI("[MTP] gen#%d token=%d piece_hex: %s", n_gen, tok, phex.c_str());
+                            LOGI("[%s] gen#%d token=%d piece_hex: %s", driver_tag, n_gen, tok, phex.c_str());
                         }
                         mtp_prompt_tgt.push_back(mtp_id_last);
                         mtp_id_last = tok;
@@ -1778,14 +1785,16 @@ struct InferenceEngine {
                     llama_memory_seq_rm(llama_get_memory(context), seq_id, mtp_n_past, -1);
                     llama_memory_seq_rm(llama_get_memory(dft_ctx),  seq_id, mtp_n_past, -1);
 
-                    if (hit_eos)  { LOGI("[MTP] EOS at gen=%d", n_gen); break; }
-                    if (gen_stopped) { LOGI("[MTP] stopped by callback at gen=%d", n_gen); break; }
+                    if (hit_eos)  { LOGI("[%s] EOS at gen=%d", driver_tag, n_gen); break; }
+                    if (gen_stopped) { LOGI("[%s] stopped by callback at gen=%d", driver_tag, n_gen); break; }
                 }
                 llama_batch_free(batch_tgt);
                 {
                     const float rate = (mtp_draft_sum > 0) ? (mtp_accept_sum / mtp_draft_sum) : 0.0f;
-                    LOGI("MTP generation done: %d tokens, accept_rate=%.3f, adaptive_n_draft=%d",
-                         n_gen, rate, mtp_adaptive_max);
+                    LOGI("%s generation done: %d tokens, accept_rate=%.3f, adaptive_n_draft=%d",
+                         driver_tag, n_gen, rate, mtp_adaptive_max);
+                     reportSpecLog("%s generation done: %d tokens, accept_rate=%.3f, adaptive_n_draft=%d",
+                          driver_tag, n_gen, rate, mtp_adaptive_max);
                 }
             } else {
                 // ============================================================
@@ -2086,6 +2095,20 @@ static void reportLoadingLog(const char *message) {
     env->CallVoidMethod(g_loading_callback_obj, mid, jmsg);
     env->DeleteLocalRef(jmsg);
     env->DeleteLocalRef(cls);
+}
+
+// Speculative-decode loop logs: these MUST reach the in-app "推理引擎日志"
+// screen (which only reads reportLoadingLog), not just logcat. Without this
+// helper the [MTP]/[dspark] proof (drafted/accepted tokens, accept_rate) would
+// be invisible in the UI. This is the printf-style variant of reportLoadingLog.
+static void reportSpecLog(const char *fmt, ...) {
+    if (!g_loading_callback_obj) return;
+    va_list args;
+    va_start(args, fmt);
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    reportLoadingLog(buf);
 }
 
 JNIEXPORT jboolean JNICALL
