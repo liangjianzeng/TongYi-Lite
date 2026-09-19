@@ -102,3 +102,7 @@ third_party/llama.cpp.b10176/
 # 本次构建产物 + 临时 Gradle home（不进入仓库）
 _build_log/
 android/.gradle-home/
+
+# 本机调试产物 + 真机验证日志（含宿主复现二进制/模型缓存），不进仓库
+.upgrade-tmp/
+gate4_logcat.ps1

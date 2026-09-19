@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.22.1)
+cmake_minimum_required(VERSION 3.22.1)
 
 project("tongyilite_native" VERSION 0.1.3 LANGUAGES C CXX)
 
@@ -41,6 +41,13 @@ set(KLEIDIAI_VENDOR_DIR ${PROJECT_ROOT_DIR}/third_party/kleidiai)
 if(NOT EXISTS "${KLEIDIAI_VENDOR_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "KleidiAI source not found at ${KLEIDIAI_VENDOR_DIR}. Run: git clone --depth 1 --branch v1.24.0 https://github.com/ARM-software/kleidiai ${KLEIDIAI_VENDOR_DIR}")
 endif()
+# NOTE(b11028 upgrade): upstream renamed the FetchContent project from
+# `KleidiAI_Download` (<=fe8156f) to `kleidiai`, so the override variable is now
+# FETCHCONTENT_SOURCE_DIR_KLEIDIAI. Set BOTH names so the vendored source is used
+# regardless of the llama.cpp tree version -- a mismatched name means CMake tries
+# a network download and, if someone softens the failure, silently disables the
+# KleidiAI kernels (silent ~2x CPU slowdown; see the -O3 incident in AGENTS.md).
+set(FETCHCONTENT_SOURCE_DIR_KLEIDIAI ${KLEIDIAI_VENDOR_DIR} CACHE STRING "" FORCE)
 set(FETCHCONTENT_SOURCE_DIR_KLEIDIAI_DOWNLOAD ${KLEIDIAI_VENDOR_DIR} CACHE STRING "" FORCE)
 message(STATUS "KleidiAI vendored source -> ${KLEIDIAI_VENDOR_DIR}")
 # The Android debug variant compiles with -O0 and no NDEBUG, leaving llama.cpp's
