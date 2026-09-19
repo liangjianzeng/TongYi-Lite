@@ -41,6 +41,7 @@ typedef void *(*pfn_clEnqueueWriteBuffer)(void);
 typedef void *(*pfn_clEnqueueCopyBuffer)(void);
 typedef void *(*pfn_clCreateKernel)(void);
 typedef void *(*pfn_clGetKernelWorkGroupInfo)(void);
+typedef void *(*pfn_clGetKernelSubGroupInfo)(void);
 typedef void *(*pfn_clGetEventInfo)(void);
 typedef void *(*pfn_clWaitForEvents)(void);
 typedef void *(*pfn_clGetEventProfilingInfo)(void);
@@ -160,6 +161,11 @@ cl_kernel clCreateKernel(cl_program program, const char *kernel_name, cl_int *er
 }
 cl_int clGetKernelWorkGroupInfo(cl_kernel kernel, cl_device_id device, cl_kernel_work_group_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     CL_FORWARD(clGetKernelWorkGroupInfo, (kernel, device, param_name, param_value_size, param_value, param_value_size_ret));
+}
+/* CL 2.1 core entry, used by ggml-opencl (mamba2 subgroup kernels). On drivers
+ * without it the forward returns 0 and ggml falls back (subgroup_size stays 0). */
+cl_int clGetKernelSubGroupInfo(cl_kernel kernel, cl_device_id device, cl_kernel_sub_group_info param_name, size_t input_value_size, const void *input_value, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    CL_FORWARD(clGetKernelSubGroupInfo, (kernel, device, param_name, input_value_size, input_value, param_value_size, param_value, param_value_size_ret));
 }
 cl_int clGetEventInfo(cl_event event, cl_event_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     CL_FORWARD(clGetEventInfo, (event, param_name, param_value_size, param_value, param_value_size_ret));

@@ -110,6 +110,23 @@ add_compile_definitions(NDEBUG)
 > 应改成**按模型 id 的 `Map<String, bool>`**（`mtpEnabledByModel`），每个模型独立持久化，
 > 加载时用 `gpu.mtpEnabled(modelId)` 取当前模型自己的开关。迁移旧配置时全局 bool 不迁移为开（保持默认关）。
 
+## 关键教训：release 包 AOT 暂存必须用 app.so 原名，且必须字符串级验收（2026-09-18 踩坑）
+
+> `-x compileFlutterBuildRelease` 跳过后，libapp.so 的唯一来源是 gradle `packJniLibs*` 任务，
+> 它从 **`build/app/intermediates/flutter/release/arm64-v8a/app.so`（原名 app.so！）** 取文件，
+> 打包时才改名成 `lib/arm64-v8a/libapp.so`。放成 `libapp.so` 会打成 `liblibapp.so`（Flutter 起不来）；
+> 删掉 merged_native_libs 再指望它重新生成是错觉——flutter 任务被 `-x` 跳过，没人喂产物。
+
+**release 打包正确流程**：`flutter assemble release_android_application` → 把输出的
+**`app.so` 原名**拷到 `intermediates/flutter/release/arm64-v8a/`，flutter_assets 拷到同级 `flutter_assets/` → gradlew。
+
+**打包后必做字符串级验收（本次连错两次才抓到的原因：只看时间戳/大小）**：
+```bash
+python -c "import zipfile; d=zipfile.ZipFile(apk).read('lib/arm64-v8a/libapp.so'); print(d.count('新代码字样'.encode('utf-16-le')), d.count('旧字样'.encode('utf-16-le')))"
+```
+AOT 串在 libapp.so 里是 **UTF-16LE**，debug kernel_blob 是 UTF-8；确认 NEW>0 且 OLD=0。
+`app-debug.apk`/`app-release.apk` 里"旧 Dart 幽灵"就用这招当场验尸。
+
 ## 真机调试注意
 
 - 屏幕休眠（`mWakefulness=Dozing`）时 `uiautomator dump` 返回**空节点**，易误判"UI 没渲染"。
@@ -160,3 +177,48 @@ add_compile_definitions(NDEBUG)
   APK 一般没问题；超上限需换用 `download_manager` 的断点续传流程。
 - 手机侧需开启"资源下载"开关（`config.dart` 的 `resourceDownloadEnabled`，默认开），
   且 SSH 隧道已连上对应主机。
+
+## llama.cpp 升级门槛（四道门，缺一不算升级完成）（2026-09-18 实测立规）
+
+> **背景**：另一台开发机升级到 b11028 后 CPU/GPU 全后端慢一倍——升级类回归几乎都是**静默的**
+> （不崩、不报错、功能全对，就是慢），防不住它的人只能事后考古。所有检查必须**机检化**，
+> 验收基准是 `docs/backend_benchmark_2026-08-04.md`（8 Elite 实测：Vulkan 8.60 / OpenCL 8.77 / CPU 4.33 tok/s）。
+
+**升级流程（本机 b10173→b11028 走通的打法）：**
+1. **先算 fork 增量再动手**：`git log --oneline -- third_party/llama.cpp` 找上游同步点（本仓库基线 = 上游 `fe8156f`），
+   `git diff --no-index <上游base> third_party/llama.cpp` 得真实补丁面。**别把本地补丁当祖传**——
+   本次发现 XHToken/Spark2.5 已合入上游 b11028（`spark2-5.cpp` 与 fork 版仅 1 行差异、模板改名 `Spark2.5.jinja`），
+   fork 里多余的 `XHToken-Spark-X2.5-1.7B.jinja` 直接删。
+2. 替换树：`robocopy <新树> third_party/llama.cpp /MIR`（`Remove-Item` 删 .cxx/大目录会慢到超时）。
+
+**四道验收门（全过才算完）：**
+1. **编译门**：`gradlew --stop` + 清 `.cxx` 全量重编后，扫 `.cxx/Debug/*/arm64-v8a/compile_commands.json`：
+   ggml-cpu / kleidiai / mtmd / llama core / JNI 的命令行**必须同时含 `-O3 -DNDEBUG`**，
+   ggml-cpu 主源码必须 `-march=armv8.2-a+dotprod`（NDK 顶掉 -O3 的老坑就是这么抓的）。
+   ⚠️ 写检查脚本注意 PowerShell `-match` **大小写不敏感**、compile_commands 路径是**反斜杠**——本次差点误报 292 条不合格。
+2. **内核门**：configure 摘要 KleidiAI 必须 ON，且对象文件来自 `third_party/kleidiai`（vendored），**不是网络拉取**。
+   ⚠️ **FetchContent 项目名会变**：`KleidiAI_Download`(fe8156f) → `kleidiai`(b11028)，
+   覆盖变量是 `FETCHCONTENT_SOURCE_DIR_<名字大写>`，名字错=静默失去 vendored 目录；
+   app CMakeLists 已同时设新旧两个变量兜底。KleidiAI pin 版本（v1.24.0）要与 ggml-cpu/CMakeLists.txt 里 `KLEIDIAI_COMMIT_TAG` 对得上。
+3. **参数门**：logcat 抓 `[handleLoadModel]`，与升级前逐项 diff：`n_gpu_layers=100` /
+   `n_ubatch`（CPU=16、GPU=512）/ `flash_attn=DISABLED` / sampler 链。移植 JNI 时不许顺手改默认值。
+4. **基准门**：基线设备（Xiaomi 25053RT47C / 8 Elite）同 prompt 各后端 3 轮，tok/s 对 8-04 基线，
+   **偏差 >±10% 不许收工**，按 编译门→内核门→上游回归 顺序排查。
+
+**b11028 实际踩到的 API 漂移（下次升级先查同类）：**
+- `mtmd_helper_bitmap_init_from_file()` 加了第 4 参 `mtmd_helper_init_opt`，图片路径传 `mtmd_helper_init_opt_default()`（JNI 已修）。
+- **`MTMD_BACKEND_DEVICE` 环境变量在 b11028 被删**（fe8156f `clip.cpp:189` 的 `getenv` 没了）→ 视觉编码后端必须改设
+  `mtmd_context_params.device`（`ggml_backend_reg_by_name("vulkan"/"opencl")` + `ggml_backend_reg_dev_get(reg,0)`）。
+  **静默失效不报错**，视觉塔从此不跟主后端——JNI 已修（保留 setenv 兼容旧库）。
+- ⚠️ UI 报错文案会指错方向：model_provider 旧逻辑只要 `loadModel` 返回 false 且模型类型是 vision 就显示
+  "mmproj 投影器加载出错"——上下文 OOM/主模型失败全被甩锅 mmproj（已改为只认真实日志）。
+  **教训：真凶看引擎日志最后一步，别信红条标题。** 本机 b11028 宿主复现（mingw `llama-mtmd-cli` + 同款 4B/mmproj）
+  加载推理全过，上游 mtmd 对 unsloth Qwen3.5 mmproj 无罪。
+- ggml-opencl 直接用 CL2.1 核心入口 `clGetKernelSubGroupInfo` → `third_party/opencl-stub/opencl_stub.c` 已加转发
+  （升级后链接报 `undefined symbol: cl*` 就照现有 CL_FORWARD 模式补）。
+- Vulkan 后端 24k 行大重写（拆分出 buffers/types/push-constants 等新文件），
+  **Mali 崩溃缓解需在 b11028 上重验**（旧"删 copy_transpose_02.comp"式改动未回带，若 Mali 再崩从这里查）。
+- `llama-ext.h` 的 `llama_set_embeddings_nextn`（MTP/dspark staging API）仍在，MTP 代码未动。
+
+**隔离口诀**：先在本机重编**旧版**——旧版也慢=环境问题（NDK 版本/构建类型/设备不同），旧版快=新树问题。
+慢一倍这种问题，有这四道门就活不过当天。

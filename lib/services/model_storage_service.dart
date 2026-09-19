@@ -104,15 +104,30 @@ class ModelStorageService {
   }
 
   /// 获取模型文件路径
+  ///
+  /// 主目录（/sdcard/TongYiLite/models）优先；文件不在时扫描候选目录
+  /// （内部 app_flutter/models、Download、DCIM、app docs）。
+  /// 旧版 App 把模型存在内部存储（app_flutter/models），只查主目录会把
+  /// "已缓存"（isFullyCached 多目录判）和"可加载"（只查主目录）劈成两半。
+  /// 找不到时仍返回主目录路径，保持原生"模型文件不存在"的错误语义。
   Future<String> getModelPath(String modelId) async {
-    final dir = await getModelsRootDir();
-    return p.join(dir.path, '${modelId}.gguf');
+    return await _findFile(modelId, '.gguf');
   }
 
   /// 获取 mmproj 投影器文件路径（text+mmproj 两文件形态的视觉模型）。
   Future<String> getMmprojPath(String modelId) async {
+    return await _findFile(modelId, '.mmproj');
+  }
+
+  Future<String> _findFile(String modelId, String suffix) async {
+    for (final dir in await _allCandidateDirs()) {
+      try {
+        final file = File(p.join(dir.path, '$modelId$suffix'));
+        if (await file.exists()) return file.path;
+      } catch (_) {}
+    }
     final dir = await getModelsRootDir();
-    return p.join(dir.path, '${modelId}.mmproj');
+    return p.join(dir.path, '$modelId$suffix');
   }
 
   /// 获取 dspark 投机草稿头文件路径（独立 GGUF，如 Bonsai-27B-dspark-Q4_1）。

@@ -19,12 +19,12 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <nlohmann/json.hpp>
+#include "json.h"
 #include <set>
 #include <stdexcept>
 #include <string>
 
-using json = nlohmann::ordered_json;
+using json = common_json;
 
 static std::ostream & operator<<(std::ostream & os, const common_chat_msg_diff & diff) {
     os << "{ content_delta: " << diff.content_delta << "; ";
@@ -472,6 +472,12 @@ static common_chat_tool empty_args_tool_no_properties{
     })",
 };
 
+static common_chat_tool empty_args_tool_no_schema{
+    /* .name = */ "empty_args_no_schema",
+    /* .description = */ "A tool that takes no arguments and has no parameters schema",
+    /* .parameters = */ "{}",
+};
+
 static common_chat_tool python_tool{
     /* .name = */ "python",
     /* .description = */ "an ipython interpreter",
@@ -837,6 +843,25 @@ static common_chat_tool nullable_int_tool{
             }
         },
         "required": ["count"]
+    })",
+};
+
+static common_chat_tool string_union_tool{
+    /* .name = */ "set_union",
+    /* .description = */ "Set values whose types are unions with string",
+    /* .parameters = */ R"({
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": ["string", "object"],
+                "description": "A string or object value"
+            },
+            "amount": {
+                "type": ["string", "integer"],
+                "description": "A string or integer value"
+            }
+        },
+        "required": ["value", "amount"]
     })",
 };
 
@@ -3799,6 +3824,46 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .run();
 
+        // nullable string given null - parses as JSON null, not the string "null"
+        tst.test(
+               "<tool_call>\n"
+               "<function=set_nullable_str>\n"
+               "<parameter=name>\nnull\n</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .tools({ nullable_string_tool })
+            .expect_tool_calls({
+                { "set_nullable_str", R"({"name": null})", {} },
+            })
+            .run();
+
+        // unions with string - JSON values of the other types are typed, everything else is a string
+        tst.test(
+               "<tool_call>\n"
+               "<function=set_union>\n"
+               "<parameter=value>\n{\"a\": 1}\n</parameter>\n"
+               "<parameter=amount>\n2 dollars\n</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .tools({ string_union_tool })
+            .expect_tool_calls({
+                { "set_union", R"({"value": {"a": 1}, "amount": "2 dollars"})", {} },
+            })
+            .run();
+
+        tst.test(
+               "<tool_call>\n"
+               "<function=set_union>\n"
+               "<parameter=value>\n{not valid json\n</parameter>\n"
+               "<parameter=amount>\n42\n</parameter>\n"
+               "</function>\n"
+               "</tool_call>")
+            .tools({ string_union_tool })
+            .expect_tool_calls({
+                { "set_union", R"({"value": "{not valid json", "amount": 42})", {} },
+            })
+            .run();
+
         // enum without explicit type key - should infer string from enum values
         tst.test(
                "<tool_call>\n"
@@ -4405,9 +4470,9 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
     }
 
-    // Spark2_5 uses tagged arguments with forced-open thinking.
+    // Spark2.5 uses tagged arguments with forced-open thinking.
     {
-        auto tst = peg_tester("models/templates/XHToken-Spark-X2.5-1.7B.jinja", detailed_debug);
+        auto tst = peg_tester("models/templates/Spark2.5.jinja", detailed_debug);
 
         tst.test("Hello, world!\nWhat's up?")
             .enable_thinking(false)
@@ -5069,6 +5134,13 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .enable_thinking(false)
             .tools({ empty_args_tool })
             .expect(simple_assist_msg("", "", "empty_args", "{}"))
+            .run();
+
+        // Tool call with no parameters schema, {} means no arguments
+        tst.test("<tool_call>\n{\"name\": \"empty_args_no_schema\", \"arguments\": {}}</tool_call>")
+            .enable_thinking(false)
+            .tools({ empty_args_tool_no_schema })
+            .expect(simple_assist_msg("", "", "empty_args_no_schema", "{}"))
             .run();
 
         // fake tool call marker in reasoning

@@ -792,8 +792,23 @@ struct InferenceEngine {
             // 规避 #23422 类显存不足 NULL 解引用崩溃。
             mparams.image_max_tokens = 512;
             if (mm_backend != "CPU") {
+                // b11028 BREAKING CHANGE: libmtmd no longer reads the
+                // MTMD_BACKEND_DEVICE env var (fe8156f clip.cpp had a getenv for
+                // it; upstream removed it in favor of ctx_params.device).
+                // Without this, vision backend selection silently ignores the
+                // main backend choice. Env var kept for old-lib compatibility.
+                ggml_backend_reg_t vreg = ggml_backend_reg_by_name(
+                    mm_backend == "OpenCL" ? "opencl" : "vulkan");
+                mparams.device = (vreg && ggml_backend_reg_dev_count(vreg) > 0)
+                    ? ggml_backend_reg_dev_get(vreg, 0)
+                    : nullptr;
+                if (!mparams.device) {
+                    LOGW("mmproj: backend registry '%s' not found, mtmd will auto-pick", mm_backend.c_str());
+                    reportLoadingLog((std::string("视觉后端 ") + mm_backend + " 不可用，交由 mtmd 自动选择").c_str());
+                }
                 setenv("MTMD_BACKEND_DEVICE", mm_backend.c_str(), 1);
             } else {
+                mparams.device = nullptr;
                 unsetenv("MTMD_BACKEND_DEVICE");
             }
             LOGI("mmproj: attempting %s GPU encode (flash_attn=AUTO)", mm_backend.c_str());
@@ -981,8 +996,10 @@ struct InferenceEngine {
 
         // 2. Decode the media file (image OR audio — mtmd_helper auto-detects by
         //    magic bytes: jpg/png/bmp for images, wav/mp3/flac for audio) to a bitmap.
+        //    b11028: helper gained an init_opt param (video sampling opts; default ok).
         struct mtmd_helper_bitmap_wrapper wrap =
-            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false);
+            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false,
+                                              mtmd_helper_init_opt_default());
         if (!wrap.bitmap) {
             LOGW("vision: failed to decode media %s", media_path);
             return "[ERROR: 媒体文件解码失败]";

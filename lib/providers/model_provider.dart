@@ -388,7 +388,11 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         if (state.latestLog != null && state.latestLog!.contains('内存')) {
           errorMsg = '内存不足，无法加载此模型。请关闭其他应用后重试，或选择更小的模型（如 Qwen3-0.6B）。';
         } else if (config != null && config.type == ModelType.vision) {
-          errorMsg = '视觉模型加载失败：mmproj 投影器加载出错，已回退文本推理，请查看加载日志。';
+          // 只有加载日志真的提到 mmproj 才归因投影器，否则别误导排查方向。
+          final lastLog = state.latestLog ?? '';
+          errorMsg = lastLog.contains('mmproj')
+              ? '视觉模型加载失败：mmproj 投影器加载出错，请查看加载日志。'
+              : '视觉模型加载失败，最后一步日志：$lastLog';
         }
         state = ModelState.error(
           message: errorMsg,
