@@ -6,7 +6,6 @@ import 'providers/settings_provider.dart' show settingsProvider;
 import 'screens/home_screen.dart';
 import 'services/inference_service.dart';
 import 'services/model_manager.dart';
-import 'widgets/splash_screen.dart';
 
 /// 全局导航 key：沙箱升级审批确认框经此弹出（ProviderScope 在 MaterialApp 之前，
 /// 无法直接使用 BuildContext）。
@@ -87,8 +86,8 @@ class TongYiLiteApp extends ConsumerWidget {
   }
 }
 
-/// 启动门控：先显示启动画面（LOGO + APP 描述），等模型目录与原生引擎
-/// 初始化完成后切换到首页，避免启动期间出现空白加载页。
+/// 启动门控：运行模型目录与原生引擎初始化，初始化期间直接渲染首页（首页
+/// 自带加载态），不再显示启动画面。
 class AppStartupGate extends ConsumerStatefulWidget {
   const AppStartupGate({super.key});
 
@@ -97,8 +96,6 @@ class AppStartupGate extends ConsumerStatefulWidget {
 }
 
 class _AppStartupGateState extends ConsumerState<AppStartupGate> {
-  bool _ready = false;
-
   @override
   void initState() {
     super.initState();
@@ -122,12 +119,11 @@ class _AppStartupGateState extends ConsumerState<AppStartupGate> {
     } catch (e) {
       debugPrint('[Main] Failed to initialize native engine: $e');
     }
-
-    if (mounted) setState(() => _ready = true);
   }
 
   @override
   Widget build(BuildContext context) {
-    return _ready ? const HomeScreen() : const SplashScreen();
+    // 直接进首页，初始化期间由首页自身加载态（spinner / 模型状态）承担。
+    return const HomeScreen();
   }
 }
