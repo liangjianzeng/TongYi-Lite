@@ -137,6 +137,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final manager = ref.read(modelManagerProvider.notifier);
     if (manager.isBusy || manager.isLoadedState) return;
 
+    // 直接进首页后，本页自动加载可能先于启动门控的 InferenceService.initialize()
+    // 完成；llama_backend_init 幂等（多次调用无副作用），先确保原生引擎就绪。
+    try {
+      await InferenceService().initialize();
+    } catch (e) {
+      debugPrint('[Home] InferenceService init failed, skipping auto-load: $e');
+      return;
+    }
+
     final cached = await manager.isModelCached(defaultId);
     if (!cached || !mounted) return;
 
