@@ -13,6 +13,7 @@ import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
+import '../widgets/agent_activity_panel.dart';
 import '../widgets/chat_bubble.dart';
 import 'settings_screen.dart';
 
@@ -419,6 +420,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget build(BuildContext context) {
     final isGenerating = ref.watch(isGeneratingProvider);
     final modelState = ref.watch(modelManagerProvider);
+    // Phase 6：新智能体模式 UI（活动面板/状态徽章；旧 UI 保留并行）。
+    final newAgentMode =
+        ref.watch(settingsProvider.select((s) => s.useNewAgentMode));
 
     // 每次 build 同步采样 Timer（幂等）：按监控开关/采样周期启停。
     _syncResourceSampling(isGenerating);
@@ -441,6 +445,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
         actions: [
+          if (newAgentMode) const AgentStatusBadge(),
           _buildModelStatusChip(modelState, isGenerating),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -463,9 +468,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
           Expanded(
             child: _initiallyLoaded
-                ? _buildMessagesList()
+                ? _buildMessagesList(newAgentMode)
                 : const Center(child: CircularProgressIndicator()),
           ),
+
+          // Phase 6：智能体活动面板（工具卡片/压缩横幅/重试指示）。
+          if (newAgentMode) const AgentActivityPanel(),
 
           // Image preview (if selected)
           if (_selectedImagePath != null)
@@ -812,13 +820,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Chat UI
   // =========================================================================
 
-  Widget _buildMessagesList() {
+  Widget _buildMessagesList(bool newAgentMode) {
     final messagesAsync = ref.watch(messagesProvider(_currentConversationId));
 
     return messagesAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (err, stack) => Center(child: Text('Error: $err')),
-      data: (messages) {
+      data: (rawMessages) {
+        // Phase 6：新智能体模式下，🔧 占位消息由活动面板的结构化
+        // ToolActivityCard 取代（§12.5「现有 🔧 升级为结构化卡片」）。
+        final messages = newAgentMode
+            ? rawMessages
+                .where((m) =>
+                    !(m.role.name == 'assistant' &&
+                        m.content.startsWith('🔧')))
+                .toList()
+            : rawMessages;
         if (messages.isEmpty) {
           return Center(
             child: Column(

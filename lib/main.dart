@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'providers/agent_approval.dart' show sandboxApproverProvider;
+import 'dart:convert';
+
+import 'providers/agent_approval.dart'
+    show sandboxApproverProvider, toolPreApproverProvider;
 import 'providers/settings_provider.dart' show settingsProvider;
 import 'screens/home_screen.dart';
 import 'services/inference_service.dart';
@@ -48,6 +51,44 @@ Future<void> main() async {
                   FilledButton(
                     onPressed: () => Navigator.pop(ctx, true),
                     child: const Text('批准'),
+                  ),
+                ],
+              ),
+            );
+            return granted == true;
+          };
+        }),
+        // Phase 6：流水线 pre-execute `ask` 审批（ApprovalDialog，§12.3）。
+        toolPreApproverProvider.overrideWith((ref) {
+          return (call) async {
+            final navigator = appNavigatorKey.currentState;
+            if (navigator == null) return false;
+            var argsText = '';
+            try {
+              argsText = jsonEncode(call.arguments ?? const <String, dynamic>{});
+            } catch (_) {
+              argsText = call.arguments?.toString() ?? '';
+            }
+            if (argsText.length > 300) {
+              argsText = '${argsText.substring(0, 300)}…';
+            }
+            final granted = await showDialog<bool>(
+              context: navigator.context,
+              barrierDismissible: false,
+              builder: (ctx) => AlertDialog(
+                title: Text('允许调用工具「${call.name}」？'),
+                content: Text(
+                  '参数：$argsText',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('拒绝'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('允许'),
                   ),
                 ],
               ),
