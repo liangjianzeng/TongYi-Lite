@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../agent/web_search/web_search_provider.dart';
 import '../models/api_model.dart';
 import '../services/settings_service.dart';
 
@@ -155,6 +156,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 是否启用新智能体模式（Phase 0 重写的事件源 ReactLoopAgent）；
+  /// 关闭则回退旧 runAgent 逻辑（可回退开关）。
+  Future<void> setUseNewAgentMode(bool value) async {
+    state = state.copyWith(useNewAgentMode: value);
+    await _persist();
+  }
+
   /// 指定/取消智能体驱动模型。
   /// - source='local' → [modelId] 为本地模型目录 id；
   /// - source='api' → [modelId] 为 API 模型配置 id；
@@ -219,6 +227,67 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   Future<void> setWebSearchEnabled(bool value) async {
     state = state.copyWith(webSearchEnabled: value);
     await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  // ---- 联网搜索（SearXNG）实例配置 ----
+  // 每项保存后立即热更新 WebSearchSeam 里的 provider（配置未变则复用实例），
+  // 改地址无需重启应用。
+
+  /// SearXNG 实例地址，如 `http://192.168.1.20:8080`；空 = 未配置。
+  Future<void> setWebSearchSearXngBaseUrl(String value) async {
+    state = state.copyWith(webSearchSearXngBaseUrl: value.trim());
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// SearXNG API key（私有实例才需要；空 = 无密钥）。
+  Future<void> setWebSearchSearXngApiKey(String value) async {
+    state = state.copyWith(
+        webSearchSearXngApiKey: value.trim().isEmpty ? null : value.trim());
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 引擎白名单（逗号分隔，如 `bing,sogou`）；空 = 由实例决定全部引擎。
+  /// 实例上存在不可达引擎时，只填可达引擎可把搜索从二十秒级降到秒级。
+  Future<void> setWebSearchSearXngEngines(String value) async {
+    state = state.copyWith(
+        webSearchSearXngEngines: value.trim().isEmpty ? null : value.trim());
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 搜索语言（如 `zh-CN`）；空 = 不指定。
+  Future<void> setWebSearchSearXngLanguage(String value) async {
+    state = state.copyWith(
+        webSearchSearXngLanguage: value.trim().isEmpty ? null : value.trim());
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 单次搜索最多返回条数（1~20）。
+  Future<void> setWebSearchSearXngMaxResults(int value) async {
+    state = state.copyWith(webSearchSearXngMaxResults: value.clamp(1, 20));
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 单次搜索超时（毫秒，3s~120s）。
+  Future<void> setWebSearchSearXngTimeoutMs(int value) async {
+    state = state.copyWith(webSearchSearXngTimeoutMs: value.clamp(3000, 120000));
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 按当前设置重建联网搜索 provider（内容未变时 [applySearXNGProviderFromSettings]
+  /// 直接复用现有实例，不会打断连接池）。
+  void _reapplyWebSearchProvider() {
+    try {
+      applySearXNGProviderFromSettings(state);
+    } catch (_) {
+      // 热更新失败不影响设置本身的保存：下一轮对话构建注册表时会再试一次。
+    }
   }
 
   /// shell 执行工具开关。

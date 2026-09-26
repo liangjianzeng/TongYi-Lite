@@ -239,6 +239,8 @@ Future<ToolResult> _executeTool(
     return ToolResult.error('工具 "${call.name}" 执行失败: $e');
   }
 
+  // 工具自己声明的 timeout 优先于全局 toolTimeout（联网搜索要 30s，全局默认 15s）。
+  final effectiveTimeout = tool.timeout ?? timeout;
   try {
     return await future
         .then<ToolResult>(
@@ -246,8 +248,9 @@ Future<ToolResult> _executeTool(
           onError: (Object e, StackTrace st) =>
               ToolResult.error('工具 "${call.name}" 执行失败: $e'),
         )
-        .timeout(timeout, onTimeout: () {
-          return ToolResult.error('工具 "${call.name}" 执行超时');
+        .timeout(effectiveTimeout, onTimeout: () {
+          return ToolResult.error(
+              '工具 "${call.name}" 执行超时（${effectiveTimeout.inSeconds}s）');
         });
   } catch (e) {
     // timeout 阶段的错误兜底。

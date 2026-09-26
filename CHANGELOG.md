@@ -6,6 +6,75 @@
 
 ---
 
+## [0.2.1] — 2026-09-26
+
+### 变更：联网搜索改为「用户自配 SearXNG 实例」
+
+- **不再预置任何搜索实例**：`SearXNGSearchProvider.kDefaultBaseUrl` 与设置项默认值全部中立（留空 =
+  未配置）。未配置时 `available()` 直接回「未配置 SearXNG 地址：请在 设置 → API 接入 → 联网搜索 填写」，
+  而不是拿 `127.0.0.1` 去连手机自己再报一句误导性的"不可达"。
+- **设置页「API 接入」新增 🌐 联网搜索配置卡**（`_WebSearchCard`）：启用开关、实例地址、API Key
+  （可切换明文显示；http 明文传密钥到非回环地址时告警）、引擎白名单、搜索语言、最多条数、超时，
+  以及「测试连接」——用输入框里的**草稿值**直接发一次真实搜索，回显条数 / 耗时 / 具体失败原因，
+  不必先保存。数字项保存后回显真正生效的值（`SettingsNotifier` 会夹紧到合法区间）。
+- **新增设置项与 setter**（`InferenceSettings` + `SettingsNotifier`）：
+  `webSearchSearXngBaseUrl` / `ApiKey` / `Engines` / `Language` / `MaxResults` / `TimeoutMs`，
+  全部随 settings JSON 持久化；每项 setter 保存后热更新到 `WebSearchSeam`，改地址无需重启应用。
+- **provider 复用不打断连接池**：`applySearXNGProviderFromSettings` 先比 `configSignature`
+  （由配置内容计算，非实例身份），内容未变直接复用现有实例；`WebSearchSeam.registerProvider`
+  同签名也复用，避免每轮对话重建 Dio / 释放 HttpClient。
+
+### 修复：搜索链路 4 处「静默失效」（不报错，只是搜不到或必超时）
+
+- **URL 构造**：旧实现 `Uri.replace(query: …)` 生成 `host:8080?q=…`（空 path），依赖实例 308 跳到
+  `/search` 才勉强能用，换成不跳转的实例就彻底失效。现在 `buildRequestUri` 自行补齐 `/search`
+  （尾斜杠 / 已写 `/search` 均不会重复拼），并把查询参数合并进 `Uri.queryParameters`
+  （`q` / `format=json` / `language` / `categories` / `engines`）。
+- **HTTP 状态判定是死代码**：Dio 默认 `validateStatus` 只放过 2xx，`statusCode >= 400` 分支永远进不去。
+  现在请求带 `validateStatus: (_) => true` 自行判定，并按状态码给出原因（401 未授权 / 403 被拒 /
+  404 baseURL 多写路径 / 429 限流 / 400·422 引擎不被接受 / 5xx 实例内部错误）。
+- **HTML 被误报成"不可达"**：Dio 只在 Content-Type 是 JSON 时才解码，实例未开 `format=json` 时
+  `assureResponse<String>` 抛类型错，界面显示「SearXNG 不可达」把排查指向网络。现在按
+  `ResponseType.plain` 收响应、自行 `jsonDecode`，明确提示「需在实例 settings.yml 的 `search.formats`
+  加 json」；坏 JSON 单独报「响应不是合法 JSON」。
+- **工具超时从未生效**：`ToolDefinition.timeout` 没有任何地方消费，且 `WebSearchSeam.search` 写死
+  15s 默认值会覆盖设置项里的超时 → 慢实例上搜索必然超时。现在接缝的 `timeout` 默认为 null
+  （null = 用 provider 自身配置），`ToolExecutor` 与旧 `agent_loop` 均改为 `tool.timeout ?? timeout`，
+  `web_search` 声明 30s、provider 默认 30s、`connectTimeout` 6s。
+
+### 优化：搜索质量、上下文预算与诊断
+
+- **结果去重与排序**：URL 规范化（去 `utm_*` / `from` / fragment / 尾斜杠、scheme+host 小写）后去重，
+  按 SearXNG `score` 降序，`take(maxResults)`；原始条数 > 映射条数时置 `WebSearchResult.truncated`，
+  提示模型"换更具体关键词"。
+- **回填文本预算**：单条摘要截到 200 字、整体截到 1500 字（`kSnippetMaxChars` / `kResultMaxChars`），
+  够了就停 —— 端侧 `n_ctx` 常见 8k，8 条长摘要既挤占上下文也拖慢手机 prefill。
+- **引擎白名单被拒自愈**：白名单里有该实例不认识的引擎时 SearXNG 返回 400/422，provider 去掉
+  `engines` 参数自动重试一次（`kWebEngineRejected`），不会一错到底。
+- **诊断挖到根**：`_describeDioError` 区分连接超时 / 接收超时 / 发送超时 / 取消 / 连接错误，并把被
+  Dio 塞进 `DioException.error` 的真实 `SocketException`（含 `osError` 错误码）挖出来展示，附带
+  `host:port` 与已耗时（实测不可达地址 2.0s 报「远程计算机拒绝网络连接。(1225)」）。
+- **延迟来自引擎**：SearXNG 会等待实例上每一个引擎，存在访问不到的引擎时整次搜索被拖到超时
+  （一台自建实例实测全引擎 21s，只留可达引擎 2.2s）。引擎白名单因此做成设置项并在界面上写明。
+
+### 测试
+
+- 新增 `test/agent/web_search_provider_test.dart` **21 项**（注入可编程 `HttpClientAdapter`，
+  覆盖 URL 构造 3 类 base 变体、5 类错误分类、引擎被拒重试、URL 去重、score 排序 + truncated、
+  摘要/总量预算、接缝不遮蔽 provider 超时、`ToolDefinition.timeout` 生效与全局超时兜底、
+  provider 复用/重建、设置项 toJson/fromJson 往返、默认值中立）。
+- 新增 `test/agent/web_search_live_test.dart`：真实实例连通性验收（打印条数/耗时/引擎/摘要长度）+
+  不可达地址快速失败，**默认跳过**（需设 `SEARX_LIVE_URL`），不污染常规测试与 CI。
+- 与本改动相关的用例全绿；改动涉及文件 `dart analyze` 无 error。
+
+### 已知无关问题
+
+- 全量 `flutter test` 另有 3 个测试文件（`loop_test` / `pipeline_test` / `subagents_test`）编译失败，
+  根因是 `lib/agent/skills/*`、`lib/agent/agents_md/*`、`lib/agent/loop/agent.dart` 中尚未完成的
+  WIP 语法/类型错误，与本次联网搜索改动无关。
+
+---
+
 ## [0.2.0] — 2026-09-04
 
 ### 新增：端侧 Agent Lite 智能体

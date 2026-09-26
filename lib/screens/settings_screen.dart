@@ -16,6 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
 import '../models/api_model.dart';
@@ -1605,7 +1606,8 @@ class _AgentTab extends ConsumerWidget {
                     '🌐 联网搜索',
                     settings.webSearchEnabled,
                     notifier.setWebSearchEnabled,
-                    subtitle: '允许智能体调用网络搜索（默认关闭，端侧不联网）',
+                    subtitle: '允许智能体调用 web_search/get_weather'
+                        '（默认关闭；实例地址在「API 接入」页配置）',
                   ),
                 ],
               ),
@@ -1663,7 +1665,8 @@ class _AgentTab extends ConsumerWidget {
                   SwitchListTile(
                     title: const Text('🔍 联网搜索（web_search + get_weather）',
                         style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('联网查资料/天气，需网络', style: TextStyle(fontSize: 12)),
+                    subtitle: const Text('联网查资料/天气，实例地址在「API 接入」页配置',
+                        style: TextStyle(fontSize: 12)),
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                     value: settings.webSearchEnabled,
@@ -1907,9 +1910,9 @@ class _buildAboutTab extends StatelessWidget {
 }
 
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
-// versionName（0.2.0）保持同步。离线沙箱无法下载 package_info_plus 的
+// versionName（0.2.1）保持同步。离线沙箱无法下载 package_info_plus 的
 // AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.2.0';
+const _appVersion = '0.2.1';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
@@ -2391,6 +2394,9 @@ class _ApiTab extends ConsumerWidget {
               ),
             ),
           ),
+          const SizedBox(height: 20),
+          // 联网搜索（SearXNG 实例地址等）：与 API 接入同属"外部服务"配置。
+          const _WebSearchCard(),
         ],
       ),
     );
@@ -2693,6 +2699,304 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
         ),
         FilledButton(onPressed: _save, child: const Text('保存')),
       ],
+    );
+  }
+}
+
+// =========================================================================
+// 联网搜索（SearXNG）配置卡 —— 放在「API 接入」页：与远程 API 同属外部服务配置。
+//
+// 设计要点：
+// - 地址由用户自己的部署决定，App **不预置任何实例**；未填时 web_search 会
+//   明确回"未配置地址"的诊断，而不是拿 127.0.0.1 去连手机自己。
+// - 「测试连接」用输入框里的**草稿值**直接发一次真实搜索（无需先保存），并把
+//   provider 的分类诊断原样显示（HTTP 状态 / 超时 / 实例未开 format=json 等），
+//   避免"红条指错方向"。
+// =========================================================================
+
+class _WebSearchCard extends ConsumerStatefulWidget {
+  const _WebSearchCard();
+
+  @override
+  ConsumerState<_WebSearchCard> createState() => _WebSearchCardState();
+}
+
+class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
+  final _url = TextEditingController();
+  final _apiKey = TextEditingController();
+  final _engines = TextEditingController();
+  final _language = TextEditingController();
+  final _maxResults = TextEditingController();
+  final _timeoutSec = TextEditingController();
+
+  bool _revealKey = false;
+  bool _testing = false;
+  String? _testResult;
+  bool _testOk = false;
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _apiKey.dispose();
+    _engines.dispose();
+    _language.dispose();
+    _maxResults.dispose();
+    _timeoutSec.dispose();
+    super.dispose();
+  }
+
+  /// 设置是异步加载的：首帧输入框还是空的，等值到位后灌进去一次。
+  /// 只灌空字段——绝不覆盖用户正在输入的内容。
+  void _seed(TextEditingController c, String value) {
+    if (c.text.isEmpty && value.isNotEmpty) c.text = value;
+  }
+
+  SettingsNotifier get _notifier => ref.read(settingsProvider.notifier);
+
+  String? get _draftKeyOrNull =>
+      _apiKey.text.trim().isEmpty ? null : _apiKey.text.trim();
+
+  /// 用输入框里的当前内容构造一个 provider 并搜索一次"测试"。
+  Future<void> _test() async {
+    setState(() {
+      _testing = true;
+      _testResult = null;
+    });
+    final provider = SearXNGSearchProvider(
+      baseURL: _url.text.trim(),
+      apiKey: _draftKeyOrNull,
+      engines: _engines.text.trim().isEmpty ? null : _engines.text.trim(),
+      language: _language.text.trim().isEmpty ? null : _language.text.trim(),
+      maxResults: int.tryParse(_maxResults.text.trim()) ?? 8,
+      timeout: Duration(
+          seconds: int.tryParse(_timeoutSec.text.trim()) ??
+              (InferenceSettings.kDefaultSearXngTimeoutMs ~/ 1000)),
+    );
+    final sw = Stopwatch()..start();
+    String message;
+    bool ok;
+    try {
+      final result = await provider.search('测试');
+      ok = true;
+      message = '连接成功：${result.sources.length} 条结果'
+          '，用时 ${sw.elapsedMilliseconds} ms'
+          '${result.truncated ? '（结果超过上限，已截断）' : ''}';
+      if (result.sources.isEmpty) {
+        message = '连接成功但 0 条结果（用时 ${sw.elapsedMilliseconds} ms）：'
+            '多半是指定的引擎都没结果，清空引擎白名单试试';
+      }
+    } on WebSearchProviderError catch (e) {
+      ok = false;
+      message = e.kind == 'WEB_ABORTED'
+          ? '${e.message}（已等 ${sw.elapsedMilliseconds} ms）'
+          : e.message;
+    } catch (e) {
+      ok = false;
+      message = '搜索失败：$e';
+    } finally {
+      provider.dispose();
+    }
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _testOk = ok;
+      _testResult = message;
+    });
+  }
+
+  /// 数字项保存：notifier 会把值夹紧到合法区间，保存后把**真正生效的值**回写输入框，
+  /// 避免"填了 300、实际生效 120"这种自己看不出来的偏差。
+  Future<void> _saveMaxResults(String v) async {
+    final current = ref.read(settingsProvider).webSearchSearXngMaxResults;
+    await _notifier.setWebSearchSearXngMaxResults(int.tryParse(v.trim()) ?? current);
+    if (!mounted) return;
+    _maxResults.text =
+        '${ref.read(settingsProvider).webSearchSearXngMaxResults}';
+  }
+
+  Future<void> _saveTimeoutSec(String v) async {
+    final currentSec =
+        ref.read(settingsProvider).webSearchSearXngTimeoutMs ~/ 1000;
+    await _notifier.setWebSearchSearXngTimeoutMs(
+        (int.tryParse(v.trim()) ?? currentSec) * 1000);
+    if (!mounted) return;
+    _timeoutSec.text =
+        '${(ref.read(settingsProvider).webSearchSearXngTimeoutMs / 1000).round()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+    _seed(_url, settings.webSearchSearXngBaseUrl);
+    _seed(_apiKey, settings.webSearchSearXngApiKey ?? '');
+    _seed(_engines, settings.webSearchSearXngEngines ?? '');
+    _seed(_language, settings.webSearchSearXngLanguage ?? '');
+    _seed(_maxResults, '${settings.webSearchSearXngMaxResults}');
+    _seed(_timeoutSec,
+        '${(settings.webSearchSearXngTimeoutMs / 1000).round()}');
+
+    final url = _url.text.trim();
+    final notConfigured = url.isEmpty;
+    // http 明文 + 填了密钥 = Bearer key 明文过网（回环地址除外）。
+    final isHttp = url.toLowerCase().startsWith('http://');
+    final host = url.isEmpty ? '' : (Uri.tryParse(url)?.host ?? '');
+    final isLoopbackHost =
+        host == '127.0.0.1' || host == 'localhost' || host == '::1';
+    final insecureKey =
+        !notConfigured && isHttp && !isLoopbackHost && _apiKey.text.trim().isNotEmpty;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('🌐 联网搜索（SearXNG）', context),
+            const SizedBox(height: 4),
+            Text(
+              '为智能体提供 web_search 联网搜索。地址需手机能直接访问'
+              '（局域网 IP 或 Tailscale 地址均可）；App 不预置任何搜索实例。',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('启用联网搜索', style: TextStyle(fontSize: 14)),
+              subtitle: const Text(
+                  '开启后模型可用 web_search / get_weather；关闭则这两个工具不可见',
+                  style: TextStyle(fontSize: 12)),
+              value: settings.webSearchEnabled,
+              onChanged: (v) => _notifier.setWebSearchEnabled(v),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _url,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: 'SearXNG 地址',
+                hintText: 'http://192.168.1.20:8080',
+                helperText: '回车保存；路径会自动补 /search，只填主机和端口即可',
+                helperMaxLines: 2,
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiKey,
+              obscureText: !_revealKey,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'API Key（可选）',
+                helperText: '仅私有实例需要；以 Bearer 发送',
+                border: const OutlineInputBorder(),
+                isDense: true,
+                suffixIcon: IconButton(
+                  icon: Icon(_revealKey ? Icons.visibility_off : Icons.visibility,
+                      size: 18),
+                  onPressed: () => setState(() => _revealKey = !_revealKey),
+                ),
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
+            ),
+            if (insecureKey) ...[
+              const SizedBox(height: 6),
+              Text(
+                '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
+                style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _engines,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '引擎白名单（可选）',
+                hintText: '如 bing,sogou',
+                helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
+                    '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
+                helperMaxLines: 3,
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _language,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '搜索语言（可选）',
+                hintText: '如 zh-CN，留空 = 不指定',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _maxResults,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '最多条数',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onSubmitted: _saveMaxResults,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _timeoutSec,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '超时（秒）',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onSubmitted: _saveTimeoutSec,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _testing ? null : _test,
+                    icon: const Icon(Icons.wifi_tethering, size: 16),
+                    label: Text(_testing ? '测试中…' : '测试连接'),
+                  ),
+                ),
+              ],
+            ),
+            if (notConfigured) ...[
+              const SizedBox(height: 6),
+              Text(
+                '尚未填写地址，联网搜索会返回"未配置"。填好后点「测试连接」验证一下。',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+            ],
+            if (_testResult != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '${_testOk ? '✅' : '❌'} $_testResult',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _testOk ? Colors.green : Colors.red,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
