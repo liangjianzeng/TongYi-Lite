@@ -4,7 +4,7 @@ description: 端侧离线 AI 智能体
 # 此处同步保持一致，About 页版本号运行时从安装包读取（package_info_plus）。
 # 注意：About 页版本号是 Dart 常量（settings_screen.dart），与 gradle 同步；
 # 离线沙箱无法下载 package_info_plus 的 AGP 依赖，故不引插件读取。
-version: 0.2.1+9
+version: 0.2.3+11
 publish_to: 'none'
 
 environment:

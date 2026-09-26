@@ -110,6 +110,25 @@ void main() {
       expect(msgs[0]['role'], 'user');
       expect(msgs[0]['content'], 'SUMMARY');
     });
+
+    test('回归：system 晚于历史 append 仍恒置队首（每轮重建 log 场景）', () {
+      // 新引擎每轮先导入历史（user/assistant），构造 ReactLoopAgent 时才
+      // append system，再 kick 当前用户消息。system 若按事件序落在中间，
+      // OpenAI 兼容服务端会 400 拒收（重复问候 bug 的根因）。
+      final log = SessionLog.fromEvents([]);
+      log.append(kEventUserMessage, {'content': '你好'});
+      log.append(kEventAssistantMessage, {'content': '你好呀！'});
+      log.append(kEventSystemMessage, {'content': 'SYSTEM'},
+          source: const {'kind': 'system'});
+      log.append(kEventUserMessage, {'content': '中秋新闻'});
+      final msgs = log.deriveModelMessages();
+      expect(msgs.map((m) => m['role']).toList(),
+          ['system', 'user', 'assistant', 'user']);
+      expect(msgs[0]['content'], 'SYSTEM');
+      expect(msgs.last['content'], '中秋新闻');
+      // 纯函数性不受重排影响（两次调用一致）
+      expect(log.deriveModelMessages().length, msgs.length);
+    });
   });
 
   group('SessionLog.replace（压缩/表面替换）', () {

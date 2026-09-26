@@ -1,4 +1,4 @@
-﻿/// prompt-JSON/XML 文本协议 —— 当前本地引擎的兜底工具协议。
+/// prompt-JSON/XML 文本协议 —— 当前本地引擎的兜底工具协议。
 ///
 /// 原理：把工具清单 + 调用协议注入系统提示，要求模型输出工具调用块：
 /// - JSON：`{"tool_call": {"name": "get_time", "arguments": {}}}`
@@ -13,6 +13,7 @@ library;
 import 'dart:convert';
 
 import '../capability.dart';
+import '../llm/adapter.dart' show LlmFailure, LlmFailureCode;
 import '../tool_definition.dart';
 import '../tool_registry.dart';
 import 'tool_protocol.dart';
@@ -104,6 +105,32 @@ class PromptJsonProtocol implements ToolProtocol {
   /// 从全文解析：优先 XML `<tool_call>`（llama.cpp 原生格式），
   /// 再试 JSON 对象；都失败则整段作为普通文本回答（优雅降级）。
   StreamOutcome _parseText(String text) {
+    // 0) 截断兜底（先于一切降级）：文本以未闭合的工具调用块开头
+    //    （生成 token 预算不足，JSON/`</tool_call>` 被拦腰截断）。旧行为是
+    //    整段当普通回答 → turn 静默"完成"，任务半途而废且无提示——
+    //    正是"迭代一两下就停、输出没完成任务"的静默卡死路径。现在按
+    //    完整性分类：结构完整（仅缺收尾括号）→ 补全执行；断在参数内容里
+    //    → 抛 toolCallTruncated 失败，交失败瀑布重试并在 UI 明确报错；
+    //    补完括号仍非法的语法错误 → 继续走下面的容错解析（不误报截断）。
+    final truncation = _truncatedToolCall(text);
+    if (truncation != null) {
+      final repaired = truncation.repairedJson;
+      if (repaired == null) {
+        // 断在字符串/参数内容内部：内容真丢了，不可修复。
+        throw toolCallTruncatedFailure();
+      }
+      final call = _decodeToolCallAnyForm(repaired);
+      if (call != null) {
+        final head = text.substring(0, truncation.start);
+        return StreamOutcome(text: head, toolCalls: [call]);
+      }
+      // 补齐收尾括号后仍解不出 JSON ⇒ 这不是预算截断，而是模型自己的
+      // 语法错误（如用 `;` 代替 `,`）。预算截断只有两种形态：断在字符串
+      // 内部（上面已抛）、纯缺收尾括号（补全后即可解码），都不会落到这里。
+      // 语法错误落回下方容错解析 —— 保持"解析失败优雅降级为文本"的
+      // 协议契约，不误报"token 预算不足"误导用户去调设置。
+    }
+
     // 1) XML tool_call 格式（Spark/Hunyuan 训练分布常见）。
     final xmlCall = _extractXmlToolCall(text);
     if (xmlCall != null) {
@@ -335,6 +362,23 @@ class PromptJsonProtocol implements ToolProtocol {
     );
   }
 
+  /// 宽容解码：先试 `{"tool_call": {...}}` 包裹式，再试顶层
+  /// `{"name": ...}` 式（提示词约定的两种格式）。用于截断修复路径。
+  ToolCall? _decodeToolCallAnyForm(String jsonText) {
+    try {
+      final decoded = jsonDecode(jsonText);
+      if (decoded is Map<String, dynamic>) {
+        final wrapped = decoded['tool_call'];
+        if (wrapped is Map<String, dynamic>) {
+          return _decodeJsonToolCall(jsonEncode(wrapped));
+        }
+      }
+    } catch (_) {
+      // 落到顶层解码（其内部自带 try-catch）。
+    }
+    return _decodeJsonToolCall(jsonText);
+  }
+
   /// 顺序解析 XML 参数对（容错坏格式）。
   ///
   /// 正常：`<arg_key>key<arg_value>value` 或带闭合标签；
@@ -439,4 +483,99 @@ class PromptJsonProtocol implements ToolProtocol {
     // 括号不平衡（模型输出被截断）→ 视为无完整 JSON。
     return null;
   }
+
+  // ---------------------------------------------------------------------------
+  // 截断工具调用检测与修复（token 预算不足的静默卡死根治）
+  // ---------------------------------------------------------------------------
+
+  /// 检测文本中的**截断工具调用**：XML 有 `<tool_call>` 但整个文本没有
+  /// 收尾（`</tool_call>` / `</arg_key>` / `</arg_value>`），或 JSON 从
+  /// `{"name"` 起手但括号/字符串未闭合。
+  ///
+  /// 返回 null = 不存在截断的调用（正常文本 / 完整调用，走原解析）。
+  /// 返回非 null：`repairedJson` 非空 = 结构完整可补全（仅缺收尾括号，
+  /// 未断在字符串内部，参数无损）；为空 = 参数内容真丢了，不可修复。
+  ({int start, String? repairedJson})? _truncatedToolCall(String text) {
+    // XML：有开标签且全文无任何收尾标记（有收尾时即便格式坏也走原容错解析）。
+    final xmlOpen = text.indexOf('<tool_call>');
+    if (xmlOpen >= 0 &&
+        !text.contains('</tool_call>') &&
+        !text.contains('</arg_key>') &&
+        !text.contains('</arg_value>')) {
+      final body =
+          text.substring(xmlOpen + '<tool_call>'.length).trimLeft();
+      // JSON-in-XML 且结构只差收尾 → 可补全。
+      if (body.startsWith('{')) {
+        final rep = _repairTruncatedJsonObject(body);
+        return (start: xmlOpen, repairedJson: rep);
+      }
+      return (start: xmlOpen, repairedJson: null);
+    }
+
+    // JSON：首个平衡对象缺失时，若文本以 `{"name"` 或 `{"tool_call"`
+    // 起手则判为截断调用（两种提示词约定格式都覆盖）。
+    final open = text.indexOf('{');
+    if (open < 0) return null;
+    if (_extractFirstJsonObject(text) != null) return null; // 有完整对象
+    final afterBrace = text.substring(open + 1);
+    if (!RegExp(r'^\s*"(?:name|tool_call)"\s*:').hasMatch(afterBrace)) {
+      return null;
+    }
+    final rep = _repairTruncatedJsonObject(text.substring(open));
+    return (start: open, repairedJson: rep);
+  }
+
+  /// 修复只差收尾括号/逗号的 JSON 对象文本：字符串字面量未闭合（参数断在
+  /// 内容中间）→ 返回 null（不可修复，绝不伪造半截参数去执行）；
+  /// 否则按括号栈补 `"]}` 等收尾返回修复文本（纯语法补全，是否真能解出
+  /// 工具调用由调用方解码判定）。
+  String? _repairTruncatedJsonObject(String src) {
+    var depth = 0;
+    var inString = false;
+    var escaped = false;
+    for (var i = 0; i < src.length; i++) {
+      final ch = src[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch == r'\') {
+          escaped = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      switch (ch) {
+        case '"':
+          inString = true;
+          break;
+        case '{':
+        case '[':
+          depth++;
+          break;
+        case '}':
+        case ']':
+          depth--;
+          break;
+      }
+    }
+    if (depth <= 0) return null; // 并非"只差收尾"（或本就平衡），交回原逻辑
+    if (inString) return null; // 断在字符串内部：参数内容丢失，不可修复
+    var trimmed = src.trimRight();
+    while (trimmed.endsWith(',')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    // 按"先闭合未闭合容器"朴素补全（对象/数组统一用栈计数补全括号种类，
+    // 但小模型工具调用几乎恒为纯对象嵌套，直接按剩余层数补 '}' 即可）。
+    // 只补括号、不做解码：能否真正解出工具调用由调用方判定（区分
+    // "预算截断"与"模型语法错误"）。
+    return '$trimmed${'}' * depth}';
+  }
 }
+
+/// 工具调用截断失败（协议 → 主循环失败瀑布的约定信号）。
+LlmFailure toolCallTruncatedFailure() => const LlmFailure(
+      code: LlmFailureCode.toolCallTruncated,
+      message: '工具调用生成不完整（输出 token 预算不足被截断）：'
+          '请在设置中调大「智能体每轮生成 token」后重试',
+    );

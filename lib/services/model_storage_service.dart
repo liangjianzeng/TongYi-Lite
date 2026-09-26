@@ -120,10 +120,28 @@ class ModelStorageService {
   }
 
   Future<String> _findFile(String modelId, String suffix) async {
-    for (final dir in await _allCandidateDirs()) {
+    final candidates = await _allCandidateDirs();
+    // 快路径：各候选目录顶层精确查找
+    for (final dir in candidates) {
       try {
         final file = File(p.join(dir.path, '$modelId$suffix'));
         if (await file.exists()) return file.path;
+      } catch (_) {}
+    }
+    // 慢路径：递归查找。必须与 scanExistingModels 的递归扫描对称，否则
+    // 子目录里的模型会被判成"已缓存"但永远加载失败（幽灵缓存）。
+    // Download/DCIM 在扫描时也只查顶层，这里无需递归（避免扫全盘变慢）。
+    for (final dir in candidates) {
+      final dirPath = dir.path;
+      if (dirPath == '/sdcard/Download' || dirPath == '/sdcard/DCIM') continue;
+      try {
+        if (!await dir.exists()) continue;
+        final target = '$modelId$suffix';
+        await for (final entity in dir.list(recursive: true)) {
+          if (entity is File && p.basename(entity.path) == target) {
+            return entity.path;
+          }
+        }
       } catch (_) {}
     }
     final dir = await getModelsRootDir();

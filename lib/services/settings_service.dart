@@ -103,8 +103,24 @@ class InferenceSettings {
   /// 单工具执行超时（毫秒）。默认 15s：防止工具卡死拖住整个循环。
   final int agentToolTimeoutMs;
 
-  /// 是否允许并行工具调用（预留能力，默认关闭）。
+  /// 是否允许并行工具调用（默认关闭；开启后按 [agentMaxParallel] 分批并发）。
   final bool agentAllowParallelTools;
+
+  /// 并行工具并发上限（默认 4；实际再受驱动模型能力夹紧）。
+  final int agentMaxParallel;
+
+  /// 生成温度（0~2，默认 0.7）。工具决策建议偏低，直答场景可偏高。
+  final double agentTemperature;
+
+  /// 子代理工具（subagent，spawn/fork）注册开关。默认开：
+  /// 不变量固定（深度 ≤ 2 / 子代理审批恒 never / 每层独立预算）。
+  final bool agentSubagentEnabled;
+
+  /// 上下文超限自动压缩（默认开；关闭后超限直接报错终止）。
+  final bool agentCompactEnabled;
+
+  /// 超长工具输出溢写落盘（默认开；模型侧只留摘要与文件定位）。
+  final bool agentSpillEnabled;
 
   /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）。
   final bool webSearchEnabled;
@@ -216,6 +232,11 @@ class InferenceSettings {
     this.agentTokensPerRound = 512,
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
+    this.agentMaxParallel = 4,
+    this.agentTemperature = 0.7,
+    this.agentSubagentEnabled = true,
+    this.agentCompactEnabled = true,
+    this.agentSpillEnabled = true,
     this.webSearchEnabled = false,
     this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
     this.webSearchSearXngApiKey,
@@ -295,6 +316,11 @@ class InferenceSettings {
       int? agentTokensPerRound,
       int? agentToolTimeoutMs,
       bool? agentAllowParallelTools,
+      int? agentMaxParallel,
+      double? agentTemperature,
+      bool? agentSubagentEnabled,
+      bool? agentCompactEnabled,
+      bool? agentSpillEnabled,
       bool? webSearchEnabled,
       String? webSearchSearXngBaseUrl,
       String? webSearchSearXngApiKey,
@@ -345,6 +371,11 @@ class InferenceSettings {
       agentToolTimeoutMs: agentToolTimeoutMs ?? this.agentToolTimeoutMs,
       agentAllowParallelTools:
           agentAllowParallelTools ?? this.agentAllowParallelTools,
+      agentMaxParallel: agentMaxParallel ?? this.agentMaxParallel,
+      agentTemperature: agentTemperature ?? this.agentTemperature,
+      agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
+      agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
+      agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
       webSearchSearXngBaseUrl:
           webSearchSearXngBaseUrl ?? this.webSearchSearXngBaseUrl,
@@ -397,6 +428,11 @@ class InferenceSettings {
         'agentTokensPerRound': agentTokensPerRound,
         'agentToolTimeoutMs': agentToolTimeoutMs,
         'agentAllowParallelTools': agentAllowParallelTools,
+        'agentMaxParallel': agentMaxParallel,
+        'agentTemperature': agentTemperature,
+        'agentSubagentEnabled': agentSubagentEnabled,
+        'agentCompactEnabled': agentCompactEnabled,
+        'agentSpillEnabled': agentSpillEnabled,
         'webSearchEnabled': webSearchEnabled,
         'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
         'webSearchSearXngApiKey': webSearchSearXngApiKey,
@@ -454,6 +490,11 @@ class InferenceSettings {
           (json['agentToolTimeoutMs'] as num?)?.toInt() ?? 15000,
       agentAllowParallelTools:
           json['agentAllowParallelTools'] as bool? ?? false,
+      agentMaxParallel: json['agentMaxParallel'] as int? ?? 4,
+      agentTemperature: (json['agentTemperature'] as num?)?.toDouble() ?? 0.7,
+      agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
+      agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
+      agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）。
       // 空地址 = 未配置，此时联网搜索工具会给出"请先在设置里填地址"的诊断。

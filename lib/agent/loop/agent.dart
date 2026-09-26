@@ -100,6 +100,15 @@ class ReactLoopAgent {
   Completer<void>? _cancelCompleter;
   bool _cancelCompleted = false;
 
+  /// 本轮最终答案：仅本轮 append 的末条 assistant/message 内容。
+  /// **失败时为空串**——绝不穿透回历史里的旧 assistant（否则会把上一轮
+  /// 回复冒充成本轮回复显示，看起来像"模型只会这一句"）。
+  String _turnAnswer = '';
+  String? _turnError;
+
+  String get lastTurnAnswer => _turnAnswer;
+  String? get lastTurnError => _turnError;
+
   ReactLoopAgent({
     required SessionLog session,
     required LlmAdapter adapter,
@@ -223,6 +232,8 @@ class ReactLoopAgent {
     }
     _cancelCompleter = Completer<void>();
     _cancelCompleted = false;
+    _turnAnswer = '';
+    _turnError = null;
     final userSeq = _session.append(
       kEventUserMessage,
       {'content': userMessage},
@@ -274,6 +285,7 @@ class ReactLoopAgent {
             );
             _appendAssistant(turn, step, result);
             if (!result.hasToolCalls) {
+              _turnAnswer = result.text; // 本轮最终回答（无工具那步）
               turnDone = true;
               break; // 无工具调用 → turn 完成（最终回答）
             }
@@ -288,10 +300,14 @@ class ReactLoopAgent {
           } on LlmFailure catch (f) {
             // 失败 → 落 assistant/attempt（log-only，模型不可见）→ 跑瀑布。
             _appendAttempt(turn, step, f);
+            _turnError = f.message;
             final decision = await _handleFailure(turn, step, f);
             if (decision.kind == FailureDecisionKind.retry) {
               retryStep = true; // 同一 step 重试（_retries 已累加）
             } else {
+              if (decision.detail != null) {
+                _turnError = '${f.message}（${decision.detail}）';
+              }
               reason = TurnEndReasonKind.error;
               turnDone = true;
               break;

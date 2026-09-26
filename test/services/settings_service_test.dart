@@ -119,4 +119,40 @@ void main() {
       expect(s.copyWith().agentModelId, 'abc');
     });
   });
+
+  group('InferenceSettings 智能体引擎 v0.2.1 新键', () {
+    test('默认值：温度 0.7 / 并发 4 / 子代理·压缩·溢写默认开', () {
+      const s = InferenceSettings();
+      expect(s.agentTemperature, 0.7);
+      expect(s.agentMaxParallel, 4);
+      expect(s.agentSubagentEnabled, isTrue);
+      expect(s.agentCompactEnabled, isTrue);
+      expect(s.agentSpillEnabled, isTrue);
+    });
+
+    test('toJson → fromJson 往返一致', () {
+      const s = InferenceSettings(
+        agentTemperature: 0.3,
+        agentMaxParallel: 6,
+        agentSubagentEnabled: false,
+        agentCompactEnabled: false,
+        agentSpillEnabled: false,
+      );
+      final restored = InferenceSettings.fromJson(s.toJson());
+      expect(restored.agentTemperature, 0.3);
+      expect(restored.agentMaxParallel, 6);
+      expect(restored.agentSubagentEnabled, isFalse);
+      expect(restored.agentCompactEnabled, isFalse);
+      expect(restored.agentSpillEnabled, isFalse);
+    });
+
+    test('旧配置无新键 → 取安全默认（向后兼容）', () {
+      final old = InferenceSettings.fromJson({'agentMaxRounds': 3});
+      expect(old.agentTemperature, 0.7);
+      expect(old.agentMaxParallel, 4);
+      expect(old.agentSubagentEnabled, isTrue);
+      expect(old.agentCompactEnabled, isTrue);
+      expect(old.agentSpillEnabled, isTrue);
+    });
+  });
 }

@@ -1,17 +1,23 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data' show Uint8List;
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 
 import '../agent/agent.dart';
 import '../agent/web_search/web_search_provider.dart';
-import '../agent/loop/agent.dart' show ReactLoopAgent, TurnEndReason;
+import '../agent/context_eng/compaction.dart' show DeterministicCompaction;
+import '../agent/loop/agent.dart'
+    show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/capability.dart';
-import '../agent/llm/adapter.dart' show LlmAdapter, ProviderKind;
+import '../agent/llm/adapter.dart'
+    show LlmAdapter, ProviderKind, LlmFailure, LlmFailureCode;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
 import '../agent/protocol/protocol_selector.dart' show selectProtocol;
@@ -767,8 +773,10 @@ class ChatNotifier extends StateNotifier<bool> {
     final newConfig = loopConfig.AgentConfig(
       maxStepsPerTurn: settings.agentMaxRounds,
       maxTokensPerRound: settings.agentTokensPerRound,
+      temperature: settings.agentTemperature,
       toolTimeout: Duration(milliseconds: settings.agentToolTimeoutMs),
       allowParallelTools: settings.agentAllowParallelTools,
+      maxParallel: settings.agentMaxParallel,
     );
     // 按路由选 adapter（local/API），各自冻结能力快照。
     final LlmAdapter engine = useApi
@@ -803,19 +811,21 @@ class ChatNotifier extends StateNotifier<bool> {
     // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
     _ref.read(agentUiStateProvider.notifier).attach(sessionLog);
 
-    // ---- 子代理接缝（Phase 4）：in-process spawn/fork ----
+    // ---- 子代理接缝（Phase 4）：in-process spawn/fork（设置可关）----
     // 复用当前 registry/adapter/模型/系统提示（同模型、同工具集，§10.6）。
     // 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
-    final subagentProvider = InProcessSubagentProvider(
-      adapter: engine,
-      registry: registry,
-      modelId: targetModelId,
-      providerKind: useApi ? ProviderKind.api : ProviderKind.local,
-      systemPrompt: systemPrompt,
-      parentSession: sessionLog,
-    );
-    // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
-    registry.register(createSubagentTool(subagentProvider));
+    if (settings.agentSubagentEnabled) {
+      final subagentProvider = InProcessSubagentProvider(
+        adapter: engine,
+        registry: registry,
+        modelId: targetModelId,
+        providerKind: useApi ? ProviderKind.api : ProviderKind.local,
+        systemPrompt: systemPrompt,
+        parentSession: sessionLog,
+      );
+      // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
+      registry.register(createSubagentTool(subagentProvider));
+    }
 
     // 保存用户消息（UI 立即可见）。
     final userMsg = ChatMessage(
@@ -896,10 +906,22 @@ class ChatNotifier extends StateNotifier<bool> {
       hooks: hooks,
       skills: skillProvider,
       agentsMd: agentsMdText,
+      // 上下文压缩（确定性裁剪）：设置可关；关 = 超限直接走失败终止。
+      compaction: settings.agentCompactEnabled
+          ? DeterministicCompaction()
+          : null,
+      // 超长工具输出溢写：写 ApplicationSupport/agent_spill/，模型侧留摘要。
+      spillStore: settings.agentSpillEnabled ? _writeSpillFile : null,
     );
     _currentAgent = agent;
     String answer = '';
     TurnEndReason? reason;
+    // 推理日志：本轮路由与请求规模（「推理日志」页可见，配合排障）。
+    final logManager = _ref.read(modelManagerProvider.notifier);
+    logManager.appendInferenceLog(
+      '智能体请求 | ${useApi ? "API(${activeApi?.name})" : "本地($targetModelId)"} '
+      '事件数=${sessionLog.eventsCount}',
+    );
     try {
       reason = await agent.kick(
         prompt,
@@ -907,12 +929,13 @@ class ChatNotifier extends StateNotifier<bool> {
         audioPath: audioPath,
         onToken: tokenController,
       );
-      answer = agent.lastAssistantContent;
+      // 只取**本轮**产出的答案；失败时为空——绝不回退历史旧回复冒充本回复。
+      answer = agent.lastTurnAnswer;
       debugPrint(
-          '[ChatNotifier] new-agent done: reason=${reason!.kind.name}, '
+          '[ChatNotifier] new-agent done: reason=${reason.kind.name}, '
           'answer len=${answer.length}');
     } catch (e, s) {
-      answer = agent.lastAssistantContent;
+      answer = agent.lastTurnAnswer;
       debugPrint('[ChatNotifier] new-agent error: $e\n$s');
     } finally {
       // 收尾（无论正常/异常/取消）：重置 UI 生成态 + 清 agent 引用 + 收流。
@@ -926,6 +949,25 @@ class ChatNotifier extends StateNotifier<bool> {
     }
 
     // 最终占位文本 = 本轮最终回答（turn 末位 assistant/message）。
+    // 本轮没产出答案（失败/异常）→ 明确报错误文案，绝不拿历史旧回复冒充。
+    final turnFailed = reason?.kind != TurnEndReasonKind.completed;
+    if (answer.isEmpty && turnFailed) {
+      final detail = agent.lastTurnError;
+      answer = '⚠️ 本轮执行失败${detail != null ? '：$detail' : ''}'
+          '（详见推理日志）';
+      logManager.appendInferenceLog('本轮失败 | ${detail ?? '未知错误'}');
+    }
+    // 达到最大轮数仍在调工具：明确告知"没做完"而不是假装完成。
+    if (reason?.kind == TurnEndReasonKind.maxSteps) {
+      logManager.appendInferenceLog(
+        '达到最大轮数上限（${settings.agentMaxRounds}）仍未产出最终回答，'
+        '可在设置中调大「工具循环最大轮数」',
+      );
+      answer = answer.isEmpty
+          ? 'ℹ️ 工具循环达到最大轮数（${settings.agentMaxRounds}），任务未完成。'
+              '可在设置中调大「工具循环最大轮数」后重试。'
+          : '$answer\n\nℹ️（注意：达到最大轮数上限，任务可能未完成）';
+    }
     assistantMsg = assistantMsg.copyWith(content: answer, isStreaming: false);
     await _storage.saveMessage(assistantMsg);
     await _refreshConversationMeta(conversationId);
@@ -963,6 +1005,18 @@ class ChatNotifier extends StateNotifier<bool> {
       toolTemplate: isXmlFamily ? 'spark-xml' : null,
       maxParallelToolCalls: 2,
     );
+  }
+
+  /// 溢写存储：超长工具输出落盘 `ApplicationSupport/agent_spill/`，
+  /// 返回文件路径（模型侧摘要里带定位，可按需读取）。
+  static Future<String> _writeSpillFile(Uint8List bytes) async {
+    final base = await getApplicationSupportDirectory();
+    final dir = Directory('${base.path}/agent_spill');
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    final file = File('${dir.path}/'
+        'spill_${DateTime.now().microsecondsSinceEpoch}_${bytes.length}.bin');
+    await file.writeAsBytes(bytes);
+    return file.path;
   }
 
   /// 默认全启用；联网类（web_search/get_weather）由 [settings.webSearchEnabled]
@@ -1101,8 +1155,26 @@ class ChatNotifier extends StateNotifier<bool> {
 
       // ---- 流结束：收尾（未闭合 XML/JSON 恢复为普通文本）→ 解析工具调用 ----
       processor.finish();
-      final outcome =
-          await protocol.parseStream(Stream<String>.value(rawBuffer.toString()));
+      StreamOutcome outcome;
+      try {
+        outcome = await protocol.parseStream(
+            Stream<String>.value(rawBuffer.toString()));
+      } on LlmFailure catch (f) {
+        if (f.code != LlmFailureCode.toolCallTruncated) rethrow;
+        // 截断的工具调用：旧循环无失败瀑布，以最终回答明确报错收轮，
+        // 绝不异常穿透崩会话。
+        final notice = '⚠️ 本轮工具调用生成不完整（输出 token 预算不足被截断）：'
+            '请在设置中调大「智能体每轮生成 token」后重试';
+        debugPrint('[ChatNotifier] agent toolCallTruncated: ${f.message}');
+        _ref.read(modelManagerProvider.notifier)
+            .appendInferenceLog('Agent 轮 $round | 工具调用截断 | ${f.message}');
+        assistantMsg = assistantMsg.copyWith(
+          content: notice,
+          isStreaming: false,
+        );
+        await _storage.saveMessage(assistantMsg);
+        return StreamOutcome(text: notice); // 无工具调用 → 循环终止
+      }
 
       // ---- 本轮性能统计（同普通聊天：原生真实 token 数 + 纯生成耗时）----
       final totalMs = DateTime.now().difference(roundStart).inMilliseconds;

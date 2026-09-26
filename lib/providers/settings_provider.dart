@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../agent/web_search/web_search_provider.dart';
@@ -196,9 +197,9 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 工具循环轮次上限（1~20）。
+  /// 工具循环轮次上限（1~24，与引擎 AgentConfig assert 对齐）。
   Future<void> setAgentMaxRounds(int value) async {
-    final clamped = value.clamp(1, 20);
+    final clamped = value.clamp(1, 24);
     state = state.copyWith(agentMaxRounds: clamped);
     await _persist();
   }
@@ -217,9 +218,40 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 并行工具调用（预留能力）。
+  /// 并行工具调用开关。
   Future<void> setAgentAllowParallelTools(bool value) async {
     state = state.copyWith(agentAllowParallelTools: value);
+    await _persist();
+  }
+
+  /// 并行工具并发上限（2~8；运行期再按模型能力夹紧）。
+  Future<void> setAgentMaxParallel(int value) async {
+    final clamped = value.clamp(2, 8);
+    state = state.copyWith(agentMaxParallel: clamped);
+    await _persist();
+  }
+
+  /// 智能体生成温度（0~2）。
+  Future<void> setAgentTemperature(double value) async {
+    state = state.copyWith(agentTemperature: value.clamp(0.0, 2.0));
+    await _persist();
+  }
+
+  /// 子代理工具注册开关。
+  Future<void> setAgentSubagentEnabled(bool value) async {
+    state = state.copyWith(agentSubagentEnabled: value);
+    await _persist();
+  }
+
+  /// 上下文超限自动压缩开关。
+  Future<void> setAgentCompactEnabled(bool value) async {
+    state = state.copyWith(agentCompactEnabled: value);
+    await _persist();
+  }
+
+  /// 超长工具输出溢写开关。
+  Future<void> setAgentSpillEnabled(bool value) async {
+    state = state.copyWith(agentSpillEnabled: value);
     await _persist();
   }
 
@@ -336,8 +368,10 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   Future<void> _persist() async {
     try {
       await _service.save(state);
-    } catch (_) {
+    } catch (e) {
       // 持久化失败不应阻断 UI 交互；内存状态已更新。
+      // 记录日志便于定位（此前完全静默，失败时用户无感知）。
+      debugPrint('[Settings] persist failed: $e');
     }
   }
 }
