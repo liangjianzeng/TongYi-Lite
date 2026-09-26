@@ -103,3 +103,21 @@ adb shell "cd /data/local/tmp/vkm6 && LD_LIBRARY_PATH=$PWD \
 ```
 
 相关产物：CLI 验证构建 `_study/vkcli/build-m5chk/`、驱动素材 `_study/vkcli/drivers/`、实验脚本 `_study/vkcli/{checkres,final,combo,ksweep,probe*}.sh`、工作日志 `.workbuddy/memory/2026-09-26.md`。
+
+---
+
+## 2026-09-27 补充：最终定案 —— e2e 从未通过，Vulkan 在本机不可用
+
+**重要修正**：本文档早期版本称「CLI 端到端 prefill 文本正确（Paris/北京）」——经全文检索 `_study/vkcli/*.out` 证伪：**6 次 CLI e2e 全部输出乱码或中途崩溃，0 次出现正确文本**。"验证通过"的说法来自单算子 CHECK_RESULTS 微测试（那部分属实），e2e 从未成功过。
+
+### 真相链（全部有日志/测试证据）
+1. 本机 Vulkan 失败模式与树无关：
+   - vendored b11028（App）：GPU 静默停摆（per-chunk fence 归因到 `MUL_MAT(conv.in_proj-11)` 附近，挂点不固定，前 10 层同算子均正常 → 时序敏感竞态）
+   - master（CLI）：`createComputePipeline: ErrorUnknown` 直接崩（warmup 第一个 ubatch）；`-ot conv=CPU` 无效
+   - test-backend-ops（master）：全系列 IQ 量化 GET_ROWS 数值错（ERR 0.2~1.0）；CPY(q8_0→f32) 数值错；后续 CPY 变体建管线时 ErrorUnknown 崩溃
+2. 共性：高通 Vulkan 驱动 0800.71 对 int8/unpack 族 shader 存在**多个独立编译器 bug**——错编（数值错）、拒建（ErrorUnknown）、执行挂死（静默停摆）三种表现并存。unpack8 补丁只修了其中一类（数值错），修不完。
+3. **OpenCL 后端完全正常**（同机同模型同配置实测出字），ggml-opencl 对 Adreno 是 Qualcomm 官方路径。
+
+### 结论与行动
+- TongYi-Lite 在 SM8735/Adreno 8 Elite2 上：**GPU 推理走 OpenCL，Vulkan 标记为驱动不可用**（除非未来高通驱动更新后重测）。
+- 本文档的 shader 补丁（unpack8 等）仍有价值：修复的是真实驱动错编，未来驱动修复后重测可直接对照。
