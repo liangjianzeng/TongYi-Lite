@@ -88,6 +88,36 @@
       ]
     },
     {
+      "id": "bonsai-2-27b-ternary-ptq1_0",
+      "name": "Bonsai 2 27B (PTQ1_0 1.58-bit 纯文本)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/master/Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+          "source": "huggingface"
+        }
+      ],
+      "sizeGB": 5.95,
+      "sizeMBDisplay": "5.9 GB",
+      "recommended": false,
+      "minRamMB": 8192,
+      "sha256Hash": null,
+      "tags": [
+        "1.58-bit",
+        "纯文本",
+        "限高端旗舰",
+        "需新版引擎"
+      ]
+    },
+    {
       "id": "gemma-3-4b-q4_k_m",
       "name": "Gemma 3 4B (Q4_K_M)",
       "type": "text",
