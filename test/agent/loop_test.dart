@@ -292,4 +292,64 @@ void main() {
     expect(tr?['isError'], true);
     expect(tr?['content'], contains('缺少必填参数'));
   });
+
+  test('回归：turn 失败 → lastTurnAnswer 为空不回溯上一轮旧答案，lastTurnError 带原因',
+      () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(text: '第一轮答案', toolCalls: const []),
+      LlmFailure(code: LlmFailureCode.emptyResponse, message: 'HTTP 400'),
+    ]);
+    final agent = _agent(fake);
+    await agent.kick('第一轮问题');
+    expect(agent.lastTurnAnswer, '第一轮答案');
+
+    final reason = await agent.kick('第二轮问题');
+    expect(reason.kind, TurnEndReasonKind.error);
+    // 关键：失败轮不得把上一轮答案冒充本轮回复（重复问候 bug 的根因防线）。
+    expect(agent.lastTurnAnswer, '');
+    expect(agent.lastTurnError, contains('HTTP 400'));
+  });
+
+  test('回归：成功轮的 lastTurnAnswer 在多次 kick 后只反映当轮', () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(text: '答案A', toolCalls: const []),
+      LlmResult(text: '答案B', toolCalls: const []),
+    ]);
+    final agent = _agent(fake);
+    await agent.kick('问题1');
+    expect(agent.lastTurnAnswer, '答案A');
+    await agent.kick('问题2');
+    expect(agent.lastTurnAnswer, '答案B');
+    expect(agent.lastTurnError, isNull);
+  });
+
+  test('工具调用截断失败：重试有界（maxRetries）后终态报错，不静默', () async {
+    const trunc = LlmFailure(
+      code: LlmFailureCode.toolCallTruncated,
+      message: '工具调用生成不完整（输出 token 预算不足被截断）',
+    );
+    final fake = FakeLlmAdapter([trunc, trunc, trunc]);
+    final agent = ReactLoopAgent(
+      session: SessionLog.fromEvents(const []),
+      adapter: fake,
+      registry: _registryWith([_weatherTool()]),
+      modelId: 'test-model',
+      providerKind: ProviderKind.local,
+      systemPrompt: 'sys',
+      compaction: const NoCompactionPlugin(),
+      retry: LlmRetry(
+        maxRetries: 2,
+        initialDelay: Duration.zero,
+        maxDelay: Duration.zero,
+      ),
+    );
+
+    final reason = await agent.kick('写个文件');
+
+    // 1 次原始 + 2 次重试后止损（重试不豁免 maxRetries 上限）。
+    expect(fake.calls, 3);
+    expect(reason.kind, TurnEndReasonKind.error);
+    expect(agent.lastTurnAnswer, '');
+    expect(agent.lastTurnError, contains('截断'));
+  });
 }

@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/agent.dart';
+import 'package:tongyi_lite/agent/llm/adapter.dart'
+    show LlmFailure, LlmFailureCode;
 
 void main() {
   final protocol = PromptJsonProtocol();
@@ -39,11 +41,15 @@ void main() {
       expect(outcome.toolCalls.single.name, 'get_time');
     });
 
-    test('XML 未闭合 → 普通文本（不误判）', () async {
+    test('XML 未闭合且无任何收尾 → 判截断（抛 toolCallTruncated，不再静默）',
+        () async {
+      // 旧行为：整段当普通文本 → turn 静默"完成"，任务半途而废无提示。
       const text = '<tool_call>get_time';
-      final outcome = await protocol.parseStream(tokens(text));
-      expect(outcome.hasToolCalls, isFalse);
-      expect(outcome.text, '<tool_call>get_time');
+      expect(
+        () => protocol.parseStream(tokens(text)),
+        throwsA(isA<LlmFailure>()
+            .having((f) => f.code, 'code', LlmFailureCode.toolCallTruncated)),
+      );
     });
 
     test('XML 坏格式（值误塞进 arg_key）容错配对', () async {
@@ -163,6 +169,18 @@ void main() {
       expect(outcome.text, text);
     });
 
+    test('模型语法错误（逗号写成冒号）≠ 截断 → 降级为文本，不误报 token 不足',
+        () async {
+      // 补齐收尾括号后仍解不出 JSON，说明错误出自模型自己的语法，
+      // 与 token 预算无关：此时报 toolCallTruncated 会让用户去调大
+      // 「每轮生成 token」而毫无效果，故按协议契约降级为文本。
+      const text = '{"name": "web_search", "arguments": {"query": "天气": 3}';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isFalse);
+      expect(outcome.text, text);
+    });
+
     test('合法 JSON 但不是工具调用 → 整段降级为文本', () async {
       const text = '{"answer": "42"}';
       final outcome = await protocol.parseStream(tokens(text));
@@ -171,11 +189,51 @@ void main() {
       expect(outcome.text, text);
     });
 
-    test('括号不平衡（输出被截断）→ 无工具调用', () async {
+    test('括号不平衡且断在字符串内部 → 抛 toolCallTruncated（不可修复）', () async {
+      // 断在字符串内部：参数内容已丢失，绝不伪造执行。
+      const text =
+          '{"tool_call": {"name": "file_write", "arguments": {"content": "abc';
+      expect(
+        () => protocol.parseStream(tokens(text)),
+        throwsA(isA<LlmFailure>()
+            .having((f) => f.code, 'code', LlmFailureCode.toolCallTruncated)),
+      );
+    });
+
+    test('tool_call 包裹式只差收尾括号 → 自动补全执行', () async {
       const text = '{"tool_call": {"name": "get_time", "arguments": {';
       final outcome = await protocol.parseStream(tokens(text));
 
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+    });
+
+    test('截断在字符串内部（file_write 内容写一半）→ 抛 toolCallTruncated',
+        () async {
+      const text =
+          '{"name": "file_write", "arguments": {"path": "a.txt", "content": "从前有座';
+      expect(
+        () => protocol.parseStream(tokens(text)),
+        throwsA(isA<LlmFailure>()
+            .having((f) => f.code, 'code', LlmFailureCode.toolCallTruncated)),
+      );
+    });
+
+    test('只差收尾括号的截断 JSON → 自动补全执行（name 完整、参数无损）', () async {
+      const text = '{"name": "web_search", "arguments": {"query": "今天天气"}';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], '今天天气');
+    });
+
+    test('非工具的 JSON 片段（{"foo": 未完）→ 仍优雅降级为文本', () async {
+      const text = '答案如下 {"foo": 4';
+      final outcome = await protocol.parseStream(tokens(text));
+
       expect(outcome.hasToolCalls, isFalse);
+      expect(outcome.text, text);
     });
 
     test('字符串内的大括号不破坏平衡扫描', () async {

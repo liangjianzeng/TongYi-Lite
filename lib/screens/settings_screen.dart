@@ -9,6 +9,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -16,6 +17,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../agent/skills/provider.dart' show loadUserSkills;
+import '../agent/skills/skill.dart' show Skill, loadBuiltinSkills;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
@@ -1464,34 +1467,112 @@ Widget _buildToggleTitle(
 // Tab 4: 智能体（Agent）
 // =========================================================================
 
-class _AgentTab extends ConsumerWidget {
+/// 智能体设置 Tab（v0.2.1 全新引擎对齐）。
+///
+/// 设计原则：
+/// 1. **能力驱动展示**：特性块查询驱动模型的能力快照，不支持则置灰说明；
+/// 2. **只保留新引擎真实消费的旋钮**：每项设置都映射到引擎消费点；
+/// 3. 旧键不动，新键安全默认，旧配置无损迁移。
+class _AgentTab extends ConsumerStatefulWidget {
   const _AgentTab();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_AgentTab> createState() => _AgentTabState();
+}
+
+class _AgentTabState extends ConsumerState<_AgentTab> {
+  /// 用户自定义 skills（null = 扫描中）。
+  List<Skill>? _userSkills;
+
+  /// 全局 AGENTS.md 路径与字节数（-1 = 不存在）。
+  String? _agentsMdPath;
+  int _agentsMdLen = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    _rescanSkills();
+    _loadAgentsMdInfo();
+  }
+
+  Future<void> _rescanSkills() async {
+    final skills = await loadUserSkills();
+    if (!mounted) return;
+    setState(() => _userSkills = skills);
+  }
+
+  Future<void> _loadAgentsMdInfo() async {
+    final base = await getApplicationSupportDirectory();
+    final file = File(p.join(base.path, 'AGENTS.md'));
+    if (!mounted) return;
+    setState(() {
+      _agentsMdPath = file.path;
+      _agentsMdLen = file.existsSync() ? file.lengthSync() : -1;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
+
+    // ---- 能力快照（与 chat_provider._engineCapabilitiesFor 同源规则）----
+    // api → 原生工具调用 + 并行 5；local/跟随默认 → Prompt-JSON + 并行 2。
+    final isApi = settings.agentModelSource == 'api';
+    final capsMaxParallel = isApi ? 5 : 2;
+    final effectiveParallel =
+        settings.agentAllowParallelTools ? settings.agentMaxParallel : 1;
+    final parallelNote = isApi
+        ? 'API 路线能力上限 5 路；实际并发 = min(设置值, 能力上限)'
+        : '本地路线能力上限 2 路（prompt-JSON 协议）；实际并发 = min(设置值, 2)';
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ---- 驱动模型选择卡片 ----
+          // ================= ① 引擎状态（能力总览）=================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  _buildToggleTitle(
+                    '⚡ 新一代引擎',
+                    settings.useNewAgentMode,
+                    notifier.setUseNewAgentMode,
+                    subtitle: '事件日志上下文 · 失败自动恢复 · 子代理 · Skills/Hooks。'
+                        '关闭 = 回退旧引擎（保留回滚通道）',
+                  ),
+                  const SizedBox(height: 12),
                   _buildSectionHeader('🤖 驱动模型', context),
-                  const SizedBox(height: 4),
                   const Text(
-                    '指定智能体由哪个模型驱动：端侧本地模型或 API 接入模型',
+                    '指定智能体由哪个模型驱动；能力徽标随选择实时变化',
                     style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                   const SizedBox(height: 8),
                   _buildAgentModelSelector(context, ref, settings),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _capChip(isApi ? '协议：原生工具调用' : '协议：Prompt-JSON',
+                          ok: true),
+                      _capChip('工具调用：支持', ok: true),
+                      _capChip('并行上限：$capsMaxParallel 路',
+                          ok: capsMaxParallel > 1),
+                      _capChip(
+                          isApi
+                              ? '上下文：由服务端决定'
+                              : '上下文：${settings.agentNctx} tok',
+                          ok: true),
+                      _capChip('上下文压缩', ok: settings.agentCompactEnabled),
+                      _capChip('输出溢写', ok: settings.agentSpillEnabled),
+                      _capChip('子代理', ok: settings.agentSubagentEnabled),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1499,42 +1580,26 @@ class _AgentTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
-          // ---- 智能体模式总开关 ----
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: _buildToggleTitle(
-                '🤖 智能体模式',
-                settings.agentEnabled,
-                notifier.setAgentEnabled,
-                subtitle: '开启后模型可调用工具完成任务；关闭 = 普通聊天',
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 16),
-
-          // ---- 工具循环参数 ----
+          // ================= ② 核心执行参数 =================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('🔁 工具循环', context),
-                  const SizedBox(height: 8),
+                  _buildSectionHeader('🔁 执行参数', context),
                   _buildSliderRow(
-                    label: '循环轮次上限',
+                    label: '单轮最大步数',
                     value: settings.agentMaxRounds,
                     min: 1,
-                    max: 20,
-                    divisions: 19,
-                    display: '${settings.agentMaxRounds} 轮',
+                    max: 24,
+                    divisions: 23,
+                    display: '${settings.agentMaxRounds} 步',
                     onChanged: (v) => notifier.setAgentMaxRounds(v),
-                    hint: '工具调用最多执行几轮（端侧速度有限，默认 5 轮）',
+                    hint: '一次提问内最多几次模型请求（含工具往返）；端侧建议 3–8（默认 5）',
                   ),
                   _buildSliderRow(
-                    label: '每轮生成预算',
+                    label: '每步生成预算',
                     value: settings.agentTokensPerRound,
                     min: 128,
                     max: 16384,
@@ -1543,7 +1608,7 @@ class _AgentTab extends ConsumerWidget {
                         ? '${settings.agentTokensPerRound ~/ 1024}k token'
                         : '${settings.agentTokensPerRound} token',
                     onChanged: (v) => notifier.setAgentTokensPerRound(v),
-                    hint: '每轮模型生成的 token 上限（默认 512；最大 16k，按需配置）',
+                    hint: '每步模型生成 token 上限（默认 512）',
                   ),
                   _buildSliderRow(
                     label: '工具执行超时',
@@ -1553,7 +1618,35 @@ class _AgentTab extends ConsumerWidget {
                     divisions: 59,
                     display: _formatTimeout(settings.agentToolTimeoutMs),
                     onChanged: (v) => notifier.setAgentToolTimeoutMs(v),
-                    hint: '单个工具执行超时，防止卡死整个循环（默认 15 秒）',
+                    hint: '单工具超时，防止卡死循环；工具自声明超时优先（默认 15 秒）',
+                  ),
+                  _buildDoubleSliderRow(
+                    label: '生成温度',
+                    value: settings.agentTemperature,
+                    min: 0.0,
+                    max: 2.0,
+                    divisions: 20,
+                    display: settings.agentTemperature.toStringAsFixed(1),
+                    onChanged: (v) => notifier.setAgentTemperature(v),
+                    hint: '工具决策建议 0.3–0.7；创意直答可到 1.0+（默认 0.7）',
+                  ),
+                  Opacity(
+                    opacity: isApi ? 0.4 : 1.0,
+                    child: IgnorePointer(
+                      ignoring: isApi,
+                      child: _buildSliderRow(
+                        label: '智能体上下文长度',
+                        value: settings.agentNctx,
+                        min: 1024,
+                        max: 65536,
+                        divisions: 63,
+                        display: '${settings.agentNctx} token',
+                        onChanged: (v) => notifier.setAgentNctx(v),
+                        hint: isApi
+                            ? 'API 驱动的上下文长度由服务端决定，此设置仅本地引擎生效'
+                            : '本地引擎 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）。修改后需重载模型生效',
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1562,24 +1655,28 @@ class _AgentTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
-          // ---- 智能体上下文长度 ----
+          // ================= ③ 上下文管理 =================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('📏 智能体上下文', context),
-                  const SizedBox(height: 8),
-                  _buildSliderRow(
-                    label: '上下文长度',
-                    value: settings.agentNctx,
-                    min: 1024,
-                    max: 65536,
-                    divisions: 63,
-                    display: '${settings.agentNctx} token',
-                    onChanged: (v) => notifier.setAgentNctx(v),
-                    hint: '智能体模式的 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）',
+                  _buildSectionHeader('🗜️ 上下文管理', context),
+                  _buildToggleTitle(
+                    '超限自动压缩',
+                    settings.agentCompactEnabled,
+                    notifier.setAgentCompactEnabled,
+                    subtitle: '上下文超限时自动裁剪旧轮工具结果（追加摘要 + 影子遮蔽，'
+                        '日志永不删原文）。关闭 = 超限直接报错终止',
+                  ),
+                  const Divider(height: 24),
+                  _buildToggleTitle(
+                    '超长工具输出溢写',
+                    settings.agentSpillEnabled,
+                    notifier.setAgentSpillEnabled,
+                    subtitle: '单条工具结果超过约 4k token 时落盘，模型侧只留摘要与文件定位，'
+                        '可按需读回；省上下文显著',
                   ),
                 ],
               ),
@@ -1588,26 +1685,59 @@ class _AgentTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
-          // ---- 能力开关 ----
+          // ================= ④ 能力与并行 =================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  _buildSectionHeader('🧩 能力与并行', context),
                   _buildToggleTitle(
                     '🛠️ 并行工具调用',
                     settings.agentAllowParallelTools,
                     notifier.setAgentAllowParallelTools,
-                    subtitle: '预留能力：一次调用多个工具（默认关闭）',
+                    subtitle: '模型一次要多个工具时并发执行（$parallelNote）；'
+                        '当前生效并发：$effectiveParallel',
+                  ),
+                  if (settings.agentAllowParallelTools && capsMaxParallel > 2)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: _buildSliderRow(
+                        label: '并发上限',
+                        value: settings.agentMaxParallel
+                            .clamp(2, capsMaxParallel)
+                            .toInt(),
+                        min: 2,
+                        max: capsMaxParallel,
+                        divisions: capsMaxParallel - 1,
+                        display: '${settings.agentMaxParallel.clamp(2, capsMaxParallel)} 路',
+                        onChanged: (v) => notifier.setAgentMaxParallel(v),
+                        hint: '同时执行的工具数上限（按驱动模型能力封顶 $capsMaxParallel）',
+                      ),
+                    )
+                  else if (settings.agentAllowParallelTools)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        '本地路线并发固定 2 路（能力上限）；换 API 驱动可调更高',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      ),
+                    ),
+                  const Divider(height: 24),
+                  _buildToggleTitle(
+                    '🤝 子代理（subagent）',
+                    settings.agentSubagentEnabled,
+                    notifier.setAgentSubagentEnabled,
+                    subtitle: '模型可派生独立子代理执行大任务的子任务（spawn/fork）。'
+                        '固定约束：嵌套 ≤ 2 层、子代理内不可申请沙箱升级、每层独立预算',
                   ),
                   const Divider(height: 24),
                   _buildToggleTitle(
                     '🌐 联网搜索',
                     settings.webSearchEnabled,
                     notifier.setWebSearchEnabled,
-                    subtitle: '允许智能体调用 web_search/get_weather'
-                        '（默认关闭；实例地址在「API 接入」页配置）',
+                    subtitle: '允许调用 web_search/get_weather（实例地址在「API 接入」页配置）',
                   ),
                 ],
               ),
@@ -1616,29 +1746,59 @@ class _AgentTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
-          // ---- 内置工具说明 ----
+          // ================= ⑤ Skills 与指令文件 =================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('🧰 内置工具', context),
-                  const SizedBox(height: 8),
-                  Text(
-                    '当前已内置：\n'
-                    '• get_time —— 返回当前时间/日期\n'
-                    '• calculator —— 安全计算（白名单求值，禁 eval）\n'
-                    '• todo_write / todo_list —— 待办清单\n'
-                    '• note_take / note_list —— 便签\n'
-                    '• unit_converter —— 单位换算\n'
-                    '• memory_set / memory_get —— 长期记忆\n'
-                    '• read_file / write_file / edit_file —— 读写编辑工作区文件\n'
-                    '• list_files / search_text —— 文件查找与内容搜索\n'
-                    '• shell_exec —— 设备 shell 命令执行\n'
-                    '• python_exec —— 嵌入式 Python 脚本执行\n'
-                    '• web_search / get_weather —— 联网搜索与天气（联网开关开启后可用）',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  _buildSectionHeader('📚 Skills 与指令文件', context),
+                  for (final s in loadBuiltinSkills())
+                    _kvLine('内置 · ${s.name}', s.description),
+                  const SizedBox(height: 6),
+                  if (_userSkills == null)
+                    const Text('正在扫描用户技能…',
+                        style: TextStyle(fontSize: 12, color: Colors.grey))
+                  else if (_userSkills!.isEmpty)
+                    _kvLine('用户技能',
+                        '暂无。放置 SKILL.md 到技能目录后点「重新扫描」')
+                  else
+                    for (final s in _userSkills!)
+                      _kvLine('用户 · ${s.name}', s.description),
+                  Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: _rescanSkills,
+                        icon: const Icon(Icons.refresh, size: 16),
+                        label: const Text('重新扫描'),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '目录：ApplicationSupport/skills/<名称>/SKILL.md',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade500),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Divider(height: 20),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: const Icon(Icons.description_outlined),
+                    title: Text(
+                      _agentsMdLen < 0
+                          ? 'AGENTS.md 指令文件（未创建）'
+                          : 'AGENTS.md 指令文件（${_agentsMdLen} 字节）',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    subtitle: const Text('注入系统提示的全局指令（角色、偏好、约束），点按编辑',
+                        style: TextStyle(fontSize: 12)),
+                    trailing: const Icon(Icons.edit_outlined, size: 18),
+                    onTap: _editAgentsMd,
                   ),
                 ],
               ),
@@ -1647,40 +1807,29 @@ class _AgentTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
-          // ---- 工具配置（用户可选开关）----
+          // ================= ⑥ 工具 =================
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildSectionHeader('⚙️ 工具配置', context),
-                  const SizedBox(height: 4),
+                  _buildSectionHeader('🧰 工具', context),
                   Text(
-                    '核心工具（时间/计算/待办/便签/换算/记忆/文件读写）恒可用；'
+                    '核心工具恒可用：时间 / 计算 / 待办 / 便签 / 单位换算 / 文件读写检索。'
                     '以下高级工具按需开启：',
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                   const SizedBox(height: 4),
                   SwitchListTile(
-                    title: const Text('🔍 联网搜索（web_search + get_weather）',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('联网查资料/天气，实例地址在「API 接入」页配置',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.webSearchEnabled,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).setWebSearchEnabled(v),
-                  ),
-                  SwitchListTile(
                     title: const Text('🖥️ Shell 执行（shell_exec）',
                         style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('在设备上执行 shell 命令（app 权限内，能力延伸）',
+                    subtitle: const Text('设备 shell 命令执行（app 权限内），逐次弹窗审批',
                         style: TextStyle(fontSize: 12)),
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                     value: settings.agentShellEnabled,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentShellEnabled(v),
+                    onChanged: notifier.setAgentShellEnabled,
                   ),
                   SwitchListTile(
                     title: const Text('🐍 Python 执行（python_exec）',
@@ -1690,32 +1839,256 @@ class _AgentTab extends ConsumerWidget {
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                     value: settings.agentPythonEnabled,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentPythonEnabled(v),
-                  ),
-                  SwitchListTile(
-                    title: const Text('📂 完整文件访问授权',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('允许智能体经你逐次批准访问公共目录/完整文件系统（All-Files-Access，默认关）',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.agentFullFileAccess,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentFullFileAccess(v),
+                    onChanged: notifier.setAgentPythonEnabled,
                   ),
                   SwitchListTile(
                     title: const Text('🧠 长期记忆（memory_set / memory_get）',
                         style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('跨会话持久化记忆；默认关闭——避免不同模型/情况偶发错误被写入积累，开启后按需配置',
+                    subtitle: const Text('跨会话持久记忆；默认关——避免偶发错误被写入积累',
                         style: TextStyle(fontSize: 12)),
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                     value: settings.agentMemoryEnabled,
-                    onChanged: (v) => ref.read(settingsProvider.notifier).setAgentMemoryEnabled(v),
+                    onChanged: notifier.setAgentMemoryEnabled,
+                  ),
+                  SwitchListTile(
+                    title: const Text('📂 完整文件访问授权',
+                        style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('允许经逐次批准访问公共目录/完整文件系统'
+                        '（All-Files-Access，默认关）',
+                        style: TextStyle(fontSize: 12)),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: settings.agentFullFileAccess,
+                    onChanged: notifier.setAgentFullFileAccess,
                   ),
                 ],
               ),
             ),
           ),
+
+          const SizedBox(height: 16),
+
+          // ================= ⑦ 高级 / 开发者 =================
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSectionHeader('🧪 高级 / 开发者', context),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: const Icon(Icons.folder_outlined),
+                    title: const Text('智能体数据目录', style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('会话事件日志(JSONL) / 溢写文件 / 技能 / AGENTS.md',
+                        style: TextStyle(fontSize: 12)),
+                    trailing: const Icon(Icons.chevron_right, size: 18),
+                    onTap: _showDataDirs,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '扩展接缝（代码级）：agent/pre-step 可否决单步；tools/result 只读审计；'
+                    '流水线 pre/post-execute 可拦截改写。',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+        ],
+      ),
+    );
+  }
+
+  // ---------------- 小部件 ----------------
+
+  /// 能力徽标：绿=支持/开，灰=关或不可用。
+  Widget _capChip(String label, {required bool ok}) {
+    final color = ok ? Colors.teal : Colors.grey;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 11, color: color),
+      ),
+    );
+  }
+
+  /// 浮点滑块行（温度）。
+  Widget _buildDoubleSliderRow({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String display,
+    required ValueChanged<double> onChanged,
+    String? hint,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                  child: Text(label, style: const TextStyle(fontSize: 13))),
+              Text(display,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w500, fontSize: 13)),
+            ],
+          ),
+          Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            label: display,
+            onChanged: onChanged,
+          ),
+          if (hint != null)
+            Text(hint,
+                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        ],
+      ),
+    );
+  }
+
+  Widget _kvLine(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: RichText(
+        text: TextSpan(
+          style: const TextStyle(fontSize: 12, height: 1.4),
+          children: [
+            TextSpan(
+              text: '$k　',
+              style: TextStyle(
+                  fontWeight: FontWeight.w600, color: Colors.grey.shade800),
+            ),
+            TextSpan(
+                text: v,
+                style: TextStyle(color: Colors.grey.shade600)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------------- 对话框 ----------------
+
+  /// AGENTS.md 编辑对话框（全局文件）。
+  Future<void> _editAgentsMd() async {
+    final base = await getApplicationSupportDirectory();
+    final file = File(p.join(base.path, 'AGENTS.md'));
+    final initial = file.existsSync() ? file.readAsStringSync() : '';
+    if (!mounted) return;
+    final controller = TextEditingController(text: initial);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('AGENTS.md 指令文件'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '作为低权威 workspace guidance 注入系统提示。\n${file.path}',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              maxLines: 12,
+              minLines: 6,
+              autofocus: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: '例如：回答一律用中文；先列计划再执行…',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    try {
+      if (controller.text.trim().isEmpty) {
+        if (file.existsSync()) file.deleteSync();
+      } else {
+        file.writeAsStringSync(controller.text);
+      }
+    } catch (_) {/* 只读分区等情况：忽略，状态刷新会如实反映 */}
+    _loadAgentsMdInfo();
+  }
+
+  /// 智能体数据目录对话框（可复制路径）。
+  Future<void> _showDataDirs() async {
+    final base = await getApplicationSupportDirectory();
+    if (!mounted) return;
+    final dirs = <String, String>{
+      '会话事件日志': p.join(base.path, 'sessions'),
+      '工具输出溢写': p.join(base.path, 'agent_spill'),
+      '用户技能': p.join(base.path, 'skills'),
+      'AGENTS.md': _agentsMdPath ?? p.join(base.path, 'AGENTS.md'),
+    };
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('智能体数据目录'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final e in dirs.entries)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(e.key,
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    subtitle: Text(e.value,
+                        style: const TextStyle(fontSize: 11),
+                        overflow: TextOverflow.ellipsis),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.copy, size: 16),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: e.value));
+                        ScaffoldMessenger.of(dialogContext).showSnackBar(
+                          SnackBar(content: Text('已复制 ${e.key} 路径')),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('关闭')),
         ],
       ),
     );
@@ -1912,7 +2285,7 @@ class _buildAboutTab extends StatelessWidget {
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
 // versionName（0.2.1）保持同步。离线沙箱无法下载 package_info_plus 的
 // AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.2.1';
+const _appVersion = '0.2.3';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
@@ -2729,19 +3102,79 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
   final _maxResults = TextEditingController();
   final _timeoutSec = TextEditingController();
 
+  /// 各文本框的 FocusNode：用于「离焦即自动保存」，
+  /// 解决"填完值没按回车就丢了"的问题。
+  final _urlFocus = FocusNode();
+  final _apiKeyFocus = FocusNode();
+  final _enginesFocus = FocusNode();
+  final _languageFocus = FocusNode();
+  final _maxResultsFocus = FocusNode();
+  final _timeoutSecFocus = FocusNode();
+
   bool _revealKey = false;
   bool _testing = false;
   String? _testResult;
   bool _testOk = false;
 
+  /// 提前捕获 notifier（provider 与应用同生命周期）：dispose（离开页面）时
+  /// 还要落盘草稿，而那时不能再触碰 ref。
+  SettingsNotifier? _liveNotifier;
+
+  @override
+  void initState() {
+    super.initState();
+    _liveNotifier = ref.read(settingsProvider.notifier);
+    // 离焦即保存（SDK 3.27 的 TextField 既无 onBlur 也无 onFocusChange，
+    // 用 FocusNode 监听实现；仅"由有焦点→失去焦点"时触发一次）。
+    final n = _liveNotifier!;
+    _saveOnBlur(_urlFocus, () => n.setWebSearchSearXngBaseUrl(_url.text));
+    _saveOnBlur(_apiKeyFocus, () => n.setWebSearchSearXngApiKey(_apiKey.text));
+    _saveOnBlur(_enginesFocus, () => n.setWebSearchSearXngEngines(_engines.text));
+    _saveOnBlur(
+        _languageFocus, () => n.setWebSearchSearXngLanguage(_language.text));
+    _saveOnBlur(_maxResultsFocus, () => _saveMaxResults(_maxResults.text));
+    _saveOnBlur(_timeoutSecFocus, () => _saveTimeoutSec(_timeoutSec.text));
+  }
+
+  /// 焦点离开 [node] 时执行一次 [save]（不依赖 ref，页面销毁路径也安全）。
+  void _saveOnBlur(FocusNode node, void Function() save) {
+    var hadFocus = false;
+    node.addListener(() {
+      if (hadFocus && !node.hasFocus && _liveNotifier != null) save();
+      hadFocus = node.hasFocus;
+    });
+  }
+
   @override
   void dispose() {
+    // 离页兜底保存：离焦保存只覆盖"焦点切换"场景；填完直接返回/切页时
+    // 焦点从未离开过输入框，若不在此落盘，值就丢了（"配置不自动保存"的
+    // 最后一个口子）。setter 幂等，与离焦保存重复触发无副作用。
+    final n = _liveNotifier;
+    if (n != null) {
+      n.setWebSearchSearXngBaseUrl(_url.text);
+      n.setWebSearchSearXngApiKey(_apiKey.text);
+      n.setWebSearchSearXngEngines(_engines.text);
+      n.setWebSearchSearXngLanguage(_language.text);
+      final maxResults = int.tryParse(_maxResults.text.trim());
+      if (maxResults != null) n.setWebSearchSearXngMaxResults(maxResults);
+      final timeoutSec = int.tryParse(_timeoutSec.text.trim());
+      if (timeoutSec != null) {
+        n.setWebSearchSearXngTimeoutMs(timeoutSec * 1000);
+      }
+    }
     _url.dispose();
     _apiKey.dispose();
     _engines.dispose();
     _language.dispose();
     _maxResults.dispose();
     _timeoutSec.dispose();
+    _urlFocus.dispose();
+    _apiKeyFocus.dispose();
+    _enginesFocus.dispose();
+    _languageFocus.dispose();
+    _maxResultsFocus.dispose();
+    _timeoutSecFocus.dispose();
     super.dispose();
   }
 
@@ -2757,7 +3190,10 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
       _apiKey.text.trim().isEmpty ? null : _apiKey.text.trim();
 
   /// 用输入框里的当前内容构造一个 provider 并搜索一次"测试"。
+  /// 测试前先**保存草稿**（点测试通常代表"我配完了"），避免只点了测试、
+  /// 没按回车/没离焦导致值丢失——这正是"配置后不自动保存"的常见场景。
   Future<void> _test() async {
+    await _saveAllDrafts();
     setState(() {
       _testing = true;
       _testResult = null;
@@ -2807,21 +3243,34 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
   /// 数字项保存：notifier 会把值夹紧到合法区间，保存后把**真正生效的值**回写输入框，
   /// 避免"填了 300、实际生效 120"这种自己看不出来的偏差。
   Future<void> _saveMaxResults(String v) async {
-    final current = ref.read(settingsProvider).webSearchSearXngMaxResults;
-    await _notifier.setWebSearchSearXngMaxResults(int.tryParse(v.trim()) ?? current);
+    final n = _liveNotifier;
+    if (n == null) return;
+    await n.setWebSearchSearXngMaxResults(
+        int.tryParse(v.trim()) ?? n.state.webSearchSearXngMaxResults);
     if (!mounted) return;
-    _maxResults.text =
-        '${ref.read(settingsProvider).webSearchSearXngMaxResults}';
+    _maxResults.text = '${n.state.webSearchSearXngMaxResults}';
   }
 
   Future<void> _saveTimeoutSec(String v) async {
-    final currentSec =
-        ref.read(settingsProvider).webSearchSearXngTimeoutMs ~/ 1000;
-    await _notifier.setWebSearchSearXngTimeoutMs(
+    final n = _liveNotifier;
+    if (n == null) return;
+    final currentSec = n.state.webSearchSearXngTimeoutMs ~/ 1000;
+    await n.setWebSearchSearXngTimeoutMs(
         (int.tryParse(v.trim()) ?? currentSec) * 1000);
     if (!mounted) return;
-    _timeoutSec.text =
-        '${(ref.read(settingsProvider).webSearchSearXngTimeoutMs / 1000).round()}';
+    _timeoutSec.text = '${(n.state.webSearchSearXngTimeoutMs / 1000).round()}';
+  }
+
+  /// 顺序保存所有文本框的当前草稿值（测试连接前调用）。
+  /// 逐个 await（setter 内部读 state 再写 controller），避免并发竞态。
+  /// 每个 setter 都会 _persist（原子写 + 热更新 provider），重复调用幂等。
+  Future<void> _saveAllDrafts() async {
+    await _notifier.setWebSearchSearXngBaseUrl(_url.text);
+    await _notifier.setWebSearchSearXngApiKey(_apiKey.text);
+    await _notifier.setWebSearchSearXngEngines(_engines.text);
+    await _notifier.setWebSearchSearXngLanguage(_language.text);
+    await _saveMaxResults(_maxResults.text);
+    await _saveTimeoutSec(_timeoutSec.text);
   }
 
   @override
@@ -2872,11 +3321,12 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             TextField(
               controller: _url,
               keyboardType: TextInputType.url,
+              focusNode: _urlFocus,
               autocorrect: false,
               decoration: const InputDecoration(
                 labelText: 'SearXNG 地址',
                 hintText: 'http://192.168.1.20:8080',
-                helperText: '回车保存；路径会自动补 /search，只填主机和端口即可',
+                helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
                 helperMaxLines: 2,
                 border: OutlineInputBorder(),
                 isDense: true,
@@ -2886,6 +3336,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             const SizedBox(height: 12),
             TextField(
               controller: _apiKey,
+              focusNode: _apiKeyFocus,
               obscureText: !_revealKey,
               autocorrect: false,
               decoration: InputDecoration(
@@ -2911,6 +3362,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             const SizedBox(height: 12),
             TextField(
               controller: _engines,
+              focusNode: _enginesFocus,
               autocorrect: false,
               decoration: const InputDecoration(
                 labelText: '引擎白名单（可选）',
@@ -2926,6 +3378,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             const SizedBox(height: 12),
             TextField(
               controller: _language,
+              focusNode: _languageFocus,
               autocorrect: false,
               decoration: const InputDecoration(
                 labelText: '搜索语言（可选）',
@@ -2941,6 +3394,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                 Expanded(
                   child: TextField(
                     controller: _maxResults,
+                    focusNode: _maxResultsFocus,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                       labelText: '最多条数',
@@ -2954,6 +3408,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                 Expanded(
                   child: TextField(
                     controller: _timeoutSec,
+                    focusNode: _timeoutSecFocus,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                       labelText: '超时（秒）',

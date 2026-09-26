@@ -175,12 +175,19 @@ final class SessionLog {
   /// 结构事件/log-only 事件**不投影**；影子区内的表面事件被跳过（已压缩）。
   List<Map<String, dynamic>> deriveModelMessages() {
     final out = <Map<String, dynamic>>[];
+    // system 事件恒置队首：每轮 agent 构造时才 append system，晚于导入的
+    // 历史事件；若按事件序原样投影，第二轮起 system 落在消息中间，
+    // OpenAI 兼容服务端直接 400 拒收（本地 chatml 也会被中段系统块污染）。
+    final systemMsgs = <Map<String, dynamic>>[];
     for (final e in _events) {
       if (isLogOnly(e.type)) continue;
       if (isShadowed(e.seq)) continue; // 已被压缩遮蔽
       switch (e.type) {
         case kEventSystemMessage:
-          out.add({'role': 'system', 'content': e.data['content'] as String? ?? ''});
+          systemMsgs.add({
+            'role': 'system',
+            'content': e.data['content'] as String? ?? '',
+          });
           break;
         case kEventUserMessage:
           out.add({'role': 'user', 'content': e.data['content'] as String? ?? ''});
@@ -224,7 +231,8 @@ final class SessionLog {
         // 结构事件（turn/step）不投影
       }
     }
-    return out;
+    // system 恒在最前（见上方说明）；其余保持事件序。
+    return <Map<String, dynamic>>[...systemMsgs, ...out];
   }
 
   /// 派生 UI 视图（ChatMessage 投影）。

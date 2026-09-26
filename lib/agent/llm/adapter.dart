@@ -36,6 +36,7 @@ enum LlmFailureCode {
   transport,             // 网络传输 / native channel 错误
   noAdapter,             // 无可用适配器
   emptyResponse,         // 响应为空
+  toolCallTruncated,     // 工具调用块生成到一半被截断（token 预算不足）
   unknown,
 }
 

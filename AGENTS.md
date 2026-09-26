@@ -222,3 +222,31 @@ AOT 串在 libapp.so 里是 **UTF-16LE**，debug kernel_blob 是 UTF-8；确认 
 
 **隔离口诀**：先在本机重编**旧版**——旧版也慢=环境问题（NDK 版本/构建类型/设备不同），旧版快=新树问题。
 慢一倍这种问题，有这四道门就活不过当天。
+
+## 智能体"迭代一两下就停 / 没正确结果"根因与修复（2026-09-27 v0.2.4-agent-stall-fix）
+
+> 用户反馈：智能体模式跑一两轮就执行不下去、输出没完成任务。定位到**三条静默卡死路径**，
+> 共同特征是**不崩不报错、任务半途而废当成功**——和升级回归一样阴险，验收靠"看有没有红字"永远抓不到。
+
+**根因 1：工具调用块被 token 预算截断 → 静默降级成普通回答（主因）**
+- 现象：模型输出 `{"name":"file_write","arguments":{"content":"……`（写到一半被 `maxTokensPerRound=512` 拦断），
+  `prompt_json_protocol` 括号不平衡 → **整段当普通文本返回** → 主循环判定"无工具调用 → 本轮完成"，
+  任务没做还显示得像成功。**这是"迭代一两下就停、没结果"的头号元凶。**
+- 修复（`lib/agent/protocol/prompt_json_protocol.dart` `_parseText` 第 0 步三分类）：
+  先 `_truncatedToolCall` 判定——① 断在字符串/参数内容内部 → 抛 `LlmFailureCode.toolCallTruncated`（不可伪造执行）；
+  ② 仅缺收尾括号且能补全 → 自动补括号照常执行（参数无损）；③ 补完仍非法 = 模型自身语法错误 → 优雅降级为文本，
+  **不误报截断**误导用户去调设置。`failure.dart` 的 `LlmRetry` 把 toolCallTruncated 纳入有限重试预算。
+- **排障铁律**：智能体"没结果"先翻推理日志看是不是截断，别先怀疑模型笨。可调「智能体每轮生成 token」。
+
+**根因 2：失败轮回溯历史旧答案冒充本轮回复（"重复问候 bug"）**
+- 现象：第二轮起 turn 内失败 → UI 又显示第一轮的问候，像"模型只会这一句"。
+- 修复：`ReactLoopAgent._turnAnswer` **只取本轮 append 的 assistant**，失败置空串绝不穿透历史；
+  失败原因走 `_turnError` → chat_provider 明确报 `⚠️ 本轮执行失败：…`，不再拿旧回复顶包。
+
+**根因 3：每轮重建 log 时 system 落在消息中段 → OpenAI 兼容服务端 400 拒收**
+- 现象：新引擎每轮 importFromMessages 先导入历史，构造 agent 时才 append system →
+  system 不在队首 → API 路线 400、本地 chatml 被中段 system 污染 → 表现为"执行不下去"。
+- 修复：`SessionLog.deriveModelMessages` **system 恒置队首**（纯投影重排，不破坏事件序不变量）。
+
+**回归防线（test/agent/ 全绿 241 项，含本次新增）**：截断三分类、toolCallTruncated 有界重试后终态 error、
+lastTurnAnswer 不回溯、system 晚 append 仍恒队首。**下次动智能体循环/协议先跑 `flutter test test/agent`。**
