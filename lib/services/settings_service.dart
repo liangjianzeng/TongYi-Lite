@@ -77,6 +77,11 @@ class InferenceSettings {
   /// 有工具调用时进入工具循环。关闭 = 完全走普通聊天路径。
   final bool agentEnabled;
 
+  /// 是否启用「新智能体模式」（Phase 0 起重写的事件源 ReactLoopAgent）。
+  /// - 开启（默认）：走新事件日志 + 主循环（G12 派生请求、失败瀑布、取消竞跑）。
+  /// - 关闭：回退到旧 `runAgent` 逻辑（保留可回退）。
+  final bool useNewAgentMode;
+
   /// 智能体驱动模型来源：'local'（本地端侧模型）/ 'api'（API 接入模型）。
   /// null = 跟随默认路由（本地优先，API 兜底）。
   final String? agentModelSource;
@@ -104,8 +109,10 @@ class InferenceSettings {
   /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）。
   final bool webSearchEnabled;
 
-  /// 联网搜索 SearXNG provider 的自建实例地址（对齐 DSH 默认值）。
-  /// 默认 `http://127.0.0.1:8080`；私有实例需配 apiKey 并以 Bearer 发送。
+  /// 联网搜索 SearXNG 实例地址（用户在「设置 → API 接入 → 联网搜索」填写）。
+  ///
+  /// 默认留空 = 未配置。不要预置任何个人实例地址；空地址时 provider 会返回
+  /// "请先在设置里填写地址"的诊断，而不是拿 127.0.0.1 去连手机自己。
   final String webSearchSearXngBaseUrl;
 
   /// SearXNG 实例的 API key（私有实例才需要；空 = 无需密钥）。
@@ -114,7 +121,11 @@ class InferenceSettings {
   /// 单次 SearXNG 搜索最多返回来源条数（对齐 DSH 默认 8）。
   final int webSearchSearXngMaxResults;
 
-  /// 单次 SearXNG 搜索超时毫秒（默认 15s，与端侧工具超时对齐）。
+  /// 单次 SearXNG 搜索超时毫秒。
+  ///
+  /// 默认 30s：SearXNG 聚合多引擎本身就慢（一台自建实例走全引擎实测 21s，多数
+  /// 时间耗在其访问不到的引擎上），旧的 15s 默认值会让这类实例**每次都必然超时**；
+  /// 用 [webSearchSearXngEngines] 只留可达引擎后可降到秒级。
   final int webSearchSearXngTimeoutMs;
 
   /// SearXNG 搜索语言（如 "zh-CN"）；空 = 不指定。
@@ -122,6 +133,13 @@ class InferenceSettings {
 
   /// SearXNG 搜索分类（如 "general","news"）；空 = 不指定。
   final String? webSearchSearXngCategories;
+
+  /// SearXNG 引擎白名单（逗号分隔，如 `bing,sogou`）。
+  ///
+  /// 默认留空 = 由实例决定用哪些引擎。当实例上存在访问不到的引擎时，把它从白名单
+  /// 里去掉可把搜索从二十秒级降到秒级。若白名单里有该实例不认识的引擎，SearXNG 会
+  /// 报 400，provider 会自动去掉该参数重试一次（见 SearXNGSearchProvider.search）。
+  final String? webSearchSearXngEngines;
 
   /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限；
   /// 用户可在设置中关闭）。
@@ -159,6 +177,19 @@ class InferenceSettings {
   /// 覆盖全局默认值（模型目录 agentDefaults 合并到用户设置）。
   final Map<String, Map<String, dynamic>> agentByModel;
 
+  // ---- 联网搜索默认值（保持中性：不预置任何个人实例）----
+  // 地址默认留空 = 未配置。真机上没有可用实例时，provider 会给出"请先在
+  // 设置 → 联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己。
+  static const String kDefaultSearXngBaseUrl = '';
+
+  // 引擎白名单默认留空 = 由实例决定。实例上有不可达引擎（如墙内实例挂着
+  // google cse / duckduckgo）时，用户自行填写可达引擎可显著提速
+  // （实测某实例：全引擎 21s → 指定 2 个可达引擎 2.5s）。
+  static const String kDefaultSearXngEngines = '';
+
+  // 超时 30s：实例聚合多引擎本身就要十几到二十几秒，15s 会稳定误杀。
+  static const int kDefaultSearXngTimeoutMs = 30000;
+
   const InferenceSettings({
     // 默认开启 GPU：与 gpuLayers=100 全量卸载一致；在 settingsProvider
     // 异步 _load() 完成前，UI/加载逻辑若读取默认值，仍应走 GPU 路径，
@@ -177,6 +208,7 @@ class InferenceSettings {
     this.activeApiModelId,
     // ---- 智能体（Agent）----
     this.agentEnabled = true,
+    this.useNewAgentMode = true,
     this.agentModelSource,
     this.agentModelId,
     this.agentNctx = 8192,
@@ -185,12 +217,13 @@ class InferenceSettings {
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
     this.webSearchEnabled = false,
-    this.webSearchSearXngBaseUrl = 'http://127.0.0.1:8080',
+    this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
     this.webSearchSearXngApiKey,
     this.webSearchSearXngMaxResults = 8,
-    this.webSearchSearXngTimeoutMs = 15000,
+    this.webSearchSearXngTimeoutMs = kDefaultSearXngTimeoutMs,
     this.webSearchSearXngLanguage,
     this.webSearchSearXngCategories,
+    this.webSearchSearXngEngines = kDefaultSearXngEngines,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -252,6 +285,7 @@ class InferenceSettings {
       bool clearActiveApiModel = false,
       // ---- 智能体（Agent）----
       bool? agentEnabled,
+      bool? useNewAgentMode,
       String? agentModelSource,
       String? agentModelId,
       // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」。
@@ -268,6 +302,7 @@ class InferenceSettings {
       int? webSearchSearXngTimeoutMs,
       String? webSearchSearXngLanguage,
       String? webSearchSearXngCategories,
+      String? webSearchSearXngEngines,
       bool? agentShellEnabled,
       bool? agentPythonEnabled,
       bool? agentFullFileAccess,
@@ -297,6 +332,7 @@ class InferenceSettings {
           ? null
           : activeApiModelId ?? this.activeApiModelId,
       agentEnabled: agentEnabled ?? this.agentEnabled,
+      useNewAgentMode: useNewAgentMode ?? this.useNewAgentMode,
       agentModelSource: clearAgentModel
           ? null
           : agentModelSource ?? this.agentModelSource,
@@ -322,6 +358,8 @@ class InferenceSettings {
           webSearchSearXngLanguage ?? this.webSearchSearXngLanguage,
       webSearchSearXngCategories:
           webSearchSearXngCategories ?? this.webSearchSearXngCategories,
+      webSearchSearXngEngines:
+          webSearchSearXngEngines ?? this.webSearchSearXngEngines,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess:
@@ -351,6 +389,7 @@ class InferenceSettings {
         'activeApiModelId': activeApiModelId,
         // ---- 智能体（Agent）----
         'agentEnabled': agentEnabled,
+        'useNewAgentMode': useNewAgentMode,
         'agentModelSource': agentModelSource,
         'agentModelId': agentModelId,
         'agentNctx': agentNctx,
@@ -365,6 +404,7 @@ class InferenceSettings {
         'webSearchSearXngTimeoutMs': webSearchSearXngTimeoutMs,
         'webSearchSearXngLanguage': webSearchSearXngLanguage,
         'webSearchSearXngCategories': webSearchSearXngCategories,
+        'webSearchSearXngEngines': webSearchSearXngEngines,
         'agentShellEnabled': agentShellEnabled,
         // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson，
         // 保存后读回会静默丢配置（默认值兜底）。
@@ -402,6 +442,8 @@ class InferenceSettings {
       activeApiModelId: json['activeApiModelId'] as String?,
       // 智能体（Agent）：旧配置缺字段时用默认值，向后兼容。
       agentEnabled: json['agentEnabled'] as bool? ?? true,
+      // 旧配置无此字段时默认开启新智能体模式（向后兼容）。
+      useNewAgentMode: json['useNewAgentMode'] as bool? ?? true,
       agentModelSource: json['agentModelSource'] as String?,
       agentModelId: json['agentModelId'] as String?,
       agentNctx: (json['agentNctx'] as num?)?.toInt() ?? 8192,
@@ -414,17 +456,20 @@ class InferenceSettings {
           json['agentAllowParallelTools'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）。
+      // 空地址 = 未配置，此时联网搜索工具会给出"请先在设置里填地址"的诊断。
       webSearchSearXngBaseUrl:
-          json['webSearchSearXngBaseUrl'] as String? ?? 'http://127.0.0.1:8080',
+          json['webSearchSearXngBaseUrl'] as String? ?? kDefaultSearXngBaseUrl,
       webSearchSearXngApiKey: json['webSearchSearXngApiKey'] as String?,
       webSearchSearXngMaxResults:
           (json['webSearchSearXngMaxResults'] as num?)?.toInt() ?? 8,
       webSearchSearXngTimeoutMs:
-          (json['webSearchSearXngTimeoutMs'] as num?)?.toInt() ?? 15000,
-      webSearchSearXngLanguage:
-          json['webSearchSearXngLanguage'] as String?,
+          (json['webSearchSearXngTimeoutMs'] as num?)?.toInt() ??
+              kDefaultSearXngTimeoutMs,
+      webSearchSearXngLanguage: json['webSearchSearXngLanguage'] as String?,
       webSearchSearXngCategories:
           json['webSearchSearXngCategories'] as String?,
+      webSearchSearXngEngines:
+          json['webSearchSearXngEngines'] as String? ?? kDefaultSearXngEngines,
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,

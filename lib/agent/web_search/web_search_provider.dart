@@ -3,10 +3,17 @@
 /// 本文件只定义接缝与默认实现（SearXNG）：web_search 工具通过 [WebSearchSeam]
 /// 调用、不感知具体搜索源——替换搜索实现只需 [WebSearchSeam.registerProvider]。
 ///
-/// 搜索实现（SearXNG）调用自建 SearXNG 实例的 JSON API，把返回的 `results[]`
-/// 映射为标准化 [WebSearchSource]；无需 API key（私有实例才需要，作为 Bearer
-/// token 发送）。
+/// 2026-09 在一台自建 SearXNG 实例上实测修正：
+/// - 请求必须自带 `/search` 路径，不能依赖实例把空路径 308 过去；
+/// - 必须按字符串收响应再自行 jsonDecode：Dio 只在 Content-Type 是 JSON 时才解码，
+///   实例未开 `format=json` 时旧代码会抛类型错、被误报成"不可达"；
+/// - 引擎列表决定延迟：实例上不可达的引擎（google cse / duckduckgo / brave /
+///   startpage / wikipedia）各自等到超时，实测默认全引擎 21s、只指定可达引擎 2.5s，
+///   所以引擎白名单做成了设置项。
 library;
+
+import 'dart:convert';
+import 'dart:io' show SocketException;
 
 import 'package:dio/dio.dart';
 
@@ -26,7 +33,10 @@ abstract class WebSearchProvider {
   String? available();
 
   /// 执行一次搜索。失败抛 [WebSearchProviderError]。
-  Future<WebSearchResult> search(String query, {Duration timeout});
+  ///
+  /// [timeout] 为 null 时使用 provider 自身配置的超时——调用方**不要**传自己的
+  /// 默认值进来，否则设置项里的超时会静默失效（本文件曾踩此坑）。
+  Future<WebSearchResult> search(String query, {Duration? timeout});
 
   /// 释放资源（如 HttpClient / Dio）。
   void dispose();
@@ -35,6 +45,8 @@ abstract class WebSearchProvider {
 /// 标准化搜索结果（对齐 DSH WebSearchResult）。
 class WebSearchResult {
   final List<WebSearchSource> sources;
+
+  /// 是否因超出 maxResults 丢弃过结果（此前该字段恒为 false）。
   final bool truncated;
   const WebSearchResult({required this.sources, this.truncated = false});
 }
@@ -45,17 +57,30 @@ class WebSearchSource {
   final String? title;
   final String? snippet;
   final String? publishedAt;
+
+  /// 来源引擎（SearXNG `engine`；定位"哪个引擎给的结果"很有用）。
+  final String? engine;
+
+  /// 相关性得分（SearXNG `score`，越大越相关；缺失为 null）。
+  final double? score;
   const WebSearchSource({
     required this.url,
     this.title,
     this.snippet,
     this.publishedAt,
+    this.engine,
+    this.score,
   });
 }
 
+/// 内部错误码：实例拒绝了 `engines=`（400/422）。仅用于触发"去引擎重试"，
+/// 不会外泄给模型（对外仍是 WEB_PROVIDER_ERROR / WEB_ABORTED 两类）。
+const String kWebEngineRejected = 'WEB_ENGINE_REJECTED';
+
 /// 结构化搜索错误（对齐 DSH WEB_PROVIDER_ERROR / WEB_ABORTED）。
 class WebSearchProviderError {
-  /// 'WEB_PROVIDER_ERROR'（provider 不可用）| 'WEB_ABORTED'（请求被取消/超时）。
+  /// 'WEB_PROVIDER_ERROR'（不可用/出错）| 'WEB_ABORTED'（超时/取消）
+  /// | 'WEB_ENGINE_REJECTED'（实例不接受 engines 参数，触发去引擎重试）。
   final String kind;
   final String message;
   const WebSearchProviderError(this.kind, this.message);
@@ -63,16 +88,23 @@ class WebSearchProviderError {
 
 /// SearXNG 搜索 provider（对齐 DSH `@deepseek-ai/dsh-web-search-searxng`）。
 ///
-/// 调用自建 SearXNG 实例的 JSON API：`GET {baseURL}/search?q=...&format=json`，
-/// 把返回的 `results[]` 映射为标准化 [WebSearchSource]（url / title /
-/// content←snippet / publishedDate）。无需 API key（私有实例才需要，作为
-/// Bearer token 发送）。最大返回条数、超时、语言、分类均可配置。
+/// 调用自建 SearXNG 实例的 JSON API：`GET {baseURL}/search?q=...&format=json`。
 class SearXNGSearchProvider implements WebSearchProvider {
-  static const String kDefaultBaseUrl = 'http://127.0.0.1:8080';
+  /// 默认不预置任何实例：搜索服务由用户在「设置 → API 接入 → 联网搜索」填写。
+  /// 留空时 [available] 会给出"未配置"的明确诊断（旧默认 127.0.0.1 在手机上
+  /// 指向手机自己，只会得到一个误导性的"不可达"）。
+  static const String kDefaultBaseUrl = '';
+
+  /// 引擎白名单默认为空 = 由实例决定。实例上存在不可达引擎时，用户自行缩小
+  /// 白名单可把搜索从二十秒级降到秒级（实测某实例：21s → 2.5s）。
+  static const String kDefaultEngines = '';
   static const int kDefaultMaxResults = 8;
-  // 与端侧 agent 循环默认工具超时（15s）对齐：provider 自身超时不超过约束，
-  // 避免与循环的通用超时竞争；仍作为独立于循环的安全兜底。
-  static const Duration kDefaultTimeout = Duration(seconds: 15);
+
+  /// 默认预算 30s：SearXNG 聚合多引擎本身就要十几到二十几秒，15s 会稳定误杀。
+  static const Duration kDefaultTimeout = Duration(seconds: 30);
+
+  /// 连接超时：不设时 Dio 不限连接阶段，主机不可达会挂到 OS TCP 超时（几十秒）。
+  static const Duration kConnectTimeout = Duration(seconds: 6);
 
   @override
   final String id = 'searxng';
@@ -86,7 +118,13 @@ class SearXNGSearchProvider implements WebSearchProvider {
   final String? language;
   final String? categories;
 
-  final Dio _dio = Dio();
+  /// 逗号分隔引擎白名单（SearXNG `engines=` 参数）。
+  final String? engines;
+
+  /// 请求 User-Agent（部分实例/反代会拦非常规 UA）。
+  final String userAgent;
+
+  final Dio _dio;
 
   SearXNGSearchProvider({
     this.baseURL = kDefaultBaseUrl,
@@ -95,7 +133,16 @@ class SearXNGSearchProvider implements WebSearchProvider {
     this.timeout = kDefaultTimeout,
     this.language,
     this.categories,
-  });
+    this.engines = kDefaultEngines,
+    this.userAgent = 'Mozilla/5.0 (Android) TongYiLite/1.0',
+    Dio? dio,
+  }) : _dio = dio ??
+            Dio(BaseOptions(
+              // 按字符串收响应、自行 jsonDecode（见文件头实测说明）。
+              responseType: ResponseType.plain,
+              connectTimeout: kConnectTimeout,
+              sendTimeout: const Duration(seconds: 10),
+            ));
 
   /// 从持久化设置构建（对齐 DSH web-search-searxng settings section）。
   factory SearXNGSearchProvider.fromSettings(InferenceSettings settings) {
@@ -106,74 +153,261 @@ class SearXNGSearchProvider implements WebSearchProvider {
       timeout: Duration(milliseconds: settings.webSearchSearXngTimeoutMs),
       language: settings.webSearchSearXngLanguage,
       categories: settings.webSearchSearXngCategories,
+      engines: settings.webSearchSearXngEngines,
     );
   }
 
-  /// 廉价可用性探测：仅校验 baseURL 可解析且有 host，不联网。
-  /// 对齐 DSH available() 只做廉价 URL 校验、不发起请求。
+  /// 配置签名：内容相同即同一份配置，供 [WebSearchSeam] 判断是否需要重建。
+  /// 没有它，每轮对话都会 new provider 并 dispose 旧 Dio，连接池全废。
+  String get configSignature => _signature(
+        baseURL,
+        apiKey,
+        maxResults,
+        timeout,
+        language,
+        categories,
+        engines,
+      );
+
+  /// 不构造实例也能算签名（避免"比较前先 new 一个带 HttpClient 的对象"）。
+  static String signatureFromSettings(InferenceSettings s) => _signature(
+        s.webSearchSearXngBaseUrl,
+        s.webSearchSearXngApiKey,
+        s.webSearchSearXngMaxResults,
+        Duration(milliseconds: s.webSearchSearXngTimeoutMs),
+        s.webSearchSearXngLanguage,
+        s.webSearchSearXngCategories,
+        s.webSearchSearXngEngines,
+      );
+
+  static String _signature(
+    String baseURL,
+    String? apiKey,
+    int maxResults,
+    Duration timeout,
+    String? language,
+    String? categories,
+    String? engines,
+  ) =>
+      [
+        baseURL.trim(),
+        apiKey ?? '',
+        maxResults,
+        timeout.inMilliseconds,
+        language ?? '',
+        categories ?? '',
+        engines ?? '',
+      ].join('\u0000');
+
+  /// 廉价可用性探测：校验 baseURL 可解析、协议合法、有 host；不联网。
   @override
   String? available() {
+    if (baseURL.trim().isEmpty) {
+      return '未配置 SearXNG 地址：请在「设置 → API 接入 → 联网搜索」填写实例地址'
+          '（如 http://192.168.1.20:8080），并确认手机能访问该地址';
+    }
     try {
       final uri = Uri.parse(baseURL);
-      if (uri.scheme.isEmpty || uri.host.isEmpty) {
-        return 'baseURL 未配置或格式错误：$baseURL';
+      if (uri.scheme.isEmpty) {
+        return 'baseURL 缺少协议（应为 http:// 或 https://）：$baseURL';
       }
+      if (uri.scheme != 'http' && uri.scheme != 'https') {
+        return 'baseURL 协议不支持 "${uri.scheme}"（仅 http/https）：$baseURL';
+      }
+      if (uri.host.isEmpty) return 'baseURL 未配置或格式错误：$baseURL';
       return null;
     } catch (_) {
       return 'baseURL 格式错误：$baseURL';
     }
   }
 
+  /// 构造搜索请求 URI：**显式带 `/search` 路径**。
+  ///
+  /// 容忍 `http://h:8080`、`http://h:8080/`、`http://h:8080/search` 三种写法。
+  Uri buildRequestUri(String query, {String? enginesOverride}) {
+    var base = baseURL.trim();
+    while (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    if (!base.toLowerCase().endsWith('/search')) base = '$base/search';
+    final uri = Uri.parse(base);
+    final params = <String, String>{
+      ...uri.queryParameters,
+      'q': query,
+      'format': 'json',
+    };
+    if (language != null && language!.isNotEmpty) params['language'] = language!;
+    if (categories != null && categories!.isNotEmpty) {
+      params['categories'] = categories!;
+    }
+    final eng = enginesOverride ?? engines;
+    if (eng != null && eng.trim().isNotEmpty) params['engines'] = eng.trim();
+    return uri.replace(queryParameters: params, fragment: '');
+  }
+
   @override
   Future<WebSearchResult> search(String query, {Duration? timeout}) async {
+    final availableErr = available();
+    if (availableErr != null) {
+      throw WebSearchProviderError('WEB_PROVIDER_ERROR', availableErr);
+    }
     final t = timeout ?? this.timeout;
-    final base = Uri.parse(baseURL);
-    final queryParts = <String>[
-      'q=${Uri.encodeQueryComponent(query)}',
-      'format=json',
-    ];
-    if (language != null && language!.isNotEmpty) {
-      queryParts.add('language=${Uri.encodeQueryComponent(language!)}');
-    }
-    if (categories != null && categories!.isNotEmpty) {
-      queryParts.add('categories=${Uri.encodeQueryComponent(categories!)}');
-    }
-    final uri = base.replace(query: queryParts.join('&'), fragment: '');
+
+    // 第一击带引擎白名单（实测 21s → 2.5s）。若实例上没有这些引擎会回
+    // 400/422，此时去掉 engines 再试一次——换实例不至于直接不可用。
+    final useEngines = engines != null && engines!.trim().isNotEmpty;
     try {
-      final resp = await _dio.get<Map<String, dynamic>>(
-        uri.toString(),
-        options: Options(
-          receiveTimeout: t,
-          headers: _headers(),
-        ),
-      );
-      if (resp.statusCode != null && resp.statusCode! >= 400) {
-        throw WebSearchProviderError('WEB_PROVIDER_ERROR',
-            'SearXNG 返回 HTTP ${resp.statusCode}');
+      return await _request(query, t, buildRequestUri(query));
+    } on WebSearchProviderError catch (e) {
+      if (useEngines && e.kind == kWebEngineRejected) {
+        return _request(query, t, buildRequestUri(query, enginesOverride: ''));
       }
-      final data = resp.data ?? const <String, dynamic>{};
-      return WebSearchResult(sources: _mapResults(data));
-    } on WebSearchProviderError {
       rethrow;
-    } on DioException catch (e) {
-      if (e.type == DioExceptionType.connectionTimeout ||
-          e.type == DioExceptionType.receiveTimeout ||
-          e.type == DioExceptionType.sendTimeout) {
-        throw const WebSearchProviderError('WEB_ABORTED', 'SearXNG 搜索超时');
-      }
-      throw WebSearchProviderError('WEB_PROVIDER_ERROR',
-          'SearXNG 不可达：${e.message ?? e.type}');
     }
   }
 
+  Future<WebSearchResult> _request(String query, Duration t, Uri uri) async {
+    final sw = Stopwatch()..start();
+    try {
+      final resp = await _dio.get<String>(
+        uri.toString(),
+        options: Options(
+          receiveTimeout: t,
+          responseType: ResponseType.plain,
+          headers: _headers(),
+          // 状态码自己判定，才能给出可诊断的错（Dio 默认只放过 2xx）。
+          validateStatus: (_) => true,
+        ),
+      );
+      final status = resp.statusCode ?? 0;
+      if (status >= 400) {
+        throw WebSearchProviderError(
+          // 400/422 最常见的原因是 engines= 里有该实例没有的引擎。
+          (status == 400 || status == 422)
+              ? kWebEngineRejected
+              : 'WEB_PROVIDER_ERROR',
+          'SearXNG 返回 HTTP $status${_statusHint(status)}'
+          '（${uri.host}:${uri.port}，用时 ${sw.elapsedMilliseconds}ms）',
+        );
+      }
+      final body = resp.data ?? '';
+      // Content-Type 明确不是 JSON → 实例没开 format=json。
+      final ct =
+          (resp.headers.value(Headers.contentTypeHeader) ?? '').split(';').first.trim();
+      if (ct.isNotEmpty && !_isJsonMime(ct)) {
+        throw WebSearchProviderError(
+          'WEB_PROVIDER_ERROR',
+          'SearXNG 返回 $ct 而非 JSON：需在实例 settings.yml 的 search.formats '
+          '里加上 json（用时 ${sw.elapsedMilliseconds}ms）',
+        );
+      }
+      final Map<String, dynamic> data;
+      try {
+        final decoded = body.isEmpty ? <String, dynamic>{} : jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          throw const FormatException('顶层不是 JSON 对象');
+        }
+        data = decoded;
+      } on FormatException catch (e) {
+        throw WebSearchProviderError('WEB_PROVIDER_ERROR',
+            'SearXNG 响应不是合法 JSON：${e.message}（用时 ${sw.elapsedMilliseconds}ms）');
+      }
+      final rawCount = (data['results'] as List?)?.length ?? 0;
+      final mapped = _mapResults(data);
+      return WebSearchResult(
+        sources: mapped,
+        truncated: rawCount > mapped.length,
+      );
+    } on WebSearchProviderError {
+      rethrow;
+    } on DioException catch (e) {
+      throw _describeDioError(e, uri, sw);
+    }
+  }
+
+  /// 把 Dio 的异常翻成人能看懂、且方向正确的诊断（旧实现一律报"不可达"）。
+  WebSearchProviderError _describeDioError(
+    DioException e,
+    Uri uri,
+    Stopwatch sw,
+  ) {
+    final ms = sw.elapsedMilliseconds;
+    final target = '${uri.host}:${uri.port}';
+    switch (e.type) {
+      case DioExceptionType.connectionTimeout:
+        return WebSearchProviderError('WEB_ABORTED',
+            '连接 SearXNG 超时（$target，${ms}ms）：检查实例是否开机、Tailscale 是否在线');
+      case DioExceptionType.receiveTimeout:
+        return WebSearchProviderError('WEB_ABORTED',
+            'SearXNG 响应超时（$target，已等 ${ms}ms）：引擎过多/过慢，'
+            '考虑在「联网搜索」里指定引擎（如实例只留本域可达的引擎）');
+      case DioExceptionType.sendTimeout:
+        return WebSearchProviderError('WEB_ABORTED', 'SearXNG 请求发送超时（$target）');
+      case DioExceptionType.badResponse:
+        final code = e.response?.statusCode;
+        return WebSearchProviderError(
+          'WEB_PROVIDER_ERROR',
+          'SearXNG 返回 HTTP $code${_statusHint(code)}（$target，${ms}ms）',
+        );
+      case DioExceptionType.cancel:
+        return const WebSearchProviderError('WEB_ABORTED', '搜索已取消');
+      case DioExceptionType.connectionError:
+        return WebSearchProviderError('WEB_PROVIDER_ERROR',
+            '连不上 SearXNG（$target，${ms}ms）：${_underlying(e) ?? '网络不通'}；'
+            '检查地址/端口是否正确、实例是否在线、手机与实例是否在同一网络或 Tailscale');
+      default:
+        return WebSearchProviderError('WEB_PROVIDER_ERROR',
+            'SearXNG 请求失败（$target，${ms}ms）：${e.message ?? e.type}'
+            '${_underlying(e) == null ? '' : ' / ${_underlying(e)}'}');
+    }
+  }
+
+  /// Dio 常把真正的 socket 错误塞进 [DioException.error]（type 只报 unknown），
+  /// 不挖出来就只剩一句没用的"请求失败"。
+  String? _underlying(DioException e) {
+    final err = e.error;
+    if (err is SocketException) {
+      final os = err.osError;
+      return os == null ? err.message : '${err.message}(${os.errorCode} ${os.message})';
+    }
+    return err?.toString();
+  }
+
+  String _statusHint(int? status) {
+    switch (status) {
+      case 401:
+        return '（未授权：需要在设置里填 API key）';
+      case 403:
+        return '（被拒绝：实例可能禁止 JSON API 或对来源限流）';
+      case 404:
+        return '（找不到 /search：确认 baseURL 是否多写了路径）';
+      case 429:
+        return '（限流：稍后再试或减少搜索频次）';
+      case 400:
+      case 422:
+        return '（请求不被接受：常见于 engines 指定了实例上没有的引擎）';
+      default:
+        return status != null && status >= 500 ? '（实例内部错误）' : '';
+    }
+  }
+
+  bool _isJsonMime(String ct) {
+    final lower = ct.toLowerCase();
+    return lower == 'application/json' || lower.endsWith('+json');
+  }
+
   Map<String, String> _headers() {
-    final headers = <String, String>{'User-Agent': 'deepseek-harness/0.0.1'};
+    final headers = <String, String>{
+      'User-Agent': userAgent,
+      'Accept': 'application/json',
+    };
     if (apiKey != null && apiKey!.isNotEmpty) {
       headers['Authorization'] = 'Bearer $apiKey';
     }
     return headers;
   }
 
+  /// 映射 SearXNG `results[]`：URL 规范化去重 → 按 score 降序 → 截 maxResults。
   List<WebSearchSource> _mapResults(Map<String, dynamic> data) {
     final seen = <String>{};
     final sources = <WebSearchSource>[];
@@ -182,29 +416,73 @@ class SearXNGSearchProvider implements WebSearchProvider {
       if (item is! Map) continue;
       final url = item['url'];
       if (url is! String || url.isEmpty) continue;
-      if (seen.contains(url)) continue;
-      seen.add(url);
+      // 规范化后再去重：utm 参数 / fragment / 尾斜杠 / host 大小写不同即同一篇。
+      final key = normalizeSourceUrl(url);
+      if (!seen.add(key)) continue;
       sources.add(WebSearchSource(
         url: url,
         title: item['title'] as String?,
         snippet: item['content'] as String?,
         publishedAt: item['publishedDate'] as String?,
+        engine: item['engine'] as String?,
+        score: (item['score'] as num?)?.toDouble(),
       ));
     }
+    // 有 score 的按相关性优先（缺失的保持原有顺序）。
+    sources.sort((a, b) {
+      final sa = a.score, sb = b.score;
+      if (sa == null && sb == null) return 0;
+      if (sa == null) return 1;
+      if (sb == null) return -1;
+      return sb.compareTo(sa);
+    });
     return sources.take(maxResults).toList();
   }
 
   @override
   void dispose() {
-    _dio.close();
+    _dio.close(force: true);
   }
+}
+
+/// 去掉跟踪参数/fragment/尾斜杠并小写 host，用于跨引擎的同源去重。
+String normalizeSourceUrl(String raw) {
+  final uri = Uri.tryParse(raw.trim());
+  if (uri == null || uri.host.isEmpty) return raw.trim();
+  final params = uri.queryParameters.entries
+      .where((e) => !e.key.toLowerCase().startsWith('utm_'))
+      .where((e) => e.key.toLowerCase() != 'from')
+      .toList()
+    ..sort((a, b) => a.key.compareTo(b.key));
+  var path = uri.path;
+  if (path.length > 1 && path.endsWith('/')) {
+    path = path.substring(0, path.length - 1);
+  }
+  final query = params.map((e) => '${e.key}=${e.value}').join('&');
+  final normalized = Uri(
+    scheme: uri.scheme.toLowerCase(),
+    host: uri.host.toLowerCase(),
+    port: uri.hasPort ? uri.port : null,
+    path: path.isEmpty ? '/' : path,
+    query: query.isEmpty ? null : query,
+  );
+  return normalized.toString();
 }
 
 /// 用持久化设置（重新）构建并注册当前 SearXNG provider 到 [WebSearchSeam]。
 ///
 /// 在设置变更时调用即可热切换搜索源，无需重启应用。
+///
+/// **配置未变时直接复用现有实例**：每轮对话都 new 一个 provider 会 dispose 掉旧
+/// Dio（连接池作废 → 每次搜索重新 DNS+TCP+TLS，移动网络额外几百 ms 与射频唤醒），
+/// 还会打断上一轮在飞的请求。这里先比签名，不匹配才构造新实例。
 void applySearXNGProviderFromSettings(InferenceSettings settings) {
-  WebSearchSeam.instance.registerProvider(
-    SearXNGSearchProvider.fromSettings(settings),
-  );
+  final seam = WebSearchSeam.instance;
+  final current = seam.provider;
+  if (current is SearXNGSearchProvider &&
+      current.configSignature ==
+          SearXNGSearchProvider.signatureFromSettings(settings)) {
+    return; // 配置没变：连 provider 带连接池一起留着。
+  }
+  seam.registerProvider(SearXNGSearchProvider.fromSettings(settings));
 }
