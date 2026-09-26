@@ -102,6 +102,15 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
 
     # Point FindVulkan (glslc) and find_package(SPIRV-Headers) at the LunarG SDK.
     set(ENV{VULKAN_SDK} "${_vk_sdk}")
+    # RESEARCH(vendor fix): use the newer glslc (shaderc v2026.3) from the local
+    # study SDK for SPIR-V generation -- numerically verified on Adreno 825
+    # (unpack8/Int8 + subgroup + fusion fixes were validated with this exact
+    # compiler). Headers/libs still come from the full LunarG SDK above.
+    set(_vk_glslc_new "${PROJECT_ROOT_DIR}/_study/vkcli/sdk/vksdk-new/Bin/glslc.exe")
+    if(EXISTS "${_vk_glslc_new}")
+        set(Vulkan_GLSLC_EXECUTABLE "${_vk_glslc_new}" CACHE FILEPATH "glslc used for ggml-vulkan shader generation" FORCE)
+        message(STATUS "glslc override -> ${_vk_glslc_new}")
+    endif()
     # Explicitly hint find_package(SPIRV-Headers) at the SDK config dir so the
     # Vulkan backend configures reliably regardless of CMAKE_PREFIX_PATH state.
     set(SPIRV-Headers_DIR "${_vk_sdk}/Lib/cmake/SPIRV-Headers" CACHE PATH "SPIRV-Headers cmake config" FORCE)

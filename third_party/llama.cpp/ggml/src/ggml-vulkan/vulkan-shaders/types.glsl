@@ -12,6 +12,31 @@
 #extension GL_EXT_float_e4m3 : require
 #endif
 
+// RESEARCH(vendor fix): replace the extension unpack8() with a pure 32-bit
+// implementation. Adreno (0800.71, driver compiler E031) miscompiles the
+// SPIR-V Int8 sequences emitted for unpack8(), producing garbage dequantized
+// values (q8_0/q6_K/q4_K etc.). Bit pattern is identical to the extension
+// version for signed and unsigned inputs alike; downstream 8-bit variables
+// keep their types.
+u8vec4 vk_unpack8u(uint32_t x) {
+    return u8vec4(
+        uint8_t( x        & 0xFFu),
+        uint8_t((x >>  8) & 0xFFu),
+        uint8_t((x >> 16) & 0xFFu),
+        uint8_t((x >> 24) & 0xFFu));
+}
+#define unpack8(x) vk_unpack8u(x)
+
+// signed variant for call sites that assign to i8vec* (sign-extension per byte)
+i8vec4 vk_unpack8i(int32_t x) {
+    const uint32_t ux = uint32_t(x);
+    return i8vec4(
+        int(( ux        & 0xFFu) ^ 0x80u) - 128,
+        int(((ux >>  8) & 0xFFu) ^ 0x80u) - 128,
+        int(((ux >> 16) & 0xFFu) ^ 0x80u) - 128,
+        int(((ux >> 24) & 0xFFu) ^ 0x80u) - 128);
+}
+
 #if defined(DATA_A_F32)
 #define QUANT_K 1
 #define QUANT_R 1
@@ -211,6 +236,51 @@ struct block_q1_0
 #define A_TYPE block_q1_0
 #endif
 
+// PTQ1_0: ternary at group 128, base-3 packed five trits per byte.
+// Field order mirrors block_ptq1_0 in ggml-common.h EXACTLY -- qs, then qh, then d.
+// Unlike q1_0 the scale is LAST, and getting that wrong silently misindexes every
+// block rather than failing loudly.
+#define QUANT_K_PTQ1_0 128
+#define QUANT_R_PTQ1_0 1
+
+struct block_ptq1_0
+{
+    uint8_t qs[24];
+    uint8_t qh[2];
+    float16_t d;
+};
+
+#if defined(DATA_A_PTQ1_0)
+#define QUANT_K QUANT_K_PTQ1_0
+#define QUANT_R QUANT_R_PTQ1_0
+#define QUANT_AUXF 1
+#define A_TYPE block_ptq1_0
+#endif
+
+// PQ2_0: Prism Q2_0 at group 128 (same 2-bit codec, one fp16 scale per 128).
+#define QUANT_K_PQ2_0 128
+#define QUANT_R_PQ2_0 1
+
+struct block_pq2_0
+{
+    float16_t d;
+    uint8_t qs[QUANT_K_PQ2_0 / 4];
+};
+
+struct block_pq2_0_packed16
+{
+    float16_t d;
+    uint16_t qs[QUANT_K_PQ2_0 / 8];
+};
+
+#if defined(DATA_A_PQ2_0)
+#define QUANT_K QUANT_K_PQ2_0
+#define QUANT_R QUANT_R_PQ2_0
+#define QUANT_AUXF 1
+#define A_TYPE block_pq2_0
+#define A_TYPE_PACKED16 block_pq2_0_packed16
+#endif
+
 #define QUANT_K_Q2_0 64
 #define QUANT_R_Q2_0 1
 
@@ -300,41 +370,6 @@ struct block_q2_K_packed32
 #define A_TYPE_PACKED16 block_q2_K_packed16
 #define A_TYPE_PACKED32 block_q2_K_packed32
 #define SCALES_PER_32 2
-#define DATA_A_QUANT_K
-#endif
-
-#define QUANT_K_TQ1_0 256
-
-// TQ1_0: base-3 packed trits, 5 per byte in `qs` (48B) and 4 in `qh` (4B).
-struct block_tq1_0
-{
-    uint8_t qs[(QUANT_K_TQ1_0 - 4 * QUANT_K_TQ1_0 / 64) / 5];
-    uint8_t qh[QUANT_K_TQ1_0 / 64];
-    float16_t d;
-};
-
-// Element e in [0,255] -> its packed byte (0..47 qs, 48..51 qh) and digit.
-uint tq1_0_byte_of(uint e) {
-    return e < 160u ? (e % 32u)
-         : e < 240u ? 32u + ((e - 160u) % 16u)
-         : 48u + ((e - 240u) % 4u);
-}
-uint tq1_0_digit_of(uint e) {
-    return e < 160u ? (e / 32u)
-         : e < 240u ? ((e - 160u) / 16u)
-         : ((e - 240u) / 4u);
-}
-// The 8-bit truncation below is part of the format, not an optimisation:
-// the C reference does `uint8_t q = qs[..] * pow3[n]`.
-uint tq1_0_trit(uint qbyte, uint t) {
-    const uint POW3_PACKED = (1u << 28) | (3u << 21) | (9u << 14) | (27u << 7) | 81u;
-    return ((((qbyte * ((POW3_PACKED >> (7u * (4u - t))) & 0x7Fu)) & 255u) * 3u) >> 8);
-}
-
-#if defined(DATA_A_TQ1_0)
-#define QUANT_K QUANT_K_TQ1_0
-#define QUANT_R 1
-#define A_TYPE block_tq1_0
 #define DATA_A_QUANT_K
 #endif
 
@@ -955,7 +990,6 @@ shared uint16_t iq1s_grid[2048];
 shared uint32_t iq1s_grid_gpu[2048];
 #endif
 
-#if defined(DATA_A_IQ1_S) || defined(DATA_A_IQ1_M)
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -978,17 +1012,6 @@ void init_iq_shmem(uvec3 wgsize)
 #endif
     barrier();
 }
-#endif
-#endif
-
-#if defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S)
-#if defined(DATA_A_IQ2_S)
-shared uvec2 iq2s_grid[1024];
-#elif defined(DATA_A_IQ2_XS)
-shared uvec2 iq2xs_grid[512];
-#else
-shared uvec2 iq2xxs_grid[256];
-#endif
 #endif
 
 #define QUANT_K_IQ2_XXS 256
@@ -1075,7 +1098,8 @@ const uvec2[256] iq2xxs_grid_const = {
     uvec2(0x08080808, 0x2b2b082b), uvec2(0x08192b08, 0x2b2b1908), uvec2(0x19190808, 0x2b2b2b08), uvec2(0x08081908, 0x2b2b2b19)
 };
 
-#if defined(DATA_A_IQ2_XXS)
+shared uvec2 iq2xxs_grid[256];
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1087,14 +1111,11 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 
-#if defined(DATA_A_IQ2_XXS)
 #define QUANT_K QUANT_K_IQ2_XXS
 #define QUANT_R QUANT_R_IQ2_XXS
 #define A_TYPE block_iq2_xxs
 #define A_TYPE_PACKED16 block_iq2_xxs_packed16
-#endif
 #endif
 
 #define QUANT_K_IQ2_XS 256
@@ -1247,7 +1268,8 @@ const uvec2 iq2xs_grid_const[512] = {
     uvec2(0x082b2b08, 0x2b2b2b2b), uvec2(0x082b2b2b, 0x2b2b2b2b), uvec2(0x2b190819, 0x2b2b2b2b), uvec2(0x2b2b2b2b, 0x2b2b2b2b),
 };
 
-#if defined(DATA_A_IQ2_XS)
+shared uvec2 iq2xs_grid[512];
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1259,14 +1281,11 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 
-#if defined(DATA_A_IQ2_XS)
 #define QUANT_K QUANT_K_IQ2_XS
 #define QUANT_R QUANT_R_IQ2_XS
 #define A_TYPE block_iq2_xs
 #define A_TYPE_PACKED16 block_iq2_xs_packed16
-#endif
 #endif
 
 #define QUANT_K_IQ2_S 256
@@ -1549,7 +1568,8 @@ const uvec2 iq2s_grid_const[1024] = {
     uvec2(0x082b082b, 0x2b2b2b2b), uvec2(0x082b2b08, 0x2b2b2b2b), uvec2(0x2b082b08, 0x2b2b2b2b), uvec2(0x2b2b2b2b, 0x2b2b2b2b)
 };
 
-#if defined(DATA_A_IQ2_S)
+shared uvec2 iq2s_grid[1024];
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1561,22 +1581,11 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 
-#if defined(DATA_A_IQ2_S)
 #define QUANT_K QUANT_K_IQ2_S
 #define QUANT_R QUANT_R_IQ2_S
 #define A_TYPE block_iq2_s
 #define A_TYPE_PACKED16 block_iq2_s_packed16
-#endif
-#endif
-
-#if defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ3_S)
-#if defined(DATA_A_IQ3_S)
-shared uint32_t iq3s_grid[512];
-#else
-shared uint32_t iq3xxs_grid[256];
-#endif
 #endif
 
 #define QUANT_K_IQ3_XXS 256
@@ -1631,7 +1640,8 @@ const uint32_t iq3xxs_grid_const[256] = {
     0x3e1c1c1c, 0x3e1c3404, 0x3e24140c, 0x3e24240c, 0x3e2c0404, 0x3e2c0414, 0x3e2c1424, 0x3e341c04,
 };
 
-#if defined(DATA_A_IQ3_XXS)
+shared uint32_t iq3xxs_grid[256];
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1643,14 +1653,11 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 
-#if defined(DATA_A_IQ3_XXS)
 #define QUANT_K QUANT_K_IQ3_XXS
 #define QUANT_R QUANT_R_IQ3_XXS
 #define A_TYPE block_iq3_xxs
 #define A_TYPE_PACKED16 block_iq3_xxs_packed16
-#endif
 #endif
 
 #define QUANT_K_IQ3_S 256
@@ -1743,7 +1750,8 @@ const uint32_t iq3s_grid_const[512] = {
     0x0f090307, 0x0f090501, 0x0f090b01, 0x0f0b0505, 0x0f0b0905, 0x0f0d0105, 0x0f0d0703, 0x0f0f0101,
 };
 
-#if defined(DATA_A_IQ3_S)
+shared uint32_t iq3s_grid[512];
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1755,14 +1763,11 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 
-#if defined(DATA_A_IQ3_S)
 #define QUANT_K QUANT_K_IQ3_S
 #define QUANT_R QUANT_R_IQ3_S
 #define A_TYPE block_iq3_s
 #define A_TYPE_PACKED16 block_iq3_s_packed16
-#endif
 #endif
 
 #define QUANT_K_IQ4_XS 256
@@ -1877,7 +1882,6 @@ const int8_t kvalues_iq4nl_const[16] = {
 
 shared FLOAT_TYPE kvalues_iq4nl[16];
 
-#if defined(DATA_A_IQ4_NL) || defined(DATA_A_IQ4_XS)
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
@@ -1887,7 +1891,6 @@ void init_iq_shmem(uvec3 wgsize)
     }
     barrier();
 }
-#endif
 #endif
 
 #if defined(DATA_A_MXFP4) || defined(DATA_A_NVFP4)
@@ -1918,7 +1921,7 @@ float ue4m3_to_fp32_build(uint u) {
 }
 #endif
 
-#if (defined(DATA_A_MXFP4) || defined(DATA_A_NVFP4)) && !defined(USE_OCP_FP4)
+#if !defined(USE_OCP_FP4)
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {

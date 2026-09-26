@@ -308,6 +308,14 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   `vkGetDeviceQueue2`（Vulkan 1.2）返回坏 queue → 改用 Vulkan 1.0 的 `vkGetDeviceQueue`（3 处 patch，
   仅 ARM vendor 0x13B5 生效，真机验证通过）。Mali-G68 无矩阵加速单元，Vulkan 解码约为 CPU 的 1/3，属
   **硬件天花板**（大模型上 GPU 卸载仍省内存）。
+- **骁龙 Adreno 8 Elite2（SM8735 / Adreno 825）专项**：**v0.2.2 起修复 Vulkan 乱码 / 管线崩溃**。驱动
+  0800.71（E031 编译器）错误编译 shader 的 `unpack8()`（Int8 capability）导致量化模型输出乱码，另存在
+  subgroup matvec 管线创建失败、图融合 kernel 输出全零、dp4a 数值错误、decode 部分管线建不出共 5 个独立
+  问题。修复：shader 层用纯 32 位位操作替换 `unpack8()`（21 处调用点 + q8_0 反量化重写，位模式逐位等价），
+  运行时默认注入 `GGML_VK_NO_SUBGROUP / GGML_VK_DISABLE_FUSION / GGML_VK_NO_MMV /
+  GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`（JNI 层注入，可用 `/storage/emulated/0/TongYiLite/vk_flags.conf`
+  覆盖做 A/B）。构建 glslc 锁定 shaderc v2026.3（`_study/vkcli/sdk/vksdk-new`）。详见
+  [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
 - **KleidiAI dotprod（纯 CPU 备选）**：`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod` 编译手调 matmul 内核；
   ⚠️ **不加 `+i8mm`**（天玑 Cortex-A78 无 i8mm，`armv8.4-a+dotprod+i8mm` 会 SIGILL 三后端同崩），已降级
   为 `armv8.2-a+dotprod`。
@@ -343,6 +351,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）；glslc 锁定 shaderc v2026.3。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
 | **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI（工具卡片 / 压缩横幅 / 重试指示 / 审批对话框）；**联网搜索全面配置化**：SearXNG 实例地址/密钥/引擎白名单/条数/超时「设置 → API 接入」自配、一键测试连接、保存即热更新（含 4 处静默失效修复）；llama.cpp 升级 b11028 + 模型加载全链路修复；移除启动加载页。**229 项单测全绿** |
 | **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、18 内置工具、代码质量 P0 加固 |
 | v0.1.6 | 2026-08-19 | llama.cpp 升级上游 master（`fe8156f`）、天玑 Mali Vulkan 崩溃根治、mmproj 视觉编码后端跟随主后端、天玑 OpenCL 置灰、Gradle 16 核并行 |
