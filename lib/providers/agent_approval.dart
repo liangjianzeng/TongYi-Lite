@@ -9,8 +9,15 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../agent/agent.dart';
+import '../agent/tools/pipeline.dart' show ToolPreExecuteApprover;
 
 /// 全局审批通道：默认 null（无审批服务 → 升级请求 fail-closed）。
 /// UI 层通过覆盖此 Provider 注入确认框实现。
 final sandboxApproverProvider =
     Provider<AgentSandboxApprover?>((ref) => null);
+
+/// 流水线 pre-execute `ask` 审批通道（Phase 6 ApprovalDialog，§12.3）。
+/// 默认 null：无审批服务时 ask 视为拒绝（fail-closed）。
+/// UI 层（main.dart）覆盖为确认框实现。
+final toolPreApproverProvider =
+    Provider<ToolPreExecuteApprover?>((ref) => null);

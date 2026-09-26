@@ -8,13 +8,32 @@ import '../models/conversation.dart';
 
 import '../agent/agent.dart';
 import '../agent/web_search/web_search_provider.dart';
+import '../agent/loop/agent.dart' show ReactLoopAgent, TurnEndReason;
+import '../agent/loop/config.dart' as loopConfig;
+import '../agent/capability.dart';
+import '../agent/llm/adapter.dart' show LlmAdapter, ProviderKind;
+import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
+import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
+import '../agent/protocol/protocol_selector.dart' show selectProtocol;
+import '../agent/protocol/prompt_json_protocol.dart' show PromptJsonProtocol;
+import '../agent/subagents/in_process.dart' show InProcessSubagentProvider;
+import '../agent/subagents/subagent_tool.dart' show createSubagentTool;
+import '../agent/hooks/hooks.dart' show AgentHooks;
+import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
+import '../agent/skills/skill.dart' show loadBuiltinSkills;
+import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
+import '../agent/session/event.dart' as agentEvent;
+import '../agent/session/log.dart' show SessionLog;
+import '../agent/session/store.dart' show JsonlSessionStore;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/openai_service.dart';
 import '../services/settings_service.dart';
 import '../services/storage_service.dart';
 import 'agent_stream_processor.dart';
-import 'agent_approval.dart' show sandboxApproverProvider;
+import 'agent_approval.dart'
+    show sandboxApproverProvider, toolPreApproverProvider;
+import 'agent_state_provider.dart' show agentUiStateProvider;
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
@@ -122,6 +141,7 @@ class ChatNotifier extends StateNotifier<bool> {
   final InferenceService _inference;
   final StorageService _storage;
   final Ref _ref;
+  final JsonlSessionStore _sessionStore = JsonlSessionStore();
 
   /// Which conversation currently occupies the native KV cache. When the user
   /// switches to a different conversation we must reset the cache so the OLD
@@ -135,6 +155,10 @@ class ChatNotifier extends StateNotifier<bool> {
   /// `DioException [request cancelled]`，属正常停止信号而非错误——
   /// 此标记用于区分二者，避免把「用户停止」误报成「发送失败」。
   bool _userCancelled = false;
+
+  /// 新智能体模式的当前主循环（Phase 0+）。非 null 且 running 时，
+  /// [stopGeneration] 走 agent.cancel()；turn 结束置 null。
+  ReactLoopAgent? _currentAgent;
 
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
@@ -490,6 +514,18 @@ class ChatNotifier extends StateNotifier<bool> {
     String? audioPath,
   }) async {
     final settings = _ref.read(settingsProvider);
+
+    // 新智能体模式（Phase 0+ 重写）：事件源 ReactLoopAgent；关闭则回退旧 runAgent。
+    if (settings.useNewAgentMode) {
+      return _sendAgentMessageNew(
+        conversationId,
+        prompt,
+        imagePath: imagePath,
+        audioPath: audioPath,
+        settings: settings,
+      );
+    }
+
     final agentSource = settings.agentModelSource;
     final agentModelId = settings.agentModelId;
 
@@ -641,9 +677,294 @@ class ChatNotifier extends StateNotifier<bool> {
     }
   }
 
+  /// 新智能体模式发送（Phase 0+ 重写）：事件源 [ReactLoopAgent] +
+  /// [EngineLlmAdapter]（local/API 双路，共用文本协议）。
+  ///
+  /// 与旧 [runAgent] 路径等价的用户可见行为：
+  /// - 同一模型路由（local/api/默认兜底）；
+  /// - 同一 KV 缓存策略（会话切换 resetContext）；
+  /// - 历史从 SQLite 读（排除 🔧 工具活动消息）→ [JsonlSessionStore.importFromMessages]；
+  /// - 流式占位 + 工具活动（复用 [_AgentActivitySession]）；
+  /// - 最终回答持久化 + 返回。
+  Future<String> _sendAgentMessageNew(
+    String conversationId,
+    String prompt, {
+    String? imagePath,
+    String? audioPath,
+    required InferenceSettings settings,
+  }) async {
+    // ---- 模型路由（与旧路径一致）----
+    var useApi = false;
+    ApiModelConfig? activeApi;
+    var targetModelId = _ref.read(currentModelIdProvider);
+
+    if (settings.agentModelSource == 'api') {
+      for (final m in settings.apiModels) {
+        if (m.id == settings.agentModelId) {
+          activeApi = m;
+          break;
+        }
+      }
+      if (activeApi == null) {
+        return '[智能体配置的 API 模型不存在，请在设置中重新选择]';
+      }
+      useApi = true;
+    } else if (settings.agentModelSource == 'local') {
+      targetModelId = settings.agentModelId ?? targetModelId;
+      final ok = await ensureModelLoaded(targetModelId);
+      if (!ok) {
+        return '[模型加载失败，请在设置中重新下载并加载]';
+      }
+      useApi = false;
+    } else {
+      final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
+      final hasDefault = settings.defaultModelId != null;
+      if (settings.activeApiModel() != null && !hasLocalLoaded && !hasDefault) {
+        useApi = true;
+        activeApi = settings.activeApiModel();
+      } else {
+        final ok = await ensureModelLoaded(targetModelId);
+        if (!ok) {
+          final fallback = settings.activeApiModel();
+          if (fallback != null) {
+            useApi = true;
+            activeApi = fallback;
+          } else {
+            return '[模型加载失败，请在设置中重新下载并加载]';
+          }
+        }
+      }
+    }
+    _lastGenWasApi = useApi;
+    debugPrint('[ChatNotifier] new-agent route='
+        '${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
+
+    state = true;
+    _ref.read(isGeneratingProvider.notifier).state = true;
+
+    // 会话切换时重置原生 KV 缓存（沿用现有策略）。
+    if (_currentKvConvId != conversationId) {
+      debugPrint(
+          '[ChatNotifier] new-agent conversation changed: resetContext()');
+      await _inference.resetContext();
+      _currentKvConvId = conversationId;
+    }
+
+    // ---- 构建组件（复用旧路径共享件）----
+    final registry = _buildAgentRegistry(settings, targetModelId);
+
+    // 能力快照（Phase 3）：本地/本地模型目录静态声明；运行探测待补。
+    // 当前仅 PromptJsonProtocol 落盘，selectProtocol 是能力驱动选路
+    // （新增 xml-tool / native-tools 协议自动生效）。
+    final caps = _engineCapabilitiesFor(targetModelId, activeApi);
+    final protocol = selectProtocol([PromptJsonProtocol()], caps);
+    final systemPrompt = buildSystemPrompt(
+      modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
+      registry: registry,
+      protocol: protocol,
+      modelId: targetModelId,
+    );
+    final newConfig = loopConfig.AgentConfig(
+      maxStepsPerTurn: settings.agentMaxRounds,
+      maxTokensPerRound: settings.agentTokensPerRound,
+      toolTimeout: Duration(milliseconds: settings.agentToolTimeoutMs),
+      allowParallelTools: settings.agentAllowParallelTools,
+    );
+    // 按路由选 adapter（local/API），各自冻结能力快照。
+    final LlmAdapter engine = useApi
+        ? OpenAiAdapter(
+            protocol: protocol,
+            capabilities: caps,
+            openAi: _ref.read(openAiServiceProvider),
+            apiModel: activeApi,
+          )
+        : LocalEngineAdapter(
+            inference: _inference,
+            protocol: protocol,
+            capabilities: caps,
+          );
+
+    // [NewAgent] 新 seam 活跃标记（验证 Phase 3 代码路径；验证后可删）
+    debugPrint(
+      '[NewAgent] seam=active route=$useApi '
+      'adapter=${useApi ? 'OpenAiAdapter' : 'LocalEngineAdapter'} '
+      'protocol=${protocol.id} model=$targetModelId caps=$caps',
+    );
+
+    // ---- 历史 → 事件日志（导入，log-only 标记）----
+    final allMessages =
+        await _storage.getMessages(conversationId, limit: 200);
+    final history = allMessages
+        .where((m) => m.content.isNotEmpty && !_isToolActivityMessage(m))
+        .toList();
+    final sessionLog =
+        _sessionStore.importFromMessages(conversationId, history);
+
+    // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
+    _ref.read(agentUiStateProvider.notifier).attach(sessionLog);
+
+    // ---- 子代理接缝（Phase 4）：in-process spawn/fork ----
+    // 复用当前 registry/adapter/模型/系统提示（同模型、同工具集，§10.6）。
+    // 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
+    final subagentProvider = InProcessSubagentProvider(
+      adapter: engine,
+      registry: registry,
+      modelId: targetModelId,
+      providerKind: useApi ? ProviderKind.api : ProviderKind.local,
+      systemPrompt: systemPrompt,
+      parentSession: sessionLog,
+    );
+    // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
+    registry.register(createSubagentTool(subagentProvider));
+
+    // 保存用户消息（UI 立即可见）。
+    final userMsg = ChatMessage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      conversationId: conversationId,
+      role: MessageRole.user,
+      content: prompt,
+      imagePath: imagePath,
+      audioPath: audioPath,
+    );
+    await _storage.saveMessage(userMsg);
+    await _refreshConversationMeta(conversationId);
+
+    // ---- 流式占位 + 活动会话（与旧路径共享 UI 契约）----
+    final tokenController = StreamController<String>.broadcast();
+    final session = _AgentActivitySession(
+      conversationId: conversationId,
+      storage: _storage,
+    );
+    final assistantId =
+        (DateTime.now().millisecondsSinceEpoch + 1).toString();
+    var assistantMsg = ChatMessage(
+      id: assistantId,
+      conversationId: conversationId,
+      role: MessageRole.assistant,
+      content: '',
+      isStreaming: true,
+    );
+    await _storage.saveMessage(assistantMsg);
+    session.attach(assistantMsg);
+
+    // 消费替换式 visible text → 周期持久化（节流）。
+    StreamSubscription<String>? sub;
+    var _lastSave = DateTime.now();
+    sub = tokenController.stream.listen((visible) async {
+      if (visible.isEmpty ||
+          visible.length == assistantMsg.content.length) {
+        return;
+      }
+      final now = DateTime.now();
+      // 与旧路径一致的节流（150ms）；此前误用秒级导致流式文字迟迟不更新。
+      if (now.difference(_lastSave).inMilliseconds >= 150) {
+        final next = assistantMsg.copyWith(content: visible);
+        assistantMsg = next;
+        await _storage.saveMessage(next).catchError((_) {});
+        _lastSave = now;
+      }
+    });
+
+    // ---- Phase 5：hooks / skills / AGENTS.md ----
+    // AGENTS.md（全局；workspace 暂无路径来源，留空）。
+    String? agentsMdText;
+    try {
+      final agentsMd = await loadAgentsMd();
+      agentsMdText = agentsMd.content;
+    } on Exception catch (_) {}
+    // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
+    final userSkills = await loadUserSkills();
+    final skillProvider = userSkills.isEmpty
+        ? SkillProvider()
+        : SkillProvider(
+            skills: [...loadBuiltinSkills(), ...userSkills]);
+    // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
+    final hooks = AgentHooks();
+    // ---- 主循环 ----
+    final agent = ReactLoopAgent(
+      session: sessionLog,
+      adapter: engine,
+      registry: registry,
+      config: newConfig,
+      modelId: targetModelId,
+      providerKind: useApi ? ProviderKind.api : ProviderKind.local,
+      systemPrompt: systemPrompt,
+      onToolActivity: session.update,
+      sandboxApprover: _ref.read(sandboxApproverProvider),
+      // Phase 6：pre-execute `ask` → 审批确认框（ApprovalDialog）。
+      preApprover: _ref.read(toolPreApproverProvider),
+      hooks: hooks,
+      skills: skillProvider,
+      agentsMd: agentsMdText,
+    );
+    _currentAgent = agent;
+    String answer = '';
+    TurnEndReason? reason;
+    try {
+      reason = await agent.kick(
+        prompt,
+        imagePath: imagePath,
+        audioPath: audioPath,
+        onToken: tokenController,
+      );
+      answer = agent.lastAssistantContent;
+      debugPrint(
+          '[ChatNotifier] new-agent done: reason=${reason!.kind.name}, '
+          'answer len=${answer.length}');
+    } catch (e, s) {
+      answer = agent.lastAssistantContent;
+      debugPrint('[ChatNotifier] new-agent error: $e\n$s');
+    } finally {
+      // 收尾（无论正常/异常/取消）：重置 UI 生成态 + 清 agent 引用 + 收流。
+      _currentAgent = null;
+      state = false;
+      _ref.read(isGeneratingProvider.notifier).state = false;
+      // Phase 6：停止订阅本 turn 事件流（状态保留供面板展示本轮末态）。
+      _ref.read(agentUiStateProvider.notifier).detach();
+      sub?.cancel();
+      tokenController.close();
+    }
+
+    // 最终占位文本 = 本轮最终回答（turn 末位 assistant/message）。
+    assistantMsg = assistantMsg.copyWith(content: answer, isStreaming: false);
+    await _storage.saveMessage(assistantMsg);
+    await _refreshConversationMeta(conversationId);
+    return answer;
+  }
+
   /// 构建 agent 工具注册表：全量内置工具 → 联网类按配置移除 → 按模型过滤。
   ///
   /// 核心工具（get_time/calculator/todo/note/unit_converter/memory/文件类）
+  /// 引擎能力快照（Phase 3 能力驱动协议选择依据，对应 [PreparedLlmCall.capabilities]）。
+  ///
+  /// 端侧简化：当前为**静态声明**（模型目录暂不承载 capability 字段）。
+  /// - **api**：OpenAI 兼容 → 原生工具调用可用（nativeToolCall）。
+  /// - **local**：Spark/Qwen 系给 `toolTemplate: spark-xml`（为 xml-tool 协议
+  ///   预留）；其余本地模型全默认（prompt-json 兜底）。
+  ///
+  /// 后续增强：模型目录加 capability 字段 + 引擎运行时探测
+  /// （`EngineCapabilities.resolve(declared:, probed:)`）替换本静态映射，
+  /// 协议选择（`selectProtocol`）即自动跟随能力变化，无需改调用方。
+  EngineCapabilities _engineCapabilitiesFor(
+    String modelId,
+    ApiModelConfig? activeApi,
+  ) {
+    if (activeApi != null) {
+      // API 路线：OpenAI 兼容，原生工具调用 + 并行（API 侧能力较松）。
+      return const EngineCapabilities(
+        nativeToolCall: true,
+        maxParallelToolCalls: 5,
+      );
+    }
+    // 本地路线：静态声明。Spark/Qwen 系标 xml 模板；其余默认 prompt-json。
+    final lower = modelId.toLowerCase();
+    final isXmlFamily = ['spark', 'qwen', 'tongyi'].any(lower.contains);
+    return EngineCapabilities(
+      toolTemplate: isXmlFamily ? 'spark-xml' : null,
+      maxParallelToolCalls: 2,
+    );
+  }
+
   /// 默认全启用；联网类（web_search/get_weather）由 [settings.webSearchEnabled]
   /// 控制；shell_exec 默认启用（端侧能力向强扩展，不做自我设限）。
   ToolRegistry _buildAgentRegistry(
@@ -905,6 +1226,13 @@ class ChatNotifier extends StateNotifier<bool> {
     // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
     // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
     _userCancelled = true;
+    // 新智能体模式：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
+    if (_currentAgent != null && _currentAgent!.isRunning) {
+      debugPrint('[ChatNotifier] stopGeneration: cancel new-agent turn');
+      await _currentAgent!.cancel();
+      return;
+    }
+    // 旧模式（useNewAgentMode 关）：直接中止 native/API。
     if (_lastGenWasApi) {
       _ref.read(openAiServiceProvider).stop();
     } else {

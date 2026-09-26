@@ -6,8 +6,9 @@
 [![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)](https://github.com/ggerganov/llama.cpp)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp）· Vulkan / OpenCL GPU 加速 + KleidiAI
-> CPU 加速 · 应用内模型下载与管理 · Agent 智能体（工具调用）· OpenAI 兼容远程模型
+> **端到端离线的 Android AI 助手。** 本地模型推理（llama.cpp b11028）· Vulkan / OpenCL GPU 加速 + KleidiAI
+> CPU 加速 · 应用内模型下载与管理 · **新一代 Agent 智能体**（事件日志架构 · 工具流水线 · 子代理 ·
+> Skills/Hooks）· OpenAI 兼容远程模型
 >
 > **数据不出设备，隐私安全无忧。**
 
@@ -40,7 +41,8 @@ TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模�
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描 |
 | **多模态（视觉 + 语音）** | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；Gemma 4 E2B 自带原生语音编码器，支持**按住说话**语音输入 |
 | **远程 API 接入** | 兼容 OpenAI `{baseUrl}/chat/completions` 端点（云端大模型或自建 llama.cpp 服务），**本地优先、API 后备**，共用同一套聊天界面 |
-| **Agent 智能体（工具调用）** | 18 个内置工具（`shell_exec` / `python_exec` / 联网 / 计算 / 文件 / 待办 / 记忆 / 天气等），模型多轮调用工具 → 回填结果 → 组织回答；沙箱授权 + 逐次审批 |
+| **联网搜索（自建实例）** | `web_search` / `get_weather` 走**用户自己部署的 SearXNG**：地址 / 密钥 / 引擎白名单 / 条数 / 超时全在设置里配，带一键「测试连接」；App **不预置任何搜索服务** |
+| **Agent 智能体（工具调用）** | 全新智能体引擎：事件日志上下文 + 失败自动恢复主循环 + 六段工具流水线 + **子代理**（spawn/fork）+ Skills/Hooks/AGENTS.md 指令文件 + 活动面板 UI；18 个内置工具（`shell_exec` / `python_exec` / 联网 / 计算 / 文件 / 待办 / 记忆 / 天气等），沙箱授权 + 逐次审批 |
 | **MTP 投机解码** | 部分模型支持多 token 预测（Multi-Token Prediction），可在设置页为该模型单独开启投机解码加速 |
 | **智能体可配置** | 循环轮次 / 每轮预算 / 工具超时 / 联网源 / 按模型开启或关闭特定工具，全部持久化；支持原生工具调用能力探测（`nativeToolCall`） |
 
@@ -148,6 +150,27 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   图片剥离为纯文本 `[图片]` 占位，绝不发送原始图数据。
 - 配置明文保存在与本地推理设置同一个 settings JSON 里（`lib/models/api_model.dart`），适合本地个人使用。
 
+### 联网搜索（SearXNG 自建实例）
+
+`web_search` / `get_weather` 走**你自己部署的 [SearXNG](https://docs.searxng.org/) 实例**，在
+**「设置 → API 接入 → 🌐 联网搜索」**配置。App **不预置任何搜索实例**（不内置第三方搜索地址、
+也不内置别人的服务器），地址留空就是"未配置"，`web_search` 会直接回明确诊断并指向这个设置页。
+
+| 配置项 | 说明 |
+|--------|------|
+| 实例地址 | 手机能直接访问即可（局域网 IP、Tailscale 地址、https 域名均可）；`/search` 路径自动补 |
+| API Key | 仅私有实例需要（以 `Bearer` 发送）；用 http 明文传密钥到非回环地址时界面会告警 |
+| 引擎白名单 | 留空 = 实例全部引擎。**实例上存在访问不到的引擎时，把可达引擎填进来可把搜索从二十秒级降到秒级**（自建实例实测 21s → 2.2s） |
+| 语言 / 最多条数 / 超时 | 数字项保存后回显真正生效的值（自动夹紧到合法区间） |
+| 测试连接 | 用输入框里的当前内容（无需先保存）打一次真实搜索，回显条数、耗时与具体失败原因 |
+
+- **保存即生效**：每项保存后立刻热更新搜索 provider（配置未变则复用实例，不打断连接池），改地址无需重启。
+- **失败可诊断**：HTTP 状态码 / 实例未开 `format=json` / 引擎白名单被拒 / 连接被拒（含系统错误码）
+  分别给出对应原因与下一步，不再统一显示"不可达"。
+- **给模型的输出有预算**：结果按 URL 规范化去重、按相关性排序，单条摘要 200 字、总 1500 字截断，
+  不挤占端侧本就不大的上下文窗口。
+- 实例侧只需在 `settings.yml` 的 `search.formats` 里加上 `json`。
+
 ### Agent 智能体（工具调用）
 
 内置工具型智能体循环：**模型按需调用工具 → 工具真实执行并回填结果 → 模型根据结果组织最终回答**（绝不假装执行）。
@@ -164,7 +187,34 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 - **必填参数校验**：工具执行前统一校验必填参数，缺失时明确列出缺失项并回填「补全后重试」；工具清单渲染
   带必填参数提示（如 `shell_exec（必填: command）`）。
 - **设置页「智能体」Tab**：驱动模型选择（本地/API/跟随默认）、总开关、循环轮次/每轮预算（默认 512，
-  最大 16k）/工具超时/联网搜索全部可调并持久化（按模型 `agentToolsByModel`）。
+  最大 16k）/工具超时全部可调并持久化（按模型 `agentToolsByModel`）；联网搜索工具在此开关，
+  **其实例地址在「API 接入」页配置**（见[联网搜索](#联网搜索searxng-自建实例)）。
+
+#### 全新智能体引擎（v0.2.1）
+
+v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相源、主循环带失败自动恢复与可靠停止、
+工具执行走六段流水线，并新增**子代理**、Skills / Hooks / `AGENTS.md` 指令文件与活动面板 UI。
+
+- **会话事件日志（唯一真相源）**：每个对话一本 append-only 事件日志（JSONL、`seq` 严格递增）；模型上下文是
+  事件日志的**纯函数投影**（"模型看到的 = 日志能重建的"）；上下文压缩 = 追加摘要 + 影子遮蔽（永不删除原文）；
+  进程崩溃后自动修复未闭合的 turn/step/工具调用（合成"结果未知"回执）。旧 SQLite 对话一次性导入，标记来源。
+- **主循环 ReactLoopAgent**：显式 turn / step / phase 状态机；失败恢复瀑布（上下文超限 → 先压缩重试；
+  瞬态错误 → 退避重试；其余 → 明确终止）；**Stop 立即停 turn、UI 状态可靠恢复**；流式增量 150ms 节流上屏。
+- **六段工具流水线**：pre-execute（allow/deny/ask 瀑布）→ guard（单调 deny）→ execute（沙箱审批 + 超时）→
+  结果投影 → post-execute（可改写）→ 溢写（超长工具输出自动落盘、只回摘要与定位）。支持并行工具执行（可配）。
+- **LLM Adapter 接缝**：本地引擎与 OpenAI 兼容端点统一在 `LlmAdapter` 接口后，每次调用冻结能力快照
+  （`prepareCall`），协议按能力驱动选择（prompt-JSON 落盘，XML-tool / native-tools 预留位）——
+  **换模型 / 加模型不改调用方代码**。
+- **子代理（Subagents）**：`subagent` 工具支持 `spawn` / `fork` 两种模式（进程内、复用同模型同工具集），
+  嵌套深度 ≤ 2、每层独立预算，子代理审批恒 `never`（沙箱升级自动拒绝，恒 workspace-write），
+  fork 种子按上下文预算截断。
+- **Skills / Hooks / 指令文件**：内置 Skill（`web-research` / `code-review`）以 `<available_skills>` 注入
+  系统提示；用户可在 `ApplicationSupport/skills/<name>/SKILL.md` 添加自己的 Skill（用户级 rank 高于内置，
+  同名覆盖）；Hook 接缝 `agent/pre-step`（可否决单步）与 `tools/result`（只读审计）、流水线 pre/post-execute
+  监听全部开放；全局 `AGENTS.md` 指令文件自动注入（`<workspace:guidance>`）。
+- **智能体活动 UI**：输入框上方新增活动面板——结构化工具卡片（状态图标 + 参数摘要，展开看完整参数/结果）、
+  「上下文已压缩」横幅、「重试中…（N）」指示、标题栏运行徽章；工具审批（沙箱升级 / pre-execute `ask`）
+  弹确认框逐次批准。原「🔧」过程文本由结构化卡片取代。
 
 ---
 
@@ -219,6 +269,10 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 ```
 
 - **前端**：Flutter 3.x (Material3)，Riverpod 状态管理。
+- **智能体层（`lib/agent/`）**：`session/`（事件日志唯一真相源 + JSONL 存储）· `loop/`（ReactLoopAgent
+  主循环 + 失败瀑布）· `tools/`（六段流水线）· `llm/`（`LlmAdapter` 接缝：本地 / OpenAI）·
+  `protocol/`（能力驱动协议选择）· `subagents/`（子代理）· `hooks/` `skills/` `agents_md/`（扩展生态）·
+  `context_eng/`（压缩 + 溢写）。
 - **通信**：`MethodChannel`（请求）+ `EventChannel`（流式 token 批量化回调），无 HTTP Server，高效省内存。
 - **推理引擎**：llama.cpp（`third_party/` 直接入库），含 ggml-cpu、Vulkan / OpenCL GPU 后端、
   KleidiAI dotprod CPU 内核、mtmd 多模态（视觉 + 语音）支持。
@@ -289,12 +343,16 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI（工具卡片 / 压缩横幅 / 重试指示 / 审批对话框）；**联网搜索全面配置化**：SearXNG 实例地址/密钥/引擎白名单/条数/超时「设置 → API 接入」自配、一键测试连接、保存即热更新（含 4 处静默失效修复）；llama.cpp 升级 b11028 + 模型加载全链路修复；移除启动加载页。**229 项单测全绿** |
 | **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、18 内置工具、代码质量 P0 加固 |
 | v0.1.6 | 2026-08-19 | llama.cpp 升级上游 master（`fe8156f`）、天玑 Mali Vulkan 崩溃根治、mmproj 视觉编码后端跟随主后端、天玑 OpenCL 置灰、Gradle 16 核并行 |
 | v0.1.3 | 2026-08-04 | 多轮对话正确性修复（KV 缓存跨轮残留等根因）、`tok/s` 口径对齐、`n_ubatch` 按后端动态、助手复制 / 自定义模型名 / 加载进度弹窗 |
 | v0.1.2 | 2026-08-03 | 量化 GEMM 路径 / 重复惩罚失效 / flash attention CPU 陷阱修复 |
 | v0.1.1 | 2026-08-03 | Vulkan GPU 加速（arm64-v8a）、模型下载系统、设置页 UI、对话 SQLite 持久化 |
 | v0.1.0 | 2025-07-29 | 端侧 LLM 推理引擎（llama.cpp）、Flutter Material3 前端、架构设计文档 v2 |
+
+**v0.2.1 下载**：待打包发布（构建产物 `build\app\outputs\flutter-apk\`，发布时拷入
+`releases/TongYi-Lite-v0.2.1.apk` 并在此更新链接与 SHA-256）。
 
 **v0.2.0 下载**（release 签名 `CN=TongYiLite`）：
 
@@ -318,6 +376,71 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
   GPU/CPU 占用率监控线、联网工具换国内可达源、每轮预算放宽至 16k。
 - **代码质量 P0 加固**：消息 role 反序列化安全回落、SQLite v3（`audioPath` 列迁移）、原生消息 JSON 解析器
   重写、设置原子写入、假数据 stub 与死代码移除。**101–123 项单测全绿**。
+
+**v0.2.1 详细变更**（2026-09-26）：
+
+- **联网搜索改为「用户自配 SearXNG 实例」**：设置页「API 接入」新增 🌐 联网搜索配置卡 —— 实例地址、
+  API Key（可隐藏显示，http 明文过网会告警）、引擎白名单、搜索语言、最多条数、超时，外加
+  **「测试连接」**（用输入框里的草稿值直接打一次真实搜索，回显条数与耗时，无需先保存）。
+  **App 不预置任何搜索实例**：地址留空即"未配置"，`web_search` 直接回明确诊断并指向设置页，
+  不再拿 `127.0.0.1` 去连手机自己。
+- **保存即热更新**：每项设置保存后立刻重建接缝里的 provider（配置内容未变则复用同一实例，
+  不打断 HTTP 连接池），改地址无需重启应用；各项均随 settings JSON 持久化。
+- **修复 4 处"静默失效"**（不报错、只是搜不到 / 必超时）：
+  ① 请求 URL 拼成 `host:8080?q=…`（空 path），此前依赖实例 308 跳到 `/search` 才侥幸可用，
+  换成不做跳转的实例就彻底失效 —— 现在自行补齐 `/search` 且不会重复拼接；
+  ② Dio 默认 `validateStatus` 只放过 2xx，原来的 `statusCode >= 400` 分支是**死代码**，
+  4xx/5xx 全被吞掉 —— 现在自行判定并给出 `401/403/404/429/4xx/5xx` 各自的原因；
+  ③ 实例未开 `format=json` 返回 HTML 时，Dio 抛类型转换错被显示成「SearXNG 不可达」彻底指错方向
+  —— 现在按字符串收响应自行解码，明确提示「需在实例 settings.yml 的 `search.formats` 加 json」；
+  ④ `ToolDefinition.timeout` 从未被消费、接缝又写死 15s 默认值覆盖设置项 —— 现在工具声明的
+  超时优先于全局 `toolTimeout`（`ToolExecutor` 与旧 `agent_loop` 口径一致），搜索预算 30s。
+- **搜索质量与上下文预算**：URL 规范化去重（`utm_*` / fragment / 尾斜杠 / 大小写视为同一条）、
+  按 SearXNG `score` 排序、结果超上限时置 `truncated` 提示模型换更具体关键词；回填给模型的文本
+  加了预算（单条摘要 200 字、总量 1500 字），不再把 8 条长摘要塞进 8k 端侧上下文。
+- **引擎白名单提速**：SearXNG 会等待实例上每一个引擎，存在访问不到的引擎时整次搜索被拖到超时
+  （一台自建实例实测全引擎 21s，只留可达引擎 2.2s）。因此把白名单做成设置项，且当填了该实例
+  不认识的引擎被拒（400）时，provider 会自动去掉该参数重试一次。
+- **诊断挖到根**：连不上时把被 Dio 塞进 `error` 的真实 `SocketException` 挖出来展示
+  （如「远程计算机拒绝网络连接。(1225)」）并带上 `host:port` 与耗时，不再只有一句"不可达"。
+- **测试**：新增 `test/agent/web_search_provider_test.dart` **21 项**（注入 Dio adapter 覆盖
+  URL 构造 / 错误分类 / 引擎被拒重试 / 去重 / 文本预算 / 超时链路 / provider 复用 / 设置持久化）；
+  另附 `web_search_live_test.dart` 真实实例验收（默认跳过，设 `SEARX_LIVE_URL` 才跑，不污染 CI）。
+
+**v0.2.1 详细变更（续）— 智能体引擎升级**：
+
+- **会话事件日志（上下文唯一真相源）**：每个对话一本 append-only 事件日志（JSONL、`seq` 严格递增），
+  模型上下文由其纯函数投影——「模型看到的」永远可以从「记录下的」精确重建；上下文压缩改为
+  追加摘要 + 影子遮蔽（**永不删除原文**，可审计可回放）；进程崩溃后自动修复未闭合的
+  turn/step/工具调用（合成"结果未知"回执）；旧 SQLite 对话一次性导入，标记来源。
+- **主循环升级**：显式 turn/step/phase 状态机；失败自动恢复：上下文超限 → 先压缩重试，
+  瞬态错误（429/500/超时）→ 有界退避重试，其余 → 明确终止并给出原因；**Stop 可靠停止并恢复 UI 状态**；
+  流式上屏节流修正为 150ms（原实现误用秒级，体感卡顿）。
+- **六段工具流水线**：pre-execute（allow/deny/ask 审批瀑布）→ guard（单调 deny）→
+  execute（必填校验 / 沙箱审批 / 超时）→ 结果投影 → post-execute（可改写）→ 溢写
+  （超长工具输出自动落盘，模型侧只留摘要与定位）；支持并行工具执行（按 `maxParallel` 分批），
+  日志顺序恒保持模型调用顺序。
+- **模型接入接缝**：本地引擎与 OpenAI 兼容端点统一在 `LlmAdapter` 接口后，每次调用冻结能力快照，
+  协议按能力驱动选择（prompt-JSON 现行，XML-tool / native-tools 预留）——**换模型 / 加模型不改调用方**。
+- **子代理（Subagents）**：模型可通过 `subagent` 工具派生子代理（`spawn` 全新 / `fork` 携带当前对话），
+  适合把大任务的独立子任务隔离执行、只回结论；安全约束：嵌套深度 ≤ 2、每层独立预算、
+  子代理内**不可申请沙箱升级**（恒 workspace-write）。
+- **Skills / Hooks / 指令文件**：内置技能 `web-research`、`code-review`（`<available_skills>` 注入
+  系统提示）；用户可在 `ApplicationSupport/skills/<name>/SKILL.md` 添加自定义技能（同名覆盖内置）；
+  Hook 开放 `agent/pre-step`（可否决单步）与 `tools/result`（只读审计）及流水线 pre/post-execute 监听；
+  `AGENTS.md` 指令文件自动读取并注入（全局 + workspace 两级）。
+- **智能体活动 UI**：输入框上方活动面板实时展示——结构化工具卡片（状态图标 + 参数摘要，
+  展开看完整参数/结果）、「上下文已压缩」横幅、「重试中…（N）」指示、错误行；标题栏运行状态徽章；
+  工具审批（沙箱升级 / pre-execute `ask`）弹确认框逐次批准；原「🔧」过程文本升级为结构化卡片。
+- **测试**：智能体相关新增 **79 项**单测（事件日志 / 主循环 / 流水线 / 适配器 / 子代理 /
+  Skills·Hooks / UI 状态），全仓库 **229 项全绿**，`flutter analyze` 0 error。
+
+**v0.2.1 其他**：
+
+- **llama.cpp 升级 b11028**：上游 b9 系 → b11028（API 漂移全修：mtmd helper 第 4 参、
+  `MTMD_BACKEND_DEVICE` 环境变量被删 → 视觉塔改设 `mtmd_context_params.device`、OpenCL stub 转发补齐、
+  KleidiAI vendored 项目名双写兜底）；模型加载全链路修复（视觉报错文案不再甩锅 mmproj，真凶看引擎日志）。
+- **移除启动加载页**：冷启动直接进首页，模型目录与原生引擎初始化改为后台进行。
 
 ---
 
@@ -414,6 +537,7 @@ llama.cpp 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_voca
 - [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md) — 本机打包构建环境备忘（快速构建）
 - [`docs/backend_benchmark_2026-08-04.md`](docs/backend_benchmark_2026-08-04.md) — 三后端实测专报
 - [`docs/agent_light_design.md`](docs/agent_light_design.md) — Agent Lite 设计
+- [`docs/agent_mode_dsh_replication_design.md`](docs/agent_mode_dsh_replication_design.md) — 智能体引擎架构设计（v0.2.1）
 
 ---
 
