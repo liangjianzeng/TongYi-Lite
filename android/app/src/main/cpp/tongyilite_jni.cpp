@@ -362,6 +362,7 @@ struct InferenceEngine {
         std::string backend = gpu_backend ? gpu_backend : "auto";
         int effective_gpu_layers = 0;
         bool vulkan_ok = false, opencl_ok = false;
+        ggml_backend_dev_t vulkan_dev = nullptr, opencl_dev = nullptr;
         if (enable_gpu) {
             // Probe the registry for backend devices of each type.
             const size_t n_dev = ggml_backend_dev_count();
@@ -379,11 +380,13 @@ struct InferenceEngine {
                 if (dn.find("Vulkan") != std::string::npos ||
                     dn.find("vulkan") != std::string::npos) {
                     vulkan_ok = true;
+                    if (vulkan_dev == nullptr) vulkan_dev = dev;
                 }
                 if (dn.find("OpenCL") != std::string::npos ||
                     dn.find("opencl") != std::string::npos ||
                     dn.find("CL") != std::string::npos) {
                     opencl_ok = true;
+                    if (opencl_dev == nullptr) opencl_dev = dev;
                 }
             }
 
@@ -392,9 +395,12 @@ struct InferenceEngine {
                 reportLoadingLog("已选择 CPU 推理");
             } else if (backend == "vulkan") {
                 if (vulkan_ok) {
-                    // Vulkan verified working on Adreno 825 (V0.1.3): correct
-                    // output, throughput within ~2% of OpenCL.
-                    LOGI("Vulkan selected — verified OK on Adreno 825 (Q4_K_M & Q1_0).");
+                    // NOTE: this was previously logged as "verified OK on Adreno 825 (Q4_K_M & Q1_0)",
+                    // which claimed a Q1_0 verification that never actually happened. Measured
+                    // 2026-09-26 on SM8735/Adreno 825 (vulkan.adreno.so 0800.71): Q1_0 models hang
+                    // the GPU during the first prefill ("Adreno-GSL: log_gpu_snapshot" ->
+                    // "ggml_vulkan: device lost on Vulkan0"). Only claim what has been measured.
+                    LOGI("Vulkan selected (Adreno 825): Q4_K_M-class quants OK, Q1_0 currently HANGS the GPU.");
                     reportLoadingLog("已选择 Vulkan 后端");
                     effective_gpu_layers = gpu_layers;
                 } else {
@@ -428,6 +434,35 @@ struct InferenceEngine {
             LOGI("GPU acceleration disabled by user -> pure CPU");
             reportLoadingLog("已关闭 GPU 加速，使用 CPU 推理");
         }
+        // Pin the chosen device explicitly via model_params.devices.
+        // CRITICAL: without this, llama.cpp's default device selection applies
+        // an iGPU de-dup workaround (llama.cpp src/llama.cpp ~line 260) that
+        // keeps only the FIRST registered iGPU backend and silently drops the
+        // rest. On this build OpenCL registers before Vulkan, so Adreno 825
+        // was exclusively owned by OpenCL — selecting "vulkan" in the UI only
+        // printed a log line and set n_gpu_layers, but the model buffers were
+        // still placed on OpenCL. Quant types OpenCL has no kernel for
+        // (e.g. PTQ1_0) then fell back to CPU inside the scheduler, which is
+        // the "Vulkan selected yet 10x slower" mystery. Pinning the device
+        // makes the UI setting actually control which backend owns the model.
+        ggml_backend_dev_t chosen_dev = nullptr;
+        if (enable_gpu && backend != "cpu") {
+            if (backend == "vulkan") {
+                chosen_dev = vulkan_dev;
+            } else if (backend == "opencl") {
+                chosen_dev = opencl_dev;
+            } else { // auto: prefer OpenCL (well-optimized on Adreno)
+                chosen_dev = (opencl_dev != nullptr) ? opencl_dev : vulkan_dev;
+            }
+        }
+        static ggml_backend_dev_t pinned_devices[2] = {nullptr, nullptr};
+        pinned_devices[0] = chosen_dev;
+        pinned_devices[1] = nullptr;
+        model_params.devices = (chosen_dev != nullptr) ? pinned_devices : nullptr;
+        if (chosen_dev != nullptr) {
+            LOGI("model_params.devices pinned to %s", ggml_backend_dev_name(chosen_dev));
+        }
+
         model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
 
@@ -519,6 +554,10 @@ struct InferenceEngine {
             // Match the target's offload policy; a pure-CPU target keeps the
             // draft on CPU too (n_gpu_layers=0).
             draft_params.n_gpu_layers = effective_gpu_layers;
+            // Same device pinning as the target model — otherwise the draft
+            // head lands on the first-registered iGPU (OpenCL) while the
+            // target lives on Vulkan, splitting the KV/injection path.
+            draft_params.devices = model_params.devices;
             draft_model = llama_model_load_from_file(draft_path, draft_params);
             if (!draft_model) {
                 LOGE("Failed to load dspark draft model -> dspark disabled");
@@ -581,6 +620,17 @@ struct InferenceEngine {
         // (OpenCL/Vulkan) prefill runs on the GPU kernel and does NOT hit that CPU
         // GEMM bug, so we raise ubatch to 512 for fast prefill there.
         ctx_params.n_ubatch = enable_gpu ? 512 : 16;
+        // VULKAN_DEBUG: TONGYI_UBATCH overrides the prefill width from vk_flags.conf so
+        // we can bisect "large physical batch vs. GPU backend" without a rebuild.
+        if (const char * ub = getenv("TONGYI_UBATCH")) {
+            const int v = atoi(ub);
+            if (v >= 32 && v <= 2048) {
+                ctx_params.n_ubatch = v;
+                LOGW("n_ubatch overridden by TONGYI_UBATCH -> %d", v);
+            } else {
+                LOGW("TONGYI_UBATCH=%s ignored (out of range 32..2048)", ub);
+            }
+        }
         LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
         // Flash attention: AUTO enables it on backends that support it (e.g. Vulkan
@@ -996,10 +1046,10 @@ struct InferenceEngine {
 
         // 2. Decode the media file (image OR audio — mtmd_helper auto-detects by
         //    magic bytes: jpg/png/bmp for images, wav/mp3/flac for audio) to a bitmap.
-        //    b11028: helper gained an init_opt param (video sampling opts; default ok).
+        //    prism 分支的 mtmd helper 没有 b11028 新增的 init_opt 形参（视频采样选项），
+        //    所以这里保持 3 参调用；若将来回到 b11028 基线，需补回 mtmd_helper_init_opt_default()。
         struct mtmd_helper_bitmap_wrapper wrap =
-            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false,
-                                              mtmd_helper_init_opt_default());
+            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false);
         if (!wrap.bitmap) {
             LOGW("vision: failed to decode media %s", media_path);
             return "[ERROR: 媒体文件解码失败]";
@@ -2083,6 +2133,104 @@ static std::string jstring_to_std(JNIEnv *env, jstring jstr) {
 
 extern "C" {
 
+// --- VULKAN_DEBUG: apply GGML_VK_* feature flags from a conf file at startup ---
+// Purpose: toggle Vulkan backend feature switches without rebuilding the .so.
+// Format: one KEY=VALUE per line; '#' starts a comment; a bare KEY means "1".
+// The Vulkan device is created during llama_backend_init(), so this has to run first.
+static void applyVkFlagsConf(const char *path) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return;
+    }
+    std::string line;
+    int applied = 0;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
+        size_t b = line.find_first_not_of(" \t");
+        if (b == std::string::npos) {
+            continue;
+        }
+        line = line.substr(b);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::string key = line;
+        std::string val = "1";
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            key = line.substr(0, eq);
+            val = line.substr(eq + 1);
+        }
+        if (key.empty()) {
+            continue;
+        }
+        setenv(key.c_str(), val.c_str(), 1);
+        LOGI("vk flag applied: %s=%s", key.c_str(), val.c_str());
+        applied++;
+    }
+    if (applied > 0) {
+        LOGI("vk flags conf loaded from %s (%d entries)", path, applied);
+    }
+}
+
+static void loadVkFlagsConf() {
+    // RESEARCH(vendor fix): Adreno 825 (0800.71) defaults, verified via
+    // test-backend-ops / CHECK_RESULTS on device (2026-09-26):
+    //  - NO_SUBGROUP: the subgroup-reduction mul_mat_vec pipeline variants fail
+    //    to create/link on this driver -> force SHMEM reduction.
+    //  - DISABLE_FUSION: the fused add+rms kernel returns an all-zero buffer.
+    //  - NO_MMV: route n==1 (decode) to MMQ too; some mul_mat_vec NCOLS variants
+    //    cannot be created on this driver.
+    //  - DISABLE_INTEGER_DOT_PRODUCT: dp4a (int8 dot) paths are numerically
+    //    wrong on this driver (avg_err > 1.0).
+    // A vk_flags.conf entry overrides any of these (e.g. to A/B test).
+    static const char * defaults[] = {
+        "GGML_VK_NO_SUBGROUP=1",
+        "GGML_VK_DISABLE_FUSION=1",
+        "GGML_VK_NO_MMV=1",
+        "GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1",
+    };
+    for (const char * d : defaults) {
+        std::string kv(d);
+        size_t eq = kv.find('=');
+        if (getenv(kv.substr(0, eq).c_str()) == nullptr) {
+            setenv(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str(), 1);
+            LOGI("vk flag default: %s", d);
+        }
+    }
+
+    static const char * candidates[] = {
+        "/data/data/com.dgxspark.tongyilite/app_flutter/vk_flags.conf",
+        "/sdcard/TongYiLite/vk_flags.conf",
+        "/storage/emulated/0/TongYiLite/vk_flags.conf",
+    };
+    for (const char * p : candidates) {
+        struct stat st {};
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) {
+            applyVkFlagsConf(p);
+        }
+    }
+}
+
+// --- VULKAN_DEBUG: bridge llama/ggml logs to logcat ---
+// ggml's default log callback writes to stderr, which an Android app does not surface,
+// so every "ggml_vulkan: ..." error was invisible in logcat. Forward them.
+static void ggmlLogToLogcat(ggml_log_level level, const char * text, void * /*user_data*/) {
+    if (text == nullptr) {
+        return;
+    }
+    int prio = ANDROID_LOG_INFO;
+    switch (level) {
+        case GGML_LOG_LEVEL_ERROR: prio = ANDROID_LOG_ERROR; break;
+        case GGML_LOG_LEVEL_WARN:  prio = ANDROID_LOG_WARN;  break;
+        case GGML_LOG_LEVEL_DEBUG: prio = ANDROID_LOG_DEBUG; break;
+        default:                   prio = ANDROID_LOG_INFO;  break;
+    }
+    __android_log_print(prio, "llama", "%s", text);
+}
+
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *) {
     g_jvm = vm;
     LOGI("JNI_OnLoad");
@@ -2094,6 +2242,8 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *) {
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeInit(JNIEnv *env, jobject) {
     LOGI("nativeInit: initializing llama backend");
+    loadVkFlagsConf();
+    llama_log_set(ggmlLogToLogcat, nullptr);
     llama_backend_init();
     return JNI_TRUE;
 }
