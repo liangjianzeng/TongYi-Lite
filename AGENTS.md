@@ -1,5 +1,36 @@
 # TongYi-Lite 项目指令 / 记忆
 
+## 智能体模式总开关 + 「同时最多一个 spinner」不变量（2026-09-28）
+
+> 用户要求：智能体模式**必须可关闭**（本地小模型扛不住大 prefill），关闭后 = 简单聊天；
+> 且修复"发一条消息两处转圈思考"的蠢 UI。
+
+**总开关**（设置 → 智能体 Tab 首排）：
+- `agentEnabled` 路由本就存在（`chat_provider.sendMessage` 按 `_ref.read(settingsProvider).agentEnabled`
+  分流），**缺的只是 UI**；现 `settings_screen._AgentTab` 首排加 `_buildToggleTitle` 绑
+  `notifier.setAgentEnabled`，关闭时 `Opacity(0.45)+IgnorePointer` 置灰全部子设置卡。
+- 关闭路径 = 纯历史消息直连模型（无系统提示词/工具定义/AGENTS.md/Skills），
+  🔧 工具活动消息两路都已排除，历史互不污染。
+- **模式切换必须 resetContext**：KV 缓存按会话复用（`_currentKvConvId`），
+  同会话中途开/关智能体若不重置，普通聊天会续跑在被大提示词污染的 KV 上。
+  已加 `_currentKvWasAgentMode` 标记，两路径在"同会话但模式变了"时强制 reset。
+
+**双转圈根因**：智能体回合空答案占位气泡（ChatBubble 自带"思考中…"）+
+`AgentTurnBlock.ThinkingIndicator` 同时渲染 = 两个转圈。修复（`agent_workflow.dart`）：
+- `_answerPending`（live+running+答案空）时**不渲染空答案气泡**，只留思考行；
+- 工具有 executing 步骤 → 思考行隐藏（工具卡自带"执行中…"状态）；
+- `retryAttempt>0` → 思考行隐藏（已有 RetryIndicator）；重试/压缩横幅加 `ui.running` 门槛防串台。
+- `home_screen`：`isLiveTurn` 改为 `(uiState.running || isGenerating) && 末组`，
+  普通聊天生成中才有唯一"思考中…"占位与流式光标；
+  `_stepsFor` 只在 `ui.running`（真智能体回合）取事件流，
+  **普通聊天绝不借上一智能体回合残留的 ui.tools 工具卡**。
+- 不变量：**界面上同时最多一个 spinner**。动这块先跑 `flutter test test/agent`
+  （本次全绿 212 项 + 2 skip）。
+
+**环境坑（本次抓到）**：沙箱受限模式下 `flutter.bat`/`flutter analyze`/`dart analyze`/`flutter test`
+会**无声挂死**（fork analysis_server/编译测试子进程被拒：`CreateFile failed 5`），
+不是编译慢。`flutter --version` 90s 不出结果即可确诊；解法=放开沙箱（full-access）后一切正常。
+
 ## 真机打包安装（重要规则，务必遵守）
 
 > **更新安装真机时，绝不要"先卸载再装"**（`adb uninstall` + `adb install`）。
