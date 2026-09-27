@@ -110,9 +110,13 @@ kernel void kernel_mul_mv_ptq1_0_f32(
     global float * y  = (global float *) (src1 + offset_src1);
 
     // pointers to src0 rows
+    // Row reads are NOT write-guarded below, so clamp tail rows (grid covers
+    // ceil(ne01/4)) to the last valid row: reading past the final tensor of
+    // the weights buffer can fault the GPU SMMU and reboot the device.
     global block_ptq1_0 * ax[N_R0_PTQ1_0];
     for (int row = 0; row < N_R0_PTQ1_0; ++row) {
-        ulong offset_src0 = (ulong)(first_row + row)*nb01 + (i12/r2)*nb02 + (i13/r3)*nb03;
+        const int row_idx = min(first_row + row, ne01 - 1);
+        ulong offset_src0 = (ulong)row_idx*nb01 + (i12/r2)*nb02 + (i13/r3)*nb03;
         ax[row] = (global block_ptq1_0 *) ((global char *) src0 + offset_src0);
     }
 

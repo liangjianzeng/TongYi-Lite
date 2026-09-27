@@ -173,6 +173,19 @@ class InferenceSettings {
   /// 模型）；关闭后视觉模型仅文本推理，不加载投影器。
   final bool autoLoadMmproj;
 
+  /// OOM 内存守卫总开关（设置→推理引擎→内存守卫）。默认开启：加载前预检
+  /// 「模型体积 + 预检余量」是否超出可用内存，超出则拒绝加载，防止 UMA 手机
+  /// 整机硬死机。关闭 = 完全跳过守卫拒绝（高级用户排障用，有死机风险）。
+  final bool oomGuardEnabled;
+
+  /// OOM 预检余量（MB，默认 768）。加载前 MemAvailable 扣除该余量后再与
+  /// 模型体积比较；调小更容易放过接近极限的大模型，调大更保守。
+  final int oomPreHeadroomMb;
+
+  /// OOM 加载后余量（MB，默认 1536）。加载完成后 KV cache / 图计算缓冲的
+  /// 内存预算 = MemAvailable - 该余量；调小可给 KV 更大空间，调大更保守。
+  final int oomPostHeadroomMb;
+
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
   /// 目录声明的默认工具集（agentDefaults.enabledTools）。
   final Map<String, List<String>> agentToolsByModel;
@@ -239,6 +252,10 @@ class InferenceSettings {
     this.agentMemoryEnabled = false,
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
+    // OOM 内存守卫默认开启，余量默认与原生层常量一致（768 / 1536 MB）。
+    this.oomGuardEnabled = true,
+    this.oomPreHeadroomMb = 768,
+    this.oomPostHeadroomMb = 1536,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -319,6 +336,9 @@ class InferenceSettings {
       bool? agentMemoryEnabled,
       // ---- 推理引擎 ----
       bool? autoLoadMmproj,
+      bool? oomGuardEnabled,
+      int? oomPreHeadroomMb,
+      int? oomPostHeadroomMb,
       Map<String, List<String>>? agentToolsByModel,
       Map<String, Map<String, dynamic>>? agentByModel}) {
     return InferenceSettings(
@@ -378,6 +398,9 @@ class InferenceSettings {
           agentFullFileAccess ?? this.agentFullFileAccess,
       agentMemoryEnabled: agentMemoryEnabled ?? this.agentMemoryEnabled,
       autoLoadMmproj: autoLoadMmproj ?? this.autoLoadMmproj,
+      oomGuardEnabled: oomGuardEnabled ?? this.oomGuardEnabled,
+      oomPreHeadroomMb: oomPreHeadroomMb ?? this.oomPreHeadroomMb,
+      oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
     );
@@ -426,6 +449,9 @@ class InferenceSettings {
         'agentMemoryEnabled': agentMemoryEnabled,
         // ---- 推理引擎 ----
         'autoLoadMmproj': autoLoadMmproj,
+        'oomGuardEnabled': oomGuardEnabled,
+        'oomPreHeadroomMb': oomPreHeadroomMb,
+        'oomPostHeadroomMb': oomPostHeadroomMb,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
       };
@@ -491,6 +517,10 @@ class InferenceSettings {
       agentMemoryEnabled: json['agentMemoryEnabled'] as bool? ?? false,
       // 推理引擎扩展：旧配置缺字段时用默认值（投影器默认加载、监控默认开启）。
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
+      // OOM 内存守卫：旧配置缺字段时默认开启 + 原生层默认余量（向后兼容）。
+      oomGuardEnabled: json['oomGuardEnabled'] as bool? ?? true,
+      oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
+      oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );
