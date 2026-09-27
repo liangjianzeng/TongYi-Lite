@@ -373,10 +373,13 @@ class AgentTurnBlock extends StatelessWidget {
       isLive && ui.running && (answer == null || answer!.content.trim().isEmpty);
 
   /// 思考行只在「模型确实在转、答案未开始、且没有工具正在执行」时显示。
-  /// 工具执行中不显示——工具卡片自带「执行中…」转圈，再叠一个就是
-  /// 双转圈（蠢）。全程保证界面上同时最多一个 spinner。
+  /// 工具执行中不显示——工具卡片自带「执行中…」状态，再叠一个就是
+  /// 双转圈（蠢）；重试中已有 RetryIndicator 转圈，同理不再叠加。
+  /// 全程保证界面上同时最多一个 spinner。
   bool get _thinking =>
-      _answerPending && !steps.any((s) => s.status == ToolUiStatus.executing);
+      _answerPending &&
+      ui.retryAttempt == 0 &&
+      !steps.any((s) => s.status == ToolUiStatus.executing);
 
   @override
   Widget build(BuildContext context) {
