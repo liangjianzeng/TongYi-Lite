@@ -101,6 +101,10 @@ class InferenceEngine(private val context: Context) {
     private external fun nativeGetKvCacheBytes(): Long
     private external fun nativeGetModelInfo(): String
     private external fun nativeGetLastStats(): String
+    private external fun nativeGetLastLoadingMessage(): String
+
+    /** Push OOM-guard settings from the UI (设置→推理引擎→内存守卫) into native env. */
+    private external fun nativeSetOomGuardParams(enabled: Boolean, preHeadroomMb: Int, postHeadroomMb: Int)
 
     // --- Public API ---
 
@@ -143,7 +147,12 @@ class InferenceEngine(private val context: Context) {
         if (ok) {
             loadingCallback?.onLoadingLog("模型加载成功 ✓")
         } else {
-            loadingCallback?.onLoadingLog("模型加载失败，请检查日志")
+            // Surface the native-side refusal reason (oom-guard numbers, file
+            // errors...) instead of a bare "check the logs" line.
+            val reason = try { nativeGetLastLoadingMessage() } catch (_: Throwable) { "" }
+            loadingCallback?.onLoadingLog(
+                if (reason.isNotBlank()) "模型加载失败：$reason" else "模型加载失败，请检查日志"
+            )
         }
         return ok
     }
@@ -161,6 +170,17 @@ class InferenceEngine(private val context: Context) {
     /** Toggle Qwen3-style "thinking" (<think> chain). false = answer directly. */
     fun setEnableThinking(enable: Boolean) {
         nativeSetEnableThinking(enable)
+    }
+
+    /**
+     * Configure the OOM guard (设置→推理引擎→内存守卫). Called before every
+     * model load; native reads these at load time via getenv.
+     * @param enabled false = 完全跳过守卫拒绝（风险：整台机器硬死机重启）
+     * @param preHeadroomMb  预检余量（加载前判定，默认 768）
+     * @param postHeadroomMb 加载后余量（KV/图计算预算，默认 1536）
+     */
+    fun setOomGuardParams(enabled: Boolean, preHeadroomMb: Int, postHeadroomMb: Int) {
+        nativeSetOomGuardParams(enabled, preHeadroomMb, postHeadroomMb)
     }
 
     /** Clear the KV cache to start a brand-new conversation (multi-turn append-only). */

@@ -97,6 +97,14 @@ abstract class BaseEngineAdapter implements LlmAdapter {
 
   /// 解析最终文本流 → [LlmResult]（两条路线共用）。
   ///
+  /// 解析最终文本流 → [LlmResult]（两条路线共用）。
+  ///
+  /// 优先用 [AgentStreamProcessor.cleanText]（原始流去掉思考块、保留工具调用）
+  /// 喂协议解析——而非原始流，否则 Qwen 的  think/response 思考块
+  /// 会渗入 LlmResult.text，成为历史 assistant 内容，污染上下文、
+  /// 把"思考内容"冒充回复并断开执行链。processor 未经流喂入（cleanText 空）
+  /// 时退回 [rawBuffer]（测试桩/调用方自持缓冲的形态）。
+  ///
   /// 空响应兜底（fail-loud）：流干净结束但既无文本也无工具调用时抛
   /// [LlmFailureCode.emptyResponse] 走失败瀑布——否则主循环会把空结果当
   /// "最终回答" 静默完成，UI 存一条空白消息（API 思考型模型推理耗尽
@@ -104,8 +112,10 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   Future<LlmResult> parseAndReturn(
       StringBuffer rawBuffer, AgentStreamProcessor processor) async {
     processor.finish();
+    final clean = processor.cleanText;
+    final text = clean.isEmpty ? rawBuffer.toString() : clean;
     final outcome =
-        await _protocol.parseStream(Stream<String>.value(rawBuffer.toString()));
+        await _protocol.parseStream(Stream<String>.value(text));
     final result = LlmResult(text: outcome.text, toolCalls: outcome.toolCalls);
     if (result.text.trim().isEmpty && !result.hasToolCalls) {
       throw const LlmFailure(

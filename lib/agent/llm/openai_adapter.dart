@@ -347,6 +347,8 @@ class OpenAiAdapter extends BaseEngineAdapter {
       if (error != null) {
         throw _normalizeStreamError(error);
       }
+      // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
+      print('[AGDBG/API] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
       return parseAndReturn(rawBuffer, processor);
     } on AgentCancelledException catch (e) {
       rethrow;
