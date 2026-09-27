@@ -777,7 +777,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           itemCount: units.length,
           itemBuilder: (context, index) {
             final unit = units[index];
-            final isLiveTurn = uiState.running && index == units.length - 1;
+            final isLiveTurn =
+                (uiState.running || generating) && index == units.length - 1;
             return switch (unit) {
               UserUnit(:final message) => ChatBubble(
                     role: message.role.name,
@@ -801,14 +802,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 回合步骤：live 回合用事件流实时数据（参数/结果/状态实时更新）；
-  /// 历史回合解析存储 🔧 活动消息。解析为空但本回合活动未结束（轮询
-  /// 500ms 间隙内）时短暂 fallback 事件流，避免步骤闪现为空。
+  /// 回合步骤：live **智能体**回合用事件流实时数据（参数/结果/状态实时更新）；
+  /// 其余（历史回合 / 普通聊天生成中）解析存储 🔧 活动消息。
+  /// 普通聊天生成中绝不借用事件流——那是上一智能体回合的残留卡片，
+  /// 借了就会在简单对话下面凭空多出一排工具卡。
   List<ToolActivityUi> _stepsFor(
       AgentUiState ui, List<ChatMessage> tools, bool isLiveTurn) {
-    if (isLiveTurn) return ui.tools;
-    final parsed = parsedToolActivities(tools);
-    return parsed.isEmpty && ui.hasActivity ? ui.tools : parsed;
+    if (isLiveTurn && ui.running) return ui.tools;
+    return parsedToolActivities(tools);
   }
 
   Widget _buildInputBar(bool isGenerating) {
