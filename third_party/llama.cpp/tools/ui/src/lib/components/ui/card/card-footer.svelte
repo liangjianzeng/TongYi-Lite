@@ -12,8 +12,8 @@
 
 <div
 	bind:this={ref}
-	class={cn('flex items-center px-6 [.border-t]:pt-6', className)}
 	data-slot="card-footer"
+	class={cn('flex items-center px-6 [.border-t]:pt-6', className)}
 	{...restProps}
 >
 	{@render children?.()}

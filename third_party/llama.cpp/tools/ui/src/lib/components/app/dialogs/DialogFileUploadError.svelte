@@ -21,7 +21,7 @@
 	}
 </script>
 
-<AlertDialog.Root onOpenChange={handleOpenChange} {open}>
+<AlertDialog.Root {open} onOpenChange={handleOpenChange}>
 	<AlertDialog.Portal>
 		<AlertDialog.Overlay />
 

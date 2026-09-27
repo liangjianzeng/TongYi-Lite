@@ -1152,45 +1152,6 @@ class _InferenceEngineTab extends ConsumerWidget {
                     gpuNotifier.setAutoLoadMmproj,
                     subtitle: '针对有投影器（mmproj）的视觉模型；关闭后仅文本推理',
                   ),
-                  const SizedBox(height: 16),
-                  _buildToggleTitle(
-                    '📊 GPU/CPU 占用率监控',
-                    gpuSettings.showResourceMonitor,
-                    gpuNotifier.setShowResourceMonitor,
-                    subtitle: '模型状态栏底部双色线：蓝=GPU、紫=CPU',
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Slider(
-                          value: gpuSettings.resourceSampleIntervalSec.toDouble(),
-                          min: 0,
-                          max: 30,
-                          divisions: 30,
-                          label: '${gpuSettings.resourceSampleIntervalSec} 秒',
-                          onChanged: (v) => gpuNotifier
-                              .setResourceSampleIntervalSec(v.round()),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 78,
-                        child: Text(
-                          gpuSettings.resourceSampleIntervalSec == 0
-                              ? '推理时'
-                              : '${gpuSettings.resourceSampleIntervalSec}s',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(fontWeight: FontWeight.w500),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '采样周期：0 秒 = 仅推理时采样（空闲不采样省电）；>0 = 周期性采样',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                  ),
                 ],
               ),
             ),
@@ -1531,6 +1492,34 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ============ ⓪ 智能体模式总开关（首排） ============
+          // 关闭 = 普通聊天：不注入系统提示词/工具定义/AGENTS.md/Skills，
+          // prefill 最小，本地小模型友好；打开才走工具循环。
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: _buildToggleTitle(
+                '🤖 智能体模式',
+                settings.agentEnabled,
+                notifier.setAgentEnabled,
+                subtitle: settings.agentEnabled
+                    ? '开：走智能体循环（注入系统提示词 + 工具定义，可多步调用工具）'
+                    : '关：简单聊天直连模型，不注入系统提示词/工具说明，'
+                        'prefill 最小；下方所有智能体设置暂不生效',
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // 关闭总开关时置灰全部子项（不可交互，直观反映"暂不生效"）。
+          Opacity(
+            opacity: settings.agentEnabled ? 1.0 : 0.45,
+            child: IgnorePointer(
+              ignoring: !settings.agentEnabled,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
           // ================= ① 引擎状态（能力总览）=================
           Card(
             child: Padding(
@@ -1538,14 +1527,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildToggleTitle(
-                    '⚡ 新一代引擎',
-                    settings.useNewAgentMode,
-                    notifier.setUseNewAgentMode,
-                    subtitle: '事件日志上下文 · 失败自动恢复 · 子代理 · Skills/Hooks。'
-                        '关闭 = 回退旧引擎（保留回滚通道）',
-                  ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 8),
                   _buildSectionHeader('🤖 驱动模型', context),
                   const Text(
                     '指定智能体由哪个模型驱动；能力徽标随选择实时变化',
@@ -1899,6 +1881,10 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
           ),
 
           const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );

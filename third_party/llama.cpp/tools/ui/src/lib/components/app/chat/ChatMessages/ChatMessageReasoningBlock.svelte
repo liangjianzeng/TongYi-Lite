@@ -124,23 +124,23 @@
 </script>
 
 <CollapsibleContentBlock
+	{open}
 	class="my-2"
 	icon={Lightbulb}
 	iconClass="h-3.5 w-3.5"
-	{onToggle}
-	{open}
-	{shimmerTitle}
-	{subtitle}
 	{title}
+	{subtitle}
+	{shimmerTitle}
+	{onToggle}
 >
 	<div
 		bind:this={scrollEl}
-		class:is-streaming={isPending}
 		class="reasoning-content"
+		class:is-streaming={isPending}
 		onscroll={handleScrollEvent}
 	>
 		{#if currentConfig.renderThinkingAsMarkdown}
-			<MarkdownContent {attachments} class="text-muted-foreground" content={section.content} />
+			<MarkdownContent content={section.content} class="text-muted-foreground" {attachments} />
 		{:else}
 			<div
 				class="text-[13px] leading-relaxed wrap-break-word whitespace-pre-wrap text-muted-foreground"

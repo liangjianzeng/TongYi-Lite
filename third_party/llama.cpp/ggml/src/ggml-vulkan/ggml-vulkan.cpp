@@ -1,5 +1,8 @@
 #include "ggml-vulkan.h"
 #include <vulkan/vulkan_core.h>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
 #include <chrono>
 #include "ggml-cpu.h"
@@ -5932,13 +5935,23 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             GGML_ASSERT(is_pow2(S_V));
 
             uint32_t lanes_per_column;
-            if (S_V >= 128u && device->subgroup_clustered) {
+            if (S_V >= 128u && device->subgroup_clustered && device->subgroup_arithmetic) {
                 lanes_per_column = 8u;
             } else {
                 // Use largest power-of-two that divides both S_V and subgroup_size so that
                 // (1) S_V % lanes_per_column == 0 and (2) S_V % (subgroup_size / lanes_per_column) == 0.
                 // This means we don't need extra bounds checking logic in the shader.
                 lanes_per_column = std::min(S_V, device->subgroup_size);
+            }
+
+            // [turnip-fix] RESEARCH(vendor fix): with arithmetic-subgroup ops disabled
+            // (GGML_VK_NO_SUBGROUP / broken vendor drivers) the shader takes the shmem-butterfly
+            // reduce path; Turnip out-of-tree gen8 (Adreno 825) miscompiles it for the S_V=128
+            // layout (both the LANES=8 clustered shortcut and the LANES=128 full-butterfly) --
+            // only head_size=128 GATED_DELTA_NET cases fail. Clamp to 64, which matches the
+            // known-good S_V=64 layout (64-lane butterfly, 2 cols/workgroup).
+            if (!device->subgroup_arithmetic && lanes_per_column > 64u) {
+                lanes_per_column = 64u;
             }
 
             // gated_delta_net.comp relies on S_V % COLS_PER_WG == 0 and
@@ -6492,6 +6505,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
                                  (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eBasic);
         device->subgroup_arithmetic = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                       (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eArithmetic);
+        // RESEARCH(vendor fix): Turnip out-of-tree gen8 (Adreno 825) miscompiles subgroup arithmetic
+        // reductions (subgroupAdd) -> f32 MUL_MAT garbage and SSM_SCAN state corruption.
+        // GGML_VK_NO_SUBGROUP must disable ALL arithmetic-subgroup pipeline variants, not just matvec.
+        if (getenv("GGML_VK_NO_SUBGROUP") != nullptr) {
+            device->subgroup_arithmetic = false;
+        }
 #ifdef __APPLE__
         // Workaround for subgroup arithmetic failing on MoltenVK with AMD GPUs (issue 15846)
         if (device->vendor_id == VK_VENDOR_ID_AMD) {
@@ -6725,7 +6744,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_EXT_device_fault");
         }
 
-        vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
 
         device->device_fault = device->device_fault && fault_features.deviceFault;
 
@@ -7029,7 +7048,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
 
         if (device->device_fault) {
             device->pfn_vkGetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)
-                vkGetDeviceProcAddr(device->device, "vkGetDeviceFaultInfoEXT");
+                (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr != nullptr ? VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(device->device, "vkGetDeviceFaultInfoEXT") : nullptr);
         }
 
         // Queues
@@ -7355,7 +7374,7 @@ static void ggml_vk_print_gpu_info(size_t idx) {
     }
 #endif
 
-    vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);
 
     fp16 = fp16 && vk12_features.shaderFloat16;
 
@@ -7433,22 +7452,115 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher() {
     return ggml_vk_default_dispatcher_instance;
 }
 
+#if defined(__ANDROID__) || defined(__linux__)
+// [turnip] Direct-load a user-supplied Vulkan driver (e.g. Mesa Turnip), bypassing
+// the system loader/vendor driver. GGML_VK_TURNIP = absolute path of driver .so.
+// Entry conventions: standard ICD exports, or Android Vulkan HAL module
+// (dlsym "HMI" -> hw_module_t -> methods->open("vulkan") -> vulkan_device_t),
+// which is how Mesa Turnip Android builds expose their entry points.
+namespace turnip_hal {
+struct hw_module_methods_t { int (*open_)(const void *module, const char *id, void **device); };
+struct hw_module_t {
+    uint32_t tag; uint16_t module_api_version; uint16_t hal_api_version;
+    const char *id; const char *name; const char *author;
+    hw_module_methods_t *methods; void *dso; uint32_t reserved[8];
+};
+struct hw_device_t {
+    uint32_t tag; uint32_t version; hw_module_t *module;
+    hw_module_methods_t *methods; int (*close_)(void *device); int32_t reserved[32];
+};
+struct vulkan_device_t {
+    // Mesa HAL device: PFN table observed starting at byte offset 0x70
+    // (hw_device_t common occupies less than that here), same field order as
+    // the AOSP vulkan_device_t: EnumerateInstanceExtensionProperties,
+    // EnumerateInstanceLayerProperties, CreateInstance, GetInstanceProcAddr.
+    uint8_t _common[0x70];
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkEnumerateInstanceLayerProperties EnumerateInstanceLayerProperties;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+}  // namespace turnip_hal
+
+static PFN_vkGetInstanceProcAddr ggml_vk_turnip_resolve_gipa(const char *path) {
+    void *drv = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (drv == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] dlopen(%s) failed: %s\n", path, dlerror());
+        return nullptr;
+    }
+    PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr) dlsym(drv, "vk_icdGetInstanceProcAddr");
+    if (gipa == nullptr)
+        gipa = (PFN_vkGetInstanceProcAddr) dlsym(drv, "vkGetInstanceProcAddr");
+    if (gipa != nullptr) {
+        GGML_LOG_INFO("ggml_vulkan: [turnip] using ICD entry from %s\n", path);
+        return gipa;
+    }
+    auto mod = (turnip_hal::hw_module_t *) dlsym(drv, "HMI");
+    if (mod == nullptr || mod->tag != 0x48574d54u /* 'HWMT' */ || mod->methods == nullptr || mod->methods->open_ == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] no usable driver entry found in %s\n", path);
+        return nullptr;
+    }
+    void *dev = nullptr;
+    if (mod->methods->open_(mod, "vulkan", &dev) != 0 || dev == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL open() failed for %s\n", path);
+        return nullptr;
+    }
+    auto vdev = (turnip_hal::vulkan_device_t *) dev;
+    if (vdev->GetInstanceProcAddr == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL device has no GetInstanceProcAddr\n");
+        return nullptr;
+    }
+    // Sanity check: a genuine vkGetInstanceProcAddr resolves global entry points for a NULL instance
+    if (vdev->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance") == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL GetInstanceProcAddr failed sanity check\n");
+        return nullptr;
+    }
+    GGML_LOG_INFO("ggml_vulkan: [turnip] using Vulkan HAL GetInstanceProcAddr from %s\n", path);
+    return vdev->GetInstanceProcAddr;
+}
+#endif
+
 static void ggml_vk_instance_init() {
     if (vk_instance_initialized) {
         return;
     }
     VK_LOG_DEBUG("ggml_vk_instance_init()");
 
-    // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
-    ggml_vk_default_dispatcher_instance.init(vkGetInstanceProcAddr);
+    const char* turnip_path = getenv("GGML_VK_TURNIP");
+    if (turnip_path != nullptr && turnip_path[0] != '\0') {
+        PFN_vkGetInstanceProcAddr turnip_gipa = ggml_vk_turnip_resolve_gipa(turnip_path);
+        if (turnip_gipa == nullptr)
+            throw std::runtime_error("[turnip] failed to resolve driver entry points");
+        GGML_LOG_ERROR("[turnip-step] gipa resolved, init dispatcher\n");
+        ggml_vk_default_dispatcher_instance.init(turnip_gipa);
+        GGML_LOG_ERROR("[turnip-step] dispatcher init done (enumVer=%p)\n", (void*) ggml_vk_default_dispatcher().vkEnumerateInstanceVersion);
+    } else {
+        ggml_vk_default_dispatcher_instance.init(vkGetInstanceProcAddr);
+    }
 
-    uint32_t api_version = vk::enumerateInstanceVersion();
+    // [turnip] vk::enumerateInstanceVersion() would call a NULL dispatcher entry if the
+    // loaded driver's GetInstanceProcAddr does not export vkEnumerateInstanceVersion.
+    uint32_t api_version;
+    {
+        auto pfn_enum_ver = (PFN_vkEnumerateInstanceVersion) ggml_vk_default_dispatcher().vkEnumerateInstanceVersion;
+        uint32_t v = 0;
+        api_version = VK_API_VERSION_1_2;
+        if (pfn_enum_ver != nullptr) {
+            Dl_info info{};
+            if (dladdr((void *) pfn_enum_ver, &info) != 0)
+                GGML_LOG_ERROR("[turnip-step] enumVer -> %s +0x%llx\n", info.dli_fname,
+                               (unsigned long long) ((uintptr_t) pfn_enum_ver - (uintptr_t) info.dli_fbase));
+            else
+                GGML_LOG_ERROR("[turnip-step] enumVer -> <unknown mapping> (not calling it)\n");
+        }
+    }
 
     if (api_version < VK_API_VERSION_1_2) {
         std::cerr << "ggml_vulkan: Error: Vulkan 1.2 required." << std::endl;
         throw vk::SystemError(vk::Result::eErrorFeatureNotPresent, "Vulkan 1.2 required");
     }
 
+    GGML_LOG_ERROR("[turnip-step] creating appinfo\n");
     vk::ApplicationInfo app_info{ "ggml-vulkan", 1, nullptr, 0, api_version };
 
     const std::vector<vk::ExtensionProperties> instance_extensions = vk::enumerateInstanceExtensionProperties();
@@ -7492,7 +7604,9 @@ static void ggml_vk_instance_init() {
     }
 #endif
 
+    GGML_LOG_ERROR("[turnip-step] calling vkCreateInstance\n");
     vk_instance.instance = vk::createInstance(instance_create_info);
+    GGML_LOG_ERROR("[turnip-step] instance created\n");
     vk_instance_initialized = true;
 
     if (debug_utils_ext) {
@@ -7521,8 +7635,34 @@ static void ggml_vk_instance_init() {
 
     // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
     VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_instance.instance);
+    GGML_LOG_ERROR("[turnip-step] instance dispatcher init done\n");
+    {   // [turnip] find dispatch entries that the driver's gipa did not resolve
+        #define VKCHK(fn) if (VULKAN_HPP_DEFAULT_DISPATCHER.fn == nullptr) GGML_LOG_ERROR("[turnip-step]   NULL: " #fn "\n");
+        VKCHK(vkGetPhysicalDeviceProperties2)
+        VKCHK(vkGetPhysicalDeviceFeatures2)
+        VKCHK(vkGetPhysicalDeviceMemoryProperties2)
+        VKCHK(vkGetPhysicalDeviceQueueFamilyProperties2)
+        VKCHK(vkGetPhysicalDeviceFormatProperties2)
+        VKCHK(vkGetPhysicalDeviceProperties)
+        VKCHK(vkGetPhysicalDeviceFeatures)
+        VKCHK(vkGetPhysicalDeviceMemoryProperties)
+        VKCHK(vkGetPhysicalDeviceQueueFamilyProperties)
+        VKCHK(vkGetPhysicalDeviceFormatProperties)
+        VKCHK(vkEnumerateDeviceExtensionProperties)
+        VKCHK(vkEnumerateDeviceLayerProperties)
+        VKCHK(vkGetPhysicalDeviceProperties2KHR)
+        VKCHK(vkGetPhysicalDeviceFeatures2KHR)
+        VKCHK(vkGetPhysicalDeviceMemoryProperties2KHR)
+        VKCHK(vkGetPhysicalDeviceExternalSemaphoreProperties)
+        VKCHK(vkGetPhysicalDeviceExternalBufferProperties)
+        VKCHK(vkGetPhysicalDeviceSparseImageFormatProperties)
+        #undef VKCHK
+        GGML_LOG_ERROR("[turnip-step] NULL scan complete\n");
+    }
 
+    GGML_LOG_ERROR("[turnip-step] enumerating physical devices\n");
     std::vector<vk::PhysicalDevice> devices = vk_instance.instance.enumeratePhysicalDevices();
+    GGML_LOG_ERROR("[turnip-step] physical devices: %zu\n", devices.size());
 
     // Emulate behavior of CUDA_VISIBLE_DEVICES for Vulkan
     char * devices_env = getenv("GGML_VK_VISIBLE_DEVICES");
@@ -19079,7 +19219,7 @@ static bool ggml_vk_device_is_supported(const vk::PhysicalDevice & vkdev) {
     vk11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     device_features2.pNext = &vk11_features;
 
-    vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);
 
     return vk11_features.storageBuffer16BitAccess;
 }

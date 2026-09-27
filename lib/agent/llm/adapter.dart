@@ -37,6 +37,7 @@ enum LlmFailureCode {
   noAdapter,             // 无可用适配器
   emptyResponse,         // 响应为空
   toolCallTruncated,     // 工具调用块生成到一半被截断（token 预算不足）
+  modelNotReady,         // 本地引擎未加载模型（isLoaded=false）；重试无益
   unknown,
 }
 
@@ -57,6 +58,7 @@ final class LlmFailure {
   });
 
   bool get isContextWindowExceeded => code == LlmFailureCode.contextWindowExceeded;
+  bool get isModelNotReady => code == LlmFailureCode.modelNotReady;
   bool get isRetryableTransient =>
       code == LlmFailureCode.rateLimit ||
       code == LlmFailureCode.server ||

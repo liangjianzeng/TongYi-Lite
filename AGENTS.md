@@ -250,3 +250,42 @@ AOT 串在 libapp.so 里是 **UTF-16LE**，debug kernel_blob 是 UTF-8；确认 
 
 **回归防线（test/agent/ 全绿 241 项，含本次新增）**：截断三分类、toolCallTruncated 有界重试后终态 error、
 lastTurnAnswer 不回溯、system 晚 append 仍恒队首。**下次动智能体循环/协议先跑 `flutter test test/agent`。**
+
+## 智能体"新引擎唯一 + 对话内嵌工作流"（2026-09-27）
+
+> 用户要求：智能体模式应**只有新引擎**（ReactLoopAgent），不要"关闭回退旧模式"的开关；
+> 且状态提示要像主流智能体，在**对话内一步步向下**输出（[思考中…]→[🔧 工具卡]→[答案]），
+> 而不是分散的 AppBar 徽章/输入区面板。
+
+**已删除（彻底）**：旧 `runAgent` 循环（`lib/agent/agent_loop.dart`）及其测试
+（`test/agent/agent_loop_test.dart`）、`useNewAgentMode` 回退开关
+（settings_service/provider/screen）、`AgentStatusBadge`、`AgentActivityPanel`。
+新引擎严格子集覆盖旧引擎（同路由/注册表/协议/工具/执行器/沙箱），删除安全。
+共享展示类型（`ToolActivity` + `AgentToolActivityCallback`）迁到
+`lib/agent/tool_activity.dart`，`lib/agent/agent.dart` 聚合导出随之指向它。
+
+**内嵌工作流 UI**（`lib/widgets/agent_workflow.dart`，取代 agent_activity_panel）：
+- `groupMessages` 把原始消息流重排为 `[UserUnit | TurnUnit]`：user 是分界，
+  其后非 🔧 assistant = 回答，🔧 前缀 assistant = 工具步骤；**无论存储顺序
+  （新 [user, ans, t1..tk] / 旧 [user, t1..tk, ans]）都重排成 [工具… → 答案]**。
+- `parseToolActivity` 把存储 🔧 消息解析回卡片（历史回合回看），
+  兼容新格式 `🔧 正在调用 X…` 与旧格式 `🔧 正在调用：A、B…`。
+- `AgentTurnBlock` 内嵌块：[重试/压缩横幅（仅 live）]→[🔧 卡 ×N]→[思考中…（live 且无答案）]→
+  [答案 ChatBubble（showAvatar:false，保留统计/复制）]。
+- **live 回合**步骤取 `agentUiStateProvider` 事件流实时数据；**历史回合**
+  解析自存储 🔧 消息（`parsedToolActivities`；解析为空但活动未结束
+  [500ms 轮询间隙] 时短暂 fallback 事件流）。
+
+**工具活动逐工具独立落库**（`chat_provider._AgentActivitySession` 重写）：
+executing = `🔧 正在调用 X…`、done/failed = `🔧 X ✓/⚠️summary`（`isStreaming` 恒 false，
+实时"执行中"由事件流驱动，存储只负责可回看步骤）；对位更新靠"最早执行中"匹配。
+`stopGeneration`：智能体回合走 `_currentAgent.cancel()`（adapter.cancel 中止 native/API），
+普通聊天仍直接 stop。
+
+**坑**：`TurnUnit.tools` 曾拿 `pendingTools` 列表引用、`flush` 后 `clear()` 清空它 →
+tools 全空；已改 `[...pendingTools]` 拷贝。`🔧` 后有空格 → `parseToolActivity`
+须在 `substring` 后 `.trim()` 再判断/索引。
+
+**回归（test/agent 全绿 211 项 + 2 skip）**：新增 groupMessages 重排、
+parseToolActivity 解析、AgentTurnBlock 渲染 三组。下次动智能体循环/协议/活动 UI
+先跑 `flutter test test/agent`。**

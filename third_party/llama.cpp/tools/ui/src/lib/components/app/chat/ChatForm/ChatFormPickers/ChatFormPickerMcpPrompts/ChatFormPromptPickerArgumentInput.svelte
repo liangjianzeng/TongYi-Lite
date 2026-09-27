@@ -36,7 +36,7 @@
 </script>
 
 <div class="relative grid gap-1">
-	<Label class="mb-1 text-muted-foreground" for="arg-{argument.name}">
+	<Label for="arg-{argument.name}" class="mb-1 text-muted-foreground">
 		<span>
 			{argument.name}
 
@@ -51,30 +51,30 @@
 	</Label>
 
 	<Input
-		autocomplete="off"
 		id="arg-{argument.name}"
-		onblur={onBlur}
-		onfocus={onFocus}
-		oninput={(e) => onInput(e.currentTarget.value)}
-		onkeydown={onKeydown}
-		placeholder={argument.description || argument.name}
-		required={argument.required}
 		type="text"
 		{value}
+		oninput={(e) => onInput(e.currentTarget.value)}
+		onkeydown={onKeydown}
+		onblur={onBlur}
+		onfocus={onFocus}
+		placeholder={argument.description || argument.name}
+		required={argument.required}
+		autocomplete="off"
 	/>
 
 	{#if isAutocompleteActive && suggestions.length > 0}
 		<div
-			transition:fly={{ duration: 100, y: -5 }}
 			class="absolute top-full right-0 left-0 z-10 mt-1 max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-background shadow-lg"
+			transition:fly={{ duration: 100, y: -5 }}
 		>
 			{#each suggestions as suggestion, i (suggestion)}
 				<button
+					type="button"
+					onmousedown={() => onSelectSuggestion(suggestion)}
 					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent {i === autocompleteIndex
 						? 'bg-accent'
 						: ''}"
-					onmousedown={() => onSelectSuggestion(suggestion)}
-					type="button"
 				>
 					{suggestion}
 				</button>

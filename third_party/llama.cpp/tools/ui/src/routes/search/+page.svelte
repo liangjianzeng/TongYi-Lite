@@ -77,9 +77,9 @@
 
 <div class="fixed top-0 z-10 left-0 right-0 p-2">
 	<SearchInput
-		bind:ref={searchInputRef}
-		bind:value={searchQuery}
 		autofocus
+		bind:value={searchQuery}
+		bind:ref={searchInputRef}
 		onClose={handleBack}
 		placeholder="Search conversations..."
 	/>
@@ -87,12 +87,12 @@
 
 <div class="p-2 pt-16">
 	<SidebarNavigationSearchResults
-		{currentChatId}
-		{filteredConversations}
-		onDelete={handleDeleteConversation}
-		onEdit={handleEditConversation}
-		onSelect={selectConversation}
-		onStop={handleStopGeneration}
 		{searchQuery}
+		{filteredConversations}
+		{currentChatId}
+		onSelect={selectConversation}
+		onEdit={handleEditConversation}
+		onDelete={handleDeleteConversation}
+		onStop={handleStopGeneration}
 	/>
 </div>

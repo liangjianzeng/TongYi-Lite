@@ -5,7 +5,6 @@
 	import {
 		ActionIcon,
 		DialogConversationRename,
-		DialogSettingsChat,
 		Logo,
 		SidebarNavigationActions,
 		SidebarNavigationConversationList
@@ -92,7 +91,6 @@
 	let selectedIds = new SvelteSet<string>();
 
 	let renameDialogOpen = $state(false);
-	let settingsDialogOpen = $state(false);
 	let renameTargetConversationId = $state<string | null>(null);
 	let renameDraft = $state('');
 	let renameOriginalTitle = $state('');
@@ -308,9 +306,9 @@
 	}
 </script>
 
-<svelte:window bind:innerWidth onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} bind:innerWidth />
 
-{#if innerWidth > 768 || !page.url.hash.includes(ROUTES.SEARCH)}
+{#if innerWidth > 768 || (!page.url.hash.includes(ROUTES.SETTINGS) && !page.url.hash.includes(ROUTES.MCP_SERVERS) && !page.url.hash.includes(ROUTES.SEARCH))}
 	<aside
 		class={[
 			'fixed md:sticky top-2 left-2 md:left-0 md:ml-2 md:mt-2 pt-2 z-10 w-[calc(100dvw-1rem)]',
@@ -331,110 +329,109 @@
 	>
 		<div class="px-2 flex items-center justify-between">
 			<div
+				role="button"
+				tabindex="0"
 				class="relative"
 				onmouseenter={() => (logoHovered = true)}
 				onmouseleave={() => (logoHovered = false)}
-				role="button"
-				tabindex="0"
 			>
 				<ActionIcon
-					ariaLabel={uiStore.isSidebarExpanded ? 'Go to start' : 'Expand navigation'}
+					icon={!uiStore.isSidebarExpanded && logoHovered && innerWidth > 768
+						? PanelLeftOpen
+						: Logo}
+					size="lg"
+					iconSize="h-4.5 w-4.5 md:h-4 md:w-4"
 					class="{uiStore.isSidebarExpanded
 						? 'bg-muted! md:bg-foreground/5!'
 						: 'bg-transparent!'} md:h-9 md:w-9 h-10 w-10 rounded-full md:hover:bg-foreground/10! pointer-events-auto"
 					href={uiStore.isSidebarExpanded ? ROUTES.START : undefined}
-					icon={!uiStore.isSidebarExpanded && logoHovered && innerWidth > 768
-						? PanelLeftOpen
-						: Logo}
-					iconSize="h-4.5 w-4.5 md:h-4 md:w-4"
 					onclick={uiStore.isSidebarExpanded ? undefined : toggleExpandedMode}
-					size="lg"
 					tooltip={uiStore.isSidebarExpanded ? undefined : 'Open Sidebar'}
 					tooltipSide={TooltipSide.RIGHT}
+					ariaLabel={uiStore.isSidebarExpanded ? 'Go to start' : 'Expand navigation'}
 				/>
 			</div>
 
 			{#if isOnMobile || (uiStore.isSidebarExpanded && !alwaysShowOnDesktop)}
 				<div
-					in:fade={{ delay: 50, duration: 150, easing: circIn }}
-					out:fade={{ duration: 100 }}
 					class="flex items-center transition-all duration-150 ease-out {deviceStore.isMobile &&
 					!uiStore.isSidebarExpanded
 						? 'opacity-0 h-0!'
 						: ''}"
+					in:fade={{ delay: 50, duration: 150, easing: circIn }}
+					out:fade={{ duration: 100 }}
 				>
 					<ActionIcon
-						ariaLabel="Collapse navigation"
-						class="backdrop-blur-none md:h-9 md:w-9 h-10 w-10 rounded-full mr-1 hover:bg-accent!"
 						icon={deviceStore.isMobile ? X : PanelLeftClose}
-						iconSize="h-4.5 w-4.5 md:h-4 md:w-4"
-						onclick={toggleExpandedMode}
 						size="lg"
+						iconSize="h-4.5 w-4.5 md:h-4 md:w-4"
+						class="backdrop-blur-none md:h-9 md:w-9 h-10 w-10 rounded-full mr-1 hover:bg-accent!"
+						onclick={toggleExpandedMode}
 						tooltip="Close Sidebar"
 						tooltipSide={TooltipSide.LEFT}
+						ariaLabel="Collapse navigation"
 					/>
 				</div>
 			{/if}
 		</div>
 
 		<div
-			in:fade={{ duration: 200 }}
-			out:fade={{ duration: 200 }}
 			class="mt-2 flex min-h-0 flex-1 flex-col gap-4 md:gap-1 {deviceStore.isMobile
 				? 'transition-[opacity,height] duration-200 ease-out'
 				: ''} {deviceStore.isMobile && !uiStore.isSidebarExpanded ? 'opacity-0 !h-0' : ''}"
+			in:fade={{ duration: 200 }}
+			out:fade={{ duration: 200 }}
 		>
 			<SidebarNavigationActions
+				isExpandedMode={innerWidth > 768 ? uiStore.isSidebarExpanded : true}
+				class="px-2"
 				bind:isSearchModeActive
 				bind:searchQuery
-				class="px-2"
-				isExpandedMode={innerWidth > 768 ? uiStore.isSidebarExpanded : true}
-				onNewChat={() => {
-					if (deviceStore.isMobile) {
-						scheduleMobileCollapse();
-					}
+				onSearchDeactivated={() => {
+					isSearchModeActive = false;
+					searchQuery = '';
 				}}
 				onSearchClick={() => {
 					uiStore.isSidebarExpanded = true;
 					isSearchModeActive = true;
 				}}
-				onSearchDeactivated={() => {
-					isSearchModeActive = false;
-					searchQuery = '';
+				onNewChat={() => {
+					if (deviceStore.isMobile) {
+						scheduleMobileCollapse();
+					}
 				}}
-				onSettingsClick={() => (settingsDialogOpen = true)}
 			/>
 
 			{#if uiStore.isSidebarExpanded || isOnMobile}
 				<div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
 					<SidebarNavigationConversationList
-						{allSelectedArePinned}
-						allVisibleSelected={visibleSelectionStats.visibleCount > 0 &&
-							visibleSelectionStats.selectedVisibleCount === visibleSelectionStats.visibleCount}
 						class="px-2"
-						{currentChatId}
 						{filteredConversations}
+						{currentChatId}
 						{isSearchModeActive}
+						{searchQuery}
 						{isSelectionMode}
-						onBulkDelete={handleBulkDelete}
-						onBulkExport={handleBulkExport}
-						onBulkPinToggle={handleBulkPinToggle}
-						onCloseSelection={exitSelectionMode}
-						onDelete={handleDeleteConversation}
-						onEdit={handleEditConversation}
-						onEnterSelectionMode={enterSelectionMode}
-						onRowMouseDown={handleRowMouseDown}
+						{selectedIds}
 						onSelect={selectConversation}
-						onSelectAllToggle={toggleSelectAllVisible}
-						onSelectionClick={handleSelectionClick}
+						onEdit={handleEditConversation}
+						onDelete={handleDeleteConversation}
 						onStop={handleStopGeneration}
 						onToggleSelect={toggleSelected}
-						{pinStateIsMixed}
-						{searchQuery}
-						{selectedIds}
+						onEnterSelectionMode={enterSelectionMode}
+						onSelectionClick={handleSelectionClick}
+						onRowMouseDown={handleRowMouseDown}
+						visibleCount={visibleSelectionStats.visibleCount}
+						allVisibleSelected={visibleSelectionStats.visibleCount > 0 &&
+							visibleSelectionStats.selectedVisibleCount === visibleSelectionStats.visibleCount}
 						someVisibleSelected={visibleSelectionStats.selectedVisibleCount > 0 &&
 							visibleSelectionStats.selectedVisibleCount < visibleSelectionStats.visibleCount}
-						visibleCount={visibleSelectionStats.visibleCount}
+						{allSelectedArePinned}
+						{pinStateIsMixed}
+						onSelectAllToggle={toggleSelectAllVisible}
+						onBulkPinToggle={handleBulkPinToggle}
+						onBulkExport={handleBulkExport}
+						onBulkDelete={handleBulkDelete}
+						onCloseSelection={exitSelectionMode}
 					/>
 				</div>
 			{/if}
@@ -444,13 +441,11 @@
 
 <DialogConversationRename
 	bind:open={renameDialogOpen}
-	bind:value={renameDraft}
 	currentTitle={renameOriginalTitle}
-	onCancel={handleRenameCancel}
+	bind:value={renameDraft}
 	onConfirm={handleRenameConfirm}
+	onCancel={handleRenameCancel}
 />
-
-<DialogSettingsChat bind:open={settingsDialogOpen} />
 
 <style>
 	aside {

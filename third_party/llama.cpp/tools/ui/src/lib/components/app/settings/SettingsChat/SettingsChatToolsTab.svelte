@@ -25,13 +25,9 @@
 	<div class="py-8 text-center text-sm text-muted-foreground">No tools available</div>
 {:else}
 	<div class="space-y-2">
-		<p class="text-sm text-muted-foreground">
-			Applies to new conversations. Tool picks inside a chat only affect that chat.
-		</p>
-
 		{#each groups as group (group.key)}
 			{@const isExpanded = expandedGroups.has(group.key)}
-			<Collapsible.Root onOpenChange={() => toggleExpanded(group.key)} open={isExpanded}>
+			<Collapsible.Root open={isExpanded} onOpenChange={() => toggleExpanded(group.key)}>
 				<Collapsible.Trigger
 					class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-muted/50"
 				>
@@ -41,30 +37,19 @@
 						<ChevronRight class="h-3.5 w-3.5 shrink-0" />
 					{/if}
 
-					{@const isCategoryEnabled =
-						group.source !== ToolSource.MCP && toolsStore.isCategoryEnabled(group.source)}
-
-					{#if group.source !== ToolSource.MCP}
-						<Checkbox
-							checked={isCategoryEnabled}
-							onCheckedChange={() => toolsStore.toggleCategory(group.source)}
-							onclick={(e) => e.stopPropagation()}
-						/>
-					{/if}
-
 					{@const faviconUrl = group.serverId ? mcpStore.getServerFavicon(group.serverId) : null}
 
 					<span class="inline-flex min-w-0 items-center gap-1.5 font-medium">
 						{#if group.source === 'mcp'}
 							<McpServerIdentity
-								displayName={group.label}
-								{faviconUrl}
 								iconClass={ICON_CLASS_DEFAULT}
 								iconRounded="rounded-sm"
 								showVersion={false}
+								displayName={group.label}
+								{faviconUrl}
 							/>
 						{:else}
-							<TruncatedText class="font-medium" text={group.label} />
+							<TruncatedText text={group.label} class="font-medium" />
 						{/if}
 					</span>
 
@@ -78,9 +63,7 @@
 						<!-- Header row -->
 						<div class="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
 							<span class="min-w-0 flex-1">Tool</span>
-
 							<span class="w-16 shrink-0 text-center">Enabled</span>
-
 							<span class="w-20 shrink-0 text-center">Always allow</span>
 						</div>
 
@@ -101,22 +84,20 @@
 									{#if IconComponent}
 										<IconComponent class={ICON_CLASS_DEFAULT} />
 									{/if}
-
-									<TruncatedText class="min-w-0" showTooltip={true} text={displayLabel} />
+									<TruncatedText text={displayLabel} class="min-w-0" showTooltip={true} />
 								</span>
 
 								<div class="flex w-16 shrink-0 justify-center">
 									<Checkbox
 										checked={isEnabled}
-										class={ICON_CLASS_DEFAULT}
 										onCheckedChange={() => toolsStore.toggleTool(entry.key)}
+										class={ICON_CLASS_DEFAULT}
 									/>
 								</div>
 
 								<div class="flex w-20 shrink-0 justify-center">
 									<Checkbox
 										checked={isAlwaysAllowed}
-										class={ICON_CLASS_DEFAULT}
 										onCheckedChange={() => {
 											if (isAlwaysAllowed) {
 												permissionsStore.revokeTool(permissionKey);
@@ -124,6 +105,7 @@
 												permissionsStore.allowTool(permissionKey);
 											}
 										}}
+										class={ICON_CLASS_DEFAULT}
 									/>
 								</div>
 							</div>

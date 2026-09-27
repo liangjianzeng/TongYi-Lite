@@ -13,8 +13,11 @@ import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
-import '../widgets/agent_activity_panel.dart';
+import '../widgets/agent_workflow.dart';
 import '../widgets/chat_bubble.dart';
+import '../providers/agent_state_provider.dart'
+    show agentUiStateProvider, AgentUiState, ToolActivityUi;
+import '../models/chat_message.dart' show ChatMessage;
 import 'settings_screen.dart';
 
 /// App-lifetime guard: 启动自动加载默认模型只执行一次。
@@ -51,12 +54,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
 
-  // GPU/CPU 占用率监控（模型状态栏底部双色线）
-  Timer? _sampleTimer;
-  double _gpuUsage = 0.0;
-  double _cpuUsage = 0.0;
-  /// 当前采样模式：-1=停止，0=仅推理时采样（500ms），N>0=周期性采样（N 秒）。
-  int _samplingMode = -1;
 
   @override
   void initState() {
@@ -76,7 +73,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _recordingTimer = null;
     _recordingNotifier.dispose();
     _recordingSecondsNotifier.dispose();
-    _stopResourceSampling();
     super.dispose();
   }
 
@@ -420,12 +416,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget build(BuildContext context) {
     final isGenerating = ref.watch(isGeneratingProvider);
     final modelState = ref.watch(modelManagerProvider);
-    // Phase 6：新智能体模式 UI（活动面板/状态徽章；旧 UI 保留并行）。
-    final newAgentMode =
-        ref.watch(settingsProvider.select((s) => s.useNewAgentMode));
-
-    // 每次 build 同步采样 Timer（幂等）：按监控开关/采样周期启停。
-    _syncResourceSampling(isGenerating);
 
     return Scaffold(
       drawer: _buildConversationDrawer(),
@@ -445,7 +435,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
         actions: [
-          if (newAgentMode) const AgentStatusBadge(),
           _buildModelStatusChip(modelState, isGenerating),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -463,17 +452,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           // ---- Inline model status (only shows loading/unloading/error progress) ----
           _buildInlineProgress(modelState, isGenerating),
-          // ---- GPU/CPU 占用率监控条（蓝=GPU、紫=CPU）----
-          _buildResourceMonitor(),
 
           Expanded(
             child: _initiallyLoaded
-                ? _buildMessagesList(newAgentMode)
+                ? _buildMessagesList()
                 : const Center(child: CircularProgressIndicator()),
           ),
-
-          // Phase 6：智能体活动面板（工具卡片/压缩横幅/重试指示）。
-          if (newAgentMode) const AgentActivityPanel(),
 
           // Image preview (if selected)
           if (_selectedImagePath != null)
@@ -706,90 +690,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  // =========================================================================
-  // GPU/CPU 占用率监控条（模型状态栏底部，蓝=GPU / 紫=CPU，宽=屏宽）
-  // =========================================================================
-
-  /// 按当前设置同步采样 Timer（每次 build 调用，幂等）：
-  /// - 监控关闭 → 停止采样；
-  /// - 采样周期 >0 → 周期性采样（空闲也更新）；
-  /// - 采样周期 =0 → 仅推理时采样（500ms，空闲不采样省电）。
-  void _syncResourceSampling(bool isGenerating) {
-    final settings = ref.read(settingsProvider);
-    if (!settings.showResourceMonitor) {
-      _stopResourceSampling();
-      return;
-    }
-    final interval = settings.resourceSampleIntervalSec;
-    if (interval > 0) {
-      if (_samplingMode != interval) {
-        _stopResourceSampling();
-        _sampleTimer = Timer.periodic(Duration(seconds: interval),
-            (_) => _sampleResourceOnce());
-        _samplingMode = interval;
-      }
-    } else {
-      final want = isGenerating;
-      if (want && _samplingMode != 0) {
-        _stopResourceSampling();
-        _sampleTimer = Timer.periodic(const Duration(milliseconds: 500),
-            (_) => _sampleResourceOnce());
-        _samplingMode = 0;
-      } else if (!want && _samplingMode == 0) {
-        _stopResourceSampling();
-      }
-    }
-  }
-
-  void _stopResourceSampling() {
-    _sampleTimer?.cancel();
-    _sampleTimer = null;
-    _samplingMode = -1;
-  }
-
-  Future<void> _sampleResourceOnce() async {
-    final r = await InferenceService().getResourceUsage();
-    if (!mounted) return;
-    setState(() {
-      _gpuUsage = r.gpu ?? 0.0;
-      _cpuUsage = r.cpu;
-    });
-  }
-
-  /// 双色线监控条：蓝=GPU、紫=CPU，各占满屏宽，宽度 = 占用率%。
-  /// 高度 4px（紧凑，不挤占聊天区）。
-  Widget _buildResourceMonitor() {
-    final settings = ref.watch(settingsProvider);
-    if (!settings.showResourceMonitor) return const SizedBox.shrink();
-    return Container(
-      width: double.infinity,
-      height: 4,
-      color: const Color(0x11000000),
-      padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 1),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _buildMonitorLine(color: const Color(0xFF2196F3), usage: _gpuUsage),
-          const SizedBox(height: 1),
-          _buildMonitorLine(color: const Color(0xFF9C27B0), usage: _cpuUsage),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMonitorLine({required Color color, required double usage}) {
-    return LayoutBuilder(builder: (context, constraints) {
-      final maxW = constraints.maxWidth;
-      final w = maxW * (usage / 100).clamp(0.0, 1.0);
-      return Stack(
-        children: [
-          Container(height: 1, width: maxW, color: color.withValues(alpha: 0.15)),
-          Container(height: 1, width: w, color: color),
-        ],
-      );
-    });
-  }
-
   Widget _buildPulsingDot() {
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.3, end: 1.0),
@@ -820,23 +720,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Chat UI
   // =========================================================================
 
-  Widget _buildMessagesList(bool newAgentMode) {
+  Widget _buildMessagesList() {
+    final uiState = ref.watch(agentUiStateProvider);
+    // 普通聊天（非智能体回合）也要让最后一组进入 live 态：
+    // 空答案气泡才会显示唯一的「思考中…」占位、流式光标才会出现。
+    final generating = ref.watch(isGeneratingProvider);
     final messagesAsync = ref.watch(messagesProvider(_currentConversationId));
 
     return messagesAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (err, stack) => Center(child: Text('Error: $err')),
       data: (rawMessages) {
-        // Phase 6：新智能体模式下，🔧 占位消息由活动面板的结构化
-        // ToolActivityCard 取代（§12.5「现有 🔧 升级为结构化卡片」）。
-        final messages = newAgentMode
-            ? rawMessages
-                .where((m) =>
-                    !(m.role.name == 'assistant' &&
-                        m.content.startsWith('🔧')))
-                .toList()
-            : rawMessages;
-        if (messages.isEmpty) {
+        if (rawMessages.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -857,7 +752,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // messages change while the user is following the conversation. This
         // makes streaming replies follow in real time instead of requiring a
         // manual scroll-up to reveal the new content.
-        if (messages.isNotEmpty && _followStream) {
+        if (rawMessages.isNotEmpty && _followStream) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_followStream && _scrollController.hasClients) {
               _scrollController.animateTo(
@@ -871,26 +766,49 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
         // 聊天顺序：自上而下 = 最早的在上、最新的在下（messages 即旧→新）。
         // 无 reverse，maxScrollExtent 即最底部（最新消息）。
+        //
+        // 内嵌工作流：把流重排为 [user | 智能体回合块]。回合块 =
+        // [工具步骤… → 最终回答]；运行中步骤取事件流实时数据，历史步骤
+        // 解析自存储 🔧 活动消息（groupMessages / parsedToolActivities）。
+        final units = groupMessages(rawMessages);
         return ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: messages.length,
+          itemCount: units.length,
           itemBuilder: (context, index) {
-            final msg = messages[index];
-            return ChatBubble(
-              role: msg.role.name,
-              content: msg.content,
-              timestamp: msg.timestamp,
-              // Newest message is the last index (messages are ordered oldest→newest).
-              isStreaming: msg.isStreaming && index == messages.length - 1,
-              imagePath: msg.imagePath,
-              audioPath: msg.audioPath,
-              inferenceStats: msg.inferenceStats,
-            );
+            final unit = units[index];
+            final isLiveTurn = uiState.running && index == units.length - 1;
+            return switch (unit) {
+              UserUnit(:final message) => ChatBubble(
+                    role: message.role.name,
+                    content: message.content,
+                    timestamp: message.timestamp,
+                    isStreaming: message.isStreaming && index == units.length - 1,
+                    imagePath: message.imagePath,
+                    audioPath: message.audioPath,
+                    inferenceStats: message.inferenceStats,
+                  ),
+              TurnUnit(:final tools, :final answer) => AgentTurnBlock(
+                    isLive: isLiveTurn,
+                    steps: _stepsFor(uiState, tools, isLiveTurn),
+                    answer: answer,
+                    ui: uiState,
+                  ),
+            };
           },
         );
       },
     );
+  }
+
+  /// 回合步骤：live 回合用事件流实时数据（参数/结果/状态实时更新）；
+  /// 历史回合解析存储 🔧 活动消息。解析为空但本回合活动未结束（轮询
+  /// 500ms 间隙内）时短暂 fallback 事件流，避免步骤闪现为空。
+  List<ToolActivityUi> _stepsFor(
+      AgentUiState ui, List<ChatMessage> tools, bool isLiveTurn) {
+    if (isLiveTurn) return ui.tools;
+    final parsed = parsedToolActivities(tools);
+    return parsed.isEmpty && ui.hasActivity ? ui.tools : parsed;
   }
 
   Widget _buildInputBar(bool isGenerating) {

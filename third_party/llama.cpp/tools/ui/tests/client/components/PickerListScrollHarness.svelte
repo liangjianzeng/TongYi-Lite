@@ -25,13 +25,13 @@
 {#if open}
 	<div data-testid="picker-host">
 		<ChatFormPickerList
-			isLoading={false}
-			itemKey={(it) => it.id}
 			{items}
-			{scrollTrigger}
-			searchQuery=""
+			isLoading={false}
 			{selectedIndex}
+			searchQuery=""
 			showSearchInput={false}
+			{scrollTrigger}
+			itemKey={(it) => it.id}
 		>
 			{#snippet item(it, index, isSelected)}
 				<ChatFormPickerListItem dataIndex={index} {isSelected} onclick={() => {}}>

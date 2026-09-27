@@ -138,20 +138,20 @@
 	}
 </script>
 
-<form class="space-y-3" onsubmit={handleSubmit}>
+<form onsubmit={handleSubmit} class="space-y-3">
 	{#each variables as variable (variable.name)}
 		<InputWithSuggestions
-			autocompleteIndex={activeAutocomplete === variable.name ? autocompleteIndex : 0}
-			isAutocompleteActive={activeAutocomplete === variable.name}
-			isLoadingSuggestions={loadingSuggestions[variable.name] ?? false}
 			name={variable.name}
-			onBlur={() => handleArgBlur(variable.name)}
-			onFocus={() => handleArgFocus(variable.name)}
+			value={values[variable.name] ?? ''}
+			suggestions={suggestions[variable.name] ?? []}
+			isLoadingSuggestions={loadingSuggestions[variable.name] ?? false}
+			isAutocompleteActive={activeAutocomplete === variable.name}
+			autocompleteIndex={activeAutocomplete === variable.name ? autocompleteIndex : 0}
 			onInput={(value) => handleArgInput(variable.name, value)}
 			onKeydown={(e) => handleArgKeydown(e, variable.name)}
+			onBlur={() => handleArgBlur(variable.name)}
+			onFocus={() => handleArgFocus(variable.name)}
 			onSelectSuggestion={(value) => selectSuggestion(variable.name, value)}
-			suggestions={suggestions[variable.name] ?? []}
-			value={values[variable.name] ?? ''}
 		/>
 	{/each}
 
@@ -164,8 +164,8 @@
 	{/if}
 
 	<div class="flex justify-end gap-2 pt-1">
-		<Button onclick={onCancel} size="sm" type="button" variant="secondary">Cancel</Button>
+		<Button type="button" size="sm" variant="secondary" onclick={onCancel}>Cancel</Button>
 
-		<Button disabled={!isComplete} size="sm" type="submit">Read Resource</Button>
+		<Button size="sm" type="submit" disabled={!isComplete}>Read Resource</Button>
 	</div>
 </form>

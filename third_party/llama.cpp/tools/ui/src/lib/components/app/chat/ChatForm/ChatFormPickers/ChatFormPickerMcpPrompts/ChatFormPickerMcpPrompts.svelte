@@ -9,7 +9,7 @@
 	} from '$lib/components/app/chat';
 	import Badge from '$lib/components/ui/badge/badge.svelte';
 	import { KeyboardKey } from '$lib/enums';
-	import { mcpStore } from '$lib/stores';
+	import { conversationsStore, mcpStore } from '$lib/stores';
 	import type { GetPromptResult, MCPPromptInfo, MCPServerSettingsEntry } from '$lib/types';
 	import { debounce, uuid } from '$lib/utils';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -87,7 +87,8 @@
 		isLoading = true;
 
 		try {
-			const initialized = await mcpStore.ensureInitialized();
+			const perChatOverrides = conversationsStore.preferences.getAllMcpServerOverrides();
+			const initialized = await mcpStore.ensureInitialized(perChatOverrides);
 
 			if (!initialized) {
 				prompts = [];
@@ -358,9 +359,9 @@
 <ChatFormPickerPopover
 	bind:isOpen
 	class={className}
+	srLabel="Open prompt picker"
 	{onClose}
 	onKeydown={handleKeydown}
-	srLabel="Open prompt picker"
 >
 	{#if selectedPrompt}
 		{@const prompt = selectedPrompt}
@@ -369,10 +370,10 @@
 
 		<div class="p-4">
 			<ChatFormPickerItemHeader
-				description={prompt.description}
 				{server}
 				{serverLabel}
 				title={prompt.title || prompt.name}
+				description={prompt.description}
 			>
 				{#snippet titleExtra()}
 					{#if prompt.arguments?.length}
@@ -384,33 +385,33 @@
 			</ChatFormPickerItemHeader>
 
 			<ChatFormPromptPickerArgumentForm
-				{activeAutocomplete}
-				{autocompleteIndex}
-				{loadingSuggestions}
-				onArgBlur={handleArgBlur}
-				onArgFocus={handleArgFocus}
-				onArgInput={handleArgInput}
-				onArgKeydown={handleArgKeydown}
-				onCancel={handleCancelArgumentForm}
-				onSelectSuggestion={selectSuggestion}
-				onSubmit={handleArgumentSubmit}
 				prompt={selectedPrompt}
 				{promptArgs}
-				{promptError}
 				{suggestions}
+				{loadingSuggestions}
+				{activeAutocomplete}
+				{autocompleteIndex}
+				{promptError}
+				onArgInput={handleArgInput}
+				onArgKeydown={handleArgKeydown}
+				onArgBlur={handleArgBlur}
+				onArgFocus={handleArgFocus}
+				onSelectSuggestion={selectSuggestion}
+				onSubmit={handleArgumentSubmit}
+				onCancel={handleCancelArgumentForm}
 			/>
 		</div>
 	{:else}
 		<ChatFormPickerList
-			bind:searchQuery={internalSearchQuery}
-			emptyMessage="No MCP prompts available"
-			{isLoading}
-			itemKey={(prompt) => prompt.serverName + ':' + prompt.name}
 			items={filteredPrompts}
-			{scrollTrigger}
-			searchPlaceholder="Search prompts..."
+			{isLoading}
 			{selectedIndex}
+			bind:searchQuery={internalSearchQuery}
 			{showSearchInput}
+			searchPlaceholder="Search prompts..."
+			emptyMessage="No MCP prompts available"
+			itemKey={(prompt) => prompt.serverName + ':' + prompt.name}
+			{scrollTrigger}
 		>
 			{#snippet item(prompt, index, isSelected)}
 				{@const server = serverSettingsMap.get(prompt.serverName)}
@@ -422,10 +423,10 @@
 					onclick={() => handlePromptClick(prompt)}
 				>
 					<ChatFormPickerItemHeader
-						description={prompt.description}
 						{server}
 						{serverLabel}
 						title={prompt.title || prompt.name}
+						description={prompt.description}
 					>
 						{#snippet titleExtra()}
 							{#if prompt.arguments?.length}
@@ -439,7 +440,7 @@
 			{/snippet}
 
 			{#snippet skeleton()}
-				<ChatFormPickerListItemSkeleton showBadge titleWidth="w-32" />
+				<ChatFormPickerListItemSkeleton titleWidth="w-32" showBadge />
 			{/snippet}
 		</ChatFormPickerList>
 	{/if}

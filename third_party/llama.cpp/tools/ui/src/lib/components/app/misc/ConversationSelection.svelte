@@ -124,7 +124,7 @@
 				<tbody>
 					{#if filteredConversations.length === 0}
 						<tr>
-							<td class="p-8 text-center text-sm text-muted-foreground" colspan="3">
+							<td colspan="3" class="p-8 text-center text-sm text-muted-foreground">
 								{#if searchQuery}
 									No conversations found matching "{searchQuery}"
 								{:else}
@@ -140,8 +140,8 @@
 									? 'bg-muted/75'
 									: ''}"
 								{...{ [UI_DATA_ATTRS.CONVERSATION_ROW]: conv.id }}
-								onclick={(event) => marquee.rowClick(conv.id, event.shiftKey)}
 								onmousedown={(event) => marquee.rowMouseDown(conv.id, event)}
+								onclick={(event) => marquee.rowClick(conv.id, event.shiftKey)}
 							>
 								<td class="p-3">
 									<Checkbox
@@ -172,9 +172,9 @@
 	</div>
 
 	<div class="flex justify-end gap-2">
-		<Button onclick={handleCancel} variant="outline">Cancel</Button>
+		<Button variant="outline" onclick={handleCancel}>Cancel</Button>
 
-		<Button disabled={selectedIds.size === 0} onclick={handleConfirm}>
+		<Button onclick={handleConfirm} disabled={selectedIds.size === 0}>
 			{mode === 'export' ? 'Export' : 'Import'} ({selectedIds.size})
 		</Button>
 	</div>

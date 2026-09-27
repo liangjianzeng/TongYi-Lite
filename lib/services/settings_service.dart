@@ -77,11 +77,6 @@ class InferenceSettings {
   /// 有工具调用时进入工具循环。关闭 = 完全走普通聊天路径。
   final bool agentEnabled;
 
-  /// 是否启用「新智能体模式」（Phase 0 起重写的事件源 ReactLoopAgent）。
-  /// - 开启（默认）：走新事件日志 + 主循环（G12 派生请求、失败瀑布、取消竞跑）。
-  /// - 关闭：回退到旧 `runAgent` 逻辑（保留可回退）。
-  final bool useNewAgentMode;
-
   /// 智能体驱动模型来源：'local'（本地端侧模型）/ 'api'（API 接入模型）。
   /// null = 跟随默认路由（本地优先，API 兜底）。
   final String? agentModelSource;
@@ -178,13 +173,6 @@ class InferenceSettings {
   /// 模型）；关闭后视觉模型仅文本推理，不加载投影器。
   final bool autoLoadMmproj;
 
-  /// 推理引擎：GPU/CPU 占用率监控呈现（模型状态栏底部双色线）。默认开启。
-  final bool showResourceMonitor;
-
-  /// 占用率采样周期（秒），0~30。默认 0：仅推理时事件驱动采样（空闲不采样，
-  /// 省电）；>0：每隔 N 秒周期性采样（空闲也更新线条）。
-  final int resourceSampleIntervalSec;
-
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模型
   /// 目录声明的默认工具集（agentDefaults.enabledTools）。
   final Map<String, List<String>> agentToolsByModel;
@@ -224,7 +212,6 @@ class InferenceSettings {
     this.activeApiModelId,
     // ---- 智能体（Agent）----
     this.agentEnabled = true,
-    this.useNewAgentMode = true,
     this.agentModelSource,
     this.agentModelId,
     this.agentNctx = 8192,
@@ -252,8 +239,6 @@ class InferenceSettings {
     this.agentMemoryEnabled = false,
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
-    this.showResourceMonitor = true,
-    this.resourceSampleIntervalSec = 1,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
@@ -306,7 +291,6 @@ class InferenceSettings {
       bool clearActiveApiModel = false,
       // ---- 智能体（Agent）----
       bool? agentEnabled,
-      bool? useNewAgentMode,
       String? agentModelSource,
       String? agentModelId,
       // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」。
@@ -335,8 +319,6 @@ class InferenceSettings {
       bool? agentMemoryEnabled,
       // ---- 推理引擎 ----
       bool? autoLoadMmproj,
-      bool? showResourceMonitor,
-      int? resourceSampleIntervalSec,
       Map<String, List<String>>? agentToolsByModel,
       Map<String, Map<String, dynamic>>? agentByModel}) {
     return InferenceSettings(
@@ -358,7 +340,6 @@ class InferenceSettings {
           ? null
           : activeApiModelId ?? this.activeApiModelId,
       agentEnabled: agentEnabled ?? this.agentEnabled,
-      useNewAgentMode: useNewAgentMode ?? this.useNewAgentMode,
       agentModelSource: clearAgentModel
           ? null
           : agentModelSource ?? this.agentModelSource,
@@ -397,9 +378,6 @@ class InferenceSettings {
           agentFullFileAccess ?? this.agentFullFileAccess,
       agentMemoryEnabled: agentMemoryEnabled ?? this.agentMemoryEnabled,
       autoLoadMmproj: autoLoadMmproj ?? this.autoLoadMmproj,
-      showResourceMonitor: showResourceMonitor ?? this.showResourceMonitor,
-      resourceSampleIntervalSec:
-          resourceSampleIntervalSec ?? this.resourceSampleIntervalSec,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
     );
@@ -420,7 +398,6 @@ class InferenceSettings {
         'activeApiModelId': activeApiModelId,
         // ---- 智能体（Agent）----
         'agentEnabled': agentEnabled,
-        'useNewAgentMode': useNewAgentMode,
         'agentModelSource': agentModelSource,
         'agentModelId': agentModelId,
         'agentNctx': agentNctx,
@@ -449,8 +426,6 @@ class InferenceSettings {
         'agentMemoryEnabled': agentMemoryEnabled,
         // ---- 推理引擎 ----
         'autoLoadMmproj': autoLoadMmproj,
-        'showResourceMonitor': showResourceMonitor,
-        'resourceSampleIntervalSec': resourceSampleIntervalSec,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
       };
@@ -478,8 +453,6 @@ class InferenceSettings {
       activeApiModelId: json['activeApiModelId'] as String?,
       // 智能体（Agent）：旧配置缺字段时用默认值，向后兼容。
       agentEnabled: json['agentEnabled'] as bool? ?? true,
-      // 旧配置无此字段时默认开启新智能体模式（向后兼容）。
-      useNewAgentMode: json['useNewAgentMode'] as bool? ?? true,
       agentModelSource: json['agentModelSource'] as String?,
       agentModelId: json['agentModelId'] as String?,
       agentNctx: (json['agentNctx'] as num?)?.toInt() ?? 8192,
@@ -518,9 +491,6 @@ class InferenceSettings {
       agentMemoryEnabled: json['agentMemoryEnabled'] as bool? ?? false,
       // 推理引擎扩展：旧配置缺字段时用默认值（投影器默认加载、监控默认开启）。
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
-      showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
-      resourceSampleIntervalSec:
-          (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 1,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
     );

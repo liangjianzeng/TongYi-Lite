@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cerrno>
 #include <map>
 #include <new>
 #include <stdexcept>
@@ -238,7 +237,6 @@ struct gguf_reader {
         : callback(callback),
           userdata(userdata),
           max_chunk_read(max_chunk_read),
-          start_offset(data_offset),
           data_offset(data_offset),
           nbytes_remain(nbytes_remain) {
         GGML_ASSERT(max_chunk_read > 0);
@@ -367,11 +365,6 @@ struct gguf_reader {
         return data_offset;
     }
 
-    // position in the file where the GGUF data starts, alignment is relative to it, not to the file
-    uint64_t start() const {
-        return start_offset;
-    }
-
     bool seek(uint64_t absolute_offset) const {
         const uint64_t end_offset = uint64_t(data_offset) + nbytes_remain;
         if (absolute_offset > end_offset) {
@@ -421,7 +414,6 @@ private:
     gguf_reader_callback_t callback = nullptr;
     void * userdata = nullptr;
     size_t max_chunk_read = 0;
-    uint64_t start_offset = 0;
     mutable uint64_t data_offset = 0;
     mutable uint64_t nbytes_remain = 0;
 };
@@ -770,7 +762,7 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
     GGML_ASSERT(int64_t(ctx->info.size()) == n_tensors);
 
     // we require the data section to be aligned, so take into account any padding
-    if (n_tensors > 0 && !gr.seek(gr.start() + GGML_PAD(gr.tell() - gr.start(), ctx->alignment))) {
+    if (n_tensors > 0 && !gr.seek(GGML_PAD(gr.tell(), ctx->alignment))) {
         GGML_LOG_ERROR("%s: failed to seek to beginning of data section\n", __func__);
         gguf_free(ctx);
         return nullptr;
@@ -782,11 +774,19 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
     // compute the total size of the data section, taking into account the alignment
     {
         ctx->size = 0;
+        size_t size_if_legacy_q2 = 0; // see the legacy Q2_0 layout hint below
+        bool   has_q2_0          = false;
         for (size_t i = 0; i < ctx->info.size(); ++i) {
             const gguf_tensor_info & ti = ctx->info[i];
             if (ti.offset != ctx->size) {
                 GGML_LOG_ERROR("%s: tensor '%s' has offset %" PRIu64 ", expected %zu\n",
                     __func__, ti.t.name, ti.offset, ctx->size);
+                if (has_q2_0 && ti.offset == size_if_legacy_q2) {
+                    GGML_LOG_ERROR("%s: this file matches the legacy Prism Q2_0 layout (group size 128 stored as ggml type id 42), "
+                        "but this build reads Q2_0 as the official group-64 format\n", __func__);
+                    GGML_LOG_ERROR("%s: you are probably using the wrong GGUF: use the PQ2_0 version of this model (ggml type id 142) "
+                        "or download the group-64 Q2_0 file\n", __func__);
+                }
                 GGML_LOG_ERROR("%s: failed to read tensor data\n", __func__);
                 gguf_free(ctx);
                 return nullptr;
@@ -799,6 +799,17 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
                 return nullptr;
             }
             ctx->size += padded_size;
+
+            // track the size the data section would have if the Q2_0 tensors used the
+            // legacy Prism group-128 layout, which is byte-identical to PQ2_0
+            if (ti.t.type == GGML_TYPE_Q2_0) {
+                has_q2_0 = true;
+                const size_t nrows = ggml_nrows(&ti.t);
+                const size_t nbytes_legacy = ggml_row_size(GGML_TYPE_PQ2_0, ti.t.ne[0]) * nrows;
+                size_if_legacy_q2 += GGML_PAD(nbytes_legacy, ctx->alignment);
+            } else {
+                size_if_legacy_q2 += padded_size;
+            }
         }
     }
 

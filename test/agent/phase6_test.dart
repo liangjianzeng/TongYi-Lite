@@ -1,4 +1,5 @@
-/// Phase 6 tests：SessionLog 事件流 + AgentUiState reducer + 活动面板渲染。
+/// Phase 6 tests：SessionLog 事件流 + AgentUiState reducer + 内嵌工作流
+/// UI 渲染（回合块 / 消息分组 / 工具活动解析）。
 library;
 
 import 'package:flutter/material.dart';
@@ -6,10 +7,29 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/session/event.dart';
 import 'package:tongyi_lite/agent/session/log.dart';
+import 'package:tongyi_lite/models/chat_message.dart';
 import 'package:tongyi_lite/providers/agent_state_provider.dart';
-import 'package:tongyi_lite/widgets/agent_activity_panel.dart';
+import 'package:tongyi_lite/widgets/agent_workflow.dart';
 
 void main() {
+  /// 测试消息工厂（分组/解析组共用）。
+  ChatMessage userMsg(String c) => ChatMessage(
+        id: 'u',
+        conversationId: 'c',
+        role: MessageRole.user,
+        content: c,
+        timestamp: DateTime.now(),
+      );
+
+  ChatMessage asst(String c, {bool streaming = false}) => ChatMessage(
+        id: 'a',
+        conversationId: 'c',
+        role: MessageRole.assistant,
+        content: c,
+        isStreaming: streaming,
+        timestamp: DateTime.now(),
+      );
+
   group('SessionLog.events 广播流', () {
     test('append 实时推送事件', () async {
       final log = SessionLog.fromEvents([]);
@@ -138,55 +158,199 @@ void main() {
     });
   });
 
-  group('AgentActivityPanel 渲染', () {
-    Future<void> pump(WidgetTester tester, AgentUiStateNotifier n) async {
+  group('groupMessages 消息重排（内嵌工作流）', () {
+    test('新存储序 [user, ans, t1, t2] → 块 [t1, t2, ans]', () {
+      final units = groupMessages([
+        userMsg('Q1'),
+        asst('最终答案'),
+        asst('🔧 A ✓ok'),
+        asst('🔧 B ✓ok2'),
+      ]);
+      expect(units.length, 2);
+      expect(units.first, isA<UserUnit>());
+      final turn = units.last as TurnUnit;
+      expect(turn.tools.length, 2);
+      expect(turn.tools.map((m) => m.content), ['🔧 A ✓ok', '🔧 B ✓ok2']);
+      expect(turn.answer?.content, '最终答案');
+      expect(turn.answer?.role, MessageRole.assistant);
+    });
+
+    test('旧存储序 [user, t1, t2, ans] → 块 [t1, t2, ans]（重排到回答之前）', () {
+      final units = groupMessages([
+        userMsg('Q1'),
+        asst('🔧 A ✓ok'),
+        asst('🔧 B ✓ok2'),
+        asst('最终答案'),
+      ]);
+      expect(units.length, 2);
+      final turn = units.last as TurnUnit;
+      expect(turn.tools.length, 2);
+      expect(turn.tools.map((m) => m.content), ['🔧 A ✓ok', '🔧 B ✓ok2']);
+      expect(turn.answer?.content, '最终答案');
+    });
+
+    test('多回合：user 是分界；末回合也 flush；非 🔧 回答成普通回合块', () {
+      final units = groupMessages([
+        userMsg('Q1'),
+        asst('🔧 X ✓'),
+        asst('A1'),
+        userMsg('Q2'),
+        asst('A2'),
+      ]);
+      expect(units.length, 4);
+      expect(units[0], isA<UserUnit>());
+      final t1 = units[1] as TurnUnit;
+      expect(t1.tools.length, 1);
+      expect(t1.tools.first.content, '🔧 X ✓');
+      expect(t1.answer?.content, 'A1');
+      expect(units[2], isA<UserUnit>());
+      final t2 = units[3] as TurnUnit;
+      expect(t2.tools, isEmpty);
+      expect(t2.answer?.content, 'A2');
+    });
+
+    test('空输入 → 空', () {
+      expect(groupMessages([]), isEmpty);
+    });
+  });
+
+  group('parseToolActivity 工具活动解析（历史回合步骤回看）', () {
+    test('✓ 成功摘要', () {
+      final ui = parseToolActivity(asst('🔧 file_write ✓写入 3 行'));
+      expect(ui?.name, 'file_write');
+      expect(ui?.status, ToolUiStatus.done);
+      expect(ui?.result, '写入 3 行');
+      expect(ui?.isError, isFalse);
+    });
+
+    test('⚠️ 失败（isError + 摘要）', () {
+      final ui = parseToolActivity(asst('🔧 shell ⚠️exit code=1'));
+      expect(ui?.name, 'shell');
+      expect(ui?.status, ToolUiStatus.failed);
+      expect(ui?.result, 'exit code=1');
+      expect(ui?.isError, isTrue);
+    });
+
+    test('执行中（新单工具格式）', () {
+      final ui = parseToolActivity(asst('🔧 正在调用 web_search…'));
+      expect(ui?.name, 'web_search');
+      expect(ui?.status, ToolUiStatus.executing);
+      expect(ui?.result, isNull);
+    });
+
+    test('执行中（旧多工具冒号格式）也能解析', () {
+      final ui = parseToolActivity(asst('🔧 正在调用：web_search、shell…'));
+      expect(ui?.name, 'web_search、shell');
+      expect(ui?.status, ToolUiStatus.executing);
+    });
+
+    test('非 🔧 消息 → null', () {
+      expect(parseToolActivity(asst('普通回复')), isNull);
+      expect(parseToolActivity(asst('🔧 无状态标记')), isNull);
+    });
+  });
+
+  group('AgentTurnBlock 内嵌工作流渲染', () {
+    ToolActivityUi act({
+      required ToolUiStatus status,
+      required String name,
+      String? result,
+      Map<String, dynamic>? args,
+    }) => ToolActivityUi(
+          callId: 'c1',
+          name: name,
+          arguments: args ?? const {},
+          status: status,
+          result: result,
+        );
+
+    Future<void> pump(WidgetTester tester, AgentUiState ui,
+        {List<ToolActivityUi> steps = const [],
+         ChatMessage? answer,
+         bool isLive = false}) async {
       await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            agentUiStateProvider.overrideWith((ref) => n),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(body: AgentActivityPanel()),
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: AgentTurnBlock(
+                isLive: isLive,
+                steps: steps,
+                answer: answer,
+                ui: ui,
+              ),
+            ),
           ),
         ),
       );
     }
 
-    testWidgets('空状态不渲染', (tester) async {
-      await pump(tester, AgentUiStateNotifier());
+    testWidgets('空步骤无回答：不渲染内容', (tester) async {
+      await pump(tester, const AgentUiState(), isLive: false);
       expect(find.byType(ToolActivityCard), findsNothing);
+      expect(find.textContaining('思考中'), findsNothing);
     });
 
-    testWidgets('工具卡片 + 压缩横幅 + 重试指示渲染', (tester) async {
-      final n = AgentUiStateNotifier();
-      final log = SessionLog.fromEvents([]);
-      n.attach(log);
-      log.append(kEventTurnStart, {'turn': 1});
-      log.append(kEventCompactionSummary, {'content': '摘要'});
-      log.append(kEventLlmRetry, {'turn': 1, 'step': 1, 'retries': 2});
-      log.append(kEventToolCall,
-          {'callId': 'c1', 'name': 'get_time', 'arguments': {'tz': 'UTC'}});
-      log.append(kEventToolResult,
-          {'callId': 'c1', 'name': 'get_time', 'content': 'ok', 'isError': false});
-
-      await pump(tester, n);
-      expect(find.text('🔧 get_time'), findsOneWidget);
-      expect(find.text('上下文已压缩'), findsOneWidget);
-      expect(find.text('重试中…（2）'), findsOneWidget);
-      n.detach();
-      log.dispose();
+    testWidgets('执行中步骤：卡片 + 执行中标签', (tester) async {
+      await pump(
+        tester,
+        const AgentUiState(running: true),
+        steps: [act(status: ToolUiStatus.executing, name: 'get_time', args: {'tz': 'UTC'})],
+        isLive: true,
+      );
+      expect(find.textContaining('🔧 get_time'), findsOneWidget);
+      expect(find.textContaining('执行中'), findsOneWidget);
     });
 
-    testWidgets('运行中且无工具 → 状态行含 turn/step', (tester) async {
-      final n = AgentUiStateNotifier();
-      final log = SessionLog.fromEvents([]);
-      n.attach(log);
-      log.append(kEventTurnStart, {'turn': 2});
-      log.append(kEventStepStart, {'turn': 2, 'step': 3});
-      await pump(tester, n);
-      expect(find.textContaining('turn 2 / step 3'), findsOneWidget);
-      n.detach();
-      log.dispose();
+    testWidgets('完成步骤：展开后显示结果', (tester) async {
+      await pump(
+        tester,
+        const AgentUiState(running: false),
+        steps: [act(status: ToolUiStatus.done, name: 'get_time', result: '12:00', args: {'tz': 'UTC'})],
+        isLive: false,
+      );
+      expect(find.textContaining('🔧 get_time'), findsOneWidget);
+      expect(find.textContaining('12:00'), findsNothing); // 未展开
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pump();
+      expect(find.textContaining('12:00'), findsOneWidget);
+      expect(find.textContaining('参数'), findsOneWidget);
+    });
+
+    testWidgets('失败步骤：⚠️ 标记 + 结果（展开可见）', (tester) async {
+      await pump(
+        tester,
+        const AgentUiState(running: false),
+        steps: [act(status: ToolUiStatus.failed, name: 'shell', result: 'exit code=1')],
+        isLive: false,
+      );
+      expect(find.textContaining('🔧 shell'), findsOneWidget);
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pump();
+      expect(find.textContaining('exit code=1'), findsOneWidget);
+    });
+
+    testWidgets('运行中且无答案 → 思考中…', (tester) async {
+      await pump(tester, const AgentUiState(running: true), isLive: true);
+      expect(find.text('思考中…'), findsOneWidget);
+      // 非 live：历史回合不显示思考行
+      await pump(tester, const AgentUiState(running: true), isLive: false);
+      expect(find.text('思考中…'), findsNothing);
+    });
+
+    testWidgets('live 显示重试/压缩横幅，非 live 不显示', (tester) async {
+      final liveUi = const AgentUiState(running: true, retryAttempt: 2, compacted: true);
+      await pump(tester, liveUi, isLive: true);
+      expect(find.textContaining('重试中'), findsOneWidget);
+      expect(find.textContaining('上下文已压缩'), findsOneWidget);
+      await pump(tester, liveUi, isLive: false);
+      expect(find.textContaining('重试中'), findsNothing);
+      expect(find.textContaining('上下文已压缩'), findsNothing);
+    });
+
+    testWidgets('答案：渲染回答内容（无头像）', (tester) async {
+      final answer = asst('答案内容');
+      await pump(tester, const AgentUiState(), answer: answer, isLive: false);
+      expect(find.text('答案内容'), findsOneWidget);
     });
   });
 }

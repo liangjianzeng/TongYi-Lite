@@ -10,7 +10,7 @@
 		RECOMMENDED_MCP_SERVERS
 	} from '$lib/constants';
 	import { BooleanString, HealthCheckStatus } from '$lib/enums';
-	import { mcpStore } from '$lib/stores';
+	import { conversationsStore, mcpStore } from '$lib/stores';
 	import { canonicalizeServerUrl, parseHeadersToArray, uuid } from '$lib/utils';
 
 	interface Props {
@@ -234,6 +234,8 @@
 			useProxy: newServerUseProxy
 		});
 
+		conversationsStore.preferences.setMcpServerOverride(newServerId, true);
+
 		handleOpenChange(false);
 	}
 
@@ -243,8 +245,8 @@
 	}
 </script>
 
-<Dialog.Root onOpenChange={handleOpenChange} {open}>
-	<Dialog.Content class="max-w-2xl!">
+<Dialog.Root {open} onOpenChange={handleOpenChange}>
+	<Dialog.Content class="sm:max-w-2xl">
 		<Dialog.Header>
 			<Dialog.Title class="select-none">Add New MCP Server</Dialog.Title>
 		</Dialog.Header>
@@ -253,8 +255,7 @@
 			<div class="space-y-3 pt-2">
 				<div class="flex items-center justify-between gap-3">
 					<h3 class="text-sm font-medium">Recommended Servers</h3>
-
-					<Button class="text-muted-foreground" onclick={handleDismissAll} size="sm" variant="ghost"
+					<Button class="text-muted-foreground" variant="ghost" size="sm" onclick={handleDismissAll}
 						>Dismiss</Button
 					>
 				</div>
@@ -262,40 +263,40 @@
 				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 					{#each recommendationsToShow as recommendation (recommendation.id)}
 						<McpServerCardCompact
-							dimmed={hasSelection && selectedRecommendationId !== recommendation.id}
+							server={recommendation}
 							onClick={() => handleRecommendationClick(recommendation.id)}
 							selected={selectedRecommendationId === recommendation.id}
-							server={recommendation}
+							dimmed={hasSelection && selectedRecommendationId !== recommendation.id}
 						/>
 					{/each}
 				</div>
 			</div>
 		{/if}
 
-		<form class="contents" onsubmit={handleSubmit}>
+		<form onsubmit={handleSubmit} class="contents">
 			<div class="space-y-4 py-4">
 				<McpServerForm
-					bind:wantsAuthorization={newServerWantsAuthorization}
-					headers={newServerHeaders}
-					id="new-server"
-					name={newServerName}
-					onHeadersChange={(v) => (newServerHeaders = v)}
-					onNameChange={handleNameChange}
-					onUrlChange={(v) => (newServerUrl = v)}
-					onUseProxyChange={(v) => (newServerUseProxy = v)}
-					required={authRequired}
 					url={newServerUrl}
-					urlError={newServerUrl ? newServerUrlError : null}
+					name={newServerName}
+					onNameChange={handleNameChange}
+					headers={newServerHeaders}
 					useProxy={newServerUseProxy}
+					onUrlChange={(v) => (newServerUrl = v)}
+					onHeadersChange={(v) => (newServerHeaders = v)}
+					onUseProxyChange={(v) => (newServerUseProxy = v)}
+					urlError={newServerUrl ? newServerUrlError : null}
+					id="new-server"
+					bind:wantsAuthorization={newServerWantsAuthorization}
+					required={authRequired}
 				/>
 			</div>
 
 			<Dialog.Footer>
-				<Button onclick={() => handleOpenChange(false)} size="sm" variant="secondary">
+				<Button variant="secondary" size="sm" onclick={() => handleOpenChange(false)}>
 					Cancel
 				</Button>
 
-				<Button aria-label="Save" disabled={!canSave} size="sm" type="submit" variant="default">
+				<Button variant="default" size="sm" type="submit" disabled={!canSave} aria-label="Save">
 					Add
 				</Button>
 			</Dialog.Footer>

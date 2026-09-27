@@ -130,8 +130,7 @@ class ModelBase:
                  sentence_transformers_dense_modules: bool = False,
                  target_model_dir: Path | None = None,
                  fuse_gate_up_exps: bool = False,
-                 fp8_as_q8: bool = False,
-                 fuse_qkv: bool = False):
+                 fp8_as_q8: bool = False):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -154,15 +153,6 @@ class ModelBase:
         self.fuse_gate_up_exps = fuse_gate_up_exps
         self._gate_exp_buffer: dict[int, Tensor] = {}
         self._up_exp_buffer: dict[int, Tensor] = {}
-        self.fuse_qkv = fuse_qkv
-        self._q_buffer: dict[int, Tensor] = {}
-        self._k_buffer: dict[int, Tensor] = {}
-        self._v_buffer: dict[int, Tensor] = {}
-        self._q_bias_buffer: dict[int, Tensor] = {}
-        self._k_bias_buffer: dict[int, Tensor] = {}
-        self._v_bias_buffer: dict[int, Tensor] = {}
-        self._fusable_qkv_weight_layers: set[int] = set()
-        self._fusable_qkv_bias_layers: set[int] = set()
         self.hparams = ModelBase.load_hparams(self.dir_model, self.is_mistral_format) if hparams is None else hparams
         self.model_tensors = self.index_tensors(remote_hf_model_id=remote_hf_model_id)
         self.metadata_override = metadata_override
@@ -627,42 +617,160 @@ class ModelBase:
             raise ValueError(f"Can not map tensor {name!r}")
         return new_name
 
-    def prepare_qkv_fusion(self) -> None:
-        self._fusable_qkv_weight_layers.clear()
-        self._fusable_qkv_bias_layers.clear()
-        if not self.fuse_qkv or gguf.MODEL_TENSOR.ATTN_QKV not in gguf.MODEL_TENSORS[self.model_arch]:
+    def hadamard_folded_names(self) -> set[str]:
+        """Source-tensor names folded under a Hadamard manifest, or empty."""
+        cached = getattr(self, "_hadamard_folded_names", None)
+        if cached is not None:
+            return cached
+        names: set[str] = set()
+        manifest_path = self.dir_model / "hadamard_packing.json"
+        if manifest_path.is_file():
+            with manifest_path.open("r", encoding="utf-8") as f:
+                for record in json.load(f).get("tensors", []):
+                    if isinstance(record, dict) and isinstance(record.get("name"), str):
+                        names.add(record["name"])
+        self._hadamard_folded_names = names
+        return names
+
+    def add_hadamard_metadata(self) -> None:
+        """Transfer a packed-checkpoint transform contract into GGUF metadata."""
+        manifest_path = self.dir_model / "hadamard_packing.json"
+        if not manifest_path.is_file():
             return
 
-        qkv_types = {
-            gguf.MODEL_TENSOR.ATTN_Q,
-            gguf.MODEL_TENSOR.ATTN_K,
-            gguf.MODEL_TENSOR.ATTN_V,
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        schema_version = manifest.get("schema_version")
+        if schema_version not in (1, 2, 3) or manifest.get("kind") != "hadamard-weight-fold":
+            raise ValueError(f"Unsupported Hadamard manifest: {manifest_path}")
+        if manifest.get("status") != "requires-matching-runtime":
+            raise ValueError(f"Unexpected Hadamard manifest status: {manifest.get('status')!r}")
+
+        transform = manifest.get("transform")
+        if not isinstance(transform, dict):
+            raise ValueError("Hadamard manifest is missing transform metadata")
+        block_size = transform.get("block_size")
+        if not isinstance(block_size, int) or block_size <= 0 or block_size & (block_size - 1):
+            raise ValueError(f"Invalid Hadamard block size: {block_size!r}")
+        if transform.get("name") != "normalized-signed-sylvester-walsh-hadamard":
+            raise ValueError(f"Unsupported Hadamard transform: {transform.get('name')!r}")
+        sign_mode = transform.get("sign_mode")
+        if sign_mode not in ("identity", "explicit"):
+            raise ValueError(f"Unsupported Hadamard sign mode: {sign_mode!r}")
+        sign_widths: list[int] = []
+        sign_values: list[int] = []
+        if sign_mode == "explicit":
+            signs = manifest.get("signs")
+            if not isinstance(signs, dict) or not signs:
+                raise ValueError("explicit sign mode requires a signs table")
+            for width_str, vec in sorted(signs.items(), key=lambda kv: int(kv[0])):
+                width = int(width_str)
+                # same width rule the runtime enforces, so a manifest that converts also loads
+                if width <= 0 or width % block_size != 0:
+                    raise ValueError(
+                        f"sign width {width} must be positive and a multiple of block size {block_size}"
+                    )
+                if len(vec) != width or any(v not in (-1, 1) for v in vec):
+                    raise ValueError(f"invalid sign vector for width {width}")
+                sign_widths.append(width)
+                sign_values.extend(int(v) for v in vec)
+
+        tensor_records = manifest.get("tensors")
+        if not isinstance(tensor_records, list) or not tensor_records:
+            raise ValueError("Hadamard manifest has no folded tensors")
+
+        # The runtime applies the activation transform only where the graph goes through
+        # build_lora_mm/build_lora_mm_id. Restrict the contract to architectures and tensor
+        # kinds verified to route every matmul through those helpers; anything else must
+        # fail here instead of producing a GGUF that loads but skips the transform.
+        _HADAMARD_ARCHS = {
+            gguf.MODEL_ARCH.LLAMA,
+            gguf.MODEL_ARCH.QWEN3,
+            gguf.MODEL_ARCH.QWEN3MOE,
+            gguf.MODEL_ARCH.QWEN35,
+            gguf.MODEL_ARCH.QWEN35MOE,
+            gguf.MODEL_ARCH.QWEN3NEXT,
         }
-        weights: dict[int, set[gguf.MODEL_TENSOR]] = {}
-        biases: dict[int, set[gguf.MODEL_TENSOR]] = {}
+        if self.model_arch not in _HADAMARD_ARCHS:
+            raise ValueError(
+                f"Hadamard folding is not verified for arch {self.model_arch.name}; "
+                "the runtime would load the GGUF without applying the activation transform"
+            )
+        _HADAMARD_KINDS = re.compile(
+            r"output\.weight|"
+            r"blk\.\d+\.("
+            r"attn_q|attn_k|attn_v|attn_qkv|attn_gate|attn_output"
+            r"|ffn_gate|ffn_up|ffn_down"
+            r"|ffn_gate_exps|ffn_up_exps|ffn_down_exps|ffn_gate_up_exps"
+            r"|ffn_gate_shexp|ffn_up_shexp|ffn_down_shexp"
+            r"|ssm_out"
+            r")\.weight"
+        )
+        weight_names: list[str] = []
+        inverse_weight_names: list[str] = []
+        for record in tensor_records:
+            if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+                raise ValueError("Hadamard manifest has an invalid tensor record")
+            if record.get("axis") != -1:
+                raise ValueError(f"Unsupported Hadamard tensor axis for {record['name']!r}")
+            role = record.get("role", "fold-before-matmul")
+            if role not in ("fold-before-matmul", "inverse-after-lookup"):
+                raise ValueError(f"Unsupported Hadamard tensor role for {record['name']!r}: {role!r}")
+            filtered = self.filter_tensors((record["name"], lambda: None))
+            if filtered is None:
+                raise ValueError(f"Hadamard tensor is filtered out: {record['name']!r}")
+            mapped = self.map_tensor_name(filtered[0])
+            if role == "inverse-after-lookup":
+                # the runtime applies the inverse transform only to the token-embedding
+                # lookup; any other latent table would load and silently stay rotated
+                if mapped != "token_embd.weight":
+                    raise ValueError(
+                        f"Hadamard tensor {record['name']!r} maps to {mapped!r}, which is not a "
+                        "verified inverse-after-lookup table"
+                    )
+                inverse_weight_names.append(mapped)
+            else:
+                if not _HADAMARD_KINDS.fullmatch(mapped):
+                    raise ValueError(
+                        f"Hadamard tensor {record['name']!r} maps to {mapped!r}, which is not on a "
+                        "verified Hadamard-aware matmul path"
+                    )
+                weight_names.append(mapped)
 
-        for name in self.model_tensors:
-            mapped = self.tensor_map.get_type_and_name(name, try_suffixes=(".weight", ".bias"))
-            if mapped is None:
-                continue
-            tensor_type, new_name = mapped
-            if tensor_type not in qkv_types:
-                continue
+        tied_output = manifest.get("tied_output", False)
+        if not isinstance(tied_output, bool) or (schema_version == 3) != tied_output:
+            raise ValueError("Hadamard schema 3 requires tied_output=true; older schemas forbid it")
+        if tied_output:
+            if inverse_weight_names != ["token_embd.weight"]:
+                raise ValueError("Tied Hadamard output requires one latent token embedding")
+            if not self.hparams.get("tie_word_embeddings", False):
+                raise ValueError("Tied Hadamard output requires tie_word_embeddings=true")
+            if "output.weight" in weight_names or any(
+                self.tensor_map.get_name(name, try_suffixes=(".weight", ".bias")) == "output.weight"
+                for name in self.model_tensors
+            ):
+                raise ValueError("Tied Hadamard output must not carry a separate output head")
+            self.gguf_writer.add_bool("prism.hadamard.tied_output", True)
+        elif "token_embd.weight" in inverse_weight_names and self.hparams.get("tie_word_embeddings", False):
+            raise ValueError("A tied latent embedding requires Hadamard schema 3 and tied_output=true")
 
-            bid = next((int(part) for part in new_name.split(".") if part.isdecimal()), None)
-            if bid is None:
-                continue
-            if new_name.endswith(".weight"):
-                weights.setdefault(bid, set()).add(tensor_type)
-            elif new_name.endswith(".bias"):
-                biases.setdefault(bid, set()).add(tensor_type)
-
-        for bid, weight_types in weights.items():
-            bias_types = biases.get(bid, set())
-            if weight_types == qkv_types and (not bias_types or bias_types == qkv_types):
-                self._fusable_qkv_weight_layers.add(bid)
-                if bias_types:
-                    self._fusable_qkv_bias_layers.add(bid)
+        self.gguf_writer.add_uint32("prism.hadamard.version", 2 if tied_output else 1)
+        self.gguf_writer.add_uint32("prism.hadamard.block_size", block_size)
+        self.gguf_writer.add_string("prism.hadamard.transform", "normalized-sylvester-walsh-hadamard")
+        self.gguf_writer.add_string("prism.hadamard.axis", "input-last-dimension")
+        self.gguf_writer.add_string("prism.hadamard.sign_mode", sign_mode)
+        self.gguf_writer.add_array("prism.hadamard.weight_names", weight_names)
+        if sign_mode == "explicit":
+            self.gguf_writer.add_array("prism.hadamard.sign_widths", sign_widths)
+            self.gguf_writer.add_array("prism.hadamard.sign_values", sign_values)
+        if inverse_weight_names:
+            self.gguf_writer.add_array("prism.hadamard.inverse_weight_names", inverse_weight_names)
+        if getattr(self, "_hadamard_gdn_v_grouped", False):
+            self.gguf_writer.add_bool("prism.hadamard.gdn_v_grouped", True)
+            logger.info("GGUF Hadamard: linear-attention out_proj kept in grouped V order")
+        logger.info("GGUF Hadamard contract: H%d, sign_mode=%s, %d folded weight(s), %d inverse-lookup",
+                    block_size, sign_mode, len(weight_names), len(inverse_weight_names))
 
     def set_gguf_parameters(self):
         raise NotImplementedError("set_gguf_parameters() must be implemented in subclasses")
@@ -690,40 +798,6 @@ class ModelBase:
             # If we buffered a gate/up tensor, wait for the other
             if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.FFN_GATE_EXP, bid) or \
                self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.FFN_UP_EXP, bid):
-                return []
-
-        # Handle Q/K/V tensor fusion if enabled
-        qkv_bid = next((int(part) for part in new_name.split(".") if part.isdecimal()), None) if self.fuse_qkv else None
-        if qkv_bid is not None:
-            is_bias = new_name.endswith('.bias')
-            suffix = '.bias' if is_bias else '.weight'
-            fusable_layers = self._fusable_qkv_bias_layers if is_bias else self._fusable_qkv_weight_layers
-            if qkv_bid not in fusable_layers:
-                return [(new_name, data_torch)]
-
-            buf_q = self._q_bias_buffer if is_bias else self._q_buffer
-            buf_k = self._k_bias_buffer if is_bias else self._k_buffer
-            buf_v = self._v_bias_buffer if is_bias else self._v_buffer
-
-            if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_Q, qkv_bid, suffix):
-                buf_q[qkv_bid] = data_torch
-            elif self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_K, qkv_bid, suffix):
-                buf_k[qkv_bid] = data_torch
-            elif self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_V, qkv_bid, suffix):
-                buf_v[qkv_bid] = data_torch
-
-            if qkv_bid in buf_q and qkv_bid in buf_k and qkv_bid in buf_v:
-                q_data = buf_q.pop(qkv_bid)
-                k_data = buf_k.pop(qkv_bid)
-                v_data = buf_v.pop(qkv_bid)
-                fused_data = torch.cat([q_data, k_data, v_data], dim=0)
-                fused_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_QKV, qkv_bid, suffix=suffix)
-                logger.info(f"Fused Q, K, V {suffix[1:]} into QKV for layer {qkv_bid}")
-                return [(fused_name, fused_data)]
-
-            if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_Q, qkv_bid, suffix) or \
-               self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_K, qkv_bid, suffix) or \
-               self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.ATTN_V, qkv_bid, suffix):
                 return []
 
         return [(new_name, data_torch)]
@@ -980,8 +1054,6 @@ class ModelBase:
 
         self.dequant_model()
 
-        self.prepare_qkv_fusion()
-
         # Handle empty tensor_map for models with block_count=0 (like MobileNetV5)
         if self.tensor_map.mapping:
             max_name_len = max(len(s) for _, s in self.tensor_map.mapping.values()) + len(".weight,")
@@ -1089,16 +1161,12 @@ class ModelBase:
                     else:
                         raise ValueError(f"Unknown file type: {self.ftype.name}")
 
-                # a chunked tensor quantizes as one chunk at a time, while it is written
-                quantize = data.quantize if isinstance(data, gguf.LazyChunkedTensor) else (
-                    lambda qtype, d=data: gguf.quants.quantize(d, qtype))
-
                 try:
-                    data = quantize(data_qtype)
+                    data = gguf.quants.quantize(data, data_qtype)
                 except gguf.QuantError as e:
                     logger.warning("%s, %s", e, "falling back to F16")
                     data_qtype = gguf.GGMLQuantizationType.F16
-                    data = quantize(data_qtype)
+                    data = gguf.quants.quantize(data, data_qtype)
 
                 shape = gguf.quant_shape_from_byte_shape(data.shape, data_qtype) if data.dtype == np.uint8 else data.shape
 
@@ -1109,13 +1177,6 @@ class ModelBase:
                 logger.info(f"{f'%-{max_name_len}s' % f'{new_name},'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
                 self.gguf_writer.add_tensor(new_name, data, raw_dtype=data_qtype)
-
-        qkv_buffers = (
-            self._q_buffer, self._k_buffer, self._v_buffer,
-            self._q_bias_buffer, self._k_bias_buffer, self._v_bias_buffer,
-        )
-        if any(qkv_buffers):
-            raise ValueError("QKV fusion did not consume all buffered tensors")
 
     def set_type(self):
         self.gguf_writer.add_type(gguf.GGUFType.MODEL)
@@ -1154,6 +1215,8 @@ class ModelBase:
 
         logger.info("Set model quantization version")
         self.gguf_writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
+
+        self.add_hadamard_metadata()
 
     def write_vocab(self):
         raise NotImplementedError("write_vocab() must be implemented in subclasses")
@@ -1597,9 +1660,6 @@ class TextModel(ModelBase):
         if chkhsh == "bba3b3366b646dbdded5dbc42d59598b849371afc42f7beafa914afaa5b70aa6":
             # ref: https://huggingface.co/tencent/Hunyuan-4B-Instruct
             res = "hunyuan-dense"
-        if chkhsh == "e6ddf9c6686791c12d698d34c31ab9be1fea9af5a3d9a6909783ab382198ae1c":
-            # ref: https://huggingface.co/tencent/Hy4-preview
-            res = "hy_v4"
         if chkhsh == "a6b57017d60e6edb4d88ecc2845188e0eb333a70357e45dcc9b53964a73bbae6":
             # ref: https://huggingface.co/tiiuae/Falcon-H1-0.5B-Base
             res = "falcon-h1"
@@ -1633,12 +1693,6 @@ class TextModel(ModelBase):
         if chkhsh == "9e454714343b69b99b71795c1d27a68c2a1d15dab111f4d353109f966af29da7":
             # ref: https://huggingface.co/LiquidAI/LFM2.5-8B-A1B
             res = "lfm2"
-        if chkhsh == "846deafc5b0fa786186fa4ae6c7b49903cf2f1d1895bdb80b9120d60be135252":
-            # ref: https://huggingface.co/danish-foundation-models/DFM-Mimir
-            res = "gemma4"
-        if chkhsh == "0a766d034107bc736a3f2dc4968fd62e54a3570f1454443e0c5a4cc6bd7941ed":
-            # ref: https://huggingface.co/XHToken/Spark-X2.5-1.7B
-            res = "spark2_5"
         if chkhsh == "0ef9807a4087ebef797fc749390439009c3b9eda9ad1a097abbe738f486c01e5":
             # ref: https://huggingface.co/meta-llama/Meta-Llama-3-8B
             res = "llama-bpe"

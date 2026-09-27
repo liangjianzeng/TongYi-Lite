@@ -52,6 +52,7 @@ jobs:
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools'
 
       - name: Build
         run: |
@@ -110,7 +111,7 @@ jobs:
       #   cache on:  https://github.com/ggerganov/tmp2/actions/runs/26534713799/job/78224189394
       #
       #- name: ccache
-      #  uses: ggml-org/ccache-action@v1.2.24
+      #  uses: ggml-org/ccache-action@v1.2.21
       #  with:
       #    key: android-ubuntu-arm64
       #    evict-old-files: 1d
@@ -126,6 +127,7 @@ jobs:
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools'
 
       - name: Install NDK
         run: |
