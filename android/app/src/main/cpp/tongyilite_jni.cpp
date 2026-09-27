@@ -238,6 +238,44 @@ static int longest_common_prefix(const std::vector<llama_token> &a,
     return (int)i;
 }
 
+// MemAvailable from /proc/meminfo (bytes); 0 when unreadable. On UMA SoCs
+// (Adreno OpenCL/Vulkan) GPU buffers ARE system RAM, and an over-committed
+// GPU offload does not fail cleanly — it hard-hangs the KGSL subsystem and
+// reboots the whole phone (observed 3x with Ternary-Bonsai-2-27B PTQ1_0 on
+// OpenCL). Callers must treat 0 as "unknown" and skip the guard.
+static int64_t read_mem_available_bytes() {
+    std::ifstream f("/proc/meminfo");
+    if (!f.is_open()) return 0;
+    char line[256];
+    while (f.getline(line, sizeof(line))) {
+        long long kb = 0;
+        if (std::sscanf(line, "MemAvailable: %lld kB", &kb) == 1) return kb * 1024LL;
+    }
+    return 0;
+}
+
+// --- OOM guard configuration (vk_flags.conf overridable, 2026-09-27) ---
+// The guard protects against KGSL/dm wedges (full device reboots) when total
+// demand exceeds physical RAM on UMA phones. Its headroom constants are
+// judgement calls, so expose them instead of hardcoding:
+//   TONGYILITE_NO_OOM_GUARD=1           skip guard refusals entirely (risk: hard reboot)
+//   TONGYILITE_OOM_PRE_HEADROOM_MB=<n>  pre-load headroom,  default 768
+//   TONGYILITE_OOM_POST_HEADROOM_MB=<n> post-load headroom, default 1536
+// The effective values are printed to the loading log on every attempt so the
+// guard's inputs and math stay visible to the user.
+static bool oom_guard_disabled() {
+    const char *e = getenv("TONGYILITE_NO_OOM_GUARD");
+    return e && e[0] == '1';
+}
+static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
+    const char *e = getenv(name);
+    if (!e || !*e) return default_mb << 20;
+    char *end = nullptr;
+    long long mb = strtoll(e, &end, 10);
+    if (end == e || mb < 0) return default_mb << 20;
+    return (int64_t)mb << 20;
+}
+
 struct InferenceEngine {
     llama_model *model   = nullptr;
     const struct llama_vocab *vocab = nullptr; // extracted from model for new API
@@ -488,6 +526,41 @@ struct InferenceEngine {
 
         // Use unique_lock so we can unlock before JNI callbacks to prevent deadlock.
         std::unique_lock<std::mutex> lock(mtx);
+
+        // Pre-load OOM check (2026-09-27): the post-load guard cannot protect
+        // against the weights themselves blowing physical RAM — by the time it
+        // runs, the GPU-pinned allocations are already live and a KGSL wedge
+        // happens DURING load_tensors, before any guard logic. Estimate the
+        // worst-case demand (full file pinned + headroom for KV/graph/OS)
+        // against pre-load MemAvailable and refuse early.
+        {
+            struct stat pst{};
+            if (::stat(model_path, &pst) == 0 && effective_gpu_layers > 0) {
+                const int64_t avail_pre = read_mem_available_bytes();
+                const int64_t weights_est = (int64_t)pst.st_size;  // conservative: everything pinned
+                const int64_t pre_headroom = oom_headroom_bytes("TONGYILITE_OOM_PRE_HEADROOM_MB", 768);
+                char cmsg[256];
+                snprintf(cmsg, sizeof(cmsg),
+                         "oom-guard 预检：可用 %.2f GB，权重估算 %.2f GB，预检余量 %.0f MB，旁路=%s",
+                         avail_pre / 1073741824.0, weights_est / 1073741824.0,
+                         pre_headroom / 1048576.0, oom_guard_disabled() ? "开" : "关");
+                LOGI("[oom-guard] %s", cmsg);
+                reportLoadingLog(cmsg);
+                if (!oom_guard_disabled() && avail_pre > 0 && avail_pre - weights_est < pre_headroom) {
+                    char pmsg[320];
+                    snprintf(pmsg, sizeof(pmsg),
+                             "内存不足，已拒绝加载以防整机死机：模型 %.1f GB 超出当前可用 %.1f GB 扣除安全余量后的容量。"
+                             "请换更小的量化版本",
+                             pst.st_size / (1024.0 * 1024.0 * 1024.0),
+                             avail_pre / (1024.0 * 1024.0 * 1024.0));
+                    LOGE("[oom-guard] refuse PRE-load: avail=%lld weights_est=%lld",
+                         (long long)avail_pre, (long long)weights_est);
+                    reportLoadingLog(pmsg);
+                    return false;
+                }
+            }
+        }
+
         model = llama_model_load_from_file(model_path, model_params);
         if (!model) {
             LOGE("Failed to load model from: %s", model_path);
@@ -579,7 +652,7 @@ struct InferenceEngine {
                 n_draft_max = dspark_block_size;
                 LOGI("DSpark draft model loaded (block_size=%d) -> n_draft_max=%d",
                      dspark_block_size, n_draft_max);
-                char dlog[64] = {};
+                char dlog[96] = {};
                 snprintf(dlog, sizeof(dlog), "dspark 草稿模型加载完成 (block_size=%d) → n_draft_max=%d",
                          dspark_block_size, n_draft_max);
                 reportLoadingLog(dlog);
@@ -594,6 +667,101 @@ struct InferenceEngine {
 
         const int trained_ctx = llama_model_n_ctx_train(model);
         int effective_n_ctx = (requested_n_ctx > 0) ? requested_n_ctx : ((trained_ctx > 0) ? trained_ctx : 512);
+
+        // ------------------------------------------------------------------
+        // OOM guard (2026-09-27, after Ternary-Bonsai-2-27B PTQ1_0 + OpenCL
+        // hard-hung the phone three times — full device reboots, no app
+        // crash, no logs). On UMA GPUs the weights AND the KV cache live in
+        // system RAM; with the mmap'd file working set on top, the real peak
+        // is (weights_on_gpu + KV + file cache + graph buffers). When that
+        // exceeds physical RAM the KGSL/dm subsystem wedges and the device
+        // watchdog reboots — nothing in userspace can survive it. So refuse
+        // (or shrink n_ctx) BEFORE allocating, based on MemAvailable.
+        // ------------------------------------------------------------------
+        if (effective_gpu_layers > 0) {
+            const int64_t mem_avail = read_mem_available_bytes();
+            if (mem_avail > 0) {
+                // Weights pinned on the GPU: full GGUF when all layers offload,
+                // pro-rated otherwise. Plus draft head when it was loaded.
+                const int n_layer_total = std::max(1, n_layer);
+                const double offload_ratio =
+                    std::min(1.0, (double)effective_gpu_layers / (double)n_layer_total);
+                int64_t weights_gpu = (int64_t)(model_file_size_bytes_ * offload_ratio);
+                if (draft_model) {
+                    struct stat dst{};
+                    if (draft_path && ::stat(draft_path, &dst) == 0) {
+                        weights_gpu += (int64_t)dst.st_size;  // draft is offloaded too
+                    }
+                }
+                // KV bytes for one position (K+V, f16). Conservative: when the
+                // GQA shape is unknown assume full n_embd width.
+                const int kv_heads   = std::max(1, llama_model_n_head_kv(model));
+                const int n_head_    = llama_model_n_head(model);
+                const int64_t kv_dim = (n_head_ > 0)
+                    ? (int64_t)kv_heads * (n_embd / n_head_)
+                    : (int64_t)n_embd;
+                const int64_t kv_per_pos = 2LL * n_layer_total * kv_dim * (int64_t)sizeof(uint16_t);
+
+                // Headroom for graph compute buffers, upload staging, the mmap
+                // file working set, Android itself. Configurable (default 1536
+                // MiB) via TONGYILITE_OOM_POST_HEADROOM_MB in vk_flags.conf;
+                // effective values are logged so the math stays inspectable.
+                const int64_t post_headroom =
+                    oom_headroom_bytes("TONGYILITE_OOM_POST_HEADROOM_MB", 1536);
+                const int64_t budget = mem_avail - post_headroom;
+                // 2026-09-27 fix: do NOT subtract weights_gpu here. This guard
+                // runs AFTER llama_model_load — the GPU-pinned weights are
+                // already live and already excluded from MemAvailable, so
+                // subtracting them again double-counted and refused every
+                // model big enough to push post-load MemAvailable below
+                // (weights + headroom): Qwen3.5-4B was refused with a NEGATIVE
+                // kv_budget although it fits a 12 GB phone comfortably.
+                // True pre-load protection is the pre-load check above.
+                const int64_t kv_budget = budget;
+
+                if (!oom_guard_disabled() && kv_budget < (int64_t)512 * kv_per_pos) {
+                    char gmsg[420];
+                    snprintf(gmsg, sizeof(gmsg),
+                             "内存不足，已拒绝加载以防整机死机：可用 %.1f GB，GPU 权重约 %.1f GB，"
+                             "每 token KV 约 %.1f KB（扣除余量 %.0f MB）。"
+                             "请调低「GPU 层数」或上下文；如确认风险自负，可在 "
+                             "/storage/emulated/0/TongYiLite/vk_flags.conf 写 "
+                             "TONGYILITE_NO_OOM_GUARD=1 绕过",
+                             mem_avail / (1024.0 * 1024.0 * 1024.0),
+                             weights_gpu / (1024.0 * 1024.0 * 1024.0),
+                             kv_per_pos / 1024.0,
+                             post_headroom / (1024.0 * 1024.0));
+                    LOGE("[oom-guard] refuse load: avail=%lld weights_gpu=%lld kv_per_pos=%lld budget=%lld bypass=%d",
+                         (long long)mem_avail, (long long)weights_gpu,
+                         (long long)kv_per_pos, (long long)budget,
+                         oom_guard_disabled() ? 1 : 0);
+                    // Model/draft are not yet visible to other threads (load() has
+                    // not returned, is_loaded() still false), free under the mutex.
+                    std::lock_guard<std::mutex> guard(mtx);
+                    if (draft_model) { llama_model_free(draft_model); draft_model = nullptr; }
+                    if (model) { llama_model_free(model); model = nullptr; }
+                    vocab = nullptr;
+                    model_file_size_bytes_ = 0;
+                    reportLoadingLog(gmsg);
+                    return false;
+                }
+                const int64_t max_ctx = kv_budget / std::max<int64_t>(1, kv_per_pos);
+                if (max_ctx < effective_n_ctx) {
+                    const int orig_n_ctx = effective_n_ctx;
+                    effective_n_ctx = (int)std::max<int64_t>(512, (max_ctx / 64) * 64);
+                    LOGW("[oom-guard] n_ctx %d -> %d (avail=%lld weights_gpu=%lld kv_budget=%lld)",
+                         orig_n_ctx, effective_n_ctx,
+                         (long long)mem_avail, (long long)weights_gpu, (long long)kv_budget);
+                    char gmsg[256];
+                    snprintf(gmsg, sizeof(gmsg),
+                             "内存不足：上下文已从 %d 自动下调到 %d（可用 %.1f GB，GPU 权重约 %.1f GB），可避免整机死机",
+                             orig_n_ctx, effective_n_ctx,
+                             mem_avail / (1024.0 * 1024.0 * 1024.0),
+                             weights_gpu / (1024.0 * 1024.0 * 1024.0));
+                    reportLoadingLog(gmsg);
+                }
+            }
+        }
 
         if (requested_n_ctx <= 0 || requested_n_ctx != effective_n_ctx) {
             LOGW("Using effective n_ctx=%d (requested=%d, trained=%d)", effective_n_ctx, requested_n_ctx, trained_ctx);
@@ -1723,6 +1891,17 @@ struct InferenceEngine {
                 const llama_seq_id seq_id = 0;
                 t_gen_ms = 0;
                 while (n_gen < max_tokens && !should_stop) {
+                    // Wall-clock per speculative iteration starts HERE (2026-09-27
+                    // tok/s fix): the timer must cover draft forward + verify
+                    // decode + draft-context process + sampling + accept.
+                    // Previously only the verify decode was timed, so the draft
+                    // model cost was invisible and tok/s was hugely inflated
+                    // (e.g. Vulkan+dspark showed ~100 tok/s while the real wall
+                    // speed matched plain OpenCL). The UI emit callback below is
+                    // the only excluded segment (same convention as the plain
+                    // path's decode-only timer, whose excluded sampler/emit cost
+                    // is negligible).
+                    t_start = std::chrono::high_resolution_clock::now();
                     // 1) generate a fresh draft from the MTP head
                     if (draft.empty()) {
                         // Adaptive draft budget: shrink n_draft when the head's recent
@@ -1783,11 +1962,9 @@ struct InferenceEngine {
                     for (size_t k = 0; k < draft.size(); ++k) {
                         common_batch_add(batch_tgt, draft[k], mtp_n_past + k, { seq_id }, true);
                     }
-                    t_start = std::chrono::high_resolution_clock::now();
                     LOGI("[%s] verify batch: id_last=%d n_past=%d n_draft=%zu", driver_tag, mtp_id_last, mtp_n_past - 1, draft.size());
                     const int dec_ret = llama_decode(context, batch_tgt);
                     t_end = std::chrono::high_resolution_clock::now();
-                    t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
                     if (dec_ret != 0) {
                         LOGE("[%s] llama_decode failed ret=%d at n_past=%d", driver_tag, dec_ret, mtp_n_past - 1);
                         break;
@@ -1822,6 +1999,13 @@ struct InferenceEngine {
                     // here before the vector is cleared below).
                     mtp_accept_sum += (float)(ids.size() - 1);
                     mtp_draft_sum  += (float)draft.size();
+
+                    // tok/s honest denominator (2026-09-27): close the iteration
+                    // timer AFTER draft+verify+process+sample+accept, BEFORE the
+                    // UI emit loop. See the t_start comment at the top of the
+                    // loop body for why verify-only timing inflated tok/s.
+                    t_end = std::chrono::high_resolution_clock::now();
+                    t_gen_ms += std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
                     // 5) commit accepted tokens: ids[0] is the new sampled token,
                     //    ids[1..] are the verified draft tokens.
@@ -2201,6 +2385,41 @@ static void loadVkFlagsConf() {
         }
     }
 
+    // RESEARCH(vendor fix): the stock 0800.71 driver stays numerically broken for
+    // hybrid-SSM models (Qwen3.5 / LFM2.5) even with the flags above - the GDN /
+    // ssm_scan pipelines bypass every one of those workarounds (2026-09-27 probe:
+    // 24/24 tokens decode empty on stock driver, coherent 5.4 t/s on Turnip).
+    // The out-of-tree Turnip driver is bundled as jniLibs/arm64-v8a/
+    // libturnip_freedreno.so -> wire GGML_VK_TURNIP to the extracted native lib dir
+    // (located via /proc/self/maps: first '/' in the maps line starts the pathname).
+    // A vk_flags.conf entry (e.g. "GGML_VK_TURNIP=" to force the stock driver) overrides.
+    {
+        std::string turnip;
+        FILE * f = fopen("/proc/self/maps", "r");
+        if (f != nullptr) {
+            char line[512];
+            while (fgets(line, sizeof(line), f) != nullptr) {
+                const char * path = strchr(line, '/');
+                if (path != nullptr && strstr(path, "libtongyilite_jni.so") != nullptr) {
+                    const char * slash = strrchr(path, '/');
+                    if (slash != nullptr && slash != path) {
+                        turnip.assign(path, slash - path);
+                        turnip += "/libturnip_freedreno.so";
+                    }
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        if (!turnip.empty() && getenv("GGML_VK_TURNIP") == nullptr) {
+            struct stat st {};
+            if (stat(turnip.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                setenv("GGML_VK_TURNIP", turnip.c_str(), 1);
+                LOGI("vk flag default: GGML_VK_TURNIP=%s", turnip.c_str());
+            }
+        }
+    }
+
     static const char * candidates[] = {
         "/data/data/com.dgxspark.tongyilite/app_flutter/vk_flags.conf",
         "/sdcard/TongYiLite/vk_flags.conf",
@@ -2250,9 +2469,17 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeInit(JNIEnv *env, jobject) {
 
 // Global ref for the loading callback object (set via nativeSetLoadingCallback, used during load)
 static jobject g_loading_callback_obj = nullptr;
+// Last loading-log message, surfaced to the user when loadModel() returns
+// false. Without this the UI could only show a generic "模型加载失败" while
+// the actual reason (e.g. the oom-guard refusal with numbers) was buried in
+// the log tab. Reset at the start of every load attempt.
+static char g_last_loading_msg[640] = {0};
 
 // Inline helper — calls onLoadingLog() on the Kotlin callback if it is set.
 static void reportLoadingLog(const char *message) {
+    if (message) {
+        snprintf(g_last_loading_msg, sizeof(g_last_loading_msg), "%s", message);
+    }
     if (!g_loading_callback_obj) return;
     JNIEnv *env = get_env();
     if (!env) return;
@@ -2288,6 +2515,9 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     std::string mmproj_path = j_mmproj_path ? jstring_to_std(env, j_mmproj_path) : "";
     std::string draft_path = j_draft_path ? jstring_to_std(env, j_draft_path) : "";
+
+    // Fresh failure-reason slate per attempt (see g_last_loading_msg above).
+    g_last_loading_msg[0] = '\0';
 
     // Mali（天玑/麒麟等 ARM GPU）驱动的 Vulkan 后端对部分 compute 特性
     // dispatch 有缺陷（社区已知：llama.cpp #16881、Gio #274、ppsspp #17426）：
@@ -2329,6 +2559,36 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetLoadingCallback(
     if (jcallback != nullptr) {
         g_loading_callback_obj = env->NewGlobalRef(jcallback);
     }
+}
+
+// Last loading-log message (set by reportLoadingLog, cleared per load attempt).
+// Kotlin reads this when nativeLoadModel returns false so the UI can show the
+// real refusal reason instead of a generic "模型加载失败".
+JNIEXPORT jstring JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastLoadingMessage(
+    JNIEnv *env, jobject
+) {
+    return env->NewStringUTF(g_last_loading_msg);
+}
+
+// OOM guard settings from the in-app UI (设置→推理引擎→内存守卫, 2026-09-27).
+// Pushed as env vars so the getenv-based helpers (oom_guard_disabled /
+// oom_headroom_bytes) pick them up at every load attempt without changing the
+// nativeLoadModel signature. UI defaults keep the guard ON with the same
+// headroom constants the C++ side would use on its own.
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetOomGuardParams(
+    JNIEnv *, jobject, jboolean j_enabled, jint j_pre_mb, jint j_post_mb
+) {
+    const bool guard_on = (j_enabled == JNI_TRUE);
+    setenv("TONGYILITE_NO_OOM_GUARD", guard_on ? "0" : "1", 1);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%d", (int)j_pre_mb);
+    setenv("TONGYILITE_OOM_PRE_HEADROOM_MB", buf, 1);
+    std::snprintf(buf, sizeof(buf), "%d", (int)j_post_mb);
+    setenv("TONGYILITE_OOM_POST_HEADROOM_MB", buf, 1);
+    LOGI("nativeSetOomGuardParams: guard=%s pre=%dMB post=%dMB",
+         guard_on ? "on" : "OFF(risk: hard reboot)", (int)j_pre_mb, (int)j_post_mb);
 }
 
 JNIEXPORT void JNICALL

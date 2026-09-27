@@ -20,6 +20,11 @@ class AgentStreamProcessor {
   /// 思考块缓冲（丢弃用）。
   final StringBuffer thinking = StringBuffer();
 
+  /// 原始流去掉思考块（保留工具调用 XML/JSON），供最终协议解析。
+  /// 保证思考内容不渗入最终文本（LlmResult.text），
+  /// 从而历史 assistant 内容不会携带原始思考块。
+  final StringBuffer clean = StringBuffer();
+
   /// JSON 试探缓冲（可能形成工具调用 JSON）。
   final StringBuffer probe = StringBuffer();
 
@@ -36,6 +41,9 @@ class AgentStreamProcessor {
 
   /// 当前可见文本（思考过滤 + JSON 隐藏后）。
   String get visibleText => visible.toString();
+
+  /// 去除思考块后的原始文本（工具调用块保留，供协议解析）。
+  String get cleanText => clean.toString();
 
   /// 是否正在思考块内（UI 可显示「思考中…」）。
   bool get thinkingActive => _thinkKind != null;
@@ -87,6 +95,7 @@ class AgentStreamProcessor {
     // ---- XML 工具块内：缓冲直到闭合 ----
     if (_xmlTool != null) {
       _xmlTool!.write(ch);
+      clean.write(ch);
       if (_xmlTool!.toString().endsWith('</tool_call>')) {
         toolXmlBlocks.add(_xmlTool!.toString());
         _xmlTool = null;
@@ -97,6 +106,7 @@ class AgentStreamProcessor {
     // ---- JSON 试探中 ----
     if (_inProbe) {
       probe.write(ch);
+      clean.write(ch);
       if (ch == '{') {
         _probeDepth++;
       } else if (ch == '}') {
@@ -116,6 +126,7 @@ class AgentStreamProcessor {
 
     // ---- 普通文本：先写入可见，检测到特殊开始再回退 ----
     visible.write(ch);
+    clean.write(ch);
     final v = visible.toString();
 
     // XML 工具块开始：`<tool_call>`（Spark 训练分布）。
@@ -157,12 +168,21 @@ class AgentStreamProcessor {
     }
   }
 
-  /// 进入思考态：把已写入 visible 的触发标签回退到 thinking 缓冲（后续字符全丢弃）。
+  /// 进入思考态：把已写入 visible 的触发标签回退到 thinking 缓冲（后续字符全丢弃）；
+  /// clean 保留工具块，只去掉尾部这串触发 tag（此刻两者尾部都恰为该 tag）。
   void _enterThink(_ThinkKind kind, String v, String tag) {
     final before = v.substring(0, v.length - tag.length);
     visible
       ..clear()
       ..write(before);
+    // clean 在工具块缓冲期间与 visible 脱节，但此刻两者尾部都恰为触发 tag；
+    // 只去掉 clean 尾部这串 tag，保留其前部已积累的工具块。
+    final raw = clean.toString();
+    if (raw.length >= tag.length) {
+      clean
+        ..clear()
+        ..write(raw.substring(0, raw.length - tag.length));
+    }
     thinking.write(tag);
     _thinkKind = kind;
   }

@@ -99,6 +99,7 @@ class MainActivity : FlutterActivity() {
                 "supportsAudio"           -> handleSupportsAudio(result)
                 "stopGeneration"          -> handleStop(result)
                 "setEnableThinking"       -> handleSetEnableThinking(call, result)
+                "setOomGuard"             -> handleSetOomGuard(call, result)
                 "resetContext"            -> handleResetContext(result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
@@ -490,6 +491,22 @@ class MainActivity : FlutterActivity() {
                 result.success(true)
             } catch (e: Exception) {
                 logE("handleSetEnableThinking", "result.success failed", e)
+            }
+        }
+    }
+
+    /** OOM guard settings from the in-app UI (设置→推理引擎→内存守卫). */
+    private fun handleSetOomGuard(call: MethodCall, result: MethodChannel.Result) {
+        val enabled = call.argument<Boolean>("enabled") ?: true
+        val preMb = call.argument<Int>("preHeadroomMb") ?: 768
+        val postMb = call.argument<Int>("postHeadroomMb") ?: 1536
+        logI("handleSetOomGuard", "enabled=$enabled, pre=${preMb}MB, post=${postMb}MB")
+        engine.setOomGuardParams(enabled, preMb, postMb)
+        mainHandler.post {
+            try {
+                result.success(true)
+            } catch (e: Exception) {
+                logE("handleSetOomGuard", "result.success failed", e)
             }
         }
     }

@@ -1198,6 +1198,59 @@ class _InferenceEngineTab extends ConsumerWidget {
 
           const SizedBox(height: 16),
 
+          // ---- OOM 内存守卫设置卡片 ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    '🛡️ OOM 内存守卫',
+                    gpuSettings.oomGuardEnabled,
+                    gpuNotifier.setOomGuardEnabled,
+                    subtitle: gpuSettings.oomGuardEnabled
+                        ? '加载前预检内存余量，超出则拒绝加载，防止整机硬死机'
+                        : '⚠️ 已关闭：超大模型可强行加载，内存不足时可能整机死机重启',
+                  ),
+                  // 余量滑条仅守卫开启时可调；关闭时置灰直观反映「不生效」。
+                  Opacity(
+                    opacity: gpuSettings.oomGuardEnabled ? 1.0 : 0.45,
+                    child: IgnorePointer(
+                      ignoring: !gpuSettings.oomGuardEnabled,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Divider(height: 24),
+                          _buildHeadroomSlider(
+                            label: '预检余量',
+                            value: gpuSettings.oomPreHeadroomMb,
+                            onChanged: gpuNotifier.setOomPreHeadroomMb,
+                            hint: '加载前可用内存需超出模型体积至少该余量，否则拒绝加载；'
+                                '调小更容易放过极限大模型，调大更保守',
+                          ),
+                          _buildHeadroomSlider(
+                            label: '加载后余量',
+                            value: gpuSettings.oomPostHeadroomMb,
+                            onChanged: gpuNotifier.setOomPostHeadroomMb,
+                            hint: '加载完成后 KV 缓存/图计算缓冲的内存预算 = '
+                                '可用内存 − 该余量；调小给上下文更大空间，调大更保守',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '默认 768 / 1536 MB（与原生层一致）。修改后下次加载模型生效',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(
@@ -1367,6 +1420,46 @@ class _InferenceEngineTab extends ConsumerWidget {
   }
 
   // ---- GPU 后端辅助 ----
+
+  /// OOM 余量滑条行：标签 + 当前值（MB）+ 滑条（0~4096，步进 64）+ 说明。
+  Widget _buildHeadroomSlider({
+    required String label,
+    required int value,
+    required ValueChanged<int> onChanged,
+    required String hint,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+              SizedBox(
+                width: 88,
+                child: Text(
+                  '$value MB',
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w500),
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: value.clamp(0, 4096).toDouble(),
+            min: 0,
+            max: 4096,
+            divisions: 64,
+            label: '$value MB',
+            onChanged: (v) => onChanged((v / 64).round() * 64),
+          ),
+          Text(hint, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+        ],
+      ),
+    );
+  }
 
   /// 判断是否为 MediaTek 天玑（Dimensity）SoC。
   /// 依据：Build.SOC_MANUFACTURER == "MediaTek"（API 31+），

@@ -352,6 +352,16 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       } else {
         mtpLogs.add('投机加速: 关闭 — $draftSkipReason');
       }
+      // OOM 内存守卫设置（设置→推理引擎→内存守卫）：每次加载前推送到原生层，
+      // 原生侧在预检/加载后判定时读取。关闭守卫时日志里明示风险。
+      await _inference.setOomGuard(
+        enabled: gpu.oomGuardEnabled,
+        preHeadroomMb: gpu.oomPreHeadroomMb,
+        postHeadroomMb: gpu.oomPostHeadroomMb,
+      );
+      mtpLogs.add(gpu.oomGuardEnabled
+          ? '内存守卫: 开启（预检余量 ${gpu.oomPreHeadroomMb}MB，加载后余量 ${gpu.oomPostHeadroomMb}MB）'
+          : '内存守卫: 关闭 ⚠️（超大模型可强行加载，内存不足时可能整机死机）');
       state = ModelState(
         phase: ModelLifecyclePhase.loading,
         modelId: modelId,
