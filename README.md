@@ -333,6 +333,12 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   n=96 长生成连贯、Qwen3.5-4B 连贯（5.0 t/s，修复前 `?111.111` 乱码）。当前定位=**勘探后端**
   （CONV_2D f32 独立 bug、FA hsk=192 遗留，[turnip-step] 诊断探针清理后才能出正式 APK），
   日常 GPU 推理仍走 OpenCL。
+- **OpenCL + PTQ1_0 三元量化（Bonsai-2 27B）**（v0.2.5）：新增
+  `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），
+  Bonsai-2 27B 的 402 个 PTQ1_0 张量 decode 全 GPU（此前全回退 CPU）；根治
+  Adreno OpenCL 对 `__constant` 数组变址的误编（`pow3[4]` 恒读 0 → 每块 16
+  trit 全解成 -1）。真机 `test-backend-ops` MUL_MAT PTQ1_0 套件 174/174
+  通过。机制与解码原理见下节「PTQ1_0 三元量化」。
 - **KleidiAI dotprod（纯 CPU 备选）**：`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod` 编译手调 matmul 内核；
   ⚠️ **不加 `+i8mm`**（天玑 Cortex-A78 无 i8mm，`armv8.4-a+dotprod+i8mm` 会 SIGILL 三后端同崩），已降级
   为 `armv8.2-a+dotprod`。
@@ -360,6 +366,55 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 > 完整踩坑记录（多轮乱码根因、flash attention 陷阱、量化 GEMM bug 等）见 [版本更新](#版本更新) 与
 > [`docs/backend_benchmark_2026-08-04.md`](docs/backend_benchmark_2026-08-04.md)。
 
+### PTQ1_0 三元量化（Bonsai2）：OpenCL 实现机制
+
+Bonsai-2 27B 用 GGML `type 143`（PTQ1_0）三元量化（-1/0/1，28 字节/128 值），
+全模型 402 个 PTQ1_0 张量。上游 llama.cpp 的 OpenCL 后端只有 Q4/Q5/Q8 系列
+mul_mv 内核，PTQ1_0 无对应内核 → 全部经 `get_rows`/`CPY` 回退 CPU，decode
+极慢；Vulkan 侧旧实现实测在 Adreno 825 不可用，故在分支 `spike/opencl-bonsai2`
+新增 OpenCL 内核实现全 GPU decode。
+
+**块结构**（`block_ptq1_0`，与 `ggml-quants.c` 一致）：
+
+- `qs[24]` + `qh[2]` + `half d`（块 scale = 块内最大绝对值），28 B / 128 个
+  三元值（trits）；
+- 128 个 trit 分三段铺在字节上：`qs[0..15]` 每字节放 5 个（间隔 16）共 80
+  个、`qs[16..23]` 每字节放 5 个（间隔 8）共 40 个、`qh[0..1]` 每字节放 4
+  个（间隔 2）共 8 个。
+
+**编码**（量化工具 `quantize_row_ptq1_0_ref`）：三元值先
+`xi = round(x/d) + 1 ∈ {0,1,2}`；一个字节以三进制装下 5 个三元值
+（`q = xi_0 + xi_1*3 + xi_2*9 + xi_3*27 + xi_4*81 ∈ [0,242]`），再按
+`(q*256 + 242) / 243` 展开到 8 位（0 保持 0，1..242 展开到 2..255，为解码
+留出裕度）。
+
+**解码**（C 参考 `dequantize_row_ptq1_0` 与内核同一式）：取字节 `b`，第 n
+个（n=0..4，qh 段 n=0..3）三元值：`t = (b * 3^n) & 0xFF`，
+`xi = (t * 3) >> 8 ∈ {0,1,2}`，值 = `(xi - 1) * d`。
+
+**内核并行**（`mul_mv_ptq1_0_f32.cl`，Adreno 64-wide subgroup）：
+- `N_SG=2` subgroup/work-group、`N_R0=4` 行/subgroup；每 lane 负责每块连续的
+  `128/64 = 2` 个 trit，对 4 行各做 `(xi-1)*d*y` 累加，`sub_group_reduce_add`
+  在 64 lane 内归约，subgroup 首 lane 写 `dst[row]`；
+- 上传：PTQ1_0 权重按 raw 块布局直接入显存（无 SoA 转换）；
+- host 门控（`ggml_cl_can_mul_mat`）：`src1` f32、dst f32、各轴 ≥32，且 `src0`
+  为 PTQ1_0 时要求 `ne[0] % 128 == 0`（整块对齐），否则回退 CPU；dispatch
+  以 19 个参数传入块指针/偏移。
+
+**Adreno 编译器陷阱（本次核心教训）**：内核初版用 `__constant uint pow3[5]`
+变址取 `3^n`。Adreno OpenCL 编译器把 `pow3[4]`（值 81）误编成恒读 0 → 每块
+n=4 的 16 个 trit 全解成 -1，dot 系统性偏差。症状极具欺骗性：权重字节和
+wsum 全对、只有内积对不上（数据正确、数值错误，编译器 bug 特征）。定位：
+内核 printf 全 128 值落盘 + Python 用相同字节重算 dot（内核 -7.30 vs 真值
+-7.40）。修复：弃用所有 __constant 数组索引，改三元表达式
+`(n==4)?81:(n==3)?27:(n==2)?9:(n==1)?3:1`，并从内核删除 __constant 数组。
+
+**验证**（真机 Adreno 825，`test-backend-ops`）：MUL_MAT PTQ1_0 套件 **174/174
+OK**（`max_nmse_err=5e-4`；CPU 参考为 `vec_dot_ptq1_0_q8_0`，q8_0 的 y 自带
+~0.004 噪声，阈值留了余量）；含 67 个奇数尾行与 Bonsai 形状；删光调试代码
+后复测仍绿。已知边界：`CONV_2D cwhn=1+dilation` 是旧后端遗留 FAIL
+（ERR ~1.96，与本移植无关）；27B 全模型 tok/s 待设备连 USB 后补测。
+
 ---
 
 ## 版本更新
@@ -369,6 +424,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 | 版本 | 日期 | 要点 |
 |------|------|------|
 | **v0.2.3** | 2026-09-27 | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化 + 4 处直接调用修复）；数值三根因修复——subgroupAdd 错编全局门控（`subgroup_arithmetic=false` 直置覆盖 ssm_scan/GDN 漏网）、GDN S_V=128 lanes 钳 64、Turnip HAL 直载；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s）。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
+| **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复（三元表达式替代数组索引）；真机 174/174 通过。README 新增机制说明 |
 | **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）；glslc 锁定 shaderc v2026.3。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
 | **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI（工具卡片 / 压缩横幅 / 重试指示 / 审批对话框）；**联网搜索全面配置化**：SearXNG 实例地址/密钥/引擎白名单/条数/超时「设置 → API 接入」自配、一键测试连接、保存即热更新（含 4 处静默失效修复）；llama.cpp 升级 b11028 + 模型加载全链路修复；移除启动加载页。**229 项单测全绿** |
 | **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、18 内置工具、代码质量 P0 加固 |
