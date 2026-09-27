@@ -108,13 +108,14 @@
       "sizeGB": 5.95,
       "sizeMBDisplay": "5.9 GB",
       "recommended": false,
-      "minRamMB": 8192,
+      "minRamMB": 16384,
       "sha256Hash": null,
       "tags": [
         "1.58-bit",
         "纯文本",
         "限高端旗舰",
-        "需新版引擎"
+        "需新版引擎",
+        "需≥16GB内存（11GB 机型 GPU 加载会 OOM 死机）"
       ]
     },
     {

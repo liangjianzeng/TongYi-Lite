@@ -345,6 +345,26 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// OOM 内存守卫总开关。关闭 = 加载前不再拒绝超大模型（有整机死机风险）。
+  Future<void> setOomGuardEnabled(bool value) async {
+    state = state.copyWith(oomGuardEnabled: value);
+    await _persist();
+  }
+
+  /// OOM 预检余量（MB，0~4096）。加载前 MemAvailable 扣除该余量后与模型体积
+  /// 比较；调小更容易放过极限大模型，调大更保守。
+  Future<void> setOomPreHeadroomMb(int value) async {
+    state = state.copyWith(oomPreHeadroomMb: value.clamp(0, 4096));
+    await _persist();
+  }
+
+  /// OOM 加载后余量（MB，0~4096）。KV cache / 图计算缓冲预算 =
+  /// MemAvailable - 该余量；调小给 KV 更大空间，调大更保守。
+  Future<void> setOomPostHeadroomMb(int value) async {
+    state = state.copyWith(oomPostHeadroomMb: value.clamp(0, 4096));
+    await _persist();
+  }
+
 
 
   Future<void> _persist() async {

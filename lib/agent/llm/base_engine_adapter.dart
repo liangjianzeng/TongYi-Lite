@@ -89,11 +89,17 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   }
 
   /// 解析最终文本流 → [LlmResult]（两条路线共用）。
+  ///
+  /// 用 [AgentStreamProcessor.cleanText]（原始流去掉思考块、保留工具调用）
+  /// 喂协议解析——而非原始流，否则 Qwen 的  think/response 思考块
+  /// 会渗入 LlmResult.text，成为历史 assistant 内容，污染上下文、
+  /// 把"思考内容"冒充回复并断开执行链。
   Future<LlmResult> parseAndReturn(
-      StringBuffer rawBuffer, AgentStreamProcessor processor) async {
+      AgentStreamProcessor processor) async {
     processor.finish();
     final outcome =
-        await _protocol.parseStream(Stream<String>.value(rawBuffer.toString()));
+        await _protocol.parseStream(
+            Stream<String>.value(processor.cleanText));
     return LlmResult(text: outcome.text, toolCalls: outcome.toolCalls);
   }
 

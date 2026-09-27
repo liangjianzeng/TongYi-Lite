@@ -283,6 +283,8 @@ class ReactLoopAgent {
                 onToken: onToken,
                 cancel: _cancelCompleter,
             );
+            // [AGDBG] 诊断（开发用，可删）。
+            _dbgStep(turn, step, options, result);
             _appendAssistant(turn, step, result);
             if (!result.hasToolCalls) {
               _turnAnswer = result.text; // 本轮最终回答（无工具那步）
@@ -355,6 +357,8 @@ class ReactLoopAgent {
     String? audioPath,
   ) {
     final messages = _session.deriveModelMessages();
+    // [AGDBG] 诊断（开发用，可删）。
+    _dbgRequest(messages);
     final tools = _registry.visibleFor(_modelId);
     final options = GenerateOptions(
       provider: _providerKind,
@@ -419,6 +423,31 @@ class ReactLoopAgent {
       'turn': turn,
       'step': step,
     });
+  }
+
+  // [AGDBG] 诊断（开发用，可删）。
+  void _dbgStep(int turn, int step, GenerateOptions options, LlmResult result) {
+    final t = result.text;
+    print('[AGDBG/STEPS] turn=$turn step=$step n_msgs=${options.messages.length} hasTool=${result.hasToolCalls} toolNames=[${result.toolCalls.map((c) => c.name).join('|')}] textLen=${t.length}');
+    if (t.length > 0) {
+      print('[AGDBG/STEPS] text=<<<${t.substring(0, t.length > 400 ? 400 : t.length)}...>>>');
+    }
+  }
+
+  void _dbgRequest(List<Map<String, dynamic>> messages) {
+    print('[AGDBG/REQ] n_msgs=${messages.length}');
+    for (var i = 0; i < messages.length; i++) {
+      final m = messages[i];
+      final c = m['content'] as String? ?? '';
+      final tcs = (m['tool_calls'] as List? ?? []);
+      print('[AGDBG/MSG $i] role=${m['role']} contentLen=${c.length} toolCalls=${tcs.length}');
+    }
+    final start = math.max(0, messages.length - 4);
+    for (var i = start; i < messages.length; i++) {
+      final m = messages[i];
+      final c = m['content'] as String? ?? '';
+      print('[AGDBG/MSG-LAST $i] role=${m['role']} content=<<<${c.substring(0, c.length > 300 ? 300 : c.length)}...>>>');
+    }
   }
 
   /// 失败 → 落 assistant/attempt（log-only，模型不可见）。

@@ -320,3 +320,39 @@ tools 全空；已改 `[...pendingTools]` 拷贝。`🔧` 后有空格 → `pars
 **回归（test/agent 全绿 211 项 + 2 skip）**：新增 groupMessages 重排、
 parseToolActivity 解析、AgentTurnBlock 渲染 三组。下次动智能体循环/协议/活动 UI
 先跑 `flutter test test/agent`。**
+
+## 关键教训：大模型 GPU 加载 OOM 会打死整机 system_server（2026-09-27 Bonsai-2 死机案）
+
+> **现象**：Bonsai-2 27B (PTQ1_0, 5.95GB) + OpenCL 在小米 25053RT47C 上"一推理就死机"，
+> 连死三回：手机整机卡死 → Android Watchdog 重启。不是内核 panic、不是 OpenCL 内核 bug、
+> 不是 App 崩溃——**logcat 里永远看不到凶手**（system_server 死时日志随缓冲一起断）。
+
+**铁证**（dropbox `system_server_pre_watchdog`，dumpsys dropbox 可跨重启读）：
+- `/proc/pressure/memory` some avg60=19.3 / full=12.3（严重内存停滞）；kswapd0 5.5% CPU；
+- system_server **11897 次 major faults**；主线程/Binder/display/AM/Power 全部 blocked 30s；
+- Subject: `Blocked in monitor Watchdog$BinderThreadMonitor … for 30s` → 看门狗 reboot。
+
+**根因算账**：该机 **MemTotal 仅 11.0GB**（不是 12！），日常 MemAvailable ≈ 3.5-5GB。
+Adreno UMA：OpenCL/Vulkan 的权重和 KV 都是系统 RAM。bonsai2 需求 =
+权重 5.95GB(GPU) + KV @n_ctx4096 数 GB + mmap 文件工作集 ≈ 8-11GB → 超物理内存一倍 →
+回收风暴饿死 system_server。**一代 Bonsai 27B（3.8GB）恰好压线能活，bonsai2 超线即死**。
+CPU 后端能活的原因：权重是 mmap 文件页（可回收），而 GPU 后端是必 resident 的拷贝。
+
+**修复（已实施）**：
+- `tongyilite_jni.cpp` 加 **OOM 守卫**：建 ctx 前读 `/proc/meminfo` MemAvailable，
+  估算 GPU 权重（按 GPU 层数折算 + dspark 草稿）+ KV（n_layer×kv_dim×f16）+ 1.5GB 头量，
+  不够 → **自动下调 n_ctx**；连 n_ctx=512 都放不下 → **拒绝加载**并在应用内推理日志报
+  "已拒绝加载以防整机死机"（宁拒绝不死机）。日志 tag `[oom-guard]`。
+- `mul_mv_ptq1_0_f32.cl`：尾行**读**指针 clamp 到 `ne01-1`（写本来有 guard、读没有，
+  尾行越界读最后一个 cl_mem 之外的页可触发 GPU SMMU 故障，属顺手堵雷，不影响数值）。
+- catalog bonsai2：`minRamMB` 8192→16384 + 加"需≥16GB内存"标签（注意 minRamMB 仅元数据，
+  Dart 端**从未强制执行**，真正的闸是 JNI 守卫）。
+
+**排查方法论（下次整机死机照抄）**：
+1. `dumpsys dropbox | grep -iE 'PRE_WATCHDOG|PANIC|SYSTEM_BOOT'`——pre_watchdog=系统卡死被狗咬，
+   无 PANIC=内核没死；重启后依然可查（dropbox 落盘）。
+2. 转储里看 `/proc/pressure/*` + major faults + `Subject:` 三件套定"饿死还是崩死"。
+3. `getprop sys.boot.reason`、`/proc/meminfo` MemTotal 先算账再谈优化——**11GB 机器跑
+   ≥6GB 权重的 GPU 全载方案是物理不可能的，不是 bug**。
+4. 别再拿 llama-cli 往 /data/local/tmp 推了反复死机——**死机时现场日志只在 logcat 实时抓取
+   + dropbox 里有**，事后 `logcat -d` 拿到的只有新 boot。

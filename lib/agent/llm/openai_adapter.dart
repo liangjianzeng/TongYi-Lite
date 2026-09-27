@@ -101,7 +101,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
       if (error != null) {
         throw LlmFailure(code: LlmFailureCode.transport, message: '$error');
       }
-      return parseAndReturn(rawBuffer, processor);
+      // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
+      print('[AGDBG/API] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
+      return parseAndReturn(processor);
     } on AgentCancelledException catch (e) {
       rethrow;
     } on DioException catch (e) {

@@ -98,7 +98,9 @@ class LocalEngineAdapter extends BaseEngineAdapter {
           message: error.toString(),
         );
       }
-      return parseAndReturn(rawBuffer, processor);
+      // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
+      print('[AGDBG/LOC] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
+      return parseAndReturn(processor);
     } on AgentCancelledException catch (e) {
       rethrow;
     } on LlmFailure catch (e) {

@@ -109,6 +109,27 @@ class InferenceService {
     await _channel.invokeMethod('unloadModel');
   }
 
+  /// 推送 OOM 内存守卫设置到原生层（设置→推理引擎→内存守卫）。
+  ///
+  /// 必须在每次 loadModel 之前调用：原生侧在加载时读取这组值判定
+  /// 「预检拒绝 / 加载后 KV 预算」。guard=false 时完全跳过守卫拒绝
+  /// （风险：整台机器硬死机重启，仅高级用户排障用）。
+  Future<void> setOomGuard({
+    required bool enabled,
+    int preHeadroomMb = 768,
+    int postHeadroomMb = 1536,
+  }) async {
+    try {
+      await _channel.invokeMethod('setOomGuard', {
+        'enabled': enabled,
+        'preHeadroomMb': preHeadroomMb,
+        'postHeadroomMb': postHeadroomMb,
+      });
+    } catch (e) {
+      debugPrint('[InferenceService] setOomGuard failed: $e');
+    }
+  }
+
   Future<bool> isLoaded() async {
     final result = await _channel.invokeMethod('isLoaded');
     return result == true;
