@@ -139,8 +139,12 @@
 
 	async function handleExportConfirm(selectedConversations: DatabaseConversation[]) {
 		try {
-			const allData = await conversationsStore.getConversationsForExport(
-				selectedConversations.map((conv) => conv.id)
+			const allData: ExportedConversation[] = await Promise.all(
+				selectedConversations.map(async (conv) => {
+					const messages = await conversationsStore.getConversationMessages(conv.id);
+
+					return { conv: $state.snapshot(conv), messages: $state.snapshot(messages) };
+				})
 			);
 
 			if (allData.length === 1) {
@@ -257,92 +261,92 @@
 	}
 </script>
 
-<div in:fade={{ duration: 150 }} class="space-y-12">
+<div class="space-y-12" in:fade={{ duration: 150 }}>
 	<SettingsGroup title="Conversations">
 		<SettingsChatImportExportSection
+			title="Export"
+			description="Download your conversations as a ZIP of JSONL files. This includes all messages, attachments, and conversation history."
 			IconComponent={Download}
 			buttonText="Export conversations"
-			description="Download your conversations as a ZIP of JSONL files. This includes all messages, attachments, and conversation history."
 			onclick={handleExportClick}
 			summary={{ items: exportedConversations, show: showExportSummary, verb: 'Exported' }}
-			title="Export"
 		/>
 
 		<SettingsChatImportExportSection
+			title="Import"
+			description="Import one or more conversations from a previously exported ZIP or JSONL file. This will merge with your existing conversations."
 			IconComponent={Upload}
 			buttonText="Import conversations"
-			description="Import one or more conversations from a previously exported ZIP or JSONL file. This will merge with your existing conversations."
 			onclick={handleImportClick}
 			summary={{ items: importedConversations, show: showImportSummary, verb: 'Imported' }}
-			title="Import"
 		/>
 
 		<SettingsChatImportExportSection
-			IconComponent={Trash2}
-			buttonClass="text-destructive-foreground justify-start justify-self-start bg-destructive hover:bg-destructive/80 md:w-auto"
-			buttonText="Delete all conversations"
-			buttonVariant="destructive"
-			description="Permanently delete all conversations and their messages. This action cannot be undone. Consider exporting your conversations first if you want to keep a backup."
-			onclick={handleDeleteAllClick}
 			title="Delete All"
+			description="Permanently delete all conversations and their messages. This action cannot be undone. Consider exporting your conversations first if you want to keep a backup."
+			IconComponent={Trash2}
+			buttonText="Delete all conversations"
+			onclick={handleDeleteAllClick}
 			titleClass="text-destructive"
+			buttonVariant="destructive"
+			buttonClass="text-destructive-foreground justify-start justify-self-start bg-destructive hover:bg-destructive/80 md:w-auto"
 		/>
 	</SettingsGroup>
 
 	<SettingsGroup title="Settings">
 		<SettingsChatImportExportSection
+			title="Export"
+			description="Export your chat settings and preferences as a JSON file."
 			IconComponent={Download}
 			buttonText="Export settings"
-			description="Export your chat settings and preferences as a JSON file."
 			onclick={handleSettingsExport}
 			summary={{ items: [], show: showSettingsExportSummary, verb: 'Exported' }}
-			title="Export"
 		/>
 
 		<SettingsChatImportExportSection
+			title="Import"
+			description="Import chat settings from a previously exported JSON file. This will merge with your existing settings."
 			IconComponent={Upload}
 			buttonText="Import settings"
-			description="Import chat settings from a previously exported JSON file. This will merge with your existing settings."
 			onclick={handleSettingsImport}
 			summary={{ items: [], show: showSettingsImportSummary, verb: 'Imported' }}
-			title="Import"
 		/>
 	</SettingsGroup>
 </div>
 
 <DialogExportSettings
-	bind:includeSensitiveData
 	bind:open={showSettingsExportDialog}
-	onCancel={handleSettingsExportCancel}
+	bind:includeSensitiveData
 	onConfirm={handleSettingsExportConfirm}
+	onCancel={handleSettingsExportCancel}
 />
 
 <DialogConversationSelection
-	bind:open={showExportDialog}
 	conversations={availableConversations}
 	{messageCountMap}
 	mode={ConversationSelectionMode.EXPORT}
+	bind:open={showExportDialog}
 	onCancel={() => (showExportDialog = false)}
 	onConfirm={handleExportConfirm}
 />
 
 <DialogConversationSelection
-	bind:open={showImportDialog}
 	conversations={availableConversations}
 	{messageCountMap}
 	mode={ConversationSelectionMode.IMPORT}
+	bind:open={showImportDialog}
 	onCancel={() => (showImportDialog = false)}
 	onConfirm={handleImportConfirm}
 />
 
 <DialogConfirmation
 	bind:open={showDeleteDialog}
-	cancelText="Cancel"
-	confirmText="Delete All"
-	description="Are you sure you want to delete all conversations? This action cannot be undone and will permanently remove all your conversations and messages."
-	icon={Trash2}
-	onCancel={handleDeleteAllCancel}
-	onConfirm={handleDeleteAllConfirm}
 	title="Delete all conversations"
+	description="Are you sure you want to delete all conversations? This action cannot be undone and will permanently remove all your conversations and messages."
+	confirmText="Delete All"
+	cancelText="Cancel"
 	variant="destructive"
+	icon={Trash2}
+	onConfirm={handleDeleteAllConfirm}
+	onCancel={handleDeleteAllCancel}
 />

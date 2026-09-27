@@ -1,4 +1,4 @@
-<script lang="ts" module>
+<script module lang="ts">
 	import { defineMeta } from '@storybook/addon-svelte-csf';
 	import SidebarNavigation from '$lib/components/app/navigation/SidebarNavigation/SidebarNavigation.svelte';
 	import { waitFor } from 'storybook/test';

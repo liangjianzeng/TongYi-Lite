@@ -20,24 +20,21 @@
 
 <ScrollAreaPrimitive.Root
 	bind:ref
-	class={cn('relative', className)}
 	data-slot="scroll-area"
+	class={cn('relative', className)}
 	{...restProps}
 >
 	<ScrollAreaPrimitive.Viewport
-		class="size-full rounded-[inherit] ring-ring/10 outline-ring/50 transition-[color,box-shadow] focus-visible:ring-4 focus-visible:outline-1 dark:ring-ring/20 dark:outline-ring/40"
 		data-slot="scroll-area-viewport"
+		class="size-full rounded-[inherit] ring-ring/10 outline-ring/50 transition-[color,box-shadow] focus-visible:ring-4 focus-visible:outline-1 dark:ring-ring/20 dark:outline-ring/40"
 	>
 		{@render children?.()}
 	</ScrollAreaPrimitive.Viewport>
-
 	{#if orientation === 'vertical' || orientation === 'both'}
-		<Scrollbar class={scrollbarYClasses} orientation="vertical" />
+		<Scrollbar orientation="vertical" class={scrollbarYClasses} />
 	{/if}
-
 	{#if orientation === 'horizontal' || orientation === 'both'}
-		<Scrollbar class={scrollbarXClasses} orientation="horizontal" />
+		<Scrollbar orientation="horizontal" class={scrollbarXClasses} />
 	{/if}
-
 	<ScrollAreaPrimitive.Corner />
 </ScrollAreaPrimitive.Root>

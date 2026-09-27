@@ -1,4 +1,4 @@
-<script generics="TMeta" lang="ts">
+<script lang="ts" generics="TMeta">
 	// Generic chrome shell shared by every per-tool block under
 	// `ChatMessageToolCall/`. Owns:
 	//   - the collapsible wrapper (defaults to CollapsibleContentBlock;
@@ -114,15 +114,15 @@
 </script>
 
 <Wrapper
+	{open}
 	class="my-2"
 	icon={toolIcon}
 	iconClass={toolIconClass}
 	{iconUrl}
-	{onToggle}
-	{open}
-	{subtitle}
 	{title}
 	{titleSnippet}
+	{subtitle}
+	{onToggle}
 >
 	{@render children(meta, {
 		isCodeStreaming,

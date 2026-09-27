@@ -55,11 +55,11 @@
 	/>
 
 	<Input
-		bind:ref
-		bind:value
 		{autofocus}
-		class="pl-9 {showClearButton ? 'pr-9' : ''}"
 		{id}
+		bind:value
+		bind:ref
+		class="pl-9 {showClearButton ? 'pr-9' : ''}"
 		oninput={handleInput}
 		onkeydown={onKeyDown}
 		{placeholder}
@@ -68,10 +68,10 @@
 
 	{#if showClearButton}
 		<button
-			aria-label={value ? 'Clear search' : 'Close'}
+			type="button"
 			class="absolute top-1/2 right-3 -translate-y-1/2 transform cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
 			onclick={handleClear}
-			type="button"
+			aria-label={value ? 'Clear search' : 'Close'}
 		>
 			<X class={ICON_CLASS_DEFAULT} />
 		</button>

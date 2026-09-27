@@ -3,15 +3,12 @@
 #include "llama.h"
 
 #include <array>
-#include <bitset>
 #include <cassert>
 #include <cmath>
 
 // bump if necessary
 #define LLAMA_MAX_LAYERS  512
 #define LLAMA_MAX_EXPERTS 1024 // Kimi K3
-#define LLAMA_MAX_PLE_NGRAM 8  // qwen4exp
-#define LLAMA_MAX_PLE_HEADS 64 // qwen4exp
 
 enum llama_expert_gating_func_type {
     LLAMA_EXPERT_GATING_FUNC_TYPE_NONE           = 0,
@@ -26,14 +23,6 @@ enum llama_swa_type {
     LLAMA_SWA_TYPE_STANDARD  = 1,
     LLAMA_SWA_TYPE_CHUNKED   = 2,
     LLAMA_SWA_TYPE_SYMMETRIC = 3,
-};
-
-// how the non-causal mask should be constructed with llama_set_causal_attn(ctx, false)
-// (e.g. mtmd decoding image tokens)
-enum llama_non_causal_type {
-    LLAMA_NON_CAUSAL_TYPE_ALL      = 0, // all layers non-causal, SWA still applied (gemma 3, qwen-vl, ...)
-    LLAMA_NON_CAUSAL_TYPE_SWA_ONLY = 1, // SWA layers non-causal, dense layers stay causal (gemma 4)
-    LLAMA_NON_CAUSAL_TYPE_SWA_FULL = 2, // all layers non-causal, SWA not applied between tokens of the current ubatch (deepseek 4)
 };
 
 // forward declaration; full definition in llama-graph.h
@@ -70,6 +59,7 @@ struct llama_hparams {
     // per-token adapter selection. -1 when the model has no such layer.
     int32_t  router_layer = -1;
     uint32_t n_expert = 0;
+    uint32_t n_expert_used = 0;
     uint32_t n_rel_attn_bkts = 0;
 
     // TODO: this needs to be reworked
@@ -99,14 +89,10 @@ struct llama_hparams {
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_kv_arr;
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_ff_arr;
 
-    // per-layer expert feed-forward size
-    std::array<uint32_t, LLAMA_MAX_LAYERS> n_ff_exp_arr;
-    // per-layer top-k expert routing count
-    std::array<uint32_t, LLAMA_MAX_LAYERS> n_expert_used_arr;
-
     uint32_t n_layer_dense_lead = 0;
     uint32_t n_lora_q           = 0;
     uint32_t n_lora_kv          = 0;
+    uint32_t n_ff_exp           = 0;
     uint32_t n_ff_shexp         = 0;
     uint32_t n_ff_chexp         = 0;
     uint32_t n_expert_shared    = 0;
@@ -172,10 +158,6 @@ struct llama_hparams {
     // the size of the sliding window (0 - no SWA)
     uint32_t n_swa = 0;
 
-    // see llama_non_causal_type
-    // note: for SWA_FULL, older tokens (outside the current ubatch) are still window-clipped
-    llama_non_causal_type non_causal_type = LLAMA_NON_CAUSAL_TYPE_ALL;
-
     // if is_swa_impl[il] == 1, then layer il is SWA
     // if is_swa_impl[il] == 0, then layer il is dense (i.e. non-SWA)
     // by default, all layers are dense
@@ -205,12 +187,6 @@ struct llama_hparams {
     float    kda_gate_lower_bound = -INFINITY;
     float    situ_beta            = 1.0f;
     float    situ_linear_beta     = 0.0f;   // 0 = no linear-beta transform on the up branch
-
-    // hrm-text (looped H/L stacks)
-    uint32_t n_hrm_layers_per_stack = 0;
-    uint32_t n_hrm_h_cycles = 0;
-    uint32_t n_hrm_l_cycles = 0;
-    bool     hrm_prefix_lm = false;
 
     bool ssm_dt_b_c_rms = false;
 
@@ -294,38 +270,16 @@ struct llama_hparams {
     uint32_t dsv4_o_group_count        = 0;
     uint32_t dsv4_o_lora_rank          = 0;
     uint32_t dsv4_hc_mult              = 0;
+
+    // dspark GIDD log-SNR conditioning; GGUF sets <arch>.log_snr_conditioning
+    bool  dspark_log_snr_conditioning = false;
+    float dspark_min_log_snr = 0.0f;
+    float dspark_max_log_snr = 0.0f;
     uint32_t dsv4_hc_sinkhorn_iters    = 0;
     uint32_t dsv4_hash_layer_count     = 0;
     float    dsv4_compress_rope_base   = 0.0f;
     float    dsv4_hc_eps               = 0.0f;
     std::array<uint32_t, LLAMA_MAX_LAYERS> dsv4_compress_ratios;
-
-    // 0 = full rank (DeepSeek-V4)
-    uint32_t hc_low_rank = 0;
-
-    // scale of the hyper-connection post gate (DeepSeek-V4 hardcodes 2.0)
-    float    hc_magnitude = 0.0f;
-
-    uint32_t ple_ngram_size      = 0;
-    uint32_t ple_heads_per_ngram = 0;
-    uint32_t ple_conv_kernel     = 0;
-    uint32_t ple_n_heads         = 0;   // (ngram_size - 1) * heads_per_ngram
-    uint32_t ple_head_dim        = 0;
-    uint32_t ple_eos_token_id    = 0;
-    // the id the PLE hash stands in at image positions; 0 makes the loader fall back to EOS
-    uint32_t ple_image_token_id  = 0;
-    // the file lists PLE layer indices, so this is never a per-layer gguf array and can hold one bit per layer
-    std::bitset<LLAMA_MAX_LAYERS> is_ple_impl;
-    // the hash multipliers reach ~2e13 and have to stay 64-bit
-    std::array<uint64_t, LLAMA_MAX_PLE_NGRAM>  ple_layer_multipliers;
-    // head offsets and vocab sizes are token-space indices; the gather truncates them to int32 anyway
-    std::array<uint32_t, LLAMA_MAX_PLE_HEADS>  ple_head_offsets;
-    std::array<uint32_t, LLAMA_MAX_PLE_HEADS>  ple_head_vocab_sizes;
-
-    bool is_ple(uint32_t il) const;
-
-    // PLE conv history rows: (kernel - 1) * ngram_size; 0 without a PLE module
-    uint32_t ple_conv_state() const;
 
     // qwen3vl deepstack
     // When parsed from GGUF, this implies the first N layers consume the first
@@ -348,6 +302,35 @@ struct llama_hparams {
     // ref: https://github.com/ggml-org/llama.cpp/pull/8141
     llama_token dec_start_token_id = LLAMA_TOKEN_NULL;
     uint32_t    dec_n_layer        = 0;
+
+    // dspark drafter (EAGLE-style block-diffusion speculative decoder). the
+    // trunk itself is a plain dense Qwen3-style stack (n_layer/n_head/n_ff etc.
+    // above already cover it); these are the extra fields the block-draft head
+    // needs. target_layer_ids indexes into the TARGET model's layers, not this
+    // drafter's own (tiny) layer count.
+    uint32_t dspark_block_size                  = 0;  // number of masked positions predicted per block
+    uint32_t dspark_mask_token_id               = 0;  // vocab id used to seed un-drafted block positions
+    uint32_t dspark_markov_rank                 = 0;  // low-rank factor width for the markov logit-bias head
+    bool     dspark_confidence_head             = false;
+    bool     dspark_hidden_correction           = false;
+    bool     dspark_markov_deploy_exposure      = false;
+    uint32_t dspark_correction_size             = 0;
+    bool     dspark_confidence_head_with_markov = false;
+
+    // GIDD log-SNR / noise-level conditioning (LogSnrEmbed): sinusoidal
+    // featurization of a per-position log-SNR value, run through a 2-layer
+    // SiLU MLP (dspark.log_snr_fc1/fc2), added to the draft noise embedding
+    // before the backbone. Absent on non-GIDD drafters -- dspark_log_snr_conditioning
+    // gates whether load_arch_tensors()/graph::graph() touch it at all.
+
+    // ordered set of target-model layer indices this drafter taps; n_dspark_target_layers
+    // is also the concatenation width multiplier (n_capture) for dspark.fc's input.
+    uint32_t                               n_dspark_target_layers = 0;
+    // uint32_t (not int32_t): matches an existing explicit template
+    // instantiation of llama_model_loader::get_key_or_arr for
+    // std::array<uint32_t, LLAMA_MAX_LAYERS>; layer indices are non-negative
+    // so the signed/unsigned choice loses nothing.
+    std::array<uint32_t, LLAMA_MAX_LAYERS> dspark_target_layers   = {};
 
     enum llama_pooling_type      pooling_type            = LLAMA_POOLING_TYPE_NONE;
     enum llama_rope_type         rope_type               = LLAMA_ROPE_TYPE_NONE;
@@ -404,13 +387,6 @@ struct llama_hparams {
     uint32_t n_head_kv(uint32_t il = 0) const;
 
     uint32_t n_ff(uint32_t il = 0) const;
-
-    uint32_t n_ff_exp(uint32_t il = 0) const;
-
-    uint32_t n_expert_used(uint32_t il = 0) const;
-
-    // return the maximum n_expert_used across all layers
-    uint32_t n_expert_used_max() const;
 
     uint32_t n_gqa(uint32_t il = 0) const;
 

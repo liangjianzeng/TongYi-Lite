@@ -1,4 +1,4 @@
-<script lang="ts" module>
+<script module lang="ts">
 	import jpgAsset from './fixtures/assets/1.jpg?url';
 	import pdfAsset from './fixtures/assets/example.pdf?raw';
 	import svgAsset from './fixtures/assets/hf-logo.svg?url';
@@ -42,8 +42,8 @@
 </script>
 
 <Story
-	args={{ class: 'max-w-[56rem] w-[calc(100vw-2rem)]' }}
 	name="Default"
+	args={{ class: 'max-w-[56rem] w-[calc(100vw-2rem)]' }}
 	play={async ({ canvas, userEvent }) => {
 		const textarea = await canvas.findByRole('textbox');
 		const submitButton = await canvas.findByRole('button', { name: 'Send' });
@@ -67,14 +67,14 @@
 	}}
 />
 
-<Story args={{ class: 'max-w-[56rem] w-[calc(100vw-2rem)]', isLoading: true }} name="Loading" />
+<Story name="Loading" args={{ class: 'max-w-[56rem] w-[calc(100vw-2rem)]', isLoading: true }} />
 
 <Story
+	name="FileAttachments"
 	args={{
 		class: 'max-w-[56rem] w-[calc(100vw-2rem)]',
 		uploadedFiles: fileAttachments
 	}}
-	name="FileAttachments"
 	play={async ({ canvas }) => {
 		const jpgAttachment = canvas.getByAltText('1.jpg');
 		const svgAttachment = canvas.getByAltText('hf-logo.svg');

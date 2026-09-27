@@ -38,20 +38,20 @@
 	}: Props = $props();
 </script>
 
-<form class="space-y-3 pt-4" onsubmit={onSubmit}>
+<form onsubmit={onSubmit} class="space-y-3 pt-4">
 	{#each prompt.arguments ?? [] as arg (arg.name)}
 		<ChatFormPromptPickerArgumentInput
 			argument={arg}
-			autocompleteIndex={activeAutocomplete === arg.name ? autocompleteIndex : 0}
-			isAutocompleteActive={activeAutocomplete === arg.name}
+			value={promptArgs[arg.name] ?? ''}
+			suggestions={suggestions[arg.name] ?? []}
 			isLoadingSuggestions={loadingSuggestions[arg.name] ?? false}
-			onBlur={() => onArgBlur(arg.name)}
-			onFocus={() => onArgFocus(arg.name)}
+			isAutocompleteActive={activeAutocomplete === arg.name}
+			autocompleteIndex={activeAutocomplete === arg.name ? autocompleteIndex : 0}
 			onInput={(value) => onArgInput(arg.name, value)}
 			onKeydown={(e) => onArgKeydown(e, arg.name)}
+			onBlur={() => onArgBlur(arg.name)}
+			onFocus={() => onArgFocus(arg.name)}
 			onSelectSuggestion={(value) => onSelectSuggestion(arg.name, value)}
-			suggestions={suggestions[arg.name] ?? []}
-			value={promptArgs[arg.name] ?? ''}
 		/>
 	{/each}
 
@@ -67,7 +67,7 @@
 	{/if}
 
 	<div class="mt-8 flex justify-end gap-2">
-		<Button onclick={onCancel} size="sm" type="button" variant="secondary">Cancel</Button>
+		<Button type="button" size="sm" onclick={onCancel} variant="secondary">Cancel</Button>
 
 		<Button size="sm" type="submit">Use Prompt</Button>
 	</div>

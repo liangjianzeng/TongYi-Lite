@@ -1,4 +1,6 @@
+import { ROUTES } from './routes.constants';
 import { Package, Search, Settings, SquarePen } from '@lucide/svelte';
+import McpLogo from '$lib/components/app/mcp/McpLogo.svelte';
 import { SidebarAction, ToolSource } from '$lib/enums';
 import type { DesktopIconStripItem } from '$lib/types';
 
@@ -62,8 +64,15 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 	},
 	{ icon: Search, keys: ['cmd', 'k'], tooltip: 'Search' },
 	{
-		action: SidebarAction.SETTINGS,
+		activeRouteId: '/mcp-servers',
+		icon: McpLogo,
+		route: ROUTES.MCP_SERVERS,
+		tooltip: 'MCP Servers'
+	},
+	{
+		activeUrlIncludes: '#/settings',
 		icon: Settings,
+		route: `${ROUTES.SETTINGS}/general`,
 		tooltip: 'Settings'
 	}
 ];

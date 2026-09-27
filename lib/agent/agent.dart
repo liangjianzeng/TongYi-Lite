@@ -1,7 +1,7 @@
 /// Agent Lite 聚合导出 —— 供 chat_provider 等上游引用。
 library;
 
-export 'agent_loop.dart';
+export 'tool_activity.dart';
 export 'agent_prompt.dart';
 export 'capability.dart';
 export 'sandbox.dart';

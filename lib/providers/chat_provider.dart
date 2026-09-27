@@ -16,8 +16,7 @@ import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/capability.dart';
-import '../agent/llm/adapter.dart'
-    show LlmAdapter, ProviderKind, LlmFailure, LlmFailureCode;
+import '../agent/llm/adapter.dart' show LlmAdapter, ProviderKind;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
 import '../agent/protocol/protocol_selector.dart' show selectProtocol;
@@ -28,15 +27,12 @@ import '../agent/hooks/hooks.dart' show AgentHooks;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
 import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
-import '../agent/session/event.dart' as agentEvent;
-import '../agent/session/log.dart' show SessionLog;
 import '../agent/session/store.dart' show JsonlSessionStore;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/openai_service.dart';
 import '../services/settings_service.dart';
 import '../services/storage_service.dart';
-import 'agent_stream_processor.dart';
 import 'agent_approval.dart'
     show sandboxApproverProvider, toolPreApproverProvider;
 import 'agent_state_provider.dart' show agentUiStateProvider;
@@ -154,6 +150,11 @@ class ChatNotifier extends StateNotifier<bool> {
   /// chat doesn't bleed into the new one (multi-turn append-only caching).
   String? _currentKvConvId;
 
+  /// 当前 KV 缓存是否装载的是智能体模式上下文（含系统提示词/工具轮）。
+  /// 同一会话内「智能体 ↔ 普通聊天」模式切换时必须 resetContext，
+  /// 否则普通聊天会续跑在被大提示词污染的 KV 上（prefill 白白翻倍）。
+  bool _currentKvWasAgentMode = false;
+
   /// 上一轮生成是否走了 API 后备（用于 stopGeneration 分支到 openai 取消）。
   bool _lastGenWasApi = false;
 
@@ -242,7 +243,13 @@ class ChatNotifier extends StateNotifier<bool> {
       debugPrint('[ChatNotifier] Conversation changed ($_currentKvConvId -> $conversationId): resetContext()');
       await _inference.resetContext();
       _currentKvConvId = conversationId;
+    } else if (_currentKvWasAgentMode) {
+      // 智能体 → 普通聊天（模式切换）：KV 里是系统提示词 + 工具轮，必须重置，
+      // 本轮以最小 prefill 重放纯对话历史。
+      debugPrint('[ChatNotifier] Agent→plain mode switch: resetContext()');
+      await _inference.resetContext();
     }
+    _currentKvWasAgentMode = false;
 
     try {
       // Step 2: Save user message first (so it's available in history for template)
@@ -509,10 +516,10 @@ class ChatNotifier extends StateNotifier<bool> {
     }
   }
 
-  /// 智能体模式发送消息：路由（本地/API）→ agent 循环 → 最终回答持久化。
+  /// 智能体模式发送消息：路由（本地/API）→ 新主循环 → 最终回答持久化。
   ///
-  /// 工具轮的过程消息（🔧 提示）会持久化供 UI 展示；循环内部的历史
-  /// （含工具结果回填）不落库，避免污染存储。
+  /// 工具轮的活动消息（🔧）逐工具独立落库，供对话内嵌工作流展示与
+  /// 历史回合回看；循环内部的历史（含工具结果回填）不落库，避免污染存储。
   Future<String> _sendAgentMessage(
     String conversationId,
     String prompt, {
@@ -520,177 +527,23 @@ class ChatNotifier extends StateNotifier<bool> {
     String? audioPath,
   }) async {
     final settings = _ref.read(settingsProvider);
-
-    // 新智能体模式（Phase 0+ 重写）：事件源 ReactLoopAgent；关闭则回退旧 runAgent。
-    if (settings.useNewAgentMode) {
-      return _sendAgentMessageNew(
-        conversationId,
-        prompt,
-        imagePath: imagePath,
-        audioPath: audioPath,
-        settings: settings,
-      );
-    }
-
-    final agentSource = settings.agentModelSource;
-    final agentModelId = settings.agentModelId;
-
-    var useApi = false;
-    ApiModelConfig? activeApi;
-    var targetModelId = _ref.read(currentModelIdProvider);
-
-    if (agentSource == 'api') {
-      // 用户指定 API 模型驱动智能体。
-      for (final m in settings.apiModels) {
-        if (m.id == agentModelId) {
-          activeApi = m;
-          break;
-        }
-      }
-      if (activeApi == null) {
-        return '[智能体配置的 API 模型不存在，请在设置中重新选择]';
-      }
-      useApi = true;
-    } else if (agentSource == 'local') {
-      // 用户指定本地模型驱动智能体。
-      targetModelId = agentModelId ?? targetModelId;
-      final ok = await ensureModelLoaded(targetModelId);
-      if (!ok) {
-        return '[模型加载失败，请在设置中重新下载并加载]';
-      }
-      useApi = false;
-    } else {
-      // 跟随默认：沿用现有路由策略（本地优先，API 兜底）。
-      final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
-      final hasDefault = settings.defaultModelId != null;
-      if (settings.activeApiModel() != null && !hasLocalLoaded && !hasDefault) {
-        useApi = true;
-        activeApi = settings.activeApiModel();
-      } else {
-        final ok = await ensureModelLoaded(targetModelId);
-        if (!ok) {
-          final fallback = settings.activeApiModel();
-          if (fallback != null) {
-            useApi = true;
-            activeApi = fallback;
-          } else {
-            return '[模型加载失败，请在设置中重新下载并加载]';
-          }
-        }
-      }
-    }
-
-    _lastGenWasApi = useApi;
-    debugPrint('[ChatNotifier] agent route=${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
-
-    state = true;
-    _ref.read(isGeneratingProvider.notifier).state = true;
-
-    // 会话切换时重置原生 KV 缓存（沿用现有策略）。
-    if (_currentKvConvId != conversationId) {
-      debugPrint('[ChatNotifier] agent conversation changed: resetContext()');
-      await _inference.resetContext();
-      _currentKvConvId = conversationId;
-    }
-
-    try {
-      // 历史：先读存储（不含当前 userMsg），runAgent 会追加 userPrompt。
-      // 若在保存 userMsg 之后再读，history 会与 userPrompt 重复。
-      // 同时排除智能体工具活动消息（🔧 前缀），避免污染模型上下文。
-      final allMessages = await _storage.getMessages(conversationId, limit: 200);
-      final history = <Map<String, String>>[];
-      for (final msg in allMessages) {
-        if (msg.content.isNotEmpty && !_isToolActivityMessage(msg)) {
-          history.add({'role': msg.role.name, 'content': msg.content});
-        }
-      }
-
-      // 保存用户消息（UI 立即可见）。
-      final userMsg = ChatMessage(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        conversationId: conversationId,
-        role: MessageRole.user,
-        content: prompt,
-        imagePath: imagePath,
-        audioPath: audioPath,
-      );
-      await _storage.saveMessage(userMsg);
-      await _refreshConversationMeta(conversationId);
-
-      // Agent 配置（默认值已在设置层夹紧）。
-      final config = AgentConfig(
-        maxRounds: settings.agentMaxRounds,
-        maxTokensPerRound: settings.agentTokensPerRound,
-        toolTimeout: Duration(milliseconds: settings.agentToolTimeoutMs),
-        allowParallelTools: settings.agentAllowParallelTools,
-      );
-
-      // 注册表：内置 + 配置启用的工具，按模型过滤。
-      final registry = _buildAgentRegistry(settings, targetModelId);
-
-      // 协议：当前本地/API 均无原生工具调用 → prompt-JSON 兜底协议。
-      final protocol = PromptJsonProtocol();
-
-      // 工具活动会话：工具轮消息创建/更新由 streamFn 与 onToolActivity 共享。
-      final session = _AgentActivitySession(
-        conversationId: conversationId,
-        storage: _storage,
-      );
-
-      // 流式回调：消费本地/API 流 → 处理器 → 更新 UI → 解析工具调用。
-      final streamFn = _agentStreamFn(
-        conversationId: conversationId,
-        useApi: useApi,
-        activeApi: activeApi,
-        targetModelId: targetModelId,
-        session: session,
-        imagePath: imagePath,
-        audioPath: audioPath,
-      );
-
-      // 系统提示：身份 + 工具指引 + 工具清单（协议渲染）→ 注入为首条 system 消息。
-      final systemPrompt = buildSystemPrompt(
-        modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
-        registry: registry,
-        protocol: protocol,
-        modelId: targetModelId,
-      );
-
-      // 运行 agent 循环（工具执行/结果回填/轮次上限均由循环处理）。
-      final result = await runAgent(
-        history: history,
-        userPrompt: prompt,
-        registry: registry,
-        protocol: protocol,
-        streamFn: streamFn,
-        modelId: targetModelId,
-        config: config,
-        systemPrompt: systemPrompt,
-        onToolActivity: session.update,
-        // 沙箱升级审批：UI 注入的确认框通道（未注入时 fail-closed）。
-        sandboxApprover: _ref.read(sandboxApproverProvider),
-      );
-
-      debugPrint('[ChatNotifier] agent done: ${result.toolCallCount} tools, '
-          'answer len=${result.answer.length}');
-
-      // 最终回答已在 streamFn 里持久化；这里返回 answer（无工具 = 单轮直答文本）。
-      return result.answer;
-    } finally {
-      debugPrint('[ChatNotifier] agent sendMessage done, isGenerating=false');
-      state = false;
-      _ref.read(isGeneratingProvider.notifier).state = false;
-    }
+    return _sendAgentMessageNew(
+      conversationId,
+      prompt,
+      imagePath: imagePath,
+      audioPath: audioPath,
+      settings: settings,
+    );
   }
 
-  /// 新智能体模式发送（Phase 0+ 重写）：事件源 [ReactLoopAgent] +
+  /// 智能体模式发送（Phase 0+ 重写，唯一实现）：事件源 [ReactLoopAgent] +
   /// [EngineLlmAdapter]（local/API 双路，共用文本协议）。
   ///
-  /// 与旧 [runAgent] 路径等价的用户可见行为：
-  /// - 同一模型路由（local/api/默认兜底）；
-  /// - 同一 KV 缓存策略（会话切换 resetContext）；
+  /// 用户可见行为：
+  /// - 模型路由（local/api/默认兜底）；
+  /// - KV 缓存策略（会话切换 resetContext）；
   /// - 历史从 SQLite 读（排除 🔧 工具活动消息）→ [JsonlSessionStore.importFromMessages]；
-  /// - 流式占位 + 工具活动（复用 [_AgentActivitySession]）；
+  /// - 流式占位 + 工具活动（[_AgentActivitySession]，逐工具落库）；
   /// - 最终回答持久化 + 返回。
   Future<String> _sendAgentMessageNew(
     String conversationId,
@@ -754,7 +607,14 @@ class ChatNotifier extends StateNotifier<bool> {
           '[ChatNotifier] new-agent conversation changed: resetContext()');
       await _inference.resetContext();
       _currentKvConvId = conversationId;
+    } else if (!_currentKvWasAgentMode) {
+      // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
+      // 由主循环带系统提示词/工具协议重建。
+      debugPrint(
+          '[ChatNotifier] plain→agent mode switch: resetContext()');
+      await _inference.resetContext();
     }
+    _currentKvWasAgentMode = true;
 
     // ---- 构建组件（复用旧路径共享件）----
     final registry = _buildAgentRegistry(settings, targetModelId);
@@ -855,7 +715,6 @@ class ChatNotifier extends StateNotifier<bool> {
       isStreaming: true,
     );
     await _storage.saveMessage(assistantMsg);
-    session.attach(assistantMsg);
 
     // 消费替换式 visible text → 周期持久化（节流）。
     StreamSubscription<String>? sub;
@@ -1063,178 +922,7 @@ class ChatNotifier extends StateNotifier<bool> {
     return registry;
   }
 
-  /// 构建 agent 循环的流式回调：消费本地/API token 流 → 处理器过滤 →
-  /// 更新 assistantMsg 流式占位 → 流结束解析工具调用。
-  ///
-  /// 每轮创建独立的 assistant 消息（工具轮占位复用为工具活动消息）：
-  /// - 工具轮：空占位（思考/JSON 隐藏）→ 「🔧 正在调用：xxx」→
-  ///   onToolActivity 逐步更新为「🔧 工具名 ✓ 结果摘要」；
-  /// - 最终轮：空占位 → 可见文本（思考过滤 + JSON 隐藏后）。
-  ///
-  /// [session] 与 onToolActivity 共享，用于跨轮更新工具活动消息。
-  AgentStreamFn _agentStreamFn({
-    required String conversationId,
-    required bool useApi,
-    required ApiModelConfig? activeApi,
-    required String targetModelId,
-    required _AgentActivitySession session,
-    String? imagePath,
-    String? audioPath,
-  }) {
-    var round = 0;
-    return (messages, protocol, config) async {
-      round++;
-      final isFirst = round == 1;
 
-      // 本轮性能统计（Agent 每轮独立计时，附加到本轮 assistant 消息）。
-      final roundStart = DateTime.now();
-      DateTime? firstTokenTime;
-      var tokenCount = 0;
-
-      // ---- 构建本轮流（本地 / API）----
-      final Stream<String> sourceStream;
-      if (useApi) {
-        final apiMessages = <Map<String, dynamic>>[
-          for (final m in messages)
-            {'role': m['role'], 'content': m['content']},
-        ];
-        sourceStream = _ref.read(openAiServiceProvider).chatCompletion(
-          config: activeApi!,
-          messages: apiMessages,
-          temperature: activeApi.effectiveTemperature,
-          maxTokens: config.maxTokensPerRound,
-        );
-      } else {
-        // 原生层约定：messagesJson 的最后一个元素即「当前用户消息」（含工具结果
-        // 回填），prompt 参数会被忽略（追加会重复）。因此整体传入、prompt 留空。
-        final msgs = messages.toList();
-        final historyJson = jsonEncode(msgs);
-        sourceStream = _inference.completionWithMessages(
-          prompt: '',
-          messagesJson: historyJson,
-          imagePath: isFirst ? imagePath : null,
-          audioPath: isFirst ? audioPath : null,
-          maxTokens: config.maxTokensPerRound,
-          temperature: 0.7,
-          topP: 0.9,
-        );
-      }
-
-      // ---- 本轮流式占位消息（工具轮复用为工具活动消息）----
-      final assistantId =
-          (DateTime.now().millisecondsSinceEpoch + round).toString();
-      var assistantMsg = ChatMessage(
-        id: assistantId,
-        conversationId: conversationId,
-        role: MessageRole.assistant,
-        content: '',
-        isStreaming: true,
-      );
-      await _storage.saveMessage(assistantMsg);
-      // 让活动会话指向本轮消息，onToolActivity 更新它。
-      session.attach(assistantMsg);
-
-      // ---- 消费流：处理器过滤 + 周期持久化 ----
-      final processor = AgentStreamProcessor();
-      final rawBuffer = StringBuffer();
-      var lastSave = DateTime.now();
-
-      await for (final token in _suppressUserCancelled(sourceStream)) {
-        if (token.isEmpty) continue;
-        firstTokenTime ??= DateTime.now();
-        tokenCount++;
-        rawBuffer.write(token);
-        processor.add(token);
-        final now = DateTime.now();
-        if (now.difference(lastSave).inMilliseconds >= 150) {
-          lastSave = now;
-          assistantMsg = assistantMsg.copyWith(content: processor.visibleText);
-          await _storage.saveMessage(assistantMsg);
-        }
-      }
-
-      // ---- 流结束：收尾（未闭合 XML/JSON 恢复为普通文本）→ 解析工具调用 ----
-      processor.finish();
-      StreamOutcome outcome;
-      try {
-        outcome = await protocol.parseStream(
-            Stream<String>.value(rawBuffer.toString()));
-      } on LlmFailure catch (f) {
-        if (f.code != LlmFailureCode.toolCallTruncated) rethrow;
-        // 截断的工具调用：旧循环无失败瀑布，以最终回答明确报错收轮，
-        // 绝不异常穿透崩会话。
-        final notice = '⚠️ 本轮工具调用生成不完整（输出 token 预算不足被截断）：'
-            '请在设置中调大「智能体每轮生成 token」后重试';
-        debugPrint('[ChatNotifier] agent toolCallTruncated: ${f.message}');
-        _ref.read(modelManagerProvider.notifier)
-            .appendInferenceLog('Agent 轮 $round | 工具调用截断 | ${f.message}');
-        assistantMsg = assistantMsg.copyWith(
-          content: notice,
-          isStreaming: false,
-        );
-        await _storage.saveMessage(assistantMsg);
-        return StreamOutcome(text: notice); // 无工具调用 → 循环终止
-      }
-
-      // ---- 本轮性能统计（同普通聊天：原生真实 token 数 + 纯生成耗时）----
-      final totalMs = DateTime.now().difference(roundStart).inMilliseconds;
-      final firstTokenMs = firstTokenTime != null
-          ? firstTokenTime.difference(roundStart).inMilliseconds
-          : 0;
-      int realTokens = tokenCount;
-      double genMs = 0.0;
-      int visionMs = 0;
-      int audioMs = 0;
-      if (!useApi) {
-        Map<String, dynamic> genStats = {};
-        try {
-          genStats = await _inference.getInferenceStats();
-        } catch (_) {}
-        realTokens = (genStats['n_gen'] as num?)?.toInt() ?? tokenCount;
-        genMs = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
-        visionMs = (genStats['t_vision_ms'] as num?)?.toInt() ?? 0;
-        audioMs = (genStats['t_audio_ms'] as num?)?.toInt() ?? 0;
-      }
-      final tokensPerSec = genMs > 0
-          ? realTokens * 1000 / genMs
-          : (totalMs > 0 ? realTokens * 1000 / totalMs : 0.0);
-      final roundStats = InferenceStats(
-        firstTokenMs: firstTokenMs,
-        totalMs: totalMs,
-        tokPerSec: tokensPerSec,
-        visionMs: visionMs,
-        audioMs: audioMs,
-      );
-      _ref.read(modelManagerProvider.notifier).appendInferenceLog(
-        'Agent 轮 $round | $realTokens tokens | 首token ${firstTokenMs}ms'
-        ' | 生成 ${genMs.round()}ms | 总耗时 ${totalMs}ms'
-        ' | ${tokensPerSec.toStringAsFixed(1)} tok/s',
-      );
-
-      if (outcome.hasToolCalls) {
-        // 工具轮：占位 → 工具活动消息（后续由 onToolActivity 更新结果）。
-        final names = outcome.toolCalls.map((c) => c.name).join('、');
-        assistantMsg = assistantMsg.copyWith(
-          content: '🔧 正在调用：$names',
-          isStreaming: true,
-          inferenceStats: roundStats,
-        );
-        await _storage.saveMessage(assistantMsg);
-      } else {
-        // 最终轮：可见文本（思考过滤 + JSON 隐藏后）。
-        final finalText = processor.visibleText.trim();
-        assistantMsg = assistantMsg.copyWith(
-          content: finalText,
-          isStreaming: false,
-          inferenceStats: roundStats,
-        );
-        await _storage.saveMessage(assistantMsg);
-      }
-
-      // 工具结果回填由 runAgent 负责（messages.add），本回调只管流。
-      return outcome;
-    };
-  }
 
   /// Stop the current generation: cancels the token stream subscription and
   /// 刷新单个会话的元信息（标题 + 消息条数）并写库：
@@ -1298,13 +986,14 @@ class ChatNotifier extends StateNotifier<bool> {
     // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
     // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
     _userCancelled = true;
-    // 新智能体模式：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
-    if (_currentAgent != null && _currentAgent!.isRunning) {
-      debugPrint('[ChatNotifier] stopGeneration: cancel new-agent turn');
-      await _currentAgent!.cancel();
+    // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
+    final agent = _currentAgent;
+    if (agent != null && agent.isRunning) {
+      debugPrint('[ChatNotifier] stopGeneration: cancel agent turn');
+      await agent.cancel();
       return;
     }
-    // 旧模式（useNewAgentMode 关）：直接中止 native/API。
+    // 普通聊天：直接中止 native/API。
     if (_lastGenWasApi) {
       _ref.read(openAiServiceProvider).stop();
     } else {
@@ -1327,46 +1016,56 @@ class ChatNotifier extends StateNotifier<bool> {
   }
 }
 
-/// 工具活动会话：跨轮管理「工具活动消息」（🔧 正在调用 → 结果摘要）。
+/// 工具活动会话：新主循环回合内，每次工具调用**独立落一条 🔧 活动消息**。
 ///
-/// streamFn 每轮创建占位消息后 attach 到本会话；runAgent 的 onToolActivity
-/// 回调调用 [update]，把占位逐步更新为工具活动文本。工具轮消息不进入历史
-/// （history 在循环前构建），仅用于 UI 展示。
+/// 存储约定（与 [_isToolActivityMessage] 匹配，历史回合步骤回看依赖）：
+/// - executing：`🔧 正在调用 {name}…`
+/// - done/failed：`🔧 {name} ✓/⚠️{summary}`
+/// 活动消息 `isStreaming` 恒为 false（静态文本）；实时"执行中"状态由
+/// agentUiStateProvider 事件流驱动，存储只负责可回看的步骤记录。
 class _AgentActivitySession {
   final String conversationId;
   final StorageService storage;
 
-  /// 当前轮消息（streamFn attach；onToolActivity 更新）。
-  ChatMessage? current;
+  var _seq = 0;
 
   _AgentActivitySession({
     required this.conversationId,
     required this.storage,
   });
 
-  /// streamFn 每轮创建占位消息后调用，让后续活动更新落到该消息。
-  void attach(ChatMessage msg) {
-    current = msg;
-  }
-
-  /// 更新活动消息（executing → done/failed）。
+  /// 更新活动消息（executing → 新建独立消息；done/failed → 对位更新）。
   Future<void> update(ToolActivity activity) async {
-    final msg = current;
-    if (msg == null) return;
     if (activity.status == 'executing') {
-      current = msg.copyWith(
+      final n = _seq++;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final msg = ChatMessage(
+        id: 'agent_tool_${now}_${n}',
+        conversationId: conversationId,
+        role: MessageRole.assistant,
         content: '🔧 正在调用 ${activity.name}…',
-        isStreaming: true,
-      );
-    } else {
-      final mark = activity.isFailed ? '⚠️' : '✓';
-      final summary = _summarizeToolResult(activity.result);
-      current = msg.copyWith(
-        content: '🔧 ${activity.name} $mark$summary',
         isStreaming: false,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(now + 1000 + n),
       );
+      await storage.saveMessage(msg);
+      return;
     }
-    await storage.saveMessage(current!);
+    // done/failed：新主循环固定顺序回调（同一步 tool/call 先全部触发
+    // executing，随后按同一顺序触发 done/failed）→ 对位到最早"执行中"
+    // 的 🔧 消息。
+    final msgs = await storage.getAllMessages(conversationId);
+    for (final m in msgs) {
+      if (m.role == MessageRole.assistant &&
+          m.content.startsWith('🔧 正在调用')) {
+        final mark = activity.isFailed ? '⚠️' : '✓';
+        final summary = _summarizeToolResult(activity.result);
+        await storage.saveMessage(m.copyWith(
+          content: '🔧 ${activity.name} $mark$summary',
+          isStreaming: false,
+        ));
+        return;
+      }
+    }
   }
 }
 

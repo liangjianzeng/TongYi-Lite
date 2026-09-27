@@ -176,7 +176,6 @@
 {#snippet execShellTitle()}
 	{#if cwd}
 		<span class="exec-wd" title={cwd}>{wdDisplay}</span>
-
 		<span class="exec-prompt">$</span>
 	{/if}
 
@@ -188,14 +187,14 @@
 {/snippet}
 
 <ToolCallBlock
-	extraLiveStreaming={isLive}
+	{section}
+	{open}
 	{isStreaming}
 	meta={execShellMeta ? { errorMessage: execShellError } : null}
-	{onToggle}
-	{open}
-	{section}
-	spinIconWhenActive={true}
 	wrapper={CollapsibleTerminalBlock}
+	extraLiveStreaming={isLive}
+	spinIconWhenActive={true}
+	{onToggle}
 >
 	{#snippet titleSnippet()}
 		{@render execShellTitle()}
@@ -210,25 +209,23 @@
 		{:else if execShellError}
 			<div class="flex items-start gap-2 text-xs text-red-600 italic dark:text-red-400">
 				<XCircle class="mt-0.5 h-3 w-3 shrink-0" />
-
 				<span>{execShellError}</span>
 			</div>
 		{:else if section.toolResult}
 			<div
 				bind:this={scrollEl}
-				class:is-clamped={!useFullHeightCodeBlocks}
 				class="terminal-output"
+				class:is-clamped={!useFullHeightCodeBlocks}
 				onscroll={handleScrollEvent}
 			>
 				{#each outputLines as line, i (i)}
 					<div class="font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{line.text}</div>
-
 					{#if line.media?.type === AttachmentType.IMAGE}
 						<img
+							src={line.media.base64Url}
 							alt={line.media.name}
 							class="mt-2 mb-2 h-auto max-w-full rounded-lg"
 							loading="lazy"
-							src={line.media.base64Url}
 						/>
 					{/if}
 				{/each}
@@ -237,19 +234,14 @@
 					<div class={exitBadgeClass}>
 						{#if execShellExitStatus.timedOut}
 							<AlertTriangle class="h-3 w-3" />
-
 							<span>timed out</span>
-
 							<span class="exit-sep">&middot;</span>
-
 							<span>exit {execShellExitStatus.code}</span>
 						{:else if execShellExitStatus.code === 0}
 							<Check class="h-3 w-3" />
-
 							<span>exit 0</span>
 						{:else}
 							<XCircle class="h-3 w-3" />
-
 							<span>exit {execShellExitStatus.code}</span>
 						{/if}
 					</div>

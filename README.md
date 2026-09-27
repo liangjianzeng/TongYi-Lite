@@ -37,7 +37,7 @@ TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模�
 | 能力 | 说明 |
 |------|------|
 | **本地端侧推理** | 基于 llama.cpp 的 JNI 直调推理（无 HTTP Server），mmap 加载、批量 prefill、内置采样器；纯 CPU 也可跑，数据零外传 |
-| **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；`n_gpu_layers` 全量卸载，运行时可控 |
+| **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 825 上 Vulkan 经 **Turnip（Mesa gen8）直载** 重新可用（三药修复，详见下文）；`n_gpu_layers` 全量卸载，运行时可控 |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描 |
 | **多模态（视觉 + 语音）** | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；Gemma 4 E2B 自带原生语音编码器，支持**按住说话**语音输入 |
 | **远程 API 接入** | 兼容 OpenAI `{baseUrl}/chat/completions` 端点（云端大模型或自建 llama.cpp 服务），**本地优先、API 后备**，共用同一套聊天界面 |
@@ -308,7 +308,7 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   `vkGetDeviceQueue2`（Vulkan 1.2）返回坏 queue → 改用 Vulkan 1.0 的 `vkGetDeviceQueue`（3 处 patch，
   仅 ARM vendor 0x13B5 生效，真机验证通过）。Mali-G68 无矩阵加速单元，Vulkan 解码约为 CPU 的 1/3，属
   **硬件天花板**（大模型上 GPU 卸载仍省内存）。
-- **骁龙 Adreno 8 Elite2（SM8735 / Adreno 825）专项**：**v0.2.2 起修复 Vulkan 乱码 / 管线崩溃**。驱动
+- **骁龙 8s Gen 4（SM8735 / Adreno 825）专项**：**v0.2.2 起修复 Vulkan 乱码 / 管线崩溃**。驱动
   0800.71（E031 编译器）错误编译 shader 的 `unpack8()`（Int8 capability）导致量化模型输出乱码，另存在
   subgroup matvec 管线创建失败、图融合 kernel 输出全零、dp4a 数值错误、decode 部分管线建不出共 5 个独立
   问题。修复：shader 层用纯 32 位位操作替换 `unpack8()`（21 处调用点 + q8_0 反量化重写，位模式逐位等价），
@@ -316,6 +316,23 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`（JNI 层注入，可用 `/storage/emulated/0/TongYiLite/vk_flags.conf`
   覆盖做 A/B）。构建 glslc 锁定 shaderc v2026.3（`_study/vkcli/sdk/vksdk-new`）。详见
   [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
+- **骁龙 8s Gen 4（Adreno 825）Vulkan 突破——Turnip（Mesa gen8）直载 + 三药修复（v0.2.3）**：
+  原厂 0800.71 驱动经 2026-08-05 HyperOS OS3.0.305 OTA 回归（7 月原味代码 + 新驱动同样拒建管线，
+  OTA 时间线与公开 ROM 记录闭环实锤；Bonsai2 实现 / llama.cpp 升级均与故障无关），原厂 Vulkan 弃用。
+  改为 **Turnip（Mesa out-of-tree gen8 分支）App 内直载**（免 root、不碰系统分区）：该驱动不导出任何
+  `vk_*` 符号，入口是 Android Vulkan HAL 模块（`hw_module_t → vulkan_device_t`，PFN 表偏移 +0x70、
+  GetInstanceProcAddr +0x88，逆向确认）；ggml-vulkan 4 处直接 C 符号调用全部改走 dispatcher，
+  `GGML_VK_TURNIP=<驱动.so>` 指定直载。数值损坏三根因逐一修复：
+  ① Turnip gen8 **错编 subgroup 算术归约（subgroupAdd）**——一切含归约的算子（matmul / conv）数值错，
+  tbo f32 MUL_MAT 203 case 全 FAIL → `GGML_VK_NO_SUBGROUP=1` 后 203/203 全过；
+  ② 我方 `NO_SUBGROUP` 门控有漏网——ssm_scan / gated_delta_net 管线选择直查 `device->subgroup_arithmetic`
+  不走 use_subgroups 门控 → 设备能力初始化处直接置 `subgroup_arithmetic=false`，一处覆盖全部 op 级选择；
+  ③ GDN shmem butterfly 的 **S_V=128 lanes 配置错编**（clustered LANES=8 / 全宽 128 均坏）→
+  `!subgroup_arithmetic` 时 lanes 钳 64（与已验证的 S_V=64 布局同构）。
+  验收：tbo GATED_DELTA_NET 36/36、SSM_SCAN 12/12，LFM2.5-2.6B 短生成 5/5 连贯（6~10.6 t/s）、
+  n=96 长生成连贯、Qwen3.5-4B 连贯（5.0 t/s，修复前 `?111.111` 乱码）。当前定位=**勘探后端**
+  （CONV_2D f32 独立 bug、FA hsk=192 遗留，[turnip-step] 诊断探针清理后才能出正式 APK），
+  日常 GPU 推理仍走 OpenCL。
 - **KleidiAI dotprod（纯 CPU 备选）**：`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod` 编译手调 matmul 内核；
   ⚠️ **不加 `+i8mm`**（天玑 Cortex-A78 无 i8mm，`armv8.4-a+dotprod+i8mm` 会 SIGILL 三后端同崩），已降级
   为 `armv8.2-a+dotprod`。
@@ -351,6 +368,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| **v0.2.3** | 2026-09-27 | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化 + 4 处直接调用修复）；数值三根因修复——subgroupAdd 错编全局门控（`subgroup_arithmetic=false` 直置覆盖 ssm_scan/GDN 漏网）、GDN S_V=128 lanes 钳 64、Turnip HAL 直载；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s）。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
 | **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）；glslc 锁定 shaderc v2026.3。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
 | **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI（工具卡片 / 压缩横幅 / 重试指示 / 审批对话框）；**联网搜索全面配置化**：SearXNG 实例地址/密钥/引擎白名单/条数/超时「设置 → API 接入」自配、一键测试连接、保存即热更新（含 4 处静默失效修复）；llama.cpp 升级 b11028 + 模型加载全链路修复；移除启动加载页。**229 项单测全绿** |
 | **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、18 内置工具、代码质量 P0 加固 |

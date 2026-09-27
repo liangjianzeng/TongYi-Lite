@@ -102,34 +102,35 @@
 
 <div class="relative w-full max-w-[80%]">
 	<ChatForm
-		bind:uploadedFiles={editCtx.editedUploadedFiles}
+		value={editCtx.editedContent}
 		attachments={editCtx.editedExtras}
-		onAttachmentRemove={handleAttachmentRemove}
-		onFilesAdd={handleFilesAdd}
-		onSubmit={handleSubmit}
-		onUploadedFileRemove={handleUploadedFileRemove}
-		onValueChange={editCtx.setContent}
+		bind:uploadedFiles={editCtx.editedUploadedFiles}
 		placeholder="Edit your message..."
+		showMcpPromptButton
 		showAddButton={editCtx.messageRole === MessageRole.USER}
 		showModelSelector={editCtx.messageRole === MessageRole.USER}
-		value={editCtx.editedContent}
+		onValueChange={editCtx.setContent}
+		onAttachmentRemove={handleAttachmentRemove}
+		onUploadedFileRemove={handleUploadedFileRemove}
+		onFilesAdd={handleFilesAdd}
+		onSubmit={handleSubmit}
 	/>
 </div>
 
 <div class="mt-2 flex w-full max-w-[80%] items-center justify-between">
 	{#if isUserMessage && editCtx.showSaveOnlyOption}
 		<div class="flex items-center gap-2">
-			<Switch bind:checked={saveWithoutRegenerate} class="scale-75" id="save-only-switch" />
+			<Switch id="save-only-switch" bind:checked={saveWithoutRegenerate} class="scale-75" />
 
-			<label class="cursor-pointer text-xs text-muted-foreground" for="save-only-switch">
+			<label for="save-only-switch" class="cursor-pointer text-xs text-muted-foreground">
 				Update without re-sending
 			</label>
 		</div>
 	{:else if isAssistantMessage}
 		<div class="flex items-center gap-2">
-			<Switch bind:checked={branchAfterEdit} class="scale-75" id="branch-after-edit" />
+			<Switch id="branch-after-edit" bind:checked={branchAfterEdit} class="scale-75" />
 
-			<label class="cursor-pointer text-xs text-muted-foreground" for="branch-after-edit">
+			<label for="branch-after-edit" class="cursor-pointer text-xs text-muted-foreground">
 				Branch conversation after edit
 			</label>
 		</div>
@@ -146,12 +147,12 @@
 
 <DialogConfirmation
 	bind:open={showDiscardDialog}
-	cancelText="Keep editing"
-	confirmText="Discard"
-	description="You have unsaved changes. Are you sure you want to discard them?"
-	icon={AlertTriangle}
-	onCancel={() => (showDiscardDialog = false)}
-	onConfirm={editCtx.cancel}
 	title="Discard changes?"
+	description="You have unsaved changes. Are you sure you want to discard them?"
+	confirmText="Discard"
+	cancelText="Keep editing"
 	variant="destructive"
+	icon={AlertTriangle}
+	onConfirm={editCtx.cancel}
+	onCancel={() => (showDiscardDialog = false)}
 />

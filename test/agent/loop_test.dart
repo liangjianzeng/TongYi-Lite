@@ -202,6 +202,23 @@ void main() {
     expect(agent.phaseState.phase, AgentPhase.idle);
   });
 
+  test('本地模型未加载（modelNotReady）→ 立即 giveUp，非重试不空转', () async {
+    const notReady = LlmFailure(
+      code: LlmFailureCode.modelNotReady,
+      message: '本地模型未加载（模型加载失败），请在模型管理页重新加载模型',
+    );
+    // 即使再给一次结果，也不该被调用 —— 非重试失败只发一次。
+    final fake = FakeLlmAdapter([notReady, notReady]);
+    final agent = _agent(fake);
+
+    final reason = await agent.kick('hi');
+
+    expect(reason.kind, TurnEndReasonKind.error);
+    expect(fake.calls, 1); // 模型未加载是权威状态，重试无益 → 只调一次即止损
+    expect(agent.lastTurnAnswer, '');
+    expect(agent.lastTurnError, contains('未加载'));
+  });
+
   test('取消 → interrupted（abort 与流竞跑）', () async {
     final fake = HangingFakeLlmAdapter();
     final agent = _agent(fake);

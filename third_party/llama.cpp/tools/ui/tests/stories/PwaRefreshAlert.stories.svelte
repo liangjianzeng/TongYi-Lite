@@ -1,4 +1,4 @@
-<script lang="ts" module>
+<script module lang="ts">
 	import { defineMeta } from '@storybook/addon-svelte-csf';
 	import PwaRefreshAlert from '$lib/components/pwa/PwaRefreshAlert.svelte';
 	import { expect } from 'storybook/test';
@@ -13,8 +13,8 @@
 </script>
 
 <Story
-	args={{ needRefresh: true, updateServiceWorker: () => console.log('reload') }}
 	name="Default"
+	args={{ needRefresh: true, updateServiceWorker: () => console.log('reload') }}
 	play={async ({ canvas }) => {
 		const title = canvas.getByText('Update available');
 
@@ -31,8 +31,8 @@
 />
 
 <Story
-	args={{ needRefresh: false, updateServiceWorker: () => console.log('reload') }}
 	name="Hidden"
+	args={{ needRefresh: false, updateServiceWorker: () => console.log('reload') }}
 	play={async ({ canvas }) => {
 		const title = canvas.queryByText('Update available');
 
@@ -41,11 +41,11 @@
 />
 
 <Story
+	name="ClickReload"
 	args={{
 		needRefresh: true,
 		updateServiceWorker: () => console.log('reload')
 	}}
-	name="ClickReload"
 	play={async ({ canvas, userEvent }) => {
 		const button = canvas.getByRole('button', { name: 'Reload' });
 

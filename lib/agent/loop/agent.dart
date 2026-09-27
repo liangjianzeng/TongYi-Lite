@@ -31,7 +31,7 @@ import '../tool_registry.dart';
 import '../tools/guard.dart';
 import '../tools/pipeline.dart';
 import '../tools/tool_executor.dart';
-import '../agent_loop.dart' show AgentToolActivityCallback, ToolActivity;
+import '../tool_activity.dart' show AgentToolActivityCallback, ToolActivity;
 import '../hooks/hooks.dart' show AgentHooks, PreStepContext;
 import '../skills/provider.dart' show SkillProvider;
 

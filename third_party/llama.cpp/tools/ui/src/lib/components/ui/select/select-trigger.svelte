@@ -30,12 +30,11 @@
 
 <SelectPrimitive.Trigger
 	bind:ref
-	class={cn(baseClasses, className)}
-	data-size={size}
 	data-slot="select-trigger"
+	data-size={size}
+	class={cn(baseClasses, className)}
 	{...restProps}
 >
 	{@render children?.()}
-
 	<ChevronDownIcon class={chevronClasses} />
 </SelectPrimitive.Trigger>

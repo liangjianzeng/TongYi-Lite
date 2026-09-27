@@ -2,14 +2,18 @@
 
 #include "ggml.h"
 #include "llama-arch.h"
+#include "llama-batch.h"
+#include "llama-ext.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
-#include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kv-cache-iswa.h"
+#include "llama-kv-cache.h"
+#include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-hybrid.h"
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
-#include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
 
@@ -17,12 +21,89 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
 //
 // llama_context
 //
+
+// Verify that every Hadamard-folded weight consumed by the graph receives its
+// activation-side transform, and every latent lookup table gets the inverse.
+// An architecture whose matmul path bypasses the transform helpers would
+// otherwise load cleanly and silently compute wrong results.
+static void llama_verify_hadamard_graph(
+        ggml_cgraph * gf,
+        const llama_hadamard_rotations & rotations,
+        const llama_hadamard_rotations & inverses) {
+    auto unwrap = [](const ggml_tensor * t) {
+        while (t && (t->op == GGML_OP_RESHAPE || t->op == GGML_OP_VIEW)) {
+            t = t->src[0];
+        }
+        return t;
+    };
+
+    std::map<const ggml_tensor *, bool> lookups; // get_rows results of latent tables
+
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        const ggml_tensor * node = ggml_graph_node(gf, i);
+
+        if (node->op == GGML_OP_GET_ROWS && inverses.count(node->src[0])) {
+            lookups.emplace(node, false);
+            continue;
+        }
+
+        if (node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_MUL_MAT_ID) {
+            continue;
+        }
+
+        if (node->op == GGML_OP_MUL_MAT && ((const int32_t *) node->op_params)[1] == GGML_HINT_SRC0_IS_HADAMARD) {
+            const auto lk = lookups.find(unwrap(node->src[1]));
+            if (lk != lookups.end()) {
+                lk->second = true;
+            }
+            continue;
+        }
+
+        const auto it = rotations.find(node->src[0]);
+        if (it == rotations.end()) {
+            if (inverses.count(node->src[0])) {
+                throw std::runtime_error(format(
+                    "Hadamard-latent table '%s' is used as a head without a forward transform", node->src[0]->name));
+            }
+            continue;
+        }
+        const ggml_tensor * src = unwrap(node->src[1]);
+        const bool transformed = src && src->op == GGML_OP_MUL_MAT &&
+            ((const int32_t *) src->op_params)[1] == GGML_HINT_SRC0_IS_HADAMARD &&
+            src->src[0] == it->second.rot;
+        if (!transformed) {
+            throw std::runtime_error(format(
+                "Hadamard-folded weight '%s' is consumed without its activation transform; "
+                "this graph's matmul path does not support prism.hadamard folding",
+                node->src[0]->name));
+        }
+    }
+
+    for (const auto & [node, ok] : lookups) {
+        if (!ok) {
+            for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+                const ggml_tensor * n2 = ggml_graph_node(gf, i);
+                for (int s = 0; s < GGML_MAX_SRC && n2->src[s]; ++s) {
+                    if (unwrap(n2->src[s]) == node) {
+                        LLAMA_LOG_WARN("%s: latent lookup '%s' consumed by op=%s name='%s' src%d hint=%d\n",
+                                __func__, node->name, ggml_op_name(n2->op), n2->name, s,
+                                ((const int32_t *) n2->op_params)[1]);
+                    }
+                }
+            }
+            throw std::runtime_error(format(
+                "Hadamard-latent table '%s' is read without the inverse transform",
+                node->src[0]->name));
+        }
+    }
+}
 
 static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     switch (ctx_type) {
@@ -125,9 +206,8 @@ llama_context::llama_context(
     cparams.embeddings_layer_inp.resize(hparams.n_layer() + 1, false);
     embd_layer_inp.resize(hparams.n_layer() + 1);
 
-    cparams.ctx_type          = params.ctx_type;
-    cparams.rope_scaling_type = params.rope_scaling_type;
-    cparams.pooling_type      = params.pooling_type;
+    cparams.ctx_type     = params.ctx_type;
+    cparams.pooling_type = params.pooling_type;
 
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
@@ -161,16 +241,26 @@ llama_context::llama_context(
         }
     }
 
-    if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
-        cparams.rope_scaling_type = hparams.rope_scaling_type_train;
+    hadamard_rotations = model.hadamard_rotations;
+    hadamard_inverses  = model.hadamard_inverses;
+    if (cparams.ctx_other) {
+        // Transform entries are keyed by tensor pointer, so borrowed target tensors remain distinct.
+        const auto & other = cparams.ctx_other->model;
+        hadamard_rotations.insert(other.hadamard_rotations.begin(), other.hadamard_rotations.end());
+        hadamard_inverses .insert(other.hadamard_inverses .begin(), other.hadamard_inverses .end());
     }
 
-    if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_NONE) {
+    auto rope_scaling_type = params.rope_scaling_type;
+    if (rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
+        rope_scaling_type = hparams.rope_scaling_type_train;
+    }
+
+    if (rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_NONE) {
         cparams.rope_freq_scale = 1.0f; // never scale if scaling type is none
     }
 
     if (cparams.yarn_ext_factor < 0.0f) { // negative indicates 'not set'
-        cparams.yarn_ext_factor = cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_YARN ? 1.0f : 0.0f;
+        cparams.yarn_ext_factor = rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_YARN ? 1.0f : 0.0f;
     }
 
     if (cparams.yarn_ext_factor != 0) {
@@ -231,10 +321,10 @@ llama_context::llama_context(
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
-    cparams.auto_fgdn    = false;
+    cparams.auto_fgdn    = true;
 
-    cparams.fused_lid = true;
-    cparams.auto_flid = false;
+    cparams.fused_lid    = true;
+    cparams.auto_flid    = true;
 
     cparams.fused_dsv4_hc_pre  = true;
     cparams.fused_dsv4_hc_comb = true;
@@ -393,6 +483,34 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
+
+        if (params.path_kv_mean_center != nullptr) {
+            // collect every standard llama_kv_cache the memory module keeps for attention
+            // layers. hybrid (recurrent + attention) models keep one for their attention
+            // sublayers; SWA variants keep a base/SWA pair. bias tensors are matched by
+            // model layer id, so layers absent from a given cache are simply skipped.
+            std::vector<llama_kv_cache *> kvs;
+            if (auto * kv = dynamic_cast<llama_kv_cache *>(memory.get())) {
+                kvs.push_back(kv);
+            } else if (auto * kv_iswa = dynamic_cast<llama_kv_cache_iswa *>(memory.get())) {
+                kvs.push_back(kv_iswa->get_base());
+                kvs.push_back(kv_iswa->get_swa());
+            } else if (auto * hyb = dynamic_cast<llama_memory_hybrid *>(memory.get())) {
+                kvs.push_back(hyb->get_mem_attn());
+            } else if (auto * hyb_iswa = dynamic_cast<llama_memory_hybrid_iswa *>(memory.get())) {
+                kvs.push_back(hyb_iswa->get_mem_attn()->get_base());
+                kvs.push_back(hyb_iswa->get_mem_attn()->get_swa());
+            }
+            if (kvs.empty()) {
+                throw std::runtime_error("path_kv_mean_center is only supported for standard KV caches "
+                        "(not recurrent-only or MLA/DSA memory types)");
+            }
+            for (auto * kv : kvs) {
+                if (!kv->load_kv_mean_center(params.path_kv_mean_center)) {
+                    throw std::runtime_error("failed to load K-cache mean-centering bias file");
+                }
+            }
+        }
     }
 
     // init backends
@@ -482,8 +600,7 @@ llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
 
-    // when training, ggml_opt allocates extra buffers through the scheduler, so the sizes no longer match the expectation
-    if (!model.hparams.no_alloc && !opt_ctx) {
+    if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
             ggml_backend_buffer_type_t buft    = backend_buft[i];
@@ -599,11 +716,8 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
-    for (auto & res : gf_res_prev) {
-        res.reset();
-    }
+    gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
-    gf_res_prev_active = nullptr;
 
     sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
 
@@ -665,21 +779,11 @@ void llama_context::sched_reserve() {
 
     // reserve again with pp graph to avoid ggml-alloc reallocations during inference
     {
-        // TODO: the worst case graph is not always reached for `n_seqs > 1`
-        //       need to implement a more robust mechanism that tries a few different inputs and analyzes the results
-        ggml_cgraph * gf = nullptr;
-        switch (model.arch) {
-            case LLM_ARCH_KIMI_LINEAR:
-            case LLM_ARCH_MINIMAX_01:
-                // [TAG_RESERVE_DIAG_DECAY]
-                // the `inp_diag_decay` tensor size scales with `n_seq_tokens^2` which
-                // makes `n_seqs == 1` use more memory for the compute graph compared to `n_seqs > 1`
-                gf = graph_reserve(n_tokens, 1,      n_outputs_pp, mctx.get(), model.hparams.no_alloc);
-                break;
-            default:
-                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), model.hparams.no_alloc);
-        };
-
+        // TODO: not sure if the following graph would be worst case for multi-stream KV caches:
+        //
+        // auto * gf = graph_reserve(n_tokens, 1, n_tokens, mctx.get());
+        //
+        auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), model.hparams.no_alloc);
         if (!gf) {
             throw std::runtime_error("failed to allocate compute pp buffers");
         }
@@ -819,14 +923,10 @@ bool llama_context::memory_update(bool optimize) {
                 }
         }
 
-        // reset the previous graph results to make sure that they won't be reused
-        // TODO: make mctx->apply() report if a graph reserve is needed, then reset graph results only if the memory module reset the scheduler
-        for (auto & res : gf_res_prev) {
-            if (res) {
-                res->reset();
-            }
-        }
-        gf_res_prev_active = nullptr;
+        // reset the previous graph result to make sure that it won't be reused
+        // TODO: change the mctx->apply() to return information if a graph reserve is needed
+        //       reset the graph result only if the memory module did reset the scheduler
+        gf_res_prev->reset();
 
         if (!mctx->apply()) {
             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
@@ -995,6 +1095,41 @@ float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
     GGML_ASSERT(lid < embd_layer_inp.size() && embd_layer_inp[lid].has_data());
 
     return embd_layer_inp[lid].data;
+}
+
+uint32_t llama_context::get_n_capture() const {
+    return cparams.n_capture_layers;
+}
+
+float * llama_context::get_embeddings_capture() {
+    output_reorder();
+
+    return embd_capture.data;
+}
+
+float * llama_context::get_embeddings_capture_ith(int32_t i) {
+    output_reorder();
+
+    try {
+        if (embd_capture.data == nullptr) {
+            throw std::runtime_error("no capture embeddings");
+        }
+
+        const uint32_t n_cap  = cparams.n_capture_layers;
+        const uint32_t n_embd = model.hparams.n_embd;
+        const uint32_t row    = n_cap * n_embd;  // width of one concatenated row
+
+        // capture rows always follow the masked (output-row) layout, mirroring the
+        // pre-norm masked path: the buffer holds one row per output position.
+        const int64_t j = output_resolve_row(i);
+        if (j < 0 || (size_t) (j + 1) * row > embd_capture.size) {
+            throw std::runtime_error(format("out of range [0, %zu)", embd_capture.size / row));
+        }
+        return embd_capture.data + (size_t) j * row;
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: invalid capture embeddings id %d, reason: %s\n", __func__, i, err.what());
+        return nullptr;
+    }
 }
 
 llama_token llama_context::get_sampled_token_ith(int32_t idx) {
@@ -1199,6 +1334,75 @@ void llama_context::set_nextn_layer_offset(int32_t offset) {
     cparams.nextn_layer_offset = offset;
 }
 
+void llama_context::set_capture_layers(const std::vector<int32_t> & layer_ids) {
+    const int32_t n_layer = (int32_t) model.hparams.n_layer();
+    if (layer_ids.size() > LLAMA_MAX_LAYERS) {
+        throw std::invalid_argument("Too many capture layers");
+    }
+    for (int32_t il : layer_ids) {
+        if (il < 0 || il >= n_layer || il >= LLAMA_MAX_LAYERS) {
+            throw std::invalid_argument("Capture layer index out of range");
+        }
+    }
+    // reset
+    cparams.embeddings_capture = false;
+    cparams.n_capture_layers   = 0;
+    cparams.capture_layer_idx  = {};
+
+    // enabling/disabling capture adds/removes the t_h_capture node from the
+    // graph (see llm_graph_result::set_outputs()), so the scheduler's
+    // backend-assignment table -- built against whatever topology was live
+    // at the last reserve -- must be re-derived before the next decode.
+    // Without this, ggml_backend_sched_get_tensor_backend() on the newly
+    // introduced t_h_capture tensor correctly reports "unknown" (nullptr),
+    // since the scheduler never split a graph that contained it.
+    sched_need_reserve = true;
+
+    if (layer_ids.empty()) {
+        return;
+    }
+
+    uint32_t n = 0;
+    for (int32_t il : layer_ids) {
+        cparams.capture_layer_idx[n++] = il;
+    }
+
+    cparams.n_capture_layers        = n;
+    cparams.embeddings_capture      = n > 0;
+    // capture rows reuse the masked output-row layout; force masked extraction on.
+    cparams.embeddings_nextn_masked = true;
+}
+
+void llama_context::set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos) {
+    if (n_ctx_rows <= 0 || n_embd_cap <= 0 || feat == nullptr) {
+        // reset: no staged context (e.g. before the very first drafter round,
+        // where the whole prompt still needs to go through as context on the
+        // first call, or between unrelated decodes).
+        dspark_ctx.n_ctx_rows = 0;
+        dspark_ctx.n_embd_cap = 0;
+        dspark_ctx.v_ctx_feat.clear();
+        dspark_ctx.v_ctx_pos.clear();
+        return;
+    }
+
+    dspark_ctx.n_ctx_rows = n_ctx_rows;
+    dspark_ctx.n_embd_cap = n_embd_cap;
+
+    dspark_ctx.v_ctx_feat.assign(feat, feat + (size_t) n_ctx_rows * (size_t) n_embd_cap);
+
+    dspark_ctx.v_ctx_pos.resize((size_t) n_ctx_rows);
+    if (pos != nullptr) {
+        std::copy(pos, pos + n_ctx_rows, dspark_ctx.v_ctx_pos.begin());
+    } else {
+        // caller didn't supply explicit positions: assume a contiguous run
+        // ending just before the current staged sequence length. this is a
+        // convenience default; callers doing real multi-round decoding should
+        // pass explicit positions since the growing-cache bookkeeping (Phase 2)
+        // owns the authoritative position numbering.
+        std::iota(dspark_ctx.v_ctx_pos.begin(), dspark_ctx.v_ctx_pos.end(), 0);
+    }
+}
+
 void llama_context::set_causal_attn(bool value) {
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
@@ -1347,14 +1551,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
-    auto * res = get_gf_res_prev();
+    auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
+    if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1366,7 +1570,6 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         n_reused++;
     } else {
-        gf_res_prev_active = nullptr;
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
@@ -1389,8 +1592,6 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
-
-        gf_res_prev_active = res;
     }
 
     // set the input data for the input tensors
@@ -1572,6 +1773,21 @@ int llama_context::encode(const llama_batch & batch_inp) {
         ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn.data, 0, n_tokens*n_embd*sizeof(float));
     }
 
+    // extract multi-layer capture embeddings (concatenated per position).
+    // single bulk copy: t_h_capture is already [n_capture * n_embd, n_tokens].
+    if (embd_capture.data && cparams.n_capture_layers > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
+        ggml_tensor * t_cap = res->get_h_capture();
+        if (!t_cap) {
+            LLAMA_LOG_ERROR("%s: target graph did not produce requested capture layers\n", __func__);
+            return -1;
+        }
+        ggml_backend_t backend_c = ggml_backend_sched_get_tensor_backend(sched.get(), t_cap);
+        GGML_ASSERT(backend_c != nullptr);
+        const uint32_t row = cparams.n_capture_layers * hparams.n_embd;
+        GGML_ASSERT(n_tokens * (int64_t) row <= (int64_t) embd_capture.size);
+        ggml_backend_tensor_get_async(backend_c, t_cap, embd_capture.data, 0, (size_t) n_tokens * row * sizeof(float));
+    }
+
     // TODO: hacky solution
     if (model.arch == LLM_ARCH_T5 && t_embd) {
         //cross.t_embd = t_embd;
@@ -1673,9 +1889,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     const int64_t n_vocab = vocab.n_tokens();
     const bool    mtp_embd = cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && batch_inp.embd;
-    // DFlash embd batches carry the fused target features at the encoder input width
-    const bool    dflash_embd = model.arch == LLM_ARCH_DFLASH && batch_inp.embd;
-    const int64_t n_embd  = mtp_embd ? hparams.n_embd_out() : dflash_embd ? hparams.n_embd_inp_enc() : hparams.n_embd_inp();
+    const int64_t n_embd  = mtp_embd ? hparams.n_embd_out() : hparams.n_embd_inp();
 
     // when computing embeddings, all tokens are output
     const bool output_all   = cparams.embeddings;
@@ -1882,6 +2096,25 @@ int llama_context::decode(const llama_batch & batch_inp) {
             t_embd = res->get_embd_pooled();
         }
 
+        // extract multi-layer capture embeddings, concatenated per output position.
+        // capture always uses the masked (output-row) layout, so t_h_capture is
+        // [n_capture * n_embd, n_outputs]; copy in one shot per ubatch.
+        if (embd_capture.data && cparams.n_capture_layers > 0 && n_outputs > 0 &&
+            cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
+            ggml_tensor * t_cap = res->get_h_capture();
+            if (!t_cap) {
+                LLAMA_LOG_ERROR("%s: target graph did not produce requested capture layers\n", __func__);
+                return -1;
+            }
+            ggml_backend_t backend_c = ggml_backend_sched_get_tensor_backend(sched.get(), t_cap);
+            GGML_ASSERT(backend_c != nullptr);
+            const uint32_t row              = cparams.n_capture_layers * hparams.n_embd;
+            float *        embd_capture_out = embd_capture.data + (size_t) n_outputs_prev * row;
+            GGML_ASSERT((n_outputs_prev + n_outputs) * (int64_t) row <= (int64_t) embd_capture.size);
+            ggml_backend_tensor_get_async(backend_c, t_cap, embd_capture_out, 0,
+                                          (size_t) n_outputs * row * sizeof(float));
+        }
+
         // extract logits
         if (logits.data && t_logits && n_outputs > 0 && needs_raw_logits(ubatch, sampling.samplers)) {
             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
@@ -2066,6 +2299,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     bool has_logits     = true;
     bool has_embd       = cparams.embeddings;
     bool has_embd_nextn = cparams.embeddings_nextn;
+    bool has_embd_capture = cparams.n_capture_layers > 0;
 
     // TODO: hacky enc-dec support
     if (model.arch == LLM_ARCH_T5) {
@@ -2106,9 +2340,11 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
-    const size_t new_size  =
-        (logits.size + embd.size + embd_nextn.size + embd_layer_inp_float_count + backend_float_count) * sizeof(float) +
-        (                                                                         backend_token_count) * sizeof(llama_token);
+    embd_capture.size      = has_embd_capture ? (size_t) cparams.n_capture_layers * hparams.n_embd * n_outputs_max : 0;
+    const size_t new_size  = (logits.size + embd.size + embd_nextn.size + embd_capture.size +
+                              embd_layer_inp_float_count + backend_float_count) *
+                                 sizeof(float) +
+                             (backend_token_count) * sizeof(llama_token);
 
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer
@@ -2125,6 +2361,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
             logits.data = nullptr;
             embd.data = nullptr;
             embd_nextn.data = nullptr;
+            embd_capture.data = nullptr;
             for (auto & layer_inp : embd_layer_inp) {
                 layer_inp = {nullptr, 0};
             }
@@ -2167,6 +2404,10 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
             embd_layer_inp[il] = buffer_view<float>{nullptr, 0};
         }
     }
+
+    embd_capture = has_embd_capture ? buffer_view<float>{ (float *) (base + offset), embd_capture.size } :
+                                      buffer_view<float>{ nullptr, 0 };
+    offset += embd_capture.size * sizeof(float);
 
     if (has_sampling) {
         sampling.logits = {(float *) (base + offset), (size_t)(n_vocab*n_outputs_max)};
@@ -2263,6 +2504,12 @@ void llama_context::output_reorder() {
             }
         }
 
+        if (embd_capture.size > 0) {
+            const uint64_t row = (uint64_t) cparams.n_capture_layers * n_embd;
+            for (uint64_t k = 0; k < row; k++) {
+                std::swap(embd_capture.data[i0 * row + k], embd_capture.data[i1 * row + k]);
+            }
+        }
         if (embd_nextn.size > 0) {
             for (uint64_t k = 0; k < n_embd_out; k++) {
                 std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
@@ -2319,21 +2566,16 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     if (model.arch == LLM_ARCH_KIMI_K3) {
         // the n_tokens*40 budget below is exhausted at ubatch 3840
         res = std::max<uint32_t>(n_tokens * 160, 64u * model.n_tensors());
-    } else if (model.arch == LLM_ARCH_HRM_TEXT) {
-        // the 128-slot looped graph needs roughly one stack per token budget
-        res = std::max<uint32_t>(n_tokens * 80, 64u * model.n_tensors());
     } else if (model.arch == LLM_ARCH_QWEN3NEXT ||
         model.arch == LLM_ARCH_KIMI_LINEAR ||
         model.arch == LLM_ARCH_BAILINGMOE3 ||
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
-        model.arch == LLM_ARCH_QWEN4EXP ||
         model.arch == LLM_ARCH_DEEPSEEK4 ||
         (model.arch == LLM_ARCH_DFLASH && model.hparams.dsv4_hc_mult > 0) ||
         model.arch == LLM_ARCH_NANBEIGE ||
         model.arch == LLM_ARCH_MINIMAX_01 ||
-        model.arch == LLM_ARCH_MINIMAX_M3 ||
-        model.arch == LLM_ARCH_HY_V4) {
+        model.arch == LLM_ARCH_MINIMAX_M3) {
         res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     } else if (model.arch == LLM_ARCH_DFLASH && model.hparams.dflash_selector_rank > 0) {
         // DFlash2's convolutions and selector are shape work rather than matmuls,
@@ -2369,14 +2611,6 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
 
 llm_graph_result * llama_context::get_gf_res_reserve() const {
     return static_cast<llm_graph_result *>(gf_res_reserve.get());
-}
-
-llm_graph_result * llama_context::get_gf_res_prev() {
-    auto & res = gf_res_prev[n_outputs > 0];
-    if (!res) {
-        res.reset(new llm_graph_result(gf_res_reserve->get_max_nodes()));
-    }
-    return res.get();
 }
 
 // pack sampler outputs into as few sequences as possible before using sequences without samplers
@@ -2448,13 +2682,8 @@ ggml_cgraph * llama_context::graph_reserve(
 
     ggml_backend_sched_reset(sched.get());
 
-    // when the scheduler is reset, we cannot reuse old graphs, so we reset the previous graph results
-    for (auto & res : gf_res_prev) {
-        if (res) {
-            res->reset();
-        }
-    }
-    gf_res_prev_active = nullptr;
+    // when the scheduler is reset, we cannot reuse the old graph, so we reset the previous graph result to prevent that
+    gf_res_prev->reset();
 
     // store the n_outputs as it is, and restore it afterwards
     // TODO: not sure if needed, might simplify in the future by removing this
@@ -2474,6 +2703,13 @@ ggml_cgraph * llama_context::graph_reserve(
     res->reset();
 
     auto * gf = model.build_graph(gparams);
+
+    // verify transform coverage on the pristine graph: after scheduling,
+    // cross-backend copies break the producer chain the check follows
+    if (!hadamard_verified && gf && (!hadamard_rotations.empty() || !hadamard_inverses.empty())) {
+        llama_verify_hadamard_graph(gf, hadamard_rotations, hadamard_inverses);
+        hadamard_verified = true;
+    }
 
     this->n_outputs = save_n_outputs;
 
@@ -2499,21 +2735,27 @@ llm_graph_params llama_context::graph_params(
             const llama_memory_context_i * mctx,
                           llm_graph_type   gtype) const {
     return {
-        /*.arch        =*/ model.arch,
-        /*.hparams     =*/ model.hparams,
-        /*.cparams     =*/ cparams,
-        /*.ubatch      =*/ ubatch,
-        /*.gtype       =*/ gtype,
-        /*.sched       =*/ sched.get(),
-        /*.backend_cpu =*/ backend_cpu,
-        /*.cvec        =*/ cvec.get(),
-        /*.loras       =*/ loras.get(),
-        /*.mctx        =*/ mctx,
-        /*.cross       =*/ &cross,
-        /*.samplers    =*/ sampling.samplers,
-        /*.n_outputs   =*/ n_outputs,
-        /*.cb          =*/ graph_get_cb(),
-        /*.res         =*/ res,
+        /*.arch        =*/model.arch,
+        /*.hparams     =*/model.hparams,
+        /*.cparams     =*/cparams,
+        /*.ubatch      =*/ubatch,
+        /*.gtype       =*/gtype,
+        /*.sched       =*/sched.get(),
+        /*.backend_cpu =*/backend_cpu,
+        /*.cvec        =*/cvec.get(),
+        /*.loras       =*/loras.get(),
+        /*.mctx        =*/mctx,
+        /*.cross       =*/&cross,
+        /*.dspark_ctx  =*/&dspark_ctx,
+        /*.dspark_has_context =*/!dspark_ctx.v_ctx_feat.empty(),
+        /*.dspark_ctx_rows =*/dspark_ctx.n_ctx_rows,
+        /*.dspark_ctx_width =*/dspark_ctx.n_embd_cap,
+        /*.hadamard_rotations =*/&hadamard_rotations,
+        /*.hadamard_inverses  =*/&hadamard_inverses,
+        /*.samplers    =*/sampling.samplers,
+        /*.n_outputs   =*/n_outputs,
+        /*.cb          =*/graph_get_cb(),
+        /*.res         =*/res,
     };
 }
 
@@ -2932,94 +3174,13 @@ public:
         for (auto & [buft, mbuf] : mbufs_new) {
             const auto & mbuf_cur = mbufs.at(buft);
 
-            if (!mbuf_cur.buf || mbuf_cur.total_size != mbuf.total_size) {
+            if (!mbuf_cur.buf || mbuf_cur.n_tensors != mbuf.n_tensors || mbuf_cur.total_size != mbuf.total_size) {
                 GGML_ABORT("%s: memory buffer mismatch\n", __func__);
             }
 
-            if (mbuf_cur.n_tensors == mbuf.n_tensors) {
-                // an equal tensor count does not imply the same chunking, e.g. save ranges [2,1] vs restore runs [1,2]
-                bool same_chunking = true;
-                for (size_t i = 0; i < mbuf_cur.org.size(); ++i) {
-                    if (ggml_nbytes(mbuf_cur.cpy[i]) != ggml_nbytes(mbuf.org[i])) {
-                        same_chunking = false;
-                        break;
-                    }
-                }
-
-                if (same_chunking) {
-                    // same chunking: copy 1:1 by index
-                    for (size_t i = 0; i < mbuf_cur.org.size(); ++i) {
-                        ggml_backend_tensor_copy(mbuf_cur.cpy[i], mbuf.org[i]);
-                    }
-                    continue;
-                }
+            for (size_t i = 0; i < mbuf_cur.org.size(); ++i) {
+                ggml_backend_tensor_copy(mbuf_cur.cpy[i], mbuf.org[i]);
             }
-
-            // different chunking: copy the write-side data (mbuf_cur.cpy) into the read-side targets (mbuf.org)
-            // with a byte cursor. Write and read enumerate the same logical data in the same order but may chunk
-            // it differently (even with an equal number of tensors), so copy across tensor boundaries rather than
-            // 1:1 by index.
-            const size_t total = mbuf_cur.total_size;
-
-            ggml_init_params params_scratch = {
-                /*.mem_size   =*/ 2*(mbuf_cur.cpy.size() + mbuf.org.size())*ggml_tensor_overhead(),
-                /*.mem_buffer =*/ NULL,
-                /*.no_alloc   =*/ true,
-            };
-            ggml_context * ctx_scratch = ggml_init(params_scratch);
-
-            size_t src_pos  = 0;
-            size_t dst_pos  = 0;
-            size_t src_j    = 0;
-            size_t dst_i    = 0;
-            size_t src_base = 0;
-            size_t dst_base = 0;
-
-            while (src_pos < total) {
-                const auto & src_t = mbuf_cur.cpy[src_j];
-                const auto & dst_t = mbuf.org[dst_i];
-
-                const size_t src_size = ggml_nbytes(src_t);
-                const size_t dst_size = ggml_nbytes(dst_t);
-
-                const size_t src_off  = src_pos - src_base;
-                const size_t dst_off  = dst_pos - dst_base;
-
-                const size_t n_copy = std::min(src_size - src_off, dst_size - dst_off);
-
-                const size_t   el   = ggml_element_size(src_t);
-                const int64_t n_el = (int64_t) (n_copy / el);
-
-                auto * src_v = ggml_view_1d(ctx_scratch, src_t, n_el, src_off);
-                ggml_backend_view_init(src_v);
-                auto * dst_v = ggml_view_1d(ctx_scratch, dst_t, n_el, dst_off);
-                ggml_backend_view_init(dst_v);
-
-                ggml_backend_tensor_copy(src_v, dst_v);
-
-                src_pos += n_copy;
-                dst_pos += n_copy;
-
-                if (src_pos - src_base == src_size) {
-                    src_base = src_pos;
-                    ++src_j;
-                }
-                if (dst_pos - dst_base == dst_size) {
-                    dst_base = dst_pos;
-                    ++dst_i;
-                }
-            }
-
-            GGML_ASSERT(src_pos == total && dst_pos == total);
-            // any tensors left unvisited hold no data
-            for (size_t i = src_j; i < mbuf_cur.cpy.size(); ++i) {
-                GGML_ASSERT(ggml_nbytes(mbuf_cur.cpy[i]) == 0);
-            }
-            for (size_t i = dst_i; i < mbuf.org.size(); ++i) {
-                GGML_ASSERT(ggml_nbytes(mbuf.org[i]) == 0);
-            }
-
-            ggml_free(ctx_scratch);
         }
 
         GGML_ASSERT(buf_size == 0);
@@ -3438,15 +3599,6 @@ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params
     GGML_ASSERT(model->hparams.n_ctx_train % n_batch  == 0);
     GGML_ASSERT(n_batch                    % n_ubatch == 0);
 
-    if (cparams.flash_attn) {
-        LLAMA_LOG_INFO("%s: disabling flash attention, FLASH_ATTN_EXT has no backward pass\n", __func__);
-        cparams.flash_attn = false;
-
-        // the graph changes without flash attention, need to reserve again
-        sched_need_reserve = true;
-        sched_reserve();
-    }
-
     ggml_opt_params opt_params = ggml_opt_default_params(sched.get(), GGML_OPT_LOSS_TYPE_CROSS_ENTROPY);
     opt_params.opt_period      = n_batch / n_ubatch;
     opt_params.get_opt_pars    = lopt_params.get_opt_pars;
@@ -3544,12 +3696,10 @@ void llama_context::opt_epoch_iter(
                 break;
             }
 
-            auto * res = get_gf_res_prev();
+            auto * res = gf_res_prev.get();
 
             const auto gparams = graph_params(res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type));
 
-            // the optimizer graph is allocated outside sched, so the next decode must rebuild
-            gf_res_prev_active = nullptr;
             res->reset();
 
             auto * gf = model.build_graph(gparams);
@@ -3671,6 +3821,7 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.path_kv_mean_center         =*/ nullptr,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
@@ -3719,9 +3870,6 @@ llama_context * llama_init_from_model(
             LLAMA_LOG_ERROR("%s: SPLIT_MODE_TENSOR requires flash_attn to be enabled\n", __func__);
             return nullptr;
         }
-        if (model->get_split_state_ud.n_devices == 1) {
-            LLAMA_LOG_WARN("%s: SPLIT_MODE_TENSOR being used for a single device is not recommended\n", __func__);
-        }
     }
 
     if ((model->hparams.is_mla() || model->arch == LLM_ARCH_DEEPSEEK4) && params.type_k != params.type_v) {
@@ -3762,6 +3910,13 @@ llama_context * llama_init_from_model(
         }
     }
 
+    if (params.path_kv_mean_center != nullptr && params.type_k != GGML_TYPE_Q4_0) {
+        LLAMA_LOG_ERROR("%s: path_kv_mean_center requires the K cache type to be Q4_0 (got %s)\n",
+                __func__, ggml_type_name(params.type_k));
+        return nullptr;
+    }
+
+
     if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
         params.pooling_type != model->hparams.pooling_type) {
         //user-specified pooling-type is different from the model default
@@ -3778,14 +3933,6 @@ llama_context * llama_init_from_model(
 
     try {
         auto * ctx = new llama_context(*model, params);
-        const auto & cparams = ctx->get_cparams();
-
-        if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_YARN && cparams.rope_freq_scale != model->hparams.rope_freq_scale_train) {
-            LLAMA_LOG_INFO("%s: custom YaRN scaling detected, re-adjusting n_ctx_train(%u)...\n", __func__, model->hparams.n_ctx_train);
-            model->hparams.n_ctx_train = cparams.n_ctx_orig_yarn / cparams.rope_freq_scale;
-            LLAMA_LOG_INFO("%s: n_ctx_train adjusted to %u\n", __func__, model->hparams.n_ctx_train);
-        }
-
         return ctx;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: failed to initialize the context: %s\n", __func__, err.what());
@@ -3954,6 +4101,41 @@ float * llama_get_embeddings_layer_inp(llama_context * ctx, uint32_t lid) {
     ctx->synchronize();
 
     return ctx->get_embeddings_layer_inp(lid);
+}
+
+// multi-layer hidden-state tap C API (staging) -------------------------------
+
+void llama_set_capture_layers(llama_context * ctx, const int32_t * layer_ids, size_t n_layers) {
+    std::vector<int32_t> ids;
+    ids.reserve(n_layers);
+    for (size_t i = 0; i < n_layers; ++i) {
+        ids.push_back(layer_ids[i]);
+    }
+    ctx->set_capture_layers(ids);
+}
+
+uint32_t llama_get_n_capture(llama_context * ctx) {
+    return ctx->get_n_capture();
+}
+
+float * llama_get_embeddings_capture(llama_context * ctx) {
+    ctx->synchronize();
+    return ctx->get_embeddings_capture();
+}
+
+float * llama_get_embeddings_capture_ith(llama_context * ctx, int32_t i) {
+    ctx->synchronize();
+    return ctx->get_embeddings_capture_ith(i);
+}
+
+// dspark drafter target-context staging C API --------------------------------
+
+void llama_set_dspark_ctx(llama_context * ctx,
+                          const float *   feat,
+                          int64_t         n_ctx_rows,
+                          int64_t         n_embd_cap,
+                          const int32_t * pos) {
+    ctx->set_dspark_ctx(feat, n_ctx_rows, n_embd_cap, pos);
 }
 
 bool llama_set_sampler(llama_context * ctx, llama_seq_id seq_id, llama_sampler * smpl) {

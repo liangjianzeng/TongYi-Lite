@@ -157,13 +157,6 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 是否启用新智能体模式（Phase 0 重写的事件源 ReactLoopAgent）；
-  /// 关闭则回退旧 runAgent 逻辑（可回退开关）。
-  Future<void> setUseNewAgentMode(bool value) async {
-    state = state.copyWith(useNewAgentMode: value);
-    await _persist();
-  }
-
   /// 指定/取消智能体驱动模型。
   /// - source='local' → [modelId] 为本地模型目录 id；
   /// - source='api' → [modelId] 为 API 模型配置 id；
@@ -352,18 +345,7 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// GPU/CPU 占用率监控呈现开关。
-  Future<void> setShowResourceMonitor(bool value) async {
-    state = state.copyWith(showResourceMonitor: value);
-    await _persist();
-  }
 
-  /// 占用率采样周期（秒，0~30；0 = 仅推理时采样）。
-  Future<void> setResourceSampleIntervalSec(int value) async {
-    final clamped = value.clamp(0, 30);
-    state = state.copyWith(resourceSampleIntervalSec: clamped);
-    await _persist();
-  }
 
   Future<void> _persist() async {
     try {

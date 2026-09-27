@@ -16,13 +16,13 @@
 	{/snippet}
 
 	{#snippet actions()}
-		<Button onclick={() => onDecision(true)} size="sm">Continue</Button>
+		<Button size="sm" onclick={() => onDecision(true)}>Continue</Button>
 
 		<Button
+			variant="destructive"
+			size="sm"
 			class="text-destructive hover:text-destructive"
 			onclick={() => onDecision(false)}
-			size="sm"
-			variant="destructive"
 		>
 			Stop
 		</Button>

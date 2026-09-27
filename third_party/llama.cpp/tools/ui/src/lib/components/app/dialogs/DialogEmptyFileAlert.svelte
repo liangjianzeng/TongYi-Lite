@@ -16,7 +16,7 @@
 	}
 </script>
 
-<AlertDialog.Root onOpenChange={handleOpenChange} {open}>
+<AlertDialog.Root {open} onOpenChange={handleOpenChange}>
 	<AlertDialog.Content>
 		<AlertDialog.Header>
 			<AlertDialog.Title class="flex items-center gap-2">

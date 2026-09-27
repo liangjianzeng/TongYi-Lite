@@ -108,13 +108,13 @@
 {/if}
 
 <DialogChatAttachmentsPreview
-	bind:open={viewAllDialogOpen}
 	{activeModelId}
 	{attachments}
+	bind:open={viewAllDialogOpen}
 	{previewFocusIndex}
 	{uploadedFiles}
 />
 
 {#if mcpResourcePreviewExtra}
-	<DialogMcpResourcePreview bind:open={mcpResourcePreviewOpen} extra={mcpResourcePreviewExtra} />
+	<DialogMcpResourcePreview extra={mcpResourcePreviewExtra} bind:open={mcpResourcePreviewOpen} />
 {/if}

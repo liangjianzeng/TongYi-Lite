@@ -53,18 +53,18 @@
 	{#key currentItem.id}
 		{#if isPdf}
 			<ChatAttachmentsPreviewCurrentItemPdf
-				{activeModelId}
 				{currentItem}
 				displayName={currentItem.name}
 				{displayTextContent}
 				{hasVisionModality}
+				{activeModelId}
 			/>
 		{:else if isImage}
 			<ChatAttachmentsPreviewCurrentItemImage {currentItem} {displayPreview} />
 		{:else if isText && displayTextContent}
 			<ChatAttachmentsPreviewCurrentItemText {displayTextContent} {language} />
 		{:else if isAudio}
-			<ChatAttachmentsPreviewCurrentItemAudio {audioSrc} {currentItem} />
+			<ChatAttachmentsPreviewCurrentItemAudio {currentItem} {audioSrc} />
 		{:else if isVideo}
 			<ChatAttachmentsPreviewCurrentItemVideo {currentItem} {videoSrc} />
 		{:else if isUnavailable}

@@ -52,8 +52,8 @@ struct ggml_compute_params {
 #endif
 #endif
 
-// __SSE3__ and __SSSE3__ are not defined in MSVC, but SSE3/SSSE3 are present when AVX/AVX2/AVX512 are available
-#if defined(_MSC_VER) && (defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__))
+// MSVC does not define SSE3/SSSE3 feature macros.
+#if defined(_MSC_VER) && (defined(GGML_SSSE3) || defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__))
 #ifndef __SSE3__
 #define __SSE3__
 #endif
@@ -78,7 +78,7 @@ struct ggml_compute_params {
 #if defined(__ARM_NEON)
 
 // ref: https://github.com/ggml-org/llama.cpp/pull/5404
-#if defined(_MSC_VER) && !defined(__clang__)
+#ifdef _MSC_VER
 #define ggml_vld1q_u32(w,x,y,z) { ((w) + ((uint64_t)(x) << 32)), ((y) + ((uint64_t)(z) << 32)) }
 #else
 #define ggml_vld1q_u32(w,x,y,z) { (w), (x), (y), (z) }

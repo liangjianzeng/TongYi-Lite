@@ -8,7 +8,6 @@
 #include "ggml.h"
 #include "llama.h"
 
-#include <list>
 #include <set>
 #include <sstream>
 #include <string>
@@ -108,6 +107,7 @@ enum llama_example {
     LLAMA_EXAMPLE_EXPORT_GRAPH_OPS,
     LLAMA_EXAMPLE_DOWNLOAD,
     LLAMA_EXAMPLE_TOKENIZE,
+    LLAMA_EXAMPLE_KV_MEAN_CENTER,
 
     LLAMA_EXAMPLE_COUNT,
 };
@@ -270,7 +270,7 @@ struct common_params_sampling {
         COMMON_SAMPLER_TYPE_TEMPERATURE,
     };
 
-    common_grammar                      grammar;          // optional grammar constraint (user / output-format / tool-calls)
+    common_grammar              grammar;      // optional grammar constraint (user / output-format / tool-calls)
     bool                                grammar_lazy = false;
     std::vector<common_grammar_trigger> grammar_triggers; // optional triggers (for lazy grammars)
     std::set<llama_token>               preserved_tokens;
@@ -370,9 +370,6 @@ struct common_params_speculative_ngram_cache {
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
 
-    double synth_len = -1.0;
-    std::vector<double> synth_rates;
-
     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
     common_params_speculative_draft draft;
 
@@ -387,13 +384,9 @@ struct common_params_speculative {
         return !draft.mparams.empty();
     }
 
-    bool has_synth() const {
-        return synth_len != -1.0 || !synth_rates.empty();
-    }
-
     uint32_t need_n_rs_seq() const {
         bool needs_rs_seq = std::any_of(types.begin(), types.end(), [&](auto t) {
-            return t == COMMON_SPECULATIVE_TYPE_DRAFT_MTP || t == COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3 || t == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            return t == COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE || t == COMMON_SPECULATIVE_TYPE_DRAFT_MTP || t == COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3 || t == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
         });
 
         return needs_rs_seq ? draft.n_max : 0u;
@@ -482,8 +475,6 @@ struct common_params {
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
-
-    enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;
@@ -587,6 +578,10 @@ struct common_params {
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 
+    // path to a K-cache mean-centering bias file (GGUF), or empty to disable.
+    // only takes effect when cache_type_k == GGML_TYPE_Q4_0; see docs/kv-mean-center.md
+    std::string kv_mean_center_path = "";
+
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 
     // multimodal models (see tools/mtmd)
@@ -598,11 +593,6 @@ struct common_params {
     int image_min_tokens = -1;
     int image_max_tokens = -1;
     int mtmd_batch_max_tokens = 1024;
-
-    // for video input
-    float       video_fps                   = 4.0f;
-    int64_t     video_timestamp_interval_ms = 5000;
-    std::string video_ffmpeg_bin_dir        = "";
 
     // finetune
     struct lr_opt lr;
@@ -627,7 +617,6 @@ struct common_params {
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
-    int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 
@@ -657,7 +646,6 @@ struct common_params {
     std::string ssl_file_cert = "";                                                                         // NOLINT
 
     std::map<std::string, std::string> default_template_kwargs;
-    bool preserve_reasoning_specified = false;
 
     // CLI params
     std::string server_base; // if set, connect to this server instead of starting a new one
@@ -1125,28 +1113,17 @@ const char * const LLM_KV_SPLIT_TENSORS_COUNT = "split.tensors.count";
 }
 
 //
-// FFN offload utils
+// MoE utils
 //
 
 const char * const LLM_FFN_EXPS_REGEX = "\\.ffn_(up|down|gate|gate_up)_(ch|)exps";
 
-const char * const LLM_FFN_DENSE_REGEX = "\\.ffn_(up|down|gate)\\.";
-
-inline std::string llm_ffn_block_regex(int idx, const char * ffn_regex) {
-    return string_format("blk\\.%d%s", idx, ffn_regex);
+inline std::string llm_ffn_exps_block_regex(int idx) {
+    return string_format("blk\\.%d%s", idx, LLM_FFN_EXPS_REGEX);
 }
 
 inline llama_model_tensor_buft_override llm_ffn_exps_cpu_override() {
     return { LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type() };
-}
-
-inline void llm_add_n_cpu_ffn_overrides(int n, const char * ffn_regex, std::vector<llama_model_tensor_buft_override> & overrides) {
-    // keep strings alive and avoid leaking memory by storing them in a static list
-    static std::list<std::string> buft_override_strings;
-    for (int i = 0; i < n; ++i) {
-        buft_override_strings.push_back(llm_ffn_block_regex(i, ffn_regex));
-        overrides.push_back({buft_override_strings.back().c_str(), ggml_backend_cpu_buffer_type()});
-    }
 }
 
 //

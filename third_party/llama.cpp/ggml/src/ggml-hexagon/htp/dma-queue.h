@@ -244,17 +244,16 @@ static inline dma_ptr dma_queue_pop(dma_queue * q) {
         return dptr;
     }
 
-    dptr = r->dptr[r->pop_idx];
-
-    volatile dma_descriptor_2d * desc = &r->desc[r->pop_idx];
+    dma_descriptor_2d * desc = &r->desc[r->pop_idx];
 
     // Wait for desc to complete
     if (!desc->done) {
-        // FARF(ALWAYS, "dma-poll: idx %u dst %p src %p", r->pop_idx, dptr.dst, dptr.src);
         while (!desc->done) {
             dmpoll();
         }
     }
+
+    dptr = r->dptr[r->pop_idx];
 
     htp_trace_event_stop(r->trace, HTP_TRACE_EVT_DMA, r->pop_idx);
 

@@ -40,6 +40,16 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     StreamController<String>? onToken,
     Completer<void>? cancel,
   }) async {
+    // 本地引擎：生成前确认模型已加载（查询原生 isLoaded，权威状态）。
+    // 未加载 → 立即抛非重试失败（modelNotReady），避免 native 把
+    // COMPLETION_ERROR 归一化成可重试的 transport 导致 agent 空转重试。
+    final ready = await _inference.isModelLoaded();
+    if (!ready) {
+      throw LlmFailure(
+        code: LlmFailureCode.modelNotReady,
+        message: '本地模型未加载（模型加载失败），请在模型管理页重新加载模型',
+      );
+    }
     final messagesJson = jsonEncode(convertEngineMessages(options.messages));
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();

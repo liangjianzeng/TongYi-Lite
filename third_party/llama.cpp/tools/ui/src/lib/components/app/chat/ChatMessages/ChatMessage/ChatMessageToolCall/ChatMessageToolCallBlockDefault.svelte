@@ -34,17 +34,15 @@
 	);
 </script>
 
-<ToolCallBlock {isStreaming} meta={null} {onToggle} {open} {section} {title}>
+<ToolCallBlock {section} {open} {isStreaming} meta={null} {title} {onToggle}>
 	{#snippet children(_meta, ctx)}
 		{#if ctx.isStreamingCall}
 			<div class="mb-2 flex items-center gap-2 text-xs text-muted-foreground/70">
 				<span>Input</span>
-
 				{#if ctx.isStreaming}
 					<Loader2 class="h-3 w-3 animate-spin" />
 				{/if}
 			</div>
-
 			{#if section.toolArgs}
 				<SyntaxHighlightedCode
 					code={formatJsonPretty(section.toolArgs)}
@@ -69,7 +67,6 @@
 				<div class="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground/70">
 					<span>Input</span>
 				</div>
-
 				<SyntaxHighlightedCode
 					code={formatJsonPretty(section.toolArgs ?? '')}
 					language={FileTypeText.JSON}
@@ -77,19 +74,16 @@
 					streaming={ctx.isCodeStreaming}
 				/>
 			{/if}
-
 			<div
 				class={showInput
 					? 'mt-4 mb-1.5 flex items-center gap-2 text-xs text-muted-foreground/70'
 					: 'mb-1.5 flex items-center gap-2 text-xs text-muted-foreground/70'}
 			>
 				<span>Output</span>
-
 				{#if ctx.isPending}
 					<Loader2 class="h-3 w-3 animate-spin" />
 				{/if}
 			</div>
-
 			{#if ctx.isPending}
 				<div class="rounded bg-muted/20 p-2 text-xs text-muted-foreground/70 italic">
 					Waiting for result...
@@ -102,19 +96,18 @@
 						maxHeight={MAX_HEIGHT_CODE_BLOCK}
 					/>
 				{:else if outputKind === ToolResultKind.MARKDOWN}
-					<MarkdownContent {attachments} content={section.toolResult} />
+					<MarkdownContent content={section.toolResult} {attachments} />
 				{:else}
 					<div class="overflow-auto">
 						{#each parsedLines as line, i (i)}
 							<div class="font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
 								{line.text}
 							</div>
-
 							{#if line.media}
 								{#if line.media.type === AttachmentType.AUDIO}
 									{@const audioMimeType = line.media.mimeType ?? MimeTypeAudio.MP3_MPEG}
 									<div class="mt-2 mb-2">
-										<audio class="w-full rounded-lg" controls>
+										<audio controls class="w-full rounded-lg">
 											<source
 												src={createBase64DataUrl(audioMimeType, line.media.base64Data)}
 												type={audioMimeType}
@@ -124,10 +117,10 @@
 									</div>
 								{:else}
 									<img
+										src={line.media.base64Url}
 										alt={line.media.name}
 										class="mt-2 mb-2 h-auto max-w-full rounded-lg"
 										loading="lazy"
-										src={line.media.base64Url}
 									/>
 								{/if}
 							{/if}

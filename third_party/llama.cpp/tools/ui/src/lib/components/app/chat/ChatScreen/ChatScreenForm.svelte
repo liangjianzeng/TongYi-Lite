@@ -147,14 +147,15 @@
 	});
 </script>
 
-<div bind:this={formWrapperEl} class="chat-screen-form-wrapper">
+<div class="chat-screen-form-wrapper" bind:this={formWrapperEl}>
 	<ChatForm
-		bind:this={chatFormRef}
-		bind:uploadedFiles
-		bind:value={message}
 		class="mx-auto max-w-3xl {className}"
+		bind:this={chatFormRef}
+		bind:value={message}
+		bind:uploadedFiles
 		{disabled}
 		{isLoading}
+		showMcpPromptButton
 		onFilesAdd={handleFilesAdd}
 		{onStop}
 		onSubmit={handleSubmit}

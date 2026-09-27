@@ -26,14 +26,14 @@
 
 <DialogConfirmation
 	bind:open={showDeleteDialog}
-	cancelText="Cancel"
-	confirmText="Delete"
-	description="Are you sure you want to delete this conversation? This action cannot be undone and will permanently remove all messages in this conversation."
-	icon={Trash2}
-	onCancel={() => (showDeleteDialog = false)}
-	onConfirm={handleDeleteConfirm}
 	title="Delete Conversation"
+	description="Are you sure you want to delete this conversation? This action cannot be undone and will permanently remove all messages in this conversation."
+	confirmText="Delete"
+	cancelText="Cancel"
 	variant="destructive"
+	icon={Trash2}
+	onConfirm={handleDeleteConfirm}
+	onCancel={() => (showDeleteDialog = false)}
 />
 
 <DialogEmptyFileAlert
@@ -47,8 +47,8 @@
 />
 
 <DialogChatError
-	contextInfo={activeErrorDialog?.contextInfo}
 	message={activeErrorDialog?.message ?? ''}
+	contextInfo={activeErrorDialog?.contextInfo}
 	onOpenChange={handleErrorDialogOpenChange}
 	open={Boolean(activeErrorDialog)}
 	type={activeErrorDialog?.type ?? ErrorDialogType.SERVER}

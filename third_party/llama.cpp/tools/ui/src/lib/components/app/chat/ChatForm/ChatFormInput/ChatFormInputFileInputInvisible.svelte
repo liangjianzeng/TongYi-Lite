@@ -24,8 +24,8 @@
 
 <input
 	bind:this={fileInputElement}
-	class="hidden {className}"
+	type="file"
 	{multiple}
 	onchange={handleFileSelect}
-	type="file"
+	class="hidden {className}"
 />

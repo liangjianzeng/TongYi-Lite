@@ -67,27 +67,27 @@
 	}
 </script>
 
-<form class="contents" onsubmit={handleSubmit}>
+<form onsubmit={handleSubmit} class="contents">
 	<div class="space-y-4">
 		<p class="font-medium">Configure Server</p>
 
 		<McpServerForm
-			headers={editHeaders}
-			id={serverId}
-			name={editName}
-			onHeadersChange={(v) => (editHeaders = v)}
-			onNameChange={(v) => (editName = v)}
-			onUrlChange={(v) => (editUrl = v)}
-			onUseProxyChange={(v) => (editUseProxy = v)}
 			url={editUrl}
-			urlError={editUrl ? urlError : null}
+			name={editName}
+			onNameChange={(v) => (editName = v)}
+			headers={editHeaders}
 			useProxy={editUseProxy}
+			onUrlChange={(v) => (editUrl = v)}
+			onHeadersChange={(v) => (editHeaders = v)}
+			onUseProxyChange={(v) => (editUseProxy = v)}
+			urlError={editUrl ? urlError : null}
+			id={serverId}
 		/>
 
 		<div class="flex items-center justify-end gap-2">
-			<Button onclick={onCancel} size="sm" variant="secondary">Cancel</Button>
+			<Button variant="secondary" size="sm" onclick={onCancel}>Cancel</Button>
 
-			<Button disabled={!canSave} size="sm" type="submit">
+			<Button size="sm" type="submit" disabled={!canSave}>
 				{serverUrl.trim() ? 'Update' : 'Add'}
 			</Button>
 		</div>

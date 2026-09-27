@@ -94,10 +94,12 @@ final class LlmRetry {
 
   /// 该失败是否允许 llm-retry（compaction 不在此判定，由瀑布分开处理）。
   bool isRetryable(LlmFailure f) {
-    // 无适配器 / 上下文溢出 → 不靠 retry 解决。
+    // 无适配器 / 上下文溢出 / 响应为空 / 本地引擎未加载模型 → 都不靠 retry 解决。
+    // （模型未加载：isLoaded=false 是原生层的权威状态，重试只会再撞同一堵墙。）
     if (f.code == LlmFailureCode.noAdapter) return false;
     if (f.code == LlmFailureCode.contextWindowExceeded) return false;
     if (f.code == LlmFailureCode.emptyResponse) return false;
+    if (f.code == LlmFailureCode.modelNotReady) return false;
     // 其余失败（含 toolCallTruncated：采样可能产出更短的完整调用）走
     // 统一的 maxRetries 预算——连续截断说明 token 预算真不够，及时止损。
     return _retries < maxRetries;
