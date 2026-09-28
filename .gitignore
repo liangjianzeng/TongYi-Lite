@@ -125,3 +125,7 @@ releases/*bonsai2*.apk
 releases/*agent-stall-fix*.apk
 skill.dart.bak
 ui.xml
+
+# 本地验证工作区（2026-09-28）：spike worktree 与 OpenCL/Vulkan 桌面构建链
+wt/
+_build/
