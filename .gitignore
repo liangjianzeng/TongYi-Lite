@@ -14,6 +14,9 @@
 *.class
 *.jar
 *.so
+# 例外：jniLibs 下随 APK 分发的捆绑原生库必须入库（同 KleidiAI/OpenCL-Headers 入库理由，
+# 否则其他开发机 clone 后打不出 Turnip 包）。目前仅 libturnip_freedreno.so，见其旁 README。
+!android/app/src/main/jniLibs/**/*.so
 *.o
 *.a
 *.d
