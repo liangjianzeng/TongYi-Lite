@@ -327,17 +327,23 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 > 完整根因链与修复记录：[`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
 
-#### OpenCL PTQ1_0 三元量化内核（Bonsai-2 27B，v0.2.5）
+#### OpenCL PTQ1_0 三元量化内核（Bonsai-2 27B，v0.2.5 / v0.2.6 补齐 prefill）
 
 - Bonsai-2 27B 全模型 402 个 PTQ1_0 张量（GGML `type 143`，-1/0/1 三元，28 B/128 值）；上游 OpenCL 后端
   只有 Q4/Q5/Q8 系列 mul_mv 内核 → 此前全部回退 CPU、decode 极慢。分支 `spike/opencl-bonsai2` 新增
   `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约）实现全 GPU decode。
+- **v0.2.6 补齐 prefill GEMM**：新增 `mul_mm_ptq1_0_f32_l4_lm.cl`（BM64/BN64/BK32 分块，raw 块布局
+  逐元素 staged 三进制解码，BK=32 整除 QK=128 故 K-tile 永不跨量化块）。此前 prefill（n>1）掉进
+  逐行 matvec 反复发射路径——桌面 Arc 140T 实测 pp128 **1.14 → 18.89 t/s（16.5×）**；桌面 OpenCL
+  数值 tbo 174/174。
 - **根治 Adreno OpenCL 编译器对 `__constant` 数组变址的误编**（`pow3[4]` 恒读 0 → 每块 16 trit 全解成 -1，
   数据正确但内积系统性偏差）：弃用 `__constant` 数组索引，改三元表达式。
 - 真机 `test-backend-ops` MUL_MAT PTQ1_0 套件 **174/174 通过**（含 67 个奇数尾行与 Bonsai 形状）。
 
 > 块结构 / 编码 / 解码 / 内核并行 / Adreno 陷阱定位过程：
 > [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md)。
+> 双驱动真机验证矩阵（原厂 0800.71 / fork Turnip × 三药；FWHT 门控与 GEMM 大 n 错编定案）：
+> [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md)。
 
 **验证 CPU 内核是否生效**（编译后查 `compile_commands.json`）：
 
@@ -389,6 +395,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
+| **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（`mul_mm_ptq1_0_f32_l4_lm`，raw 块布局 + staged 三进制解码；桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控 + `GGML_VK_FWHT_SUBGROUP` A/B 开关——真机实锤 Turnip shuffle 错编（8/27）原厂无罪（27/27），门控恰好兜住；③ **Turnip e2e 乱码根因定案**：GEMM 大 n（≥48）编译器错编（f16+MMQ 双中招，ERR≈1.0；原厂 16/16 全绿）——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界（`-ub 16` e2e 连贯闭环）；④ tbo 增补 hadamard 4096/8192、PTQ1_0 二分/大 batch、f16 大 n 用例防回归；⑤ 双驱动真机全矩阵验证（原厂 0800.71 / fork Turnip × 三药）记录于 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) |
 | **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复（三元表达式替代数组索引）；真机 174/174 通过 |
 | **v0.2.3** | 2026-09-27 | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化 + 4 处直接调用修复）；数值三根因修复——subgroupAdd 错编全局门控（`subgroup_arithmetic=false` 直置覆盖 ssm_scan/GDN 漏网）、GDN S_V=128 lanes 钳 64；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s） |
 | **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖） |

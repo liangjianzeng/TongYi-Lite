@@ -6,6 +6,41 @@
 
 ---
 
+## [0.2.6] — 2026-09-28
+
+### Bonsai-2 双后端补齐 + Turnip 错编双定案
+
+**OpenCL：PTQ1_0 prefill GEMM 内核**（此前 decode 有专用内核、prefill 掉进逐行 matvec 反复发射）
+
+- 新增 `mul_mm_ptq1_0_f32_l4_lm.cl`：BM64/BN64/BK32 分块 GEMM，raw `block_ptq1_0` 布局逐元素
+  staged 三进制解码（pow3 三元选择规避 Adreno `__constant` 误编），BK=32 整除 QK=128 故
+  K-tile 永不跨量化块；host 门控 ne00%128==0 + ne11≥32（与 q1_0 同门槛）。
+- 桌面 Arc 140T（OpenCL 3.0 NEO）实测：pp128 **1.14 → 18.89 t/s（16.5×）**，tbo 174/174，
+  e2e 答案正确。
+
+**Vulkan：FWHT subgroup 门控 + Turnip 错编双定案**
+
+- FWHT（tied-output 头每 token 必经）的 subgroup 变体判定并入三药门控；新增
+  `GGML_VK_FWHT_SUBGROUP=1`（vk_flags.conf 可控）供 A/B。真机实锤：**Turnip shuffle 错编**
+  （开启后 MUL_MAT_HADAMARD 8/27），原厂 0800.71 无罪（27/27）——门控默认关，恰好兜住。
+- **Turnip e2e 乱码根因定案**：GEMM **大 n（≥48）编译器错编**——PTQ1_0 MMQ 二分
+  n=16/24/32 全对、n=48/64/512 全错（ERR≈1.0）；f16 GEMM n=64/512 同错；原厂同 shader
+  16/16 全绿；App 的 shader 集（shaderc v2026.3）同错 → 驱动端问题，与 glslc 版本无关。
+- **0.2.3 时代 e2e 连贯之谜解开**：App JNI 的 `n_ubatch=16` 限制使 prefill 恒走安全区。
+  CLI 复现（默认 ub512 乱码）与闭环（`-ub 16` 连贯）双双落地。
+- **生产口径**：App n_ubatch 上限保持 ≤32（现值 16）为 Turnip 正确性必要条件；
+  CLI/服务端用 Turnip 跑 Bonsai-2 必须 `-ub ≤32`。
+
+**测试与文档**
+
+- tbo 增补：hadamard 4096/8192 宽度（此前盲区）、PTQ1_0 二分/大 batch（n=64/128/512）、
+  f16 大 n——本次定位主力，防回归。
+- 新增验证记录 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md)
+  （双驱动全矩阵：原厂 0800.71 / fork Turnip × 三药）与 `scripts/cl_enum.cs`（免编译器
+  OpenCL 平台枚举探针）。
+
+---
+
 ## [0.2.1] — 2026-09-26
 
 ### 变更：联网搜索改为「用户自配 SearXNG 实例」
