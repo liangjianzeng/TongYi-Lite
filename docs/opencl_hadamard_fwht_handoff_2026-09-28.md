@@ -53,22 +53,43 @@ Bonsai-2 的 hadamard 是 **MUL_MAT 上的 hint**（`op_params[1] == GGML_HINT_S
 ## 验证闭环（顺序执行）
 
 > **⚠️ 2026-09-29 实现注记（8cde426，本机）**：4 处改动已实现（fwht.cl /
-> CMakeLists / struct+创建块 / mul_mat hint 分支 / supports_op 门控），NDK
-> 定向编译 + libggml-opencl.so 字符串验收通过。tbo 未跑（设备未连）。
+> CMakeLists / struct+创建块 / mul_mat hint 分支 / supports_op 门控）。
 > **第 3 步禁止照跑**：llama-cli 无 OOM 守卫，11GB 机全载 bonsai2 = 整机死机
 > （AGENTS.md 死机案先例）。e2e 一律走**项目内 APK**（带 `[oom-guard]`）：
 > 真机装新 APK 后在 App 内加载验证；若预检仍拒绝 bonsai2，该机型 e2e 不可行，
 > 正确性以 tbo 全绿为准（MUL_MAT_HADAMARD 覆盖 1024/5120/7 全形状）。
 
-1. gradle 增量编译出 libggml-opencl.so（.cxx 已在，只编 opencl 很快；本机已备：
-   `android/app/.cxx/Debug/61c5qc2s/arm64-v8a/bin/libggml-opencl.so` 9.7MB 2026-09-29 00:33），
-   推真机 `/data/local/tmp/vkptq/`（CLI 二进制+库都在那；缺 libomp.so 从 NDK clang/18/lib/linux/aarch64/ 补）
-2. `test-backend-ops -b OpenCL0 -o MUL_MAT_HADAMARD` 全绿（含 test_fwht_signed 1024/5120/7）
+> **✅ 2026-09-29 验证完成（本机 8cde426，真机 25053RT47C 经 5555 无线 adb）**：
+>
+> **两个 CLI 拦路虎（下次接手先看，否则 tbo 永远静默 0 测）：**
+> 1. **设备名不是 `OpenCL0`，是 `GPUOpenCL`**（本 fork 注册名；`-b` 走 strcmp
+>    精确匹配，写 `OpenCL0` → 后端被当"非目标"跳过，日志只字不提 fwht）。
+>    正确：`test-backend-ops -b GPUOpenCL -o MUL_MAT_HADAMARD`。
+> 2. **CLI 加载 opencl 需 `GGML_BACKEND_DL` 版 `.so`**：app 构建产物只导出
+>    `ggml_backend_opencl_reg`，加载器 `load_backend()` 要的是 `ggml_backend_init`
+>    （`GGML_BACKEND_DL_IMPL` 宏，`-DGGML_SHARED` 后加 `-DGGML_BACKEND_DL`）。
+>    做法：从 `ninja -t commands` 抠出编译/链接命令，补宏重编
+>    `ggml-opencl.cpp` → 链成 `libggml-opencl.so`，连同 **`libopencl_stub.so`**
+>    （NEEDED，在 `build/app/intermediates/merged_native_libs/debug/.../arm64-v8a/`）
+>    一起推 vkptq。缺 stub → dlopen 失败静默跳过。
+>
+> **结果**：
+> - `-o MUL_MAT_HADAMARD -b GPUOpenCL`：**24/24 全绿**（含 test_fwht_signed
+>   1024/5120/7 + 全 f32 FWHT 蝶形；8192/f16 走门控回落 CPU 属预期"not supported"）。
+> - `-o MUL_MAT -b GPUOpenCL`：**1185/1185 全绿，FAIL=0**（PTQ1_0 GEMM/matvec 无回归）。
+> - debug APK：包内 `libggml-opencl.so` 字符串验收 `kernel_fwht_f32/f16`=4、
+>   `FWHT_rows` 源码在、`GGML_OPENCL_PTQ10_MM_N` 旋钮在 → `adb install -r` 成功。
+>   FWHT 修复已交付真机 App，待用户 OpenCL 实测 bonsai2（守卫自动把关）。
+> - 注：tbo 用 CLI 侧 `.so`，App 走静态注册（`ggml_backend_opencl_reg`），
+>   同一份 ggml-opencl.cpp 源码，仅链接形态不同。
+
+1. gradle 增量编译出 libggml-opencl.so（见上：CLI 测需 DL 版 + libopencl_stub.so 同推 vkptq）
+2. `test-backend-ops -b GPUOpenCL -o MUL_MAT_HADAMARD` 全绿（含 test_fwht_signed 1024/5120/7）
 3. ~~`llama-cli -m .../bonsai-2-27b-ternary-ptq1_0.gguf --device GPUOpenCL -ub 16 -st -p "你好"`~~
    **已废止（见上方注记：11GB 机死机风险）**。替代：真机 `adb install -r` 新 APK →
    App 内 OpenCL 加载 bonsai2（守卫自动把关）；或大内存设备（≥16GB）跑 llama-cli 记录 tok/s
 4. 若速度仍差：再查 mul_mv_ptq1_0 在 K=17408 的表现（正确性已由 174/174 保证，纯性能问题）
-5. 全量重打 APK（debug+release，AGENTS.md 协议：flutter assemble → intermediates 同步 → gradlew -x）→ `adb install -r`
+5. 全量重打 APK（debug+release，AGENTS.md 协议：flutter assemble → intermediates 同步 → gradlew -x）→ `adb install -r`（debug 已装）
 
 ## 新增（2026-09-29）：Vulkan 正确但慢——留另起任务排查
 
