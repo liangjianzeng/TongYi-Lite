@@ -9307,6 +9307,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 67, n, k, {1, 1}, {1, 1}));
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PQ2_0, GGML_TYPE_F32, 67, n, k, {1, 1}, {1, 1}));
         }
+        // Large-batch prefill shapes (real weight m, ubatch-scale n): the MMQ GEMM
+        // path at ubatch sizes was never covered above (max n = 16, usually skipped).
+        // Bisection: find the largest n where the MMQ stays correct (Turnip miscompiles it).
+        for (int64_t nb : {16, 24, 32, 48, 64}) {
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 5120, nb, 5120, {1, 1}, {1, 1}));
+        }
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 5120, 64, 5120, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 17408, 128, 17408, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 5120, 512, 17408, {1, 1}, {1, 1}));
+        // Fallback-path check: dequant(PTQ1_0)->f16 x f32 GEMM at ubatch-scale n (the
+        // route quantize_y=false takes when the PTQ1_0 MMQ is gated off on Turnip).
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 5120, 64, 5120, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 5120, 512, 17408, {1, 1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 64, n, 2048, {2, 3}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PQ2_0, GGML_TYPE_F32, 64, n, 2048, {2, 3}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PTQ1_0, GGML_TYPE_F32, 64, n, 2048, {1, 2}, {2, 1}));

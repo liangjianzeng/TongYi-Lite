@@ -39,21 +39,27 @@ Turnip 直载 = `GGML_VK_TURNIP=/data/local/tmp/vkptq/libturnip_freedreno.so`（
   自动落 `fwht_shmem_*` 变体；新增 `GGML_VK_FWHT_SUBGROUP=1` 供 A/B。
 - 生产口径：**Turnip 上 FWHT_SUBGROUP 永久关闭**（vk_flags.conf 不配置该项）。
 
-## 3. Turnip e2e 乱码定位（进行中）
+## 3. Turnip e2e 乱码定位（已定案）
 
 - 症状：tbo 的 MUL_MAT/MUL_MAT_HADAMARD 全绿，但全模型输出 `.yahooabasorie grahtmugelhtmanski...`
-  式碎片；`-fa off` 无改善 → 非 FA；decode/prefill 均走已验证路径。
-- 全算子扫描结果：Turnip 上仅 `CONV_2D`(1158)/`CONV_TRANSPOSE_2D`(6) FAIL（qwen35 架构不用）；
-  FA 全线错（sinks=0/1 共 2405 FAIL）但 `-fa off` 同乱已排除；其余算子族（ROPE/NORM/SOFTMAX/GLU/
-  GET_ROWS/CPY…）全绿。原厂对照仅 4 个 `GET_ROWS(iq4_xs)` FAIL（上游已知，与 Bonsai-2 无关）。
-- hadamard 宽度盲区假设**证伪**：tbo 补 4096/8192 用例后 `MUL_MAT_HADAMARD` 29/29 全绿（shmem）。
-- 大 buffer（>4GB）假设**弱化**：Turnip + `-ngl 16`（GPU buffer ~2GB）输出全 `0000…`（32 token 恒同值）
-  ——仍异常但错误模式随卸载层数改变（-ngl 99 多语言碎片 → -ngl 16 恒零），
-  指向 GPU/CPU 边界层传递或误差累积，而非单一 buffer 缺陷。
-- **下一步（最快分叉判定）**：用 App 真身（spike 分支 APK：shader 与 0.2.3 验证环境同源、
-  JNI 自动注入三药+Turnip）跑 Bonsai-2 e2e——App 乱 → 树/代码层问题；App 连贯 → CLI 交叉构建
-  环境差异（NDK glslc vs 验证环境 shaderc v2026.3，0.2.2 文档明示 glslc 版本敏感性）。
-  备选重手段：`GGML_VULKAN_CHECK_RESULTS` 插桩定位首个错算子。
+  式碎片；`-fa off` 无改善 → 非 FA。
+- 排除记录：全算子扫描 Turnip 上仅 `CONV_2D`(1158)/`CONV_TRANSPOSE_2D`(6) FAIL（qwen35 不用）；
+  FA 全线错但 `-fa off` 同乱；hadamard 4096/8192 盲区补用例后 29/29 绿；原厂对照仅
+  `GET_ROWS(iq4_xs)` 4 FAIL（上游已知，无关）。
+- **根因定案（二分实测）**：Turnip 端 **GEMM 大 n 错编**——PTQ1_0 的 MMQ 与 f16 GEMM 双双中招：
+  `m=5120` 二分 n=16/24/32 全对（8/8）、n=48/64/512 全错（ERR≈1.0 纯随机级）；
+  f16 GEMM n=512 同错（n=64 也错）。**原厂驱动同 shader 16/16 全绿** → 驱动特有，shader 无罪。
+  App 的 libggml-vulkan.so（shaderc v2026.3）同样大 n 全错 → **glslc 版本假设证伪**，
+  与 0.2.2 的 unpack8、subgroupAdd、FWHT shuffle 同谱系：Turnip gen8 编译器错编。
+- `-ngl 16` 输出全 `0000…` 修正推论：其 prefill 仍是默认 ubatch=512 的大 n → 同一根因的
+  表现变体，与 GPU/CPU 边界层、buffer 大小无关。
+- **为何 0.2.3 时代 e2e 连贯**：App JNI 带 `n_ubatch=16` 限制 → prefill 恒走 n=16 安全区。
+  CLI 未限 ubatch（默认 512）才踩雷。
+- **验证闭环**：CLI e2e `-ub 16`（其余同 Turnip 生产配置）→ 连贯英文零乱码。
+- **生产口径**：
+  1. App 的 n_ubatch 上限保持 ≤32（现值 16），是 Turnip 上的正确性必要条件（JNI 层确认即可）；
+  2. CLI/服务端用 Turnip 跑 Bonsai-2 必须 `-ub ≤32`；
+  3. 大 ubatch 长上下文性能（MMQ 按 n≤32 分块调度，权重流量 ×⌈n/32⌉）留作优化项，非阻塞。
 
 ## 4. 复现入口
 
@@ -72,8 +78,8 @@ LD_LIBRARY_PATH=$PWD GGML_VK_TURNIP=$PWD/libturnip_freedreno.so \
 
 ## 5. 遗留与下一步
 
-- [x] Turnip 全算子扫描：仅 CONV_2D/CONV_TRANSPOSE_2D FAIL（qwen35 不用）；FA 已排除；hadamard 4096/8192 盲区已补用例并证伪
-- [ ] Turnip e2e 乱码根因定案（§3 下一步：App 真身分叉判定）→ 修复 → llama-bench pp/tg 性能（对照原厂三药 0.6/0.2 t/s、OpenCL 路径）
+- [x] Turnip e2e 乱码根因定案：Turnip 端 GEMM 大 n（≥48）错编（f16+MMQ 双中招，原厂全绿），App 靠 n_ubatch=16 避开；`-ub 16` e2e 连贯闭环
+- [ ] App 侧确认 n_ubatch 上限 ≤32（生产安全闸）；MMQ 按 n≤32 分块调度留作长上下文优化项；llama-bench 性能基线（对照 OpenCL 路径）
 - [ ] 桌面 Arc OpenCL PTQ1_0 GEMM 补丁（d6a5ecf）的 Adreno 真机 tbo 复测
 - [ ] MTP/dspark 与 Bonsai-2 无关（一代专属），不做接线
 - [ ] 全绿后：catalog `bonsai-2-27b-ternary-ptq1_0` 后端偏好 Vulkan + 需 ≥16GB RAM 标签复核
