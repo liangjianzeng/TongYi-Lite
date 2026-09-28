@@ -33,9 +33,10 @@ adb install -r app-debug.apk    # -r = replace/update锛屼笉娓呮暟鎹?
 > **姣忔鏋勫缓鍚庯紝鎶?APK 杈撳嚭鐩綍鍦板潃鍐欒繘杩欐潯澶囧繕**锛屾柟渚跨敤鎴风洿鎺ユ壘鍖呫€?
 
 - **APK 杈撳嚭鐩綍**锛歚build\app\outputs\flutter-apk\`锛圵indows 缁濆璺緞
-  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`锛夈€?
+  `E:\Work\DgxSpark\TongYi-Lite\build\app\outputs\flutter-apk\`锛夈€?
 - debug 鍖咃細`app-debug.apk`锛堢湡鏈鸿皟璇曪紝`adb install -r` 瑕嗙洊瀹夎锛夈€?
 - release 鍖咃細`app-release.apk`锛堢敓浜у垎鍙戯級銆?
+- wt/ 宸ヤ綔鍖烘瀯寤轰骇鐗╁湪 `wt\<name>\build\app\outputs\flutter-apk\`锛屼笉鍦ㄤ富浠� build/锛�2026-09-28 v0.2.6 瀹炴祴锛屽埆鐪嬮敊鐩�褰曪級銆�
 - 鏋勫缓鍚?*蹇呴』**鍒楀嚭璇ョ洰褰曠殑 APK 鍚?澶у皬/鏃堕棿锛屽苟鎶婄洰褰曞湴鍧€鍙戠粰鐢ㄦ埛銆?
 
 ## APK 绛惧悕锛堥噸瑕佽蹇嗭級
@@ -125,6 +126,7 @@ add_compile_definitions(NDEBUG)
 python -c "import zipfile; d=zipfile.ZipFile(apk).read('lib/arm64-v8a/libapp.so'); print(d.count('鏂颁唬鐮佸瓧鏍?.encode('utf-16-le')), d.count('鏃у瓧鏍?.encode('utf-16-le')))"
 ```
 AOT 涓插湪 libapp.so 閲屾槸 **UTF-16LE**锛宒ebug kernel_blob 鏄?UTF-8锛涚‘璁?NEW>0 涓?OLD=0銆?
+- **0.2.6 楠屾敹琛ュ厖**锛氱函 ASCII 瀛楅潰閲忥紙濡傜増鏈�鍙� 0.2.6锛夊湪 libapp.so AOT 閲屾寜鍗曞瓧鑺� ASCII 瀛樺偍鈥斺�旂敤 `d.count(b'0.2.6')` 鏌ワ紱UTF-16LE 鍙�鍛戒腑闈� ASCII锛堜腑鏂囷級瀛楅潰閲忥紝鐗堟湰鍙锋寜 UTF-16LE 鏌ユ亽 0锛�2026-09-28 瀹炴祴锛夛紝鍕胯��鍒ゆ垚鎵撳寘浜嗘棫 Dart銆�
 `app-debug.apk`/`app-release.apk` 閲?鏃?Dart 骞界伒"灏辩敤杩欐嫑褰撳満楠屽案銆?
 
 ## 鐪熸満璋冭瘯娉ㄦ剰
