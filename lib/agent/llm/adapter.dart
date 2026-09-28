@@ -34,6 +34,7 @@ enum LlmFailureCode {
   server,                // 服务端 5xx
   timeout,               // 超时
   transport,             // 网络传输 / native channel 错误
+  invalidRequest,        // 请求非法（HTTP 4xx 除 429：参数/鉴权/路由错误，确定性失败，重试无意义）
   noAdapter,             // 无可用适配器
   emptyResponse,         // 响应为空
   toolCallTruncated,     // 工具调用块生成到一半被截断（token 预算不足）

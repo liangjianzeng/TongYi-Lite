@@ -158,6 +158,9 @@ class ReactLoopAgent {
               maxRetries: providerKind == ProviderKind.local ? 3 : 5,
               initialDelay: const Duration(milliseconds: 500),
               maxDelay: const Duration(seconds: 10),
+              // API 思考型模型可能把 max_tokens 耗在推理上导致 content 为空
+              // （EMPTY_RESPONSE，设计文档 §5.4 计入 API 可重试档）。
+              retryEmptyResponse: providerKind == ProviderKind.api,
             ),
         _compaction = compaction ?? const NoCompactionPlugin() {
     // 系统提示以 system/message 节点入 log（turn 0 前一次性，幂等）。

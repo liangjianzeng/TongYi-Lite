@@ -228,8 +228,11 @@ class InferenceSettings {
     this.agentModelSource,
     this.agentModelId,
     this.agentNctx = 8192,
-    this.agentMaxRounds = 5,
-    this.agentTokensPerRound = 512,
+    // 2026-09-28 调大：5 步/512 token 对真实任务太小（多步任务必撞上限、
+    // 思考型模型 512 连工具调用都写不完被截断）。存量等于旧默认的值在
+    // fromJson 一次性迁移到新默认。
+    this.agentMaxRounds = 12,
+    this.agentTokensPerRound = 1024,
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
     this.agentMaxParallel = 4,
@@ -483,9 +486,13 @@ class InferenceSettings {
       agentModelSource: json['agentModelSource'] as String?,
       agentModelId: json['agentModelId'] as String?,
       agentNctx: (json['agentNctx'] as num?)?.toInt() ?? 8192,
-      agentMaxRounds: (json['agentMaxRounds'] as num?)?.toInt() ?? 5,
-      agentTokensPerRound:
-          (json['agentTokensPerRound'] as num?)?.toInt() ?? 512,
+      agentMaxRounds:
+          _migrateOldDefault((json['agentMaxRounds'] as num?)?.toInt(),
+              oldDefault: 5, newDefault: 12),
+      agentTokensPerRound: _migrateOldDefault(
+          (json['agentTokensPerRound'] as num?)?.toInt(),
+          oldDefault: 512,
+          newDefault: 1024),
       agentToolTimeoutMs:
           (json['agentToolTimeoutMs'] as num?)?.toInt() ?? 15000,
       agentAllowParallelTools:
@@ -564,6 +571,16 @@ class InferenceSettings {
       }
     }
     return list;
+  }
+
+  /// 旧默认值一次性迁移：存量设置里等于旧默认的值抬到新默认（幂等）。
+  ///
+  /// 用户显式设置过的非默认值不动；旧默认值与"从未改过"不可区分，
+  /// 一并抬升（2026-09-28 智能体预算调大：maxRounds 5→12、tokens 512→1024）。
+  static int _migrateOldDefault(int? stored,
+      {required int oldDefault, required int newDefault}) {
+    if (stored == null) return newDefault;
+    return stored == oldDefault ? newDefault : stored;
   }
 
   /// 兼容旧配置：旧字段 `enableMtp`（全局 bool）→ 新的按模型 map。

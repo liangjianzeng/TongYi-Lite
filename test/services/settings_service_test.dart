@@ -4,14 +4,14 @@ import 'package:tongyi_lite/services/settings_service.dart';
 
 void main() {
   group('InferenceSettings 智能体配置默认值', () {
-    test('默认值符合设计（智能体开启、循环 5 轮、nctx 8192）', () {
+    test('默认值符合设计（智能体开启、循环 12 轮、nctx 8192）', () {
       const s = InferenceSettings();
       expect(s.agentEnabled, isTrue);
       expect(s.agentModelSource, isNull);
       expect(s.agentModelId, isNull);
       expect(s.agentNctx, 8192);
-      expect(s.agentMaxRounds, 5);
-      expect(s.agentTokensPerRound, 512);
+      expect(s.agentMaxRounds, 12);
+      expect(s.agentTokensPerRound, 1024);
       expect(s.agentToolTimeoutMs, 15000);
       expect(s.agentAllowParallelTools, isFalse);
       expect(s.webSearchEnabled, isFalse);
@@ -94,8 +94,27 @@ void main() {
       });
       expect(old.agentEnabled, isTrue);
       expect(old.agentNctx, 8192);
-      expect(old.agentMaxRounds, 5);
+      // 无字段 → 新默认（12 轮 / 1024 token）。
+      expect(old.agentMaxRounds, 12);
+      expect(old.agentTokensPerRound, 1024);
       expect(old.agentToolsByModel, isEmpty);
+    });
+
+    test('旧默认值存量迁移：5→12、512→1024；显式设置过的值不动', () {
+      // 存量配置等于旧默认 → 一次性抬到新默认。
+      final migrated = InferenceSettings.fromJson({
+        'agentMaxRounds': 5,
+        'agentTokensPerRound': 512,
+      });
+      expect(migrated.agentMaxRounds, 12);
+      expect(migrated.agentTokensPerRound, 1024);
+      // 用户显式设置过的非默认值保持不动。
+      final kept = InferenceSettings.fromJson({
+        'agentMaxRounds': 3,
+        'agentTokensPerRound': 768,
+      });
+      expect(kept.agentMaxRounds, 3);
+      expect(kept.agentTokensPerRound, 768);
     });
 
     test('agentToolsByModel 解析非法格式不崩', () {
