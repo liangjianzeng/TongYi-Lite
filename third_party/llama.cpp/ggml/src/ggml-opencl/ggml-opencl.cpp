@@ -19728,7 +19728,14 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_PTQ1_0: {
-                if (ne11 < 32) {
+                // GEMM min-batch knob: vk_flags.conf GGML_OPENCL_PTQ10_MM_N=0
+                // disables this path (prefill falls back to the matvec path),
+                // to A/B-debug suspected kernel miscompiles on device.
+                static const int ptq10_mm_min_n = [] {
+                    const char * e = getenv("GGML_OPENCL_PTQ10_MM_N");
+                    return e ? atoi(e) : 32;
+                }();
+                if (ptq10_mm_min_n <= 0 || ne11 < ptq10_mm_min_n) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
