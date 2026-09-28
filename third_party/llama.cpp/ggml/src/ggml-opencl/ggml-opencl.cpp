@@ -865,6 +865,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_expm1_f16, kernel_expm1_f16_4, kernel_expm1_f16_nc;
     cl_kernel kernel_abs_f32, kernel_abs_f32_4, kernel_abs_f32_nc;
     cl_kernel kernel_abs_f16, kernel_abs_f16_4, kernel_abs_f16_nc;
+    cl_kernel kernel_fwht_f32, kernel_fwht_f16;
     cl_kernel kernel_softplus_f32, kernel_softplus_f32_4, kernel_softplus_f32_nc;
     cl_kernel kernel_softplus_f16, kernel_softplus_f16_4, kernel_softplus_f16_nc;
     cl_kernel kernel_upscale;
@@ -3046,6 +3047,23 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_abs_f16    = clCreateKernel(prog, "kernel_abs_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_abs_f16_4  = clCreateKernel(prog, "kernel_abs_f16_4", &err), err));
         CL_CHECK((backend_ctx->kernel_abs_f16_nc = clCreateKernel(prog, "kernel_abs_f16_nc", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+    // fwht (MUL_MAT hadamard hint)
+    {
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "fwht.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("fwht.cl");
+#endif
+        cl_program prog =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_fwht_f32 = clCreateKernel(prog, "kernel_fwht_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_fwht_f16 = clCreateKernel(prog, "kernel_fwht_f16", &err), err));
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -7768,6 +7786,17 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         case GGML_OP_GROUP_NORM:
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_MUL_MAT:
+            // hadamard hint: semantics is FWHT(src1), not a matmul; if the
+            // shape is not supported here the sched runs it on CPU (correct,
+            // just slower).
+            if (ggml_get_op_params_i32(op, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
+                const ggml_tensor * fw   = op->src[1];
+                const int64_t       fw_n = fw->ne[0];
+                return (fw->type == GGML_TYPE_F32 || fw->type == GGML_TYPE_F16) &&
+                       op->type == GGML_TYPE_F32 &&
+                       fw_n >= 2 && (fw_n & (fw_n - 1)) == 0 && fw_n <= 4096 &&
+                       ggml_is_contiguous(fw) && ggml_is_contiguous(op);
+            }
             if (op->src[0]->type == GGML_TYPE_F16) {
                 return true;
             } else if (op->src[0]->type == GGML_TYPE_BF16) {
@@ -19116,7 +19145,43 @@ static cl_mem ggml_cl_img_pool_get_or_create(
     return img;
 }
 
+// MUL_MAT hadamard hint: dst = FWHT_rows(src1). Matches CPU
+// ggml_compute_forward_fwht_impl. Contiguous only (supports_op gates it).
+static void ggml_cl_fwht(ggml_backend_t backend, const ggml_tensor * src1, ggml_tensor * dst) {
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+
+    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    const int n    = (int) src1->ne[0];
+    const int rows = (int) (src1->ne[1] * src1->ne[2] * src1->ne[3]);
+
+    cl_kernel kernel = src1->type == GGML_TYPE_F32 ? backend_ctx->kernel_fwht_f32
+                                                   : backend_ctx->kernel_fwht_f16;
+
+    int idx = 0;
+    CL_CHECK(clSetKernelArg(kernel, idx++, sizeof(cl_mem),   &extra1->data_device));
+    CL_CHECK(clSetKernelArg(kernel, idx++, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel, idx++, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel, idx++, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel, idx++, sizeof(int),      &n));
+
+    // one workgroup (256 threads) per row
+    size_t gws[] = { (size_t) rows * 256 };
+    size_t lws[] = { 256 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 1, gws, lws, dst);
+}
+
 static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    // hadamard hint node: dst = FWHT_rows(src1); src0 (rot) is unused and
+    // may have no extra, so handle it before the asserts below.
+    if (ggml_get_op_params_i32(dst, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
+        ggml_cl_fwht(backend, src1, dst);
+        return;
+    }
+
     GGML_ASSERT(src0);
     GGML_ASSERT(src0->extra);
     GGML_ASSERT(src1);
