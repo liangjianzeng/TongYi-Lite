@@ -189,7 +189,7 @@ test('压缩：旧轮工具结果被遮蔽，摘要入历史，recent 保留', (
       isNotNull);
 });
 
-test('压缩：足够近期无旧工具结果 → 不压缩（不无谓 advance）', () async {
+test('压缩：足够近期无旧工具结果 → failure（无前进不 retry，防死循环）', () async {
   final log = SessionLog.fromEvents(const []);
   log.append(kEventSystemMessage, {'content': 'sys'},
       source: const {'kind': 'system'});
@@ -199,7 +199,9 @@ test('压缩：足够近期无旧工具结果 → 不压缩（不无谓 advance�
   final compaction = DeterministicCompaction(keepRounds: 3);
   final result =
       await compaction.decide(ref: SessionRef(log), turn: 0, step: 0, reason: 'x');
-  expect(result.kind, CompactionResultKind.success);
+  // 2026-09-28 死循环修复：无可裁内容时不得返回 success——否则失败瀑布会
+  // 无条件 retry 同一超限请求（不变量 11：重试必须 replaceGeneration 前进）。
+  expect(result.kind, CompactionResultKind.failure);
   expect(log.replaceGeneration, 0); // 未遮蔽
 });
 

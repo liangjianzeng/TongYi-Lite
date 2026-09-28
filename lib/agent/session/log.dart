@@ -203,7 +203,12 @@ final class SessionLog {
               if (c is Map<String, dynamic>) {
                 tc.add({
                   'type': 'tool_call',
-                  'id': c['id'] as String? ?? '',
+                  // 写入侧键是 call_id（_appendAssistant）；历史/导入数据可能
+                  // 是 id。此前只读 id 导致配对 id 恒为空串——API 原生路线的
+                  // role:tool 消息因此配不上 tool_calls（服务端 400）。
+                  'id': (c['call_id'] as String?) ??
+                      (c['id'] as String?) ??
+                      '',
                   'function_name': c['function_name'] as String? ??
                       (c['name'] as String? ?? (c['function'] as Map<String, dynamic>?)?['name'] ?? ''),
                   // arguments 保留原始形式（协议解析出 Map 或 String）；
@@ -335,7 +340,10 @@ final class SessionLog {
           if (calls != null) {
             for (final c in calls) {
               if (c is Map<String, dynamic>) {
-                final id = c['id'] as String? ?? '';
+                // 写入侧键是 call_id（_appendAssistant）；导入/历史数据可能是 id。
+                final id = (c['call_id'] as String?) ??
+                    (c['id'] as String?) ??
+                    '';
                 if (id != '') {
                   pendingCalls[id] = {
                     'callId': id,

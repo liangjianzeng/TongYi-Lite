@@ -18,6 +18,20 @@ import 'package:dio/dio.dart';
 import '../models/api_model.dart';
 import '../models/chat_message.dart';
 
+/// OpenAI 兼容端点的 HTTP/网络异常（携带状态码，供失败归一化分档）。
+///
+/// 4xx（除 429）是确定性错误（参数/鉴权/路由），重试无意义；
+/// 429/5xx 是瞬态错误。状态码随异常携带，adapter 才能可靠分档。
+class OpenAiHttpException implements Exception {
+  final int? statusCode;
+  final String message;
+
+  OpenAiHttpException({this.statusCode, required this.message});
+
+  @override
+  String toString() => message;
+}
+
 /// OpenAI 兼容远程推理服务。密钥明文由配置持有，此处仅用于请求头。
 class OpenAiService {
   OpenAiService({Dio? dio}) : _dio = dio ?? Dio();
@@ -64,51 +78,12 @@ class OpenAiService {
     double? temperature,
     int? maxTokens,
   }) async* {
-    // 中断上一轮（若存在），并为本轮创建新令牌。
-    _cancelToken?.cancel();
-    _cancelToken = CancelToken();
-
-    final url = normalizeChatUrl(config.baseUrl);
-    final body = <String, dynamic>{
-      'model': config.model,
-      'messages': messages,
-      'stream': true,
-      'temperature': temperature ?? config.effectiveTemperature,
-      'max_tokens': maxTokens ?? config.effectiveMaxTokens,
-    };
-
-    final Response<ResponseBody> response;
-    try {
-      response = await _dio.post<ResponseBody>(
-        url,
-        data: body,
-        options: Options(
-          responseType: ResponseType.stream,
-          headers: _headers(config.apiKey),
-        ),
-        cancelToken: _cancelToken,
-      );
-    } on DioException catch (e) {
-      throw Exception(_friendlyDioError(e));
-    }
-
-    if (response.statusCode != 200) {
-      throw Exception('API 请求失败：HTTP ${response.statusCode}');
-    }
-
-    // 逐行解析 SSE：data: {json} ... data: [DONE]
-    // dio 流式响应：response.data 是 ResponseBody，其 .stream 为字节流。
-    final byteStream =
-        response.data?.stream ?? const Stream<Uint8List>.empty();
-    final lines = utf8.decoder
-        .bind(byteStream)
-        .transform(const LineSplitter());
-
-    await for (final rawLine in lines) {
-      final line = rawLine.trim();
-      if (!line.startsWith('data:')) continue;
-      final payload = line.substring(5).trim();
-      if (payload.isEmpty) continue;
+    await for (final payload in _sseDataPayloads(
+      config: config,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+    )) {
       if (payload == '[DONE]') break;
       try {
         final json = jsonDecode(payload) as Map<String, dynamic>;
@@ -125,6 +100,140 @@ class OpenAiService {
       } catch (_) {
         // 忽略无法解析的行（心跳/注释/不完整 JSON），继续下一行。
       }
+    }
+  }
+
+  /// 发起流式 chat/completions，返回**结构化增量事件流**（原生工具调用用）。
+  ///
+  /// 事件形如：
+  /// - `{'type': 'text', 'text': ...}` —— content 增量；
+  /// - `{'type': 'tool_call', 'index': int, 'id': String?, 'name': String?,
+  ///    'argumentsFragment': String?}` —— `delta.tool_calls` 增量分片
+  ///    （arguments 是 JSON 字符串分片，须按 index 拼齐后整体 jsonDecode）；
+  /// - `{'type': 'finish', 'reason': String}` —— finish_reason
+  ///    （stop / length / tool_calls…）。
+  ///
+  /// [tools] 为 OpenAI function 工具 schema（`{type:'function', function:{…}}`）；
+  /// 传入后请求体带 `tools` 字段，模型才能产出原生 tool_calls。
+  Stream<Map<String, dynamic>> chatCompletionEvents({
+    required ApiModelConfig config,
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    double? temperature,
+    int? maxTokens,
+  }) async* {
+    await for (final payload in _sseDataPayloads(
+      config: config,
+      messages: messages,
+      tools: tools,
+      temperature: temperature,
+      maxTokens: maxTokens,
+    )) {
+      if (payload == '[DONE]') break;
+      Map<String, dynamic> json;
+      try {
+        final decoded = jsonDecode(payload);
+        if (decoded is! Map<String, dynamic>) continue;
+        json = decoded;
+      } catch (_) {
+        continue; // 心跳/注释/不完整 JSON
+      }
+      final choices = json['choices'] as List?;
+      if (choices == null || choices.isEmpty) continue;
+      final first = choices.first;
+      if (first is! Map<String, dynamic>) continue;
+      final delta = first['delta'];
+      if (delta is Map<String, dynamic>) {
+        final content = delta['content'];
+        if (content is String && content.isNotEmpty) {
+          yield {'type': 'text', 'text': content};
+        }
+        final calls = delta['tool_calls'];
+        if (calls is List) {
+          for (final c in calls) {
+            if (c is! Map<String, dynamic>) continue;
+            final fn = c['function'];
+            yield {
+              'type': 'tool_call',
+              'index': (c['index'] as num?)?.toInt() ?? 0,
+              'id': c['id'] is String ? c['id'] : null,
+              'name': fn is Map<String, dynamic> ? fn['name'] : null,
+              'argumentsFragment':
+                  fn is Map<String, dynamic> ? fn['arguments'] : null,
+            };
+          }
+        }
+      }
+      final reason = first['finish_reason'];
+      if (reason is String && reason.isNotEmpty) {
+        yield {'type': 'finish', 'reason': reason};
+      }
+    }
+  }
+
+  /// 共享 SSE 通道：发起请求并产出 `data:` 载荷行（不含 `data:` 前缀）。
+  ///
+  /// HTTP/网络错误抛 [OpenAiHttpException]（携带状态码，供 adapter 分档）。
+  Stream<String> _sseDataPayloads({
+    required ApiModelConfig config,
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    double? temperature,
+    int? maxTokens,
+  }) async* {
+    // 中断上一轮（若存在），并为本轮创建新令牌。
+    _cancelToken?.cancel();
+    _cancelToken = CancelToken();
+
+    final url = normalizeChatUrl(config.baseUrl);
+    final body = <String, dynamic>{
+      'model': config.model,
+      'messages': messages,
+      'stream': true,
+      'temperature': temperature ?? config.effectiveTemperature,
+      'max_tokens': maxTokens ?? config.effectiveMaxTokens,
+      if (tools != null && tools.isNotEmpty) 'tools': tools,
+    };
+
+    final Response<ResponseBody> response;
+    try {
+      response = await _dio.post<ResponseBody>(
+        url,
+        data: body,
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: _headers(config.apiKey),
+        ),
+        cancelToken: _cancelToken,
+      );
+    } on DioException catch (e) {
+      throw OpenAiHttpException(
+        statusCode: e.response?.statusCode,
+        message: _friendlyDioError(e),
+      );
+    }
+
+    if (response.statusCode != 200) {
+      throw OpenAiHttpException(
+        statusCode: response.statusCode,
+        message: 'API 请求失败：HTTP ${response.statusCode}',
+      );
+    }
+
+    // 逐行解析 SSE：data: {json} ... data: [DONE]
+    // dio 流式响应：response.data 是 ResponseBody，其 .stream 为字节流。
+    final byteStream =
+        response.data?.stream ?? const Stream<Uint8List>.empty();
+    final lines = utf8.decoder
+        .bind(byteStream)
+        .transform(const LineSplitter());
+
+    await for (final rawLine in lines) {
+      final line = rawLine.trim();
+      if (!line.startsWith('data:')) continue;
+      final payload = line.substring(5).trim();
+      if (payload.isEmpty) continue;
+      yield payload;
     }
   }
 
