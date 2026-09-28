@@ -356,3 +356,33 @@ CPU 后端能活的原因：权重是 mmap 文件页（可回收），而 GPU �
    ≥6GB 权重的 GPU 全载方案是物理不可能的，不是 bug**。
 4. 别再拿 llama-cli 往 /data/local/tmp 推了反复死机——**死机时现场日志只在 logcat 实时抓取
    + dropbox 里有**，事后 `logcat -d` 拿到的只有新 boot。
+
+## 关键教训：Adreno OpenCL 编译器把 `half` 当类型关键字 + OpenCL 加载守卫开关（2026-09-28 GEMM 移植案）
+
+> **现象**：带新 GEMM 内核的 APK 用 OpenCL 加载 bonsai2 到一半直接崩（不是死机，是进程 abort）。
+
+**根因**：新内核里 `const int half = kt & 1;`——Adreno CL 编译器把 `half` 保留为类型说明符，
+当变量名用则 **clBuildProgram 失败（err=-11: cannot combine with previous 'int' declaration
+specifier）**，ggml-opencl init abort。NDK 交叉编译能过、桌面 NEO 能编，**都不代表 Adreno 能编**。
+错误只在真机 logcat tag `llama` 里（主 buffer 滚得快：`logcat -c` 后实时抓文件复现；
+二次 SIGABRT "pthread_mutex_lock on destroyed mutex" 是烟幕弹，真凶是首条 compile error）。
+修复 = 改名 `blk_half`；验收 = APK 内 `libggml-opencl.so` 字符串级：`blk_half`>0 且旧代码=0。
+现 `mul_mm_ptq1_0_f32_l4_lm.cl` 未用 `half` 变量名，安全。
+
+**验证铁律**：`.cl` 改动必须过 Adreno 编译门——内核在 ggml-opencl init 时无条件编译，
+**用任意安全小模型（qwen3.5-4b）开 OpenCL 加载一次即全量编译**，logcat 无
+`kernel compile error` 才算过；不许拿 bonsai2 当编译测试（先过守卫/OOM 关）。
+
+**OOM 加载守卫开关（设置 → 推理引擎）**：`oomGuardEnabled` 默认开；关 = 旁路预检+夹逼强行加载，
+日志每次打 `guard=OFF(risk: hard reboot)`——**11.5GB 机型上旁路 bonsai2 必死机，不要建议用户关**。
+链路：model_provider→`setOomGuard`→Kotlin MethodChannel→JNI `nativeSetOomGuardParams`
+（setenv `TONGYILITE_NO_OOM_GUARD` + 预/后余量 MB）；`[oom-guard]` 日志带"旁路=开/关"。
+
+## 约定：parseAndReturn 双参语义（main 原生工具调用 x 思考块清洗 合并版）
+
+`base_engine_adapter.parseAndReturn(StringBuffer rawBuffer, AgentStreamProcessor processor)`：
+优先解析 `processor.cleanText`（去  think/response 思考块、保留工具调用），cleanText 为空
+（测试桩/调用方自持缓冲）回退 rawBuffer；空响应 fail-loud 抛 `emptyResponse`。
+**两条调用线（local/openai adapter）都必须传 `(rawBuffer, processor)` 双参**；
+改成单参会挂 main 线的 `native_tools_test`（它靠双参桩测空响应回退），动前先跑
+`flutter test test/agent`。
