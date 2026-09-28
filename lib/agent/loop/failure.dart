@@ -79,6 +79,10 @@ final class LlmRetry {
   final Duration initialDelay;
   final Duration maxDelay;
   final double backoffFactor;
+
+  /// 空响应是否计入可重试档（API 路线开：思考型模型推理耗尽 max_tokens
+  /// 时 content 为空，属设计文档 §5.4 的 EMPTY_RESPONSE 可重试码）。
+  final bool retryEmptyResponse;
   int _retries;
 
   LlmRetry({
@@ -86,6 +90,7 @@ final class LlmRetry {
     this.initialDelay = const Duration(milliseconds: 500),
     this.maxDelay = const Duration(seconds: 10),
     this.backoffFactor = 2.0,
+    this.retryEmptyResponse = false,
   }) :
     _retries = 0;
 
@@ -94,12 +99,17 @@ final class LlmRetry {
 
   /// 该失败是否允许 llm-retry（compaction 不在此判定，由瀑布分开处理）。
   bool isRetryable(LlmFailure f) {
-    // 无适配器 / 上下文溢出 / 响应为空 / 本地引擎未加载模型 → 都不靠 retry 解决。
-    // （模型未加载：isLoaded=false 是原生层的权威状态，重试只会再撞同一堵墙。）
+    // 无适配器 / 上下文溢出 → 不靠 retry 解决。
     if (f.code == LlmFailureCode.noAdapter) return false;
     if (f.code == LlmFailureCode.contextWindowExceeded) return false;
-    if (f.code == LlmFailureCode.emptyResponse) return false;
+    // 4xx（参数/鉴权/路由）是确定性错误，重试同样失败，只浪费时间。
+    if (f.code == LlmFailureCode.invalidRequest) return false;
+    // 模型未加载：isLoaded=false 是原生层的权威状态，重试只会再撞同一堵墙。
     if (f.code == LlmFailureCode.modelNotReady) return false;
+    // 空响应默认不重试；API 路线按 EMPTY_RESPONSE 计入可重试档。
+    if (f.code == LlmFailureCode.emptyResponse && !retryEmptyResponse) {
+      return false;
+    }
     // 其余失败（含 toolCallTruncated：采样可能产出更短的完整调用）走
     // 统一的 maxRetries 预算——连续截断说明 token 预算真不够，及时止损。
     return _retries < maxRetries;
