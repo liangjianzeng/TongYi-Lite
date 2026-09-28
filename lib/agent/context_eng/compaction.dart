@@ -50,8 +50,11 @@ final class DeterministicCompaction implements CompactionPlugin {
     }
 
     // 保留尾部 keepRounds 轮；若 user 轮数 ≤ keepRounds，无旧内容可裁。
+    // 返回 failure（而非 success）：DSH 不变量 11 —— 重试必须以
+    // replaceGeneration 前进为前提。此处没有遮蔽任何事件，若返回 success
+    // 会让失败瀑布无条件 retry 同一超限请求 → 无限循环（turn 永不结束）。
     if (userSeqs.length <= keepRounds) {
-      return const CompactionResult(CompactionResultKind.success);
+      return const CompactionResult(CompactionResultKind.failure);
     }
 
     // 阈值 = 近期窗口的第一条 user 消息；其之前的 tool/result 均为"旧"。
@@ -67,8 +70,8 @@ final class DeterministicCompaction implements CompactionPlugin {
       }
     }
     if (oldToolResultSeqs.isEmpty) {
-      // 旧轮无工具结果 → 无 token 大户，不压缩（避免无谓 advance）。
-      return const CompactionResult(CompactionResultKind.success);
+      // 旧轮无工具结果 → 无 token 大户可裁，无前进 → failure（同上，防死循环）。
+      return const CompactionResult(CompactionResultKind.failure);
     }
     final first = oldToolResultSeqs.first;
     final last = oldToolResultSeqs.last;

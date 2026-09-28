@@ -24,7 +24,14 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   final EngineCapabilities? _capabilities;
 
   /// 当前进行中的流订阅（子类 [generate] 管理，[cancel] 统一中止）。
-  StreamSubscription<String>? currentSub;
+  /// dynamic：文本路线是 `StreamSubscription<String>`，API 原生工具路线是
+  /// 结构化事件流订阅（`StreamSubscription<Map<String, dynamic>>`），
+  /// 取消只需 `.cancel()`，无需元素类型。
+  StreamSubscription<dynamic>? currentSub;
+
+  /// 能力快照只读访问（子类协议路由用；Dart 私有按库隔离，
+  /// 子类跨库读不到 `_capabilities`，故开只读门）。
+  EngineCapabilities? get capabilities => _capabilities;
 
   BaseEngineAdapter({
     required ToolProtocol protocol,
@@ -90,17 +97,33 @@ abstract class BaseEngineAdapter implements LlmAdapter {
 
   /// 解析最终文本流 → [LlmResult]（两条路线共用）。
   ///
-  /// 用 [AgentStreamProcessor.cleanText]（原始流去掉思考块、保留工具调用）
+  /// 解析最终文本流 → [LlmResult]（两条路线共用）。
+  ///
+  /// 优先用 [AgentStreamProcessor.cleanText]（原始流去掉思考块、保留工具调用）
   /// 喂协议解析——而非原始流，否则 Qwen 的  think/response 思考块
   /// 会渗入 LlmResult.text，成为历史 assistant 内容，污染上下文、
-  /// 把"思考内容"冒充回复并断开执行链。
+  /// 把"思考内容"冒充回复并断开执行链。processor 未经流喂入（cleanText 空）
+  /// 时退回 [rawBuffer]（测试桩/调用方自持缓冲的形态）。
+  ///
+  /// 空响应兜底（fail-loud）：流干净结束但既无文本也无工具调用时抛
+  /// [LlmFailureCode.emptyResponse] 走失败瀑布——否则主循环会把空结果当
+  /// "最终回答" 静默完成，UI 存一条空白消息（API 思考型模型推理耗尽
+  /// max_tokens 时的真实形态）。
   Future<LlmResult> parseAndReturn(
-      AgentStreamProcessor processor) async {
+      StringBuffer rawBuffer, AgentStreamProcessor processor) async {
     processor.finish();
+    final clean = processor.cleanText;
+    final text = clean.isEmpty ? rawBuffer.toString() : clean;
     final outcome =
-        await _protocol.parseStream(
-            Stream<String>.value(processor.cleanText));
-    return LlmResult(text: outcome.text, toolCalls: outcome.toolCalls);
+        await _protocol.parseStream(Stream<String>.value(text));
+    final result = LlmResult(text: outcome.text, toolCalls: outcome.toolCalls);
+    if (result.text.trim().isEmpty && !result.hasToolCalls) {
+      throw const LlmFailure(
+        code: LlmFailureCode.emptyResponse,
+        message: '模型返回空响应（无文本也无工具调用）',
+      );
+    }
+    return result;
   }
 
   /// 流终态 vs cancel 竞跑；返回 true 表示 cancel 先行。
@@ -133,18 +156,32 @@ abstract class BaseEngineAdapter implements LlmAdapter {
     return LlmFailureCode.transport;
   }
 
-  /// API 错误归一化（dio 异常）。
+  /// API 错误归一化（dio 异常）。4xx（除 429）为请求非法——确定性错误，
+  /// 归 [LlmFailureCode.invalidRequest] 永久失败档（重试无意义）；
+  /// 429 → 限流，5xx → 服务端错误，均可重试。
   LlmFailureCode mapApiError(DioException e) {
     switch (e.type) {
       case DioExceptionType.connectionTimeout:
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
         return LlmFailureCode.timeout;
-      case DioExceptionType.connectionError:
-        return LlmFailureCode.transport;
+      case DioExceptionType.badResponse:
+        return mapApiStatus(e.response?.statusCode);
       default:
         return LlmFailureCode.transport;
     }
+  }
+
+  /// 按 HTTP 状态码分档失败类别（[OpenAiHttpException] 与 dio 共用）。
+  LlmFailureCode mapApiStatus(int? statusCode) {
+    if (statusCode == 429) return LlmFailureCode.rateLimit;
+    if (statusCode != null && statusCode >= 500) {
+      return LlmFailureCode.server;
+    }
+    if (statusCode != null && statusCode >= 400) {
+      return LlmFailureCode.invalidRequest;
+    }
+    return LlmFailureCode.transport;
   }
 
   String friendlyApiError(DioException e) {

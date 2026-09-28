@@ -50,6 +50,7 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         message: '本地模型未加载（模型加载失败），请在模型管理页重新加载模型',
       );
     }
+
     final messagesJson = jsonEncode(convertEngineMessages(options.messages));
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
@@ -100,7 +101,7 @@ class LocalEngineAdapter extends BaseEngineAdapter {
       }
       // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
       print('[AGDBG/LOC] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
-      return parseAndReturn(processor);
+      return parseAndReturn(rawBuffer, processor);
     } on AgentCancelledException catch (e) {
       rethrow;
     } on LlmFailure catch (e) {

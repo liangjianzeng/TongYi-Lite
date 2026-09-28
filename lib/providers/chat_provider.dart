@@ -21,6 +21,7 @@ import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
 import '../agent/protocol/protocol_selector.dart' show selectProtocol;
 import '../agent/protocol/prompt_json_protocol.dart' show PromptJsonProtocol;
+import '../agent/protocol/native_tool_protocol.dart' show NativeToolProtocol;
 import '../agent/subagents/in_process.dart' show InProcessSubagentProvider;
 import '../agent/subagents/subagent_tool.dart' show createSubagentTool;
 import '../agent/hooks/hooks.dart' show AgentHooks;
@@ -617,18 +618,24 @@ class ChatNotifier extends StateNotifier<bool> {
     _currentKvWasAgentMode = true;
 
     // ---- 构建组件（复用旧路径共享件）----
-    final registry = _buildAgentRegistry(settings, targetModelId);
+    // 智能体模型标识：本地=模型 id；API=API 模型名。工具可见性过滤、
+    // 协议选择、系统提示渲染、子代理都按它走——此前 API 路线沿用本地模型
+    // id，协议指令/工具清单全被本地模型"张冠李戴"。
+    final agentModelKey =
+        useApi ? (activeApi?.model ?? targetModelId) : targetModelId;
 
-    // 能力快照（Phase 3）：本地/本地模型目录静态声明；运行探测待补。
-    // 当前仅 PromptJsonProtocol 落盘，selectProtocol 是能力驱动选路
-    // （新增 xml-tool / native-tools 协议自动生效）。
-    final caps = _engineCapabilitiesFor(targetModelId, activeApi);
-    final protocol = selectProtocol([PromptJsonProtocol()], caps);
+    final registry = _buildAgentRegistry(settings, agentModelKey);
+
+    // 能力快照（Phase 3）：API 声明原生工具调用 → selectProtocol 选出
+    // NativeToolProtocol（tools 进请求体）；本地走 prompt-json 文本协议。
+    final caps = _engineCapabilitiesFor(agentModelKey, activeApi);
+    final protocol =
+        selectProtocol([NativeToolProtocol(), PromptJsonProtocol()], caps);
     final systemPrompt = buildSystemPrompt(
       modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
       registry: registry,
       protocol: protocol,
-      modelId: targetModelId,
+      modelId: agentModelKey,
     );
     final newConfig = loopConfig.AgentConfig(
       maxStepsPerTurn: settings.agentMaxRounds,
@@ -656,7 +663,7 @@ class ChatNotifier extends StateNotifier<bool> {
     debugPrint(
       '[NewAgent] seam=active route=$useApi '
       'adapter=${useApi ? 'OpenAiAdapter' : 'LocalEngineAdapter'} '
-      'protocol=${protocol.id} model=$targetModelId caps=$caps',
+      'protocol=${protocol.id} model=$agentModelKey caps=$caps',
     );
 
     // ---- 历史 → 事件日志（导入，log-only 标记）----
@@ -678,7 +685,7 @@ class ChatNotifier extends StateNotifier<bool> {
       final subagentProvider = InProcessSubagentProvider(
         adapter: engine,
         registry: registry,
-        modelId: targetModelId,
+        modelId: agentModelKey,
         providerKind: useApi ? ProviderKind.api : ProviderKind.local,
         systemPrompt: systemPrompt,
         parentSession: sessionLog,
@@ -755,7 +762,7 @@ class ChatNotifier extends StateNotifier<bool> {
       adapter: engine,
       registry: registry,
       config: newConfig,
-      modelId: targetModelId,
+      modelId: agentModelKey,
       providerKind: useApi ? ProviderKind.api : ProviderKind.local,
       systemPrompt: systemPrompt,
       onToolActivity: session.update,
