@@ -59,6 +59,38 @@ Bonsai-2 的 hadamard 是 **MUL_MAT 上的 hint**（`op_params[1] == GGML_HINT_S
 4. 若速度仍差：再查 mul_mv_ptq1_0 在 K=17408 的表现（正确性已由 174/174 保证，纯性能问题）
 5. 全量重打 APK（debug+release，AGENTS.md 协议：flutter assemble → intermediates 同步 → gradlew -x）→ `adb install -r`
 
+## 新增（2026-09-29）：Vulkan 正确但慢——留另起任务排查
+
+> 用户实测：真机 **Vulkan** 后端跑 Bonsai-2，输出**正确**（Vulkan 路径 hadamard
+> 折叠是通的，与 OpenCL"乱答"形成对照），但**速度也很慢**。本任务只交接总结，
+> 排查在下一任务进行。
+
+**已知/可对照：**
+
+- 同设备 OpenCL：16.5 s/tk + 乱答（根因见本文，待实现 FWHT 修复）。
+- 同设备 Vulkan：对答 + 慢 → 慢**不**来自 hadamard 折叠缺失，是另一线路。
+- 设备 bf1552ef = 25053RT47C（Adreno 825）。AGENTS.md 8-04 基线（同机型 8 Elite）：
+  Vulkan 8.60 / OpenCL 8.77 / CPU 4.33 tok/s（短 prompt，同一批模型）。
+- 12GB 手机放不下 27B PTQ1_0（~17GB）：**先核实 Vulkan 实测时到底加载的
+  哪个模型/量化**（4B 变体？），否则"慢/快"无参照。
+
+**下一任务排查清单（建议顺序）：**
+
+1. `adb logcat` 抓 `[handleLoadModel]`，逐项 diff 8-04 基线：`n_gpu_layers`、
+   `n_ubatch`（GPU 应 512）、`flash_attn`、量化类型、sampler 链。
+2. 记录 Vulkan 实测 tok/s（**prefill 与 decode 分开**报），对基线判断是"绝对慢"
+   还是"机型/模型与基线不匹配"。
+3. 怀疑点排序：
+   - **flash_attn=DISABLED** → attention naive 路径，长 decode 慢（短 prompt 影响小）；
+   - **n_gpu_layers 未全上 GPU** → 部分层落 CPU；
+   - **Adreno 驱动/turnip fork 状态**（0.2.5 修过高通 driver bug，核实现时 APK
+     是否带修复版库）；
+   - **GEMM 内核选择**：量化类型决定 GEMM/GEMV 内核在 Adreno 825 的表现
+     （PTQ1_0 批阈 GGML_OPENCL_PTQ10_MM_N 是 OpenCL 专属 env，Vulkan 另查 `mul_mat` 分支）；
+   - 先排除"拿基线 4.33 tok/s 对照 27B/别的量化"的**参照错位**。
+4. 若 config 全对纯慢：`test-backend-ops -b Vulkan0 -o MUL_MAT_HADAMARD`
+   及 `-o MUL_MAT`/`MUL_MAT_PTQ1_0` 单算子计时，定位瓶颈算子。
+
 ## 环境备忘
 
 - 设备 bf1552ef = 25053RT47C（Adreno 825）；模型在 /storage/emulated/0/TongYiLite/models/
