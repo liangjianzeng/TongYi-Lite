@@ -5834,7 +5834,18 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     const bool can_use_fwht = device->driver_id != vk::DriverId::eIntelProprietaryWindows ||
         !ggml_vk_intel_windows_driver_in_range(device->properties.driverVersion, 101, 8509, 101, 8860);
     if (can_use_fwht) {
-        const bool use_subgroup = device->subgroup_basic && device->subgroup_shuffle;
+        // FWHT sits on the Bonsai-2 (prism.hadamard) tied-output head and runs on
+        // every token. Turnip gen8 (Adreno 825) is proven to miscompile subgroup
+        // *arithmetic* reductions (GGML_VK_NO_SUBGROUP forces subgroup_arithmetic
+        // = false), and the FWHT butterfly uses subgroup *shuffle* (subgroupShuffle
+        // Xor) which has never been verified on Turnip. Gate the subgroup FWHT
+        // variant behind the same drug: gated off, the else branch below builds
+        // the fwht_shmem_* variants (correct, slower). Once a device passes the
+        // MUL_MAT_HADAMARD test-backend-ops suite, GGML_VK_FWHT_SUBGROUP=1 via
+        // vk_flags.conf re-enables the subgroup variant for A/B.
+        const bool use_subgroup = (device->subgroup_basic && device->subgroup_shuffle &&
+                                   device->subgroup_arithmetic) ||
+                                  getenv("GGML_VK_FWHT_SUBGROUP") != nullptr;
         int idx = 0;
         const uint32_t sg = std::max(device->subgroup_size, 1u);
         for (uint32_t n : {64, 128, 256, 512, 1024, 2048, 4096, 8192}) {
