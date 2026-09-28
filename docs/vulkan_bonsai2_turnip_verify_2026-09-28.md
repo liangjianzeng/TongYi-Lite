@@ -47,7 +47,9 @@ Turnip 直载 = `GGML_VK_TURNIP=/data/local/tmp/vkptq/libturnip_freedreno.so`（
   FA 全线错（sinks=0/1 共 2405 FAIL）但 `-fa off` 同乱已排除；其余算子族（ROPE/NORM/SOFTMAX/GLU/
   GET_ROWS/CPY…）全绿。原厂对照仅 4 个 `GET_ROWS(iq4_xs)` FAIL（上游已知，与 Bonsai-2 无关）。
 - hadamard 宽度盲区假设**证伪**：tbo 补 4096/8192 用例后 `MUL_MAT_HADAMARD` 29/29 全绿（shmem）。
-- 大 buffer（>4GB）假设：Turnip + `-ngl 16`（GPU buffer ~2GB）输出亦异常，实验中止，**未定案**。
+- 大 buffer（>4GB）假设**弱化**：Turnip + `-ngl 16`（GPU buffer ~2GB）输出全 `0000…`（32 token 恒同值）
+  ——仍异常但错误模式随卸载层数改变（-ngl 99 多语言碎片 → -ngl 16 恒零），
+  指向 GPU/CPU 边界层传递或误差累积，而非单一 buffer 缺陷。
 - **下一步（最快分叉判定）**：用 App 真身（spike 分支 APK：shader 与 0.2.3 验证环境同源、
   JNI 自动注入三药+Turnip）跑 Bonsai-2 e2e——App 乱 → 树/代码层问题；App 连贯 → CLI 交叉构建
   环境差异（NDK glslc vs 验证环境 shaderc v2026.3，0.2.2 文档明示 glslc 版本敏感性）。
