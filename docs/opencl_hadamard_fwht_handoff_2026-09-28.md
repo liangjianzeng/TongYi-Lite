@@ -157,11 +157,30 @@ tbo 单算子测试覆盖不到拆图/SoA repack 全图路径 → **app 侧 Open
   launch+同步）。Vulkan 已实现 FWHT 仍 0.2 t/s → hadamard 非主导因素。
   优化方向：减少每 token 算子数（算子融合/少同步），而非继续修单算子内核。
 
-**下次插线复现清单（OpenCL 优先）：**
-1. 重跑 oc_repro 同参数，确认加载卡死必现；试 `-ngl 32`（≤5616MB 可放下）对照——
-   若小 offload 能跑，说明卡死在大 offload/拆图 repack 的 submit 上。
-2. app 切 OpenCL 复现错答并抓 logcat（`[handleLoadModel]` + GGML/OpenCL 输出）。
-3. CPU 后端同 prompt 记 tok/s，量化"不如 CPU"差距。
+## 2026-09-29 插线复现结果（全部日志已拷本机 vkptq_logs/）
+
+同 prompt「你好」、`-n 16 -ub 16 -c 2048 -st --no-warmup` 横向对照（Adreno 825 真机，27B PTQ1_0 5807 MiB）：
+
+| 后端 | 结果 | Prompt | Generation |
+|---|---|---|---|
+| OpenCL `-ngl 32`（约 4.7GB，放得下） | ✅ 连贯中文（"用户用中文说了'你好'…"） | 0.1 t/s | 0.1 t/s |
+| OpenCL `-ngl 99`（5807>5616MB） | ❌ **加载死锁 2/2 必现**（`adreno_drawctxt_wait`，90s 内 CPU 0.2 ticks） | — | — |
+| CPU `-ngl 0` | ✅ 连贯中文 | 0.3 t/s | 0.1 t/s |
+| Vulkan（9-28 vendor / ndk 库 e2e） | ✅ 连贯 | 0.6~1.5 t/s | 0.2~0.3 t/s |
+
+**定案：**
+1. **OpenCL 数值无罪**：`-ngl 32` 全图（含全部 hadamard 节点）跑通且连贯 →
+   app 侧"Kotler's model"错答只发生在**超容量拆图路径**（ngl=100 时 5807>5616MB，
+   sched 拆图 + 加载期 GPU submit 死锁/异常）。app 修复方向：OpenCL 后端加载前
+   按设备显存限层（或超限直接回退 CPU），可同时消掉死锁和错答。
+2. **CLI 层面"GPU 不如 CPU"不成立**：decode 三者 0.1~0.3 t/s 同档（都烂，
+   瓶颈是每算子 ~6ms launch/同步开销）；GPU 的 prefill（0.6~1.5）快于 CPU（0.3）。
+   app 里 OpenCL 16.5 s/tk 是死锁路径的病态值，不是 OpenCL 正常水平。
+3. Vulkan 今日复跑（`vulkan_e2e_final.log`）在 `createComputePipeline: ErrorUnknown`
+   崩溃——与 9-28 ndk 库 e2e 连贯矛盾，差异为 `-c 2048`/未显式 `-fa on`；
+   app 用 FA=off 不受影响，留待下次插线单独查。
+
+**剩余待办**：app 侧 OpenCL 复现错答 + 抓 logcat（`[handleLoadModel]`）验证定案 1。
 
 ## 环境备忘
 
