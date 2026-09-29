@@ -180,7 +180,14 @@ tbo 单算子测试覆盖不到拆图/SoA repack 全图路径 → **app 侧 Open
    崩溃——与 9-28 ndk 库 e2e 连贯矛盾，差异为 `-c 2048`/未显式 `-fa on`；
    app 用 FA=off 不受影响，留待下次插线单独查。
 
-**剩余待办**：app 侧 OpenCL 复现错答 + 抓 logcat（`[handleLoadModel]`）验证定案 1。
+**剩余待办**：~~app 侧复现~~ → **已完成（10:15 logcat，app_load1.log）**：
+`[handleLoadModel] gpuLayers=100, gpuBackend=opencl, nCtx=4096` →
+`load_tensors: offloaded 65/65 layers to GPU` + `global mem size: 5616 MB`、
+`n_ubatch = 512 (GPU)`、`flash_attn = disabled`——**app 就是跑在超容量全量拆图配置上**，
+与定案 1 完全吻合（加载后期 CPU 持续低占比烧 10+ 分钟未完成，与 CLI ngl99 卡死同路径）。
+**app 修复落地**：model_provider/JNI 在 OpenCL 加载前对比模型大小（或 offload 需求）与
+OpenCL `global mem size`（5616MB），超限则限层/回退 CPU，同时消掉死锁与错答；
+Vulkan（15329MB）不受此限。
 
 ## 环境备忘
 
