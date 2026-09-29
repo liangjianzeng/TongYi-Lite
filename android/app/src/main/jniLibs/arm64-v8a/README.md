@@ -15,3 +15,15 @@
   回原厂驱动。
 - **更新方法**: 从上游替换本文件后，务必更新本 README 的来源版本与 SHA256。
   替换属驱动行为变更，需真机跑 MUL_MAT/HADAMARD tbo + e2e 回归再合入。
+
+## libhardware.so — app 命名空间 libhardware 存根（配套 turnip 依赖）
+
+- **为什么存在**: turnip 的 DT_NEEDED 含 `libhardware.so`（Android HAL 库），而
+  App 进程 classloader 命名空间不能 dlopen 系统 HAL 库 → ggml-vulkan 按
+  `GGML_VK_TURNIP` dlopen turnip 时依赖解析失败，整个 Vulkan 后端不可用、
+  回落 CPU。打进同名存根后依赖解析在 app 自己的 lib 目录命中它，dlopen 成功。
+- **符号面**: 仅导出 turnip 实际 import 的 `hw_get_module`（返回 -ENOENT；
+  gralloc/AHardwareBuffer 导入路径 LLM 推理不走，调用方按返回值优雅跳过）。
+  源码 `stub_hardware.c`，NDK clang 编译，SONAME 与系统库同名。
+- **注意**: 若后续换上游 turnip 新增 libhardware 符号 import，需同步扩充存根；
+  真机验收 = 任意模型 Vulkan 加载不再「Vulkan 不可用，回落 CPU」。

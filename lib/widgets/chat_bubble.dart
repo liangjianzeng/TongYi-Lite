@@ -264,10 +264,13 @@ class ChatBubble extends StatelessWidget {
 
   /// 性能指标：首Tok / 视觉(仅视觉) / 耗时 / 速率。
   /// 例：'首Tok 1.2s · 视觉 3.4s · 耗时 5.3s · 14.5 tok/s'
+  /// 首Tok=0（智能体回答无单步首Tok语义）时省略，显示 '耗时 X · Y tok/s'。
   String _formatStats(InferenceStats s) {
-    final first = s.firstTokenMs >= 1000
-        ? '${(s.firstTokenMs / 1000).toStringAsFixed(1)}s'
-        : '${s.firstTokenMs}ms';
+    final first = s.firstTokenMs > 0
+        ? (s.firstTokenMs >= 1000
+            ? '首Tok ${(s.firstTokenMs / 1000).toStringAsFixed(1)}s · '
+            : '首Tok ${s.firstTokenMs}ms · ')
+        : '';
     final total = s.totalMs >= 1000
         ? '${(s.totalMs / 1000).toStringAsFixed(1)}s'
         : '${s.totalMs}ms';
@@ -283,6 +286,6 @@ class ChatBubble extends StatelessWidget {
             ? ' · 听音 ${(s.audioMs / 1000).toStringAsFixed(1)}s'
             : ' · 听音 ${s.audioMs}ms')
         : '';
-    return '首Tok $first$vision$audio · 耗时 $total · $rate tok/s';
+    return '$first$vision$audio · 耗时 $total · $rate tok/s';
   }
 }

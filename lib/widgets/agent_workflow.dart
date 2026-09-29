@@ -579,10 +579,55 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
   Ticker? _ticker;
   int _lastSec = -1;
 
+  /// 流式长内容自动跟随：内容变长时滚到可见区底部，直到用户手动上滑。
+  final ScrollController _scroll = ScrollController();
+  bool _userScrolledUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
   @override
   void dispose() {
     _ticker?.dispose();
+    _scroll.dispose();
     super.dispose();
+  }
+
+  /// 用户滚动时判定是否离开了底部：离开 = 暂停跟随；滚回底部 = 恢复。
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final atBottom = pos.maxScrollExtent == 0 ||
+        pos.pixels >= pos.maxScrollExtent - 4;
+    if (_userScrolledUp == atBottom) {
+      _userScrolledUp = !atBottom;
+    }
+  }
+
+  /// 流式中把最新内容滚进可见区（仅当仍在跟随状态）。
+  void _followStream() {
+    if (!mounted || _userScrolledUp || !_scroll.hasClients) return;
+    final pos = _scroll.position;
+    if (pos.maxScrollExtent > 0 && pos.pixels < pos.maxScrollExtent) {
+      _scroll.jumpTo(pos.maxScrollExtent);
+    }
+  }
+
+  @override
+  void didUpdateWidget(ThinkingStreamCard old) {
+    super.didUpdateWidget(old);
+    // 内容变长（流式推进）时跟随底部；同一内容仅头部耗时刷新的重建
+    // 不触发（length 相同），避免无谓跳转。
+    if (widget.ui.thinking.length != old.ui.thinking.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _followStream());
+    }
+    // 回合结束 / 答案开始 → 自动闭合；下次再流式时恢复跟随。
+    if (!widget.ui.running || widget.answerVisible) {
+      _userScrolledUp = false;
+    }
   }
 
   /// 思考开始时记录起点并开秒级 Ticker（头部耗时走秒更新）。
@@ -674,6 +719,7 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 150),
                   child: SingleChildScrollView(
+                    controller: _scroll,
                     child: Text(
                       tail,
                       style: TextStyle(

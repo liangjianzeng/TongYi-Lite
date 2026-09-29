@@ -400,6 +400,37 @@ void main() {
       expect(find.text('正在推理的内容'), findsNothing);
     });
 
+    testWidgets('思考流式长内容：自动滚动到底部，用户上滑后暂停跟随', (tester) async {
+      // 流式内容超过卡片 150px 可见区时，最新输出必须滚进可见区
+      //（用户反馈：内容长了之后最新输出跑到可见区外）。
+      String lines(int n) =>
+          List.generate(n, (i) => '流式思考第$i行内容').join('\n');
+      await pump(tester, AgentUiState(running: true, thinking: lines(3)),
+          isLive: true);
+      await tester.pump(); // 等首帧：didUpdateWidget 的 post-frame 跟随执行
+      // 内容变长 → 自动滚到底部。
+      await pump(tester,
+          AgentUiState(running: true, thinking: lines(60)), isLive: true);
+      await tester.pump();
+
+      final scrollable = tester.widget<Scrollable>(find.byType(Scrollable).first);
+      final pos = scrollable.controller!.position;
+      expect(pos.maxScrollExtent, greaterThan(0)); // 内容确实超出可见区
+      expect(pos.pixels, pos.maxScrollExtent); // 已跟随到底部
+
+      // 用户手动上滑（查看早前内容）→ 暂停跟随。
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, 120));
+      await tester.pump();
+      final before = scrollable.controller!.position.pixels;
+      expect(before, lessThan(scrollable.controller!.position.maxScrollExtent));
+
+      // 流式继续变长 → 位置保持不动（不抢用户的阅读位置）。
+      await pump(tester,
+          AgentUiState(running: true, thinking: lines(80)), isLive: true);
+      await tester.pump();
+      expect(scrollable.controller!.position.pixels, before);
+    });
+
     testWidgets('live 显示重试/压缩横幅，非 live 不显示', (tester) async {
       final liveUi = const AgentUiState(running: true, retryAttempt: 2, compacted: true);
       await pump(tester, liveUi, isLive: true);
