@@ -8,13 +8,18 @@
 package com.dgxspark.tongyilite
 
 import android.app.ActivityManager
+import android.content.ContentValues
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
+import android.webkit.MimeTypeMap
 import androidx.annotation.NonNull
+import androidx.core.content.FileProvider
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import com.dgxspark.tongyilite.service.InferenceService
@@ -120,6 +125,115 @@ class MainActivity : FlutterActivity() {
                 "runScript"   -> handleRunPythonScript(call, result)
                 else         -> result.notImplemented()
             }
+        }
+
+        // 文件产物桥（WP6）：智能体报告/文档导出到公共下载目录 + 系统查看器打开。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/files"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "exportFile" -> handleExportFile(call, result)
+                "openFile"   -> handleOpenFile(call, result)
+                else         -> result.notImplemented()
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 文件产物桥（WP6）
+    // ------------------------------------------------------------------
+
+    /** 按扩展名推断 MIME（MimeTypeMap 缺 md/csv/svg 等时人工兜底）。 */
+    private fun mimeFor(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?: when (ext) {
+                "md" -> "text/markdown"
+                "csv" -> "text/csv"
+                "html", "htm" -> "text/html"
+                "json" -> "application/json"
+                "svg" -> "image/svg+xml"
+                "log" -> "text/plain"
+                else -> "application/octet-stream"
+            }
+    }
+
+    /**
+     * exportFile：把工作区文件复制到公共下载目录 `Download/TongYi-Lite/`。
+     * targetSdk 33+ 必须走 MediaStore（直接 java.io 写公共目录会被拒绝）。
+     * 返回 content:// URI 字符串（openFile 可直接用它打开）。
+     */
+    private fun handleExportFile(call: MethodCall, result: MethodChannel.Result) {
+        val src = call.argument<String>("src")?.trim().orEmpty()
+        val name = call.argument<String>("name")?.trim().orEmpty()
+            .ifEmpty { File(src).name }
+        if (src.isEmpty() || !File(src).isFile) {
+            result.error("NOT_FOUND", "源文件不存在：$src", null)
+            return
+        }
+        Thread {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeFor(name))
+                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/TongYi-Lite")
+                }
+                val uri = contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+                )
+                if (uri == null) {
+                    runOnMain { result.error("EXPORT_FAILED", "MediaStore 写入被拒绝", null) }
+                    return@Thread
+                }
+                contentResolver.openOutputStream(uri)!!.use { out ->
+                    File(src).inputStream().use { it.copyTo(out) }
+                }
+                logI("handleExportFile", "exported $name -> $uri")
+                runOnMain { result.success(uri.toString()) }
+            } catch (e: Exception) {
+                logE("handleExportFile", "export failed: ${e.message}", e)
+                runOnMain { result.error("EXPORT_FAILED", "导出失败：${e.message}", null) }
+            }
+        }.start()
+    }
+
+    /**
+     * openFile：用系统查看器打开产物。接受 content:// URI（exportFile 返回值）
+     * 或绝对文件路径（走 FileProvider，限应用目录内）。带图查看 html/png/pdf 等。
+     */
+    private fun handleOpenFile(call: MethodCall, result: MethodChannel.Result) {
+        val target = call.argument<String>("path")?.trim().orEmpty()
+        if (target.isEmpty()) {
+            result.error("NO_PATH", "缺少 path 参数", null)
+            return
+        }
+        try {
+            val uri: Uri
+            val mime: String
+            if (target.startsWith("content:")) {
+                uri = Uri.parse(target)
+                mime = contentResolver.getType(uri) ?: "*/*"
+            } else {
+                val f = File(target)
+                if (!f.isFile) {
+                    result.error("NOT_FOUND", "文件不存在：$target", null)
+                    return
+                }
+                uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+                mime = mimeFor(f.name)
+            }
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime)
+                .addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        or Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            startActivity(intent)
+            result.success(true)
+        } catch (e: Exception) {
+            logE("handleOpenFile", "open failed: ${e.message}", e)
+            result.error("OPEN_FAILED", "无法打开（未安装可查看该格式的应用？）：${e.message}", null)
         }
     }
 

@@ -25,10 +25,16 @@ import '../agent/protocol/native_tool_protocol.dart' show NativeToolProtocol;
 import '../agent/subagents/in_process.dart' show InProcessSubagentProvider;
 import '../agent/subagents/subagent_tool.dart' show createSubagentTool;
 import '../agent/hooks/hooks.dart' show AgentHooks;
+import '../agent/skills/load_skill_tool.dart' show createLoadSkillTool;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
 import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
-import '../agent/session/store.dart' show JsonlSessionStore;
+import '../agent/session/store.dart'
+    show
+        JsonlSessionStore,
+        kAgentTraceMessagePrefix,
+        encodeAgentTraceMessage;
+import '../agent/session/event.dart' show kEventAssistantMessage;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/openai_service.dart';
@@ -59,7 +65,73 @@ final storageServiceProvider = Provider<StorageService>((ref) => StorageService(
 
 /// Currently selected model ID. Defaults to Qwen3.5-2B (MTP) which is the
 /// recommended balance of quality, speed and memory usage for most phones.
+///
+/// ⚠️ 这只是 UI 层的"上次选中"占位，**不得**作为隐式加载触发器：
+/// 用户没勾默认模型时，任何路由都不许拿它去 loadModel（2026-09-29
+/// 修复"智能体对话莫名自动加载本地模型"——占位 id 曾被兜底路径当真）。
 final currentModelIdProvider = StateProvider<String>((ref) => 'qwen3.5-2b-mtp-ud-q4_k_xl');
+
+// ---------------------------------------------------------------------------
+// 生成路由决策（纯函数，可机检）
+// ---------------------------------------------------------------------------
+
+/// 一次生成的路由计划。
+class GenerationRoutePlan {
+  final bool useApi;
+
+  /// 本地路线应加载/使用的模型 id（useApi=false 时非空）。
+  final String? localModelId;
+
+  /// 非空 = 无法路由（调用方应直接把该文案返回给用户，不得再触发加载）。
+  final String? error;
+
+  const GenerationRoutePlan._(this.useApi, this.localModelId, this.error);
+  const GenerationRoutePlan.api() : this._(true, null, null);
+  const GenerationRoutePlan.local(String id) : this._(false, id, null);
+  const GenerationRoutePlan.failure(String message) : this._(false, null, message);
+}
+
+/// 路由规则（普通聊天与智能体"跟随默认"共用）：
+///
+/// - **无本地意图**（当前没加载任何模型 且 未勾选默认模型）→ 有激活 API 走
+///   API；没有 API 也不许隐式加载本地模型——出厂占位 id 不是用户意图，
+///   由此修复"没勾默认却莫名加载 qwen 占位模型、把 API 驱动带偏"的 bug。
+/// - **有本地意图** → local-first：目标 = 已加载模型 > 默认勾选 > 上次选中；
+///   本地加载失败再回退 API（由调用方执行，回退语义与此前一致）。
+GenerationRoutePlan planGenerationRoute({
+  required InferenceSettings settings,
+  required bool localLoaded,
+  required String? loadedModelId,
+  required String fallbackModelId,
+}) {
+  final defaultId = settings.defaultModelId;
+  final hasDefault = defaultId != null && defaultId.isNotEmpty;
+  if (!localLoaded && !hasDefault) {
+    final activeApi = settings.activeApiModel();
+    if (activeApi != null) return const GenerationRoutePlan.api();
+    return const GenerationRoutePlan.failure(
+        '[未配置任何模型：请在 设置→模型管理 勾选默认模型，或在 设置→API 接入 配置并启用]');
+  }
+  final target = localLoaded
+      ? (loadedModelId ?? (hasDefault ? defaultId : fallbackModelId))
+      : (hasDefault ? defaultId : fallbackModelId);
+  return GenerationRoutePlan.local(target);
+}
+
+/// 显式本地驱动（智能体 agentModelSource='local'）的目标模型 id：
+/// agentModelId > 默认勾选 > 已加载模型；返回 null = 无明确本地意图，
+/// 调用方必须报错而不是隐式加载出厂占位模型。
+String? resolveExplicitLocalTarget({
+  required String? agentModelId,
+  required String? defaultModelId,
+  required bool localLoaded,
+  required String? loadedModelId,
+}) {
+  if (agentModelId != null && agentModelId.isNotEmpty) return agentModelId;
+  if (defaultModelId != null && defaultModelId.isNotEmpty) return defaultModelId;
+  if (localLoaded) return loadedModelId;
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Conversations
@@ -203,26 +275,25 @@ class ChatNotifier extends StateNotifier<bool> {
           imagePath: imagePath, audioPath: audioPath);
     }
 
-    final targetModelId = _ref.read(currentModelIdProvider);
+    var targetModelId = _ref.read(currentModelIdProvider);
     final activeApi = settings.activeApiModel();
 
-    // 尊重用户选择：若用户「不运行本地模型」且「未设置默认模型」，
-    // 则必须直接走 API 接入——绝不再自动去加载本地模型（否则 API 永远不会
-    // 被触发）。仅当用户有本地意图（已加载某模型，或设置了默认模型）时才
-    // 走 local-first：本地可加载则优先本地，本地不可用才回退 API。
-    final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
-    final hasDefault = settings.defaultModelId != null;
-
-    var ok = true;
-    var useApi = false;
-    if (activeApi != null && !hasLocalLoaded && !hasDefault) {
-      useApi = true; // 无本地意图 → 必须走 API
-    } else {
-      // Local-first policy: try the local model first; ONLY when it is
-      // unavailable (not cached / load failed) and an API model is activated
-      // do we fall back to the remote OpenAI-compatible endpoint.
-      ok = await ensureModelLoaded(targetModelId);
-      if (!ok && activeApi != null) {
+    // 尊重用户选择：无本地意图（未加载模型且未勾选默认）→ 绝不自动加载
+    // 本地模型，有激活 API 走 API、没有则明确报错指引；有本地意图才
+    // local-first（本地不可用回退 API）。
+    final managerState = _ref.read(modelManagerProvider);
+    final plan = planGenerationRoute(
+      settings: settings,
+      localLoaded: managerState.isLoaded,
+      loadedModelId: managerState.modelId,
+      fallbackModelId: targetModelId,
+    );
+    if (plan.error != null) return plan.error!;
+    var useApi = plan.useApi;
+    if (plan.localModelId != null) {
+      targetModelId = plan.localModelId!;
+      final ok = await ensureModelLoaded(targetModelId);
+      if (!ok && settings.activeApiModel() != null) {
         useApi = true; // 本地不可用 → 走 API 后备
       } else if (!ok) {
         return '[模型加载失败，请在设置中重新下载并加载]';
@@ -570,19 +641,41 @@ class ChatNotifier extends StateNotifier<bool> {
       }
       useApi = true;
     } else if (settings.agentModelSource == 'local') {
-      targetModelId = settings.agentModelId ?? targetModelId;
+      // 显式本地驱动：只认用户明确指定过的 id（agentModelId > 默认勾选 >
+      // 已加载模型）；都没有 → 明确报错，绝不隐式加载出厂占位模型
+      //（无默认勾选不许自动加载，API 驱动场景曾被它带偏）。
+      final managerState = _ref.read(modelManagerProvider);
+      final intended = resolveExplicitLocalTarget(
+        agentModelId: settings.agentModelId,
+        defaultModelId: settings.defaultModelId,
+        localLoaded: managerState.isLoaded,
+        loadedModelId: managerState.modelId,
+      );
+      if (intended == null || intended.isEmpty) {
+        return '[智能体驱动=本地模型，但未指定具体模型：'
+            '请在 设置→智能体→驱动模型 重新选择，或改为跟随默认/API]';
+      }
+      targetModelId = intended;
       final ok = await ensureModelLoaded(targetModelId);
       if (!ok) {
         return '[模型加载失败，请在设置中重新下载并加载]';
       }
       useApi = false;
     } else {
-      final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
-      final hasDefault = settings.defaultModelId != null;
-      if (settings.activeApiModel() != null && !hasLocalLoaded && !hasDefault) {
-        useApi = true;
+      // 跟随默认：与普通聊天同一套路由规则（planGenerationRoute）。
+      final managerState = _ref.read(modelManagerProvider);
+      final plan = planGenerationRoute(
+        settings: settings,
+        localLoaded: managerState.isLoaded,
+        loadedModelId: managerState.modelId,
+        fallbackModelId: targetModelId,
+      );
+      if (plan.error != null) return plan.error!;
+      useApi = plan.useApi;
+      if (plan.useApi) {
         activeApi = settings.activeApiModel();
       } else {
+        targetModelId = plan.localModelId!;
         final ok = await ensureModelLoaded(targetModelId);
         if (!ok) {
           final fallback = settings.activeApiModel();
@@ -624,7 +717,20 @@ class ChatNotifier extends StateNotifier<bool> {
     final agentModelKey =
         useApi ? (activeApi?.model ?? targetModelId) : targetModelId;
 
+    // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
+    // 提前构建（与 load_skill 工具注册、agent 注入共用同一实例）。
+    final userSkills = await loadUserSkills();
+    final skillProvider = userSkills.isEmpty
+        ? SkillProvider()
+        : SkillProvider(
+            skills: [...loadBuiltinSkills(), ...userSkills]);
+
     final registry = _buildAgentRegistry(settings, agentModelKey);
+    // WP2c：API 档且有可用技能 → 注册 load_skill，模型按需拉技能全文
+    // （本地档跳过：小模型多一个工具多一分协议出错面）。
+    if (useApi && skillProvider.count > 0) {
+      registry.register(createLoadSkillTool(skillProvider));
+    }
 
     // 能力快照（Phase 3）：API 声明原生工具调用 → selectProtocol 选出
     // NativeToolProtocol（tools 进请求体）；本地走 prompt-json 文本协议。
@@ -637,26 +743,35 @@ class ChatNotifier extends StateNotifier<bool> {
       protocol: protocol,
       modelId: agentModelKey,
     );
+    // 双场景档：local/API 各自一套循环参数（API 档吃满云端预算，
+    // local 档维持端侧省 token 策略）；档内数值仍可在设置里改。
+    final agentProfile = settings.agentProfileFor(useApi: useApi);
     final newConfig = loopConfig.AgentConfig(
-      maxStepsPerTurn: settings.agentMaxRounds,
-      maxTokensPerRound: settings.agentTokensPerRound,
-      temperature: settings.agentTemperature,
-      toolTimeout: Duration(milliseconds: settings.agentToolTimeoutMs),
-      allowParallelTools: settings.agentAllowParallelTools,
-      maxParallel: settings.agentMaxParallel,
+      maxStepsPerTurn: agentProfile.maxRounds,
+      maxTokensPerRound: agentProfile.tokensPerRound,
+      temperature: agentProfile.temperature,
+      toolTimeout: Duration(milliseconds: agentProfile.toolTimeoutMs),
+      allowParallelTools: agentProfile.allowParallelTools,
+      maxParallel: agentProfile.maxParallel,
+      // 主动压缩/分阶段预算只对端侧小上下文有意义（WP3 消费）。
+      contextTokenBudget: useApi ? null : (settings.agentNctx * 3) ~/ 4,
+      maxTokensFinalRound: useApi ? null : 2048,
     );
     // 按路由选 adapter（local/API），各自冻结能力快照。
+    // 思考失控守卫阈值共用一份设置（WP4：可调，默认 6000 字）。
     final LlmAdapter engine = useApi
         ? OpenAiAdapter(
             protocol: protocol,
             capabilities: caps,
             openAi: _ref.read(openAiServiceProvider),
             apiModel: activeApi,
+            maxThinkingChars: settings.agentThinkingMaxChars,
           )
         : LocalEngineAdapter(
             inference: _inference,
             protocol: protocol,
             capabilities: caps,
+            maxThinkingChars: settings.agentThinkingMaxChars,
           );
 
     // [NewAgent] 新 seam 活跃标记（验证 Phase 3 代码路径；验证后可删）
@@ -667,10 +782,16 @@ class ChatNotifier extends StateNotifier<bool> {
     );
 
     // ---- 历史 → 事件日志（导入，log-only 标记）----
+    // 🔧 轨迹信封（kAgentTraceMessagePrefix 前缀）要放行：importFromMessages
+    // 会把它还原成真实 assistant(toolCalls)/tool/result 事件（WP1a）；
+    // 其余 🔧 活动消息（纯 UI 用）照旧排除。
     final allMessages =
         await _storage.getMessages(conversationId, limit: 200);
     final history = allMessages
-        .where((m) => m.content.isNotEmpty && !_isToolActivityMessage(m))
+        .where((m) =>
+            m.content.isNotEmpty &&
+            (!_isToolActivityMessage(m) ||
+                m.content.startsWith(kAgentTraceMessagePrefix)))
         .toList();
     final sessionLog =
         _sessionStore.importFromMessages(conversationId, history);
@@ -719,6 +840,16 @@ class ChatNotifier extends StateNotifier<bool> {
       lastThinkingPush = now;
       agentUi.setThinking(thinking);
     });
+    // WP5：生成过程状态流（toolgen|chars|preview）——工具调用参数生成期
+    // 可见流/思考流都为空，UI 靠它显示"正在生成工具调用参数…已 N 字"。
+    final statusController = StreamController<String>.broadcast();
+    final statusSub = statusController.stream.listen((line) {
+      if (!line.startsWith('toolgen|')) return;
+      final parts = line.split('|');
+      final chars = int.tryParse(parts.length > 1 ? parts[1] : '') ?? 0;
+      final preview = parts.length > 2 ? parts[2] : '';
+      agentUi.setToolGen(chars: chars, preview: preview);
+    });
     final session = _AgentActivitySession(
       conversationId: conversationId,
       storage: _storage,
@@ -759,12 +890,6 @@ class ChatNotifier extends StateNotifier<bool> {
       final agentsMd = await loadAgentsMd();
       agentsMdText = agentsMd.content;
     } on Exception catch (_) {}
-    // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
-    final userSkills = await loadUserSkills();
-    final skillProvider = userSkills.isEmpty
-        ? SkillProvider()
-        : SkillProvider(
-            skills: [...loadBuiltinSkills(), ...userSkills]);
     // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
     final hooks = AgentHooks();
     // ---- 主循环 ----
@@ -806,6 +931,7 @@ class ChatNotifier extends StateNotifier<bool> {
         audioPath: audioPath,
         onToken: tokenController,
         onThinking: thinkingController,
+        onStatus: statusController,
       );
       // 只取**本轮**产出的答案；失败时为空——绝不回退历史旧回复冒充本回复。
       answer = agent.lastTurnAnswer;
@@ -822,10 +948,13 @@ class ChatNotifier extends StateNotifier<bool> {
       _ref.read(isGeneratingProvider.notifier).state = false;
       // Phase 6：停止订阅本 turn 事件流（状态保留供面板展示本轮末态）。
       _ref.read(agentUiStateProvider.notifier).detach();
+      agentUi.setToolGen(chars: 0); // WP5：清工具参数生成提示
       sub?.cancel();
       await thinkingSub.cancel();
+      await statusSub.cancel();
       tokenController.close();
       unawaited(thinkingController.close());
+      unawaited(statusController.close());
     }
 
     // 最终占位文本 = 本轮最终回答（turn 末位 assistant/message）。
@@ -866,6 +995,39 @@ class ChatNotifier extends StateNotifier<bool> {
           tokPerSec: n * 1000 / gms,
         );
       }
+    }
+    // WP2e：API 路线 token 用量观测（前缀缓存命中评估打底；
+    // usage 由 SSE 末块透传 → LlmResult.usage → assistant 事件）。
+    if (useApi) {
+      Map<String, dynamic>? usage;
+      for (final e in sessionLog.rawEvents) {
+        final u = e.data['usage'];
+        if (e.type == kEventAssistantMessage && u is Map<String, dynamic>) {
+          usage = u;
+        }
+      }
+      if (usage != null) {
+        logManager.appendInferenceLog(
+          'API 用量 | prompt=${usage['prompt_tokens'] ?? '?'} '
+          'completion=${usage['completion_tokens'] ?? '?'}'
+          '${usage['prompt_cache_hit_tokens'] != null ? ' 缓存命中=${usage['prompt_cache_hit_tokens']}' : ''}',
+        );
+      }
+    }
+    // WP1a：本轮工具轮轨迹以信封消息落库，下一轮导入时还原为真实
+    // assistant(toolCalls)/tool/result 事件——修"turn 间失忆"（模型每轮
+    // 忘掉上一轮调过什么工具）。createdAt 置于最终回答之前 1ms，
+    // 保证导入顺序 = 工具轮轨迹 → 最终回答（createdAt ASC 排序）。
+    final traceContent = encodeAgentTraceMessage(sessionLog);
+    if (traceContent != null) {
+      await _storage.saveMessage(ChatMessage(
+        id: '${assistantMsg.id}-trace',
+        conversationId: conversationId,
+        role: MessageRole.assistant,
+        content: traceContent,
+        timestamp:
+            assistantMsg.timestamp.subtract(const Duration(milliseconds: 1)),
+      ));
     }
     assistantMsg = assistantMsg.copyWith(
       content: answer,
@@ -1104,7 +1266,11 @@ class _AgentActivitySession {
       if (m.role == MessageRole.assistant &&
           m.content.startsWith('🔧 正在调用')) {
         final mark = activity.isFailed ? '⚠️' : '✓';
-        final summary = _summarizeToolResult(activity.result);
+        // export_file 的摘要必须保留完整 content:// URI——历史回合工具卡
+        // 的「打开」按钮靠它（截断到 300 字保路径）。
+        final summary = activity.name == 'export_file'
+            ? _summarizeToolResult(activity.result, max: 300)
+            : _summarizeToolResult(activity.result);
         await storage.saveMessage(m.copyWith(
           content: '🔧 ${activity.name} $mark$summary',
           isStreaming: false,
@@ -1116,10 +1282,10 @@ class _AgentActivitySession {
 }
 
 /// 工具结果摘要：多行/长文本压缩为单行，截断到 ~60 字符（UI 展示用）。
-String _summarizeToolResult(String? result) {
+String _summarizeToolResult(String? result, {int max = 60}) {
   if (result == null || result.isEmpty) return '';
   final oneLine = result.replaceAll('\n', ' ').trim();
-  return oneLine.length <= 60 ? oneLine : '${oneLine.substring(0, 57)}…';
+  return oneLine.length <= max ? oneLine : '${oneLine.substring(0, max - 3)}…';
 }
 
 final chatNotifierProvider = StateNotifierProvider<ChatNotifier, bool>((ref) {

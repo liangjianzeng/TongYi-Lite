@@ -116,6 +116,33 @@ class InferenceSettings {
   /// 鐢熸垚娓╁害锛?~2锛岄粯璁?0.7锛夈€傚伐鍏峰喅绛栧缓璁亸浣庯紝鐩寸瓟鍦烘櫙鍙亸楂樸€?
   final double agentTemperature;
 
+  // ---- API 档智能体参数（独立于 local 档平铺键；双场景档分流）----
+  // local 档沿用上面 agentMaxRounds 等平铺键；API 档是云端大模型场景
+  // （大生成预算/并行工具/长超时），出厂默认对齐 AgentConfig.forRoute(api)。
+
+  /// API 档：工具循环轮次上限（1~24，默认 16）。
+  final int agentApiMaxRounds;
+
+  /// API 档：每步生成 token 预算（默认 8192，云端模型吃满思考与长回答）。
+  final int agentApiTokensPerRound;
+
+  /// API 档：生成温度（0~2，默认 0.7）。
+  final double agentApiTemperature;
+
+  /// API 档：单工具执行超时毫秒（默认 30000，联网类工具更宽裕）。
+  final int agentApiToolTimeoutMs;
+
+  /// API 档：是否允许并行工具调用（默认开）。
+  final bool agentApiAllowParallelTools;
+
+  /// API 档：并行执行上限（默认 4）。
+  final int agentApiMaxParallel;
+
+  /// 思考失控守卫阈值：思考块超长未闭合到该字符数即主动停流止损
+  ///（thinkingOverflow，确定性失败）。默认 6000；小模型易思考独白
+  /// 不停时会被掐断报"思考超长未闭合"——按模型调大（上限 65536）。
+  final int agentThinkingMaxChars;
+
   /// 瀛愪唬鐞嗗伐鍏凤紙subagent锛宻pawn/fork锛夋敞鍐屽紑鍏炽€傞粯璁ゅ紑锛?
   /// 涓嶅彉閲忓浐瀹氾紙娣卞害 鈮?2 / 瀛愪唬鐞嗗鎵规亽 never / 姣忓眰鐙珛棰勭畻锛夈€?
   final bool agentSubagentEnabled;
@@ -254,6 +281,13 @@ class InferenceSettings {
     this.agentAllowParallelTools = false,
     this.agentMaxParallel = 4,
     this.agentTemperature = 0.7,
+    this.agentApiMaxRounds = 16,
+    this.agentApiTokensPerRound = 8192,
+    this.agentApiTemperature = 0.7,
+    this.agentApiToolTimeoutMs = 30000,
+    this.agentApiAllowParallelTools = true,
+    this.agentApiMaxParallel = 4,
+    this.agentThinkingMaxChars = 6000,
     this.agentSubagentEnabled = true,
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
@@ -310,6 +344,25 @@ class InferenceSettings {
     return null;
   }
 
+  /// 双场景档生效参数视图：按驱动路线取 local 平铺键或 API 专键。
+  AgentProfile agentProfileFor({required bool useApi}) => useApi
+      ? AgentProfile(
+          maxRounds: agentApiMaxRounds,
+          tokensPerRound: agentApiTokensPerRound,
+          temperature: agentApiTemperature,
+          toolTimeoutMs: agentApiToolTimeoutMs,
+          allowParallelTools: agentApiAllowParallelTools,
+          maxParallel: agentApiMaxParallel,
+        )
+      : AgentProfile(
+          maxRounds: agentMaxRounds,
+          tokensPerRound: agentTokensPerRound,
+          temperature: agentTemperature,
+          toolTimeoutMs: agentToolTimeoutMs,
+          allowParallelTools: agentAllowParallelTools,
+          maxParallel: agentMaxParallel,
+        );
+
   InferenceSettings copyWith(
       {bool? enableGpu,
       int? gpuLayers,
@@ -343,6 +396,13 @@ class InferenceSettings {
       bool? agentAllowParallelTools,
       int? agentMaxParallel,
       double? agentTemperature,
+      int? agentApiMaxRounds,
+      int? agentApiTokensPerRound,
+      double? agentApiTemperature,
+      int? agentApiToolTimeoutMs,
+      bool? agentApiAllowParallelTools,
+      int? agentApiMaxParallel,
+      int? agentThinkingMaxChars,
       bool? agentSubagentEnabled,
       bool? agentCompactEnabled,
       bool? agentSpillEnabled,
@@ -403,6 +463,17 @@ class InferenceSettings {
           agentAllowParallelTools ?? this.agentAllowParallelTools,
       agentMaxParallel: agentMaxParallel ?? this.agentMaxParallel,
       agentTemperature: agentTemperature ?? this.agentTemperature,
+      agentApiMaxRounds: agentApiMaxRounds ?? this.agentApiMaxRounds,
+      agentApiTokensPerRound:
+          agentApiTokensPerRound ?? this.agentApiTokensPerRound,
+      agentApiTemperature: agentApiTemperature ?? this.agentApiTemperature,
+      agentApiToolTimeoutMs:
+          agentApiToolTimeoutMs ?? this.agentApiToolTimeoutMs,
+      agentApiAllowParallelTools:
+          agentApiAllowParallelTools ?? this.agentApiAllowParallelTools,
+      agentApiMaxParallel: agentApiMaxParallel ?? this.agentApiMaxParallel,
+      agentThinkingMaxChars:
+          agentThinkingMaxChars ?? this.agentThinkingMaxChars,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
@@ -464,6 +535,13 @@ class InferenceSettings {
         'agentAllowParallelTools': agentAllowParallelTools,
         'agentMaxParallel': agentMaxParallel,
         'agentTemperature': agentTemperature,
+        'agentApiMaxRounds': agentApiMaxRounds,
+        'agentApiTokensPerRound': agentApiTokensPerRound,
+        'agentApiTemperature': agentApiTemperature,
+        'agentApiToolTimeoutMs': agentApiToolTimeoutMs,
+        'agentApiAllowParallelTools': agentApiAllowParallelTools,
+        'agentApiMaxParallel': agentApiMaxParallel,
+        'agentThinkingMaxChars': agentThinkingMaxChars,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
@@ -535,6 +613,20 @@ class InferenceSettings {
           json['agentAllowParallelTools'] as bool? ?? false,
       agentMaxParallel: json['agentMaxParallel'] as int? ?? 4,
       agentTemperature: (json['agentTemperature'] as num?)?.toDouble() ?? 0.7,
+      agentApiMaxRounds:
+          (json['agentApiMaxRounds'] as num?)?.toInt() ?? 16,
+      agentApiTokensPerRound:
+          (json['agentApiTokensPerRound'] as num?)?.toInt() ?? 8192,
+      agentApiTemperature:
+          (json['agentApiTemperature'] as num?)?.toDouble() ?? 0.7,
+      agentApiToolTimeoutMs:
+          (json['agentApiToolTimeoutMs'] as num?)?.toInt() ?? 30000,
+      agentApiAllowParallelTools:
+          json['agentApiAllowParallelTools'] as bool? ?? true,
+      agentApiMaxParallel:
+          (json['agentApiMaxParallel'] as num?)?.toInt() ?? 4,
+      agentThinkingMaxChars:
+          (json['agentThinkingMaxChars'] as num?)?.toInt() ?? 6000,
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
@@ -645,6 +737,27 @@ class InferenceSettings {
     // 瑙?AGENTS.md 绾﹀畾锛夛紝鐢辩敤鎴峰湪妯″瀷鍒楄〃閲嶆柊閫愪釜寮€鍚€?
     return const {};
   }
+}
+
+/// 智能体双场景档生效参数视图（[InferenceSettings.agentProfileFor] 返回）。
+///
+/// 把 local 平铺键与 API 专键归一成同一口径，供 AgentConfig 构建消费。
+class AgentProfile {
+  final int maxRounds;
+  final int tokensPerRound;
+  final double temperature;
+  final int toolTimeoutMs;
+  final bool allowParallelTools;
+  final int maxParallel;
+
+  const AgentProfile({
+    required this.maxRounds,
+    required this.tokensPerRound,
+    required this.temperature,
+    required this.toolTimeoutMs,
+    required this.allowParallelTools,
+    required this.maxParallel,
+  });
 }
 
 /// 鍩轰簬鏈湴 JSON 鏂囦欢鐨勮交閲忚缃寔涔呭寲锛堜笉寮曞叆棰濆渚濊禆锛屽鐢?path_provider锛夈€?

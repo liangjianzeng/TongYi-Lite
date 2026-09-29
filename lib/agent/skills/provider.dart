@@ -87,6 +87,9 @@ final class SkillProvider {
       sb.writeln();
     }
     sb.writeln('</available_skills>');
+    // WP2c：目录 → 加载链路说明（正文此前无任何获取途径）。
+    sb.writeln('任务匹配某技能的 whenToUse 时，先调用 load_skill 工具'
+        '（name=技能名）获取完整指引，再按指引执行。');
     return sb.toString();
   }
 

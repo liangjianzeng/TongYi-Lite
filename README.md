@@ -1,6 +1,7 @@
 # TongYi-Lite 端侧离线 AI 智能体
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![v0.2.6](https://img.shields.io/badge/v0.2.6-8B5CF6)]
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)](https://flutter.dev)
 [![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)](https://developer.android.com)
 [![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)](https://github.com/ggerganov/llama.cpp)

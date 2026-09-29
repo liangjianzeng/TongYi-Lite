@@ -27,8 +27,12 @@ import '../protocol/tool_protocol.dart';
 import '../tool_definition.dart';
 
 /// 把 [ToolDefinition] 列表渲染为 OpenAI function 工具 schema。
+/// 工具 schema 按 name 排序后构建：请求体 tools 数组逐字节稳定，
+/// 是 OpenAI 兼容服务端**前缀缓存命中**的前提（每 turn 重建 registry
+/// 也不能让顺序漂移，否则缓存全失效、计费翻倍）。
 List<Map<String, dynamic>> buildOpenAiToolsSchema(List<ToolDefinition> tools) {
-  return tools
+  final sorted = [...tools]..sort((a, b) => a.name.compareTo(b.name));
+  return sorted
       .map((t) => {
             'type': 'function',
             'function': {
@@ -136,6 +140,9 @@ class OpenAiNativeStreamAssembler {
   final Map<int, _PendingNativeCall> _pending = {};
   String? finishReason;
 
+  /// 末块 usage（{prompt_tokens, completion_tokens, ...}；服务端未带则 null）。
+  Map<String, dynamic>? usage;
+
   // ---- 思考通道（reasoning 字段 + 内嵌 <think> 剥离）----
   final StringBuffer _thinking = StringBuffer();
   final StringBuffer _pendingTag = StringBuffer();
@@ -147,6 +154,16 @@ class OpenAiNativeStreamAssembler {
   String get textSoFar => _text.toString();
   String get thinkingSoFar => _thinking.toString();
 
+  /// 原生 tool_calls 分片累计字符数（WP5 进度反馈：大参数工具调用
+  /// 生长期可见文本为空，UI 靠这个数字显示"正在生成工具调用参数"）。
+  int get pendingToolCallChars {
+    var n = 0;
+    for (final p in _pending.values) {
+      n += p.args.length + p.id.length + (p.name?.length ?? 0);
+    }
+    return n;
+  }
+
   /// 消费一条 [OpenAiService.chatCompletionEvents] 事件。
   void addEvent(Map<String, dynamic> event) {
     switch (event['type']) {
@@ -157,6 +174,10 @@ class OpenAiNativeStreamAssembler {
       case 'thinking':
         final t = event['text'];
         if (t is String) _thinking.write(t);
+        break;
+      case 'usage':
+        final u = event['usage'];
+        if (u is Map<String, dynamic>) usage = u;
         break;
       case 'tool_call':
         final idx = (event['index'] as num?)?.toInt() ?? 0;
@@ -264,13 +285,18 @@ class OpenAiAdapter extends BaseEngineAdapter {
   final OpenAiService? _openAi;
   final ApiModelConfig? _apiModel;
 
+  /// 思考失控守卫阈值（设置可调；默认 [kMaxThinkingChars]）。
+  final int _maxThinkingChars;
+
   OpenAiAdapter({
     required ToolProtocol protocol,
     EngineCapabilities? capabilities,
     OpenAiService? openAi,
     ApiModelConfig? apiModel,
+    int maxThinkingChars = kMaxThinkingChars,
   })  : _openAi = openAi,
         _apiModel = apiModel,
+        _maxThinkingChars = maxThinkingChars,
         super(protocol: protocol, capabilities: capabilities);
 
   /// 取消：先中止 Dart 侧流（基类），再取消 API SSE 请求。
@@ -333,6 +359,10 @@ class OpenAiAdapter extends BaseEngineAdapter {
     try {
       // 思考失控守卫（local/API 同规）：思考超长未闭合 → 主动停 SSE 止损。
       var _thinkingOverflow = false;
+      // WP5：API 路线工具调用以原生 tool_calls 分片到达（reasoning 内容在
+      // assembler 思考通道），工具参数生长期 assembler 文本为空——
+      // 用思考通道+分片累计长度合成提示，避免 UI 干转圈。
+      var _toolGenActive = false;
       sub = openAi.chatCompletionEvents(
         config: model,
         messages: wireMessages,
@@ -349,9 +379,19 @@ class OpenAiAdapter extends BaseEngineAdapter {
             onThinking.add(assembler.thinkingSoFar);
           }
           if (!_thinkingOverflow &&
-              assembler.thinkingSoFar.length > kMaxThinkingChars) {
+              assembler.thinkingSoFar.length > _maxThinkingChars) {
             _thinkingOverflow = true;
             openAi.stop();
+          }
+          if (options.onStatus != null) {
+            final pendingFrag = assembler.pendingToolCallChars;
+            if (pendingFrag > 0) {
+              _toolGenActive = true;
+              options.onStatus!.add('toolgen|$pendingFrag|');
+            } else if (_toolGenActive) {
+              _toolGenActive = false;
+              options.onStatus!.add('toolgen|0|');
+            }
           }
         },
         onError: (Object e, [StackTrace? s]) {
@@ -368,10 +408,10 @@ class OpenAiAdapter extends BaseEngineAdapter {
       // 思考失控先于错误判定：stop() 会以 cancel 错误收场，若先走 error
       // 分支会归为 transport（可重试）→ 失控思考被重试 5 遍。
       if (_thinkingOverflow) {
-        throw const LlmFailure(
+        throw LlmFailure(
           code: LlmFailureCode.thinkingOverflow,
-          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
-              '建议关闭此模型的思考模式，或调大「智能体每轮生成 token」并换模型/重试',
+          message: '思考超长未闭合（>$_maxThinkingChars 字），已中止生成：'
+              '该模型思考失控。可在 设置→智能体 调大「思考失控守卫阈值」后重试',
         );
       }
       final error = await outcome.future;
@@ -400,7 +440,7 @@ class OpenAiAdapter extends BaseEngineAdapter {
               : '模型返回空响应（finish_reason=${assembler.finishReason}）',
         );
       }
-      return LlmResult(text: r.text, toolCalls: r.calls);
+      return LlmResult(text: r.text, toolCalls: r.calls, usage: assembler.usage);
     } on AgentCancelledException catch (e) {
       rethrow;
     } on LlmFailure catch (e) {
@@ -483,10 +523,10 @@ class OpenAiAdapter extends BaseEngineAdapter {
       }
       // 思考失控先于错误判定（stop() 以 cancel 收场，别让它进可重试档）。
       if (_thinkingOverflow) {
-        throw const LlmFailure(
+        throw LlmFailure(
           code: LlmFailureCode.thinkingOverflow,
-          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
-              '建议关闭此模型的思考模式，或调大「智能体每轮生成 token」并换模型/重试',
+          message: '思考超长未闭合（>$_maxThinkingChars 字），已中止生成：'
+              '该模型思考失控。可在 设置→智能体 调大「思考失控守卫阈值」后重试',
         );
       }
       final error = await outcome.future;

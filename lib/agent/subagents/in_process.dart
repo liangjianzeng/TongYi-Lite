@@ -75,14 +75,25 @@ final class InProcessSubagentProvider extends SubagentProvider {
         _providerKind = providerKind,
         _systemPrompt = systemPrompt,
         _parentSession = parentSession,
-        _subConfig = const AgentConfig(
-          maxStepsPerTurn: 5,
-          maxTokensPerRound: 4096,
-          temperature: 0.7,
-          toolTimeout: Duration(seconds: 30),
-          allowParallelTools: false,
-          maxParallel: 4,
-        ),
+        // 子代理受限配置（§10.6 成本控制），按驱动路线分档：
+        // API 档放宽步数与预算（云端模型便宜快），local 档维持端侧紧预算。
+        _subConfig = providerKind == ProviderKind.api
+            ? const AgentConfig(
+                maxStepsPerTurn: 8,
+                maxTokensPerRound: 8192,
+                temperature: 0.7,
+                toolTimeout: Duration(seconds: 30),
+                allowParallelTools: false,
+                maxParallel: 4,
+              )
+            : const AgentConfig(
+                maxStepsPerTurn: 5,
+                maxTokensPerRound: 4096,
+                temperature: 0.7,
+                toolTimeout: Duration(seconds: 30),
+                allowParallelTools: false,
+                maxParallel: 4,
+              ),
       super(name: 'in-process',
           capabilities: const SubagentCapabilities(),
           inheritsParentContext: false);
