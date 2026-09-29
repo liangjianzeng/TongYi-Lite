@@ -179,6 +179,24 @@ class AgentStreamProcessor {
       return;
     }
 
+    // 孤立闭合记号（无前置 think 触发）：Qwen 风格模型偶发在回答中途再输出
+    // ` response`——通常是一段被提前闭合的思考续写。把它当作隐式 opener
+    // 重新进入思考态、续写一并丢弃，否则闭合记号与后续内容会直接渗进
+    // 可见回答（2026-09-29 真机观察到）。紧跟英文/数字（如 "API response"
+    // 这类词）不算孤立闭合记号，保持原样不吞——宽松检测代价与既有
+    // `' think'` 触发一致：中文回答罕见，可接受。
+    for (final c in _thinkClosers) {
+      if (c == '</thinking>') continue;
+      if (v.endsWith(c)) {
+        if (v.length > c.length) {
+          final prev = v[v.length - c.length - 1];
+          if (_isAsciiWord(prev)) return;
+        }
+        _enterThink(_ThinkKind.qwen, v, c);
+        return;
+      }
+    }
+
     // HTML 风格思考：`<thinking>` / `<think>`（Qwen3/DeepSeek 短标签）/
     // ` think`（Qwen3.5 实际输出不带 ing，宽松检测可接受）。
     const htmlTags = ['<thinking>', '<think>', ' think'];
@@ -237,4 +255,11 @@ class AgentStreamProcessor {
     probe.clear();
     _inProbe = false;
   }
+}
+
+/// 单个字符是否为 ASCII 字母/数字（用于区分英文词 "response" 与孤立闭合记号）。
+bool _isAsciiWord(String ch) {
+  if (ch.isEmpty) return false;
+  final c = ch.codeUnitAt(0);
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }

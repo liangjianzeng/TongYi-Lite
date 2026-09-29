@@ -350,6 +350,56 @@ void main() {
       expect(find.text('执行中…'), findsNothing);
     });
 
+    testWidgets('live 回合：思考与工具按执行顺序交错渲染', (tester) async {
+      // 时间线 [思考0, 工具0, 思考1, 工具1] → 渲染顺序必须与执行次序一致，
+      // 而非"思考一律在前、工具一律在后"（用户反馈）。
+      final ui = AgentUiState(
+        running: true,
+        thinkingHistory: ['第一步思考', '第二步思考'],
+        thinkingDurations: const [Duration(seconds: 3), Duration(seconds: 2)],
+        tools: [
+          act(status: ToolUiStatus.done, name: 'web_search', result: '2 条结果'),
+          act(status: ToolUiStatus.done, name: 'get_weather', result: '晴'),
+        ],
+        timeline: const [
+          UiTimelineThinking(0),
+          UiTimelineTool(0),
+          UiTimelineThinking(1),
+          UiTimelineTool(1),
+        ],
+      );
+      await pump(tester, ui, isLive: true);
+      expect(find.textContaining('思考 1 - 持续了3秒'), findsOneWidget);
+      expect(find.textContaining('🔧 web_search'), findsOneWidget);
+      expect(find.textContaining('思考 2 - 持续了2秒'), findsOneWidget);
+      expect(find.textContaining('🔧 get_weather'), findsOneWidget);
+      // 垂直顺序 = 执行顺序（思考0 → 工具0 → 思考1 → 工具1）。
+      final dyThink1 = tester.getTopLeft(find.textContaining('思考 1 - 持续了3秒')).dy;
+      final dyTool1 = tester.getTopLeft(find.textContaining('🔧 web_search')).dy;
+      final dyThink2 = tester.getTopLeft(find.textContaining('思考 2 - 持续了2秒')).dy;
+      final dyTool2 = tester.getTopLeft(find.textContaining('🔧 get_weather')).dy;
+      expect(dyThink1, lessThan(dyTool1));
+      expect(dyTool1, lessThan(dyThink2));
+      expect(dyThink2, lessThan(dyTool2));
+    });
+
+    testWidgets('思考流式自动展开：流式中内容可见，答案开始/回合结束自动闭合',
+        (tester) async {
+      // 流式输出中 → 自动展开（否则用户不知道智能体在干什么）。
+      final streaming = AgentUiState(running: true, thinking: '正在推理的内容');
+      await pump(tester, streaming, isLive: true);
+      expect(find.text('正在推理的内容'), findsOneWidget);
+
+      // 答案开始 → 自动闭合（内容隐藏，仅剩头部耗时）。
+      await pump(tester, streaming,
+          isLive: true, answer: asst('答案'));
+      expect(find.text('正在推理的内容'), findsNothing);
+
+      // 回合结束（running=false）→ 闭合。
+      await pump(tester, AgentUiState(thinking: '正在推理的内容'), isLive: true);
+      expect(find.text('正在推理的内容'), findsNothing);
+    });
+
     testWidgets('live 显示重试/压缩横幅，非 live 不显示', (tester) async {
       final liveUi = const AgentUiState(running: true, retryAttempt: 2, compacted: true);
       await pump(tester, liveUi, isLive: true);

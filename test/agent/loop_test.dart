@@ -314,9 +314,11 @@ void main() {
 
   test('回归：turn 失败 → lastTurnAnswer 为空不回溯上一轮旧答案，lastTurnError 带原因',
       () async {
+    // 用确定性失败（invalidRequest，永不重试）——空响应现已计入本地可重试档，
+    // 会走重试预算改变调用次数；本测试只验证"失败轮不回溯旧答案"。
     final fake = FakeLlmAdapter([
       LlmResult(text: '第一轮答案', toolCalls: const []),
-      LlmFailure(code: LlmFailureCode.emptyResponse, message: 'HTTP 400'),
+      LlmFailure(code: LlmFailureCode.invalidRequest, message: 'HTTP 400'),
     ]);
     final agent = _agent(fake);
     await agent.kick('第一轮问题');
@@ -327,6 +329,21 @@ void main() {
     // 关键：失败轮不得把上一轮答案冒充本轮回复（重复问候 bug 的根因防线）。
     expect(agent.lastTurnAnswer, '');
     expect(agent.lastTurnError, contains('HTTP 400'));
+  });
+
+  test('本地路线空响应可重试：思考中途 EOS → 重试一次成功', () async {
+    final fake = FakeLlmAdapter([
+      LlmFailure(code: LlmFailureCode.emptyResponse, message: '模型思考中途 EOS'),
+      LlmResult(text: '最终回答', toolCalls: const []),
+    ]);
+    final agent = _agent(fake);
+
+    final reason = await agent.kick('问题');
+
+    expect(reason.kind, TurnEndReasonKind.completed);
+    expect(agent.lastTurnAnswer, '最终回答');
+    expect(fake.calls, 2); // 空响应计入可重试档 → 重试一次
+    expect(_findData(agent.session, kEventLlmRetry), isNotNull);
   });
 
   test('回归：成功轮的 lastTurnAnswer 在多次 kick 后只反映当轮', () async {
