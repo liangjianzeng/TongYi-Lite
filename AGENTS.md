@@ -64,9 +64,12 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 > **每次构建后，把 APK 输出目录地址写进这条备忘**，方便用户直接找包。
 
 - **APK 输出目录**：`build\app\outputs\flutter-apk\`（Windows 绝对路径
-  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`）。
+  `E:\Work\DgxSpark\TongYi-Lite\build\app\outputs\flutter-apk\`）。
 - debug 包：`app-debug.apk`（真机调试，`adb install -r` 覆盖安装）。
 - release 包：`app-release.apk`（生产分发）。
+- **2026-09-29 15:12 最新构建（23049c5）**：app-debug.apk 100701814 B、
+  app-release.apk 53408334 B，均在上述目录；字符串级验收过（debug kernel_blob
+  UTF-8 / release libapp.so UTF-16LE 均命中新 UI 串）。
 - wt/ 工作区构建产物在 `wt\<name>\build\app\outputs\flutter-apk\`，不在主仓 build/
   （2026-09-28 v0.2.6 实测，另一台开发机用 wt 工作区，别看错目录）。
 - 构建后**必须**列出该目录的 APK 名/大小/时间，并把目录地址发给用户。
@@ -81,6 +84,17 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
   `key.properties`：`storePassword=android` / `keyAlias=androiddebugkey` / `storeFile=../key.jks`
 - **铁律**：覆盖更新安装必须保持同一签名（否则 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。构建时若发现 APK 签名不是 `CN=TongYiLite`（比如变成了临时生成的 `CN=TongYi-Lite Dev`），说明签名文件不对，需核对 `key.jks`。
 - 新环境 clone 后若签名文件缺失：从源工作区拷贝，或用 `keytool -genkey -dname "CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN"` 重新生成并写 `key.properties`。
+
+## 关键教训：wttr.in 只认 `/城市` 路径形态，`/?q=城市` 返回 HTTP 500（2026-09-29 真机定案）
+
+> get_weather 工具"基本全失败"根因：`https://wttr.in/?q=武汉&format=...` 的查询参数
+> 形态 **返回 500**（curl/Dio 一致，与 format 串、中文无关——连 `%c` 都挂）；改
+> `https://wttr.in/<url-encoded-city>?format=...&m=&lang=zh` 路径形态即 200。
+> 排查时手机 shell curl 测通不代表 app 能通——**必须用 app 的精确请求形态复现**。
+> 修复已落 weather_tool.dart（`Uri.encodeComponent(city)` 进路径）。web_search
+> 侧同日复核：DGX SearXNG 实例/设备配置/请求形态（含 language=zh-CN）全链路
+> 200，无 app 侧 bug；`category=news` 与 general 结果相同是实例引擎配置问题
+> （keep_only 下 bing news 未真正区分），非 app 代码问题。
 
 ## 关键教训：CMAKE_C_FLAGS_DEBUG 会被 NDK 工具链静默顶掉（CPU 内核失去 -O3 → 全模型变慢）
 
