@@ -106,6 +106,10 @@ class ReactLoopAgent {
   String _turnAnswer = '';
   String? _turnError;
 
+  /// 上一步是否执行了工具调用（WP3b 分阶段预算档位依据；
+  /// 每 step 开始重置，工具执行后置真）。
+  bool _lastStepHadToolResults = false;
+
   String get lastTurnAnswer => _turnAnswer;
   String? get lastTurnError => _turnError;
 
@@ -234,6 +238,7 @@ class ReactLoopAgent {
     String? audioPath,
     StreamController<String>? onToken,
     StreamController<String>? onThinking,
+    StreamController<String>? onStatus,
   }) async {
     if (_phase.phase != AgentPhase.idle) {
       throw StateError('agent is running; cancel() first');
@@ -242,6 +247,7 @@ class ReactLoopAgent {
     _cancelCompleted = false;
     _turnAnswer = '';
     _turnError = null;
+    _lastStepHadToolResults = false;
     // imagePath 入事件（store.dart importFromMessages 同款键名）：API 路线
     // 无状态，每个 step 重放历史时都要把图片重发；不入 log 则后续 step 丢图。
     final userSeq = _session.append(
@@ -271,6 +277,11 @@ class ReactLoopAgent {
         // 新 step：重置本步重试预算（同一 step 内最多 maxRetries 次重试）。
         _retry.reset();
         _session.append(kEventStepStart, {'turn': turn, 'step': step});
+        // WP3a：主动压缩前置——估算投影 token，超预算先裁剪，
+        // 不等撞 nctx/服务端硬墙（被动压缩只救得了 CONTEXT_WINDOW_EXCEEDED）。
+        if (_config.contextTokenBudget != null) {
+          await _maybeCompactProactively(turn, step);
+        }
         // Phase 5：agent/pre-step hook（可否决本 step；reject → turn 结束）。
         if (_hooks != null) {
           final preCtx = PreStepContext(
@@ -290,7 +301,8 @@ class ReactLoopAgent {
         while (retryStep) {
           try {
             final options =
-                _buildRequest(turn, step, imagePath, audioPath);
+                _buildRequest(turn, step, imagePath, audioPath,
+                    onStatus: onStatus);
             final result = await _adapter.generate(
                 options,
                 onToken: onToken,
@@ -305,6 +317,7 @@ class ReactLoopAgent {
             }
             // 有工具 → 逐工具执行；成功后进入下一个 step。
             await _executeToolCalls(turn, step, result.toolCalls);
+            _lastStepHadToolResults = true;
             if (_cancelCompleted) {
               reason = TurnEndReasonKind.interrupted;
               turnDone = true;
@@ -366,19 +379,29 @@ class ReactLoopAgent {
     int turn,
     int step,
     String? imagePath,
-    String? audioPath,
-  ) {
+    String? audioPath, {
+    StreamController<String>? onStatus,
+  }) {
     final messages = _session.deriveModelMessages();
     final tools = _registry.visibleFor(_modelId);
+    // WP3b 分阶段预算：工具结果回填后的步更可能是"组织最终回答"，
+    // 小模型写回答比写工具调用耗 token 多——用更大的 finalRound 预算
+    // 降截断率；工具调用步维持紧预算防过度生成。API 档 finalRound=null
+    // 恒用统一大预算。
+    final maxTokens =
+        (_lastStepHadToolResults && _config.maxTokensFinalRound != null)
+            ? _config.maxTokensFinalRound!
+            : _config.maxTokensPerRound;
     final options = GenerateOptions(
       provider: _providerKind,
       messages: messages,
       tools: tools,
       temperature: _config.temperature,
-      maxTokens: _config.maxTokensPerRound,
+      maxTokens: maxTokens,
       modelId: _modelId,
       imagePath: imagePath,
       audioPath: audioPath,
+      onStatus: onStatus,
     );
     // G12 不变量（开发期 assert）：独立重建比对，请求必须能纯投影自 log。
     assert(
@@ -432,7 +455,41 @@ class ReactLoopAgent {
       'toolCalls': encodedCalls,
       'turn': turn,
       'step': step,
+      // API 路线 token 用量（SSE 末块 usage；本地恒 null 不落键）。
+      if (result.usage != null) 'usage': result.usage,
     });
+  }
+
+  /// WP3a 主动压缩：估算当前投影 token（content 字符数/4，与
+  /// Spill.estimateTokens 同口径，tool_calls 每条粗估 40 字符），
+  /// 超预算 → 走与 contextWindowExceeded 相同的确定性压缩路径
+  /// （decide 内部自行追加 compaction/summary + 影子遮蔽）。
+  /// 无可裁（decide 非 success）不致命——真超限仍由失败瀑布兜底。
+  Future<void> _maybeCompactProactively(int turn, int step) async {
+    final budget = _config.contextTokenBudget!;
+    final messages = _session.deriveModelMessages();
+    var chars = 0;
+    for (final m in messages) {
+      final c = m['content'];
+      if (c is String) chars += c.length;
+      final tc = m['tool_calls'];
+      if (tc is List) chars += tc.length * 40;
+    }
+    final estTokens = chars ~/ 4;
+    if (estTokens <= budget) return;
+    final result = await _compaction.decide(
+      ref: SessionRef(_session),
+      turn: turn,
+      step: step,
+      reason: 'proactive: 估算约 $estTokens tok 超预算 $budget（主动前置压缩）',
+    );
+    assert(() {
+      if (result.kind == CompactionResultKind.success) {
+        // ignore: avoid_print
+        print('[ReactLoopAgent] proactive compaction: ~$estTokens tok > $budget');
+      }
+      return true;
+    }());
   }
 
   /// 失败 → 落 assistant/attempt（log-only，模型不可见）。
@@ -473,6 +530,18 @@ class ReactLoopAgent {
         'retries': _retry.retries,
         'code': f.code.name,
         'message': f.message,
+      });
+      // WP1b：模型可见的失败原因注记（surface）。重试不再原样重发——
+      // 下次请求投影出 [上次尝试失败:...] 提示，模型先反思再修正。
+      // 截断 200 字防长报错撑上下文（deriveModelMessages 每 (turn,step)
+      // 只留最新一条）。
+      _session.append(kEventAssistantFailureNote, {
+        'turn': turn,
+        'step': step,
+        'code': f.code.name,
+        'content': f.message.length > 200
+            ? '${f.message.substring(0, 200)}…'
+            : f.message,
       });
       final delay = await _retry.maybeBackoff(f);
       if (delay == null) {

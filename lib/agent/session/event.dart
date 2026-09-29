@@ -30,6 +30,11 @@ const String kEventToolCall = 'tool/call';
 const String kEventToolResult = 'tool/result';
 const String kEventCompactionSummary = 'compaction/summary';
 
+/// 失败反思注记（WP1b）：LLM 重试前注入的"上次为什么失败"提示。
+/// surface（进模型历史）但 ignorable（旧运行时跳过只少一条提示，
+/// 不致语义残缺——满足"新增普通类型必须配 ignorable"的 v1 兼容门槛）。
+const String kEventAssistantFailureNote = 'assistant/failure-note';
+
 // log-only 事件（不进模型历史；UI/诊断可用；崩溃修复参与 pending 销账）
 const String kEventAssistantAttempt = 'assistant/attempt';
 const String kEventLlmRetry = 'llm/retry';
@@ -66,6 +71,7 @@ const Map<String, EventTypeCategory> kEventCategory = {
   kEventToolCall: EventTypeCategory.surface,
   kEventToolResult: EventTypeCategory.surface,
   kEventCompactionSummary: EventTypeCategory.surface,
+  kEventAssistantFailureNote: EventTypeCategory.surface,
   kEventAssistantAttempt: EventTypeCategory.logOnly,
   kEventLlmRetry: EventTypeCategory.logOnly,
   kEventLlmRetryStarted: EventTypeCategory.logOnly,
@@ -92,6 +98,7 @@ const Set<String> kIgnorableTypes = {
   kEventLlmRetryStarted,
   kEventSpillLocate,
   kEventImported,
+  kEventAssistantFailureNote,
 };
 
 bool ignorableOf(String type) => kIgnorableTypes.contains(type);

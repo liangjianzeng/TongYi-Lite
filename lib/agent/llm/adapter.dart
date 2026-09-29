@@ -88,6 +88,11 @@ final class GenerateOptions {
   final String? imagePath;
   final String? audioPath;
 
+  /// 生成过程状态流（WP5）：adapter 推轻量状态行，UI 据此显示
+  /// "正在生成工具调用参数…"等过程反馈。约定格式：
+  /// `toolgen|<chars>|<preview>`（工具调用块生成中）/ `toolgen|0|`（结束）。
+  final StreamController<String>? onStatus;
+
   const GenerateOptions({
     required this.provider,
     required this.messages,
@@ -97,6 +102,7 @@ final class GenerateOptions {
     required this.modelId,
     this.imagePath,
     this.audioPath,
+    this.onStatus,
   });
 }
 
@@ -105,9 +111,14 @@ final class LlmResult {
   final String text;
   final List<ToolCall> toolCalls;
 
+  /// 服务端 token 用量（API 路线，SSE 末块 usage 原样透传；
+  /// {prompt_tokens, completion_tokens, ...}，本地路线恒 null）。
+  final Map<String, dynamic>? usage;
+
   const LlmResult({
     required this.text,
     this.toolCalls = const [],
+    this.usage,
   });
 
   bool get hasToolCalls => toolCalls.isNotEmpty;

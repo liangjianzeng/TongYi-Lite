@@ -175,6 +175,11 @@ class OpenAiService {
       if (reason is String && reason.isNotEmpty) {
         yield {'type': 'finish', 'reason': reason};
       }
+      // token 用量（OpenAI/DeepSeek 兼容端在末块携带 usage；无则跳过）。
+      final usage = json['usage'];
+      if (usage is Map<String, dynamic>) {
+        yield {'type': 'usage', 'usage': usage};
+      }
     }
   }
 

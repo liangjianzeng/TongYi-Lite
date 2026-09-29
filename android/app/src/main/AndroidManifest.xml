@@ -65,6 +65,18 @@
             android:foregroundServiceType="specialUse"
             android:exported="false" />
 
+        <!-- WP6 文件产物桥：openFile 经 FileProvider 授读，系统查看器打开
+             应用目录内的工作区产物；导出件走 MediaStore content URI 不经此。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

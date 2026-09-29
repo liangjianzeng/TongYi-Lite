@@ -1627,8 +1627,24 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     // api → 原生工具调用 + 并行 5；local/跟随默认 → Prompt-JSON + 并行 2。
     final isApi = settings.agentModelSource == 'api';
     final capsMaxParallel = isApi ? 5 : 2;
-    final effectiveParallel =
-        settings.agentAllowParallelTools ? settings.agentMaxParallel : 1;
+    // ---- 双场景档：API 档读写 agentApi* 专键，local 档读写原平铺键 ----
+    final profMaxRounds =
+        isApi ? settings.agentApiMaxRounds : settings.agentMaxRounds;
+    final profTokensPerRound = isApi
+        ? settings.agentApiTokensPerRound
+        : settings.agentTokensPerRound;
+    final profToolTimeoutMs = isApi
+        ? settings.agentApiToolTimeoutMs
+        : settings.agentToolTimeoutMs;
+    final profTemperature =
+        isApi ? settings.agentApiTemperature : settings.agentTemperature;
+    final profAllowParallel = isApi
+        ? settings.agentApiAllowParallelTools
+        : settings.agentAllowParallelTools;
+    final profMaxParallel =
+        isApi ? settings.agentApiMaxParallel : settings.agentMaxParallel;
+    final profTokensMax = isApi ? 32768 : 16384;
+    final effectiveParallel = profAllowParallel ? profMaxParallel : 1;
     final parallelNote = isApi
         ? 'API 路线能力上限 5 路；实际并发 = min(设置值, 能力上限)'
         : '本地路线能力上限 2 路（prompt-JSON 协议）；实际并发 = min(设置值, 2)';
@@ -1686,6 +1702,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     spacing: 6,
                     runSpacing: 6,
                     children: [
+                      _capChip(isApi ? '场景档：API 档' : '场景档：本地档',
+                          ok: true),
                       _capChip(isApi ? '协议：原生工具调用' : '协议：Prompt-JSON',
                           ok: true),
                       _capChip('工具调用：支持', ok: true),
@@ -1718,13 +1736,16 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                   _buildSectionHeader('🔁 执行参数', context),
                   _buildSliderRow(
                     label: '单轮最大步数',
-                    value: settings.agentMaxRounds,
+                    value: profMaxRounds,
                     min: 1,
                     max: 24,
                     divisions: 23,
-                    display: '${settings.agentMaxRounds} 步',
-                    onChanged: (v) => notifier.setAgentMaxRounds(v),
-                    hint: '一次提问内最多几次模型请求（含工具往返）；端侧建议 3–8（默认 5）',
+                    display: '$profMaxRounds 步',
+                    onChanged: (v) => isApi
+                        ? notifier.setAgentApiMaxRounds(v)
+                        : notifier.setAgentMaxRounds(v),
+                    hint: '一次提问内最多几次模型请求（含工具往返）；'
+                        '${isApi ? 'API 档默认 16' : '端侧建议 3–8（默认 12）'}',
                   ),
                   _buildSliderRow(
                     label: '每回合搜索上限',
@@ -1739,35 +1760,58 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                   ),
                   _buildSliderRow(
                     label: '每步生成预算',
-                    value: settings.agentTokensPerRound,
+                    value: profTokensPerRound,
                     min: 128,
-                    max: 16384,
-                    divisions: 127,
-                    display: settings.agentTokensPerRound >= 1024
-                        ? '${settings.agentTokensPerRound ~/ 1024}k token'
-                        : '${settings.agentTokensPerRound} token',
-                    onChanged: (v) => notifier.setAgentTokensPerRound(v),
-                    hint: '每步模型生成 token 上限（默认 512）',
+                    max: profTokensMax,
+                    divisions: (profTokensMax - 128) ~/ 256,
+                    display: profTokensPerRound >= 1024
+                        ? '${(profTokensPerRound / 1024).toStringAsFixed(0)}k token'
+                        : '$profTokensPerRound token',
+                    onChanged: (v) => isApi
+                        ? notifier.setAgentApiTokensPerRound(v)
+                        : notifier.setAgentTokensPerRound(v),
+                    hint: isApi
+                        ? 'API 档每步生成 token 上限（默认 8192，云端模型吃满思考）'
+                        : '本地档每步生成 token 上限（默认 1024）',
                   ),
                   _buildSliderRow(
                     label: '工具执行超时',
-                    value: settings.agentToolTimeoutMs,
+                    value: profToolTimeoutMs,
                     min: 1000,
-                    max: 60000,
-                    divisions: 59,
-                    display: _formatTimeout(settings.agentToolTimeoutMs),
-                    onChanged: (v) => notifier.setAgentToolTimeoutMs(v),
-                    hint: '单工具超时，防止卡死循环；工具自声明超时优先（默认 15 秒）',
+                    max: 120000,
+                    divisions: 119,
+                    display: _formatTimeout(profToolTimeoutMs),
+                    onChanged: (v) => isApi
+                        ? notifier.setAgentApiToolTimeoutMs(v)
+                        : notifier.setAgentToolTimeoutMs(v),
+                    hint: '单工具超时，防止卡死循环；工具自声明超时优先'
+                        '（${isApi ? 'API 档默认 30 秒' : '本地档默认 15 秒'}）',
                   ),
                   _buildDoubleSliderRow(
                     label: '生成温度',
-                    value: settings.agentTemperature,
+                    value: profTemperature,
                     min: 0.0,
                     max: 2.0,
                     divisions: 20,
-                    display: settings.agentTemperature.toStringAsFixed(1),
-                    onChanged: (v) => notifier.setAgentTemperature(v),
+                    display: profTemperature.toStringAsFixed(1),
+                    onChanged: (v) => isApi
+                        ? notifier.setAgentApiTemperature(v)
+                        : notifier.setAgentTemperature(v),
                     hint: '工具决策建议 0.3–0.7；创意直答可到 1.0+（默认 0.7）',
+                  ),
+                  _buildSliderRow(
+                    label: '思考失控守卫阈值',
+                    value: settings.agentThinkingMaxChars,
+                    min: 1000,
+                    max: 65536,
+                    divisions: 129,
+                    display: settings.agentThinkingMaxChars >= 1000
+                        ? '${(settings.agentThinkingMaxChars / 1000).toStringAsFixed(1)}k 字'
+                        : '${settings.agentThinkingMaxChars} 字',
+                    onChanged: (v) => notifier.setAgentThinkingMaxChars(v),
+                    hint: '思考块超长未闭合到该字数即主动止损（默认 6000）；'
+                        '常提示"思考超长未闭合导致任务失败"时调大，'
+                        '或在模型设置里关闭思考模式',
                   ),
                   Opacity(
                     opacity: isApi ? 0.4 : 1.0,
@@ -1834,24 +1878,28 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                   _buildSectionHeader('🧩 能力与并行', context),
                   _buildToggleTitle(
                     '🛠️ 并行工具调用',
-                    settings.agentAllowParallelTools,
-                    notifier.setAgentAllowParallelTools,
+                    profAllowParallel,
+                    isApi
+                        ? notifier.setAgentApiAllowParallelTools
+                        : notifier.setAgentAllowParallelTools,
                     subtitle: '模型一次要多个工具时并发执行（$parallelNote）；'
                         '当前生效并发：$effectiveParallel',
                   ),
-                  if (settings.agentAllowParallelTools && capsMaxParallel > 2)
+                  if (profAllowParallel && capsMaxParallel > 2)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: _buildSliderRow(
                         label: '并发上限',
-                        value: settings.agentMaxParallel
+                        value: profMaxParallel
                             .clamp(2, capsMaxParallel)
                             .toInt(),
                         min: 2,
                         max: capsMaxParallel,
                         divisions: capsMaxParallel - 1,
-                        display: '${settings.agentMaxParallel.clamp(2, capsMaxParallel)} 路',
-                        onChanged: (v) => notifier.setAgentMaxParallel(v),
+                        display: '${profMaxParallel.clamp(2, capsMaxParallel)} 路',
+                        onChanged: (v) => isApi
+                            ? notifier.setAgentApiMaxParallel(v)
+                            : notifier.setAgentMaxParallel(v),
                         hint: '同时执行的工具数上限（按驱动模型能力封顶 $capsMaxParallel）',
                       ),
                     )

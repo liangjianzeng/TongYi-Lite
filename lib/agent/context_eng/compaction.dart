@@ -76,20 +76,32 @@ final class DeterministicCompaction implements CompactionPlugin {
     final first = oldToolResultSeqs.first;
     final last = oldToolResultSeqs.last;
 
-    // ---- 摘要：对 [first..last] 内未遮蔽的旧 user 消息做 digest ----
+    // ---- 摘要：对 [first..last] 内未遮蔽的旧 user 消息 + 触达工具做 digest ----
     final digestParts = <String>[];
+    final toolNames = <String>{};
     for (final e in events) {
       if (e.seq < first || e.seq > last) continue;
       if (e.type != kEventUserMessage) continue;
       if (log.isShadowed(e.seq)) continue;
       final content = e.data['content'] as String? ?? '';
-      final short = content.length > 120 ? content.substring(0, 120) : content;
+      // 240 字：120 字经常把任务诉求截掉后半句，模型据此"失忆式续跑"。
+      final short = content.length > 240 ? content.substring(0, 240) : content;
       digestParts.add('用户：$short');
+    }
+    // 附本轮触达过的工具名：模型知道"查过什么"，避免重复调用已做过的工具。
+    for (final e in events) {
+      if (e.seq < first || e.seq > last) continue;
+      if (e.type != kEventToolResult) continue;
+      if (log.isShadowed(e.seq)) continue;
+      final name = e.data['name'];
+      if (name is String && name.isNotEmpty) toolNames.add(name);
     }
 
     final summary = digestParts.isEmpty
         ? '[较早轮次的工具结果已省略，模型不可见原内容]'
-        : '较早轮次摘要（旧工具结果已省略）：\n${digestParts.join('\n')}';
+        : '较早轮次摘要（旧工具结果已省略；此前已调用过工具：'
+            '${toolNames.isEmpty ? "无" : toolNames.join("、")}）：\n'
+            '${digestParts.join('\n')}';
 
     // ---- 遮蔽 [first..last] 为一条摘要 ----
     final advance = log.replace(

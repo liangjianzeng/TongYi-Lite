@@ -179,6 +179,14 @@ final class SessionLog {
     // 历史事件；若按事件序原样投影，第二轮起 system 落在消息中间，
     // OpenAI 兼容服务端直接 400 拒收（本地 chatml 也会被中段系统块污染）。
     final systemMsgs = <Map<String, dynamic>>[];
+    // failure-note 每 (turn,step) 只投影最新一条：同一 step 连续重试多次时，
+    // 旧失败原因已过时（模型只需要最终那次为什么失败），全量投影会撑上下文。
+    final latestNoteSeq = <String, int>{};
+    for (final e in _events) {
+      if (e.type == kEventAssistantFailureNote) {
+        latestNoteSeq['${e.data['turn']}:${e.data['step']}'] = e.seq;
+      }
+    }
     for (final e in _events) {
       if (isLogOnly(e.type)) continue;
       if (isShadowed(e.seq)) continue; // 已被压缩遮蔽
@@ -238,6 +246,19 @@ final class SessionLog {
           break;
         case kEventCompactionSummary:
           out.add({'role': 'user', 'content': e.data['content'] as String? ?? ''});
+          break;
+        case kEventAssistantFailureNote:
+          // 同一 (turn,step) 只留最新一条（见上方 latestNoteSeq 预扫描）。
+          if (latestNoteSeq['${e.data['turn']}:${e.data['step']}'] != e.seq) {
+            break;
+          }
+          out.add({
+            'role': 'user',
+            'content': '[上次尝试失败: ${e.data['code']}] '
+                '${e.data['content'] ?? ''} '
+                '先分析原因并修正输出（截断→精简、语法错→严格按格式），'
+                '不要原样重发。',
+          });
           break;
         default:
         // 结构事件（turn/step）不投影

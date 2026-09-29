@@ -87,6 +87,11 @@ final class AgentUiState {
   /// 执行顺序时间线：思考落档/工具卡加入的真实次序（live 回合渲染依据）。
   final List<UiTimelineMarker> timeline;
 
+  /// 工具调用参数生成中（WP5）：非 null = 模型正在流式输出工具调用块
+  /// （可见流与思考流都是空的，没有它 UI 只能干转圈）。
+  /// 记录已生成字符数与开头预览。
+  final ({int chars, String preview})? toolGen;
+
   const AgentUiState({
     this.running = false,
     this.turn = 0,
@@ -99,6 +104,7 @@ final class AgentUiState {
     this.thinkingHistory = const [],
     this.thinkingDurations = const [],
     this.timeline = const [],
+    this.toolGen,
   });
 
   bool get hasActivity =>
@@ -119,6 +125,8 @@ final class AgentUiState {
     List<String>? thinkingHistory,
     List<Duration?>? thinkingDurations,
     List<UiTimelineMarker>? timeline,
+    ({int chars, String preview})? toolGen,
+    bool clearToolGen = false,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -132,6 +140,7 @@ final class AgentUiState {
         thinkingHistory: thinkingHistory ?? this.thinkingHistory,
         thinkingDurations: thinkingDurations ?? this.thinkingDurations,
         timeline: timeline ?? this.timeline,
+        toolGen: clearToolGen ? null : (toolGen ?? this.toolGen),
       );
 }
 
@@ -151,6 +160,16 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
     if (state.thinking == text) return;
     _thinkingStart ??= (text.isNotEmpty) ? DateTime.now() : null;
     state = state.copyWith(thinking: text);
+  }
+
+  /// 工具调用参数生成进度（WP5）。chars==0 → 清除。
+  void setToolGen({required int chars, String preview = ''}) {
+    if (chars <= 0) {
+      if (state.toolGen == null) return;
+      state = state.copyWith(clearToolGen: true);
+      return;
+    }
+    state = state.copyWith(toolGen: (chars: chars, preview: preview));
   }
 
   void attach(SessionLog log) {

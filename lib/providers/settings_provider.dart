@@ -244,6 +244,50 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  // ---- API 档智能体参数（双场景档分流；local 档用上面的平铺 setter）----
+
+  /// API 档轮次上限（1~24，与引擎 AgentConfig assert 对齐）。
+  Future<void> setAgentApiMaxRounds(int value) async {
+    state = state.copyWith(agentApiMaxRounds: value.clamp(1, 24));
+    await _persist();
+  }
+
+  /// API 档每步生成预算（1024~32768）。
+  Future<void> setAgentApiTokensPerRound(int value) async {
+    state = state.copyWith(agentApiTokensPerRound: value.clamp(1024, 32768));
+    await _persist();
+  }
+
+  /// API 档温度（0~2）。
+  Future<void> setAgentApiTemperature(double value) async {
+    state = state.copyWith(agentApiTemperature: value.clamp(0.0, 2.0));
+    await _persist();
+  }
+
+  /// API 档单工具超时（1s~120s）。
+  Future<void> setAgentApiToolTimeoutMs(int value) async {
+    state = state.copyWith(agentApiToolTimeoutMs: value.clamp(1000, 120000));
+    await _persist();
+  }
+
+  /// API 档并行工具开关。
+  Future<void> setAgentApiAllowParallelTools(bool value) async {
+    state = state.copyWith(agentApiAllowParallelTools: value);
+    await _persist();
+  }
+
+  /// API 档并行上限（2~8）。
+  Future<void> setAgentApiMaxParallel(int value) async {
+    state = state.copyWith(agentApiMaxParallel: value.clamp(2, 8));
+    await _persist();
+  }
+
+  /// 思考失控守卫阈值（1000~65536 字符；默认 6000）。
+  Future<void> setAgentThinkingMaxChars(int value) async {
+    state = state.copyWith(agentThinkingMaxChars: value.clamp(1000, 65536));
+    await _persist();
+  }
+
   /// 瀛愪唬鐞嗗伐鍏锋敞鍐屽紑鍏炽€?
   Future<void> setAgentSubagentEnabled(bool value) async {
     state = state.copyWith(agentSubagentEnabled: value);

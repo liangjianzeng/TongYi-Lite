@@ -79,6 +79,22 @@ class AgentStreamProcessor {
   bool get hasToolCalls =>
       toolJsonBlocks.isNotEmpty || toolXmlBlocks.isNotEmpty;
 
+  /// 是否正在生成工具调用块（XML/JSON 缓冲中；WP5 进度反馈用——
+  /// 此时可见流与思考流都是空的，UI 只能干转圈，需要这个状态）。
+  bool get toolGenActive => _xmlTool != null || _inProbe;
+
+  /// 当前工具调用缓冲的字符数（配合 [toolGenActive] 显示"已生成 N 字"）。
+  int get toolGenChars => (_xmlTool?.length ?? 0) + (_inProbe ? probe.length : 0);
+
+  /// 工具调用缓冲的开头预览（最多 60 字符，换行压成空格；UI 单行提示用）。
+  String get toolGenPreview {
+    final b = _xmlTool ?? (_inProbe ? probe : null);
+    if (b == null) return '';
+    var s = b.toString().replaceAll('\n', ' ').trim();
+    if (s.length > 60) s = '${s.substring(0, 60)}…';
+    return s;
+  }
+
   /// 处理一个 token（可含多字符；跨 token 状态自动衔接）。
   void add(String token) {
     for (var i = 0; i < token.length; i++) {

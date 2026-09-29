@@ -20,11 +20,16 @@ import '../protocol/tool_protocol.dart';
 class LocalEngineAdapter extends BaseEngineAdapter {
   final InferenceService _inference;
 
+  /// 思考失控守卫阈值（设置可调；默认 [kMaxThinkingChars]）。
+  final int _maxThinkingChars;
+
   LocalEngineAdapter({
     required InferenceService inference,
     required ToolProtocol protocol,
     EngineCapabilities? capabilities,
+    int maxThinkingChars = kMaxThinkingChars,
   })  : _inference = inference,
+        _maxThinkingChars = maxThinkingChars,
         super(protocol: protocol, capabilities: capabilities);
 
   /// 取消：先中止 Dart 侧流（基类），再通知 native 引擎停生成。
@@ -63,6 +68,8 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     // `<think>` 一开就数千字独白不停）→ 主动 stopGeneration 止损，
     // 结束后按 thinkingOverflow 失败——不烧光整轮预算让用户干等数分钟。
     var _thinkingOverflow = false;
+    // WP5：工具调用块生成中标记（status 流只在状态翻转/持续时推）。
+    var _toolGenActive = false;
     void _finish() {
       if (_streamFinished) return;
       _streamFinished = true;
@@ -90,9 +97,24 @@ class LocalEngineAdapter extends BaseEngineAdapter {
             onThinking!.add(processor.thinkingText);
           }
           if (!_thinkingOverflow &&
-              processor.thinking.length > kMaxThinkingChars) {
+              processor.thinking.length > _maxThinkingChars) {
             _thinkingOverflow = true;
             _inference.stopGeneration();
+          }
+          // WP5：工具调用参数生成期反馈（大 HTML/长文本写文件时
+          // 可见流为空、思考为空，UI 只能干转圈——把隐藏缓冲长度推给 UI）。
+          if (options.onStatus != null) {
+            final gen = processor.toolGenActive;
+            if (gen && !_toolGenActive) {
+              _toolGenActive = true;
+            }
+            if (gen) {
+              options.onStatus!.add(
+                  'toolgen|${processor.toolGenChars}|${processor.toolGenPreview}');
+            } else if (_toolGenActive) {
+              _toolGenActive = false;
+              options.onStatus!.add('toolgen|0|');
+            }
           }
         },
         onError: (Object e, [StackTrace? s]) {
@@ -113,11 +135,11 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         );
       }
       if (_thinkingOverflow) {
-        throw const LlmFailure(
+        throw LlmFailure(
           code: LlmFailureCode.thinkingOverflow,
-          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
-              '建议关闭此模型的思考模式（enableThinking），'
-              '或调大「智能体每轮生成 token」并换模型/重试',
+          message: '思考超长未闭合（>$_maxThinkingChars 字），已中止生成：'
+              '该模型思考失控。可在 设置→智能体 调大「思考失控守卫阈值」，'
+              '或关闭此模型的思考模式（enableThinking）后重试',
         );
       }
       return parseAndReturn(rawBuffer, processor);

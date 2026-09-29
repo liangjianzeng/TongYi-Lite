@@ -10,6 +10,7 @@
 library;
 
 export 'calculator.dart' show createCalculatorTool;
+export 'export_file_tool.dart' show createExportFileTool, kArtifactExtensions;
 export 'file_tools.dart'
     show
         createEditFileTool,
@@ -29,6 +30,7 @@ export 'web_search_tool.dart' show createWebSearchTool;
 
 import '../tool_definition.dart';
 import 'calculator.dart';
+import 'export_file_tool.dart';
 import 'file_tools.dart';
 import 'get_time.dart';
 import 'memory_tool.dart';
@@ -56,6 +58,7 @@ const List<String> kCoreToolNames = [
   'edit_file',
   'list_files',
   'search_text',
+  'export_file',
 ];
 
 /// 网络/系统工具名（默认关闭；设置开启后可见）。
@@ -85,6 +88,7 @@ List<ToolDefinition> createBuiltinTools({int webSearchMaxSearchesPerTurn = 5}) =
       createEditFileTool(),
       createListFilesTool(),
       createSearchTextTool(),
+      createExportFileTool(),
       createWebSearchTool(
           maxSearchesPerTurn: webSearchMaxSearchesPerTurn),
       createGetWeatherTool(),

@@ -108,12 +108,14 @@ void main() {
       expect(p.byName('web-research'), isNotNull);
     });
 
-    test('availableSkillsText 含 <available_skills>', () {
+    test('availableSkillsText 含 <available_skills> 与 load_skill 链路提示', () {
       final p = SkillProvider();
       final text = p.availableSkillsText();
       expect(text.trim(), startsWith('<available_skills>'));
-      expect(text.trim(), endsWith('</available_skills>'));
+      expect(text, contains('</available_skills>'));
       expect(text, contains('web-research'));
+      // WP2c：目录之后给出"目录 → load_skill 加载全文"链路说明。
+      expect(text, contains('load_skill'));
     });
 
     test('skillText 含 <skill>', () {

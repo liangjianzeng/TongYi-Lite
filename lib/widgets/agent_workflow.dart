@@ -16,6 +16,7 @@ import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../models/chat_message.dart';
 import '../providers/agent_state_provider.dart';
+import '../services/device_files_service.dart';
 import 'chat_bubble.dart';
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,53 @@ class ThinkingIndicator extends StatelessWidget {
           Text(
             '执行中…',
             style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// _ToolGenIndicator —— 工具调用参数生成期进度（WP5）。
+///
+/// 模型正在流式输出工具调用块（如 write_file 的大段 HTML 报告参数）：
+/// 可见流与思考流都是空的，此前 UI 只能干转圈"思考中"。这里显示
+/// 「🔧 正在生成工具调用参数（已 N 字）」+ 开头预览，让用户看到在做什么。
+class _ToolGenIndicator extends StatelessWidget {
+  final int chars;
+  final String preview;
+  const _ToolGenIndicator({required this.chars, required this.preview});
+
+  String get _charsLabel => chars >= 1000
+      ? '${(chars / 1000).toStringAsFixed(1)}k 字'
+      : '$chars 字';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              preview.isEmpty
+                  ? '🔧 正在生成工具调用参数（已 $_charsLabel）…'
+                  : '🔧 正在生成工具调用参数（已 $_charsLabel）：$preview',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontStyle: FontStyle.italic,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
           ),
         ],
       ),
@@ -368,6 +416,36 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     }
   }
 
+  /// WP6：export_file 产物目标（content:// URI 或绝对路径）。
+  /// live 取 result（工具真实输出），历史取解析后的 summary（落库 🔧 消息）。
+  String? get _exportTarget {
+    if (widget.activity.name != 'export_file') return null;
+    final candidates = <String>[
+      widget.activity.result ?? '',
+      widget.activity.arguments['name']?.toString() ?? '',
+    ];
+    for (final s in candidates) {
+      final m =
+          RegExp(r'(content://\S+|/storage/emulated/\S+)').firstMatch(s);
+      if (m != null) return m.group(1);
+    }
+    return null;
+  }
+
+  Future<void> _openExport() async {
+    final target = _exportTarget;
+    if (target == null) return;
+    try {
+      await DeviceFilesService.instance.openFile(target);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('打开失败：$e')),
+        );
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -495,6 +573,33 @@ class _ToolActivityCardState extends State<ToolActivityCard>
                               fontSize: 10,
                               color: theme.colorScheme.outline,
                               fontStyle: FontStyle.italic)),
+                    ],
+                    // WP6：export_file 完成后给「打开」按钮（系统查看器
+                    // 直接查阅 html/png/pdf/md 等产物）。
+                    if (activity.status != ToolUiStatus.executing &&
+                        _exportTarget != null) ...[
+                      const SizedBox(width: 6),
+                      InkWell(
+                        onTap: _openExport,
+                        borderRadius: BorderRadius.circular(4),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 2),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.open_in_new,
+                                  size: 12, color: theme.colorScheme.primary),
+                              const SizedBox(width: 2),
+                              Text('打开',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.colorScheme.primary)),
+                            ],
+                          ),
+                        ),
+                      ),
                     ],
                     Icon(
                       _expanded ? Icons.expand_less : Icons.expand_more,
@@ -772,6 +877,7 @@ class AgentTurnBlock extends StatelessWidget {
   bool get _thinking =>
       _answerPending &&
       !ui.hasThinking &&
+      ui.toolGen == null &&
       ui.retryAttempt == 0 &&
       !steps.any((s) => s.status == ToolUiStatus.executing);
 
@@ -823,6 +929,13 @@ class AgentTurnBlock extends StatelessWidget {
           ThinkingStreamCard(
             ui: ui,
             answerVisible: answer != null && !_answerPending,
+          ),
+        // WP5：工具调用参数生成期反馈（大 HTML/长文本写文件时思考与可见
+        // 流都为空，此前只能干转圈）——显示已生成字数 + 开头预览。
+        if (isLive && ui.running && ui.toolGen != null)
+          _ToolGenIndicator(
+            chars: ui.toolGen!.chars,
+            preview: ui.toolGen!.preview,
           ),
         if (_thinking) const ThinkingIndicator(),
         // 智能体回合里答案还是空占位 → 不渲染回答气泡：ChatBubble 自带的
