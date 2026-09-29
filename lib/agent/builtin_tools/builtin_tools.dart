@@ -67,7 +67,10 @@ const List<String> kOptionalToolNames = [
 ];
 
 /// 创建全部内置工具（全量；接入层按配置过滤启用集）。
-List<ToolDefinition> createBuiltinTools() => [
+///
+/// [webSearchMaxSearchesPerTurn]：web_search 每回合调用上限（DSH max_uses
+/// 语义，默认 5），接入层按设置传入。
+List<ToolDefinition> createBuiltinTools({int webSearchMaxSearchesPerTurn = 5}) => [
       createGetTimeTool(),
       createCalculatorTool(),
       createTodoWriteTool(),
@@ -82,7 +85,8 @@ List<ToolDefinition> createBuiltinTools() => [
       createEditFileTool(),
       createListFilesTool(),
       createSearchTextTool(),
-      createWebSearchTool(),
+      createWebSearchTool(
+          maxSearchesPerTurn: webSearchMaxSearchesPerTurn),
       createGetWeatherTool(),
       createShellExecTool(),
       createPythonExecTool(),

@@ -927,7 +927,9 @@ class ChatNotifier extends StateNotifier<bool> {
   ToolRegistry _buildAgentRegistry(
       InferenceSettings settings, String modelId) {
     final registry = ToolRegistry();
-    for (final tool in createBuiltinTools()) {
+    // web_search 每回合调用上限来自设置（DSH max_uses 语义，默认 5）。
+    for (final tool in createBuiltinTools(
+        webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn)) {
       registry.register(tool);
     }
 

@@ -1727,6 +1727,17 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     hint: '一次提问内最多几次模型请求（含工具往返）；端侧建议 3–8（默认 5）',
                   ),
                   _buildSliderRow(
+                    label: '每回合搜索上限',
+                    value: settings.agentMaxSearchesPerTurn,
+                    min: 1,
+                    max: 10,
+                    divisions: 9,
+                    display: '${settings.agentMaxSearchesPerTurn} 次',
+                    onChanged: (v) => notifier.setAgentMaxSearchesPerTurn(v),
+                    hint: 'web_search 每回合最多调用次数（DSH max_uses 语义，默认 5）；'
+                        '达到上限拒绝联网、强制基于已有结果回答，杜绝反复搜索',
+                  ),
+                  _buildSliderRow(
                     label: '每步生成预算',
                     value: settings.agentTokensPerRound,
                     min: 128,

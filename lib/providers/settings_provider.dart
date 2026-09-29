@@ -204,6 +204,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// web_search 每回合调用上限（1~10，DSH max_uses 语义）。
+  Future<void> setAgentMaxSearchesPerTurn(int value) async {
+    final clamped = value.clamp(1, 10);
+    state = state.copyWith(agentMaxSearchesPerTurn: clamped);
+    await _persist();
+  }
+
   /// 姣忚疆鐢熸垚 token 棰勭畻锛?28~16384锛?6k 涓婇檺鎸夐渶閰嶇疆锛夈€?
   Future<void> setAgentTokensPerRound(int value) async {
     final clamped = value.clamp(128, 16384);
