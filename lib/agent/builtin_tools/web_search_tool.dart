@@ -9,6 +9,12 @@
 /// **并发多关键词**（2026-09-29 用户要求）：一次调用可提交最多 4 个关键词
 ///（query + additional_queries），工具并行搜索、合并结果一次返回——把
 /// "一个问题搜几次"压缩成"一次搜多个角度"，减少智能体回合的交互次数。
+///
+/// **回合级搜索预算**（2026-09-29，对齐 DSH 服务端工具 `web_search_20250305`
+/// 的 `max_uses` 语义）：每回合最多调用 [maxSearchesPerTurn] 次。达到上限后
+/// 工具**拒绝联网**并返回收敛指令，让模型基于既有结果直接回答——杜绝
+/// "反复搜索同一内容 / 用完循环次数没输出"的搜索死循环。同一回合内主查询
+/// 归一化后与已搜过的关键词相同 → 直接回缓存结果（不重复联网）。
 library;
 
 import '../tool_definition.dart';
@@ -22,10 +28,47 @@ const int kResultMaxChars = 1500;
 /// 一次调用最多搜索的关键词数（query + additional_queries）。
 const int kMaxQueriesPerCall = 4;
 
+/// 每回合 web_search 最多调用次数（对齐 DSH `max_uses` 默认 5；可经设置调整）。
+/// 每次调用消耗 1 次预算（含重复关键词），达到上限即拒绝联网、强制收敛。
+const int kMaxSearchesPerTurn = 5;
+
 /// 查询里已含年份数字（20xx）时不再补——避免"2025 发布会 2026"这类冗余。
 final RegExp _yearInQuery = RegExp(r'20\d{2}');
 
-ToolDefinition createWebSearchTool() {
+/// 归一化查询：小写 + 只留中英文/数字，用于同回合重复搜索判定
+///（"华为大会 " / "华为 大会" / "华为大会。" 视为同一关键词）。
+String _normalizeQuery(String q) {
+  final lower = q.toLowerCase();
+  final buf = StringBuffer();
+  for (var i = 0; i < lower.length; i++) {
+    final c = lower.codeUnitAt(i);
+    // 0-9 / a-z / CJK 及更高（含全角标点一并保留，中文句读不影响判定）。
+    if ((c >= 0x30 && c <= 0x39) ||
+        (c >= 0x61 && c <= 0x7a) ||
+        c >= 0x80) {
+      buf.writeCharCode(c);
+    }
+  }
+  return buf.toString();
+}
+
+/// 每回合搜索会话（DSH `max_uses` 语义）。
+class _WebSearchTurnSession {
+  final int maxSearches;
+
+  /// 本轮已调用次数（每次调用消耗 1，含重复；对齐服务端 max_uses 计数）。
+  int used = 0;
+
+  /// 归一化主查询 → 首次搜索结果（重复调用直接回缓存，不重复联网）。
+  final Map<String, ToolResult> cache = {};
+
+  _WebSearchTurnSession(this.maxSearches);
+}
+
+ToolDefinition createWebSearchTool({int maxSearchesPerTurn = kMaxSearchesPerTurn}) {
+  // 每次 createWebSearchTool 都新建回合会话：接入层每回合重建注册表
+  // （createBuiltinTools 全量新建），状态天然随回合重置。
+  final session = _WebSearchTurnSession(maxSearchesPerTurn);
   return ToolDefinition(
     name: 'web_search',
     description:
@@ -35,8 +78,9 @@ ToolDefinition createWebSearchTool() {
         '一个问题的多个角度可一次提交：把想查的其他关键词放进'
         'additional_queries（最多 3 个），工具会并发搜索并合并结果一次返回，'
         '不必多次调用。'
-        '无结果时可尝试更换关键词；若返回诊断说明引擎不可用，'
-        '不要反复重试，直接向用户说明即可。',
+        '每回合最多搜索 $maxSearchesPerTurn 次（含重复），已有足够结果时'
+        '直接回答，不要重复搜索同一关键词；无结果时可尝试更换关键词；'
+        '若返回诊断说明引擎不可用，不要反复重试，直接向用户说明即可。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -66,6 +110,27 @@ ToolDefinition createWebSearchTool() {
       if (raw.isEmpty && extras.isEmpty) {
         return ToolResult.error('缺少 query 参数');
       }
+
+      // ---- 预算闸（DSH max_uses）：每次调用消耗 1，含重复。达到上限拒绝
+      // 联网，返回收敛指令让模型基于既有结果直接回答，杜绝搜索死循环。----
+      if (session.used >= session.maxSearches) {
+        return ToolResult.error(
+            '本轮搜索次数已达上限（$maxSearchesPerTurn 次）。'
+            '请直接基于以上已有的搜索结果回答，不要再调用 web_search。');
+      }
+
+      // ---- 去重：主查询归一化后与已搜过的相同 → 回缓存结果（不联网），
+      // 但仍消耗预算——重复搜索本身就是浪费，尽快逼模型收敛。----
+      final norm = raw.isNotEmpty ? _normalizeQuery(raw) : '';
+      final cached = session.cache[norm];
+      if (cached != null) {
+        session.used++;
+        return ToolResult(
+            content: '（此关键词本轮已搜索过，结果同上，未重复联网。'
+            '请直接基于已有结果回答，不要重复搜索。）\n${cached.content}');
+      }
+
+      session.used++;
       // 时间注入：模型经常不知道今天几号，查"最新/今天"类内容会拿到旧闻。
       // 查询缺年份时补当前年份；结果头部再带完整当前时间兜底。
       final now = DateTime.now();
@@ -81,9 +146,14 @@ ToolDefinition createWebSearchTool() {
         final results = await Future.wait(
           prepared.map((q) => WebSearchSeam.instance.search(q)),
         );
-        return prepared.length == 1
+        final result = prepared.length == 1
             ? _formatResult(results.first, now)
             : _formatMultiResult(prepared, results, now);
+        // 主查询结果入缓存（含时间标签；同回合重复调用直接回读）。
+        if (norm.isNotEmpty && !result.isError) {
+          session.cache[norm] = result;
+        }
+        return result;
       } on WebSearchProviderError catch (e) {
         return ToolResult.error('联网搜索失败（${e.kind}）：${e.message}');
       }

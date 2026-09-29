@@ -160,5 +160,67 @@ void main() {
         WebSearchSeam.instance.dispose();
       }
     });
+
+    test('重复关键词：同回合再次搜索相同内容 → 直接回缓存结果，不重复联网', () async {
+      final provider = _FakeSearchProvider({
+        '华为开发者大会 2026': [
+          const WebSearchSource(url: 'http://a', title: '华为大会', snippet: '开发者大会'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final tool = createWebSearchTool();
+        final first = await tool.execute({'query': '华为开发者大会'});
+        expect(first.isError, isFalse);
+        expect(first.content, contains('华为大会'));
+        // 同回合再次以相同关键词调用：命中缓存，不再触发 provider.search。
+        final second = await tool.execute({'query': '华为开发者大会'});
+        expect(provider.called.length, 1);
+        expect(second.isError, isFalse);
+        expect(second.content, contains('已搜索过'));
+        expect(second.content, contains('华为大会'));
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
+    test('预算上限：超过每回合搜索次数 → 拒绝联网并返回收敛指令', () async {
+      final provider = _FakeSearchProvider({});
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final tool = createWebSearchTool(maxSearchesPerTurn: 2);
+        await tool.execute({'query': 'q1'});
+        await tool.execute({'query': 'q2'});
+        // 第 3 次：预算耗尽 → 不联网，返回收敛指令（isError=true）。
+        final third = await tool.execute({'query': 'q3'});
+        expect(provider.called.length, 2);
+        expect(third.isError, isTrue);
+        expect(third.content, contains('已达上限'));
+        expect(third.content, contains('不要再调用 web_search'));
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
+    test('预算含重复调用：重复也消耗预算，尽快逼模型收敛', () async {
+      final provider = _FakeSearchProvider({
+        'q 2026': [
+          const WebSearchSource(url: 'http://a', title: '标题A', snippet: '摘要A'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final tool = createWebSearchTool(maxSearchesPerTurn: 2);
+        await tool.execute({'query': 'q'});
+        await tool.execute({'query': 'q'}); // 去重命中，但仍消耗预算
+        // 预算已满（2/2）→ 新的关键词直接返回收敛指令，不再联网。
+        final third = await tool.execute({'query': '新关键词'});
+        expect(provider.called.length, 1);
+        expect(third.isError, isTrue);
+        expect(third.content, contains('已达上限'));
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
   });
 }

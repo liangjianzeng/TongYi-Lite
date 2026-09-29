@@ -97,6 +97,10 @@ class InferenceSettings {
   /// 宸ュ叿寰幆杞涓婇檺锛?~20锛夈€傞粯璁?5锛氱渚ч€熷害鏈夐檺锛岃疆娆¤繃澶氫綋楠屽樊銆?
   final int agentMaxRounds;
 
+  /// web_search 每回合调用上限（1~10，默认 5）。对齐 DSH 服务端工具 max_uses
+  /// 语义：达到上限后 web_search 拒绝联网并返回收敛指令，杜绝反复搜索。
+  final int agentMaxSearchesPerTurn;
+
   /// 姣忚疆鐢熸垚鐨?token 棰勭畻銆傞粯璁?512锛氳冻澶熻緭鍑轰竴娆″伐鍏疯皟鐢?JSON 鎴栦竴娈靛洖绛斻€?
   final int agentTokensPerRound;
 
@@ -244,6 +248,7 @@ class InferenceSettings {
     // 思考型模型 512 连工具调用都写不完被截断）。存量等于旧默认的值在
     // fromJson 一次性迁移到新默认。
     this.agentMaxRounds = 12,
+    this.agentMaxSearchesPerTurn = 5,
     this.agentTokensPerRound = 1024,
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
@@ -332,6 +337,7 @@ class InferenceSettings {
       bool clearAgentModel = false,
       int? agentNctx,
       int? agentMaxRounds,
+      int? agentMaxSearchesPerTurn,
       int? agentTokensPerRound,
       int? agentToolTimeoutMs,
       bool? agentAllowParallelTools,
@@ -389,6 +395,8 @@ class InferenceSettings {
           : agentModelId ?? this.agentModelId,
       agentNctx: agentNctx ?? this.agentNctx,
       agentMaxRounds: agentMaxRounds ?? this.agentMaxRounds,
+      agentMaxSearchesPerTurn:
+          agentMaxSearchesPerTurn ?? this.agentMaxSearchesPerTurn,
       agentTokensPerRound: agentTokensPerRound ?? this.agentTokensPerRound,
       agentToolTimeoutMs: agentToolTimeoutMs ?? this.agentToolTimeoutMs,
       agentAllowParallelTools:
@@ -450,6 +458,7 @@ class InferenceSettings {
         'agentModelId': agentModelId,
         'agentNctx': agentNctx,
         'agentMaxRounds': agentMaxRounds,
+        'agentMaxSearchesPerTurn': agentMaxSearchesPerTurn,
         'agentTokensPerRound': agentTokensPerRound,
         'agentToolTimeoutMs': agentToolTimeoutMs,
         'agentAllowParallelTools': agentAllowParallelTools,
@@ -514,6 +523,8 @@ class InferenceSettings {
       agentMaxRounds:
           _migrateOldDefault((json['agentMaxRounds'] as num?)?.toInt(),
               oldDefault: 5, newDefault: 12),
+      agentMaxSearchesPerTurn:
+          (json['agentMaxSearchesPerTurn'] as num?)?.toInt() ?? 5,
       agentTokensPerRound: _migrateOldDefault(
           (json['agentTokensPerRound'] as num?)?.toInt(),
           oldDefault: 512,
