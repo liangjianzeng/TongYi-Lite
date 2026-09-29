@@ -80,6 +80,19 @@ void main() {
       log.dispose();
     });
 
+    test('step 边界把流式思考落档为历史块（工作流可回看）', () {
+      n.setThinking('第一步思考内容');
+      log.append(kEventStepStart, {'turn': 1, 'step': 2});
+      expect(n.state.thinkingHistory, ['第一步思考内容']);
+      expect(n.state.thinking, isEmpty);
+
+      n.setThinking('第二步思考');
+      log.append(kEventTurnEnd, {'reason': 'completed'});
+      expect(n.state.thinkingHistory, ['第一步思考内容', '第二步思考']);
+      expect(n.state.thinking, isEmpty);
+      expect(n.state.running, isFalse);
+    });
+
     test('turn/start → running + turn；step/start → step', () {
       log.append(kEventTurnStart, {'turn': 3});
       expect(n.state.running, isTrue);
@@ -310,7 +323,7 @@ void main() {
       );
       expect(find.textContaining('🔧 get_time'), findsOneWidget);
       expect(find.textContaining('12:00'), findsNothing); // 未展开
-      await tester.tap(find.byType(ExpansionTile));
+      await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
       expect(find.textContaining('12:00'), findsOneWidget);
       expect(find.textContaining('参数'), findsOneWidget);
@@ -324,7 +337,7 @@ void main() {
         isLive: false,
       );
       expect(find.textContaining('🔧 shell'), findsOneWidget);
-      await tester.tap(find.byType(ExpansionTile));
+      await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
       expect(find.textContaining('exit code=1'), findsOneWidget);
     });

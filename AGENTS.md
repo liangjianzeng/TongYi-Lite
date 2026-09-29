@@ -391,3 +391,41 @@ specifier）**，ggml-opencl init abort。NDK 交叉编译能过、桌面 NEO �
 **两条调用线（local/openai adapter）都必须传 `(rawBuffer, processor)` 双参**；
 改成单参会挂 main 线的 `native_tools_test`（它靠双参桩测空响应回退），动前先跑
 `flutter test test/agent`。
+
+## 2026-09-29 v0.2.7：分支停维护，主干统一 + API 视觉/思考流/工具卡三修复
+
+> **分支停维护（用户指令）**：spike/opencl-bonsai2-ptq1-gemm 已快进合并进 main
+> （739170c，含 v0.2.6 + PTQ1_0 GEMM + FWHT hadamard + Turnip 驱动 + agent 内嵌
+> 工作流重构），此后所有开发只在 main 做。主仓 third_party/llama.cpp 树 = spike
+> 完整树（fe8156f 基线）；此前「b11028 半升级 + PTQ graft」方向**废弃**，别再按
+> 那条线排查编译错误。
+>
+> **v0.2.7+14 三修复**（版本三处同步：pubspec / build.gradle.kts / settings_screen
+> _appVersion；必须高于已装机版本，否则 VERSION_DOWNGRADE 拒装）：
+> 1. **API 视觉**：kick 把 imagePath 写进 user/message 事件，deriveModelMessages
+>    投影，OpenAiAdapter attachWireImages 转 image_url part（visionCapable 门控，
+>    每 step 重发；OpenAiService.encodeImageFile 带 8 张 FIFO 缓存）。
+> 2. **思考流单独展示**：adapter.generate 新增 onThinking 通道（全量快照推送）；
+>    API 原生路线解析 delta.reasoning_content/reasoning + content 内嵌 <think>
+>    剥离（OpenAiNativeStreamAssembler 字符状态机，跨分片安全）；本地/文本协议
+>    路线走 AgentStreamProcessor.thinking。chat_provider 节流 120ms 落
+>    agentUiStateProvider.thinking；UI = agent_workflow.dart ThinkingStreamCard
+>    （live 回合内嵌，自动展开跟随滚动，点按头可手动收起）。
+> 3. **工具卡压缩**：ToolActivityCard 从 ExpansionTile 卡改为单行紧凑行
+>    （~22px：图标+名+参数摘要+执行中），点按行内展开参数/结果。
+>
+> 回归：test/agent 全绿（phase6_test 点按目标 ExpansionTile→ToolActivityCard
+> 同步更新）；新增 test/agent/vision_thinking_test.dart。
+
+> **版本号策略（用户指令 2026-09-29）**：不要频繁升级版本号。同内容重打包
+> （改 Dart/修 bug 未发版）**复用同一 versionName**，只保证 versionCode 不低于
+> 任何已装机版本（install -r 同 code 可覆盖）。当前 = **0.2.8**（code 16）。
+> 另注意：另一台开发机可能并行出包抬版本（曾装过 0.2.8+15），装机报
+> VERSION_DOWNGRADE 时先 dumpsys 查设备 versionCode 再对齐。
+
+> **2026-09-29 补充**：镜像已从 2026.7.19（8/20 构建）升级到 **2026.9.25**
+> （searxng/searxng:latest，docker rm -f 后按原参数重建：named volume /etc/searxng +
+> settings.yml ro bind + /data volume）。keep_only + cn.bing.com 覆写在新版下原样
+> 生效，实测 10 条结果 0 unresponsive。用户的直觉部分正确：引擎解析器上游每周
+> 多更，旧镜像确实会积累过期性不通；但本例主因仍是无代理（国外引擎）与 302
+> 壳（bing），版本只是加重因素。升级后引擎仍以 keep_only 名单为准。

@@ -245,7 +245,11 @@ void main() {
       WebSearchSeam.instance
           .registerProvider(_providerWith(_MockAdapter((_) => _json({'results': []}))));
       final out = await createWebSearchTool().execute({'query': 'x'});
-      expect(out.content, contains('更换关键词'));
+      // 新语义：空结果回 error（fail-loud），带当前时间；SearXNG 空结果
+      // 必附引擎诊断（unresponsive_engines），模型/用户能看出是实例挂了。
+      expect(out.isError, isTrue);
+      expect(out.content, contains('当前时间：'));
+      expect(out.content, contains('搜索服务异常'));
     });
 
     test('provider 错误回填给模型的文案里带诊断分类', () async {

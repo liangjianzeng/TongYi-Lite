@@ -52,6 +52,15 @@ final class AgentUiState {
   /// turn/end 的失败原因（error 时展示；completed 清空）。
   final String? lastError;
 
+  /// 本 turn 思考流快照（adapter onThinking 推送的全量文本；
+  /// 每个新 turn attach 时清空）。空串 = 本轮无思考输出。
+  final String thinking;
+
+  /// 已完成步骤的思考块存档：step 边界（kEventStepStart/turn end）把当时的
+  /// thinking 快照落档并清空流式缓冲——工作流里每一步的思考都以折叠条
+  /// 保留，下一步思考另起新卡流式（用户要求：过程可回看）。
+  final List<String> thinkingHistory;
+
   const AgentUiState({
     this.running = false,
     this.turn = 0,
@@ -60,10 +69,14 @@ final class AgentUiState {
     this.retryAttempt = 0,
     this.compacted = false,
     this.lastError,
+    this.thinking = '',
+    this.thinkingHistory = const [],
   });
 
   bool get hasActivity =>
       running || tools.isNotEmpty || lastError != null || compacted;
+
+  bool get hasThinking => thinking.isNotEmpty;
 
   AgentUiState copyWith({
     bool? running,
@@ -74,6 +87,8 @@ final class AgentUiState {
     bool? compacted,
     String? lastError,
     bool clearError = false,
+    String? thinking,
+    List<String>? thinkingHistory,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -83,6 +98,8 @@ final class AgentUiState {
         retryAttempt: retryAttempt ?? this.retryAttempt,
         compacted: compacted ?? this.compacted,
         lastError: clearError ? null : (lastError ?? this.lastError),
+        thinking: thinking ?? this.thinking,
+        thinkingHistory: thinkingHistory ?? this.thinkingHistory,
       );
 }
 
@@ -92,6 +109,13 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
   AgentUiStateNotifier() : super(const AgentUiState());
 
   StreamSubscription<SessionEvent>? _sub;
+
+  /// 思考流推送（adapter 全量快照）。节流由调用方（chat_provider）负责，
+  /// 这里直接落 state——事件频率低（流 delta 聚合后）。
+  void setThinking(String text) {
+    if (state.thinking == text) return;
+    state = state.copyWith(thinking: text);
+  }
 
   void attach(SessionLog log) {
     detach();
@@ -104,6 +128,15 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
     _sub = null;
   }
 
+  /// 把当前流式思考快照落档（step 边界/turn 结束时调用），清空流式缓冲。
+  AgentUiState _finalizeThinking(AgentUiState s) {
+    if (s.thinking.isEmpty) return s;
+    return s.copyWith(
+      thinkingHistory: [...s.thinkingHistory, s.thinking],
+      thinking: '',
+    );
+  }
+
   /// 事件归约（纯函数式：只产新 state，不改 log）。测试可直接调用。
   void onEvent(SessionEvent e) {
     switch (e.type) {
@@ -114,7 +147,8 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
         );
         break;
       case kEventStepStart:
-        state = state.copyWith(
+        // step 边界：上一步的思考已结束 → 落档折叠，新 step 另起思考卡。
+        state = _finalizeThinking(state).copyWith(
           step: (e.data['step'] as num?)?.toInt() ?? state.step);
         break;
       case kEventToolCall:
@@ -154,7 +188,7 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
         break;
       case kEventTurnEnd:
         final kind = _reasonKind(e.data['reason']);
-        state = state.copyWith(
+        state = _finalizeThinking(state).copyWith(
           running: false,
           retryAttempt: 0,
           lastError: kind == 'error' ? '本轮执行失败（见推理日志）' : null,

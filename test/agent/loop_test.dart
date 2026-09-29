@@ -27,6 +27,7 @@ class FakeLlmAdapter implements LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     calls++;
@@ -58,6 +59,7 @@ class HangingFakeLlmAdapter implements LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     calls++;

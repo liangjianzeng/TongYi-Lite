@@ -148,6 +148,13 @@ class OpenAiService {
         if (content is String && content.isNotEmpty) {
           yield {'type': 'text', 'text': content};
         }
+        // 思考增量（DeepSeek/Qwen 兼容端 reasoning_content；OpenRouter 端
+        // reasoning）。不产出则思考型模型长推理期间 UI 无任何反馈。
+        final reasoning =
+            delta['reasoning_content'] ?? delta['reasoning'];
+        if (reasoning is String && reasoning.isNotEmpty) {
+          yield {'type': 'thinking', 'text': reasoning};
+        }
         final calls = delta['tool_calls'];
         if (calls is List) {
           for (final c in calls) {
@@ -301,7 +308,7 @@ class OpenAiService {
 
       // 仅当 API 支持视觉时，才尝试把图片 base64 编码为 image_url part。
       final imageB64 = visionCapable && msg.imagePath != null
-          ? await _encodeImageFile(msg.imagePath!)
+          ? await encodeImageFile(msg.imagePath!)
           : null;
 
       if (imageB64 != null) {
@@ -326,16 +333,25 @@ class OpenAiService {
     return messages;
   }
 
-  static Future<String?> _encodeImageFile(String path) async {
+  /// 图片 base64 编码（带缓存：agent 每个 step 重放历史会重复编码同一图）。
+  static Future<String?> encodeImageFile(String path) async {
+    final cached = _imageB64Cache[path];
+    if (cached != null) return cached;
     try {
       final file = File(path);
       if (!await file.exists()) return null;
       final bytes = await file.readAsBytes();
-      return base64Encode(bytes);
+      final b64 = base64Encode(bytes);
+      if (_imageB64Cache.length >= 8) _imageB64Cache.remove(_imageB64Cache.keys.first);
+      _imageB64Cache[path] = b64;
+      return b64;
     } catch (_) {
       return null;
     }
   }
+
+  /// path → base64 缓存（上限 8 张，FIFO 淘汰）。
+  static final Map<String, String> _imageB64Cache = {};
 
   /// 把 dio 异常转成可读中文信息。
   String _friendlyDioError(DioException e) {

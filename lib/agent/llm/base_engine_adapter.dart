@@ -44,6 +44,7 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) {
     throw UnimplementedError('子类须覆写 generate');

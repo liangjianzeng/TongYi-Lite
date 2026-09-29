@@ -708,6 +708,17 @@ class ChatNotifier extends StateNotifier<bool> {
 
     // ---- 流式占位 + 活动会话（与旧路径共享 UI 契约）----
     final tokenController = StreamController<String>.broadcast();
+    // 思考流（agent 模式单独展示）：adapter 推全量快照，节流后落 UI state。
+    final thinkingController = StreamController<String>.broadcast();
+    final agentUi = _ref.read(agentUiStateProvider.notifier);
+    var lastThinkingPush = DateTime.now();
+    final thinkingSub = thinkingController.stream.listen((thinking) {
+      if (thinking.isEmpty) return;
+      final now = DateTime.now();
+      if (now.difference(lastThinkingPush).inMilliseconds < 120) return;
+      lastThinkingPush = now;
+      agentUi.setThinking(thinking);
+    });
     final session = _AgentActivitySession(
       conversationId: conversationId,
       storage: _storage,
@@ -794,6 +805,7 @@ class ChatNotifier extends StateNotifier<bool> {
         imagePath: imagePath,
         audioPath: audioPath,
         onToken: tokenController,
+        onThinking: thinkingController,
       );
       // 只取**本轮**产出的答案；失败时为空——绝不回退历史旧回复冒充本回复。
       answer = agent.lastTurnAnswer;
@@ -811,7 +823,9 @@ class ChatNotifier extends StateNotifier<bool> {
       // Phase 6：停止订阅本 turn 事件流（状态保留供面板展示本轮末态）。
       _ref.read(agentUiStateProvider.notifier).detach();
       sub?.cancel();
+      await thinkingSub.cancel();
       tokenController.close();
+      unawaited(thinkingController.close());
     }
 
     // 最终占位文本 = 本轮最终回答（turn 末位 assistant/message）。

@@ -236,17 +236,114 @@ class CompactionBanner extends StatelessWidget {
   }
 }
 
+/// _ThinkingBlockCard —— 已完成步骤的思考存档（折叠条）。
+///
+/// 与流式卡的区别：无 spinner、默认折叠、不跟随滚动；点按头部展开静态
+/// 文本回看。第 N 步思考按序标注。
+class _ThinkingBlockCard extends StatefulWidget {
+  final String text;
+  final int index;
+  const _ThinkingBlockCard({required this.text, required this.index});
+
+  @override
+  State<_ThinkingBlockCard> createState() => _ThinkingBlockCardState();
+}
+
+class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tail = widget.text.length > 2000
+        ? '…${widget.text.substring(widget.text.length - 2000)}'
+        : widget.text;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
+      child: Container(
+        decoration: BoxDecoration(
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.psychology,
+                        size: 14,
+                        color: theme.colorScheme.tertiary
+                            .withValues(alpha: 0.7)),
+                    const SizedBox(width: 6),
+                    Text(
+                      '思考 ${widget.index}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color:
+                              theme.colorScheme.tertiary.withValues(alpha: 0.8)),
+                    ),
+                    const Spacer(),
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 15,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_expanded)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 5),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: SingleChildScrollView(
+                    child: Text(
+                      tail,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// ToolActivityCard —— tool/call + tool/result 结构化卡片。
 ///
-/// 折叠态：状态图标 + 工具名 + 单行参数摘要；展开态：完整参数 JSON + 结果。
-class ToolActivityCard extends StatelessWidget {
+/// 折叠态压到**最低可见文字高度**（单行 ~22px）：状态图标 + 工具名 +
+/// 参数摘要；点按行内展开完整参数 JSON + 结果。
+class ToolActivityCard extends StatefulWidget {
   final ToolActivityUi activity;
   const ToolActivityCard({super.key, required this.activity});
 
+  @override
+  State<ToolActivityCard> createState() => _ToolActivityCardState();
+}
+
+class _ToolActivityCardState extends State<ToolActivityCard> {
+  bool _expanded = false;
+
   String get _argsSummary {
-    if (activity.arguments.isEmpty) return '';
+    if (widget.activity.arguments.isEmpty) return '';
     try {
-      final s = jsonEncode(activity.arguments);
+      final s = jsonEncode(widget.activity.arguments);
       return s.length > 60 ? '${s.substring(0, 60)}…' : s;
     } catch (_) {
       return '';
@@ -256,94 +353,247 @@ class ToolActivityCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final activity = widget.activity;
     final (IconData icon, Color color, bool busy) = switch (activity.status) {
       ToolUiStatus.executing => (
           Icons.hourglass_top,
           theme.colorScheme.tertiary,
-          false
+          true
         ),
       ToolUiStatus.done => (Icons.check_circle, Colors.green.shade600, false),
       ToolUiStatus.failed =>
         (Icons.error, theme.colorScheme.error, false),
     };
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
-      child: ExpansionTile(
-        dense: true,
-        shape: const Border(),
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-        childrenPadding:
-            const EdgeInsets.fromLTRB(12, 0, 12, 10),
-        leading: busy
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2))
-            : Icon(icon, size: 16, color: color),
-        title: Row(
-          children: [
-            Flexible(
-              child: Text(
-                '🔧 ${activity.name}',
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13),
-              ),
-            ),
-            if (activity.status == ToolUiStatus.executing) ...[
-              const SizedBox(width: 6),
-              Text('执行中…',
-                  style: TextStyle(
-                      fontSize: 11,
+    final summary = _argsSummary;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
+      child: Material(
+        color:
+            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            // 单行高度贴死文字：vertical 2 + fontSize 12 ≈ 22px。
+            padding:
+                const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    busy
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 1.5))
+                        : Icon(icon, size: 13, color: color),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        '🔧 ${activity.name}',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    if (summary.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          summary,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11, color: theme.colorScheme.outline),
+                        ),
+                      ),
+                    ],
+                    if (activity.status == ToolUiStatus.executing) ...[
+                      const SizedBox(width: 4),
+                      Text('执行中…',
+                          style: TextStyle(
+                              fontSize: 10,
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontStyle: FontStyle.italic)),
+                    ],
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 14,
                       color: theme.colorScheme.onSurfaceVariant,
-                      fontStyle: FontStyle.italic)),
-            ],
-          ],
-        ),
-        subtitle: _argsSummary.isEmpty
-            ? null
-            : Text(_argsSummary,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: 11, color: theme.colorScheme.outline)),
-        children: [
-          if (activity.arguments.isNotEmpty)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '参数：\n${_prettyArgs()}',
-                style: const TextStyle(
-                    fontSize: 11, fontFamily: 'monospace'),
-              ),
-            ),
-          if (activity.result != null && activity.result!.isNotEmpty)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                activity.result!.length > 800
-                    ? '${activity.result!.substring(0, 800)}…'
-                    : activity.result!,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  color: activity.isError
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
                 ),
-              ),
+                if (_expanded) ...[
+                  if (activity.arguments.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '参数：\n${_prettyArgs()}',
+                          style: const TextStyle(
+                              fontSize: 11, fontFamily: 'monospace'),
+                        ),
+                      ),
+                    ),
+                  if (activity.result != null && activity.result!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          activity.result!.length > 800
+                              ? '${activity.result!.substring(0, 800)}…'
+                              : activity.result!,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: activity.isError
+                                ? theme.colorScheme.error
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ],
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
 
   String _prettyArgs() {
     try {
-      return const JsonEncoder.withIndent('  ').convert(activity.arguments);
+      return const JsonEncoder.withIndent('  ')
+          .convert(widget.activity.arguments);
     } catch (_) {
-      return activity.arguments.toString();
+      return widget.activity.arguments.toString();
     }
+  }
+}
+
+/// ThinkingStreamCard —— 思考流式卡片（独立模块，不与正文混杂）。
+///
+/// 运行中且答案尚未开始时自动展开并跟随滚动到底；**答案一开始输出就自动
+/// 折叠回"思考"条**（思考是过程，用户要读的是正文）；点按头部随时可手动
+/// 展开/收起（手动状态优先于自动）。思考文本来自 adapter onThinking 全量
+/// 快照（触发/闭合标签已由协议层剥除，这里只会出现"思考"字样）。
+class ThinkingStreamCard extends StatefulWidget {
+  final AgentUiState ui;
+
+  /// 正文回答是否已开始输出（开始即自动折叠思考条）。
+  final bool answerVisible;
+  const ThinkingStreamCard({super.key, required this.ui, this.answerVisible = false});
+
+  @override
+  State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
+}
+
+class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
+  /// null = 跟随运行状态自动展开；非 null = 用户手动覆盖。
+  bool? _override;
+  final ScrollController _scroll = ScrollController();
+  String _lastText = '';
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.ui;
+    if (!s.hasThinking) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    // 自动展开窗口：思考进行中且正文还没开始。答案一开始就折叠回去。
+    final expanded =
+        _override ?? (s.running && s.hasThinking && !widget.answerVisible);
+    // 流式跟随：文本更新且展开时滚到底部。
+    if (expanded && s.thinking != _lastText) {
+      _lastText = s.thinking;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+      });
+    }
+    // 只显示尾部（长思考时头部早已滚出视野，截断省内存与布局开销）。
+    final tail = s.thinking.length > 2000
+        ? '…${s.thinking.substring(s.thinking.length - 2000)}'
+        : s.thinking;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
+      child: Container(
+        decoration: BoxDecoration(
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _override = !expanded),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.psychology,
+                        size: 14, color: theme.colorScheme.tertiary),
+                    const SizedBox(width: 6),
+                    Text(
+                      s.running ? '思考中…' : '思考',
+                      style: TextStyle(
+                          fontSize: 12, color: theme.colorScheme.tertiary),
+                    ),
+                    if (s.running) ...[
+                      const SizedBox(width: 6),
+                      const SizedBox(
+                          width: 10,
+                          height: 10,
+                          child: CircularProgressIndicator(strokeWidth: 1.5)),
+                    ],
+                    const Spacer(),
+                    Icon(
+                      expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 15,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (expanded)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 5),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 150),
+                  child: SingleChildScrollView(
+                    controller: _scroll,
+                    child: Text(
+                      tail,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -352,7 +602,7 @@ class ToolActivityCard extends StatelessWidget {
 /// [重试/压缩横幅（仅运行中回合）]
 /// → [🔧 工具卡片 ×N（逐步）]
 /// → [思考中…（运行中且尚无答案文本）]
-/// → [最终回答 ChatBubble（showAvatar:false，保留统计/复制）]。
+/// → [最终回答 ChatBubble（保留 assistant 头像/统计/复制）]。
 class AgentTurnBlock extends StatelessWidget {
   final List<ToolActivityUi> steps;
   final ChatMessage? answer;
@@ -374,10 +624,12 @@ class AgentTurnBlock extends StatelessWidget {
 
   /// 思考行只在「模型确实在转、答案未开始、且没有工具正在执行」时显示。
   /// 工具执行中不显示——工具卡片自带「执行中…」状态，再叠一个就是
-  /// 双转圈（蠢）；重试中已有 RetryIndicator 转圈，同理不再叠加。
-  /// 全程保证界面上同时最多一个 spinner。
+  /// 双转圈（蠢）；重试中已有 RetryIndicator，同理。
+  /// **有真思考流（思考卡）时不显示**——思考卡自带「思考中…」转圈，
+  /// 占位行不是真思考、纯属重复（用户定案：界面上同时最多一个 spinner）。
   bool get _thinking =>
       _answerPending &&
+      !ui.hasThinking &&
       ui.retryAttempt == 0 &&
       !steps.any((s) => s.status == ToolUiStatus.executing);
 
@@ -392,6 +644,16 @@ class AgentTurnBlock extends StatelessWidget {
         if (isLive && ui.running && ui.retryAttempt > 0)
           RetryIndicator(attempt: ui.retryAttempt),
         if (isLive && ui.running && ui.compacted) const CompactionBanner(),
+        // 之前各步的思考存档：折叠条常驻（点按可回看），不参与转圈。
+        if (isLive)
+          for (var i = 0; i < ui.thinkingHistory.length; i++)
+            _ThinkingBlockCard(
+                text: ui.thinkingHistory[i], index: i + 1),
+        if (isLive && ui.hasThinking)
+          ThinkingStreamCard(
+            ui: ui,
+            answerVisible: answer != null && !_answerPending,
+          ),
         ...steps.map((s) => ToolActivityCard(activity: s)),
         if (_thinking) const ThinkingIndicator(),
         // 智能体回合里答案还是空占位 → 不渲染回答气泡：ChatBubble 自带的
@@ -405,7 +667,8 @@ class AgentTurnBlock extends StatelessWidget {
             imagePath: answer!.imagePath,
             audioPath: answer!.audioPath,
             inferenceStats: answer!.inferenceStats,
-            showAvatar: false,
+            // 智能体回答与普通聊天同款：保留 assistant 头像（用户反馈要求）。
+            showAvatar: true,
           ),
       ],
     );

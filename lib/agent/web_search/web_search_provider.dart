@@ -48,7 +48,15 @@ class WebSearchResult {
 
   /// 是否因超出 maxResults 丢弃过结果（此前该字段恒为 false）。
   final bool truncated;
-  const WebSearchResult({required this.sources, this.truncated = false});
+
+  /// 0 结果时的引擎诊断（哪些引擎 timeout/CAPTCHA/静默 0 条），
+  /// 供工具层转成可行动的报错——"查询不到"必须能看出是实例挂了。
+  final String? diagnostics;
+  const WebSearchResult({
+    required this.sources,
+    this.truncated = false,
+    this.diagnostics,
+  });
 }
 
 /// 标准化搜索结果中的一条来源（对齐 DSH WebSearchSource）。
@@ -317,6 +325,8 @@ class SearXNGSearchProvider implements WebSearchProvider {
       return WebSearchResult(
         sources: mapped,
         truncated: rawCount > mapped.length,
+        diagnostics:
+            mapped.isEmpty ? _describeEmpty(data) : null,
       );
     } on WebSearchProviderError {
       rethrow;
@@ -389,6 +399,27 @@ class SearXNGSearchProvider implements WebSearchProvider {
       default:
         return status != null && status >= 500 ? '（实例内部错误）' : '';
     }
+  }
+
+  /// 0 结果时的实例侧诊断（实测案例：上游引擎全 timeout / CAPTCHA 挂起时
+  /// SearXNG 仍返回 HTTP 200 + 空 results——不挖 unresponsive_engines 就
+  /// 只会得到一句没用的"查询不到"）。
+  String _describeEmpty(Map<String, dynamic> data) {
+    final unresponsive = data['unresponsive_engines'];
+    final parts = <String>[];
+    if (unresponsive is List && unresponsive.isNotEmpty) {
+      final items = unresponsive
+          .map((e) => e is List && e.length >= 2
+              ? '${e[0]}(${e[1]})'
+              : e.toString())
+          .take(8)
+          .join('、');
+      parts.add('实例侧引擎状态：$items');
+    }
+    parts.add('所有启用的引擎都未返回结果——多半是 SearXNG 实例的出口网络'
+        '不通（引擎集体 timeout）或引擎被 CAPTCHA 挂起，需在实例所在机器上'
+        '检查外网连通性/代理与 settings.yml 的引擎配置');
+    return parts.join('；');
   }
 
   bool _isJsonMime(String ct) {

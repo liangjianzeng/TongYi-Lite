@@ -23,6 +23,7 @@ final class _FakeAdapter extends LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     final idx = _calls < _outcomes.length ? _calls : _outcomes.length - 1;

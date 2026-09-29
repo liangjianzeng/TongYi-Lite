@@ -92,23 +92,71 @@ List<Map<String, dynamic>> toOpenAiWireMessages(
   return out;
 }
 
+/// 把带 `imagePath` 的 user 消息转为 OpenAI content-parts（base64 image_url）。
+///
+/// [toOpenAiWireMessages] / [convertApiMessages] 均为 1:1 投影，[wire] 与
+/// [messages] 按下标对齐；图片读取失败时跳过该条（降级为纯文本），不影响整轮。
+/// 调用方须先确认端点 visionCapable，否则历史里的图片永不发出。
+Future<List<Map<String, dynamic>>> attachWireImages(
+  List<Map<String, dynamic>> wire,
+  List<Map<String, dynamic>> messages,
+) async {
+  for (var i = 0; i < wire.length && i < messages.length; i++) {
+    final src = messages[i];
+    if (src['role'] != 'user') continue;
+    final p = src['imagePath'];
+    if (p is! String || p.isEmpty) continue;
+    final b64 = await OpenAiService.encodeImageFile(p);
+    if (b64 == null) continue;
+    final parts = <Map<String, dynamic>>[
+      {
+        'type': 'image_url',
+        'image_url': {'url': 'data:image/jpeg;base64,$b64'},
+      },
+    ];
+    final content = wire[i]['content'];
+    if (content is String && content.isNotEmpty) {
+      parts.insert(0, {'type': 'text', 'text': content});
+    }
+    wire[i]['content'] = parts;
+  }
+  return wire;
+}
+
 /// 原生工具调用的流式分片组装器。
 ///
 /// OpenAI 流式 tool_calls 按 `index` 分片到达：首片带 id/name，
 /// `function.arguments` 是 JSON 字符串的增量分片（跨多片拼齐后整体解码）。
+///
+/// 思考通道：`reasoning_content`/`reasoning` 增量直入思考缓冲；
+/// content 内嵌 `<think>…</think>` 块经字符状态机剥离（不进可见文本，
+/// 也不进 LlmResult——否则思考污染历史上下文）。
 class OpenAiNativeStreamAssembler {
   final StringBuffer _text = StringBuffer();
   final Map<int, _PendingNativeCall> _pending = {};
   String? finishReason;
 
+  // ---- 思考通道（reasoning 字段 + 内嵌 <think> 剥离）----
+  final StringBuffer _thinking = StringBuffer();
+  final StringBuffer _pendingTag = StringBuffer();
+  bool _inThink = false;
+
+  static const String _openTag = '<think>';
+  static const String _closeTag = '</think>';
+
   String get textSoFar => _text.toString();
+  String get thinkingSoFar => _thinking.toString();
 
   /// 消费一条 [OpenAiService.chatCompletionEvents] 事件。
   void addEvent(Map<String, dynamic> event) {
     switch (event['type']) {
       case 'text':
         final t = event['text'];
-        if (t is String) _text.write(t);
+        if (t is String && t.isNotEmpty) _addText(t);
+        break;
+      case 'thinking':
+        final t = event['text'];
+        if (t is String) _thinking.write(t);
         break;
       case 'tool_call':
         final idx = (event['index'] as num?)?.toInt() ?? 0;
@@ -129,8 +177,56 @@ class OpenAiNativeStreamAssembler {
     }
   }
 
+  /// content 增量 → 逐字符过 `<think>` 状态机（标签可跨分片）。
+  void _addText(String t) {
+    for (var i = 0; i < t.length; i++) {
+      _addTextChar(t[i]);
+    }
+  }
+
+  void _addTextChar(String ch) {
+    if (_inThink) {
+      _thinking.write(ch);
+      final t = _thinking.toString();
+      if (t.endsWith(_closeTag)) {
+        // 闭合标签本身不算思考内容。
+        _thinking
+          ..clear()
+          ..write(t.substring(0, t.length - _closeTag.length));
+        _inThink = false;
+      }
+      return;
+    }
+    if (_pendingTag.isEmpty) {
+      if (ch == '<') {
+        _pendingTag.write(ch);
+      } else {
+        _text.write(ch);
+      }
+      return;
+    }
+    final candidate = _pendingTag.toString() + ch;
+    if (_openTag.startsWith(candidate)) {
+      _pendingTag
+        ..clear()
+        ..write(candidate);
+      if (candidate == _openTag) {
+        _pendingTag.clear();
+        _inThink = true;
+      }
+      return;
+    }
+    // 猜错：把已缓冲的候选回退为普通文本（最后一个字符重判，可能是新标签起点）。
+    _text.write(candidate.substring(0, candidate.length - 1));
+    _pendingTag.clear();
+    _addTextChar(ch);
+  }
+
   /// 组装终态：文本 + 按 index 序排列的工具调用。
   ({String text, List<ToolCall> calls}) finalize() {
+    // 流结束时残留的标签候选字符归还可见文本。
+    _text.write(_pendingTag.toString());
+    _pendingTag.clear();
     final indexes = _pending.keys.toList()..sort();
     final calls = <ToolCall>[];
     for (final idx in indexes) {
@@ -188,6 +284,7 @@ class OpenAiAdapter extends BaseEngineAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     if (_openAi == null || _apiModel == null) {
@@ -200,20 +297,27 @@ class OpenAiAdapter extends BaseEngineAdapter {
     final useNative =
         (capabilities?.nativeToolCall ?? false) && options.tools.isNotEmpty;
     if (useNative) {
-      return _generateNative(options, onToken: onToken, cancel: cancel);
+      return _generateNative(options,
+          onToken: onToken, onThinking: onThinking, cancel: cancel);
     }
-    return _generateTextProtocol(options, onToken: onToken, cancel: cancel);
+    return _generateTextProtocol(options,
+        onToken: onToken, onThinking: onThinking, cancel: cancel);
   }
 
   /// 原生工具调用路径：tools 进请求体，tool_calls 结构化组装。
   Future<LlmResult> _generateNative(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     final openAi = _openAi!;
     final model = _apiModel!;
     final wireMessages = toOpenAiWireMessages(options.messages);
+    // 视觉：带 imagePath 的 user 消息转 content-parts（visionCapable 才发）。
+    if (model.visionCapable) {
+      await attachWireImages(wireMessages, options.messages);
+    }
     final tools = buildOpenAiToolsSchema(options.tools);
     final assembler = OpenAiNativeStreamAssembler();
     // 流终态（null=干净完成，非 null=错误）。
@@ -238,6 +342,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
           assembler.addEvent(event);
           if (onToken != null) {
             onToken.add(assembler.textSoFar);
+          }
+          if (onThinking != null) {
+            onThinking.add(assembler.thinkingSoFar);
           }
         },
         onError: (Object e, [StackTrace? s]) {
@@ -299,12 +406,17 @@ class OpenAiAdapter extends BaseEngineAdapter {
   Future<LlmResult> _generateTextProtocol(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     final openAi = _openAi!;
     final model = _apiModel!;
     // 文本路线：'tool' 保留 role:tool（部分服务端宽容处理），助手剥除 tool_calls。
     final apiMessages = convertApiMessages(options.messages);
+    // 视觉：带 imagePath 的 user 消息转 content-parts（visionCapable 才发）。
+    if (model.visionCapable) {
+      await attachWireImages(apiMessages, options.messages);
+    }
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
     // 流终态（null=干净完成，非 null=错误）。
@@ -330,6 +442,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
           processor.add(token);
           if (onToken != null) {
             onToken!.add(processor.visibleText);
+          }
+          if (onThinking != null) {
+            onThinking!.add(processor.thinkingText);
           }
         },
         onError: (Object e, [StackTrace? s]) {

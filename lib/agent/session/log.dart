@@ -190,7 +190,14 @@ final class SessionLog {
           });
           break;
         case kEventUserMessage:
-          out.add({'role': 'user', 'content': e.data['content'] as String? ?? ''});
+          out.add({
+            'role': 'user',
+            'content': e.data['content'] as String? ?? '',
+            // API 路线视觉：adapter 按此键把图片转 image_url part；
+            // 本地路线转换器只取 role/content，此键不透传给 native。
+            if (e.data['imagePath'] is String)
+              'imagePath': e.data['imagePath'] as String,
+          });
           break;
         case kEventAssistantMessage:
           final entry = <String, dynamic>{};

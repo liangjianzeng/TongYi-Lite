@@ -42,6 +42,33 @@ class AgentStreamProcessor {
   /// 当前可见文本（思考过滤 + JSON 隐藏后）。
   String get visibleText => visible.toString();
 
+  /// 各风格的思考闭合记号（' response' 兼容 Qwen3.5 无闭合标签变体）。
+  static const List<String> _thinkClosers = [
+    '</thinking>',
+    '</think>',
+    ' response',
+  ];
+
+  /// 思考缓冲的**展示用**文本：剥掉尾部瞬态的闭合记号（流式推送时闭合标签
+  /// 是逐字符进入缓冲、命中后整体 clear 的，直接推会把 `</thi` 这类残尾
+  /// 闪现在思考卡片上）。
+  String get thinkingText {
+    var t = thinking.toString();
+    for (final c in _thinkClosers) {
+      if (t.endsWith(c)) return t.substring(0, t.length - c.length);
+    }
+    // 尾部是某个闭合记号的前缀（还没写完）→ 同样剥掉。
+    final maxLen = _thinkClosers.map((c) => c.length).reduce((a, b) => a > b ? a : b);
+    for (var len = maxLen; len >= 1; len--) {
+      if (t.length < len) continue;
+      final tail = t.substring(t.length - len);
+      if (_thinkClosers.any((c) => c.startsWith(tail))) {
+        return t.substring(0, t.length - len);
+      }
+    }
+    return t;
+  }
+
   /// 去除思考块后的原始文本（工具调用块保留，供协议解析）。
   String get cleanText => clean.toString();
 
@@ -81,7 +108,9 @@ class AgentStreamProcessor {
       thinking.write(ch);
       final t = thinking.toString();
       if (_thinkKind == _ThinkKind.html &&
-          (t.endsWith('</thinking>') || t.endsWith(' response'))) {
+          (t.endsWith('</thinking>') ||
+              t.endsWith('</think>') ||
+              t.endsWith(' response'))) {
         // ` response` 兼容 Qwen3.5 的 HTML 变体（无 `</thinking>` 闭合）。
         _thinkKind = null;
         thinking.clear();
@@ -150,9 +179,9 @@ class AgentStreamProcessor {
       return;
     }
 
-    // HTML 风格思考：`<thinking>` / ` think`（Qwen3.5 实际输出不带 ing）。
-    // ` think` 是 ` thinking` 的前缀，一并覆盖带 ing 的完整变体。
-    const htmlTags = ['<thinking>', ' think'];
+    // HTML 风格思考：`<thinking>` / `<think>`（Qwen3/DeepSeek 短标签）/
+    // ` think`（Qwen3.5 实际输出不带 ing，宽松检测可接受）。
+    const htmlTags = ['<thinking>', '<think>', ' think'];
     for (final tag in htmlTags) {
       if (v.endsWith(tag)) {
         _enterThink(_ThinkKind.html, v, tag);
@@ -168,8 +197,9 @@ class AgentStreamProcessor {
     }
   }
 
-  /// 进入思考态：把已写入 visible 的触发标签回退到 thinking 缓冲（后续字符全丢弃）；
-  /// clean 保留工具块，只去掉尾部这串触发 tag（此刻两者尾部都恰为该 tag）。
+  /// 进入思考态：把已写入 visible 的触发标签回退掉（后续字符全丢弃进思考缓冲）。
+  /// 触发标签**不写入** thinking 缓冲——思考内容展示时不许露出 `<think>` 这类
+  /// 标签（用户要求：只标注"思考"，标签是协议记号不是内容）。
   void _enterThink(_ThinkKind kind, String v, String tag) {
     final before = v.substring(0, v.length - tag.length);
     visible
@@ -183,7 +213,6 @@ class AgentStreamProcessor {
         ..clear()
         ..write(raw.substring(0, raw.length - tag.length));
     }
-    thinking.write(tag);
     _thinkKind = kind;
   }
 
