@@ -9,7 +9,6 @@
 ///   历史对话可回看每次工具调用。
 library;
 
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -557,9 +556,10 @@ class _ToolActivityCardState extends State<ToolActivityCard>
 
 /// ThinkingStreamCard —— 思考流式卡片（独立模块，不与正文混杂）。
 ///
-/// 用户定案：思考卡主信息是**耗时**（"思考 - 持续了X秒"），原始思考文本
-/// 默认收起（本地小模型的思考流常是"1234"式噪声，自动展开只会占屏）；
-/// 点按头部手动展开回看。思考文本来自 adapter onThinking 全量快照。
+/// 用户定案：思考卡主信息是**耗时**（"思考 - 持续了X秒"）。流式输出时
+/// **自动展开**并跟随列表滚动（否则用户不知道智能体在干什么）；流式输出
+/// 完成（答案开始/回合结束）自动闭合；点按头部可手动展开/收起。
+/// 思考文本来自 adapter onThinking 全量快照。
 class ThinkingStreamCard extends StatefulWidget {
   final AgentUiState ui;
 
@@ -613,7 +613,9 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
     if (!s.hasThinking) return const SizedBox.shrink();
     _syncClock();
     final theme = Theme.of(context);
-    final expanded = _override ?? false;
+    // 流式输出中（running 且答案未开始）自动展开跟随滚动；答案开始/回合
+    // 结束自动闭合。用户手动点按优先（_override 非 null 即覆盖）。
+    final expanded = _override ?? (s.running && !widget.answerVisible);
     // 只显示尾部（长思考时头部早已滚出视野，截断省内存与布局开销）。
     final tail = s.thinking.length > 2000
         ? '…${s.thinking.substring(s.thinking.length - 2000)}'
@@ -727,8 +729,40 @@ class AgentTurnBlock extends StatelessWidget {
       ui.retryAttempt == 0 &&
       !steps.any((s) => s.status == ToolUiStatus.executing);
 
+  /// live 回合按**执行顺序**交错渲染思考存档与工具卡。
+  ///
+  /// 时间线标记由归约器按事件到达次序生成（思考落档 / 工具卡加入时追加），
+  /// 渲染时依序取对应数据——工具调用与思考不再"一律思考在前、工具在后"。
+  List<Widget> _timelineWidgets() {
+    final widgets = <Widget>[];
+    for (final m in ui.timeline) {
+      switch (m) {
+        case UiTimelineThinking(:final index):
+          if (index < ui.thinkingHistory.length)
+            widgets.add(_ThinkingBlockCard(
+              text: ui.thinkingHistory[index],
+              index: index + 1,
+              duration: index < ui.thinkingDurations.length
+                  ? ui.thinkingDurations[index]
+                  : null,
+            ));
+        case UiTimelineTool(:final index):
+          if (index < ui.tools.length)
+            widgets.add(ToolActivityCard(activity: ui.tools[index]));
+      }
+    }
+    return widgets;
+  }
+
   @override
   Widget build(BuildContext context) {
+    // live 回合：思考存档与工具卡按**执行顺序**交错渲染（timeline 由归约器
+    // 按事件到达次序生成）——不再"思考一律在前、工具一律在后"。流式思考卡
+    // = 当前正在进行的思考，位于时间线末尾。
+    // 历史/普通聊天回合（timeline 恒空）：按存储 🔧 消息顺序渲染工具卡。
+    final stepWidgets = (isLive && ui.timeline.isNotEmpty)
+        ? _timelineWidgets()
+        : steps.map((s) => ToolActivityCard(activity: s)).toList();
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -738,22 +772,12 @@ class AgentTurnBlock extends StatelessWidget {
         if (isLive && ui.running && ui.retryAttempt > 0)
           RetryIndicator(attempt: ui.retryAttempt),
         if (isLive && ui.running && ui.compacted) const CompactionBanner(),
-        // 之前各步的思考存档：折叠条常驻（点按可回看），不参与转圈。
-        // 耗时与 history 平行（不足时补 null = 显示"思考 N"）。
-        if (isLive)
-          for (var i = 0; i < ui.thinkingHistory.length; i++)
-            _ThinkingBlockCard(
-                text: ui.thinkingHistory[i],
-                index: i + 1,
-                duration: i < ui.thinkingDurations.length
-                    ? ui.thinkingDurations[i]
-                    : null),
+        ...stepWidgets,
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
             ui: ui,
             answerVisible: answer != null && !_answerPending,
           ),
-        ...steps.map((s) => ToolActivityCard(activity: s)),
         if (_thinking) const ThinkingIndicator(),
         // 智能体回合里答案还是空占位 → 不渲染回答气泡：ChatBubble 自带的
         // 「思考中…」占位会和上面的思考行/工具卡转圈叠成第二个 spinner。

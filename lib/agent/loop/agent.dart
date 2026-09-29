@@ -158,9 +158,13 @@ class ReactLoopAgent {
               maxRetries: providerKind == ProviderKind.local ? 3 : 5,
               initialDelay: const Duration(milliseconds: 500),
               maxDelay: const Duration(seconds: 10),
-              // API 思考型模型可能把 max_tokens 耗在推理上导致 content 为空
-              // （EMPTY_RESPONSE，设计文档 §5.4 计入 API 可重试档）。
-              retryEmptyResponse: providerKind == ProviderKind.api,
+              // 空响应计入可重试档（两条路线都要，有界不循环）：
+              // - API：思考型模型可能把 max_tokens 耗在推理上导致 content 为空
+              //   （EMPTY_RESPONSE，设计文档 §5.4）；
+              // - 本地：4B 模型常在思考中途直接 EOS（思考块未闭合被丢弃 → 空
+              //   响应），重试一次通常能产出正式回答（2026-09-29 真机观察到，
+              //   曾把 web_search 回合误判成"执行失败"）。
+              retryEmptyResponse: true,
             ),
         _compaction = compaction ?? const NoCompactionPlugin() {
     // 系统提示以 system/message 节点入 log（turn 0 前一次性，幂等）。
@@ -293,8 +297,6 @@ class ReactLoopAgent {
                 onThinking: onThinking,
                 cancel: _cancelCompleter,
             );
-            // [AGDBG] 诊断（开发用，可删）。
-            _dbgStep(turn, step, options, result);
             _appendAssistant(turn, step, result);
             if (!result.hasToolCalls) {
               _turnAnswer = result.text; // 本轮最终回答（无工具那步）
@@ -367,8 +369,6 @@ class ReactLoopAgent {
     String? audioPath,
   ) {
     final messages = _session.deriveModelMessages();
-    // [AGDBG] 诊断（开发用，可删）。
-    _dbgRequest(messages);
     final tools = _registry.visibleFor(_modelId);
     final options = GenerateOptions(
       provider: _providerKind,
@@ -433,31 +433,6 @@ class ReactLoopAgent {
       'turn': turn,
       'step': step,
     });
-  }
-
-  // [AGDBG] 诊断（开发用，可删）。
-  void _dbgStep(int turn, int step, GenerateOptions options, LlmResult result) {
-    final t = result.text;
-    print('[AGDBG/STEPS] turn=$turn step=$step n_msgs=${options.messages.length} hasTool=${result.hasToolCalls} toolNames=[${result.toolCalls.map((c) => c.name).join('|')}] textLen=${t.length}');
-    if (t.length > 0) {
-      print('[AGDBG/STEPS] text=<<<${t.substring(0, t.length > 400 ? 400 : t.length)}...>>>');
-    }
-  }
-
-  void _dbgRequest(List<Map<String, dynamic>> messages) {
-    print('[AGDBG/REQ] n_msgs=${messages.length}');
-    for (var i = 0; i < messages.length; i++) {
-      final m = messages[i];
-      final c = m['content'] as String? ?? '';
-      final tcs = (m['tool_calls'] as List? ?? []);
-      print('[AGDBG/MSG $i] role=${m['role']} contentLen=${c.length} toolCalls=${tcs.length}');
-    }
-    final start = math.max(0, messages.length - 4);
-    for (var i = start; i < messages.length; i++) {
-      final m = messages[i];
-      final c = m['content'] as String? ?? '';
-      print('[AGDBG/MSG-LAST $i] role=${m['role']} content=<<<${c.substring(0, c.length > 300 ? 300 : c.length)}...>>>');
-    }
   }
 
   /// 失败 → 落 assistant/attempt（log-only，模型不可见）。

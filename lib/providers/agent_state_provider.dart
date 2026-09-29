@@ -36,6 +36,25 @@ final class ToolActivityUi {
   });
 }
 
+/// 时间线标记：本 turn 内某个元素何时出现（真实执行次序）。
+/// 归约器按事件到达顺序追加；AgentTurnBlock 依此交错渲染思考存档与工具卡
+/// （用户反馈：工具调用和思考的位置经常不按执行顺序呈现）。
+sealed class UiTimelineMarker {
+  const UiTimelineMarker();
+}
+
+/// 第 [index] 个思考存档（对应 [AgentUiState.thinkingHistory]）。
+final class UiTimelineThinking extends UiTimelineMarker {
+  final int index;
+  const UiTimelineThinking(this.index);
+}
+
+/// 第 [index] 个工具卡（对应 [AgentUiState.tools]）。
+final class UiTimelineTool extends UiTimelineMarker {
+  final int index;
+  const UiTimelineTool(this.index);
+}
+
 /// UI 状态快照（§12.2 AgentState 的端侧形态）。
 final class AgentUiState {
   final bool running;
@@ -65,6 +84,9 @@ final class AgentUiState {
   /// 供存档卡显示「思考 - 持续了X秒」（用户定案：避免空洞的"思考 1/2/3"）。
   final List<Duration?> thinkingDurations;
 
+  /// 执行顺序时间线：思考落档/工具卡加入的真实次序（live 回合渲染依据）。
+  final List<UiTimelineMarker> timeline;
+
   const AgentUiState({
     this.running = false,
     this.turn = 0,
@@ -76,6 +98,7 @@ final class AgentUiState {
     this.thinking = '',
     this.thinkingHistory = const [],
     this.thinkingDurations = const [],
+    this.timeline = const [],
   });
 
   bool get hasActivity =>
@@ -95,6 +118,7 @@ final class AgentUiState {
     String? thinking,
     List<String>? thinkingHistory,
     List<Duration?>? thinkingDurations,
+    List<UiTimelineMarker>? timeline,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -107,6 +131,7 @@ final class AgentUiState {
         thinking: thinking ?? this.thinking,
         thinkingHistory: thinkingHistory ?? this.thinkingHistory,
         thinkingDurations: thinkingDurations ?? this.thinkingDurations,
+        timeline: timeline ?? this.timeline,
       );
 }
 
@@ -141,7 +166,8 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
   }
 
   /// 把当前流式思考快照落档（step 边界/turn 结束时调用），清空流式缓冲。
-  /// 落档时顺带记录耗时（起点未知 → null），供存档卡显示"持续了X秒"。
+  /// 落档时顺带记录耗时（起点未知 → null），供存档卡显示"持续了X秒"；
+  /// 并追加时间线标记（思考存档在**此刻**进入渲染序列，而不是一律排最前）。
   AgentUiState _finalizeThinking(AgentUiState s) {
     if (s.thinking.isEmpty) return s;
     Duration? dur;
@@ -152,6 +178,7 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
     return s.copyWith(
       thinkingHistory: [...s.thinkingHistory, s.thinking],
       thinkingDurations: [...s.thinkingDurations, dur],
+      timeline: [...s.timeline, UiTimelineThinking(s.thinkingHistory.length)],
       thinking: '',
     );
   }
@@ -177,7 +204,10 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
           arguments: (e.data['arguments'] as Map<String, dynamic>?) ??
               const {},
         )];
-        state = state.copyWith(tools: tools);
+        state = state.copyWith(
+          tools: tools,
+          timeline: [...state.timeline, UiTimelineTool(tools.length - 1)],
+        );
         break;
       case kEventToolResult:
         final callId = e.data['callId'] as String? ?? '';

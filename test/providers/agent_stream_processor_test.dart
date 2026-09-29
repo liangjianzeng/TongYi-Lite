@@ -81,6 +81,29 @@ void main() {
       expect(p.visibleText.contains('think'), isFalse);
     });
 
+    test('孤立 response 闭合记号（无前置 think）→ 隐式 opener，续写丢弃', () {
+      final p = AgentStreamProcessor();
+      p.add('先思考 think');
+      p.add('\n\n推理一');
+      p.add(' response');
+      p.add('\n\n回答一');
+      // 模型再输出一个无前置 opener 的 ` response`——提前闭合的思考续写。
+      // 当作隐式 opener 重新进入思考态，续写一并丢弃（不渗进可见回答）。
+      p.add(' response');
+      p.add('这段泄漏的续写会一直持续');
+      expect(p.visibleText, '先思考\n\n回答一');
+      expect(p.thinkingActive, isTrue);
+      p.finish(); // EOS：未闭合思考块整体丢弃
+      expect(p.visibleText, '先思考\n\n回答一');
+    });
+
+    test('英文词 response（如 API response）不误吞', () {
+      final p = AgentStreamProcessor();
+      p.add('服务返回的 API response 是 200');
+      expect(p.visibleText, '服务返回的 API response 是 200');
+      expect(p.thinkingActive, isFalse);
+    });
+
     test('XML tool_call 块隐藏并记录', () {
       final p = AgentStreamProcessor();
       p.add('前缀<tool_call>web_search');
