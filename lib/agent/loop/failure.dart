@@ -110,6 +110,8 @@ final class LlmRetry {
     if (f.code == LlmFailureCode.emptyResponse && !retryEmptyResponse) {
       return false;
     }
+    // 思考失控：模型行为（同一模型同一配置重试还会同样失控），只浪费 token。
+    if (f.code == LlmFailureCode.thinkingOverflow) return false;
     // 其余失败（含 toolCallTruncated：采样可能产出更短的完整调用）走
     // 统一的 maxRetries 预算——连续截断说明 token 预算真不够，及时止损。
     return _retries < maxRetries;

@@ -24,10 +24,13 @@ ToolDefinition createGetWeatherTool() {
       if (city.isEmpty) return ToolResult.error('缺少 city 参数');
       try {
         final dio = Dio();
+        // 坑（2026-09-29 真机复现定案）：wttr.in 只认路径形态 `/城市`，
+        // `/?q=城市` 的查询参数形态会返回 HTTP 500（curl/Dio 一致）。
+        // 城市须 URL 编码（中文/空格），放路径里。
+        final uri = 'https://wttr.in/${Uri.encodeComponent(city)}';
         final resp = await dio.get<String>(
-          'https://wttr.in/',
+          uri,
           queryParameters: {
-            'q': city,
             'format': '当前天气: %c, 温度: %t, 体感: %f, 湿度: %h, 风: %w, 降雨: %p',
             'm': '', // 公制单位
             'lang': 'zh',

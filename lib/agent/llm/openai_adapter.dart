@@ -331,6 +331,8 @@ class OpenAiAdapter extends BaseEngineAdapter {
     }
 
     try {
+      // 思考失控守卫（local/API 同规）：思考超长未闭合 → 主动停 SSE 止损。
+      var _thinkingOverflow = false;
       sub = openAi.chatCompletionEvents(
         config: model,
         messages: wireMessages,
@@ -346,6 +348,11 @@ class OpenAiAdapter extends BaseEngineAdapter {
           if (onThinking != null) {
             onThinking.add(assembler.thinkingSoFar);
           }
+          if (!_thinkingOverflow &&
+              assembler.thinkingSoFar.length > kMaxThinkingChars) {
+            _thinkingOverflow = true;
+            openAi.stop();
+          }
         },
         onError: (Object e, [StackTrace? s]) {
           // async 生成器出错不关流 → 显式取消并标记完成。
@@ -357,6 +364,15 @@ class OpenAiAdapter extends BaseEngineAdapter {
       currentSub = sub;
       if (await race(outcome.future, cancel)) {
         throw const AgentCancelledException();
+      }
+      // 思考失控先于错误判定：stop() 会以 cancel 错误收场，若先走 error
+      // 分支会归为 transport（可重试）→ 失控思考被重试 5 遍。
+      if (_thinkingOverflow) {
+        throw const LlmFailure(
+          code: LlmFailureCode.thinkingOverflow,
+          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
+              '建议关闭此模型的思考模式，或调大「智能体每轮生成 token」并换模型/重试',
+        );
       }
       final error = await outcome.future;
       if (error != null) {
@@ -419,6 +435,8 @@ class OpenAiAdapter extends BaseEngineAdapter {
     }
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
+    // 思考失控守卫标志（同原生路线）。
+    var _thinkingOverflow = false;
     // 流终态（null=干净完成，非 null=错误）。
     final outcome = Completer<Object?>();
     StreamSubscription<String>? sub;
@@ -446,6 +464,11 @@ class OpenAiAdapter extends BaseEngineAdapter {
           if (onThinking != null) {
             onThinking!.add(processor.thinkingText);
           }
+          if (!_thinkingOverflow &&
+              processor.thinking.length > kMaxThinkingChars) {
+            _thinkingOverflow = true;
+            openAi.stop();
+          }
         },
         onError: (Object e, [StackTrace? s]) {
           // async 生成器出错不关流 → 显式取消并标记完成。
@@ -458,12 +481,18 @@ class OpenAiAdapter extends BaseEngineAdapter {
       if (await race(outcome.future, cancel)) {
         throw const AgentCancelledException();
       }
+      // 思考失控先于错误判定（stop() 以 cancel 收场，别让它进可重试档）。
+      if (_thinkingOverflow) {
+        throw const LlmFailure(
+          code: LlmFailureCode.thinkingOverflow,
+          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
+              '建议关闭此模型的思考模式，或调大「智能体每轮生成 token」并换模型/重试',
+        );
+      }
       final error = await outcome.future;
       if (error != null) {
         throw _normalizeStreamError(error);
       }
-      // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
-      print('[AGDBG/API] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
       return parseAndReturn(rawBuffer, processor);
     } on AgentCancelledException catch (e) {
       rethrow;

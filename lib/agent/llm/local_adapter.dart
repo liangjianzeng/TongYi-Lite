@@ -59,6 +59,10 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     final done = Completer<void>();
     StreamSubscription<String>? sub;
     var _streamFinished = false;
+    // 思考失控守卫：思考块超长未闭合（实测 agents-a1-4b thinking 下
+    // `<think>` 一开就数千字独白不停）→ 主动 stopGeneration 止损，
+    // 结束后按 thinkingOverflow 失败——不烧光整轮预算让用户干等数分钟。
+    var _thinkingOverflow = false;
     void _finish() {
       if (_streamFinished) return;
       _streamFinished = true;
@@ -85,6 +89,11 @@ class LocalEngineAdapter extends BaseEngineAdapter {
           if (onThinking != null) {
             onThinking!.add(processor.thinkingText);
           }
+          if (!_thinkingOverflow &&
+              processor.thinking.length > kMaxThinkingChars) {
+            _thinkingOverflow = true;
+            _inference.stopGeneration();
+          }
         },
         onError: (Object e, [StackTrace? s]) {
           error.write('$e\n');
@@ -103,8 +112,14 @@ class LocalEngineAdapter extends BaseEngineAdapter {
           message: error.toString(),
         );
       }
-      // [AGDBG] 诊断（开发用，可删）：打印原始 content 流。
-      print('[AGDBG/LOC] rawLen=${rawBuffer.length} raw=<<<${rawBuffer.toString()}>>>');
+      if (_thinkingOverflow) {
+        throw const LlmFailure(
+          code: LlmFailureCode.thinkingOverflow,
+          message: '思考超长未闭合（>6000 字），已中止生成：该模型思考失控。'
+              '建议关闭此模型的思考模式（enableThinking），'
+              '或调大「智能体每轮生成 token」并换模型/重试',
+        );
+      }
       return parseAndReturn(rawBuffer, processor);
     } on AgentCancelledException catch (e) {
       rethrow;

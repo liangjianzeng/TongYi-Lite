@@ -342,12 +342,12 @@ void main() {
       expect(find.textContaining('exit code=1'), findsOneWidget);
     });
 
-    testWidgets('运行中且无答案 → 思考中…', (tester) async {
+    testWidgets('运行中且无答案 → 执行中…', (tester) async {
       await pump(tester, const AgentUiState(running: true), isLive: true);
-      expect(find.text('思考中…'), findsOneWidget);
-      // 非 live：历史回合不显示思考行
+      expect(find.text('执行中…'), findsOneWidget);
+      // 非 live：历史回合不显示执行中行
       await pump(tester, const AgentUiState(running: true), isLive: false);
-      expect(find.text('思考中…'), findsNothing);
+      expect(find.text('执行中…'), findsNothing);
     });
 
     testWidgets('live 显示重试/压缩横幅，非 live 不显示', (tester) async {

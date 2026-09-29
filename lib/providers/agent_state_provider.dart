@@ -61,6 +61,10 @@ final class AgentUiState {
   /// 保留，下一步思考另起新卡流式（用户要求：过程可回看）。
   final List<String> thinkingHistory;
 
+  /// 与 [thinkingHistory] 平行的各步思考耗时（null = 未知/历史无数据），
+  /// 供存档卡显示「思考 - 持续了X秒」（用户定案：避免空洞的"思考 1/2/3"）。
+  final List<Duration?> thinkingDurations;
+
   const AgentUiState({
     this.running = false,
     this.turn = 0,
@@ -71,6 +75,7 @@ final class AgentUiState {
     this.lastError,
     this.thinking = '',
     this.thinkingHistory = const [],
+    this.thinkingDurations = const [],
   });
 
   bool get hasActivity =>
@@ -89,6 +94,7 @@ final class AgentUiState {
     bool clearError = false,
     String? thinking,
     List<String>? thinkingHistory,
+    List<Duration?>? thinkingDurations,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -100,6 +106,7 @@ final class AgentUiState {
         lastError: clearError ? null : (lastError ?? this.lastError),
         thinking: thinking ?? this.thinking,
         thinkingHistory: thinkingHistory ?? this.thinkingHistory,
+        thinkingDurations: thinkingDurations ?? this.thinkingDurations,
       );
 }
 
@@ -110,16 +117,21 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
 
   StreamSubscription<SessionEvent>? _sub;
 
+  /// 当前思考块的起点（首个非空 thinking 推送时记录；落档后复位）。
+  DateTime? _thinkingStart;
+
   /// 思考流推送（adapter 全量快照）。节流由调用方（chat_provider）负责，
   /// 这里直接落 state——事件频率低（流 delta 聚合后）。
   void setThinking(String text) {
     if (state.thinking == text) return;
+    _thinkingStart ??= (text.isNotEmpty) ? DateTime.now() : null;
     state = state.copyWith(thinking: text);
   }
 
   void attach(SessionLog log) {
     detach();
     state = const AgentUiState();
+    _thinkingStart = null;
     _sub = log.events.listen(onEvent);
   }
 
@@ -129,10 +141,17 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
   }
 
   /// 把当前流式思考快照落档（step 边界/turn 结束时调用），清空流式缓冲。
+  /// 落档时顺带记录耗时（起点未知 → null），供存档卡显示"持续了X秒"。
   AgentUiState _finalizeThinking(AgentUiState s) {
     if (s.thinking.isEmpty) return s;
+    Duration? dur;
+    if (_thinkingStart != null) {
+      dur = DateTime.now().difference(_thinkingStart!);
+      _thinkingStart = null;
+    }
     return s.copyWith(
       thinkingHistory: [...s.thinkingHistory, s.thinking],
+      thinkingDurations: [...s.thinkingDurations, dur],
       thinking: '',
     );
   }
