@@ -123,6 +123,46 @@ Bonsai-2 的 hadamard 是 **MUL_MAT 上的 hint**（`op_params[1] == GGML_HINT_S
 4. 若 config 全对纯慢：`test-backend-ops -b Vulkan0 -o MUL_MAT_HADAMARD`
    及 `-o MUL_MAT`/`MUL_MAT_PTQ1_0` 单算子计时，定位瓶颈算子。
 
+## 修正（2026-09-29 日志分析）：「OpenCL 无视 hint → 数值错」结论被推翻
+
+> 全部 26 个设备日志已拷至本机 `E:\Work\DgxSpark\TongYi-Lite\vkptq_logs\`（vkptq_logs.tgz），
+> 以下结论以日志为据。设备已拔线。
+
+**修正 1：hint 被无视在数值上无害。** `matmul(rot_hadamard, x) ≡ FWHT(x)`（数学等价；
+`test_mul_mat_hadamard` 把 `a` 初始化成缩放过的 hadamard 矩阵，所以普通 matmul 也能过）。
+`t_fwht_opencl.log` 24/24 绿、`t_mulmat_opencl.log` **1185/1185 全绿**
+（含 ptq1_0 m=5120 n=512 k=17408 大 n）→ **OpenCL 单算子没有数值 bug**。
+hint 无视的真实代价是**性能**：每 token ~400 次多余的 1024×1024 f32 GEMV + 400 次 launch。
+
+**修正 2：OpenCL 全模型链路从未跑通，加载即卡死。** `oc_repro.log`（9-29 复现，
+`--device GPUOpenCL -ngl 99 -ub 16 -c 2048`）：`adreno_drawctxt_wait` 挂 10+ 分钟、
+进程 0% CPU（总 CPU 时间仅 21s）→ **GPU submit 永不完成**，不是慢 JIT（JIT 烧 CPU）。
+此前没有任何一份 OpenCL 全模型 e2e 成功日志。
+
+**修正 3：OpenCL 显存不足以全量 offload。** `ggml_opencl: global mem size: 5616 MB`、
+`max mem alloc: 1024 MB`，模型 5807 MiB → 必然走 sched 拆图部分 offload。
+tbo 单算子测试覆盖不到拆图/SoA repack 全图路径 → **app 侧 OpenCL 错答
+（"Kotler's model"）的根因在拆图/加载路径，尚未定案**（需下次插线复现）。
+
+**Vulkan 侧已定案（正确但慢）：**
+- 乱码根因链：Turnip 大 n GEMM 错编（`t_ptq1_bign.log` ptq1_0 n≥64 ERR≈1.0 → **0/16**；
+  `t_bign_appso.log`/`t_f16_bign2.log` f16 k=17408 n=512 也错 → 24/72）；
+  **vendor 驱动 16/16 全绿**（`t_bign_vendor.log`）；
+  **ndk-glslc 重建的 libggml-vulkan.so + `-ub 16` e2e 连贯**
+  （`e2e_t_ub16_ndk.log` "We need answer user's simple question. Need final just number"）。
+  → app（NDK r27 glslc 构建 + n_ubatch=16）正确，与用户实测吻合。
+  注意：单靠 ub16 不够（`e2e_t_ub16.log` turnip 版同样乱），**换 shader 编译链是关键**。
+- 慢的定量：generation 0.2~0.3 t/s（≈5s/token）；权重 5.7GB ÷ Adreno 825 ~50GB/s
+  ≈ 9 t/s 理论带宽上限 → **45× 损耗全在每算子开销**（~700-900 算子/token × ~6ms/算子
+  launch+同步）。Vulkan 已实现 FWHT 仍 0.2 t/s → hadamard 非主导因素。
+  优化方向：减少每 token 算子数（算子融合/少同步），而非继续修单算子内核。
+
+**下次插线复现清单（OpenCL 优先）：**
+1. 重跑 oc_repro 同参数，确认加载卡死必现；试 `-ngl 32`（≤5616MB 可放下）对照——
+   若小 offload 能跑，说明卡死在大 offload/拆图 repack 的 submit 上。
+2. app 切 OpenCL 复现错答并抓 logcat（`[handleLoadModel]` + GGML/OpenCL 输出）。
+3. CPU 后端同 prompt 记 tok/s，量化"不如 CPU"差距。
+
 ## 环境备忘
 
 - 设备 bf1552ef = 25053RT47C（Adreno 825）；模型在 /storage/emulated/0/TongYiLite/models/
