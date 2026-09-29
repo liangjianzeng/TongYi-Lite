@@ -267,6 +267,13 @@ static bool oom_guard_disabled() {
     const char *e = getenv("TONGYILITE_NO_OOM_GUARD");
     return e && e[0] == '1';
 }
+
+// OpenCL device-memory guard bypass (2026-09-29). Unlike the system-RAM OOM
+// guard above, this one checks the OpenCL driver's own allocation ceiling.
+static bool clmem_guard_disabled() {
+    const char *e = getenv("TONGYILITE_NO_CLMEM_GUARD");
+    return e && e[0] == '1';
+}
 static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
     const char *e = getenv(name);
     if (!e || !*e) return default_mb << 20;
@@ -472,6 +479,48 @@ struct InferenceEngine {
             LOGI("GPU acceleration disabled by user -> pure CPU");
             reportLoadingLog("已关闭 GPU 加速，使用 CPU 推理");
         }
+
+        // --- OpenCL device-memory guard (2026-09-29) ---
+        // The Adreno OpenCL driver reports a hard CL_DEVICE_GLOBAL_MEM_SIZE cap
+        // (5616 MB on Adreno 825) far below UMA system RAM, and over-committing
+        // it does not fail cleanly: load-time GPU submits deadlock in
+        // adreno_drawctxt_wait and the scheduler's split-CPU path emits wrong
+        // output (Bonsai-2 27B PTQ1_0: weights 5.67 GB + KV > 5616 MB ->
+        // coherent-looking but off-topic answers at 16.5 s/token; the same
+        // model with -ngl 32 inside the cap runs coherent). Refuse OpenCL when
+        // weights + KV/graph budget exceed the device cap; in auto mode switch
+        // to Vulkan instead (Vulkan reports full UMA memory and is unaffected).
+        // TONGYILITE_NO_CLMEM_GUARD=1 bypasses this guard entirely.
+        if (enable_gpu && effective_gpu_layers > 0 && opencl_dev != nullptr &&
+            backend != "vulkan" && backend != "cpu" && !clmem_guard_disabled()) {
+            size_t dev_free = 0, dev_total = 0;
+            ggml_backend_dev_memory(opencl_dev, &dev_free, &dev_total);
+            struct stat cst{};
+            const int64_t weights = (::stat(model_path, &cst) == 0) ? (int64_t)cst.st_size : 0;
+            // KV budget: 256 KB/token (K+V f16 across all layers; the 27B model
+            // needs ~260 KB/token), capped at 1.5 GB; +0.5 GB compute buffers.
+            const int64_t kv_budget = std::min<int64_t>((int64_t)requested_n_ctx * 262144,
+                                                        (int64_t)1536 << 20);
+            const int64_t graph_budget = (int64_t)512 << 20;
+            const int64_t need = weights + kv_budget + graph_budget;
+            const bool fits = weights <= 0 || need <= (int64_t)((double)dev_total * 0.95);
+            LOGI("[clmem-guard] OpenCL dev total %.2f GB, weights %.2f GB, kv+graph est %.2f GB -> %s",
+                 dev_total / 1073741824.0, weights / 1073741824.0,
+                 (kv_budget + graph_budget) / 1073741824.0, fits ? "fits" : "OVER");
+            if (!fits) {
+                if (backend == "auto" && vulkan_ok && vulkan_dev != nullptr) {
+                    LOGI("auto: OpenCL over device-mem cap -> Vulkan");
+                    reportLoadingLog("模型+KV 超出 OpenCL 显存上限，自动改用 Vulkan");
+                    backend = "vulkan";
+                } else {
+                    LOGW("OpenCL over device-mem cap -> CPU fallback");
+                    reportLoadingLog("模型+KV 超出 OpenCL 显存上限，回落 CPU（建议在设置中选 Vulkan）");
+                    backend = "cpu";
+                    effective_gpu_layers = 0;
+                }
+            }
+        }
+
         // Pin the chosen device explicitly via model_params.devices.
         // CRITICAL: without this, llama.cpp's default device selection applies
         // an iGPU de-dup workaround (llama.cpp src/llama.cpp ~line 260) that
