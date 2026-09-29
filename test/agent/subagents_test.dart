@@ -31,6 +31,7 @@ final class _FakeAdapter extends LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     _capturedMessages.add(List.of(options.messages));
@@ -205,6 +206,7 @@ final class _FailingAdapter extends LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     // 抛出无法恢复的 server 错误 → 瀑布给 Up 为 error。

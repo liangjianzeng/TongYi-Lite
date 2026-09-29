@@ -2417,7 +2417,7 @@ class _buildAboutTab extends StatelessWidget {
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
 // versionName（0.2.1）保持同步。离线沙箱无法下载 package_info_plus 的
 // AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.2.6';
+const _appVersion = '0.2.8';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';

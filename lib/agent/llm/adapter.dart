@@ -130,9 +130,13 @@ abstract class LlmAdapter {
   ///
   /// [cancel] 若传入，adapter 应在流处理中与取消竞跑：取消先行则抛
   /// [AgentCancelledException]，让主循环把 turn 收为 interrupted。
+  /// [onThinking] 思考增量通道（可选）：adapter 把思考型模型的推理流
+  /// （reasoning 字段 / `<think>` 块）以**全量快照**形式推给它，
+  /// 供 UI 单独流式展示——不进 LlmResult，不进历史。
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   });
 

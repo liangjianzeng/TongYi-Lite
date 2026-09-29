@@ -17,6 +17,7 @@ class _CapsAdapter extends LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async => const LlmResult(text: 'ok');
 
@@ -31,6 +32,7 @@ class _PlainAdapter extends LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async => const LlmResult(text: 'ok');
 }

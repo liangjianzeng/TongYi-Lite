@@ -390,7 +390,7 @@ class FakeLlmAdapter implements LlmAdapter {
 
   @override
   Future<LlmResult> generate(GenerateOptions options,
-      {StreamController<String>? onToken, Completer<void>? cancel}) async {
+      {StreamController<String>? onToken, StreamController<String>? onThinking, Completer<void>? cancel}) async {
     calls++;
     final item = _index < _script.length ? _script[_index++] : null;
     if (item == null) {

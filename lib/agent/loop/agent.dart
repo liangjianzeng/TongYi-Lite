@@ -229,6 +229,7 @@ class ReactLoopAgent {
     String? imagePath,
     String? audioPath,
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
   }) async {
     if (_phase.phase != AgentPhase.idle) {
       throw StateError('agent is running; cancel() first');
@@ -237,9 +238,14 @@ class ReactLoopAgent {
     _cancelCompleted = false;
     _turnAnswer = '';
     _turnError = null;
+    // imagePath 入事件（store.dart importFromMessages 同款键名）：API 路线
+    // 无状态，每个 step 重放历史时都要把图片重发；不入 log 则后续 step 丢图。
     final userSeq = _session.append(
       kEventUserMessage,
-      {'content': userMessage},
+      {
+        'content': userMessage,
+        if (imagePath != null) 'imagePath': imagePath,
+      },
       source: const {'kind': 'user'},
     );
     final turn = _phase.turn + 1;
@@ -284,6 +290,7 @@ class ReactLoopAgent {
             final result = await _adapter.generate(
                 options,
                 onToken: onToken,
+                onThinking: onThinking,
                 cancel: _cancelCompleter,
             );
             // [AGDBG] 诊断（开发用，可删）。

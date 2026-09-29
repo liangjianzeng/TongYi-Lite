@@ -38,6 +38,7 @@ class LocalEngineAdapter extends BaseEngineAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     // 本地引擎：生成前确认模型已加载（查询原生 isLoaded，权威状态）。
@@ -80,6 +81,9 @@ class LocalEngineAdapter extends BaseEngineAdapter {
           processor.add(token);
           if (onToken != null) {
             onToken!.add(processor.visibleText);
+          }
+          if (onThinking != null) {
+            onThinking!.add(processor.thinkingText);
           }
         },
         onError: (Object e, [StackTrace? s]) {

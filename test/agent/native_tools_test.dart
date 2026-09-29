@@ -43,6 +43,7 @@ class _OverflowAdapter implements LlmAdapter {
   Future<LlmResult> generate(
     GenerateOptions options, {
     StreamController<String>? onToken,
+    StreamController<String>? onThinking,
     Completer<void>? cancel,
   }) async {
     calls++;
