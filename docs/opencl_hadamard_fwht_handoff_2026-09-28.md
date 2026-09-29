@@ -185,9 +185,16 @@ tbo 单算子测试覆盖不到拆图/SoA repack 全图路径 → **app 侧 Open
 `load_tensors: offloaded 65/65 layers to GPU` + `global mem size: 5616 MB`、
 `n_ubatch = 512 (GPU)`、`flash_attn = disabled`——**app 就是跑在超容量全量拆图配置上**，
 与定案 1 完全吻合（加载后期 CPU 持续低占比烧 10+ 分钟未完成，与 CLI ngl99 卡死同路径）。
-**app 修复落地**：model_provider/JNI 在 OpenCL 加载前对比模型大小（或 offload 需求）与
-OpenCL `global mem size`（5616MB），超限则限层/回退 CPU，同时消掉死锁与错答；
-Vulkan（15329MB）不受此限。
+**app 修复落地（2026-09-29，commit ff9205b）**：JNI 新增 **clmem-guard**——加载前读
+OpenCL 设备 `CL_DEVICE_GLOBAL_MEM_SIZE`（经 `ggml_backend_dev_memory`），要求
+`模型文件 + KV 预算(min(nCtx×256KB, 1.5GB)) + 0.5GB 图缓冲 ≤ total×0.95`，
+超限则 auto 模式自动改选 Vulkan、显式选 OpenCL 则回落 CPU，原因经
+`reportLoadingLog` 打回 UI（"模型+KV 超出 OpenCL 显存上限…"）。
+旁路开关 `TONGYILITE_NO_CLMEM_GUARD=1`。Vulkan（UMA 全量 15329MB）不受影响，
+Vulkan 超额仍由既有 RAM oom-guard 兜底。27B PTQ1_0：5.67+1.07+0.5=7.24GB > 5.33GB
+→ 正确触发；4B Q4_K_M 4.4GB < 5.33GB → OpenCL 照常启用（与 4B 历史 8.77 tok/s 基线一致）。
+debug+release 已打包（签名 CN=TongYiLite 验收通过，libtongyilite_jni.so 内 guard 字串
+已机检），真机覆盖安装待下次连接（`adb install -r app-debug.apk`）。
 
 ## 环境备忘
 
