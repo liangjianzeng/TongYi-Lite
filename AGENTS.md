@@ -443,3 +443,45 @@ specifier）**，ggml-opencl init abort。NDK 交叉编译能过、桌面 NEO �
 > 生效，实测 10 条结果 0 unresponsive。用户的直觉部分正确：引擎解析器上游每周
 > 多更，旧镜像确实会积累过期性不通；但本例主因仍是无代理（国外引擎）与 302
 > 壳（bing），版本只是加重因素。升级后引擎仍以 keep_only 名单为准。
+
+## 2026-09-29 v0.2.8：执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复
+
+> 用户反馈：① 工具调用和思考的位置经常不按执行顺序呈现；② 思考流式输出应自动展开、流式滚动可见、完成才闭合；③ web_search 还是不行。commit `bce9b83`（已推送 main）。
+
+**① 执行顺序渲染（timeline markers）**：`AgentUiState` 新增 `timeline: List<UiTimelineMarker>`，
+归约器在**事件到达时**追加标记（思考落档 → `UiTimelineThinking(i)`；工具卡加入 → `UiTimelineTool(i)`），
+`AgentTurnBlock._timelineWidgets()` 依序交错渲染——不再"思考一律在前、工具一律在后"。
+⚠️ **坑**：`switch` 语句不能放进 `children: [...]` 列表字面量（collection-if/for 可以，switch 不行）——
+必须抽成返回 `List<Widget>` 的辅助方法。历史回合 timeline 恒空，仍走存储 🔧 消息顺序。
+
+**② 思考流式自动展开**：`ThinkingStreamCard` 展开条件从 `_override ?? false` 改为
+`_override ?? (running && !answerVisible)`——流式中自动展开跟随滚动（home_screen 每次重建
+`_followStream` 即 animateTo 底部），答案开始/回合结束自动闭合。
+
+**③ web_search"不行"的两条静默路径 + 修复**：
+- **思考截断空响应（主因）**：4B 模型常在思考中途直接 EOS（思考块未闭合被丢弃 → 空响应），
+  本地路线 `emptyResponse` 原本**不可重试** → 瀑布直接 giveUp → 回合"本轮执行失败"，
+  用户看到的就是"web_search 不行"（实际搜索已成功）。修复：loop 里 `retryEmptyResponse: true`
+  （两条路线都计入可重试档，maxRetries 有界）。
+- **实例瞬态故障**：DGX SearXNG 偶发 0 结果带 `unresponsive_engines` 诊断 → 工具返回
+  "搜索服务异常"（内容带时间标签，logcat 里 contentLen≈378 与错误路径吻合）。主机复测实例
+  已恢复（10 条结果 0 unresponsive）；此类属实例侧，app 代码无需改。
+- **真机复现铁律**：logcat 单行截断 ~1024B、AGDBG print 截断 300 字符 → 工具结果看不全时
+  直接读 `contentLen` + 从手机 shell `curl` 同请求复现，别只盯 logcat。
+
+**④ 思考泄漏修复**：`AgentStreamProcessor` 新增"孤立闭合记号"处理——模型偶发在回答中途
+再输出 ` response`（无前置 think，一段被提前闭合的思考续写），当作**隐式 opener** 重新
+进入思考态、续写一并丢弃（否则闭合记号+后续内容直接渗进可见回答）。带保护：` response`
+紧跟英文/数字（如 "API response"）不吞，避免误伤英文词。
+
+**⑤ 顺手清理**：`loop/agent.dart` 残留的 `[AGDBG/STEPS]/[AGDBG/REQ]/[AGDBG/MSG]` 诊断 print
+全删（此前只删了 adapter 层，loop 层漏了）。
+
+**验收**：test/agent + test/providers 全绿 **259 项**（新增 6：交错渲染/自动展开/孤立记号/
+英文词保护/本地空响应重试）；analyze 无新增告警。APK：debug `app-debug.apk` 100703276B /
+release `app-release.apk` 53406582B（17:13/17:14，bce9b83），字符串级验收过
+（debug kernel `_timelineWidgets`>0 且 `_dbgStep`=0；release `[AGDBG/STEPS]`=0）。
+
+> **排障提示（web_search 类"工具失败"）**：先翻推理日志区分三段——① 工具结果是否含时间标签
+> （含=搜索成功，是模型/回合的问题）；② 回合是否"本轮执行失败"（多半是思考截断空响应，看
+> 是否触发重试）；③ 工具卡是否"执行中"卡死（超时/引擎慢）。别只看工具卡状态图标。
