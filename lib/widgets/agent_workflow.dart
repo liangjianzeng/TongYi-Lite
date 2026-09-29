@@ -9,9 +9,11 @@
 ///   历史对话可回看每次工具调用。
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../models/chat_message.dart';
 import '../providers/agent_state_provider.dart';
@@ -144,8 +146,11 @@ List<ToolActivityUi> parsedToolActivities(List<ChatMessage> tools) =>
 // 组件
 // ---------------------------------------------------------------------------
 
-/// 「思考中…」占位行（与 ChatBubble 空占位同风格；置于工具卡片之后，
-/// 表示模型在处理下一个步骤/最终答案）。
+/// 「执行中…」占位行（与 ChatBubble 空占位同风格；置于工具卡片之后，
+/// 表示智能体正在推进任务下一步/最终答案）。
+///
+/// 用户定案：这里不是"思考"（真思考走 ThinkingStreamCard），只是任务
+/// 执行中的状态过渡，标签必须写「执行中」，否则会误导成模型在空想。
 class ThinkingIndicator extends StatelessWidget {
   const ThinkingIndicator({super.key});
 
@@ -162,7 +167,7 @@ class ThinkingIndicator extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 8),
           Text(
-            '思考中…',
+            '执行中…',
             style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
           ),
         ],
@@ -243,7 +248,9 @@ class CompactionBanner extends StatelessWidget {
 class _ThinkingBlockCard extends StatefulWidget {
   final String text;
   final int index;
-  const _ThinkingBlockCard({required this.text, required this.index});
+  final Duration? duration;
+  const _ThinkingBlockCard(
+      {required this.text, required this.index, this.duration});
 
   @override
   State<_ThinkingBlockCard> createState() => _ThinkingBlockCardState();
@@ -285,7 +292,9 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
                             .withValues(alpha: 0.7)),
                     const SizedBox(width: 6),
                     Text(
-                      '思考 ${widget.index}',
+                      widget.duration == null
+                          ? '思考 ${widget.index}'
+                          : '思考 ${widget.index} - 持续了${_fmtDur(widget.duration)}',
                       style: TextStyle(
                           fontSize: 12,
                           color:
@@ -337,8 +346,18 @@ class ToolActivityCard extends StatefulWidget {
   State<ToolActivityCard> createState() => _ToolActivityCardState();
 }
 
-class _ToolActivityCardState extends State<ToolActivityCard> {
+class _ToolActivityCardState extends State<ToolActivityCard>
+    with SingleTickerProviderStateMixin {
   bool _expanded = false;
+
+  /// 执行起点（首次以 executing 状态入树时记录）；null = 未知（历史回合）。
+  DateTime? _execStart;
+  Duration? _total;
+
+  /// 秒级刷新用 Ticker（flutter test 下被 muted，无 pending-timer 问题；
+  /// 真机上每帧回调，只在秒数变化时 setState）。
+  Ticker? _ticker;
+  int _lastSec = -1;
 
   String get _argsSummary {
     if (widget.activity.arguments.isEmpty) return '';
@@ -348,6 +367,57 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
     } catch (_) {
       return '';
     }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _syncClock();
+  }
+
+  @override
+  void didUpdateWidget(covariant ToolActivityCard old) {
+    super.didUpdateWidget(old);
+    _syncClock();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.dispose();
+    super.dispose();
+  }
+
+  /// 计时归零/冻结：executing 且无起点 → 记录起点并开秒级 Ticker；
+  /// 离开 executing → 冻结总耗时、停 Ticker。
+  void _syncClock() {
+    final st = widget.activity.status;
+    if (st == ToolUiStatus.executing) {
+      if (_execStart == null) {
+        _execStart = DateTime.now();
+        _lastSec = -1;
+        _ticker?.dispose();
+        _ticker = createTicker(_onTick)..start();
+      }
+    } else if (_execStart != null && _total == null) {
+      _total = DateTime.now().difference(_execStart!);
+      _ticker?.dispose();
+      _ticker = null;
+    }
+  }
+
+  void _onTick(Duration elapsed) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    if (now.second == _lastSec) return;
+    _lastSec = now.second;
+    setState(() {});
+  }
+
+  /// 当前/最终耗时（未知为 null）。
+  Duration? get _elapsed {
+    if (_total != null) return _total;
+    if (_execStart == null) return null;
+    return DateTime.now().difference(_execStart!);
   }
 
   @override
@@ -412,10 +482,19 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
                     ],
                     if (activity.status == ToolUiStatus.executing) ...[
                       const SizedBox(width: 4),
-                      Text('执行中…',
+                      Text(
+                        _execStart == null ? '执行中…' : '执行中 - 持续了${_fmtDur(_elapsed)}',
+                        style: TextStyle(
+                            fontSize: 10,
+                            color: theme.colorScheme.onSurfaceVariant,
+                            fontStyle: FontStyle.italic),
+                      ),
+                    ] else if (_total != null) ...[
+                      const SizedBox(width: 4),
+                      Text('持续了${_fmtDur(_total)}',
                           style: TextStyle(
                               fontSize: 10,
-                              color: theme.colorScheme.onSurfaceVariant,
+                              color: theme.colorScheme.outline,
                               fontStyle: FontStyle.italic)),
                     ],
                     Icon(
@@ -478,14 +557,13 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
 
 /// ThinkingStreamCard —— 思考流式卡片（独立模块，不与正文混杂）。
 ///
-/// 运行中且答案尚未开始时自动展开并跟随滚动到底；**答案一开始输出就自动
-/// 折叠回"思考"条**（思考是过程，用户要读的是正文）；点按头部随时可手动
-/// 展开/收起（手动状态优先于自动）。思考文本来自 adapter onThinking 全量
-/// 快照（触发/闭合标签已由协议层剥除，这里只会出现"思考"字样）。
+/// 用户定案：思考卡主信息是**耗时**（"思考 - 持续了X秒"），原始思考文本
+/// 默认收起（本地小模型的思考流常是"1234"式噪声，自动展开只会占屏）；
+/// 点按头部手动展开回看。思考文本来自 adapter onThinking 全量快照。
 class ThinkingStreamCard extends StatefulWidget {
   final AgentUiState ui;
 
-  /// 正文回答是否已开始输出（开始即自动折叠思考条）。
+  /// 正文回答是否已开始输出（保留：答案开始后不展开内容，头部仅剩耗时）。
   final bool answerVisible;
   const ThinkingStreamCard({super.key, required this.ui, this.answerVisible = false});
 
@@ -493,35 +571,49 @@ class ThinkingStreamCard extends StatefulWidget {
   State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
 }
 
-class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
-  /// null = 跟随运行状态自动展开；非 null = 用户手动覆盖。
+class _ThinkingStreamCardState extends State<ThinkingStreamCard>
+    with SingleTickerProviderStateMixin {
+  /// null = 默认收起；非 null = 用户手动覆盖。
   bool? _override;
-  final ScrollController _scroll = ScrollController();
-  String _lastText = '';
+  DateTime? _start;
+  Ticker? _ticker;
+  int _lastSec = -1;
 
   @override
   void dispose() {
-    _scroll.dispose();
+    _ticker?.dispose();
     super.dispose();
   }
+
+  /// 思考开始时记录起点并开秒级 Ticker（头部耗时走秒更新）。
+  void _syncClock() {
+    final s = widget.ui;
+    if (_start == null && s.hasThinking && s.running) {
+      _start = DateTime.now();
+      _lastSec = -1;
+      _ticker?.dispose();
+      _ticker = createTicker(_onTick)..start();
+    }
+  }
+
+  void _onTick(Duration elapsed) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    if (now.second == _lastSec) return;
+    _lastSec = now.second;
+    setState(() {});
+  }
+
+  Duration? get _elapsed =>
+      _start == null ? null : DateTime.now().difference(_start!);
 
   @override
   Widget build(BuildContext context) {
     final s = widget.ui;
     if (!s.hasThinking) return const SizedBox.shrink();
+    _syncClock();
     final theme = Theme.of(context);
-    // 自动展开窗口：思考进行中且正文还没开始。答案一开始就折叠回去。
-    final expanded =
-        _override ?? (s.running && s.hasThinking && !widget.answerVisible);
-    // 流式跟随：文本更新且展开时滚到底部。
-    if (expanded && s.thinking != _lastText) {
-      _lastText = s.thinking;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) {
-          _scroll.jumpTo(_scroll.position.maxScrollExtent);
-        }
-      });
-    }
+    final expanded = _override ?? false;
     // 只显示尾部（长思考时头部早已滚出视野，截断省内存与布局开销）。
     final tail = s.thinking.length > 2000
         ? '…${s.thinking.substring(s.thinking.length - 2000)}'
@@ -551,7 +643,9 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                         size: 14, color: theme.colorScheme.tertiary),
                     const SizedBox(width: 6),
                     Text(
-                      s.running ? '思考中…' : '思考',
+                      _elapsed == null
+                          ? (s.running ? '思考中…' : '思考')
+                          : '思考 - 持续了${_fmtDur(_elapsed)}',
                       style: TextStyle(
                           fontSize: 12, color: theme.colorScheme.tertiary),
                     ),
@@ -578,7 +672,6 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 150),
                   child: SingleChildScrollView(
-                    controller: _scroll,
                     child: Text(
                       tail,
                       style: TextStyle(
@@ -622,10 +715,11 @@ class AgentTurnBlock extends StatelessWidget {
   bool get _answerPending =>
       isLive && ui.running && (answer == null || answer!.content.trim().isEmpty);
 
-  /// 思考行只在「模型确实在转、答案未开始、且没有工具正在执行」时显示。
-  /// 工具执行中不显示——工具卡片自带「执行中…」状态，再叠一个就是
-  /// 双转圈（蠢）；重试中已有 RetryIndicator，同理。
-  /// **有真思考流（思考卡）时不显示**——思考卡自带「思考中…」转圈，
+  /// 「执行中…」占位行只在「智能体确实在推进、答案未开始、且没有工具正在
+  /// 执行」时显示（用户定案：这不是"思考"，是任务执行状态过渡，标签写
+  /// 执行中）。工具执行中不显示——工具卡片自带「执行中 - 持续了Xs」；
+  /// 重试中已有 RetryIndicator，同理。
+  /// **有真思考流（思考卡）时不显示**——思考卡自带「思考 - 持续了Xs」转圈，
   /// 占位行不是真思考、纯属重复（用户定案：界面上同时最多一个 spinner）。
   bool get _thinking =>
       _answerPending &&
@@ -645,10 +739,15 @@ class AgentTurnBlock extends StatelessWidget {
           RetryIndicator(attempt: ui.retryAttempt),
         if (isLive && ui.running && ui.compacted) const CompactionBanner(),
         // 之前各步的思考存档：折叠条常驻（点按可回看），不参与转圈。
+        // 耗时与 history 平行（不足时补 null = 显示"思考 N"）。
         if (isLive)
           for (var i = 0; i < ui.thinkingHistory.length; i++)
             _ThinkingBlockCard(
-                text: ui.thinkingHistory[i], index: i + 1),
+                text: ui.thinkingHistory[i],
+                index: i + 1,
+                duration: i < ui.thinkingDurations.length
+                    ? ui.thinkingDurations[i]
+                    : null),
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
             ui: ui,
@@ -673,4 +772,11 @@ class AgentTurnBlock extends StatelessWidget {
       ],
     );
   }
+}
+
+/// 时长渲染："持续了X秒"（<60s）/"X分Y秒"。null → 空串（历史回合无起点）。
+String _fmtDur(Duration? d) {
+  if (d == null) return '';
+  if (d.inSeconds < 60) return '${d.inSeconds}秒';
+  return '${d.inMinutes}分${d.inSeconds % 60}秒';
 }

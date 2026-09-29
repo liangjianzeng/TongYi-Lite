@@ -21,6 +21,12 @@ final class AgentCancelledException {
   const AgentCancelledException();
 }
 
+/// 思考流失控守卫阈值（字符数）：思考块超长未闭合（实测 agents-a1-4b
+/// enableThinking 下 `<think>` 一开就写数千字独白不闭合，正文永不来）→
+/// adapter 主动停流并按 [LlmFailureCode.thinkingOverflow] 失败，
+/// 避免把整轮 token 预算烧光后用户干等数分钟。
+const int kMaxThinkingChars = 6000;
+
 /// 模型 provider 类型（本地引擎 / 远程 API）。
 enum ProviderKind {
   local,
@@ -39,6 +45,7 @@ enum LlmFailureCode {
   emptyResponse,         // 响应为空
   toolCallTruncated,     // 工具调用块生成到一半被截断（token 预算不足）
   modelNotReady,         // 本地引擎未加载模型（isLoaded=false）；重试无益
+  thinkingOverflow,      // 思考失控：超长未闭合，已主动中止（确定性失败，重试无意义）
   unknown,
 }
 
