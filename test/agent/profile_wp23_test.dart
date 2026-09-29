@@ -1,4 +1,3 @@
-import 'dart:async';
 
 import 'package:tongyi_lite/agent/llm/adapter.dart';
 import 'package:tongyi_lite/agent/llm/openai_adapter.dart';
@@ -11,41 +10,14 @@ import 'package:tongyi_lite/agent/skills/provider.dart';
 import 'package:tongyi_lite/agent/skills/skill.dart';
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
+import '../helpers/fake_llm.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
 // 批次二：WP2（API 档对齐）+ WP3（本地档强化）
 // ---------------------------------------------------------------------------
 
-class FakeLlmAdapter implements LlmAdapter {
-  final List<Object> _script;
-  int _index = 0;
-  int calls = 0;
-  final List<GenerateOptions> allOptions = [];
-
-  FakeLlmAdapter(List<Object> script) : _script = script;
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    calls++;
-    allOptions.add(options);
-    final item = _index < _script.length ? _script[_index++] : null;
-    if (item is LlmFailure) throw item;
-    return item as LlmResult;
-  }
-
-  @override
-  void cancel() {}
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
+// LLM 桩用共享的 FakeLlmAdapter（test/helpers/fake_llm.dart）。
 
 /// 记录型压缩桩：记录每次 decide 的 reason，按 [result] 应答。
 class RecordingCompaction implements CompactionPlugin {

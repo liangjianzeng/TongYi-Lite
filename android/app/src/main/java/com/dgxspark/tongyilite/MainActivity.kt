@@ -199,47 +199,94 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * openFile：用系统查看器打开产物。接受 content:// URI（exportFile 返回值）
-     * 或绝对文件路径（走 FileProvider，限应用目录内）。带图查看 html/png/pdf 等。
+     * openFile：用系统查看器打开产物。分层回退（真机 ROM 对授权行为不一，
+     * 尤其 MIUI/HyperOS 对 MediaStore URI 的 grant 挑剔）：
+     * ① content:// URI 直开（exportFile 返回值）；
+     * ② fallbackPath（工作区源文件）走 FileProvider——应用自有文件，授权必成；
+     * ③ target 本身是文件路径 → FileProvider。
+     * 每层失败再试 createChooser；全部失败才报错（带各层失败原因）。
      */
     private fun handleOpenFile(call: MethodCall, result: MethodChannel.Result) {
         val target = call.argument<String>("path")?.trim().orEmpty()
-        if (target.isEmpty()) {
+        val fallbackPath = call.argument<String>("fallbackPath")?.trim().orEmpty()
+        if (target.isEmpty() && fallbackPath.isEmpty()) {
             result.error("NO_PATH", "缺少 path 参数", null)
             return
         }
-        try {
-            val uri: Uri
-            val mime: String
-            if (target.startsWith("content:")) {
-                uri = Uri.parse(target)
-                mime = contentResolver.getType(uri) ?: "*/*"
-            } else {
-                val f = File(target)
-                if (!f.isFile) {
-                    result.error("NOT_FOUND", "文件不存在：$target", null)
-                    return
-                }
-                uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
-                mime = mimeFor(f.name)
-            }
-            val intent = Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, mime)
-                .addFlags(
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        or Intent.FLAG_ACTIVITY_NEW_TASK
-                )
-            startActivity(intent)
-            result.success(true)
-        } catch (e: Exception) {
-            logE("handleOpenFile", "open failed: ${e.message}", e)
-            result.error("OPEN_FAILED", "无法打开（未安装可查看该格式的应用？）：${e.message}", null)
+        data class Attempt(val uri: Uri, val mime: String, val label: String)
+        val attempts = mutableListOf<Attempt>()
+        if (target.startsWith("content:")) {
+            val uri = Uri.parse(target)
+            attempts.add(Attempt(uri, contentResolver.getType(uri) ?: "*/*", "content-uri"))
         }
+        for (p in listOf(fallbackPath, target)) {
+            if (p.isEmpty() || p.startsWith("content:")) continue
+            val f = File(p)
+            if (f.isFile) {
+                attempts.add(
+                    Attempt(
+                        FileProvider.getUriForFile(this, "$packageName.fileprovider", f),
+                        mimeFor(f.name),
+                        "fileprovider:${f.name}"
+                    )
+                )
+            }
+        }
+        if (attempts.isEmpty()) {
+            result.error("NOT_FOUND", "无可打开的文件：$target", null)
+            return
+        }
+        val errors = StringBuilder()
+        for (a in attempts) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(a.uri, a.mime)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                try {
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // 部分 ROM 直开被拒/无处理器：chooser 兜底（flags 随行传递）。
+                    startActivity(
+                        Intent.createChooser(intent, null)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    )
+                }
+                logI("handleOpenFile", "opened via ${a.label}")
+                result.success(true)
+                return
+            } catch (e: Exception) {
+                logW("handleOpenFile", "attempt ${a.label} failed: ${e.message}", e)
+                errors.append('[').append(a.label).append("] ").append(e.message).append("; ")
+            }
+        }
+        result.error("OPEN_FAILED", "所有打开方式被拒绝：$errors", null)
     }
 
     // ------------------------------------------------------------------
     // MethodChannel handlers
     // ------------------------------------------------------------------
+
+    /**
+     * MethodChannel result 必答守卫（2026-09-30 审查 P1）：业务块抛错时
+     * 转成 result.error——此前多个 handler 的 catch 只打日志不回调，
+     * Dart 侧 await 的 Future 永久挂死。
+     */
+    private inline fun replyGuard(
+        result: MethodChannel.Result,
+        tag: String,
+        block: () -> Unit,
+    ) {
+        try {
+            block()
+        } catch (e: Exception) {
+            logE(tag, "error: ${e.message}", e)
+            try {
+                result.error(tag.uppercase(), e.message ?: "unknown error", null)
+            } catch (e2: Exception) {
+                logE(tag, "result.error failed", e2)
+            }
+        }
+    }
 
     // python_exec：单线程池执行脚本（串行防 GIL 争用），超时由 Future.get 兜底。
     private val pythonExecutor = Executors.newSingleThreadExecutor()
@@ -399,14 +446,28 @@ class MainActivity : FlutterActivity() {
 
     private fun handleUnloadModel(result: MethodChannel.Result) {
         logI("handleUnloadModel", "")
-        engine.unloadModel()
-        mainHandler.post {
-            try {
-                result.success(true)
+        // unloadModel 现为阻塞式（带超时）→ 后台线程执行（channel 回调在主线程，
+        // 直跑会 ANR）；失败/超时如实上报，Dart 侧不再在「以为卸载完了、
+        // native 还在卸」的窗口里发起 load。
+        Thread {
+            val ok = try {
+                engine.unloadModel()
             } catch (e: Exception) {
-                logE("handleUnloadModel", "result.success failed", e)
+                logE("handleUnloadModel", "unload failed", e)
+                false
             }
-        }
+            mainHandler.post {
+                try {
+                    if (ok) {
+                        result.success(true)
+                    } else {
+                        result.error("UNLOAD_FAILED", "模型卸载超时或失败，请重试", null)
+                    }
+                } catch (e: Exception) {
+                    logE("handleUnloadModel", "result failed", e)
+                }
+            }
+        }.start()
     }
 
     private fun handleIsLoaded(result: MethodChannel.Result) {
@@ -436,43 +497,56 @@ class MainActivity : FlutterActivity() {
         // Update foreground notification — must be on main thread (may trigger @UiThread code)
         updateServiceStatus("AI 思考中...")
 
-        Thread {
-            try {
-                logI("handleCompletion", "calling engine.completion() from background thread")
-                val fullText = engine.completion(
-                    prompt = prompt,
-                    maxTokens = maxTokens,
-                    temperature = temperature,
-                    topP = topP,
-                    onToken = { token ->
-                        // EventChannel.EventSink must be called from the main thread.
-                        mainHandler.post { sink?.success(token) }
-                        true
+        // 入引擎单线程队列（与 load/unload/destroy 同一 executor，串行化）。
+        // 此前裸 Thread 跑 JNI，与 onDestroy 的 nativeDestroy 竞态 → 退出时
+        // SIGSEGV（2026-09-30 审查 P0）。executor 已 shutdown（销毁中）→
+        // 立即报错，不让 Dart 侧挂死。
+        val task = try {
+            engine.onEngineThread {
+                try {
+                    logI("handleCompletion", "calling engine.completion() from engine thread")
+                    val fullText = engine.completion(
+                        prompt = prompt,
+                        maxTokens = maxTokens,
+                        temperature = temperature,
+                        topP = topP,
+                        onToken = { token ->
+                            // EventChannel.EventSink must be called from the main thread.
+                            mainHandler.post { sink?.success(token) }
+                            true
+                        }
+                    )
+                    logI("handleCompletion", "completion done, fullText length=${fullText.length}")
+                    updateServiceStatus("就绪")
+                    // result.success MUST be on main thread (MethodChannel.Result is @UiThread guarded)
+                    mainHandler.post {
+                        try {
+                            result.success(fullText)
+                        } catch (e: Exception) {
+                            logE("handleCompletion", "result.success failed", e)
+                        }
                     }
-                )
-                logI("handleCompletion", "completion done, fullText length=${fullText.length}")
-                updateServiceStatus("就绪")
-                // result.success MUST be on main thread (MethodChannel.Result is @UiThread guarded)
-                mainHandler.post {
-                    try {
-                        result.success(fullText)
-                    } catch (e: Exception) {
-                        logE("handleCompletion", "result.success failed", e)
-                    }
-                }
-            } catch (e: Exception) {
-                logW("handleCompletion", "completion error: ${e.message}", e)
-                updateServiceStatus("推理出错")
-                // result.error MUST be on main thread
-                mainHandler.post {
-                    try {
-                        result.error("COMPLETION_ERROR", e.message ?: "Unknown error", null)
-                    } catch (e2: Exception) {
-                        logE("handleCompletion", "result.error failed", e2)
+                } catch (e: Exception) {
+                    logW("handleCompletion", "completion error: ${e.message}", e)
+                    updateServiceStatus("推理出错")
+                    // result.error MUST be on main thread
+                    mainHandler.post {
+                        try {
+                            result.error("COMPLETION_ERROR", e.message ?: "Unknown error", null)
+                        } catch (e2: Exception) {
+                            logE("handleCompletion", "result.error failed", e2)
+                        }
                     }
                 }
             }
-        }.start()
+        } catch (e: Exception) {
+            logW("handleCompletion", "engine executor rejected (destroying?)", e)
+            mainHandler.post {
+                result.error("ENGINE_DESTROYED", "推理引擎已销毁（应用退出中）", null)
+            }
+            null
+        }
+        task // keep reference alive until done (executor holds it anyway)
     }
 
     private fun handleCompletionWithMessages(call: MethodCall, result: MethodChannel.Result) {
@@ -489,31 +563,39 @@ class MainActivity : FlutterActivity() {
         val sink = TokenStream.sink
         updateServiceStatus("AI 思考中...")
 
-        Thread {
-            try {
-                logI("handleCompletionWithMessages", "calling engine.completionWithMessages()")
-                val fullText = engine.completionWithMessages(
-                    prompt = prompt,
-                    messagesJson = messagesJson,
-                    maxTokens = maxTokens,
-                    temperature = temperature,
-                    topP = topP,
-                    imagePath = imagePath,
-                    audioPath = audioPath,
-                    onToken = { token ->
-                        mainHandler.post { sink?.success(token) }
-                        true
-                    }
-                )
-                logI("handleCompletionWithMessages", "done, len=${fullText.length}")
-                updateServiceStatus("就绪")
-                mainHandler.post { result.success(fullText) }
-            } catch (e: Exception) {
-                logW("handleCompletionWithMessages", "error: ${e.message}", e)
-                updateServiceStatus("推理出错")
-                mainHandler.post { result.error("COMPLETION_ERROR", e.message, null) }
+        // 入引擎单线程队列（同 handleCompletion，消灭退出竞态）。
+        try {
+            engine.onEngineThread {
+                try {
+                    logI("handleCompletionWithMessages", "calling engine.completionWithMessages()")
+                    val fullText = engine.completionWithMessages(
+                        prompt = prompt,
+                        messagesJson = messagesJson,
+                        maxTokens = maxTokens,
+                        temperature = temperature,
+                        topP = topP,
+                        imagePath = imagePath,
+                        audioPath = audioPath,
+                        onToken = { token ->
+                            mainHandler.post { sink?.success(token) }
+                            true
+                        }
+                    )
+                    logI("handleCompletionWithMessages", "done, len=${fullText.length}")
+                    updateServiceStatus("就绪")
+                    mainHandler.post { result.success(fullText) }
+                } catch (e: Exception) {
+                    logW("handleCompletionWithMessages", "error: ${e.message}", e)
+                    updateServiceStatus("推理出错")
+                    mainHandler.post { result.error("COMPLETION_ERROR", e.message, null) }
+                }
             }
-        }.start()
+        } catch (e: Exception) {
+            logW("handleCompletionWithMessages", "engine executor rejected (destroying?)", e)
+            mainHandler.post {
+                result.error("ENGINE_DESTROYED", "推理引擎已销毁（应用退出中）", null)
+            }
+        }
     }
 
     /**
@@ -530,6 +612,13 @@ class MainActivity : FlutterActivity() {
                     return@Thread
                 }
                 val sr = engine.getAudioSampleRate().takeIf { it > 0 } ?: 16000
+                // 重复 start：先停掉旧实例（审查 P1——直接覆盖会让旧录音线程
+                // 与 AudioRecord 持续占用麦克风直到进程死亡）。
+                audioRecorder?.let { old ->
+                    try { old.stop() } catch (e: Exception) {
+                        logW("handleStartRecording", "old recorder stop failed", e)
+                    }
+                }
                 val rec = AudioRecorder(applicationContext, sr)
                 val ok = rec.start()
                 if (ok) {
@@ -563,48 +652,34 @@ class MainActivity : FlutterActivity() {
 
     private fun handleSupportsAudio(result: MethodChannel.Result) {
         mainHandler.post {
-            try {
+            replyGuard(result, "handleSupportsAudio") {
                 result.success(engine.supportsAudio())
-            } catch (e: Exception) {
-                logE("handleSupportsAudio", "error: ${e.message}", e)
             }
         }
     }
 
     private fun handleStop(result: MethodChannel.Result) {
         logI("handleStop", "")
-        engine.stopGeneration()
-        mainHandler.post {
-            try {
-                result.success(true)
-            } catch (e: Exception) {
-                logE("handleStop", "result.success failed", e)
-            }
+        replyGuard(result, "handleStop") {
+            engine.stopGeneration()
+            result.success(true)
         }
     }
 
     private fun handleResetContext(result: MethodChannel.Result) {
         logI("handleResetContext", "")
-        engine.resetContext()
-        mainHandler.post {
-            try {
-                result.success(true)
-            } catch (e: Exception) {
-                logE("handleResetContext", "result.success failed", e)
-            }
+        replyGuard(result, "handleResetContext") {
+            engine.resetContext()
+            result.success(true)
         }
     }
 
     private fun handleSetEnableThinking(call: MethodCall, result: MethodChannel.Result) {
         val enable = call.argument<Boolean>("enable") ?: false
         logI("handleSetEnableThinking", "enable=$enable")
-        engine.setEnableThinking(enable)
-        mainHandler.post {
-            try {
-                result.success(true)
-            } catch (e: Exception) {
-                logE("handleSetEnableThinking", "result.success failed", e)
-            }
+        replyGuard(result, "handleSetEnableThinking") {
+            engine.setEnableThinking(enable)
+            result.success(true)
         }
     }
 
@@ -614,13 +689,9 @@ class MainActivity : FlutterActivity() {
         val preMb = call.argument<Int>("preHeadroomMb") ?: 768
         val postMb = call.argument<Int>("postHeadroomMb") ?: 1536
         logI("handleSetOomGuard", "enabled=$enabled, pre=${preMb}MB, post=${postMb}MB")
-        engine.setOomGuardParams(enabled, preMb, postMb)
-        mainHandler.post {
-            try {
-                result.success(true)
-            } catch (e: Exception) {
-                logE("handleSetOomGuard", "result.success failed", e)
-            }
+        replyGuard(result, "handleSetOomGuard") {
+            engine.setOomGuardParams(enabled, preMb, postMb)
+            result.success(true)
         }
     }
 
@@ -715,7 +786,12 @@ class MainActivity : FlutterActivity() {
                     ),
                 )
             } catch (e: Exception) {
-                logE("handleGetMemoryInfo", "result.success failed", e)
+                logE("handleGetMemoryInfo", "error: ${e.message}", e)
+                try {
+                    result.error("HANDLEGETMEMORYINFO", e.message ?: "unknown error", null)
+                } catch (e2: Exception) {
+                    logE("handleGetMemoryInfo", "result.error failed", e2)
+                }
             }
         }
     }
@@ -734,10 +810,8 @@ class MainActivity : FlutterActivity() {
 
     private fun handleGetInferenceStats(result: MethodChannel.Result) {
         mainHandler.post {
-            try {
+            replyGuard(result, "handleGetInferenceStats") {
                 result.success(engine.getLastStats())
-            } catch (e: Exception) {
-                logE("handleGetInferenceStats", "result.success failed", e)
             }
         }
     }
@@ -754,6 +828,19 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 录音中销毁：先停麦克风（审查 P1：旧实例泄漏占用录音直到进程死亡）。
+        try {
+            audioRecorder?.stop()
+            audioRecorder = null
+        } catch (e: Exception) {
+            logW("onDestroy", "audioRecorder stop failed", e)
+        }
+        // Chaquopy 单线程池随 Activity 销毁关闭（审查 P2）。
+        try {
+            pythonExecutor.shutdown()
+        } catch (e: Exception) {
+            logW("onDestroy", "pythonExecutor shutdown failed", e)
+        }
         if (this::engine.isInitialized) {
             engine.destroy()
         }

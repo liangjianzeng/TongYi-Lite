@@ -505,7 +505,7 @@ class OpenAiAdapter extends BaseEngineAdapter {
             onThinking!.add(processor.thinkingText);
           }
           if (!_thinkingOverflow &&
-              processor.thinking.length > kMaxThinkingChars) {
+              processor.thinking.length > _maxThinkingChars) {
             _thinkingOverflow = true;
             openAi.stop();
           }

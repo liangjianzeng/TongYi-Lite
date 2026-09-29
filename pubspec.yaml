@@ -34,6 +34,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  # 纯 Dart SQLite（测试用）：StorageService 的真库行为（取尾语义/迁移）可在
+  # flutter test 里直接验证，无需真机/模拟器。
+  sqflite_common_ffi: ^2.3.3
 
 
 flutter:

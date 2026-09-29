@@ -8,47 +8,11 @@ import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
+import '../helpers/fake_llm.dart';
 
 // ---------------------------------------------------------------------------
 // 测试桩
 // ---------------------------------------------------------------------------
-
-/// 脚本化 LLM 桩：按顺序返回 [LlmResult] 或抛 [LlmFailure]。
-class FakeLlmAdapter implements LlmAdapter {
-  final List<Object> _script;
-  int _index = 0;
-  int calls = 0;
-  List<Map<String, dynamic>>? lastMessages;
-  final List<List<Map<String, dynamic>>> allMessages = [];
-
-  FakeLlmAdapter(List<Object> script) : _script = script;
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    calls++;
-    lastMessages = options.messages;
-    allMessages.add(options.messages);
-    final item = _index < _script.length ? _script[_index++] : null;
-    if (item == null) {
-      throw LlmFailure(
-          code: LlmFailureCode.timeout, message: 'script exhausted (call #$calls)');
-    }
-    if (item is LlmFailure) throw item;
-    return item as LlmResult;
-  }
-
-  @override
-  void cancel() {}
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
 
 /// 挂起桩：一直挂到 cancel 完成，然后抛 [AgentCancelledException]（验证取消竞跑）。
 class HangingFakeLlmAdapter implements LlmAdapter {

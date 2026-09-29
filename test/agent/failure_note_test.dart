@@ -1,12 +1,11 @@
-import 'dart:async';
-
-import 'package:tongyi_lite/agent/llm/adapter.dart';
+import 'package:tongyi_lite/agent/llm/adapter.dart' show LlmAdapter, LlmFailure, LlmFailureCode, LlmResult, ProviderKind;
 import 'package:tongyi_lite/agent/loop/agent.dart';
 import 'package:tongyi_lite/agent/loop/config.dart';
 import 'package:tongyi_lite/agent/loop/failure.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
+import '../helpers/fake_llm.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
@@ -16,36 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 // 下次请求投影出 [上次尝试失败: ...] 提示；同一 (turn,step) 只留最新一条。
 // ---------------------------------------------------------------------------
 
-/// 脚本化 LLM 桩（同 loop_test 模式）。
-class FakeLlmAdapter implements LlmAdapter {
-  final List<Object> _script;
-  int _index = 0;
-  int calls = 0;
-  final List<List<Map<String, dynamic>>> allMessages = [];
-
-  FakeLlmAdapter(List<Object> script) : _script = script;
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    calls++;
-    allMessages.add(options.messages);
-    final item = _index < _script.length ? _script[_index++] : null;
-    if (item is LlmFailure) throw item;
-    return item as LlmResult;
-  }
-
-  @override
-  void cancel() {}
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
+// LLM 桩用共享的 FakeLlmAdapter（test/helpers/fake_llm.dart）。
 
 ReactLoopAgent _agent(LlmAdapter adapter) {
   final registry = ToolRegistry();

@@ -63,7 +63,12 @@
         <service
             android:name=".service.InferenceService"
             android:foregroundServiceType="specialUse"
-            android:exported="false" />
+            android:exported="false">
+            <!-- targetSdk 34+ specialUse 前台服务必须声明用例说明（Play 审核）。 -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="端侧大模型推理保活：长时推理期间保持进程与通知可见，防止系统回收中断生成" />
+        </service>
 
         <!-- WP6 文件产物桥：openFile 经 FileProvider 授读，系统查看器打开
              应用目录内的工作区产物；导出件走 MediaStore content URI 不经此。 -->

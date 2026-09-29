@@ -51,6 +51,24 @@ class InferenceEngine(private val context: Context) {
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var initialized = false
 
+    /**
+     * 引擎销毁门闩（2026-09-30 审查 P0）：destroy 置位后，所有会触碰 native
+     * 的入口快速失败——此前「裸线程跑 completion vs onDestroy 里 nativeDestroy」
+     * 无互斥，推理中退出应用可 SIGSEGV。
+     */
+    @Volatile private var destroyed = false
+
+    private fun checkNotDestroyed() {
+        if (destroyed) throw IllegalStateException("engine destroyed")
+    }
+
+    /**
+     * 引擎单线程调度器访问：把长任务（load/unload/completion）统一入队到
+     * 与 destroy 同一个 executor，天然串行化，杜绝并发操作 g_engine。
+     */
+    fun <T> onEngineThread(block: () -> T): java.util.concurrent.Future<T> =
+        executor.submit(block)
+
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
@@ -109,6 +127,7 @@ class InferenceEngine(private val context: Context) {
     // --- Public API ---
 
     fun init(): Boolean {
+        checkNotDestroyed()
         if (initialized) return true
         initialized = nativeInit()
         Log.i(TAG, "init: $initialized")
@@ -126,6 +145,7 @@ class InferenceEngine(private val context: Context) {
         draftPath: String? = null,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
+        checkNotDestroyed()
         val file = File(modelPath)
         if (!file.exists()) {
             Log.e(TAG, "Model file not found: $modelPath")
@@ -157,8 +177,21 @@ class InferenceEngine(private val context: Context) {
         return ok
     }
 
-    fun unloadModel() {
-        executor.submit { nativeUnloadModel() }
+    /**
+     * 卸载模型并**等待完成**（带超时）。此前 fire-and-forget 立即返回，
+     * Dart 侧以为卸载完成随即 load，native 侧 unload/load 竞态操作 g_engine
+     * （2026-09-30 审查 P1）。返回 false = 超时/失败，调用方应报错而非继续。
+     */
+    fun unloadModel(timeoutSec: Long = 20): Boolean {
+        checkNotDestroyed()
+        val future = executor.submit { nativeUnloadModel() }
+        return try {
+            future.get(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "unloadModel failed/timeout", e)
+            false
+        }
     }
 
     fun isLoaded(): Boolean = nativeIsLoaded()
@@ -201,6 +234,7 @@ class InferenceEngine(private val context: Context) {
         topP: Float = 0.9f,
         onToken: ((String) -> Boolean)? = null
     ): String {
+        checkNotDestroyed()
         val callback = if (onToken != null) {
             object : InferenceCallback {
                 override fun onToken(token: String): Boolean = onToken.invoke(token)
@@ -228,6 +262,7 @@ class InferenceEngine(private val context: Context) {
         audioPath: String? = null,
         onToken: ((String) -> Boolean)? = null
     ): String {
+        checkNotDestroyed()
         val callback = if (onToken != null) {
             object : InferenceCallback {
                 override fun onToken(token: String): Boolean = onToken.invoke(token)
@@ -309,6 +344,12 @@ class InferenceEngine(private val context: Context) {
     fun getKvCacheBytes(): Long = nativeGetKvCacheBytes()
 
     fun destroy() {
+        if (destroyed) return
+        destroyed = true
+        // 先置 native 停止标记，尽快结束正在跑的生成，再入队销毁。
+        try { stopGeneration() } catch (e: Exception) {
+            Log.w(TAG, "destroy: stopGeneration failed", e)
+        }
         executor.submit {
             nativeDestroy()
             initialized = false

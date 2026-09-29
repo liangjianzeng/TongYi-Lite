@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- WP6 文件产物桥：FileProvider 可分享的目录白名单。
-     workspace/产物在应用内部存储（app_flutter/files）与外部应用目录；
+     workspace/产物在 Flutter documents 目录（/data/user/0/<pkg>/app_flutter，
+     不在 files-path 覆盖范围内！）→ 用 root-path 兜底；
      导出件走 MediaStore content URI，不经此白名单。 -->
 <paths>
+    <root-path name="root" path="." />
     <files-path name="internal_files" path="." />
     <external-files-path name="external_files" path="." />
     <cache-path name="cache" path="." />

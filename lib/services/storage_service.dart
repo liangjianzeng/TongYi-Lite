@@ -159,16 +159,22 @@ class StorageService {
     );
   }
 
+  /// 取某会话最近 [limit] 条消息（时间升序返回）。
+  ///
+  /// 语义修正（2026-09-30 健康审查 P0）：此前 `ASC + limit` 在超限会话里
+  /// 取到的是**最旧** N 条——长会话/多工具轮后模型历史被裁掉最新消息
+  /// （连刚发的用户提问都可能看不到）。改为 DESC 取尾再反转为升序，
+  /// 调用方语义不变。
   Future<List<ChatMessage>> getMessages(String conversationId, {int limit = 200}) async {
     final db = await database;
     final rows = await db.query(
       'messages',
       where: 'conversationId = ?',
       whereArgs: [conversationId],
-      orderBy: 'createdAt ASC',
+      orderBy: 'createdAt DESC',
       limit: limit,
     );
-    return rows.map(_mapMessageRow).toList();
+    return rows.map(_mapMessageRow).toList().reversed.toList();
   }
 
   Future<void> saveMessage(ChatMessage msg) async {

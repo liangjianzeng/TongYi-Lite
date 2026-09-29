@@ -23,7 +23,13 @@ class DeviceFilesService {
   }
 
   /// 用系统应用打开（html/png/pdf/md 等）。失败抛 PlatformException。
-  Future<void> openFile(String path) async {
-    await _channel.invokeMethod<void>('openFile', {'path': path});
+  /// [fallbackPath]：content URI 被拒时改用的工作区源文件路径
+  ///（Kotlin 侧 FileProvider 分层回退；应用自有文件授权必成功）。
+  Future<void> openFile(String path, {String? fallbackPath}) async {
+    await _channel.invokeMethod<void>('openFile', {
+      'path': path,
+      if (fallbackPath != null && fallbackPath.isNotEmpty)
+        'fallbackPath': fallbackPath,
+    });
   }
 }
