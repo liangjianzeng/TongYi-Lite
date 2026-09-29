@@ -848,7 +848,30 @@ class ChatNotifier extends StateNotifier<bool> {
               '可在设置中调大「工具循环最大轮数」后重试。'
           : '$answer\n\nℹ️（注意：达到最大轮数上限，任务可能未完成）';
     }
-    assistantMsg = assistantMsg.copyWith(content: answer, isStreaming: false);
+    // 智能体回答的指标：本地路线取原生末步（答案步）的 n_gen/t_gen_ms，
+    // 与普通聊天同一口径（tok/s 与推理日志一致）；API 路线无原生 stats，
+    // 保持不显示。首 Tok 对多步回合无单步语义，置 0 → 界面省略首Tok。
+    InferenceStats? answerStats;
+    if (!useApi) {
+      Map<String, dynamic> genStats = {};
+      try {
+        genStats = await _inference.getInferenceStats();
+      } catch (_) {}
+      final n = (genStats['n_gen'] as num?)?.toInt() ?? 0;
+      final gms = (genStats['t_gen_ms'] as num?)?.toDouble() ?? 0.0;
+      if (n > 0 && gms > 0) {
+        answerStats = InferenceStats(
+          firstTokenMs: 0,
+          totalMs: gms.round(),
+          tokPerSec: n * 1000 / gms,
+        );
+      }
+    }
+    assistantMsg = assistantMsg.copyWith(
+      content: answer,
+      isStreaming: false,
+      inferenceStats: answerStats,
+    );
     await _storage.saveMessage(assistantMsg);
     await _refreshConversationMeta(conversationId);
     return answer;

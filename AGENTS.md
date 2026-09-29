@@ -485,3 +485,54 @@ release `app-release.apk` 53406582B（17:13/17:14，bce9b83），字符串级验
 > **排障提示（web_search 类"工具失败"）**：先翻推理日志区分三段——① 工具结果是否含时间标签
 > （含=搜索成功，是模型/回合的问题）；② 回合是否"本轮执行失败"（多半是思考截断空响应，看
 > 是否触发重试）；③ 工具卡是否"执行中"卡死（超时/引擎慢）。别只看工具卡状态图标。
+
+## 2026-09-29 v0.2.9：Vulkan 全败定案（turnip dlopen 缺 libhardware.so）+ 并发搜索 + agent tok/s 指标 + 思考流滚动
+
+> 用户三连报：① Vulkan 加载任何模型都失败（回落 CPU）；② 智能体输出消息没有 toks 指标；
+> ③ 一个问题要 web_search 试几次，要一次性并发。另补：思考流式长内容不自动滚动到可见区。
+
+**① Vulkan 全败根因（打包问题实锤但非新回归）**：JNI 把 `GGML_VK_TURNIP` 指向 APK 内置
+turnip（libturnip_freedreno.so），dlopen 失败：`library "libhardware.so" not found`——
+turnip 的 DT_NEEDED 含 `libhardware.so`（Android HAL 库），**App 进程 classloader 命名空间
+不能 dlopen 系统 HAL 库** → ggml-vulkan init 失败 → `backend_ptrs.size()=1`（只剩 CPU）→
+`Vulkan 不可用，回落 CPU`。v0.2.6 时代 turnip 验证全在 CLI 测试基建（shell 命名空间可解析
+libhardware.so），**从没在 App 进程内验证过**——入库即埋雷。
+- **修复**：`jniLibs/arm64-v8a/libhardware.so` 极简 stub（源码 `stub_hardware.c`，NDK clang
+  编译，仅导出 turnip 实际 import 的 `hw_get_module` 返回 -ENOENT）。dlopen turnip 时依赖
+  解析在 app 自己的 lib 目录命中 stub → 成功。LLM 推理不走 gralloc/AHardwareBuffer 导入路径，
+  -ENOENT 安全。SONAME 必须与系统库同名（`-Wl,-soname,libhardware.so`）。
+- **验收铁证**：logcat `using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so`
+  + `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` + `backend_ptrs.size()=2`
+  + `loadModel result: true`。
+- **坑**：NDK 裸 `clang --target=aarch64-linux-android` 缺 crt 文件，须用
+  `aarch64-linux-androidXX-clang.cmd`（带 sysroot 的 wrapper）编译。
+
+**② 智能体回答 tok/s 指标**：agent 路径保存 answer 时从不带 `inferenceStats`（无计时）。
+修复：`_sendAgentMessageNew` 回合结束后（本地路线）读原生 `getInferenceStats()`——
+**末步（答案步）就是最后一次 generate，n_gen/t_gen_ms 恰好是答案步口径**，与普通聊天同一
+tok/s 公式；API 路线无原生 stats 保持不显示。首Tok 对多步回合无单步语义 → `firstTokenMs=0`，
+`_formatStats` 相应省略首Tok（`首Tok` 前缀并入 first 变量，0 时整段消失）。
+
+**③ 并发搜索**：`web_search` 加可选 `additional_queries: string[]`（最多 3 个），
+`Future.wait` 并行搜索全部关键词，合并返回（每关键词一个小节 `[搜索：xxx]`，各小节均分
+1500 字预算）。描述里教模型"一个问题的多个角度一次提交，不必多次调用"。
+回归：todo_web_search_test 新增并发合并 + 截断（≤4 关键词/空串忽略）两用例。
+
+**④ 思考流式滚动**：ThinkingStreamCard 内部 150px 滚动区加 `ScrollController` +
+didUpdateWidget 内容变长时 `jumpTo(maxScrollExtent)` 跟随底部；用户手动上滑暂停跟随
+（scroll listener 判 atBottom），回合结束/答案开始自动恢复。测试：phase6 新增
+"长内容自动滚到底 + 用户上滑后暂停"。
+
+**验收**：test/agent 全绿 **242 项 + 2 skip**；analyze 无新增告警（既有 3 unnecessary_import
++ 1 null-aware warning 为旧代码，未动）。APK：debug `app-debug.apk` / release
+`app-release.apk`，字符串级验收过（debug kernel `_followStream`>0 且 `_dbgStep`=0；
+release libapp.so `_followStream` 单字节 ASCII 命中；libhardware.so + libturnip_freedreno.so
+均在 APK）。
+
+> **遗留（用户指示先放）**：简单对话 Vulkan tok/s 失真 vs OpenCL 正常——待真机抓原生
+> t_gen_ms 对比定位，别在没证据时改计时口径。
+
+> **反复调用结论（为什么"一个问题搜几次"）**：每步模型自由决策，结果不够就再搜（4B 模型
+> 收敛性弱）；空响应重试（retryEmptyResponse:true）让截断步骤重试可见化，加重"反复"观感。
+> 并发多关键词 = 一次调用覆盖多角度，直接压交互次数；工具结果尾部"以上结果已够，直接回答"
+> 引导收敛留作后续可选优化。
