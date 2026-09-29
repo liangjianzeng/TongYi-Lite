@@ -536,3 +536,27 @@ release libapp.so `_followStream` 单字节 ASCII 命中；libhardware.so + libt
 > 收敛性弱）；空响应重试（retryEmptyResponse:true）让截断步骤重试可见化，加重"反复"观感。
 > 并发多关键词 = 一次调用覆盖多角度，直接压交互次数；工具结果尾部"以上结果已够，直接回答"
 > 引导收敛留作后续可选优化。
+
+## 2026-09-29 web_search 反复搜索死循环根治（DSH max_uses 语义，commit c9894f4）
+
+> 用户反馈（三连）："为什么要反复调用多次""大部分搜索是重复搜索相同的内容"
+> "经常反复搜索十几次，甚至用完循环次数没输出"。根因：端侧 4B 模型不收敛，
+> 拿到结果后仍用同一/近似关键词反复调用 web_search，直到撞 maxRounds 无答案。
+> 对照 DSH 真源（`/e/deepseek-harness-src/packages/web/web-search-deepseek/src/provider.ts`）：
+> **web_search 服务端工具带 `max_uses` 硬上限**（默认 5），达到后拒绝调用、强制模型
+> 基于既有结果回答——平台侧强制收敛，不靠模型自觉。
+
+**落地（web_search_tool.dart）**：
+- **回合级预算**：每次调用消耗 1 次（含重复，对齐服务端 max_uses 计数）；
+  达到上限**拒绝联网**返回 `ToolResult.error('本轮搜索次数已达上限（N 次）…请直接回答，
+  不要再调用 web_search')` —— 收敛指令即时返回、零网络成本。
+- **同内容去重**：主查询归一化（小写/去空白标点）相同 → 直接回缓存结果
+  （`已搜索过，结果同上，未重复联网`），不重复联网；重复同样消耗预算，尽快逼模型收敛。
+- **状态随回合重置**：createWebSearchTool 每次新建回合会话，接入层每回合重建
+  注册表（createBuiltinTools 全量新建），无需显式 reset。
+- **设置项** `agentMaxSearchesPerTurn`（1~10，默认 5 = DSH 默认）：settings_service/
+  provider/screen（智能体→执行参数「每回合搜索上限」）/chat_provider 传递。
+- **系统提示**加规则：已有足够结果直接回答；收到"已达上限"立即停止调用 web_search。
+- 回归：test/agent 245 + providers 20 全绿（新增去重/预算/重复消耗 3 测试）。
+- 验收：APK 字符串级（debug kernel UTF-8 / release libapp.so UTF-16LE 均命中
+  `已达上限`/`每回合搜索上限`）；app-debug.apk 100715376B / app-release.apk 53416056B。
