@@ -112,13 +112,24 @@ if (CUDAToolkit_FOUND)
     file(GLOB   SRCS "template-instances/mmf*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
-    ggml_cuda_fattn_vec_instances(${CMAKE_CURRENT_SOURCE_DIR} SRCS)
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    if (GGML_CUDA_FA_ALL_QUANTS)
+        file(GLOB   SRCS "template-instances/fattn-vec*.cu")
+        list(APPEND GGML_SOURCES_CUDA ${SRCS})
+        add_compile_definitions(GGML_CUDA_FA_ALL_QUANTS)
+    else()
+        list(APPEND GGML_SOURCES_CUDA
+            template-instances/fattn-vec-instance-f16-f16.cu
+            template-instances/fattn-vec-instance-q4_0-q4_0.cu
+            template-instances/fattn-vec-instance-q8_0-q8_0.cu
+            template-instances/fattn-vec-instance-bf16-bf16.cu)
+    endif()
 
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
                             )
+
+    add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
     if (GGML_CUDA_GRAPHS)
         add_compile_definitions(GGML_CUDA_USE_GRAPHS)
@@ -126,6 +137,18 @@ if (CUDAToolkit_FOUND)
 
     if (GGML_CUDA_FORCE_MMQ)
         add_compile_definitions(GGML_CUDA_FORCE_MMQ)
+    endif()
+
+    if (GGML_CUDA_HOPPER_Q1)
+        # opt-in Hopper (sm_90a) wgmma path for Q1_0/PQ2_0 prefill; needs CUTLASS headers (CuTe)
+        if (NOT GGML_CUDA_CUTLASS_DIR)
+            message(FATAL_ERROR "GGML_CUDA_HOPPER_Q1 requires GGML_CUDA_CUTLASS_DIR (CUTLASS checkout root)")
+        endif()
+        target_compile_definitions(ggml-cuda PRIVATE GGML_USE_HOPPER_Q1)
+        target_include_directories(ggml-cuda PRIVATE
+            ${GGML_CUDA_CUTLASS_DIR}/include
+            ${GGML_CUDA_CUTLASS_DIR}/tools/util/include)
+        target_compile_options(ggml-cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     endif()
 
     if (GGML_CUDA_FORCE_CUBLAS)

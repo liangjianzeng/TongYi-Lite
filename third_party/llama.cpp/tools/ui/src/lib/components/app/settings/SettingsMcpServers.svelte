@@ -1,13 +1,16 @@
 <script lang="ts">
-	import { Plus } from '@lucide/svelte';
-	import { replaceState } from '$app/navigation';
+	import McpLogo from '../mcp/McpLogo.svelte';
+	import { Plus, X } from '@lucide/svelte';
+	import { browser } from '$app/environment';
+	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
-	import { McpServerCard, McpServerCardSkeleton } from '$lib/components/app';
-	import { DialogMcpResourcesBrowser, DialogMcpServerAddNew } from '$lib/components/app/dialogs';
+	import { ActionIcon, McpServerCard, McpServerCardSkeleton } from '$lib/components/app';
+	import { DialogMcpServerAddNew } from '$lib/components/app/dialogs';
 	import { Button } from '$lib/components/ui/button';
 	import * as Empty from '$lib/components/ui/empty';
+	import { ROUTES } from '$lib/constants';
 	import { HealthCheckStatus } from '$lib/enums';
-	import { mcpStore, toolsStore } from '$lib/stores';
+	import { conversationsStore, mcpStore, toolsStore } from '$lib/stores';
 	import { onMount } from 'svelte';
 	import { fade } from 'svelte/transition';
 
@@ -20,7 +23,26 @@
 	let servers = $derived(mcpStore.getServers());
 
 	let isAddingServer = $state(false);
-	let isResourcesDialogOpen = $state(false);
+
+	let previousRouteId = $state<string | null>(null);
+
+	$effect(() => {
+		const currentId = page.route.id;
+
+		return () => {
+			previousRouteId = currentId;
+		};
+	});
+
+	function handleClose() {
+		const prevIsMcpServers = previousRouteId === '/mcp-servers';
+
+		if (browser && window.history.length > 1 && !prevIsMcpServers) {
+			history.back();
+		} else {
+			goto(ROUTES.START);
+		}
+	}
 
 	onMount(() => {
 		if (page.url.searchParams.has('add')) {
@@ -49,13 +71,25 @@
 	}
 </script>
 
-<div in:fade={{ duration: 150 }} class="flex flex-col h-full">
+<div in:fade={{ duration: 150 }} class="flex min-h-[calc(100dvh-4rem)] flex-col">
+	<div class="fixed top-4.5 right-4 z-50 md:hidden">
+		<ActionIcon icon={X} tooltip="Close" onclick={handleClose} />
+	</div>
+
+	<div
+		class="sticky top-0 z-10 mt-4 mb-2 flex items-start gap-4 md:p-4 p-0 px-4 md:justify-between md:px-8"
+	>
+		<div class="flex items-center gap-2">
+			<McpLogo class="h-5 w-5 md:h-6 md:w-6" />
+
+			<h1 class="text-lg font-semibold md:text-2xl">MCP Servers</h1>
+		</div>
+	</div>
+
 	<DialogMcpServerAddNew bind:open={isAddingServer} />
 
-	<DialogMcpResourcesBrowser bind:open={isResourcesDialogOpen} />
-
 	{#if servers.length === 0}
-		<div class="flex flex-1 items-center justify-center pb-20 pt-10 my-auto">
+		<div class="flex flex-1 items-center justify-center py-16">
 			<Empty.Root class="max-w-md">
 				<Empty.Header>
 					<Empty.Media variant="icon">
@@ -68,7 +102,7 @@
 				</Empty.Header>
 
 				<Empty.Content>
-					<Button onclick={() => (isAddingServer = true)} size="sm">
+					<Button size="sm" onclick={() => (isAddingServer = true)}>
 						<Plus />
 
 						Add New Server
@@ -78,21 +112,22 @@
 		</div>
 	{:else}
 		<div
-			class="grid gap-4 {className}"
-			style="grid-template-columns: repeat(auto-fill, minmax(min(25rem, calc(100dvw - 4rem)), 1fr));"
+			class="grid gap-3 {className}"
+			style="grid-template-columns: repeat(auto-fill, minmax(min(32rem, calc(100dvw - 2rem)), 1fr));"
 		>
 			{#each servers as server (server.id)}
 				{#if isServerPending(server.id, server.enabled)}
 					<McpServerCardSkeleton />
 				{:else}
 					<McpServerCard
-						enabled={server.enabled}
-						onBrowseResources={() => (isResourcesDialogOpen = true)}
-						onDelete={() => mcpStore.removeServer(server.id)}
+						{server}
+						enabled={conversationsStore.preferences.isMcpServerEnabledForChat(server.id)}
 						onToggle={async () => {
-							const wasEnabled = server.enabled;
+							const wasEnabled = conversationsStore.preferences.isMcpServerEnabledForChat(
+								server.id
+							);
 
-							mcpStore.updateServer(server.id, { enabled: !wasEnabled });
+							await conversationsStore.preferences.toggleMcpServerForChat(server.id);
 
 							if (!wasEnabled) {
 								// Promote the connection so tools/prompts/resources become
@@ -102,7 +137,7 @@
 							}
 						}}
 						onUpdate={(updates) => mcpStore.updateServer(server.id, updates)}
-						{server}
+						onDelete={() => mcpStore.removeServer(server.id)}
 					/>
 				{/if}
 			{/each}
@@ -120,7 +155,7 @@
 					</Empty.Header>
 
 					<Empty.Content>
-						<Button onclick={() => (isAddingServer = true)} size="sm">
+						<Button size="sm" onclick={() => (isAddingServer = true)}>
 							<Plus />
 
 							Add New Server

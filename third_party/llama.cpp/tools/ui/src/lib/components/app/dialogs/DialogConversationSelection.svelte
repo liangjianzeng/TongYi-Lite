@@ -58,8 +58,8 @@
 
 			<ConversationSelection
 				bind:this={conversationSelectionRef}
-				{conversations}
 				isOpen={open}
+				{conversations}
 				{messageCountMap}
 				{mode}
 				{onCancel}

@@ -59,10 +59,10 @@
 {#if href}
 	<a
 		bind:this={ref}
-		aria-disabled={disabled}
-		class={cn(buttonVariants({ size, variant }), className)}
 		data-slot="button"
+		class={cn(buttonVariants({ size, variant }), className)}
 		href={disabled ? undefined : href}
+		aria-disabled={disabled}
 		role={disabled ? 'link' : undefined}
 		tabindex={disabled ? -1 : undefined}
 		{...restProps}
@@ -72,10 +72,10 @@
 {:else}
 	<button
 		bind:this={ref}
-		class={cn(buttonVariants({ size, variant }), className)}
 		data-slot="button"
-		{disabled}
+		class={cn(buttonVariants({ size, variant }), className)}
 		{type}
+		{disabled}
 		{...restProps}
 	>
 		{@render children?.()}

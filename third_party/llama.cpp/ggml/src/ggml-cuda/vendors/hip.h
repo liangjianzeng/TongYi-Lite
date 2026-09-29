@@ -49,6 +49,7 @@
 #define cublasStatus_t hipblasStatus_t
 #define cublasOperation_t hipblasOperation_t
 #define cudaDevAttrCooperativeLaunch hipDeviceAttributeCooperativeLaunch
+#define cudaDevAttrIntegrated                         hipDeviceAttributeIntegrated
 #define cudaDeviceCanAccessPeer hipDeviceCanAccessPeer
 #define cudaDeviceDisablePeerAccess hipDeviceDisablePeerAccess
 #define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
@@ -73,10 +74,6 @@
 #define cudaGetDeviceProperties hipGetDeviceProperties
 #define cudaGetErrorString hipGetErrorString
 #define cudaGetLastError hipGetLastError
-#define cudaHostAlloc hipHostMalloc
-#define cudaHostAllocPortable hipHostMallocPortable
-#define cudaHostAllocMapped hipHostMallocMapped
-#define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaHostRegister hipHostRegister
 #define cudaHostRegisterPortable hipHostRegisterPortable
 #define cudaHostRegisterReadOnly hipHostRegisterReadOnly
@@ -180,9 +177,9 @@
 
 #define __CUDA_ARCH__ 1300
 
-#if defined(__gfx900__) || defined(__gfx906__) || defined(__gfx909__) || defined(__gfx90c__)
+#if defined(__gfx900__) || defined(__gfx906__)
 #define GCN5
-#endif // defined(__gfx900__) || defined(__gfx906__) || defined(__gfx909__) || defined(__gfx90c__)
+#endif // defined(__gfx900__) || defined(__gfx906__)
 
 #if defined(__gfx803__)
 #define GCN4

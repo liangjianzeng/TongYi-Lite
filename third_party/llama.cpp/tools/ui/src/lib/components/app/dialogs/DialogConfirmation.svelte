@@ -48,7 +48,7 @@
 	}
 </script>
 
-<AlertDialog.Root onOpenChange={handleOpenChange} {open}>
+<AlertDialog.Root {open} onOpenChange={handleOpenChange}>
 	<AlertDialog.Content onkeydown={handleKeydown}>
 		<AlertDialog.Header>
 			<AlertDialog.Title class="flex items-center gap-2">
@@ -71,10 +71,9 @@
 
 		<AlertDialog.Footer>
 			<AlertDialog.Cancel onclick={onCancel}>{cancelText}</AlertDialog.Cancel>
-
 			<AlertDialog.Action
-				class={variant === 'destructive' ? 'bg-destructive text-white hover:bg-destructive/80' : ''}
 				onclick={onConfirm}
+				class={variant === 'destructive' ? 'bg-destructive text-white hover:bg-destructive/80' : ''}
 			>
 				{confirmText}
 			</AlertDialog.Action>

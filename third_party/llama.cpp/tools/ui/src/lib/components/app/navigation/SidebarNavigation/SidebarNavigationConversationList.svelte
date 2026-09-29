@@ -80,19 +80,19 @@
 	{#if isSearchModeActive}
 		<SidebarNavigationSearchResults
 			class={className}
-			{currentChatId}
-			{filteredConversations}
-			{isSelectionMode}
-			{onDelete}
-			{onEdit}
-			{onEnterSelectionMode}
-			{onRowMouseDown}
-			{onSelect}
-			{onSelectionClick}
-			{onStop}
-			{onToggleSelect}
 			{searchQuery}
+			{filteredConversations}
+			{currentChatId}
+			{onSelect}
+			{onEdit}
+			{onDelete}
+			{onStop}
+			{isSelectionMode}
 			{selectedIds}
+			{onToggleSelect}
+			{onEnterSelectionMode}
+			{onSelectionClick}
+			{onRowMouseDown}
 		/>
 	{:else}
 		{#if pinnedConversations.length > 0}
@@ -120,16 +120,16 @@
 							}}
 							{depth}
 							isActive={currentChatId === conversation.id}
-							isSelected={selectedIds.has(conversation.id)}
 							{isSelectionMode}
-							{onDelete}
-							{onEdit}
-							{onEnterSelectionMode}
-							{onRowMouseDown}
+							isSelected={selectedIds.has(conversation.id)}
 							{onSelect}
-							{onSelectionClick}
+							{onEdit}
+							{onDelete}
 							{onStop}
 							{onToggleSelect}
+							{onEnterSelectionMode}
+							{onSelectionClick}
+							{onRowMouseDown}
 						/>
 					</li>
 				{/each}
@@ -160,16 +160,16 @@
 								}}
 								{depth}
 								isActive={currentChatId === conversation.id}
-								isSelected={selectedIds.has(conversation.id)}
 								{isSelectionMode}
-								{onDelete}
-								{onEdit}
-								{onEnterSelectionMode}
-								{onRowMouseDown}
+								isSelected={selectedIds.has(conversation.id)}
 								{onSelect}
-								{onSelectionClick}
+								{onEdit}
+								{onDelete}
 								{onStop}
 								{onToggleSelect}
+								{onEnterSelectionMode}
+								{onSelectionClick}
+								{onRowMouseDown}
 							/>
 						</li>
 					{/each}
@@ -187,18 +187,18 @@
 
 		{#if isSelectionMode}
 			<SidebarNavigationSelectionBar
-				{allVisibleSelected}
 				class="sticky top-0 z-10 m-2 mt-0"
-				{onBulkDelete}
-				{onBulkExport}
-				{onBulkPinToggle}
-				onClose={onCloseSelection}
-				{onSelectAllToggle}
-				{pinStateIsMixed}
 				selectedCount={selectedIds.size}
-				someSelectedPinned={allSelectedArePinned}
-				{someVisibleSelected}
 				{visibleCount}
+				{allVisibleSelected}
+				{someVisibleSelected}
+				someSelectedPinned={allSelectedArePinned}
+				{pinStateIsMixed}
+				{onSelectAllToggle}
+				{onBulkPinToggle}
+				{onBulkExport}
+				{onBulkDelete}
+				onClose={onCloseSelection}
 			/>
 		{/if}
 	{/if}

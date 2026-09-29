@@ -116,8 +116,6 @@ enum llm_type {
     LLM_TYPE_17B_16E, // llama4 Scout
     LLM_TYPE_17B_128E, // llama4 Maverick
     LLM_TYPE_A13B,
-    LLM_TYPE_1B_A400M, // Granite3 MoE
-    LLM_TYPE_3B_A800M, // Granite3 MoE
     LLM_TYPE_7B_A1B,
     LLM_TYPE_8B_A1B, // lfm2moe
     LLM_TYPE_7_9B_A1_3B, // Ling-3.0-tiny
@@ -128,12 +126,9 @@ enum llm_type {
     LLM_TYPE_26B_A4B, // Gemma4
     LLM_TYPE_30B_A3B,
     LLM_TYPE_31B_A3_5B,
-    LLM_TYPE_32B_A9B, // Granite4 Hybrid
     LLM_TYPE_35B_A3B, // Qwen3.5
     LLM_TYPE_48B_A3B, // Kimi Linear
-    LLM_TYPE_75B_A9B, // Nemotron 3 Puzzle
     LLM_TYPE_80B_A3B, // Qwen3 Next
-    LLM_TYPE_A3B,     // Qwen3.8 Flash Next
     LLM_TYPE_100B_A6B,
     LLM_TYPE_102B_A12B, // Solar-Open
     LLM_TYPE_106B_A12B, // GLM-4.5-Air
@@ -366,7 +361,6 @@ struct llama_layer {
     struct ggml_tensor * ffn_up_b   = nullptr; // b3
     struct ggml_tensor * ffn_act    = nullptr;
     struct ggml_tensor * ffn_exp_probs_b = nullptr;
-    struct ggml_tensor * ffn_exp_probs_b_vl = nullptr; // deepseek4 vision (bias for image tokens)
     struct ggml_tensor * ffn_gate_tid2eid = nullptr;
 
     struct ggml_tensor * dflash_attn_conv_base = nullptr;
@@ -566,22 +560,6 @@ struct llama_layer {
     struct ggml_tensor * index_q_norm = nullptr;
     struct ggml_tensor * index_k_norm = nullptr;
 
-    struct ggml_tensor * hc_attn_norm   = nullptr;
-    struct ggml_tensor * hc_attn_down   = nullptr;
-    struct ggml_tensor * hc_attn_up     = nullptr;
-    struct ggml_tensor * hc_attn_inject = nullptr;
-    struct ggml_tensor * hc_ffn_norm    = nullptr;
-    struct ggml_tensor * hc_ffn_down    = nullptr;
-    struct ggml_tensor * hc_ffn_up      = nullptr;
-    struct ggml_tensor * hc_ffn_inject  = nullptr;
-
-    struct ggml_tensor * ple_key        = nullptr;
-    struct ggml_tensor * ple_value      = nullptr;
-    struct ggml_tensor * ple_norm_key   = nullptr;
-    struct ggml_tensor * ple_norm_query = nullptr;
-    struct ggml_tensor * ple_norm_conv  = nullptr;
-    struct ggml_tensor * ple_conv1d     = nullptr;
-
     // gemma4 layer output scale, reused for talkie embedding skip scale
     struct ggml_tensor * out_scale = nullptr;
 
@@ -643,9 +621,6 @@ struct llama_model {
     struct ggml_tensor * nextn_proj_pre  = nullptr;
     struct ggml_tensor * nextn_proj_post = nullptr;
 
-    // hrm-text initial low-cycle state
-    struct ggml_tensor * hrm_z_l_init = nullptr;
-
     // DeepSeek-V4
     struct ggml_tensor * hc_head_fn    = nullptr;
     struct ggml_tensor * hc_head_base  = nullptr;
@@ -665,10 +640,6 @@ struct llama_model {
     struct ggml_tensor * altup_proj           = nullptr;
     struct ggml_tensor * altup_unembd_proj    = nullptr;
     struct ggml_tensor * per_layer_tok_embd   = nullptr;
-
-    struct ggml_tensor * hc_head_norm = nullptr;
-    struct ggml_tensor * hc_head_down = nullptr;
-    struct ggml_tensor * hc_head_up   = nullptr;
     struct ggml_tensor * per_layer_model_proj = nullptr;
     struct ggml_tensor * per_layer_proj_norm  = nullptr;
 
@@ -680,10 +651,25 @@ struct llama_model {
     // dspark
     struct ggml_tensor * dspark_markov_w1   = nullptr;
     struct ggml_tensor * dspark_markov_w2   = nullptr;
-    struct ggml_tensor * dspark_markov_w2_s = nullptr;
     struct ggml_tensor * dspark_conf_proj   = nullptr;
     struct ggml_tensor * dspark_conf_proj_b = nullptr;
 
+    // dspark GIDD log-SNR conditioning (only when hparams.dspark_log_snr_conditioning)
+    struct ggml_tensor * dspark_mode_embedding = nullptr;  // selected request mode, added only to draft input
+    struct ggml_tensor * dspark_log_snr_fc1_w = nullptr; // [128 -> n_embd]
+    struct ggml_tensor * dspark_log_snr_fc1_b = nullptr;
+    struct ggml_tensor * dspark_log_snr_fc2_w = nullptr; // [n_embd -> n_embd]
+    struct ggml_tensor * dspark_log_snr_fc2_b = nullptr;
+
+    // AngelSpec DFly: per-draft-layer target-context fusion + TreeFlash predecessor correction.
+    // dfly_layer_fusion is the discriminant: present => DFly, absent => plain DFlash/DSpark.
+    struct ggml_tensor * dfly_layer_fusion  = nullptr; // [n_ctx_feat, n_layer] fusion logits
+    struct ggml_tensor * dfly_ctx_norm      = nullptr; // post-fusion context norm (replaces output_norm_enc)
+    struct ggml_tensor * dfly_hc_hidden_norm = nullptr;
+    struct ggml_tensor * dfly_hc_embed_norm  = nullptr;
+    struct ggml_tensor * dfly_hc_gate        = nullptr; // [2*n_embd, n_ff_hc]
+    struct ggml_tensor * dfly_hc_up          = nullptr; // [2*n_embd, n_ff_hc]
+    struct ggml_tensor * dfly_hc_down        = nullptr; // [n_ff_hc, n_embd]
     struct ggml_tensor * dflash_selector_prev   = nullptr;
     struct ggml_tensor * dflash_selector_next   = nullptr;
     struct ggml_tensor * dflash_selector_hidden = nullptr;
@@ -700,8 +686,38 @@ struct llama_model {
     struct ggml_tensor * dense_2_out_layers_b = nullptr;
     struct ggml_tensor * dense_3_out_layers   = nullptr;
 
+    // dspark drafter: target-feature projection + auxiliary heads (output-level,
+    // not per-layer -- the trunk decoder layers reuse the standard llama_layer
+    // attn_*/ffn_* fields above like any dense Qwen3-style stack).
+    struct ggml_tensor * dspark_fc                = nullptr;  // [n_capture*n_embd -> n_embd]
+    struct ggml_tensor * dspark_hidden_norm       = nullptr;  // RMSNorm after fc
+    struct ggml_tensor * dspark_markov_head_a     = nullptr;  // low-rank logit-bias factor A
+    struct ggml_tensor * dspark_markov_head_b     = nullptr;  // low-rank logit-bias factor B
+    struct ggml_tensor * dspark_confidence_head   = nullptr;  // accept-rate predictor
+    struct ggml_tensor * dspark_confidence_head_b = nullptr;
+    struct ggml_tensor * dspark_corr_hnorm        = nullptr;
+    struct ggml_tensor * dspark_corr_enorm        = nullptr;
+    struct ggml_tensor * dspark_corr_gate         = nullptr;
+    struct ggml_tensor * dspark_corr_up           = nullptr;
+    struct ggml_tensor * dspark_corr_down         = nullptr;
+
+    // GIDD log-SNR conditioning (present only when hparams.dspark_log_snr_conditioning).
+
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
+
+    // Hadamard-folded GGUF weights are matched with persistent model tensors
+    // containing the activation-side transform.  The string map is populated
+    // from GGUF metadata while loading hparams; the pointer map is populated
+    // after model buffers have been allocated.  In explicit sign mode the
+    // per-width sign vectors come from GGUF metadata as well.
+    std::unordered_map<std::string, uint32_t> hadamard_weight_blocks;
+    std::unordered_map<std::string, uint32_t> hadamard_inverse_blocks;
+    std::map<uint32_t, std::vector<int32_t>> hadamard_sign_data;
+    bool hadamard_gdn_v_grouped = false;
+    bool hadamard_tied_output = false;
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
 
     // list of devices used in this model
     std::vector<llama_device> devices;
@@ -795,7 +811,6 @@ struct llama_model_base : public llama_model {
     const int TENSOR_SKIP;
     const int TENSOR_SKIP_IF_VIRTUAL;
     const int TENSOR_ALLOW_RESHAPE;
-    const int TENSOR_READ_LAZY;
 
     explicit llama_model_base(const llama_model_params & params);
     virtual ~llama_model_base() = default;
@@ -846,7 +861,7 @@ const char * llm_type_name(llm_type type);
     const int64_t n_token_types  = vocab.n_token_types();    GGML_UNUSED(n_token_types); \
     const int64_t n_rot          = hparams.n_rot();          GGML_UNUSED(n_rot); \
     const int64_t n_expert       = hparams.n_expert;         GGML_UNUSED(n_expert); \
-    const int64_t n_expert_used  = hparams.n_expert_used();  GGML_UNUSED(n_expert_used); \
+    const int64_t n_expert_used  = hparams.n_expert_used;    GGML_UNUSED(n_expert_used); \
     const int64_t n_ctx_train    = hparams.n_ctx_train;      GGML_UNUSED(n_ctx_train);
 
 // For internal test use

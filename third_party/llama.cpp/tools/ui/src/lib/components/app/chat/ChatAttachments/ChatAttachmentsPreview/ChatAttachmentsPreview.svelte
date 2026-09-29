@@ -185,30 +185,30 @@
 
 <div class="{className} flex flex-col text-white">
 	<div class="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
-		<ChatAttachmentsPreviewNavButtons onNext={next} onPrev={prev} show={allItems.length > 1} />
+		<ChatAttachmentsPreviewNavButtons onPrev={prev} onNext={next} show={allItems.length > 1} />
 
 		<div class="flex h-full w-full flex-col items-center justify-start overflow-auto py-4">
 			{#if currentItem}
 				<ChatAttachmentsPreviewFileInfo {displayName} {fileSize} />
 
 				<ChatAttachmentsPreviewCurrentItem
-					{activeModelId}
-					{audioSrc}
 					{currentItem}
-					{displayPreview}
-					{displayTextContent}
-					{hasVisionModality}
-					{isAudio}
 					{isImage}
+					{isAudio}
+					{isVideo}
 					{isPdf}
 					{isText}
-					{isVideo}
-					{language}
+					{displayPreview}
+					{displayTextContent}
+					{audioSrc}
 					{videoSrc}
+					{language}
+					{hasVisionModality}
+					{activeModelId}
 				/>
 			{/if}
 
-			<ChatAttachmentsPreviewThumbnailStrip {currentIndex} items={allItems} {onNavigate} />
+			<ChatAttachmentsPreviewThumbnailStrip items={allItems} {currentIndex} {onNavigate} />
 		</div>
 	</div>
 </div>

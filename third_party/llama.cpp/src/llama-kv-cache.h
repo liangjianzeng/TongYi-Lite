@@ -112,9 +112,7 @@ public:
                llama_memory_t   mem_other,
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
-        const  layer_share_cb & share,
-        // a model can hold more than one cache, so the tensor names have to stay unique
-                 const char *   name_tag = "");
+        const  layer_share_cb & share);
 
     ~llama_kv_cache() = default;
 
@@ -168,17 +166,6 @@ public:
 
     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
 
-    // state_read, plus the cells the restored tokens were placed in
-    // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
-    //   sinfos_out: if set, filled with the layout used; a stream with no cells leaves an empty entry
-    //   sinfos_in : if set, the layout to use instead of searching. one entry per stream, cell count must match the blob
-    void state_read_sinfo(
-            llama_io_read_i & io,
-               llama_seq_id   seq_id,
-      llama_state_seq_flags   flags,
-          slot_info_vec_t *   sinfos_out,
-    const slot_info_vec_t *   sinfos_in);
-
     //
     // graph_build API
     //
@@ -192,6 +179,23 @@ public:
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+
+    //
+    // K-cache mean-centering (see docs/kv-mean-center.md)
+    //
+
+    // load a per-layer bias file (GGUF, tensors named "kv_bar.blk.<il>.k") and enable
+    // mean-centering for every layer it covers: the bias is subtracted from the K vector
+    // right before it is written into the cache in cpy_k().
+    //
+    // when require_q4_0 is true (the default, used by the --kv-mean-center CLI flag), loading
+    // fails for any layer whose K cache type is not GGML_TYPE_Q4_0, since that is the only case
+    // this feature is intended/validated for. require_q4_0 = false is used by tests to exercise
+    // the exact same subtraction code path against an unquantized (e.g. F32) K cache, in order to
+    // validate the softmax-invariance argument without confounding it with quantization error.
+    //
+    // returns false (and logs an error) on failure; the cache is left with centering disabled.
+    bool load_kv_mean_center(const char * path, bool require_q4_0 = true);
 
     //
     // preparation API
@@ -231,17 +235,6 @@ public:
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
-
-    // true if llama_kv_cell_ext holds information that has to survive a state save/restore
-    bool has_cell_ext() const;
-
-    // for every token of the ubatch, the ids of the n tokens that precede it in its sequence
-    // example for M-RoPE image case: tokens A B X X X C, where X is a 3-token image at pos 2 spanning positions 2..4:
-    //   tok: A B X X X C
-    //   pos: 0 1 2 2 2 5
-    //   prev, n=2: A -> [NULL, NULL], B -> [NULL, A], 3rd X -> [X, X], C -> [X, X]
-    // note: used by n-gram input embeddings
-    void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
     const llama_model & model;
@@ -313,6 +306,15 @@ private:
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
+    // K-cache mean-centering bias (see load_kv_mean_center()):
+    //   k_bar[ikv] is indexed like `layers` and is nullptr for layers without a bias, or if
+    //   centering was never enabled (k_bar.empty() in that case).
+    //   each tensor is F32, shaped [n_embd_head_k(il), n_head_kv(il)] so it broadcasts against
+    //   the [n_embd_head, n_head, n_tokens] k_cur tensor seen in cpy_k().
+    std::vector<ggml_tensor *> k_bar;
+    std::vector<ggml_context_ptr> k_bar_ctxs;
+    std::vector<ggml_backend_buffer_ptr> k_bar_bufs;
+
     size_t total_size() const;
 
     size_t size_k_bytes() const;
@@ -342,8 +344,7 @@ private:
     void state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
 
-    // sinfo_in, when set, replaces the find_slot call: the cells are given by the caller
-    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1, const slot_info * sinfo_in = nullptr);
+    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
 };
 
@@ -425,9 +426,6 @@ public:
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
-
-    // see llama_kv_cache::get_prev_tokens()
-    void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
     llama_memory_status status;

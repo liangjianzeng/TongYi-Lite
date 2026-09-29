@@ -79,30 +79,30 @@
 
 <ChatFormPickerCommand
 	bind:this={commandPickerRef}
-	{commands}
 	isOpen={isCommandPickerOpen ?? false}
+	query={commandQuery ?? ''}
+	{commands}
 	onClose={onCommandPickerClose ?? (() => {})}
 	onSelect={onCommandSelect ?? (() => {})}
-	query={commandQuery ?? ''}
 />
 
 <ChatFormPickerMcpPrompts
 	bind:this={promptPickerRef}
 	isOpen={isPromptPickerOpen}
+	searchQuery={promptSearchQuery}
 	onClose={onPromptPickerClose}
+	{onPromptLoadStart}
 	{onPromptLoadComplete}
 	{onPromptLoadError}
-	{onPromptLoadStart}
-	searchQuery={promptSearchQuery}
 />
 
 <ChatFormPickerMention
 	bind:this={mentionPickerRef}
-	customAnchor={mentionAnchor}
 	isOpen={isMentionPickerOpen ?? false}
+	query={mentionQuery ?? ''}
+	customAnchor={mentionAnchor}
+	scopePath={scopePath ?? null}
 	onClose={onMentionPickerClose ?? (() => {})}
 	onOpened={onMentionOpened}
 	onSelect={onMentionSelect ?? (() => {})}
-	query={mentionQuery ?? ''}
-	scopePath={scopePath ?? null}
 />

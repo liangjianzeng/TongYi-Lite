@@ -82,11 +82,8 @@
 	let lastUserMessageHeight = $state(0);
 	let assistantMarginTop = $state(0);
 
-	// The measured CSS vars feed the :last-child min-height rule only, so only
-	// the last assistant message needs them. Reading isLastAssistantMessage
-	// here also re-runs the effect when this message stops being the last.
 	$effect(() => {
-		if (!assistantEl || !isLastAssistantMessage) return;
+		if (!assistantEl) return;
 
 		assistantMarginTop = Math.round(parseFloat(getComputedStyle(assistantEl).marginTop));
 
@@ -129,16 +126,16 @@
 
 <div
 	bind:this={assistantEl}
-	style:--assistant-margin-top={assistantMarginTop > 0 ? `${assistantMarginTop}px` : undefined}
+	class="chat-message-assistant text-md group w-full leading-7.5 {className}"
 	style:--last-user-message-height={lastUserMessageHeight > 0
 		? `${lastUserMessageHeight}px`
 		: undefined}
-	aria-label="Assistant message with actions"
-	class="chat-message-assistant text-md group w-full leading-7.5 {className}"
+	style:--assistant-margin-top={assistantMarginTop > 0 ? `${assistantMarginTop}px` : undefined}
 	role="group"
+	aria-label="Assistant message with actions"
 >
 	{#if showProcessingInfoTop}
-		<ChatMessageAssistantProcessingInfo {modelLoadingText} position="top" {processingState} />
+		<ChatMessageAssistantProcessingInfo {modelLoadingText} {processingState} position="top" />
 	{/if}
 
 	{#if editCtx.isEditing}
@@ -148,16 +145,16 @@
 			<ChatMessageAssistantRawOutput {message} {toolMessages} />
 		{:else}
 			<ChatMessageAgenticContent
-				{isLastAssistantMessage}
-				isStreaming={chatStore.isStreaming()}
 				{message}
 				{toolMessages}
+				isStreaming={chatStore.isStreaming()}
+				{isLastAssistantMessage}
 			/>
 		{/if}
 	{/if}
 
 	{#if showProcessingInfoBottom}
-		<ChatMessageAssistantProcessingInfo {modelLoadingText} position="bottom" {processingState} />
+		<ChatMessageAssistantProcessingInfo {modelLoadingText} {processingState} position="bottom" />
 	{/if}
 
 	{#if displayedModel}
@@ -171,8 +168,8 @@
 				/>
 
 				<ChatMessageAssistantStatistics
-					isLoading={chatStore.isLoading}
 					{message}
+					isLoading={chatStore.isLoading}
 					{processingState}
 					showMessageStats={currentConfig.showMessageStats}
 				/>
@@ -182,14 +179,14 @@
 
 	{#if message.timestamp && !editCtx.isEditing}
 		<ChatMessageActionIcons
-			actionsPosition="left"
-			justify="start"
-			onContinue={currentConfig.enableContinueGeneration ? onContinue : undefined}
-			onRawOutputToggle={(enabled) => (showRawOutput = enabled)}
-			{onRegenerate}
-			rawOutputEnabled={showRawOutput}
 			role={MessageRole.ASSISTANT}
+			justify="start"
+			actionsPosition="left"
+			{onRegenerate}
+			onContinue={currentConfig.enableContinueGeneration ? onContinue : undefined}
 			showRawOutputSwitch={currentConfig.showRawOutputSwitch}
+			rawOutputEnabled={showRawOutput}
+			onRawOutputToggle={(enabled) => (showRawOutput = enabled)}
 		/>
 	{/if}
 </div>

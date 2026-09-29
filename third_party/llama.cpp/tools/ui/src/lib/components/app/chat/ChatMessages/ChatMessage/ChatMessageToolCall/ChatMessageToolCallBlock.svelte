@@ -13,12 +13,7 @@
 	import ChatMessageToolCallBlockWriteFile from './ChatMessageToolCallBlockWriteFile.svelte';
 	import { BuiltInTool } from '$lib/enums';
 	import type { AgenticSection, DatabaseMessageExtra } from '$lib/types';
-	import {
-		extractSearchQuery,
-		extractSearchResults,
-		isWebSearchToolName,
-		looksLikeSearchResult
-	} from '$lib/utils';
+	import { extractSearchQuery, extractSearchResults, isWebSearchToolName } from '$lib/utils';
 
 	interface Props {
 		section: AgenticSection;
@@ -31,47 +26,42 @@
 
 	let { attachments, isExecuting, isStreaming, onToggle, open, section }: Props = $props();
 
-	// Runs for every tool block on mount, before the body renders: the cheap
-	// content prefilter and the tool-name allow-list come first so blobs from
-	// exec/file tools are never line-split or JSON-parsed here
-	const isSearchCall = $derived.by(() => {
-		if (looksLikeSearchResult(section.toolResult)) {
-			return extractSearchResults(section.toolResult).length > 0;
-		}
-
-		return isWebSearchToolName(section.toolName) && extractSearchQuery(section.toolArgs).length > 0;
-	});
+	const searchResults = $derived(extractSearchResults(section.toolResult));
+	const searchQuery = $derived(extractSearchQuery(section.toolArgs));
+	const isSearchCall = $derived(
+		searchResults.length > 0 || (searchQuery.length > 0 && isWebSearchToolName(section.toolName))
+	);
 </script>
 
 {#if isSearchCall}
-	<ChatMessageToolCallBlockSearchResults {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockSearchResults {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.BROWSER_GET_DATETIME}
-	<ChatMessageToolCallBlockGetDatetime {isStreaming} {section} />
+	<ChatMessageToolCallBlockGetDatetime {section} {isStreaming} />
 {:else if section.toolName === BuiltInTool.SERVER_GET_INFO}
-	<ChatMessageToolCallBlockGetInfo {isStreaming} {section} />
+	<ChatMessageToolCallBlockGetInfo {section} {isStreaming} />
 {:else if section.toolName === BuiltInTool.SERVER_READ_FILE}
-	<ChatMessageToolCallBlockReadFile {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockReadFile {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.BROWSER_READ_MEDIA}
-	<ChatMessageToolCallBlockReadMedia {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockReadMedia {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.SERVER_EDIT_FILE}
-	<ChatMessageToolCallBlockEditFile {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockEditFile {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.SERVER_WRITE_FILE}
-	<ChatMessageToolCallBlockWriteFile {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockWriteFile {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.SERVER_EXEC_SHELL_COMMAND}
 	<ChatMessageToolCallBlockExecShellCommand
-		{attachments}
-		{isExecuting}
-		{isStreaming}
-		{onToggle}
-		{open}
 		{section}
+		{open}
+		{isStreaming}
+		{isExecuting}
+		{attachments}
+		{onToggle}
 	/>
 {:else if section.toolName === BuiltInTool.SERVER_FILE_GLOB_SEARCH}
-	<ChatMessageToolCallBlockFileGlobSearch {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockFileGlobSearch {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.SERVER_GREP_SEARCH}
-	<ChatMessageToolCallBlockGrepSearch {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockGrepSearch {section} {open} {isStreaming} {onToggle} />
 {:else if section.toolName === BuiltInTool.BROWSER_RUN_JAVASCRIPT}
-	<ChatMessageToolCallBlockRunJavascript {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockRunJavascript {section} {open} {isStreaming} {onToggle} />
 {:else}
-	<ChatMessageToolCallBlockDefault {attachments} {isStreaming} {onToggle} {open} {section} />
+	<ChatMessageToolCallBlockDefault {section} {open} {isStreaming} {attachments} {onToggle} />
 {/if}

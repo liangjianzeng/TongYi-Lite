@@ -66,14 +66,13 @@
 				})()}
 
 				<div class="flex items-center gap-2">
-					<Label class="flex items-center gap-1.5 text-sm font-medium" for={field.key}>
+					<Label for={field.key} class="flex items-center gap-1.5 text-sm font-medium">
 						{field.label}
 
 						{#if field.isExperimental}
 							<FlaskConical class="h-3.5 w-3.5 text-muted-foreground" />
 						{/if}
 					</Label>
-
 					{#if isCustomRealTime}
 						<SettingsChatParameterSourceIndicator />
 					{/if}
@@ -81,9 +80,9 @@
 
 				<div class="relative w-full">
 					<Input
-						autocomplete={field.isPrivate ? 'new-password' : undefined}
 						id={field.key}
 						type={field.isPrivate ? 'password' : field.isPositiveInteger ? 'number' : 'text'}
+						autocomplete={field.isPrivate ? 'new-password' : undefined}
 						{...field.isPositiveInteger
 							? {
 									min: String(field.min ?? 1),
@@ -91,30 +90,28 @@
 									...(field.max != null ? { max: String(field.max) } : {})
 								}
 							: {}}
-						class="w-full {isCustomRealTime ? 'pr-8' : ''}"
+						value={currentValue}
 						oninput={(e) => onConfigChange(field.key, e.currentTarget.value)}
 						placeholder={currentModelParams[field.key] != null
 							? `Default: ${normalizeFloatingPoint(currentModelParams[field.key])}`
 							: (field.placeholder ?? '')}
-						value={currentValue}
+						class="w-full {isCustomRealTime ? 'pr-8' : ''}"
 					/>
-
 					{#if isCustomRealTime}
 						<button
-							aria-label="Reset to default"
-							class="absolute top-1/2 right-2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded transition-colors hover:bg-muted"
+							type="button"
 							onclick={() => {
 								settingsStore.resetParameterToServerDefault(field.key);
 								onConfigChange(field.key, '');
 							}}
+							class="absolute top-1/2 right-2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded transition-colors hover:bg-muted"
+							aria-label="Reset to default"
 							title="Reset to default"
-							type="button"
 						>
 							<RotateCcw class="h-3 w-3" />
 						</button>
 					{/if}
 				</div>
-
 				{#if field.help || SETTING_CONFIG_INFO[field.key]}
 					<p class="mt-1 text-xs text-muted-foreground">
 						{@html field.help || SETTING_CONFIG_INFO[field.key]}
@@ -122,7 +119,7 @@
 				{/if}
 			{:else if field.type === SettingsFieldType.TEXTAREA}
 				{#if field.label}
-					<Label class="block flex items-center gap-1.5 text-sm font-medium" for={field.key}>
+					<Label for={field.key} class="block flex items-center gap-1.5 text-sm font-medium">
 						{field.label}
 
 						{#if field.isExperimental}
@@ -132,11 +129,11 @@
 				{/if}
 
 				<Textarea
-					class="min-h-[10rem] w-full md:max-w-3xl"
 					id={field.key}
+					value={String(localConfig[field.key] ?? '')}
 					onchange={(e) => onConfigChange(field.key, e.currentTarget.value)}
 					placeholder=""
-					value={String(localConfig[field.key] ?? '')}
+					class="min-h-[10rem] w-full md:max-w-3xl"
 				/>
 
 				{#if field.help || SETTING_CONFIG_INFO[field.key]}
@@ -148,13 +145,13 @@
 				{#if field.key === SETTINGS_KEYS.SYSTEM_MESSAGE}
 					<div class="mt-3 flex items-center gap-2">
 						<Checkbox
-							checked={Boolean(localConfig.showSystemMessage ?? true)}
 							id="showSystemMessage"
+							checked={Boolean(localConfig.showSystemMessage ?? true)}
 							onCheckedChange={(checked) =>
 								onConfigChange(SETTINGS_KEYS.SHOW_SYSTEM_MESSAGE, Boolean(checked))}
 						/>
 
-						<Label class="cursor-pointer text-sm font-normal" for="showSystemMessage">
+						<Label for="showSystemMessage" class="cursor-pointer text-sm font-normal">
 							Show system message in conversations
 						</Label>
 					</div>
@@ -175,20 +172,21 @@
 				})()}
 
 				<div class="flex items-center gap-2">
-					<Label class="flex items-center gap-1.5 text-sm font-medium" for={field.key}>
+					<Label for={field.key} class="flex items-center gap-1.5 text-sm font-medium">
 						{field.label}
 
 						{#if field.isExperimental}
 							<FlaskConical class="h-3.5 w-3.5 text-muted-foreground" />
 						{/if}
 					</Label>
-
 					{#if isCustomRealTime}
 						<SettingsChatParameterSourceIndicator />
 					{/if}
 				</div>
 
 				<Select.Root
+					type="single"
+					value={currentValue}
 					onValueChange={(value) => {
 						if (field.key === SETTINGS_KEYS.THEME && value && onThemeChange) {
 							onThemeChange(value);
@@ -196,8 +194,6 @@
 							onConfigChange(field.key, value);
 						}
 					}}
-					type="single"
-					value={currentValue}
 				>
 					<div class="relative w-full md:w-auto">
 						<Select.Trigger class="w-full">
@@ -210,27 +206,25 @@
 								{selectedOption?.label || `Select ${field.label.toLowerCase()}`}
 							</div>
 						</Select.Trigger>
-
 						{#if isCustomRealTime}
 							<button
-								aria-label="Reset to default"
-								class="absolute top-1/2 right-8 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded transition-colors hover:bg-muted"
+								type="button"
 								onclick={() => {
 									settingsStore.resetParameterToServerDefault(field.key);
 									onConfigChange(field.key, '');
 								}}
+								class="absolute top-1/2 right-8 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded transition-colors hover:bg-muted"
+								aria-label="Reset to default"
 								title="Reset to default"
-								type="button"
 							>
 								<RotateCcw class="h-3 w-3" />
 							</button>
 						{/if}
 					</div>
-
 					<Select.Content>
 						{#if field.options}
 							{#each field.options as option (option.value)}
-								<Select.Item label={option.label} value={option.value}>
+								<Select.Item value={option.value} label={option.label}>
 									<div class="flex items-center gap-2">
 										{#if option.icon}
 											{@const IconComponent = option.icon}
@@ -243,7 +237,6 @@
 						{/if}
 					</Select.Content>
 				</Select.Root>
-
 				{#if field.help || SETTING_CONFIG_INFO[field.key]}
 					<p class="mt-1 text-xs text-muted-foreground">
 						{field.help || SETTING_CONFIG_INFO[field.key]}
@@ -265,21 +258,20 @@
 
 				<RadioGroup.Root
 					class="gap-4"
+					value={currentMode}
 					onValueChange={(value) => {
 						for (const opt of radioOptions) {
 							onConfigChange(opt.key, opt.value === value);
 						}
 					}}
-					value={currentMode}
 				>
 					{#each radioOptions as opt (opt.value)}
 						{@const itemId = `${field.key}-${opt.value}`}
 						<div class="flex items-center gap-2">
-							<RadioGroup.Item id={itemId} value={opt.value} />
-
+							<RadioGroup.Item value={opt.value} id={itemId} />
 							<Label
-								class="flex cursor-pointer items-center gap-1.5 text-sm font-normal"
 								for={itemId}
+								class="flex cursor-pointer items-center gap-1.5 text-sm font-normal"
 							>
 								{opt.label}
 
@@ -299,16 +291,16 @@
 			{:else if field.type === SettingsFieldType.CHECKBOX}
 				<div class="flex items-start space-x-3">
 					<Checkbox
-						checked={Boolean(localConfig[field.key])}
-						class="mt-1"
 						id={field.key}
+						checked={Boolean(localConfig[field.key])}
 						onCheckedChange={(checked) => onConfigChange(field.key, checked)}
+						class="mt-1"
 					/>
 
 					<div class="space-y-1">
 						<label
-							class="flex cursor-pointer items-center gap-1.5 pt-1 pb-0.5 text-sm leading-none font-medium"
 							for={field.key}
+							class="flex cursor-pointer items-center gap-1.5 pt-1 pb-0.5 text-sm leading-none font-medium"
 						>
 							{field.label}
 

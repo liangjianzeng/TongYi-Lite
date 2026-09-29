@@ -13,27 +13,27 @@
 </script>
 
 <div class="flex shrink-0 items-center gap-1">
-	<Button aria-label="Edit" class="h-7 w-7" onclick={onEdit} size="icon" variant="ghost">
+	<Button variant="ghost" size="icon" class="h-7 w-7" onclick={onEdit} aria-label="Edit">
 		<Pencil class="h-3.5 w-3.5" />
 	</Button>
 
 	<Button
-		aria-label="Refresh"
-		class="h-7 w-7"
-		disabled={isHealthChecking}
-		onclick={onRefresh}
-		size="icon"
 		variant="ghost"
+		size="icon"
+		class="h-7 w-7"
+		onclick={onRefresh}
+		disabled={isHealthChecking}
+		aria-label="Refresh"
 	>
 		<RefreshCw class="h-3.5 w-3.5" />
 	</Button>
 
 	<Button
-		aria-label="Delete"
+		variant="ghost"
+		size="icon"
 		class="hover:text-destructive-foreground h-7 w-7 text-destructive hover:bg-destructive/10"
 		onclick={onDelete}
-		size="icon"
-		variant="ghost"
+		aria-label="Delete"
 	>
 		<Trash2 class="h-3.5 w-3.5" />
 	</Button>

@@ -35,27 +35,27 @@
 
 <span class="flex min-w-0 items-center gap-1.5">
 	{#if faviconUrl}
-		<img alt="" class={['shrink-0 text-foreground', iconRounded, iconClass]} src={faviconUrl} />
+		<img src={faviconUrl} alt="" class={['shrink-0 text-foreground', iconRounded, iconClass]} />
 	{:else}
 		<McpLogo class={['shrink-0 text-foreground', iconRounded, iconClass].join(' ')} />
 	{/if}
 
-	<TruncatedText class={nameClass ?? ''} text={displayName ?? ''} />
+	<TruncatedText text={displayName ?? ''} class={nameClass ?? ''} />
 
 	{#if showVersion && serverInfo?.version}
-		<Badge class="h-4 max-w-24 min-w-0 shrink px-1 text-[10px]" variant="secondary">
+		<Badge variant="secondary" class="h-4 max-w-24 min-w-0 shrink px-1 text-[10px]">
 			<TruncatedText text={`v${serverInfo.version}`} />
 		</Badge>
 	{/if}
 
 	{#if showWebsite && safeWebsiteUrl}
 		<a
-			aria-label="Open website"
-			class="shrink-0 text-muted-foreground hover:text-foreground"
 			href={safeWebsiteUrl}
-			onclick={(e) => e.stopPropagation()}
-			rel="noopener noreferrer"
 			target="_blank"
+			rel="noopener noreferrer"
+			class="shrink-0 text-muted-foreground hover:text-foreground"
+			aria-label="Open website"
+			onclick={(e) => e.stopPropagation()}
 		>
 			<ExternalLink class="h-3 w-3" />
 		</a>

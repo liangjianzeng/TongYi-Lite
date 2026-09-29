@@ -26,7 +26,6 @@
 		onSearchDeactivated?: () => void;
 		onSearchClick?: () => void;
 		onNewChat?: () => void;
-		onSettingsClick?: () => void;
 	}
 
 	let {
@@ -36,7 +35,6 @@
 		onNewChat,
 		onSearchClick,
 		onSearchDeactivated,
-		onSettingsClick,
 		searchQuery = $bindable('')
 	}: Props = $props();
 
@@ -94,8 +92,8 @@
 {#if isSearchModeActive}
 	<div class="px-4 my-2">
 		<SearchInput
-			bind:ref={searchInputRef}
 			bind:value={searchQuery}
+			bind:ref={searchInputRef}
 			onClose={handleSearchModeDeactivate}
 			onKeyDown={(e) => e.key === 'Escape' && handleSearchModeDeactivate()}
 			placeholder="Search conversations..."
@@ -117,16 +115,14 @@
 							onNewChat?.();
 							void conversationsStore.openNewChat();
 						}
-					: item.action === SidebarAction.SETTINGS
-						? () => onSettingsClick?.()
-						: item.route
-							? () => {
-									onNewChat?.();
-									goto(item.route!);
-								}
-							: isSearchOnMobile
-								? undefined
-								: onSearchClick}
+					: item.route
+						? () => {
+								onNewChat?.();
+								goto(item.route!);
+							}
+						: isSearchOnMobile
+							? undefined
+							: onSearchClick}
 			{@const itemTransition = {
 				delay: !initialized ? i * ICON_STRIP_TRANSITION_DELAY_MULTIPLIER : 0,
 				duration: ICON_STRIP_TRANSITION_DURATION,
@@ -141,8 +137,8 @@
 							: ''}"
 						href={itemHref}
 						onclick={itemOnClick}
-						size="default"
 						variant="ghost"
+						size="default"
 					>
 						<span class="flex min-w-0 items-center px-0.5 gap-2">
 							{@render itemIcon(item.icon)}
@@ -173,16 +169,14 @@
 							onNewChat?.();
 							void conversationsStore.openNewChat();
 						}
-					: item.action === SidebarAction.SETTINGS
-						? () => onSettingsClick?.()
-						: item.route
-							? () => {
-									onNewChat?.();
-									goto(item.route!);
-								}
-							: isSearchOnMobile
-								? undefined
-								: onSearchClick}
+					: item.route
+						? () => {
+								onNewChat?.();
+								goto(item.route!);
+							}
+						: isSearchOnMobile
+							? undefined
+							: onSearchClick}
 			{@const itemTransition = {
 				delay: !initialized ? i * ICON_STRIP_TRANSITION_DELAY_MULTIPLIER : 0,
 				duration: ICON_STRIP_TRANSITION_DURATION,
@@ -192,15 +186,15 @@
 			{#if showIcons}
 				<div transition:fade={itemTransition}>
 					<ActionIcon
+						icon={item.icon}
+						tooltip={item.tooltip}
+						tooltipSide={TooltipSide.RIGHT}
+						size="lg"
+						iconSize={ICON_CLASS_DEFAULT}
 						class="h-9 w-9 rounded-full hover:bg-accent! {isActive
 							? 'bg-accent text-accent-foreground'
 							: ''}"
-						icon={item.icon}
-						iconSize={ICON_CLASS_DEFAULT}
 						onclick={itemOnClick}
-						size="lg"
-						tooltip={item.tooltip}
-						tooltipSide={TooltipSide.RIGHT}
 					/>
 				</div>
 			{/if}

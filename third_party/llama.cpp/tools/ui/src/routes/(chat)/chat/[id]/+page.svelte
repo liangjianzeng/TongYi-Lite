@@ -139,6 +139,6 @@
 
 <DialogModelNotAvailable
 	bind:open={showModelNotAvailable}
-	availableModels={availableModelNames}
 	modelName={requestedModelName}
+	availableModels={availableModelNames}
 />

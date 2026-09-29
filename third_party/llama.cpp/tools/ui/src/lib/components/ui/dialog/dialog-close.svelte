@@ -5,9 +5,3 @@
 </script>
 
 <DialogPrimitive.Close bind:ref data-slot="dialog-close" {...restProps} />
-
-<style>
-	:global([data-dialog-close]) {
-		z-index: 999;
-	}
-</style>

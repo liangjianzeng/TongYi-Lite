@@ -36,15 +36,15 @@ TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模�
 
 | 能力 | 说明 |
 |------|------|
-| **本地端侧推理** | 基于 llama.cpp 的 JNI 直调推理（无 HTTP Server），mmap 加载、批量 prefill、内置采样器；纯 CPU 也可跑，数据零外传 |
-| **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；`n_gpu_layers` 全量卸载，运行时可控 |
+| **本地端侧推理** | llama.cpp JNI 直调（无 HTTP Server），mmap 加载、批量 prefill、内置采样器；纯 CPU 也可跑，数据零外传 |
+| **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 825 上 Vulkan 经 **Turnip（Mesa gen8）直载** 重新可用（详见[技术架构](#技术架构)） |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描 |
-| **多模态（视觉 + 语音）** | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；Gemma 4 E2B 自带原生语音编码器，支持**按住说话**语音输入 |
-| **远程 API 接入** | 兼容 OpenAI `{baseUrl}/chat/completions` 端点（云端大模型或自建 llama.cpp 服务），**本地优先、API 后备**，共用同一套聊天界面 |
-| **联网搜索（自建实例）** | `web_search` / `get_weather` 走**用户自己部署的 SearXNG**：地址 / 密钥 / 引擎白名单 / 条数 / 超时全在设置里配，带一键「测试连接」；App **不预置任何搜索服务** |
-| **Agent 智能体（工具调用）** | 全新智能体引擎：事件日志上下文 + 失败自动恢复主循环 + 六段工具流水线 + **子代理**（spawn/fork）+ Skills/Hooks/AGENTS.md 指令文件 + 活动面板 UI；18 个内置工具（`shell_exec` / `python_exec` / 联网 / 计算 / 文件 / 待办 / 记忆 / 天气等），沙箱授权 + 逐次审批 |
-| **MTP 投机解码** | 部分模型支持多 token 预测（Multi-Token Prediction），可在设置页为该模型单独开启投机解码加速 |
-| **智能体可配置** | 循环轮次 / 每轮预算 / 工具超时 / 联网源 / 按模型开启或关闭特定工具，全部持久化；支持原生工具调用能力探测（`nativeToolCall`） |
+| **多模态（视觉 + 语音）** | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；Gemma 4 E2B 自带原生语音编码器，支持**按住说话** |
+| **远程 API 接入** | OpenAI 兼容 `{baseUrl}/chat/completions`（云端大模型或自建 llama.cpp 服务），本地优先、API 后备 |
+| **联网搜索（自建实例）** | `web_search` / `get_weather` 走**用户自己部署的 SearXNG**，全配置化 + 一键测试连接；App **不预置任何搜索服务** |
+| **Agent 智能体（工具调用）** | 事件日志上下文引擎 + 失败自动恢复主循环 + 六段工具流水线 + **子代理**（spawn/fork）+ Skills/Hooks/`AGENTS.md`；18 个内置工具，沙箱授权 + 逐次审批 |
+| **MTP 投机解码** | 部分模型支持多 token 预测（Multi-Token Prediction），设置页按模型单独开启 |
+| **智能体可配置** | 循环轮次 / 每轮预算 / 工具超时 / 联网源 / 按模型开关特定工具，全部持久化；支持原生工具调用能力探测（`nativeToolCall`） |
 
 ---
 
@@ -73,13 +73,13 @@ flutter run -d <device_id>
 > **真机覆盖安装铁律**：始终 `adb install -r app-debug.apk`（`-r` 覆盖更新，保留已下载的端侧模型缓存）；
 > **绝不先卸载再装**（卸载会清掉模型缓存）。设备被 `INSTALL_FAILED_USER_RESTRICTED` 拒绝时加 `-t`。
 
-> **本机（开发机）快速构建必读**：每次构建都很久很难？根因与解法、增量/全量耗时分解、flutter SDK
-> 补丁记录见 [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md)。核心两条：先
-> `set PATHEXT=.EXE;.COM;.BAT;.CMD;...`（本机 PATHEXT 异常导致 PATH 查找全失效），
-> 再走「flutter assemble → 同步 assets → gradle `-x compileFlutterBuild*`」增量路径（约 2 分钟）。
-
 <details>
-<summary><b>Windows 下 debug APK 装不进最新 Dart？</b></summary>
+<summary><b>Windows 本机快速构建 / debug APK 装不进最新 Dart？（开发机专用）</b></summary>
+
+构建慢的根因与解法、增量/全量耗时分解、flutter SDK 补丁记录见
+[`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md)。核心两条：先
+`set PATHEXT=.EXE;.COM;.BAT;.CMD;.VBS;.JS;.WSF;.MSC`（本机 PATHEXT 异常导致 PATH 查找全失效），
+再走「flutter assemble → 同步 assets → gradle `-x compileFlutterBuild*`」增量路径（约 2 分钟）。
 
 `flutter assemble` 与 gradle 读写的 kernel 路径不一致会导致打包了旧 Dart。每次改 Dart 后必须先把最新
 `flutter_assets` 同步覆盖到 gradle 的 intermediates 再打包：
@@ -89,8 +89,6 @@ flutter assemble -o build/flutter-assemble --define=BuildMode=debug --define=Tar
 xcopy /E /I build\flutter-assemble\flutter_assets\ build\app\intermediates\flutter\debug\flutter_assets\
 cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 ```
-
-> 若工具链报「找不到 git / gen_snapshot」等 PATH 相关错误，先执行 `set PATHEXT=.EXE;.COM;.BAT;.CMD;.VBS;.JS;.WSF;.MSC`。
 
 </details>
 
@@ -190,10 +188,10 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   最大 16k）/工具超时全部可调并持久化（按模型 `agentToolsByModel`）；联网搜索工具在此开关，
   **其实例地址在「API 接入」页配置**（见[联网搜索](#联网搜索searxng-自建实例)）。
 
-#### 全新智能体引擎（v0.2.1）
+#### 智能体引擎（v0.2.1 升级）
 
-v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相源、主循环带失败自动恢复与可靠停止、
-工具执行走六段流水线，并新增**子代理**、Skills / Hooks / `AGENTS.md` 指令文件与活动面板 UI。
+上下文以**事件日志**为唯一真相源、主循环带失败自动恢复与可靠停止、工具执行走六段流水线，
+并新增**子代理**、Skills / Hooks / `AGENTS.md` 指令文件与活动面板 UI。
 
 - **会话事件日志（唯一真相源）**：每个对话一本 append-only 事件日志（JSONL、`seq` 严格递增）；模型上下文是
   事件日志的**纯函数投影**（"模型看到的 = 日志能重建的"）；上下文压缩 = 追加摘要 + 影子遮蔽（永不删除原文）；
@@ -278,21 +276,7 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   KleidiAI dotprod CPU 内核、mtmd 多模态（视觉 + 语音）支持。
 - **模型管理**：`assets/models_catalog.json` 配置驱动 + Dio 断点续传下载 + SQLite 对话持久化。
 
----
-
-## 构建与开发
-
-### 前置环境
-
-| 工具 | 版本 | 用途 |
-|------|------|------|
-| Flutter SDK | 3.x | Flutter 构建 |
-| Android SDK | 34+ (compileSdk 36) | Android 构建 |
-| Android NDK | r27 (27.0.12077973) | C++ 原生编译 |
-| CMake | 3.22.1 | `CMakeLists.txt` + Gradle `externalNativeBuild` |
-| Java JDK 17 | 17 | Gradle / Kotlin |
-
-### GPU / CPU 加速
+### GPU / CPU 推理后端
 
 构建时若满足依赖，APK 会同时包含 `libggml-vulkan.so`（内嵌预编译 SPIR-V 着色器）与
 `libggml-opencl.so`（dlopen 转发 stub）。**是否真正用 GPU、用哪个后端，由 App 启动时探测 + 设置页选择
@@ -308,22 +292,58 @@ v0.2.1 智能体引擎全面升级：上下文以**事件日志**为唯一真相
   `vkGetDeviceQueue2`（Vulkan 1.2）返回坏 queue → 改用 Vulkan 1.0 的 `vkGetDeviceQueue`（3 处 patch，
   仅 ARM vendor 0x13B5 生效，真机验证通过）。Mali-G68 无矩阵加速单元，Vulkan 解码约为 CPU 的 1/3，属
   **硬件天花板**（大模型上 GPU 卸载仍省内存）。
-- **骁龙 Adreno 8 Elite2（SM8735 / Adreno 825）专项**：**v0.2.2 起修复 Vulkan 乱码 / 管线崩溃**。驱动
-  0800.71（E031 编译器）错误编译 shader 的 `unpack8()`（Int8 capability）导致量化模型输出乱码，另存在
-  subgroup matvec 管线创建失败、图融合 kernel 输出全零、dp4a 数值错误、decode 部分管线建不出共 5 个独立
-  问题。修复：shader 层用纯 32 位位操作替换 `unpack8()`（21 处调用点 + q8_0 反量化重写，位模式逐位等价），
-  运行时默认注入 `GGML_VK_NO_SUBGROUP / GGML_VK_DISABLE_FUSION / GGML_VK_NO_MMV /
-  GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`（JNI 层注入，可用 `/storage/emulated/0/TongYiLite/vk_flags.conf`
-  覆盖做 A/B）。构建 glslc 锁定 shaderc v2026.3（`_study/vkcli/sdk/vksdk-new`）。详见
-  [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
 - **KleidiAI dotprod（纯 CPU 备选）**：`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod` 编译手调 matmul 内核；
   ⚠️ **不加 `+i8mm`**（天玑 Cortex-A78 无 i8mm，`armv8.4-a+dotprod+i8mm` 会 SIGILL 三后端同崩），已降级
   为 `armv8.2-a+dotprod`。
-- **Debug 也强制 `-O3 -DNDEBUG`**：Android debug 默认 `-O0` 会让量化 matmul 内核失去优化（曾导致全模型
-  ~1.2 tok/s）。⚠️ 仅设 `CMAKE_C_FLAGS_DEBUG` 不够——NDK 工具链会静默顶掉，正确做法是 NDK 覆盖不了的目录级
-  `add_compile_options(-O3)` + `add_compile_definitions(NDEBUG)`。改 CMake 后必须清 `.cxx` 全量重建。
 - **SME2（暂未启用）**：目标设备（骁龙 8s Gen 4）仅 1 颗大核有 SME2，异构核分派收益低、收益拐点未到
   （待全核 SME2 平台如天玑 9500）。当前保持 `dotprod`。
+
+#### 骁龙 8s Gen 4（SM8735 / Adreno 825）Vulkan 专项
+
+经历「原厂驱动修复 → OTA 回归弃用 → Turnip 直载」三个阶段：
+
+1. **v0.2.2（2026-09-26）原厂驱动（0800.71）修复**：E031 编译器错误编译 shader 的 `unpack8()`
+   （Int8 capability）导致量化模型输出乱码，另存在 subgroup matvec 管线创建失败、图融合 kernel 输出全零、
+   dp4a 数值错误、decode 部分管线建不出共 5 个独立问题。修复：shader 层用纯 32 位位操作替换 `unpack8()`
+   （21 处调用点 + q8_0 反量化重写，位模式逐位等价），运行时默认注入
+   `GGML_VK_NO_SUBGROUP / GGML_VK_DISABLE_FUSION / GGML_VK_NO_MMV / GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`
+   （JNI 层注入，可用 `/storage/emulated/0/TongYiLite/vk_flags.conf` 覆盖做 A/B）。
+2. **OTA 回归定性（2026-09-27）**：2026-08-05 HyperOS OS3.0.305 OTA 后，7 月原味代码 + 新驱动同样拒建
+   管线（OTA 时间线与公开 ROM 记录闭环实锤，Bonsai2 实现 / llama.cpp 升级均与故障无关）→ 原厂 Vulkan 弃用。
+3. **v0.2.3（2026-09-27）Turnip（Mesa out-of-tree gen8）App 内直载**：免 root、不碰系统分区。该驱动不导出
+   任何 `vk_*` 符号，入口是 Android Vulkan HAL 模块（`hw_module_t → vulkan_device_t`，PFN 表偏移 +0x70、
+   GetInstanceProcAddr +0x88，逆向确认）；ggml-vulkan 4 处直接 C 符号调用全部改走 dispatcher，
+   `GGML_VK_TURNIP=<驱动.so>` 指定直载。数值损坏三根因逐一修复：
+   - ① Turnip gen8 **错编 subgroup 算术归约（subgroupAdd）**——一切含归约的算子（matmul / conv）数值错，
+     tbo f32 MUL_MAT 203 case 全 FAIL → `GGML_VK_NO_SUBGROUP=1` 后 203/203 全过；
+   - ② 我方 `NO_SUBGROUP` 门控有漏网——ssm_scan / gated_delta_net 管线选择直查 `device->subgroup_arithmetic`
+     不走 use_subgroups 门控 → 设备能力初始化处直接置 `subgroup_arithmetic=false`，一处覆盖全部 op 级选择；
+   - ③ GDN shmem butterfly 的 **S_V=128 lanes 配置错编**（clustered LANES=8 / 全宽 128 均坏）→
+     `!subgroup_arithmetic` 时 lanes 钳 64（与已验证的 S_V=64 布局同构）。
+   - 验收：tbo GATED_DELTA_NET 36/36、SSM_SCAN 12/12，LFM2.5-2.6B 短生成 5/5 连贯（6~10.6 t/s）、
+     n=96 长生成连贯、Qwen3.5-4B 连贯（5.0 t/s，修复前 `?111.111` 乱码）。
+4. **当前定位**：**勘探后端**（CONV_2D f32 独立 bug、FA hsk=192 遗留，`[turnip-step]` 诊断探针清理后才能
+   出正式 APK），日常 GPU 推理仍走 OpenCL。
+
+> 完整根因链与修复记录：[`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
+
+#### OpenCL PTQ1_0 三元量化内核（Bonsai-2 27B，v0.2.5 / v0.2.6 补齐 prefill）
+
+- Bonsai-2 27B 全模型 402 个 PTQ1_0 张量（GGML `type 143`，-1/0/1 三元，28 B/128 值）；上游 OpenCL 后端
+  只有 Q4/Q5/Q8 系列 mul_mv 内核 → 此前全部回退 CPU、decode 极慢。分支 `spike/opencl-bonsai2` 新增
+  `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约）实现全 GPU decode。
+- **v0.2.6 补齐 prefill GEMM**：新增 `mul_mm_ptq1_0_f32_l4_lm.cl`（BM64/BN64/BK32 分块，raw 块布局
+  逐元素 staged 三进制解码，BK=32 整除 QK=128 故 K-tile 永不跨量化块）。此前 prefill（n>1）掉进
+  逐行 matvec 反复发射路径——桌面 Arc 140T 实测 pp128 **1.14 → 18.89 t/s（16.5×）**；桌面 OpenCL
+  数值 tbo 174/174。
+- **根治 Adreno OpenCL 编译器对 `__constant` 数组变址的误编**（`pow3[4]` 恒读 0 → 每块 16 trit 全解成 -1，
+  数据正确但内积系统性偏差）：弃用 `__constant` 数组索引，改三元表达式。
+- 真机 `test-backend-ops` MUL_MAT PTQ1_0 套件 **174/174 通过**（含 67 个奇数尾行与 Bonsai 形状）。
+
+> 块结构 / 编码 / 解码 / 内核并行 / Adreno 陷阱定位过程：
+> [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md)。
+> 双驱动真机验证矩阵（原厂 0800.71 / fork Turnip × 三药；FWHT 门控与 GEMM 大 n 错编定案）：
+> [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md)。
 
 **验证 CPU 内核是否生效**（编译后查 `compile_commands.json`）：
 
@@ -341,40 +361,84 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 ```
 
 > 完整踩坑记录（多轮乱码根因、flash attention 陷阱、量化 GEMM bug 等）见 [版本更新](#版本更新) 与
-> [`docs/backend_benchmark_2026-08-04.md`](docs/backend_benchmark_2026-08-04.md)。
+> [`docs/archive/backend_benchmark_2026-08-04.md`](docs/archive/backend_benchmark_2026-08-04.md)。
+
+---
+
+## 构建与开发
+
+### 前置环境
+
+| 工具 | 版本 | 用途 |
+|------|------|------|
+| Flutter SDK | 3.x | Flutter 构建 |
+| Android SDK | 34+ (compileSdk 36) | Android 构建 |
+| Android NDK | r27 (27.0.12077973) | C++ 原生编译 |
+| CMake | 3.22.1 | `CMakeLists.txt` + Gradle `externalNativeBuild` |
+| Java JDK 17 | 17 | Gradle / Kotlin |
+
+### 构建要点
+
+- **glslc 锁定 shaderc v2026.3**（开发机本地 `_study/vkcli/sdk/vksdk-new`，不入库）：CMakeLists 的
+  `Vulkan_GLSLC_EXECUTABLE` 强制覆盖，shader 变更后必须重编。
+- **Debug 也强制 `-O3 -DNDEBUG`**：Android debug 默认 `-O0` 会让量化 matmul 内核失去优化（曾导致全模型
+  ~1.2 tok/s）。⚠️ 仅设 `CMAKE_C_FLAGS_DEBUG` 不够——NDK 工具链会静默顶掉，正确做法是 NDK 覆盖不了的目录级
+  `add_compile_options(-O3)` + `add_compile_definitions(NDEBUG)`。
+- **改 CMakeLists / 工具链后必须清 `.cxx` 缓存**（`Remove-Item -LiteralPath 'android\app\.cxx' -Recurse -Force`），
+  否则 Gradle 判定 up-to-date 不重编。
 
 ---
 
 ## 版本更新
 
-> 版本历史依据 git 提交维护，详细变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+> 版本历史依据 git 提交维护，详细变更见 [`CHANGELOG.md`](CHANGELOG.md)（0.2.1 及更早）。
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）；glslc 锁定 shaderc v2026.3。详见 `docs/vulkan_adreno825_fix_2026-09-26.md` |
-| **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI（工具卡片 / 压缩横幅 / 重试指示 / 审批对话框）；**联网搜索全面配置化**：SearXNG 实例地址/密钥/引擎白名单/条数/超时「设置 → API 接入」自配、一键测试连接、保存即热更新（含 4 处静默失效修复）；llama.cpp 升级 b11028 + 模型加载全链路修复；移除启动加载页。**229 项单测全绿** |
-| **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、18 内置工具、代码质量 P0 加固 |
+| **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（`mul_mm_ptq1_0_f32_l4_lm`，raw 块布局 + staged 三进制解码；桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控 + `GGML_VK_FWHT_SUBGROUP` A/B 开关——真机实锤 Turnip shuffle 错编（8/27）原厂无罪（27/27），门控恰好兜住；③ **Turnip e2e 乱码根因定案**：GEMM 大 n（≥48）编译器错编（f16+MMQ 双中招，ERR≈1.0；原厂 16/16 全绿）——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界（`-ub 16` e2e 连贯闭环）；④ tbo 增补 hadamard 4096/8192、PTQ1_0 二分/大 batch、f16 大 n 用例防回归；⑤ 双驱动真机全矩阵验证（原厂 0800.71 / fork Turnip × 三药）记录于 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) |
+| **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复（三元表达式替代数组索引）；真机 174/174 通过 |
+| **v0.2.3** | 2026-09-27 | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化 + 4 处直接调用修复）；数值三根因修复——subgroupAdd 错编全局门控（`subgroup_arithmetic=false` 直置覆盖 ssm_scan/GDN 漏网）、GDN S_V=128 lanes 钳 64；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s） |
+| **v0.2.2** | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖） |
+| **v0.2.1** | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI；**联网搜索全面配置化**（SearXNG 自配 + 测试连接 + 保存即热更新）；llama.cpp 升级 b11028；移除启动加载页。**229 项单测全绿** |
+| **v0.2.0** | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、代码质量 P0 加固 |
 | v0.1.6 | 2026-08-19 | llama.cpp 升级上游 master（`fe8156f`）、天玑 Mali Vulkan 崩溃根治、mmproj 视觉编码后端跟随主后端、天玑 OpenCL 置灰、Gradle 16 核并行 |
 | v0.1.3 | 2026-08-04 | 多轮对话正确性修复（KV 缓存跨轮残留等根因）、`tok/s` 口径对齐、`n_ubatch` 按后端动态、助手复制 / 自定义模型名 / 加载进度弹窗 |
 | v0.1.2 | 2026-08-03 | 量化 GEMM 路径 / 重复惩罚失效 / flash attention CPU 陷阱修复 |
 | v0.1.1 | 2026-08-03 | Vulkan GPU 加速（arm64-v8a）、模型下载系统、设置页 UI、对话 SQLite 持久化 |
 | v0.1.0 | 2025-07-29 | 端侧 LLM 推理引擎（llama.cpp）、Flutter Material3 前端、架构设计文档 v2 |
 
-**v0.2.1 下载**：待打包发布（构建产物 `build\app\outputs\flutter-apk\`，发布时拷入
-`releases/TongYi-Lite-v0.2.1.apk` 并在此更新链接与 SHA-256）。
-
-**v0.2.0 下载**（release 签名 `CN=TongYiLite`）：
+**下载**（release 签名 `CN=TongYiLite`）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.2.0.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.0.apk)
 > `SHA-256: FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
 
 > ⚠️ 2026-09-05 重新发布：修正为 `CN=TongYiLite` 官方签名证书（原 `652245B5…` 非官方证书）。
+> 后续版本发布流程：构建产物拷入 `releases/` 并在此更新链接与 SHA-256。
+
+**v0.2.1 详细变更**（2026-09-26，智能体引擎 / 联网搜索的功能说明见上文[应用功能](#应用功能)）：
+
+- **联网搜索改为用户自配 SearXNG**：设置页「API 接入」新增联网搜索配置卡（地址 / 密钥 / 引擎白名单 /
+  语言 / 条数 / 超时 + 测试连接）；App 不预置任何搜索实例，地址留空即"未配置"并明确诊断指向设置页。
+- **修复 4 处「静默失效」**：① `/search` 路径缺失时请求拼成 `host:8080?q=…`（原依赖实例 308 跳转才侥幸
+  可用）→ 自行补齐且不重复拼接；② Dio `validateStatus` 吞掉 4xx/5xx（原判断是死代码）→ 自行判定并
+  分类报因；③ 实例未开 `format=json` 返回 HTML 被误报「不可达」→ 明确提示在 `settings.yml` 加 json；
+  ④ 工具声明超时从未消费、被写死 15s 覆盖 → 声明超时优先于全局 `toolTimeout`。
+- **搜索质量与上下文预算**：URL 规范化去重（`utm_*` / fragment / 尾斜杠 / 大小写）+ 按 score 排序 +
+  超上限 `truncated` 提示；单条摘要 200 字 / 总 1500 字。
+- **引擎白名单提速**：全引擎 21s → 只留可达引擎 2.2s（自建实例实测）；填了实例不认识的引擎被拒（400）
+  时自动去参重试一次。
+- **诊断挖到根**：把 Dio error 里真实 `SocketException`（含系统错误码、host:port、耗时）挖出来展示。
+- **llama.cpp 升级 b11028**：API 漂移全修（mtmd helper 第 4 参、`MTMD_BACKEND_DEVICE` 删除 →
+  `mtmd_context_params.device`、OpenCL stub 转发补齐、KleidiAI vendored 项目名双写兜底）；模型加载
+  全链路修复（视觉报错文案不再甩锅 mmproj，真凶看引擎日志）。
+- **移除启动加载页**：冷启动直接进首页，模型目录与原生引擎初始化后台进行。
+- **测试**：智能体新增 79 项、联网搜索 21 项，全仓库 229 项全绿，`flutter analyze` 0 error。
 
 **v0.2.0 详细变更**（2026-09-04）：
 
-- **Agent Lite 智能体**：模型 ↔ 工具多轮交互（轮次上限可配，默认 5），工具结果以 user 角色回填后再生成；
-  工具注册表分层注册/注销、按模型可见性渲染；`ToolProtocol` 抽象按 `EngineCapabilities` 自动选协议；
-  `AgentStreamProcessor` 处理思考块/工具调用块增量隐藏；llama.cpp 换 XHToken fork（`spark2_5` +
+- **Agent Lite 智能体**：模型 ↔ 工具多轮交互（轮次上限默认 5），工具结果以 user 角色回填后再生成；
+  工具注册表分层注册/注销、按模型可见性渲染；`ToolProtocol` 按 `EngineCapabilities` 自动选协议；
+  `AgentStreamProcessor` 增量隐藏思考块/工具调用块；llama.cpp 换 XHToken fork（`spark2_5` +
   function-calling）。
 - **根治工具「缺参数」**：执行前统一必填校验，错误信息列出缺失参数名与用途并回填；工具清单渲染带必填提示。
 - **`python_exec`（Chaquopy 17.0.0 / CPython 3.11）**：嵌入式运行时随 APK 打包，MethodChannel 执行脚本，
@@ -385,71 +449,6 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
   GPU/CPU 占用率监控线、联网工具换国内可达源、每轮预算放宽至 16k。
 - **代码质量 P0 加固**：消息 role 反序列化安全回落、SQLite v3（`audioPath` 列迁移）、原生消息 JSON 解析器
   重写、设置原子写入、假数据 stub 与死代码移除。**101–123 项单测全绿**。
-
-**v0.2.1 详细变更**（2026-09-26）：
-
-- **联网搜索改为「用户自配 SearXNG 实例」**：设置页「API 接入」新增 🌐 联网搜索配置卡 —— 实例地址、
-  API Key（可隐藏显示，http 明文过网会告警）、引擎白名单、搜索语言、最多条数、超时，外加
-  **「测试连接」**（用输入框里的草稿值直接打一次真实搜索，回显条数与耗时，无需先保存）。
-  **App 不预置任何搜索实例**：地址留空即"未配置"，`web_search` 直接回明确诊断并指向设置页，
-  不再拿 `127.0.0.1` 去连手机自己。
-- **保存即热更新**：每项设置保存后立刻重建接缝里的 provider（配置内容未变则复用同一实例，
-  不打断 HTTP 连接池），改地址无需重启应用；各项均随 settings JSON 持久化。
-- **修复 4 处"静默失效"**（不报错、只是搜不到 / 必超时）：
-  ① 请求 URL 拼成 `host:8080?q=…`（空 path），此前依赖实例 308 跳到 `/search` 才侥幸可用，
-  换成不做跳转的实例就彻底失效 —— 现在自行补齐 `/search` 且不会重复拼接；
-  ② Dio 默认 `validateStatus` 只放过 2xx，原来的 `statusCode >= 400` 分支是**死代码**，
-  4xx/5xx 全被吞掉 —— 现在自行判定并给出 `401/403/404/429/4xx/5xx` 各自的原因；
-  ③ 实例未开 `format=json` 返回 HTML 时，Dio 抛类型转换错被显示成「SearXNG 不可达」彻底指错方向
-  —— 现在按字符串收响应自行解码，明确提示「需在实例 settings.yml 的 `search.formats` 加 json」；
-  ④ `ToolDefinition.timeout` 从未被消费、接缝又写死 15s 默认值覆盖设置项 —— 现在工具声明的
-  超时优先于全局 `toolTimeout`（`ToolExecutor` 与旧 `agent_loop` 口径一致），搜索预算 30s。
-- **搜索质量与上下文预算**：URL 规范化去重（`utm_*` / fragment / 尾斜杠 / 大小写视为同一条）、
-  按 SearXNG `score` 排序、结果超上限时置 `truncated` 提示模型换更具体关键词；回填给模型的文本
-  加了预算（单条摘要 200 字、总量 1500 字），不再把 8 条长摘要塞进 8k 端侧上下文。
-- **引擎白名单提速**：SearXNG 会等待实例上每一个引擎，存在访问不到的引擎时整次搜索被拖到超时
-  （一台自建实例实测全引擎 21s，只留可达引擎 2.2s）。因此把白名单做成设置项，且当填了该实例
-  不认识的引擎被拒（400）时，provider 会自动去掉该参数重试一次。
-- **诊断挖到根**：连不上时把被 Dio 塞进 `error` 的真实 `SocketException` 挖出来展示
-  （如「远程计算机拒绝网络连接。(1225)」）并带上 `host:port` 与耗时，不再只有一句"不可达"。
-- **测试**：新增 `test/agent/web_search_provider_test.dart` **21 项**（注入 Dio adapter 覆盖
-  URL 构造 / 错误分类 / 引擎被拒重试 / 去重 / 文本预算 / 超时链路 / provider 复用 / 设置持久化）；
-  另附 `web_search_live_test.dart` 真实实例验收（默认跳过，设 `SEARX_LIVE_URL` 才跑，不污染 CI）。
-
-**v0.2.1 详细变更（续）— 智能体引擎升级**：
-
-- **会话事件日志（上下文唯一真相源）**：每个对话一本 append-only 事件日志（JSONL、`seq` 严格递增），
-  模型上下文由其纯函数投影——「模型看到的」永远可以从「记录下的」精确重建；上下文压缩改为
-  追加摘要 + 影子遮蔽（**永不删除原文**，可审计可回放）；进程崩溃后自动修复未闭合的
-  turn/step/工具调用（合成"结果未知"回执）；旧 SQLite 对话一次性导入，标记来源。
-- **主循环升级**：显式 turn/step/phase 状态机；失败自动恢复：上下文超限 → 先压缩重试，
-  瞬态错误（429/500/超时）→ 有界退避重试，其余 → 明确终止并给出原因；**Stop 可靠停止并恢复 UI 状态**；
-  流式上屏节流修正为 150ms（原实现误用秒级，体感卡顿）。
-- **六段工具流水线**：pre-execute（allow/deny/ask 审批瀑布）→ guard（单调 deny）→
-  execute（必填校验 / 沙箱审批 / 超时）→ 结果投影 → post-execute（可改写）→ 溢写
-  （超长工具输出自动落盘，模型侧只留摘要与定位）；支持并行工具执行（按 `maxParallel` 分批），
-  日志顺序恒保持模型调用顺序。
-- **模型接入接缝**：本地引擎与 OpenAI 兼容端点统一在 `LlmAdapter` 接口后，每次调用冻结能力快照，
-  协议按能力驱动选择（prompt-JSON 现行，XML-tool / native-tools 预留）——**换模型 / 加模型不改调用方**。
-- **子代理（Subagents）**：模型可通过 `subagent` 工具派生子代理（`spawn` 全新 / `fork` 携带当前对话），
-  适合把大任务的独立子任务隔离执行、只回结论；安全约束：嵌套深度 ≤ 2、每层独立预算、
-  子代理内**不可申请沙箱升级**（恒 workspace-write）。
-- **Skills / Hooks / 指令文件**：内置技能 `web-research`、`code-review`（`<available_skills>` 注入
-  系统提示）；用户可在 `ApplicationSupport/skills/<name>/SKILL.md` 添加自定义技能（同名覆盖内置）；
-  Hook 开放 `agent/pre-step`（可否决单步）与 `tools/result`（只读审计）及流水线 pre/post-execute 监听；
-  `AGENTS.md` 指令文件自动读取并注入（全局 + workspace 两级）。
-- **智能体活动 UI**：输入框上方活动面板实时展示——结构化工具卡片（状态图标 + 参数摘要，
-  展开看完整参数/结果）、「上下文已压缩」横幅、「重试中…（N）」指示、错误行；标题栏运行状态徽章；
-  工具审批（沙箱升级 / pre-execute `ask`）弹确认框逐次批准；原「🔧」过程文本升级为结构化卡片。
-- **测试**：智能体相关新增 **79 项**单测（事件日志 / 主循环 / 流水线 / 适配器 / 子代理 /
-  Skills·Hooks / UI 状态），全仓库 **229 项全绿**，`flutter analyze` 0 error。
-
-**v0.2.1 其他**：
-
-- **llama.cpp 升级 b11028**：上游 b9 系 → b11028（API 漂移全修：mtmd helper 第 4 参、
-  `MTMD_BACKEND_DEVICE` 环境变量被删 → 视觉塔改设 `mtmd_context_params.device`、OpenCL stub 转发补齐、
-  KleidiAI vendored 项目名双写兜底）；模型加载全链路修复（视觉报错文案不再甩锅 mmproj，真凶看引擎日志）。
-- **移除启动加载页**：冷启动直接进首页，模型目录与原生引擎初始化改为后台进行。
 
 ---
 
@@ -541,12 +540,17 @@ llama.cpp 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_voca
 
 相关设计文档：
 
-- [`docs/architecture_design_v2.md`](docs/architecture_design_v2.md) — 架构设计 v2
 - [`docs/BUILD_AND_DEBUG_GUIDE.md`](docs/BUILD_AND_DEBUG_GUIDE.md) — 编译与调试指南
 - [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md) — 本机打包构建环境备忘（快速构建）
-- [`docs/backend_benchmark_2026-08-04.md`](docs/backend_benchmark_2026-08-04.md) — 三后端实测专报
+- [`docs/archive/architecture_design_v2.md`](docs/archive/architecture_design_v2.md) — 架构设计 v2
+- [`docs/archive/backend_benchmark_2026-08-04.md`](docs/archive/backend_benchmark_2026-08-04.md) — 三后端实测专报
 - [`docs/agent_light_design.md`](docs/agent_light_design.md) — Agent Lite 设计
 - [`docs/agent_mode_dsh_replication_design.md`](docs/agent_mode_dsh_replication_design.md) — 智能体引擎架构设计（v0.2.1）
+- [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md) — Adreno 825 Vulkan 修复全记录（v0.2.2 / v0.2.3）
+- [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md) — PTQ1_0 OpenCL 内核实现机制（v0.2.5）
+- [`docs/bonsai2_vulkan_research_2026-09-27.md`](docs/bonsai2_vulkan_research_2026-09-27.md) — Bonsai-2 Vulkan 调研
+- [`docs/python_support.md`](docs/python_support.md) — `python_exec` 支持说明
+- [`docs/agent_accessibility_方案.md`](docs/agent_accessibility_方案.md) — 智能体无障碍方案
 
 ---
 

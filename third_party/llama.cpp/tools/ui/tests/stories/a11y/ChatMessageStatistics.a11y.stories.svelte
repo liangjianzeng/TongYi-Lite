@@ -1,4 +1,4 @@
-<script lang="ts" module>
+<script module lang="ts">
 	import { defineMeta } from '@storybook/addon-svelte-csf';
 	import ChatMessageStatistics from '$lib/components/app/chat/ChatMessages/ChatMessageStatistics/ChatMessageStatistics.svelte';
 	import { expect } from 'storybook/test';
@@ -14,6 +14,7 @@
 </script>
 
 <Story
+	name="ViewButtonsSingleTabStop"
 	args={{
 		agenticTimings: {
 			llm: { predicted_ms: 1000, predicted_n: 200, prompt_ms: 500, prompt_n: 100 },
@@ -28,7 +29,6 @@
 		promptMs: 500,
 		promptTokens: 100
 	}}
-	name="ViewButtonsSingleTabStop"
 	play={async ({ canvas, userEvent }) => {
 		const reading = await canvas.findByRole('button', { name: 'Reading' });
 		const generation = await canvas.findByRole('button', { name: 'Generation' });

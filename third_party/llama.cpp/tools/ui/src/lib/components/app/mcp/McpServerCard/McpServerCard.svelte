@@ -22,10 +22,9 @@
 		onToggle: (enabled: boolean) => void;
 		onUpdate: (updates: Partial<MCPServerSettingsEntry>) => void;
 		onDelete: () => void;
-		onBrowseResources?: () => void;
 	}
 
-	let { enabled, onBrowseResources, onDelete, onToggle, onUpdate, server }: Props = $props();
+	let { enabled, onDelete, onToggle, onUpdate, server }: Props = $props();
 
 	let healthState = $derived<HealthCheckState>(mcpStore.getHealthCheckState(server.id));
 	let displayName = $derived(mcpStore.getServerLabel(server));
@@ -112,23 +111,22 @@
 	{#if isEditing}
 		<McpServerCardEditForm
 			bind:this={editFormRef}
-			onCancel={cancelEditing}
-			onSave={saveEditing}
 			serverId={server.id}
-			serverLabel={displayName}
 			serverUrl={server.url}
 			serverUseProxy={server.useProxy}
+			serverLabel={displayName}
+			onSave={saveEditing}
+			onCancel={cancelEditing}
 		/>
 	{:else}
 		<McpServerCardHeader
-			{capabilities}
-			disabled={isError}
 			{displayName}
-			enabled={enabled ?? server.enabled}
 			{faviconUrl}
-			{onBrowseResources}
+			enabled={enabled ?? server.enabled}
+			disabled={isError}
 			{onToggle}
 			{serverInfo}
+			{capabilities}
 			{transportType}
 		/>
 
@@ -147,15 +145,11 @@
 				<div class="space-y-2">
 					<div class="flex items-center gap-2">
 						<Skeleton class="{ICON_CLASS_DEFAULT} rounded" />
-
 						<Skeleton class="h-3 w-24" />
 					</div>
-
 					<div class="flex flex-wrap gap-1.5">
 						<Skeleton class="h-5 w-16 rounded-full" />
-
 						<Skeleton class="h-5 w-20 rounded-full" />
-
 						<Skeleton class="h-5 w-14 rounded-full" />
 					</div>
 				</div>
@@ -163,7 +157,6 @@
 				<div class="space-y-1.5">
 					<div class="flex items-center gap-2">
 						<Skeleton class="{ICON_CLASS_DEFAULT} rounded" />
-
 						<Skeleton class="h-3 w-32" />
 					</div>
 				</div>
@@ -177,7 +170,7 @@
 				{/if}
 
 				{#if connectionLogs.length > 0}
-					<McpConnectionLogs {connectionTimeMs} logs={connectionLogs} />
+					<McpConnectionLogs logs={connectionLogs} {connectionTimeMs} />
 				{/if}
 			{/if}
 		</div>
@@ -193,14 +186,12 @@
 				</div>
 			{/if}
 
-			<div class="flex items-center gap-2">
-				<McpServerCardActions
-					{isHealthChecking}
-					onDelete={handleDeleteClick}
-					onEdit={startEditing}
-					onRefresh={handleHealthCheck}
-				/>
-			</div>
+			<McpServerCardActions
+				{isHealthChecking}
+				onEdit={startEditing}
+				onRefresh={handleHealthCheck}
+				onDelete={handleDeleteClick}
+			/>
 		</div>
 	{/if}
 </Card.Root>
@@ -208,6 +199,6 @@
 <McpServerCardDeleteDialog
 	bind:open={showDeleteDialog}
 	{displayName}
-	onConfirm={onDelete}
 	onOpenChange={(open) => (showDeleteDialog = open)}
+	onConfirm={onDelete}
 />

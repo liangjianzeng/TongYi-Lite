@@ -46,24 +46,31 @@
 		isLastAssistantMessage ? !!agenticStore.getLastError(message.convId) : false
 	);
 
+	let permissionDismissed = $state(false);
+
 	const pendingPermission = $derived(
 		isStreaming && isLastAssistantMessage
 			? agenticStore.getPendingPermissionRequest(message.convId)
 			: null
 	);
 
-	// dismissal applies to the request object, so the next request ( new
-	// identity ) shows the card again without any reset bookkeeping
-	let dismissedPermission: typeof pendingPermission = $state(null);
+	let prevPendingRef: typeof pendingPermission = null;
+	$effect(() => {
+		if (pendingPermission !== prevPendingRef) {
+			prevPendingRef = pendingPermission;
 
-	const visiblePermission = $derived(
-		pendingPermission && dismissedPermission !== pendingPermission ? pendingPermission : null
-	);
+			if (pendingPermission) {
+				permissionDismissed = false;
+			}
+		}
+	});
 
 	function handlePermission(decision: ToolPermissionDecision) {
-		dismissedPermission = pendingPermission;
+		permissionDismissed = true;
 		agenticStore.resolvePermission(message.convId, decision);
 	}
+
+	let continueDismissed = $state(false);
 
 	const pendingContinue = $derived(
 		isStreaming && isLastAssistantMessage
@@ -71,18 +78,16 @@
 			: false
 	);
 
-	let continueDismissed = $state(false);
-
-	// the continue request is a plain boolean, so there is no identity to
-	// compare against; clear the dismissal whenever no request is pending so
-	// the next one starts from a clean state
+	let prevContinueRef = false;
 	$effect(() => {
-		if (!pendingContinue) {
-			continueDismissed = false;
+		if (pendingContinue !== prevContinueRef) {
+			prevContinueRef = pendingContinue;
+
+			if (pendingContinue) {
+				continueDismissed = false;
+			}
 		}
 	});
-
-	const showContinue = $derived(Boolean(pendingContinue) && !continueDismissed);
 
 	function handleContinue(shouldContinue: boolean) {
 		continueDismissed = true;
@@ -176,26 +181,26 @@
 {#snippet renderSection(section: AgenticSection, index: number)}
 	{#if section.type === AgenticSectionType.TEXT}
 		<div class="agentic-text">
-			<MarkdownContent attachments={message?.extra} content={section.content} />
+			<MarkdownContent content={section.content} attachments={message?.extra} />
 		</div>
 	{:else if section.type === AgenticSectionType.REASONING || section.type === AgenticSectionType.REASONING_PENDING}
 		<ChatMessageReasoningBlock
-			attachments={message?.extra}
-			{hasReasoningError}
-			{isStreaming}
-			onToggle={() => toggleExpanded(index, section)}
-			open={isExpanded(index, section)}
 			{section}
+			open={isExpanded(index, section)}
+			{isStreaming}
+			{hasReasoningError}
+			attachments={message?.extra}
+			onToggle={() => toggleExpanded(index, section)}
 		/>
 	{:else if section.type === AgenticSectionType.TOOL_CALL || section.type === AgenticSectionType.TOOL_CALL_PENDING || section.type === AgenticSectionType.TOOL_CALL_STREAMING}
 		<ChatMessageToolCallBlock
-			attachments={section.toolResultExtras}
+			{section}
+			open={isExpanded(index, section)}
+			{isStreaming}
 			isExecuting={section.toolCallId !== undefined &&
 				section.toolCallId === currentlyExecutingToolCallId}
-			{isStreaming}
+			attachments={message?.extra}
 			onToggle={() => toggleExpanded(index, section)}
-			open={isExpanded(index, section)}
-			{section}
 		/>
 	{/if}
 {/snippet}
@@ -213,15 +218,15 @@
 				{#if turnStats && showAgenticTurnStats}
 					<div class="turn-stats transition-opacity duration-150 mt-1 mb-4">
 						<ChatMessageStatistics
+							promptTokens={turnStats.llm.prompt_n}
+							promptMs={turnStats.llm.prompt_ms}
+							predictedTokens={turnStats.llm.predicted_n}
+							predictedMs={turnStats.llm.predicted_ms}
 							agenticTimings={turnStats.toolCalls.length > 0
 								? buildTurnAgenticTimings(turnStats)
 								: undefined}
-							hideSummary
 							initialView={ChatMessageStatsView.GENERATION}
-							predictedMs={turnStats.llm.predicted_ms}
-							predictedTokens={turnStats.llm.predicted_n}
-							promptMs={turnStats.llm.prompt_ms}
-							promptTokens={turnStats.llm.prompt_n}
+							hideSummary
 						/>
 					</div>
 				{/if}
@@ -233,15 +238,15 @@
 		{/each}
 	{/if}
 
-	{#if visiblePermission}
+	{#if pendingPermission && !permissionDismissed}
 		<ChatMessageActionCardPermissionRequest
+			toolName={pendingPermission.toolName}
+			serverLabel={pendingPermission.serverLabel}
 			onDecision={handlePermission}
-			serverLabel={visiblePermission.serverLabel}
-			toolName={visiblePermission.toolName}
 		/>
 	{/if}
 
-	{#if showContinue}
+	{#if pendingContinue && !continueDismissed}
 		<ChatMessageActionCardContinueRequest onDecision={handleContinue} />
 	{/if}
 </div>

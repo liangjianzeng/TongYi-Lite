@@ -104,6 +104,8 @@ final class LlmRetry {
     if (f.code == LlmFailureCode.contextWindowExceeded) return false;
     // 4xx（参数/鉴权/路由）是确定性错误，重试同样失败，只浪费时间。
     if (f.code == LlmFailureCode.invalidRequest) return false;
+    // 模型未加载：isLoaded=false 是原生层的权威状态，重试只会再撞同一堵墙。
+    if (f.code == LlmFailureCode.modelNotReady) return false;
     // 空响应默认不重试；API 路线按 EMPTY_RESPONSE 计入可重试档。
     if (f.code == LlmFailureCode.emptyResponse && !retryEmptyResponse) {
       return false;

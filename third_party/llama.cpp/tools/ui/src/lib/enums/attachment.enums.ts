@@ -19,6 +19,8 @@ export enum AttachmentType {
 export enum AttachmentMenuItemId {
 	AUDIO = 'audio',
 	IMAGES = 'images',
+	MCP_PROMPT = 'mcp-prompt',
+	MCP_RESOURCES = 'mcp-resources',
 	PDF = 'pdf',
 	SYSTEM_MESSAGE = 'system-message',
 	TEXT = 'text',
@@ -40,6 +42,8 @@ export enum AttachmentItemEnabledWhen {
  */
 export enum AttachmentAction {
 	FILE_UPLOAD = 'onFileUpload',
+	MCP_PROMPT_CLICK = 'onMcpPromptClick',
+	MCP_RESOURCES_CLICK = 'onMcpResourcesClick',
 	SYSTEM_PROMPT_CLICK = 'onSystemPromptClick'
 }
 
@@ -51,4 +55,12 @@ export enum AttachmentLabel {
 	MCP_PROMPT = 'MCP Prompt',
 	MCP_RESOURCE = 'MCP Resource',
 	PDF_FILE = 'PDF File'
+}
+
+/**
+ * Visibility conditions for attachment menu items.
+ */
+export enum AttachmentItemVisibleWhen {
+	HAS_MCP_PROMPTS_SUPPORT = 'hasMcpPromptsSupport',
+	HAS_MCP_RESOURCES_SUPPORT = 'hasMcpResourcesSupport'
 }

@@ -4,8 +4,8 @@ include(CheckIncludeFileCXX)
 
 ### llama.cpp version
 set(LLAMA_VERSION_MAJOR 0)
-set(LLAMA_VERSION_MINOR 4)
-set(LLAMA_VERSION_PATCH 1)
+set(LLAMA_VERSION_MINOR 2)
+set(LLAMA_VERSION_PATCH 0)
 set(LLAMA_VERSION_BASE "${LLAMA_VERSION_MAJOR}.${LLAMA_VERSION_MINOR}.${LLAMA_VERSION_PATCH}")
 
 # whether this is a development/nightly build
@@ -134,8 +134,8 @@ option(LLAMA_BUILD_TOOLS     "llama: build tools"                               
 option(LLAMA_BUILD_EXAMPLES  "llama: build examples"                                                             ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_SERVER    "llama: build server example"                                                       ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_APP       "llama: build the unified binary"                                                   ${LLAMA_STANDALONE})
-option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       OFF)
-option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available" ON)
+option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       ON)
+option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" ON)
 
 option(LLAMA_TOOLS_INSTALL "llama: install tools" ${LLAMA_TOOLS_INSTALL_DEFAULT})
 option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
@@ -144,6 +144,9 @@ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
 option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" ON)
 option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools and server router mode" ${LLAMA_SUBPROCESS_DEFAULT})
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
+option(LLAMA_DSPARK_MARKOV_BLAS "llama-common: use BLAS for dspark Markov resample" OFF)
+option(LLAMA_DSPARK_MARKOV_CUDA "llama-common: build CUDA dspark Markov resample" ${GGML_CUDA})
+option(LLAMA_DSPARK_MARKOV_METAL "llama-common: build Metal dspark Markov resample" OFF)
 
 
 # Required for relocatable CMake package
@@ -196,16 +199,6 @@ llama_option_depr(WARNING     LLAMA_CURL)
 
 include("cmake/license.cmake")
 license_add_file("llama.cpp" "LICENSE")
-
-#
-# compile options
-#
-
-# clang stores the modification time of the precompiled header sources inside the
-# header and rejects it when they differ, so the timestamp is left out of it
-add_compile_options(
-    "$<$<COMPILE_LANG_AND_ID:C,Clang,IntelLLVM>:SHELL:-Xclang -fno-pch-timestamp>"
-    "$<$<COMPILE_LANG_AND_ID:CXX,Clang,IntelLLVM>:SHELL:-Xclang -fno-pch-timestamp>")
 
 #
 # 3rd-party

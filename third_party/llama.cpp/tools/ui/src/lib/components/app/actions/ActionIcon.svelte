@@ -41,17 +41,17 @@
 {#snippet button(props = {})}
 	<Button
 		{...props}
-		aria-label={ariaLabel || tooltip}
-		class="h-6 w-6 p-0 {className} flex hover:bg-transparent data-[state=open]:bg-transparent!"
-		{disabled}
 		{href}
+		{variant}
+		{size}
+		{disabled}
 		onclick={(e: MouseEvent) => {
 			if (stopPropagationOnClick) e.stopPropagation();
 
 			onclick?.(e);
 		}}
-		{size}
-		{variant}
+		class="h-6 w-6 p-0 {className} flex hover:bg-transparent data-[state=open]:bg-transparent!"
+		aria-label={ariaLabel || tooltip}
 	>
 		{#if icon}
 			{@const IconComponent = icon}

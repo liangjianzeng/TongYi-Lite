@@ -1,290 +1,393 @@
-﻿# TongYi-Lite 椤圭洰鎸囦护 / 璁板繂
+# TongYi-Lite 项目指令 / 记忆
 
-## 鐪熸満鎵撳寘瀹夎锛堥噸瑕佽鍒欙紝鍔″繀閬靛畧锛?
+## 智能体模式总开关 + 「同时最多一个 spinner」不变量（2026-09-28）
 
-> **鏇存柊瀹夎鐪熸満鏃讹紝缁濅笉瑕?鍏堝嵏杞藉啀瑁?**锛坄adb uninstall` + `adb install`锛夈€?
-> 鍗歌浇浼氭竻鎺夊簲鐢ㄦ暟鎹紝鍖呮嫭宸蹭笅杞界殑绔晶妯″瀷缂撳瓨锛堜緥濡?qwen3.5-4b锛岄噸鏂颁笅杞藉緢璐瑰姴锛夈€?
+> 用户要求：智能体模式**必须可关闭**（本地小模型扛不住大 prefill），关闭后 = 简单聊天；
+> 且修复"发一条消息两处转圈思考"的蠢 UI。
 
-**姝ｇ‘鍋氭硶**锛氬缁堣蛋**瑕嗙洊鏇存柊**锛屼繚鐣欐ā鍨嬬紦瀛橈細
+**总开关**（设置 → 智能体 Tab 首排）：
+- `agentEnabled` 路由本就存在（`chat_provider.sendMessage` 按 `_ref.read(settingsProvider).agentEnabled`
+  分流），**缺的只是 UI**；现 `settings_screen._AgentTab` 首排加 `_buildToggleTitle` 绑
+  `notifier.setAgentEnabled`，关闭时 `Opacity(0.45)+IgnorePointer` 置灰全部子设置卡。
+- 关闭路径 = 纯历史消息直连模型（无系统提示词/工具定义/AGENTS.md/Skills），
+  🔧 工具活动消息两路都已排除，历史互不污染。
+- **模式切换必须 resetContext**：KV 缓存按会话复用（`_currentKvConvId`），
+  同会话中途开/关智能体若不重置，普通聊天会续跑在被大提示词污染的 KV 上。
+  已加 `_currentKvWasAgentMode` 标记，两路径在"同会话但模式变了"时强制 reset。
+
+**双转圈根因**：智能体回合空答案占位气泡（ChatBubble 自带"思考中…"）+
+`AgentTurnBlock.ThinkingIndicator` 同时渲染 = 两个转圈。修复（`agent_workflow.dart`）：
+- `_answerPending`（live+running+答案空）时**不渲染空答案气泡**，只留思考行；
+- 工具有 executing 步骤 → 思考行隐藏（工具卡自带"执行中…"状态）；
+- `retryAttempt>0` → 思考行隐藏（已有 RetryIndicator）；重试/压缩横幅加 `ui.running` 门槛防串台。
+- `home_screen`：`isLiveTurn` 改为 `(uiState.running || isGenerating) && 末组`，
+  普通聊天生成中才有唯一"思考中…"占位与流式光标；
+  `_stepsFor` 只在 `ui.running`（真智能体回合）取事件流，
+  **普通聊天绝不借上一智能体回合残留的 ui.tools 工具卡**。
+- 不变量：**界面上同时最多一个 spinner**。动这块先跑 `flutter test test/agent`
+  （本次全绿 212 项 + 2 skip）。
+
+**环境坑（本次抓到）**：沙箱受限模式下 `flutter.bat`/`flutter analyze`/`dart analyze`/`flutter test`
+会**无声挂死**（fork analysis_server/编译测试子进程被拒：`CreateFile failed 5`），
+不是编译慢。`flutter --version` 90s 不出结果即可确诊；解法=放开沙箱（full-access）后一切正常。
+
+## 真机打包安装（重要规则，务必遵守）
+
+> **更新安装真机时，绝不要"先卸载再装"**（`adb uninstall` + `adb install`）。
+> 卸载会清掉应用数据，包括已下载的端侧模型缓存（例如 qwen3.5-4b，重新下载很费劲）。
+
+**正确做法**：始终走**覆盖更新**，保留模型缓存：
 
 ```bash
-adb install -r app-debug.apk    # -r = replace/update锛屼笉娓呮暟鎹?
+adb install -r app-debug.apk    # -r = replace/update，不清数据
 ```
 
-- 鍙湪闇€瑕佸交搴曟竻鏁版嵁锛堟崲妯″瀷/鍑洪棶棰樻椂锛夋墠鑰冭檻鍗歌浇锛屼笖瑕佸厛鍛婄煡鐢ㄦ埛妯″瀷浼氳娓呴櫎銆?
-- 瀹夎琚?`INSTALL_FAILED_USER_RESTRICTED` 鎷掔粷鏃讹紝鍔?`-t` 骞惰鐢ㄦ埛鍦ㄨ澶囦笂鐐瑰厑璁革細`adb install -r -t app-debug.apk`銆?
+- 只在需要彻底清数据（换模型/出问题时）才考虑卸载，且要先告知用户模型会被清除。
+- 安装被 `INSTALL_FAILED_USER_RESTRICTED` 拒绝时，加 `-t` 并请用户在设备上点允许：`adb install -r -t app-debug.apk`。
 
-## 鏋勫缓鐜澶囧繕
+## 构建环境备忘
 
-- **榛樿鎵撳寘绛栫暐锛?026-08-08 璧凤級**锛氭瘡娆℃瀯寤洪粯璁?**debug + release 涓€璧锋墦**锛?
-  闄ら潪鐢ㄦ埛鍙偣鍚嶄竴涓€俤ebug 鐢ㄤ簬鐪熸満瀹夎璋冭瘯锛宺elease 鐢ㄤ簬鐢熶骇鍒嗗彂銆?
-  涓よ€呭叡鐢?`CN=TongYiLite` 绛惧悕銆?
-- 鏈」鐩槸 Flutter + NDK(CMake + llama.cpp)銆?
-- `flutter build apk --debug` 鍦ㄦ湰鏈?gradle 鍚姩 `flutter.bat` 浼氶潤榛樺け璐ワ紙Windows/gradle 鎵瑰鐞嗛棶棰橈級銆?
-  **workaround**锛氬厛 `flutter assemble ... debug_android_application` 鐢熸垚 kernel/assets锛?
-  鍐嶇敤 `./gradlew.bat assembleDebug -x compileFlutterBuildDebug` 鎵撳寘锛圢DK 鍏ㄩ噺缂栬瘧 + 閾炬帴锛夈€?
-- NDK 鏋勫缓鐩綍 `.cxx` 鑻ヨ娈嬬暀杩涚▼锛坄glslc.exe`/`vulkan-shaders-gen.exe`锛夐攣瀹氫細鎶?
-  "Device or resource busy" / access-denied锛岄渶鍏堢粓姝㈠搴旇繘绋嬪啀鍒?`.cxx`銆?
-- gradle 瀹堟姢杩涚▼鍙兘鎸佹湁 `.cxx` 閿佸鑷?`buildCMakeDebug` 鍋跺彂澶辫触锛歚./gradlew.bat --stop` 鍚庨噸璇曘€?
-- 鏋勫缓/瀹夎鍓嶅厛 `adb devices` 纭璁惧鍦ㄧ嚎锛涜澶囧彲鑳藉洜 USB 鏂紑鑰屾秷澶憋紝闇€绛夊緟鎴栭噸杩炪€?
+- **默认打包策略（2026-08-08 起）**：每次构建默认 **debug + release 一起打**，
+  除非用户只点名一个。debug 用于真机安装调试，release 用于生产分发。
+  两者共用 `CN=TongYiLite` 签名。
+- 本项目是 Flutter + NDK(CMake + llama.cpp)。
+- `flutter build apk --debug` 在本机 gradle 启动 `flutter.bat` 会静默失败（Windows/gradle 批处理问题）。
+  **workaround**：先 `flutter assemble ... debug_android_application` 生成 kernel/assets，
+  再用 `./gradlew.bat assembleDebug -x compileFlutterBuildDebug` 打包（NDK 全量编译 + 链接）。
+- NDK 构建目录 `.cxx` 若被残留进程（`glslc.exe`/`vulkan-shaders-gen.exe`）锁定会报
+  "Device or resource busy" / access-denied，需先终止对应进程再删 `.cxx`。
+- gradle 守护进程可能持有 `.cxx` 锁导致 `buildCMakeDebug` 偶发失败：`./gradlew.bat --stop` 后重试。
+- 构建/安装前先 `adb devices` 确认设备在线；设备可能因 USB 断开而消失，需等待或重连。
 
-## APK 鏋勫缓浜х墿鍦板潃锛堟墦鍖呭繀璁帮級
+## APK 构建产物地址（打包必记）
 
-> **姣忔鏋勫缓鍚庯紝鎶?APK 杈撳嚭鐩綍鍦板潃鍐欒繘杩欐潯澶囧繕**锛屾柟渚跨敤鎴风洿鎺ユ壘鍖呫€?
+> **每次构建后，把 APK 输出目录地址写进这条备忘**，方便用户直接找包。
 
-- **APK 杈撳嚭鐩綍**锛歚build\app\outputs\flutter-apk\`锛圵indows 缁濆璺緞
-  `E:\Work\DgxSpark\TongYi-Lite\build\app\outputs\flutter-apk\`锛夈€?
-- debug 鍖咃細`app-debug.apk`锛堢湡鏈鸿皟璇曪紝`adb install -r` 瑕嗙洊瀹夎锛夈€?
-- release 鍖咃細`app-release.apk`锛堢敓浜у垎鍙戯級銆?
-- wt/ 宸ヤ綔鍖烘瀯寤轰骇鐗╁湪 `wt\<name>\build\app\outputs\flutter-apk\`锛屼笉鍦ㄤ富浠? build/锛?2026-09-28 v0.2.6 瀹炴祴锛屽埆鐪嬮敊鐩?褰曪級銆?
-- 鏋勫缓鍚?*蹇呴』**鍒楀嚭璇ョ洰褰曠殑 APK 鍚?澶у皬/鏃堕棿锛屽苟鎶婄洰褰曞湴鍧€鍙戠粰鐢ㄦ埛銆?
+- **APK 输出目录**：`build\app\outputs\flutter-apk\`（Windows 绝对路径
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`）。
+- debug 包：`app-debug.apk`（真机调试，`adb install -r` 覆盖安装）。
+- release 包：`app-release.apk`（生产分发）。
+- wt/ 工作区构建产物在 `wt\<name>\build\app\outputs\flutter-apk\`，不在主仓 build/
+  （2026-09-28 v0.2.6 实测，另一台开发机用 wt 工作区，别看错目录）。
+- 构建后**必须**列出该目录的 APK 名/大小/时间，并把目录地址发给用户。
 
-## APK 绛惧悕锛堥噸瑕佽蹇嗭級
+## APK 签名（重要记忆）
 
-> **姝ｇ‘绛惧悕鏄?`CN=TongYiLite`锛圤=DGXSpark锛夛紝涓嶆槸涓存椂鐢熸垚鐨?dev keystore銆?*
+> **正确签名是 `CN=TongYiLite`（O=DGXSpark），不是临时生成的 dev keystore。**
 
-- **绛惧悕璇佷功**锛歚CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN`
-  SHA-256 鎸囩汗锛歚FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
-- **绛惧悕鏂囦欢**锛歚android/key.jks` + `android/key.properties`锛堝潎琚?`.gitignore` 鎺掗櫎锛屼笉鎻愪氦杩滅▼锛夈€?
-  `key.properties`锛歚storePassword=android` / `keyAlias=androiddebugkey` / `storeFile=../key.jks`
-- **閾佸緥**锛氳鐩栨洿鏂板畨瑁呭繀椤讳繚鎸佸悓涓€绛惧悕锛堝惁鍒?`INSTALL_FAILED_UPDATE_INCOMPATIBLE`锛夈€傛瀯寤烘椂鑻ュ彂鐜?APK 绛惧悕涓嶆槸 `CN=TongYiLite`锛堟瘮濡傚彉鎴愪簡涓存椂鐢熸垚鐨?`CN=TongYi-Lite Dev`锛夛紝璇存槑绛惧悕鏂囦欢涓嶅锛岄渶鏍稿 `key.jks`銆?
-- 鏂扮幆澧?clone 鍚庤嫢绛惧悕鏂囦欢缂哄け锛氫粠婧愬伐浣滃尯鎷疯礉锛屾垨鐢?`keytool -genkey -dname "CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN"` 閲嶆柊鐢熸垚骞跺啓 `key.properties`銆?
+- **签名证书**：`CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN`
+  SHA-256 指纹：`FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
+- **签名文件**：`android/key.jks` + `android/key.properties`（均被 `.gitignore` 排除，不提交远程）。
+  `key.properties`：`storePassword=android` / `keyAlias=androiddebugkey` / `storeFile=../key.jks`
+- **铁律**：覆盖更新安装必须保持同一签名（否则 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。构建时若发现 APK 签名不是 `CN=TongYiLite`（比如变成了临时生成的 `CN=TongYi-Lite Dev`），说明签名文件不对，需核对 `key.jks`。
+- 新环境 clone 后若签名文件缺失：从源工作区拷贝，或用 `keytool -genkey -dname "CN=TongYiLite, OU=Dev, O=DGXSpark, L=Wuhan, ST=Hubei, C=CN"` 重新生成并写 `key.properties`。
 
-## 鍏抽敭鏁欒锛欳MAKE_C_FLAGS_DEBUG 浼氳 NDK 宸ュ叿閾鹃潤榛橀《鎺夛紙CPU 鍐呮牳澶卞幓 -O3 鈫?鍏ㄦā鍨嬪彉鎱級
+## 关键教训：CMAKE_C_FLAGS_DEBUG 会被 NDK 工具链静默顶掉（CPU 内核失去 -O3 → 全模型变慢）
 
-> **琛€娉暀璁紙2026-08-07 鐪熸満瀹氫綅锛?*锛歚set(CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG")` 鐪嬩技姝ｇ‘锛屼絾
-> **Android NDK 宸ュ叿閾句細鍦?Debug 閰嶇疆閲嶆柊濂椾笂鑷繁鐨?`-g`锛岄潤榛樿鐩栬鍙橀噺**锛屽鑷?`-O3 -DNDEBUG` 鏍规湰娌＄敓鏁堛€?
-> 琛ㄧ幇锛?*鎵€鏈夋ā鍨嬪悓绛夐檷閫?*锛?.8B 1.2 tok/s銆?.7B ~1.2锛夛紝鏁堟灉鍍?鏈€鏃╂病鍋?KleidiAI"鈥斺€斿洜涓洪噺鍖?matmul
-> 鍐呮牳浠ラ粯璁?`-O0` 缂栬瘧銆傛鏃?KleidiAI 鍐呮牳铏界紪杩涘幓浜嗭紙`-march` 鏈夛級锛屼絾娌′紭鍖栫骇鍒瓑浜庢病鍔犻€熴€?
+> **血泪教训（2026-08-07 真机定位）**：`set(CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG")` 看似正确，但
+> **Android NDK 工具链会在 Debug 配置重新套上自己的 `-g`，静默覆盖该变量**，导致 `-O3 -DNDEBUG` 根本没生效。
+> 表现：**所有模型同等降速**（0.8B 1.2 tok/s、2.7B ~1.2），效果像"最早没做 KleidiAI"——因为量化 matmul
+> 内核以默认 `-O0` 编译。此时 KleidiAI 内核虽编进去了（`-march` 有），但没优化级别等于没加速。
 
-**楠岃瘉閾佽瘉**锛氱湅 `.cxx/.../compile_commands.json`锛岃嫢 ggml-cpu/kleidiai 婧愭枃浠跺彧鏈?`-march` 鑰?*鏃?`-O3`銆佹棤 `-DNDEBUG`**锛屽嵆涓嫑銆?
+**验证铁证**：看 `.cxx/.../compile_commands.json`，若 ggml-cpu/kleidiai 源文件只有 `-march` 而**无 `-O3`、无 `-DNDEBUG`**，即中招。
 
-**姝ｇ‘鍋氭硶**锛氭敼鐢?NDK 瑕嗙洊涓嶄簡鐨勭洰褰曠骇閫夐」锛堜細浼犵粰 llama/ggml-cpu/kleidiai/mtmd 鎵€鏈夊瓙鐩綍鐩爣锛夛細
+**正确做法**：改用 NDK 覆盖不了的目录级选项（会传给 llama/ggml-cpu/kleidiai/mtmd 所有子目录目标）：
 ```cmake
 add_compile_options(-O3)
 add_compile_definitions(NDEBUG)
 ```
-鏀?CMake 鍚庡繀椤?*娓?`.cxx` 鍏ㄩ噺閲嶅缓**锛屽苟鏍稿 compile_commands 鍚屾椂鍚?`-O3 -DNDEBUG -march` 鎵嶇畻鐢熸晥銆?
+改 CMake 后必须**清 `.cxx` 全量重建**，并核对 compile_commands 同时含 `-O3 -DNDEBUG -march` 才算生效。
 
-## 鍏抽敭鏁欒锛欳ortex-A78 涓嶆敮鎸?i8mm 鈫?SIGILL 鎾?crashes all backends
+## 关键教训：Cortex-A78 不支持 i8mm → SIGILL 撞 crashes all backends
 
-> **鏍瑰洜锛?026-08-08 鐪熸満瀹氫綅锛?*锛歚GGML_CPU_ARM_ARCH` 璁句负 `armv8.4-a+dotprod+i8mm`锛?
-> 浣嗗ぉ鐜?8200 / 澶╃帒 920 鐨?CPU 澶ф牳鏄?Cortex-A78锛圓RMv8.2-A锛夛紝鍙敮鎸?dotprod锛?
-> **涓嶆敮鎸?i8mm**锛堥渶 ARMv8.6-A/ARMv9锛夈€俫gml-cpu 鐨?i8mm kernel 鍦ㄨ繖浜涙牳蹇冧笂鎵ц
-> `i8mm` 鎸囦护 鈫?**SIGILL**锛屽穿婧冨彂鐢熷湪鍏变韩鐨?CPU 鍔犺浇/repack 璺緞锛屼笌鎺ㄧ悊鍚庣鏃犲叧锛?
-> 鍥犳"涓変釜鍚庣鍏ㄥ穿"銆?
+> **根因（2026-08-08 真机定位）**：`GGML_CPU_ARM_ARCH` 设为 `armv8.4-a+dotprod+i8mm`，
+> 但天玑 8200 / 天玑 920 的 CPU 大核是 Cortex-A78（ARMv8.2-A），只支持 dotprod，
+> **不支持 i8mm**（需 ARMv8.6-A/ARMv9）。ggml-cpu 的 i8mm kernel 在这些核心上执行
+> `i8mm` 指令 → **SIGILL**，崩溃发生在共享的 CPU 加载/repack 路径，与推理后端无关，
+> 因此"三个后端全崩"。
 
-- **鍨嬪彿纭**锛氬ぉ鐜?8200 = 1脳A78@3.1GHz + 3脳A78 + 4脳A55锛涘ぉ鐜?920 = 2脳A78 + 6脳A55銆?
-  鍧囦负 ARMv8.2-A锛宍+dotprod`锛屾棤 `i8mm`銆?
-- **淇**锛歚android/app/src/main/cpp/CMakeLists.txt` 涓?
-  `set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm ...)` 鈫?`armv8.2-a+dotprod`銆?
-  KleidiAI 鐨?dotprod 鍐呮牳浠嶅彲鐢紝i8mm 閲忓寲鍐呮牳涓嶅彲鐢紙鎬ц兘褰卞搷鍙帴鍙楋級銆?
-- **楠岃瘉鍔ㄤ綔**锛氭竻 `.cxx` 鍏ㄩ噺閲嶇紪 + 涓ゅ彴澶╃帒涓夊悗绔紙CPU / OpenCL / Vulkan锛夊悇璺戜竴閬?
-  鍔犺浇+鎺ㄧ悊 + 楂橀€?8s Gen 4 鍥炲綊銆?
-- **鍚庣画瑙傚療**锛欸PU 鍚庣锛圡ali锛夌殑 ADRENA_KERNELS 闂涓庢淇鏃犲叧锛屾槸鐙珛绾胯矾銆?
-  `n_ubatch=16` 闄愬埗鍦?dotprod 涓嬪彲璇曟帰鎻愬洖 512锛屼絾鍏堥獙璇佷笉宕┿€?
+- **型号确认**：天玑 8200 = 1×A78@3.1GHz + 3×A78 + 4×A55；天玑 920 = 2×A78 + 6×A55。
+  均为 ARMv8.2-A，`+dotprod`，无 `i8mm`。
+- **修复**：`android/app/src/main/cpp/CMakeLists.txt` 中
+  `set(GGML_CPU_ARM_ARCH armv8.4-a+dotprod+i8mm ...)` → `armv8.2-a+dotprod`。
+  KleidiAI 的 dotprod 内核仍可用，i8mm 量化内核不可用（性能影响可接受）。
+- **验证动作**：清 `.cxx` 全量重编 + 两台天玑三后端（CPU / OpenCL / Vulkan）各跑一遍
+  加载+推理 + 高通 8s Gen 4 回归。
+- **后续观察**：GPU 后端（Mali）的 ADRENA_KERNELS 问题与此修复无关，是独立线路。
+  `n_ubatch=16` 限制在 dotprod 下可试探提回 512，但先验证不崩。
 
-## 鍏抽敭鏁欒锛歠lutter assemble 杈撳嚭璺緞 鈮?gradle 璇诲彇璺緞锛圖art 鏀瑰姩"瑁呬笉杩?APK锛?
+## 关键教训：flutter assemble 输出路径 ≠ gradle 读取路径（Dart 改动"装不进"APK）
 
-> **琛€娉暀璁?*锛氭敼浜?Dart 浠ｇ爜鍚庯紝鍏?`flutter assemble` + `gradlew assembleDebug -x compileFlutterBuildDebug`锛?
-> 瑁呭嚭鏉ョ殑 APK **鍙兘浠嶆槸鏃т唬鐮?*鈥斺€斿洜涓轰袱涓伐鍏疯鍐欑殑 kernel 璺緞涓嶄竴鑷达細
+> **血泪教训**：改了 Dart 代码后，光 `flutter assemble` + `gradlew assembleDebug -x compileFlutterBuildDebug`，
+> 装出来的 APK **可能仍是旧代码**——因为两个工具读写的 kernel 路径不一致：
 >
-> - `flutter assemble -o build/flutter-assemble ...` 鎶婃渶鏂?kernel 鍐欏埌
->   `build/flutter-assemble/flutter_assets/kernel_blob.bin`锛?
-> - 浣?gradle 鎵撳寘鏃剁敤鐨勬槸 **`build/app/intermediates/flutter/debug/flutter_assets/kernel_blob.bin`**锛堟棫鎷疯礉锛夛紝
->   `-x compileFlutterBuildDebug` 璺宠繃浜?flutter 缂栬瘧锛?*涓嶄細鑷姩鍒锋柊杩欎釜璺緞**銆?
+> - `flutter assemble -o build/flutter-assemble ...` 把最新 kernel 写到
+>   `build/flutter-assemble/flutter_assets/kernel_blob.bin`；
+> - 但 gradle 打包时用的是 **`build/app/intermediates/flutter/debug/flutter_assets/kernel_blob.bin`**（旧拷贝），
+>   `-x compileFlutterBuildDebug` 跳过了 flutter 编译，**不会自动刷新这个路径**。
 >
-> 缁撴灉锛歎I 鏀逛簡鍗婂ぉ锛岃涓婂幓鐣岄潰姣棤鍙樺寲锛岃繕浠ヤ负浠ｇ爜娌″啓瀵光€斺€斿疄闄呮槸鎵撳寘浜嗘棫 Dart銆?
+> 结果：UI 改了半天，装上去界面毫无变化，还以为代码没写对——实际是打包了旧 Dart。
 >
-> **姝ｇ‘鍋氭硶锛堟瘡娆?Dart 鏀瑰姩鍚庡繀椤诲仛锛?*锛?
+> **正确做法（每次 Dart 改动后必须做）**：
 > ```bash
 > flutter assemble -o build/flutter-assemble --define=BuildMode=debug --define=TargetPlatform=android-arm64 debug_android_application
 > cp -r build/flutter-assemble/flutter_assets/* build/app/intermediates/flutter/debug/flutter_assets/
 > cd android && gradlew.bat assembleDebug -x compileFlutterBuildDebug
 > ```
-> 鍗筹細**鍏堟妸鏈€鏂?flutter_assets 鍚屾瑕嗙洊鍒?gradle 鐨?intermediates/flutter/debug锛屽啀鎵撳寘**銆?
-> 鍙敤 `ls -la build/app/intermediates/flutter/debug/flutter_assets/kernel_blob.bin` 纭澶у皬/鏃堕棿宸叉洿鏂般€?
+> 即：**先把最新 flutter_assets 同步覆盖到 gradle 的 intermediates/flutter/debug，再打包**。
+> 可用 `ls -la build/app/intermediates/flutter/debug/flutter_assets/kernel_blob.bin` 确认大小/时间已更新。
 
-## 鍏抽敭鏁欒锛歁TP 鏄叏灞€寮€鍏充細"鐐逛竴涓叏寮€鍏ㄥ叧"
+## 关键教训：MTP 是全局开关会"点一个全开全关"
 
-> MTP 寮€鍏虫渶鍒濆仛鎴愬叏灞€涓€涓?`bool enableMtp`锛岀敤鎴风偣鏌愪釜妯″瀷寮€鍏筹紝**鎵€鏈夋ā鍨嬩竴璧峰彉**銆?
-> 搴旀敼鎴?*鎸夋ā鍨?id 鐨?`Map<String, bool>`**锛坄mtpEnabledByModel`锛夛紝姣忎釜妯″瀷鐙珛鎸佷箙鍖栵紝
-> 鍔犺浇鏃剁敤 `gpu.mtpEnabled(modelId)` 鍙栧綋鍓嶆ā鍨嬭嚜宸辩殑寮€鍏炽€傝縼绉绘棫閰嶇疆鏃跺叏灞€ bool 涓嶈縼绉讳负寮€锛堜繚鎸侀粯璁ゅ叧锛夈€?
+> MTP 开关最初做成全局一个 `bool enableMtp`，用户点某个模型开关，**所有模型一起变**。
+> 应改成**按模型 id 的 `Map<String, bool>`**（`mtpEnabledByModel`），每个模型独立持久化，
+> 加载时用 `gpu.mtpEnabled(modelId)` 取当前模型自己的开关。迁移旧配置时全局 bool 不迁移为开（保持默认关）。
 
-## 鍏抽敭鏁欒锛歳elease 鍖?AOT 鏆傚瓨蹇呴』鐢?app.so 鍘熷悕锛屼笖蹇呴』瀛楃涓茬骇楠屾敹锛?026-09-18 韪╁潙锛?
+## 关键教训：release 包 AOT 暂存必须用 app.so 原名，且必须字符串级验收（2026-09-18 踩坑）
 
-> `-x compileFlutterBuildRelease` 璺宠繃鍚庯紝libapp.so 鐨勫敮涓€鏉ユ簮鏄?gradle `packJniLibs*` 浠诲姟锛?
-> 瀹冧粠 **`build/app/intermediates/flutter/release/arm64-v8a/app.so`锛堝師鍚?app.so锛侊級** 鍙栨枃浠讹紝
-> 鎵撳寘鏃舵墠鏀瑰悕鎴?`lib/arm64-v8a/libapp.so`銆傛斁鎴?`libapp.so` 浼氭墦鎴?`liblibapp.so`锛團lutter 璧蜂笉鏉ワ級锛?
-> 鍒犳帀 merged_native_libs 鍐嶆寚鏈涘畠閲嶆柊鐢熸垚鏄敊瑙夆€斺€攆lutter 浠诲姟琚?`-x` 璺宠繃锛屾病浜哄杺浜х墿銆?
+> `-x compileFlutterBuildRelease` 跳过后，libapp.so 的唯一来源是 gradle `packJniLibs*` 任务，
+> 它从 **`build/app/intermediates/flutter/release/arm64-v8a/app.so`（原名 app.so！）** 取文件，
+> 打包时才改名成 `lib/arm64-v8a/libapp.so`。放成 `libapp.so` 会打成 `liblibapp.so`（Flutter 起不来）；
+> 删掉 merged_native_libs 再指望它重新生成是错觉——flutter 任务被 `-x` 跳过，没人喂产物。
 
-**release 鎵撳寘姝ｇ‘娴佺▼**锛歚flutter assemble release_android_application` 鈫?鎶婅緭鍑虹殑
-**`app.so` 鍘熷悕**鎷峰埌 `intermediates/flutter/release/arm64-v8a/`锛宖lutter_assets 鎷峰埌鍚岀骇 `flutter_assets/` 鈫?gradlew銆?
+**release 打包正确流程**：`flutter assemble release_android_application` → 把输出的
+**`app.so` 原名**拷到 `intermediates/flutter/release/arm64-v8a/`，flutter_assets 拷到同级 `flutter_assets/` → gradlew。
 
-**鎵撳寘鍚庡繀鍋氬瓧绗︿覆绾ч獙鏀讹紙鏈杩為敊涓ゆ鎵嶆姄鍒扮殑鍘熷洜锛氬彧鐪嬫椂闂存埑/澶у皬锛?*锛?
+**打包后必做字符串级验收（本次连错两次才抓到的原因：只看时间戳/大小）**：
 ```bash
-python -c "import zipfile; d=zipfile.ZipFile(apk).read('lib/arm64-v8a/libapp.so'); print(d.count('鏂颁唬鐮佸瓧鏍?.encode('utf-16-le')), d.count('鏃у瓧鏍?.encode('utf-16-le')))"
+python -c "import zipfile; d=zipfile.ZipFile(apk).read('lib/arm64-v8a/libapp.so'); print(d.count('新代码字样'.encode('utf-16-le')), d.count('旧字样'.encode('utf-16-le')))"
 ```
-AOT 涓插湪 libapp.so 閲屾槸 **UTF-16LE**锛宒ebug kernel_blob 鏄?UTF-8锛涚‘璁?NEW>0 涓?OLD=0銆?
-- **0.2.6 楠屾敹琛ュ厖**锛氱函 ASCII 瀛楅潰閲忥紙濡傜増鏈?鍙? 0.2.6锛夊湪 libapp.so AOT 閲屾寜鍗曞瓧鑺? ASCII 瀛樺偍鈥斺?旂敤 `d.count(b'0.2.6')` 鏌ワ紱UTF-16LE 鍙?鍛戒腑闈? ASCII锛堜腑鏂囷級瀛楅潰閲忥紝鐗堟湰鍙锋寜 UTF-16LE 鏌ユ亽 0锛?2026-09-28 瀹炴祴锛夛紝鍕胯??鍒ゆ垚鎵撳寘浜嗘棫 Dart銆?
-`app-debug.apk`/`app-release.apk` 閲?鏃?Dart 骞界伒"灏辩敤杩欐嫑褰撳満楠屽案銆?
+AOT 串在 libapp.so 里是 **UTF-16LE**，debug kernel_blob 是 UTF-8；确认 NEW>0 且 OLD=0。
+- **0.2.6 验收补充**：纯 ASCII 字面量（如版本号 `0.2.6`）在 libapp.so AOT 里按**单字节 ASCII**
+存储——用 `d.count(b'0.2.6')` 查；UTF-16LE 只命中非 ASCII（中文）字面量，版本号按 UTF-16LE
+查恒 0（2026-09-28 实测），勿误判成打包了旧 Dart。
+`app-debug.apk`/`app-release.apk` 里"旧 Dart 幽灵"就用这招当场验尸。
 
-## 鐪熸満璋冭瘯娉ㄦ剰
+## 真机调试注意
 
-- 灞忓箷浼戠湢锛坄mWakefulness=Dozing`锛夋椂 `uiautomator dump` 杩斿洖**绌鸿妭鐐?*锛屾槗璇垽"UI 娌℃覆鏌?銆?
-  鍏?`input keyevent KEYCODE_WAKEUP` + `KEYCODE_MENU` 鍞ら啋锛屽啀 dump 楠岃瘉鐣岄潰銆?
-- Flutter 鐨?`Switch` 鍦?uiautomator 閲屽彲鑳戒笉鏄剧ず涓?`android.widget.Switch` 绫伙紙鍙兘鏄剧ず涓哄甫
-  `checked` 灞炴€х殑鏅€?View锛夛紝鍒彧鐪?class 鍚嶅垽鏂紑鍏虫槸鍚﹀瓨鍦ㄣ€?
+- 屏幕休眠（`mWakefulness=Dozing`）时 `uiautomator dump` 返回**空节点**，易误判"UI 没渲染"。
+  先 `input keyevent KEYCODE_WAKEUP` + `KEYCODE_MENU` 唤醒，再 dump 验证界面。
+- Flutter 的 `Switch` 在 uiautomator 里可能不显示为 `android.widget.Switch` 类（可能显示为带
+  `checked` 属性的普通 View），别只看 class 名判断开关是否存在。
 
-## 閲嶈锛氬綋鍓嶆ā鍨嬩笉鏀寔瑙嗚鐞嗚В锛堣皟璇曠鐢?鐪嬪浘鐗?鎴浘"锛?
+## 重要：当前模型不支持视觉理解（调试禁用"看图片/截图"）
 
-> **鐢ㄦ埛涓嶄富鍔ㄥ杺鍥撅紱褰撳墠椹卞姩妯″瀷涓嶆敮鎸佽瑙夛紝鏃犳硶鐪熸"鐪?鍥剧墖/鎴浘銆?*
-> 涓€鏃︿换鍔℃祦绋嬮噷鍑虹幇"鏌ョ湅鎴浘/鍥剧墖"杩欑被渚濊禆瑙嗚鐨勬楠わ紝妯″瀷浼氭嬁涓嶅埌浠讳綍鍥惧儚鍐呭锛?
-> 浠诲姟浼?*褰诲簳鍍垫**锛堝崱鍦ㄧ瓑鍥俱€佽鍒ょ晫闈㈢瓑姝诲惊鐜級銆?
+> **用户不主动喂图；当前驱动模型不支持视觉，无法真正"看"图片/截图。**
+> 一旦任务流程里出现"查看截图/图片"这类依赖视觉的步骤，模型会拿不到任何图像内容，
+> 任务会**彻底僵死**（卡在等图、误判界面等死循环）。
 
-**閾佸緥**锛?
-- 璋冭瘯/楠岃瘉涓€寰嬭蛋**鏂囨湰閫氶亾**锛歚uiautomator dump` 鐨?XML 鏂囨湰銆乣adb logcat`銆乣dumpsys`銆?
-  鏂囦欢鍐呭锛坄cat`/`Read`锛夌瓑鈥斺€?*缁濅笉渚濊禆鎴浘鍒よ**銆?
-- 涓嶄富鍔ㄧ敓鎴愩€佷笉涓诲姩鏌ョ湅 `screen.png` 涔嬬被鐨勬埅鍥句骇鐗╋紱鍗充究瀛樺湪涔熶笉鎶婂浘鍍忓唴瀹瑰綋鐪熴€?
-- 鍒ゆ柇 UI 鐘舵€佸彧鐪嬫枃鏈妭鐐?灞炴€э紙`text`銆乣content-desc`銆乣checked`銆乣bounds`锛夛紝
-  涓嶈鍐?鎵撳紑鎴浘纭涓€涓?杩欑姝ラ銆?
+**铁律**：
+- 调试/验证一律走**文本通道**：`uiautomator dump` 的 XML 文本、`adb logcat`、`dumpsys`、
+  文件内容（`cat`/`Read`）等——**绝不依赖截图判读**。
+- 不主动生成、不主动查看 `screen.png` 之类的截图产物；即便存在也不把图像内容当真。
+- 判断 UI 状态只看文本节点/属性（`text`、`content-desc`、`checked`、`bounds`），
+  不要写"打开截图确认一下"这种步骤。
 
-## 閲嶈锛氶€氳繃 DSH Phone 鎶?APK 涓嬪彂鍒版墜鏈虹殑瑙﹀彂鏈哄埗锛?026-09-05 瀹炴祴鍙锛?
+## 重要：通过 DSH Phone 把 APK 下发到手机的触发机制（2026-09-05 实测可行）
 
-> **鑳屾櫙**锛氱敤鎴峰湪鎵嬫満涓婄敤 `E:\DTXY\DSH-Phone` 杩欎釜 App 閫氳繃 SSH 闅ч亾杩炲洖鏈満锛?
-> 鎯冲湪鎵嬫満涓婄洿鎺ヤ笅杞藉垰鎵撳寘鐨?APK銆侱SH Phone 鐨?璧勬簮涓嬭浇"鑳藉姏閾捐矾锛?
+> **背景**：用户在手机上用 `E:\DTXY\DSH-Phone` 这个 App 通过 SSH 隧道连回本机，
+> 想在手机上直接下载刚打包的 APK。DSH Phone 的"资源下载"能力链路：
 >
-> - 鎵嬫満 webview 娉ㄥ叆 `artifactBridgeJs`锛岀洃鍚?DSH Web UI 閲?*鎴愭灉锛坅rtifact锛夌偣鍑?*锛?
-> - 鍙湁褰?Web UI 閲屽嚭鐜?*浜х墿鎸夐挳锛坒ile-mention chip锛宍title` 瀛樿繙绔矾寰勩€?
->   甯?`.apk` 鍚庣紑 鈫?褰掔被涓?resource 璧颁笅杞斤級**鏃讹紝鎵嬫満鎵嶄細瑙﹀彂 SFTP 闅ч亾涓嬭浇锛?
-> - 璇ヤ骇鐗╂寜閽敱 **`write` 宸ュ叿璋冪敤锛堝甫 `file_path`锛?* 瑙﹀彂锛?*涓嶆槸** gradle 缂栬瘧浜х墿銆?
+> - 手机 webview 注入 `artifactBridgeJs`，监听 DSH Web UI 里**成果（artifact）点击**；
+> - 只有当 Web UI 里出现**产物按钮（file-mention chip，`title` 存远端路径、
+>   带 `.apk` 后缀 → 归类为 resource 走下载）**时，手机才会触发 SFTP 隧道下载；
+> - 该产物按钮由 **`write` 工具调用（带 `file_path`）** 触发，**不是** gradle 编译产物。
 
-**涓轰粈涔堜箣鍓嶈Е鍙戜笉浜?*锛欰PK 鏄?`gradle` 缂栬瘧鍑烘潵鐨勶紝涓嶆槸閫氳繃 `write` 宸ュ叿璋冪敤浜х敓鐨勶紝
-鎵€浠?Web UI 閲?*娌℃湁瀹冪殑浜х墿鎸夐挳** 鈫?鎵嬫満鐐逛笉鍒般€佷笅涓嶄簡銆?
-**鍙湁 `write` 宸ュ叿浜у嚭鐨勬枃浠讹紝鎵嶄細琚?Web UI 娓叉煋鎴愬彲鐐瑰嚮鐨勪骇鐗?璧勬簮鎸夐挳銆?*
+**为什么之前触发不了**：APK 是 `gradle` 编译出来的，不是通过 `write` 工具调用产生的，
+所以 Web UI 里**没有它的产物按钮** → 手机点不到、下不了。
+**只有 `write` 工具产出的文件，才会被 Web UI 渲染成可点击的产物/资源按钮。**
 
-**姝ｇ‘鍋氭硶锛堣鎵嬫満鑳戒笅杞斤級锛?*
-1. 鍏堢‘璁ゆ墜鏈?SSH 杩炵殑鏄摢鍙颁富鏈猴紙`E:\DTXY\DSH-Phone\lib\tunnel_service.dart` 閲岄厤鐨?host锛夛紱
-2. 鐢?**`write` 宸ュ叿璋冪敤**鎶?APK 鍐欏埌**鎵嬫満鎵€杩炰富鏈轰笂鐨勬煇涓矾寰?*锛堜笉鏄洿鎺ョ粰璺緞锛夛紱
-3. 杩欐牱 Web UI 浼氭妸瀹冩覆鏌撴垚浜х墿鎸夐挳锛屾墜鏈轰竴鐐瑰氨璧?SFTP 闅ч亾涓嬭浇锛坄download_manager.dart`锛夈€?
+**正确做法（让手机能下载）：**
+1. 先确认手机 SSH 连的是哪台主机（`E:\DTXY\DSH-Phone\lib\tunnel_service.dart` 里配的 host）；
+2. 用 **`write` 工具调用**把 APK 写到**手机所连主机上的某个路径**（不是直接给路径）；
+3. 这样 Web UI 会把它渲染成产物按钮，手机一点就走 SFTP 隧道下载（`download_manager.dart`）。
 
-**璁╄緭鍑烘洿楂樻鐜囪Е鍙戜笅杞界殑浼樺寲寤鸿锛堥拡瀵?DSH Phone锛夛細**
-- 鍑℃槸鍙兘涓嬪彂鐨勪簩杩涘埗锛坅pk/zip/鍥剧墖绛夛級锛?*涓€寰嬭蛋 `write` 宸ュ叿鍐欏埌涓€涓槑纭矾寰?*锛?
-  涓嶈鍙粰璺緞鏂囨湰鎴?`file://` 閾炬帴鈥斺€斿彧鏈?`write` 鎵嶄細琚瘑鍒负浜х墿銆?
-- `write` 鐨?`file_path` 鐢?*甯﹀悗缂€鐨勫畬鏁磋矾寰?*锛坄.apk` 绛夛級锛岀‘淇濆懡涓?
-  `artifact_recognizer.dart` 鐨?`resourceSuffixes`锛坄.apk/.zip/.png/.pdf` 绛夛級銆?
-- 鑻ユ媴蹇冭矾寰勮 chips 闅愯棌锛宍write` 鍚庡湪鍥炲閲?*鏄惧紡鍐欏嚭璇ュ畬鏁磋矾寰?*锛?
-  閰嶅悎 `webview_bridges.dart` 鐨?`findMentionPath` / `collectProducedDirs` 鍏滃簳瑙ｆ瀽銆?
-- 澶ф枃浠舵敞鎰?`maxDownloadBytes = 256MB`銆乣maxRemoteReadBytes = 8MB` 涓婇檺锛?
-  APK 涓€鑸病闂锛涜秴涓婇檺闇€鎹㈢敤 `download_manager` 鐨勬柇鐐圭画浼犳祦绋嬨€?
-- 鎵嬫満渚ч渶寮€鍚?璧勬簮涓嬭浇"寮€鍏筹紙`config.dart` 鐨?`resourceDownloadEnabled`锛岄粯璁ゅ紑锛夛紝
-  涓?SSH 闅ч亾宸茶繛涓婂搴斾富鏈恒€?
+**让输出更高概率触发下载的优化建议（针对 DSH Phone）：**
+- 凡是可能下发的二进制（apk/zip/图片等），**一律走 `write` 工具写到一个明确路径**，
+  不要只给路径文本或 `file://` 链接——只有 `write` 才会被识别为产物。
+- `write` 的 `file_path` 用**带后缀的完整路径**（`.apk` 等），确保命中
+  `artifact_recognizer.dart` 的 `resourceSuffixes`（`.apk/.zip/.png/.pdf` 等）。
+- 若担心路径被 chips 隐藏，`write` 后在回复里**显式写出该完整路径**，
+  配合 `webview_bridges.dart` 的 `findMentionPath` / `collectProducedDirs` 兜底解析。
+- 大文件注意 `maxDownloadBytes = 256MB`、`maxRemoteReadBytes = 8MB` 上限，
+  APK 一般没问题；超上限需换用 `download_manager` 的断点续传流程。
+- 手机侧需开启"资源下载"开关（`config.dart` 的 `resourceDownloadEnabled`，默认开），
+  且 SSH 隧道已连上对应主机。
 
-## llama.cpp 鍗囩骇闂ㄦ锛堝洓閬撻棬锛岀己涓€涓嶇畻鍗囩骇瀹屾垚锛夛紙2026-09-18 瀹炴祴绔嬭锛?
+## llama.cpp 升级门槛（四道门，缺一不算升级完成）（2026-09-18 实测立规）
 
-> **鑳屾櫙**锛氬彟涓€鍙板紑鍙戞満鍗囩骇鍒?b11028 鍚?CPU/GPU 鍏ㄥ悗绔參涓€鍊嶁€斺€斿崌绾х被鍥炲綊鍑犱箮閮芥槸**闈欓粯鐨?*
-> 锛堜笉宕┿€佷笉鎶ラ敊銆佸姛鑳藉叏瀵癸紝灏辨槸鎱級锛岄槻涓嶄綇瀹冪殑浜哄彧鑳戒簨鍚庤€冨彜銆傛墍鏈夋鏌ュ繀椤?*鏈烘鍖?*锛?
-> 楠屾敹鍩哄噯鏄?`docs/backend_benchmark_2026-08-04.md`锛? Elite 瀹炴祴锛歏ulkan 8.60 / OpenCL 8.77 / CPU 4.33 tok/s锛夈€?
+> **背景**：另一台开发机升级到 b11028 后 CPU/GPU 全后端慢一倍——升级类回归几乎都是**静默的**
+> （不崩、不报错、功能全对，就是慢），防不住它的人只能事后考古。所有检查必须**机检化**，
+> 验收基准是 `docs/backend_benchmark_2026-08-04.md`（8 Elite 实测：Vulkan 8.60 / OpenCL 8.77 / CPU 4.33 tok/s）。
 
-**鍗囩骇娴佺▼锛堟湰鏈?b10173鈫抌11028 璧伴€氱殑鎵撴硶锛夛細**
-1. **鍏堢畻 fork 澧為噺鍐嶅姩鎵?*锛歚git log --oneline -- third_party/llama.cpp` 鎵句笂娓稿悓姝ョ偣锛堟湰浠撳簱鍩虹嚎 = 涓婃父 `fe8156f`锛夛紝
-   `git diff --no-index <涓婃父base> third_party/llama.cpp` 寰楃湡瀹炶ˉ涓侀潰銆?*鍒妸鏈湴琛ヤ竵褰撶浼?*鈥斺€?
-   鏈鍙戠幇 XHToken/Spark2.5 宸插悎鍏ヤ笂娓?b11028锛坄spark2-5.cpp` 涓?fork 鐗堜粎 1 琛屽樊寮傘€佹ā鏉挎敼鍚?`Spark2.5.jinja`锛夛紝
-   fork 閲屽浣欑殑 `XHToken-Spark-X2.5-1.7B.jinja` 鐩存帴鍒犮€?
-2. 鏇挎崲鏍戯細`robocopy <鏂版爲> third_party/llama.cpp /MIR`锛坄Remove-Item` 鍒?.cxx/澶х洰褰曚細鎱㈠埌瓒呮椂锛夈€?
+**升级流程（本机 b10173→b11028 走通的打法）：**
+1. **先算 fork 增量再动手**：`git log --oneline -- third_party/llama.cpp` 找上游同步点（本仓库基线 = 上游 `fe8156f`），
+   `git diff --no-index <上游base> third_party/llama.cpp` 得真实补丁面。**别把本地补丁当祖传**——
+   本次发现 XHToken/Spark2.5 已合入上游 b11028（`spark2-5.cpp` 与 fork 版仅 1 行差异、模板改名 `Spark2.5.jinja`），
+   fork 里多余的 `XHToken-Spark-X2.5-1.7B.jinja` 直接删。
+2. 替换树：`robocopy <新树> third_party/llama.cpp /MIR`（`Remove-Item` 删 .cxx/大目录会慢到超时）。
 
-**鍥涢亾楠屾敹闂紙鍏ㄨ繃鎵嶇畻瀹岋級锛?*
-1. **缂栬瘧闂?*锛歚gradlew --stop` + 娓?`.cxx` 鍏ㄩ噺閲嶇紪鍚庯紝鎵?`.cxx/Debug/*/arm64-v8a/compile_commands.json`锛?
-   ggml-cpu / kleidiai / mtmd / llama core / JNI 鐨勫懡浠よ**蹇呴』鍚屾椂鍚?`-O3 -DNDEBUG`**锛?
-   ggml-cpu 涓绘簮鐮佸繀椤?`-march=armv8.2-a+dotprod`锛圢DK 椤舵帀 -O3 鐨勮€佸潙灏辨槸杩欎箞鎶撶殑锛夈€?
-   鈿狅笍 鍐欐鏌ヨ剼鏈敞鎰?PowerShell `-match` **澶у皬鍐欎笉鏁忔劅**銆乧ompile_commands 璺緞鏄?*鍙嶆枩鏉?*鈥斺€旀湰娆″樊鐐硅鎶?292 鏉′笉鍚堟牸銆?
-2. **鍐呮牳闂?*锛歝onfigure 鎽樿 KleidiAI 蹇呴』 ON锛屼笖瀵硅薄鏂囦欢鏉ヨ嚜 `third_party/kleidiai`锛坴endored锛夛紝**涓嶆槸缃戠粶鎷夊彇**銆?
-   鈿狅笍 **FetchContent 椤圭洰鍚嶄細鍙?*锛歚KleidiAI_Download`(fe8156f) 鈫?`kleidiai`(b11028)锛?
-   瑕嗙洊鍙橀噺鏄?`FETCHCONTENT_SOURCE_DIR_<鍚嶅瓧澶у啓>`锛屽悕瀛楅敊=闈欓粯澶卞幓 vendored 鐩綍锛?
-   app CMakeLists 宸插悓鏃惰鏂版棫涓や釜鍙橀噺鍏滃簳銆侹leidiAI pin 鐗堟湰锛坴1.24.0锛夎涓?ggml-cpu/CMakeLists.txt 閲?`KLEIDIAI_COMMIT_TAG` 瀵瑰緱涓娿€?
-3. **鍙傛暟闂?*锛歭ogcat 鎶?`[handleLoadModel]`锛屼笌鍗囩骇鍓嶉€愰」 diff锛歚n_gpu_layers=100` /
-   `n_ubatch`锛圕PU=16銆丟PU=512锛? `flash_attn=DISABLED` / sampler 閾俱€傜Щ妞?JNI 鏃朵笉璁搁『鎵嬫敼榛樿鍊笺€?
-4. **鍩哄噯闂?*锛氬熀绾胯澶囷紙Xiaomi 25053RT47C / 8 Elite锛夊悓 prompt 鍚勫悗绔?3 杞紝tok/s 瀵?8-04 鍩虹嚎锛?
-   **鍋忓樊 >卤10% 涓嶈鏀跺伐**锛屾寜 缂栬瘧闂ㄢ啋鍐呮牳闂ㄢ啋涓婃父鍥炲綊 椤哄簭鎺掓煡銆?
+**四道验收门（全过才算完）：**
+1. **编译门**：`gradlew --stop` + 清 `.cxx` 全量重编后，扫 `.cxx/Debug/*/arm64-v8a/compile_commands.json`：
+   ggml-cpu / kleidiai / mtmd / llama core / JNI 的命令行**必须同时含 `-O3 -DNDEBUG`**，
+   ggml-cpu 主源码必须 `-march=armv8.2-a+dotprod`（NDK 顶掉 -O3 的老坑就是这么抓的）。
+   ⚠️ 写检查脚本注意 PowerShell `-match` **大小写不敏感**、compile_commands 路径是**反斜杠**——本次差点误报 292 条不合格。
+2. **内核门**：configure 摘要 KleidiAI 必须 ON，且对象文件来自 `third_party/kleidiai`（vendored），**不是网络拉取**。
+   ⚠️ **FetchContent 项目名会变**：`KleidiAI_Download`(fe8156f) → `kleidiai`(b11028)，
+   覆盖变量是 `FETCHCONTENT_SOURCE_DIR_<名字大写>`，名字错=静默失去 vendored 目录；
+   app CMakeLists 已同时设新旧两个变量兜底。KleidiAI pin 版本（v1.24.0）要与 ggml-cpu/CMakeLists.txt 里 `KLEIDIAI_COMMIT_TAG` 对得上。
+3. **参数门**：logcat 抓 `[handleLoadModel]`，与升级前逐项 diff：`n_gpu_layers=100` /
+   `n_ubatch`（CPU=16、GPU=512）/ `flash_attn=DISABLED` / sampler 链。移植 JNI 时不许顺手改默认值。
+4. **基准门**：基线设备（Xiaomi 25053RT47C / 8 Elite）同 prompt 各后端 3 轮，tok/s 对 8-04 基线，
+   **偏差 >±10% 不许收工**，按 编译门→内核门→上游回归 顺序排查。
 
-**b11028 瀹為檯韪╁埌鐨?API 婕傜Щ锛堜笅娆″崌绾у厛鏌ュ悓绫伙級锛?*
-- `mtmd_helper_bitmap_init_from_file()` 鍔犱簡绗?4 鍙?`mtmd_helper_init_opt`锛屽浘鐗囪矾寰勪紶 `mtmd_helper_init_opt_default()`锛圝NI 宸蹭慨锛夈€?
-- **`MTMD_BACKEND_DEVICE` 鐜鍙橀噺鍦?b11028 琚垹**锛坒e8156f `clip.cpp:189` 鐨?`getenv` 娌′簡锛夆啋 瑙嗚缂栫爜鍚庣蹇呴』鏀硅
-  `mtmd_context_params.device`锛坄ggml_backend_reg_by_name("vulkan"/"opencl")` + `ggml_backend_reg_dev_get(reg,0)`锛夈€?
-  **闈欓粯澶辨晥涓嶆姤閿?*锛岃瑙夊浠庢涓嶈窡涓诲悗绔€斺€擩NI 宸蹭慨锛堜繚鐣?setenv 鍏煎鏃у簱锛夈€?
-- 鈿狅笍 UI 鎶ラ敊鏂囨浼氭寚閿欐柟鍚戯細model_provider 鏃ч€昏緫鍙 `loadModel` 杩斿洖 false 涓旀ā鍨嬬被鍨嬫槸 vision 灏辨樉绀?
-  "mmproj 鎶曞奖鍣ㄥ姞杞藉嚭閿?鈥斺€斾笂涓嬫枃 OOM/涓绘ā鍨嬪け璐ュ叏琚敥閿?mmproj锛堝凡鏀逛负鍙鐪熷疄鏃ュ織锛夈€?
-  **鏁欒锛氱湡鍑剁湅寮曟搸鏃ュ織鏈€鍚庝竴姝ワ紝鍒俊绾㈡潯鏍囬銆?* 鏈満 b11028 瀹夸富澶嶇幇锛坢ingw `llama-mtmd-cli` + 鍚屾 4B/mmproj锛?
-  鍔犺浇鎺ㄧ悊鍏ㄨ繃锛屼笂娓?mtmd 瀵?unsloth Qwen3.5 mmproj 鏃犵姜銆?
-- ggml-opencl 鐩存帴鐢?CL2.1 鏍稿績鍏ュ彛 `clGetKernelSubGroupInfo` 鈫?`third_party/opencl-stub/opencl_stub.c` 宸插姞杞彂
-  锛堝崌绾у悗閾炬帴鎶?`undefined symbol: cl*` 灏辩収鐜版湁 CL_FORWARD 妯″紡琛ワ級銆?
-- Vulkan 鍚庣 24k 琛屽ぇ閲嶅啓锛堟媶鍒嗗嚭 buffers/types/push-constants 绛夋柊鏂囦欢锛夛紝
-  **Mali 宕╂簝缂撹В闇€鍦?b11028 涓婇噸楠?*锛堟棫"鍒?copy_transpose_02.comp"寮忔敼鍔ㄦ湭鍥炲甫锛岃嫢 Mali 鍐嶅穿浠庤繖閲屾煡锛夈€?
-- `llama-ext.h` 鐨?`llama_set_embeddings_nextn`锛圡TP/dspark staging API锛変粛鍦紝MTP 浠ｇ爜鏈姩銆?
+**b11028 实际踩到的 API 漂移（下次升级先查同类）：**
+- `mtmd_helper_bitmap_init_from_file()` 加了第 4 参 `mtmd_helper_init_opt`，图片路径传 `mtmd_helper_init_opt_default()`（JNI 已修）。
+- **`MTMD_BACKEND_DEVICE` 环境变量在 b11028 被删**（fe8156f `clip.cpp:189` 的 `getenv` 没了）→ 视觉编码后端必须改设
+  `mtmd_context_params.device`（`ggml_backend_reg_by_name("vulkan"/"opencl")` + `ggml_backend_reg_dev_get(reg,0)`）。
+  **静默失效不报错**，视觉塔从此不跟主后端——JNI 已修（保留 setenv 兼容旧库）。
+- ⚠️ UI 报错文案会指错方向：model_provider 旧逻辑只要 `loadModel` 返回 false 且模型类型是 vision 就显示
+  "mmproj 投影器加载出错"——上下文 OOM/主模型失败全被甩锅 mmproj（已改为只认真实日志）。
+  **教训：真凶看引擎日志最后一步，别信红条标题。** 本机 b11028 宿主复现（mingw `llama-mtmd-cli` + 同款 4B/mmproj）
+  加载推理全过，上游 mtmd 对 unsloth Qwen3.5 mmproj 无罪。
+- ggml-opencl 直接用 CL2.1 核心入口 `clGetKernelSubGroupInfo` → `third_party/opencl-stub/opencl_stub.c` 已加转发
+  （升级后链接报 `undefined symbol: cl*` 就照现有 CL_FORWARD 模式补）。
+- Vulkan 后端 24k 行大重写（拆分出 buffers/types/push-constants 等新文件），
+  **Mali 崩溃缓解需在 b11028 上重验**（旧"删 copy_transpose_02.comp"式改动未回带，若 Mali 再崩从这里查）。
+- `llama-ext.h` 的 `llama_set_embeddings_nextn`（MTP/dspark staging API）仍在，MTP 代码未动。
 
-**闅旂鍙ｈ瘈**锛氬厛鍦ㄦ湰鏈洪噸缂?*鏃х増**鈥斺€旀棫鐗堜篃鎱?鐜闂锛圢DK 鐗堟湰/鏋勫缓绫诲瀷/璁惧涓嶅悓锛夛紝鏃х増蹇?鏂版爲闂銆?
-鎱竴鍊嶈繖绉嶉棶棰橈紝鏈夎繖鍥涢亾闂ㄥ氨娲讳笉杩囧綋澶┿€?
+**隔离口诀**：先在本机重编**旧版**——旧版也慢=环境问题（NDK 版本/构建类型/设备不同），旧版快=新树问题。
+慢一倍这种问题，有这四道门就活不过当天。
 
-## 鏅鸿兘浣?杩唬涓€涓や笅灏卞仠 / 娌℃纭粨鏋?鏍瑰洜涓庝慨澶嶏紙2026-09-27 v0.2.4-agent-stall-fix锛?
+## 智能体"迭代一两下就停 / 没正确结果"根因与修复（2026-09-27 v0.2.4-agent-stall-fix）
 
-> 鐢ㄦ埛鍙嶉锛氭櫤鑳戒綋妯″紡璺戜竴涓よ疆灏辨墽琛屼笉涓嬪幓銆佽緭鍑烘病瀹屾垚浠诲姟銆傚畾浣嶅埌**涓夋潯闈欓粯鍗℃璺緞**锛?
-> 鍏卞悓鐗瑰緛鏄?*涓嶅穿涓嶆姤閿欍€佷换鍔″崐閫旇€屽簾褰撴垚鍔?*鈥斺€斿拰鍗囩骇鍥炲綊涓€鏍烽槾闄╋紝楠屾敹闈?鐪嬫湁娌℃湁绾㈠瓧"姘歌繙鎶撲笉鍒般€?
+> 用户反馈：智能体模式跑一两轮就执行不下去、输出没完成任务。定位到**三条静默卡死路径**，
+> 共同特征是**不崩不报错、任务半途而废当成功**——和升级回归一样阴险，验收靠"看有没有红字"永远抓不到。
 
-**鏍瑰洜 1锛氬伐鍏疯皟鐢ㄥ潡琚?token 棰勭畻鎴柇 鈫?闈欓粯闄嶇骇鎴愭櫘閫氬洖绛旓紙涓诲洜锛?*
-- 鐜拌薄锛氭ā鍨嬭緭鍑?`{"name":"file_write","arguments":{"content":"鈥︹€锛堝啓鍒颁竴鍗婅 `maxTokensPerRound=512` 鎷︽柇锛夛紝
-  `prompt_json_protocol` 鎷彿涓嶅钩琛?鈫?**鏁存褰撴櫘閫氭枃鏈繑鍥?* 鈫?涓诲惊鐜垽瀹?鏃犲伐鍏疯皟鐢?鈫?鏈疆瀹屾垚"锛?
-  浠诲姟娌″仛杩樻樉绀哄緱鍍忔垚鍔熴€?*杩欐槸"杩唬涓€涓や笅灏卞仠銆佹病缁撴灉"鐨勫ご鍙峰厓鍑躲€?*
-- 淇锛坄lib/agent/protocol/prompt_json_protocol.dart` `_parseText` 绗?0 姝ヤ笁鍒嗙被锛夛細
-  鍏?`_truncatedToolCall` 鍒ゅ畾鈥斺€斺憼 鏂湪瀛楃涓?鍙傛暟鍐呭鍐呴儴 鈫?鎶?`LlmFailureCode.toolCallTruncated`锛堜笉鍙吉閫犳墽琛岋級锛?
-  鈶?浠呯己鏀跺熬鎷彿涓旇兘琛ュ叏 鈫?鑷姩琛ユ嫭鍙风収甯告墽琛岋紙鍙傛暟鏃犳崯锛夛紱鈶?琛ュ畬浠嶉潪娉?= 妯″瀷鑷韩璇硶閿欒 鈫?浼橀泤闄嶇骇涓烘枃鏈紝
-  **涓嶈鎶ユ埅鏂?*璇鐢ㄦ埛鍘昏皟璁剧疆銆俙failure.dart` 鐨?`LlmRetry` 鎶?toolCallTruncated 绾冲叆鏈夐檺閲嶈瘯棰勭畻銆?
-- **鎺掗殰閾佸緥**锛氭櫤鑳戒綋"娌＄粨鏋?鍏堢炕鎺ㄧ悊鏃ュ織鐪嬫槸涓嶆槸鎴柇锛屽埆鍏堟€€鐤戞ā鍨嬬銆傚彲璋冦€屾櫤鑳戒綋姣忚疆鐢熸垚 token銆嶃€?
+**根因 1：工具调用块被 token 预算截断 → 静默降级成普通回答（主因）**
+- 现象：模型输出 `{"name":"file_write","arguments":{"content":"……`（写到一半被 `maxTokensPerRound=512` 拦断），
+  `prompt_json_protocol` 括号不平衡 → **整段当普通文本返回** → 主循环判定"无工具调用 → 本轮完成"，
+  任务没做还显示得像成功。**这是"迭代一两下就停、没结果"的头号元凶。**
+- 修复（`lib/agent/protocol/prompt_json_protocol.dart` `_parseText` 第 0 步三分类）：
+  先 `_truncatedToolCall` 判定——① 断在字符串/参数内容内部 → 抛 `LlmFailureCode.toolCallTruncated`（不可伪造执行）；
+  ② 仅缺收尾括号且能补全 → 自动补括号照常执行（参数无损）；③ 补完仍非法 = 模型自身语法错误 → 优雅降级为文本，
+  **不误报截断**误导用户去调设置。`failure.dart` 的 `LlmRetry` 把 toolCallTruncated 纳入有限重试预算。
+- **排障铁律**：智能体"没结果"先翻推理日志看是不是截断，别先怀疑模型笨。可调「智能体每轮生成 token」。
 
-**鏍瑰洜 2锛氬け璐ヨ疆鍥炴函鍘嗗彶鏃х瓟妗堝啋鍏呮湰杞洖澶嶏紙"閲嶅闂€?bug"锛?*
-- 鐜拌薄锛氱浜岃疆璧?turn 鍐呭け璐?鈫?UI 鍙堟樉绀虹涓€杞殑闂€欙紝鍍?妯″瀷鍙細杩欎竴鍙?銆?
-- 淇锛歚ReactLoopAgent._turnAnswer` **鍙彇鏈疆 append 鐨?assistant**锛屽け璐ョ疆绌轰覆缁濅笉绌块€忓巻鍙诧紱
-  澶辫触鍘熷洜璧?`_turnError` 鈫?chat_provider 鏄庣‘鎶?`鈿狅笍 鏈疆鎵ц澶辫触锛氣€锛屼笉鍐嶆嬁鏃у洖澶嶉《鍖呫€?
+**根因 2：失败轮回溯历史旧答案冒充本轮回复（"重复问候 bug"）**
+- 现象：第二轮起 turn 内失败 → UI 又显示第一轮的问候，像"模型只会这一句"。
+- 修复：`ReactLoopAgent._turnAnswer` **只取本轮 append 的 assistant**，失败置空串绝不穿透历史；
+  失败原因走 `_turnError` → chat_provider 明确报 `⚠️ 本轮执行失败：…`，不再拿旧回复顶包。
 
-**鏍瑰洜 3锛氭瘡杞噸寤?log 鏃?system 钀藉湪娑堟伅涓 鈫?OpenAI 鍏煎鏈嶅姟绔?400 鎷掓敹**
-- 鐜拌薄锛氭柊寮曟搸姣忚疆 importFromMessages 鍏堝鍏ュ巻鍙诧紝鏋勯€?agent 鏃舵墠 append system 鈫?
-  system 涓嶅湪闃熼 鈫?API 璺嚎 400銆佹湰鍦?chatml 琚腑娈?system 姹℃煋 鈫?琛ㄧ幇涓?鎵ц涓嶄笅鍘?銆?
-- 淇锛歚SessionLog.deriveModelMessages` **system 鎭掔疆闃熼**锛堢函鎶曞奖閲嶆帓锛屼笉鐮村潖浜嬩欢搴忎笉鍙橀噺锛夈€?
+**根因 3：每轮重建 log 时 system 落在消息中段 → OpenAI 兼容服务端 400 拒收**
+- 现象：新引擎每轮 importFromMessages 先导入历史，构造 agent 时才 append system →
+  system 不在队首 → API 路线 400、本地 chatml 被中段 system 污染 → 表现为"执行不下去"。
+- 修复：`SessionLog.deriveModelMessages` **system 恒置队首**（纯投影重排，不破坏事件序不变量）。
 
-**鍥炲綊闃茬嚎锛坱est/agent/ 鍏ㄧ豢 241 椤癸紝鍚湰娆℃柊澧烇級**锛氭埅鏂笁鍒嗙被銆乼oolCallTruncated 鏈夌晫閲嶈瘯鍚庣粓鎬?error銆?
-lastTurnAnswer 涓嶅洖婧€乻ystem 鏅?append 浠嶆亽闃熼銆?*涓嬫鍔ㄦ櫤鑳戒綋寰幆/鍗忚鍏堣窇 `flutter test test/agent`銆?*
+**回归防线（test/agent/ 全绿 241 项，含本次新增）**：截断三分类、toolCallTruncated 有界重试后终态 error、
+lastTurnAnswer 不回溯、system 晚 append 仍恒队首。**下次动智能体循环/协议先跑 `flutter test test/agent`。**
 
-## 鍏抽敭鏁欒锛氬ぇ妯″瀷 GPU 鍔犺浇 OOM 浼氭墦姝绘暣鏈?system_server锛?026-09-27 Bonsai-2 姝绘満妗堬級
+## 智能体"新引擎唯一 + 对话内嵌工作流"（2026-09-27）
 
-> **鐜拌薄**锛欱onsai-2 27B (PTQ1_0, 5.95GB) + OpenCL 鍦ㄥ皬绫?25053RT47C 涓?涓€鎺ㄧ悊灏辨鏈?锛?
-> 杩炴涓夊洖锛氭墜鏈烘暣鏈哄崱姝?鈫?Android Watchdog 閲嶅惎銆備笉鏄唴鏍?panic銆佷笉鏄?OpenCL 鍐呮牳 bug銆?
-> 涓嶆槸 App 宕╂簝鈥斺€?*logcat 閲屾案杩滅湅涓嶅埌鍑舵墜**锛坰ystem_server 姝绘椂鏃ュ織闅忕紦鍐蹭竴璧锋柇锛夈€?
+> 用户要求：智能体模式应**只有新引擎**（ReactLoopAgent），不要"关闭回退旧模式"的开关；
+> 且状态提示要像主流智能体，在**对话内一步步向下**输出（[思考中…]→[🔧 工具卡]→[答案]），
+> 而不是分散的 AppBar 徽章/输入区面板。
 
-**閾佽瘉**锛坉ropbox `system_server_pre_watchdog`锛宒umpsys dropbox 鍙法閲嶅惎璇伙級锛?
-- `/proc/pressure/memory` some avg60=19.3 / full=12.3锛堜弗閲嶅唴瀛樺仠婊烇級锛沰swapd0 5.5% CPU锛?
-- system_server **11897 娆?major faults**锛涗富绾跨▼/Binder/display/AM/Power 鍏ㄩ儴 blocked 30s锛?
-- Subject: `Blocked in monitor Watchdog$BinderThreadMonitor 鈥?for 30s` 鈫?鐪嬮棬鐙?reboot銆?
+**已删除（彻底）**：旧 `runAgent` 循环（`lib/agent/agent_loop.dart`）及其测试
+（`test/agent/agent_loop_test.dart`）、`useNewAgentMode` 回退开关
+（settings_service/provider/screen）、`AgentStatusBadge`、`AgentActivityPanel`。
+新引擎严格子集覆盖旧引擎（同路由/注册表/协议/工具/执行器/沙箱），删除安全。
+共享展示类型（`ToolActivity` + `AgentToolActivityCallback`）迁到
+`lib/agent/tool_activity.dart`，`lib/agent/agent.dart` 聚合导出随之指向它。
 
-**鏍瑰洜绠楄处**锛氳鏈?**MemTotal 浠?11.0GB**锛堜笉鏄?12锛侊級锛屾棩甯?MemAvailable 鈮?3.5-5GB銆?
-Adreno UMA锛歄penCL/Vulkan 鐨勬潈閲嶅拰 KV 閮芥槸绯荤粺 RAM銆俠onsai2 闇€姹?=
-鏉冮噸 5.95GB(GPU) + KV @n_ctx4096 鏁?GB + mmap 鏂囦欢宸ヤ綔闆?鈮?8-11GB 鈫?瓒呯墿鐞嗗唴瀛樹竴鍊?鈫?
-鍥炴敹椋庢毚楗挎 system_server銆?*涓€浠?Bonsai 27B锛?.8GB锛夋伆濂藉帇绾胯兘娲伙紝bonsai2 瓒呯嚎鍗虫**銆?
-CPU 鍚庣鑳芥椿鐨勫師鍥狅細鏉冮噸鏄?mmap 鏂囦欢椤碉紙鍙洖鏀讹級锛岃€?GPU 鍚庣鏄繀 resident 鐨勬嫹璐濄€?
+**内嵌工作流 UI**（`lib/widgets/agent_workflow.dart`，取代 agent_activity_panel）：
+- `groupMessages` 把原始消息流重排为 `[UserUnit | TurnUnit]`：user 是分界，
+  其后非 🔧 assistant = 回答，🔧 前缀 assistant = 工具步骤；**无论存储顺序
+  （新 [user, ans, t1..tk] / 旧 [user, t1..tk, ans]）都重排成 [工具… → 答案]**。
+- `parseToolActivity` 把存储 🔧 消息解析回卡片（历史回合回看），
+  兼容新格式 `🔧 正在调用 X…` 与旧格式 `🔧 正在调用：A、B…`。
+- `AgentTurnBlock` 内嵌块：[重试/压缩横幅（仅 live）]→[🔧 卡 ×N]→[思考中…（live 且无答案）]→
+  [答案 ChatBubble（showAvatar:false，保留统计/复制）]。
+- **live 回合**步骤取 `agentUiStateProvider` 事件流实时数据；**历史回合**
+  解析自存储 🔧 消息（`parsedToolActivities`；解析为空但活动未结束
+  [500ms 轮询间隙] 时短暂 fallback 事件流）。
 
-**淇锛堝凡瀹炴柦锛?*锛?
-- `tongyilite_jni.cpp` 鍔?**OOM 瀹堝崼**锛氬缓 ctx 鍓嶈 `/proc/meminfo` MemAvailable锛?
-  浼扮畻 GPU 鏉冮噸锛堟寜 GPU 灞傛暟鎶樼畻 + dspark 鑽夌锛? KV锛坣_layer脳kv_dim脳f16锛? 1.5GB 澶撮噺锛?
-  涓嶅 鈫?**鑷姩涓嬭皟 n_ctx**锛涜繛 n_ctx=512 閮芥斁涓嶄笅 鈫?**鎷掔粷鍔犺浇**骞跺湪搴旂敤鍐呮帹鐞嗘棩蹇楁姤
-  "宸叉嫆缁濆姞杞戒互闃叉暣鏈烘鏈?锛堝畞鎷掔粷涓嶆鏈猴級銆傛棩蹇?tag `[oom-guard]`銆?
-- `mul_mv_ptq1_0_f32.cl`锛氬熬琛?*璇?*鎸囬拡 clamp 鍒?`ne01-1`锛堝啓鏈潵鏈?guard銆佽娌℃湁锛?
-  灏捐瓒婄晫璇绘渶鍚庝竴涓?cl_mem 涔嬪鐨勯〉鍙Е鍙?GPU SMMU 鏁呴殰锛屽睘椤烘墜鍫甸浄锛屼笉褰卞搷鏁板€硷級銆?
-- catalog bonsai2锛歚minRamMB` 8192鈫?6384 + 鍔?闇€鈮?6GB鍐呭瓨"鏍囩锛堟敞鎰?minRamMB 浠呭厓鏁版嵁锛?
-  Dart 绔?*浠庢湭寮哄埗鎵ц**锛岀湡姝ｇ殑闂告槸 JNI 瀹堝崼锛夈€?
+**工具活动逐工具独立落库**（`chat_provider._AgentActivitySession` 重写）：
+executing = `🔧 正在调用 X…`、done/failed = `🔧 X ✓/⚠️summary`（`isStreaming` 恒 false，
+实时"执行中"由事件流驱动，存储只负责可回看步骤）；对位更新靠"最早执行中"匹配。
+`stopGeneration`：智能体回合走 `_currentAgent.cancel()`（adapter.cancel 中止 native/API），
+普通聊天仍直接 stop。
 
-**鎺掓煡鏂规硶璁猴紙涓嬫鏁存満姝绘満鐓ф妱锛?*锛?
-1. `dumpsys dropbox | grep -iE 'PRE_WATCHDOG|PANIC|SYSTEM_BOOT'`鈥斺€攑re_watchdog=绯荤粺鍗℃琚嫍鍜紝
-   鏃?PANIC=鍐呮牳娌℃锛涢噸鍚悗渚濈劧鍙煡锛坉ropbox 钀界洏锛夈€?
-2. 杞偍閲岀湅 `/proc/pressure/*` + major faults + `Subject:` 涓変欢濂楀畾"楗挎杩樻槸宕╂"銆?
-3. `getprop sys.boot.reason`銆乣/proc/meminfo` MemTotal 鍏堢畻璐﹀啀璋堜紭鍖栤€斺€?*11GB 鏈哄櫒璺?
-   鈮?GB 鏉冮噸鐨?GPU 鍏ㄨ浇鏂规鏄墿鐞嗕笉鍙兘鐨勶紝涓嶆槸 bug**銆?
-4. 鍒啀鎷?llama-cli 寰€ /data/local/tmp 鎺ㄤ簡鍙嶅姝绘満鈥斺€?*姝绘満鏃剁幇鍦烘棩蹇楀彧鍦?logcat 瀹炴椂鎶撳彇
-   + dropbox 閲屾湁**锛屼簨鍚?`logcat -d` 鎷垮埌鐨勫彧鏈夋柊 boot銆?
+**坑**：`TurnUnit.tools` 曾拿 `pendingTools` 列表引用、`flush` 后 `clear()` 清空它 →
+tools 全空；已改 `[...pendingTools]` 拷贝。`🔧` 后有空格 → `parseToolActivity`
+须在 `substring` 后 `.trim()` 再判断/索引。
+
+**回归（test/agent 全绿 211 项 + 2 skip）**：新增 groupMessages 重排、
+parseToolActivity 解析、AgentTurnBlock 渲染 三组。下次动智能体循环/协议/活动 UI
+先跑 `flutter test test/agent`。**
+
+## 关键教训：大模型 GPU 加载 OOM 会打死整机 system_server（2026-09-27 Bonsai-2 死机案）
+
+> **现象**：Bonsai-2 27B (PTQ1_0, 5.95GB) + OpenCL 在小米 25053RT47C 上"一推理就死机"，
+> 连死三回：手机整机卡死 → Android Watchdog 重启。不是内核 panic、不是 OpenCL 内核 bug、
+> 不是 App 崩溃——**logcat 里永远看不到凶手**（system_server 死时日志随缓冲一起断）。
+
+**铁证**（dropbox `system_server_pre_watchdog`，dumpsys dropbox 可跨重启读）：
+- `/proc/pressure/memory` some avg60=19.3 / full=12.3（严重内存停滞）；kswapd0 5.5% CPU；
+- system_server **11897 次 major faults**；主线程/Binder/display/AM/Power 全部 blocked 30s；
+- Subject: `Blocked in monitor Watchdog$BinderThreadMonitor … for 30s` → 看门狗 reboot。
+
+**根因算账**：该机 **MemTotal 仅 11.0GB**（不是 12！），日常 MemAvailable ≈ 3.5-5GB。
+Adreno UMA：OpenCL/Vulkan 的权重和 KV 都是系统 RAM。bonsai2 需求 =
+权重 5.95GB(GPU) + KV @n_ctx4096 数 GB + mmap 文件工作集 ≈ 8-11GB → 超物理内存一倍 →
+回收风暴饿死 system_server。**一代 Bonsai 27B（3.8GB）恰好压线能活，bonsai2 超线即死**。
+CPU 后端能活的原因：权重是 mmap 文件页（可回收），而 GPU 后端是必 resident 的拷贝。
+
+**修复（已实施）**：
+- `tongyilite_jni.cpp` 加 **OOM 守卫**：建 ctx 前读 `/proc/meminfo` MemAvailable，
+  估算 GPU 权重（按 GPU 层数折算 + dspark 草稿）+ KV（n_layer×kv_dim×f16）+ 1.5GB 头量，
+  不够 → **自动下调 n_ctx**；连 n_ctx=512 都放不下 → **拒绝加载**并在应用内推理日志报
+  "已拒绝加载以防整机死机"（宁拒绝不死机）。日志 tag `[oom-guard]`。
+- `mul_mv_ptq1_0_f32.cl`：尾行**读**指针 clamp 到 `ne01-1`（写本来有 guard、读没有，
+  尾行越界读最后一个 cl_mem 之外的页可触发 GPU SMMU 故障，属顺手堵雷，不影响数值）。
+- catalog bonsai2：`minRamMB` 8192→16384 + 加"需≥16GB内存"标签（注意 minRamMB 仅元数据，
+  Dart 端**从未强制执行**，真正的闸是 JNI 守卫）。
+
+**排查方法论（下次整机死机照抄）**：
+1. `dumpsys dropbox | grep -iE 'PRE_WATCHDOG|PANIC|SYSTEM_BOOT'`——pre_watchdog=系统卡死被狗咬，
+   无 PANIC=内核没死；重启后依然可查（dropbox 落盘）。
+2. 转储里看 `/proc/pressure/*` + major faults + `Subject:` 三件套定"饿死还是崩死"。
+3. `getprop sys.boot.reason`、`/proc/meminfo` MemTotal 先算账再谈优化——**11GB 机器跑
+   ≥6GB 权重的 GPU 全载方案是物理不可能的，不是 bug**。
+4. 别再拿 llama-cli 往 /data/local/tmp 推了反复死机——**死机时现场日志只在 logcat 实时抓取
+   + dropbox 里有**，事后 `logcat -d` 拿到的只有新 boot。
+
+## 关键教训：Adreno OpenCL 编译器把 `half` 当类型关键字 + OpenCL 加载守卫开关（2026-09-28 GEMM 移植案）
+
+> **现象**：带新 GEMM 内核的 APK 用 OpenCL 加载 bonsai2 到一半直接崩（不是死机，是进程 abort）。
+
+**根因**：新内核里 `const int half = kt & 1;`——Adreno CL 编译器把 `half` 保留为类型说明符，
+当变量名用则 **clBuildProgram 失败（err=-11: cannot combine with previous 'int' declaration
+specifier）**，ggml-opencl init abort。NDK 交叉编译能过、桌面 NEO 能编，**都不代表 Adreno 能编**。
+错误只在真机 logcat tag `llama` 里（主 buffer 滚得快：`logcat -c` 后实时抓文件复现；
+二次 SIGABRT "pthread_mutex_lock on destroyed mutex" 是烟幕弹，真凶是首条 compile error）。
+修复 = 改名 `blk_half`；验收 = APK 内 `libggml-opencl.so` 字符串级：`blk_half`>0 且旧代码=0。
+现 `mul_mm_ptq1_0_f32_l4_lm.cl` 未用 `half` 变量名，安全。
+
+**验证铁律**：`.cl` 改动必须过 Adreno 编译门——内核在 ggml-opencl init 时无条件编译，
+**用任意安全小模型（qwen3.5-4b）开 OpenCL 加载一次即全量编译**，logcat 无
+`kernel compile error` 才算过；不许拿 bonsai2 当编译测试（先过守卫/OOM 关）。
+
+**OOM 加载守卫开关（设置 → 推理引擎）**：`oomGuardEnabled` 默认开；关 = 旁路预检+夹逼强行加载，
+日志每次打 `guard=OFF(risk: hard reboot)`——**11.5GB 机型上旁路 bonsai2 必死机，不要建议用户关**。
+链路：model_provider→`setOomGuard`→Kotlin MethodChannel→JNI `nativeSetOomGuardParams`
+（setenv `TONGYILITE_NO_OOM_GUARD` + 预/后余量 MB）；`[oom-guard]` 日志带"旁路=开/关"。
+
+## 约定：parseAndReturn 双参语义（main 原生工具调用 x 思考块清洗 合并版）
+
+`base_engine_adapter.parseAndReturn(StringBuffer rawBuffer, AgentStreamProcessor processor)`：
+优先解析 `processor.cleanText`（去  think/response 思考块、保留工具调用），cleanText 为空
+（测试桩/调用方自持缓冲）回退 rawBuffer；空响应 fail-loud 抛 `emptyResponse`。
+**两条调用线（local/openai adapter）都必须传 `(rawBuffer, processor)` 双参**；
+改成单参会挂 main 线的 `native_tools_test`（它靠双参桩测空响应回退），动前先跑
+`flutter test test/agent`。
