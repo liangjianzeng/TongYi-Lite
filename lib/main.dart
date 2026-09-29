@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:permission_handler/permission_handler.dart';
 
 import 'providers/agent_approval.dart'
     show sandboxApproverProvider, toolPreApproverProvider;
@@ -14,8 +17,22 @@ import 'services/model_manager.dart';
 /// 无法直接使用 BuildContext）。
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
+/// Android 13+ 通知运行时权限请求（fire-and-forget，失败静默）。
+Future<void> _requestNotificationPermission() async {
+  try {
+    await Permission.notification.request();
+  } catch (_) {
+    // 非 Android 平台/插件未就绪：静默跳过（通知仅为可见性增强）。
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Android 13+ 通知运行时权限（审查 P1：清单已声明 POST_NOTIFICATIONS 但
+  // 从未请求——前台推理进度通知对用户不可见）。fire-and-forget：拒绝不阻塞
+  // 启动，推理保活通知只是不可见，功能不受影响。
+  unawaited(_requestNotificationPermission());
 
   // 立即渲染启动画面（LOGO + APP 描述），避免初始化期间出现空白加载页。
   // 模型目录 / 原生引擎的初始化改在启动画面内异步进行（见 AppStartupGate）。

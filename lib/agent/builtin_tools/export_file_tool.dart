@@ -71,7 +71,9 @@ ToolDefinition createExportFileTool() {
         final uri = await DeviceFilesService.instance
             .exportFile(src: src, name: name)
             .timeout(const Duration(seconds: 25));
-        return ToolResult(content: '已导出：$uri（$name，$size 字节）');
+        // 源文件路径一并返回：部分 ROM 对 MediaStore URI 的 ACTION_VIEW
+        // 授权挑剔，UI「打开」按钮凭源文件走 FileProvider 分层回退。
+        return ToolResult(content: '已导出：$uri（$name，$size 字节）源文件：$src');
       } catch (e) {
         return ToolResult.error('导出失败：$e');
       }

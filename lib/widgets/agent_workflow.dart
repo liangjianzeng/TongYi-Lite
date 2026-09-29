@@ -416,27 +416,34 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     }
   }
 
-  /// WP6：export_file 产物目标（content:// URI 或绝对路径）。
+  /// WP6：export_file 产物打开目标。
+  /// primary = content:// URI（exportFile 返回值）；
+  /// fallback = 工作区源文件路径（部分 ROM 对 MediaStore URI 授权挑剔，
+  /// Kotlin 侧凭它走 FileProvider 回退——应用自有文件授权必成）。
   /// live 取 result（工具真实输出），历史取解析后的 summary（落库 🔧 消息）。
-  String? get _exportTarget {
+  (String, String?)? get _exportTargetInfo {
     if (widget.activity.name != 'export_file') return null;
     final candidates = <String>[
       widget.activity.result ?? '',
       widget.activity.arguments['name']?.toString() ?? '',
     ];
     for (final s in candidates) {
-      final m =
+      final primary =
           RegExp(r'(content://\S+|/storage/emulated/\S+)').firstMatch(s);
-      if (m != null) return m.group(1);
+      if (primary == null) continue;
+      final fallback =
+          RegExp(r'源文件：(\S+)').firstMatch(s)?.group(1);
+      return (primary.group(1)!, fallback);
     }
     return null;
   }
 
   Future<void> _openExport() async {
-    final target = _exportTarget;
-    if (target == null) return;
+    final info = _exportTargetInfo;
+    if (info == null) return;
     try {
-      await DeviceFilesService.instance.openFile(target);
+      await DeviceFilesService.instance
+          .openFile(info.$1, fallbackPath: info.$2);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -577,7 +584,7 @@ class _ToolActivityCardState extends State<ToolActivityCard>
                     // WP6：export_file 完成后给「打开」按钮（系统查看器
                     // 直接查阅 html/png/pdf/md 等产物）。
                     if (activity.status != ToolUiStatus.executing &&
-                        _exportTarget != null) ...[
+                        _exportTargetInfo != null) ...[
                       const SizedBox(width: 6),
                       InkWell(
                         onTap: _openExport,

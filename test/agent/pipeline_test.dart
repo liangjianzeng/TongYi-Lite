@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:tongyi_lite/agent/loop/agent.dart';
@@ -9,6 +8,7 @@ import 'package:tongyi_lite/agent/context_eng/compaction.dart';
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
 import 'package:tongyi_lite/agent/tools/guard.dart';
+import '../helpers/fake_llm.dart';
 import 'package:tongyi_lite/agent/tools/pipeline.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -380,31 +380,6 @@ List<Map<String, dynamic>> logToolResults(SessionLog log) {
   return out;
 }
 
-/// 脚本化 LLM 桩（复制 loop_test 的，避免跨文件私有访问）。
-class FakeLlmAdapter implements LlmAdapter {
-  final List<Object> _script;
-  int _index = 0;
-  int calls = 0;
+// 脚本化 LLM 桩已提取到 test/helpers/fake_llm.dart（2026-09-30 审查 P0-3，
+// 原「复制 loop_test」的本地副本删除，全测试共享一份）。
 
-  FakeLlmAdapter(List<Object> script) : _script = script;
-
-  @override
-  Future<LlmResult> generate(GenerateOptions options,
-      {StreamController<String>? onToken, StreamController<String>? onThinking, Completer<void>? cancel}) async {
-    calls++;
-    final item = _index < _script.length ? _script[_index++] : null;
-    if (item == null) {
-      throw LlmFailure(code: LlmFailureCode.timeout,
-          message: 'script exhausted (call #$calls)');
-    }
-    if (item is LlmFailure) throw item;
-    return item as LlmResult;
-  }
-
-  @override
-  void cancel() {}
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
