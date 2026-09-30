@@ -697,7 +697,6 @@ llama.cpp 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_voca
 - [`docs/archive/architecture_design_v2.md`](docs/archive/architecture_design_v2.md) — 架构设计 v2
 - [`docs/archive/backend_benchmark_2026-08-04.md`](docs/archive/backend_benchmark_2026-08-04.md) — 三后端实测专报
 - [`docs/agent_light_design.md`](docs/agent_light_design.md) — Agent Lite 设计
-- [`docs/agent_mode_dsh_replication_design.md`](docs/agent_mode_dsh_replication_design.md) — 智能体引擎架构设计（v0.2.1）
 - [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md) — Adreno 825 Vulkan 修复全记录（v0.2.2 / v0.2.3）
 - [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md) — PTQ1_0 OpenCL 内核实现机制（v0.2.5）
 - [`docs/bonsai2_opencl_oom_2026-09-27.md`](docs/bonsai2_opencl_oom_2026-09-27.md) — Bonsai-2 OpenCL OOM 整机死机定案与守卫
