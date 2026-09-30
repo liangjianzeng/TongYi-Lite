@@ -1214,10 +1214,11 @@ struct InferenceEngine {
 
         // 2. Decode the media file (image OR audio — mtmd_helper auto-detects by
         //    magic bytes: jpg/png/bmp for images, wav/mp3/flac for audio) to a bitmap.
-        //    prism 分支的 mtmd helper 没有 b11028 新增的 init_opt 形参（视频采样选项），
-        //    所以这里保持 3 参调用；若将来回到 b11028 基线，需补回 mtmd_helper_init_opt_default()。
+        //    b11267 的 mtmd helper 有 init_opt 形参（视频采样选项），补回
+        //    mtmd_helper_init_opt_default()。
         struct mtmd_helper_bitmap_wrapper wrap =
-            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false);
+            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false,
+                                              mtmd_helper_init_opt_default());
         if (!wrap.bitmap) {
             LOGW("vision: failed to decode media %s", media_path);
             return "[ERROR: 媒体文件解码失败]";
