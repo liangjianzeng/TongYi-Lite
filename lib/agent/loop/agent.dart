@@ -18,6 +18,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert' show jsonEncode;
 import 'dart:math' as math;
 
 import '../llm/adapter.dart';
@@ -173,9 +174,14 @@ class ReactLoopAgent {
         _compaction = compaction ?? const NoCompactionPlugin() {
     // 系统提示以 system/message 节点入 log（turn 0 前一次性，幂等）。
     // Phase 5：注入 <available_skills>（skills）+ workspace:guidance（AGENTS.md）。
+    // load_skill 仅 API 档注册：本地档注入文本不得提及 load_skill（教唆调用
+    // 不存在的工具），按注册表实际可见性门控。
     String systemContent = _systemPrompt;
     if (_skills != null) {
-      final skillText = _skills.availableSkillsText();
+      final loadSkillVisible =
+          _registry.visibleFor(_modelId).any((t) => t.name == 'load_skill');
+      final skillText =
+          _skills.availableSkillsText(loadSkillAvailable: loadSkillVisible);
       if (skillText.trim().isNotEmpty) {
         systemContent += '\n\n$skillText';
       }
@@ -249,6 +255,9 @@ class ReactLoopAgent {
     _turnAnswer = '';
     _turnError = null;
     _lastStepHadToolResults = false;
+    // 回合内重复调用去重（2026-09-30 定案）：端侧 2B 模型拿到结果后常原样
+    // 重发同一调用不收敛。签名 → 首次结果缓存，回合开始时清空。
+    _turnToolCallCache.clear();
     // imagePath 入事件（store.dart importFromMessages 同款键名）：API 路线
     // 无状态，每个 step 重放历史时都要把图片重发；不入 log 则后续 step 丢图。
     final userSeq = _session.append(
@@ -561,11 +570,11 @@ class ReactLoopAgent {
     return const FailureDecision(FailureDecisionKind.giveUp);
   }
 
-  /// 执行一轮工具调用（tool/call → 执行 → tool/result）。
-  ///
-  /// Phase 2：走六段流水线 [ToolPipeline]；`allowParallelTools` 时按
-  /// [config.maxParallel] 分批并发执行，否则串行。日志/ UI 始终按模型
-  /// 调用顺序落 tool/call、tool/result（保持模型视角一致）。
+  /// 回合内重复调用去重缓存：`name+args` 签名 → 首次 ToolResult。
+  /// kick 时清空（每回合独立）。重复调用不再真执行，回缓存结果 +
+  /// 收敛提示，逼模型直接回答。
+  final Map<String, ToolResult> _turnToolCallCache = {};
+
   /// 单次工具调用安全包装（流水线异常不逃逸，转 ToolResult）。
   Future<ToolResult> _safeExecute(ToolCall call) async {
     try {
@@ -575,6 +584,20 @@ class ReactLoopAgent {
     }
   }
 
+  /// 工具调用签名（name + 规范化参数 JSON）；参数不可编码时退化 name。
+  static String _toolCallSignature(ToolCall call) {
+    try {
+      return '${call.name}#${jsonEncode(call.arguments ?? const {})}';
+    } catch (_) {
+      return '${call.name}#';
+    }
+  }
+
+  /// 执行一轮工具调用（tool/call → 执行 → tool/result）。
+  ///
+  /// Phase 2：走六段流水线 [ToolPipeline]；`allowParallelTools` 时按
+  /// [config.maxParallel] 分批并发执行，否则串行。日志/ UI 始终按模型
+  /// 调用顺序落 tool/call、tool/result（保持模型视角一致）。
   Future<void> _executeToolCalls(
     int turn,
     int step,
@@ -597,8 +620,34 @@ class ReactLoopAgent {
       }
     }
 
-    // ---- 2. 执行（并行 / 串行）----
-    final results = await _runCalls(turn, step, calls);
+    // ---- 2. 执行：重复调用回缓存（不再真执行），只执行首次出现的调用 ----
+    final results = List<ToolResult>.filled(calls.length, ToolResult(content: ''));
+    final pendingIndex = <int>[];
+    for (var i = 0; i < calls.length; i++) {
+      final sig = _toolCallSignature(calls[i]);
+      final cached = _turnToolCallCache[sig];
+      if (cached != null) {
+        results[i] = ToolResult(
+          content: '${cached.content}\n'
+              '[重复调用提示：本回合已执行过完全相同的调用，以上即当时结果。'
+              '请直接依据已有结果回答用户，不要再重复调用工具]',
+          isError: cached.isError,
+        );
+      } else {
+        pendingIndex.add(i);
+      }
+    }
+    if (pendingIndex.isNotEmpty) {
+      final freshCalls = [for (final i in pendingIndex) calls[i]];
+      final freshResults = await _runCalls(turn, step, freshCalls);
+      for (var j = 0; j < pendingIndex.length; j++) {
+        final i = pendingIndex[j];
+        results[i] = freshResults[j];
+        _turnToolCallCache[_toolCallSignature(calls[i])] = freshResults[j];
+      }
+    }
+
+    // ---- 3. 按模型顺序记 tool/result + 触发 done/failed ----
 
     // ---- 3. 按模型顺序记 tool/result + 触发 done/failed ----
     for (var i = 0; i < calls.length; i++) {

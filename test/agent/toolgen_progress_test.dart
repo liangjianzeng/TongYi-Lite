@@ -33,4 +33,22 @@ void main() {
     p.add('这是普通回答，不含花括号，不进试探态。');
     expect(p.toolGenActive, isFalse);
   });
+
+  test('MiniCPM5 特殊标记：可见流不漏标记，clean 归一化为 <tool_call>', () {
+    final p = AgentStreamProcessor();
+    p.add('好的，我来查时间。<|tool_call_start|>get_time<|tool_call_end|>');
+    expect(p.visibleText, contains('好的，我来查时间'));
+    expect(p.visibleText, isNot(contains('tool_call')));
+    expect(p.cleanText, contains('<tool_call>get_time</tool_call>'));
+    expect(p.toolXmlBlocks.single, '<tool_call>get_time</tool_call>');
+  });
+
+  test('MiniCPM5 特殊标记内嵌 JSON：clean 归一化后收块完整', () {
+    final p = AgentStreamProcessor();
+    p.add('<|tool_call_start|>{"name": "get_weather", '
+        '"arguments": {"city": "南宁"}}<|tool_call_end|>');
+    expect(p.visibleText, isNot(contains('tool_call')));
+    expect(p.cleanText, contains('<tool_call>{"name"'));
+    expect(p.toolXmlBlocks.single, contains('</tool_call>'));
+  });
 }

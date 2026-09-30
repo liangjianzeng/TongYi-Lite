@@ -141,7 +141,22 @@ class AgentStreamProcessor {
     if (_xmlTool != null) {
       _xmlTool!.write(ch);
       clean.write(ch);
-      if (_xmlTool!.toString().endsWith('</tool_call>')) {
+      final buf = _xmlTool!.toString();
+      // MiniCPM5 特殊标记闭合 → 归一化写入 </tool_call> 再收块。
+      const miniEnd = '<|tool_call_end|>';
+      if (buf.endsWith(miniEnd)) {
+        _xmlTool!
+          ..clear()
+          ..write(buf.substring(0, buf.length - miniEnd.length) + '</tool_call>');
+        final c = clean.toString();
+        clean
+          ..clear()
+          ..write(c.substring(0, c.length - miniEnd.length) + '</tool_call>');
+        toolXmlBlocks.add(_xmlTool!.toString());
+        _xmlTool = null;
+        return;
+      }
+      if (buf.endsWith('</tool_call>')) {
         toolXmlBlocks.add(_xmlTool!.toString());
         _xmlTool = null;
       }
@@ -177,10 +192,16 @@ class AgentStreamProcessor {
     // XML 工具块开始：`<tool_call>`（Spark 训练分布）。
     const xmlTag = '<tool_call>';
     if (v.endsWith(xmlTag)) {
-      visible
-        ..clear()
-        ..write(v.substring(0, v.length - xmlTag.length));
-      _xmlTool = StringBuffer()..write(xmlTag);
+      _enterXmlTool(v, xmlTag, xmlTag);
+      return;
+    }
+
+    // MiniCPM5 系特殊 token 形式（原生层 special=true 渲染后到达此处）：
+    // `<|tool_call_start|>` → 归一化为 `<tool_call>`，`<|tool_call_end|>` 同理，
+    // 下游解析与隐藏逻辑统一走 XML 工具块路径（2026-09-30 真机定案）。
+    const miniTag = '<|tool_call_start|>';
+    if (v.endsWith(miniTag)) {
+      _enterXmlTool(v, miniTag, xmlTag);
       return;
     }
 
@@ -229,6 +250,23 @@ class AgentStreamProcessor {
     if (v.length >= qwenTag.length && v.endsWith(qwenTag)) {
       _enterThink(_ThinkKind.qwen, v, qwenTag);
     }
+  }
+
+  /// 进入 XML 工具块缓冲：从 visible/clean 回退掉触发标记 [marker]，
+  /// 并以规范化形式 [canonical]（如 `<tool_call>`）开启缓冲。
+  void _enterXmlTool(String v, String marker, String canonical) {
+    visible
+      ..clear()
+      ..write(v.substring(0, v.length - marker.length));
+    // clean 同步回退标记，再写入规范化开标签（工具块保留在 clean 里供协议解析）。
+    final c = clean.toString();
+    if (c.length >= marker.length && c.endsWith(marker)) {
+      clean
+        ..clear()
+        ..write(c.substring(0, c.length - marker.length));
+    }
+    clean.write(canonical);
+    _xmlTool = StringBuffer()..write(canonical);
   }
 
   /// 进入思考态：把已写入 visible 的触发标签回退掉（后续字符全丢弃进思考缓冲）。

@@ -44,6 +44,8 @@ enum LlmFailureCode {
   noAdapter,             // 无可用适配器
   emptyResponse,         // 响应为空
   toolCallTruncated,     // 工具调用块生成到一半被截断（token 预算不足）
+  toolCallSyntax,        // 工具调用块语法坏到容错解析也解不开（如 <tool_call><名</tool_call>）；
+                         // 可重试：重新采样 + 失败反思注记常能产出正确格式
   modelNotReady,         // 本地引擎未加载模型（isLoaded=false）；重试无益
   thinkingOverflow,      // 思考失控：超长未闭合，已主动中止（确定性失败，重试无意义）
   unknown,
