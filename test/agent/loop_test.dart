@@ -150,6 +150,35 @@ void main() {
     expect(_findData(agent.session, kEventAssistantAttempt), isNotNull);
   });
 
+  test('回合内重复调用：同名同参只真执行一次，重复回缓存 + 收敛提示', () async {
+    final call = ToolCall(
+        id: 'call_1',
+        name: 'get_weather',
+        arguments: {'city': 'Beijing'});
+    final dup = ToolCall(
+        id: 'call_2',
+        name: 'get_weather',
+        arguments: {'city': 'Beijing'});
+    final fake = FakeLlmAdapter([
+      LlmResult(text: '', toolCalls: [call]),
+      LlmResult(text: '', toolCalls: [dup]),
+      LlmResult(text: '北京今天晴，25C', toolCalls: const []),
+    ]);
+    final agent = _agent(fake);
+
+    final reason = await agent.kick('北京天气？');
+
+    expect(reason.kind, TurnEndReasonKind.completed);
+    // 两次工具调用都落 tool/result（模型视角一致），但重复调用不真执行，
+    // 回填内容 = 首次结果 + 收敛提示。
+    final results = agent.session.rawEvents
+        .where((e) => e.type == kEventToolResult)
+        .toList();
+    expect(results.length, 2);
+    expect(results.last.data['content'], contains('重复调用提示'));
+    expect(results.last.data['content'], contains('Beijing: sunny 25C'));
+  });
+
   test('连续失败超预算 → 终态 error（不无限重试）', () async {
     final fake = FakeLlmAdapter(
         [

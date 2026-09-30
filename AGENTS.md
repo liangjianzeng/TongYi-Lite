@@ -696,3 +696,68 @@ ec2d…02fd）与 `minicpm5-2b-q8_0`（2.5GB，sha256 c541…b078），ModelScop
 app-release.apk 53789540 B；字符串级验收过（debug kernel/release libapp.so
 `对话文字大小`/`执行过程` 命中；APK 内 models_catalog.json `minicpm5-2b-q4_k_m`
 命中、`agents-a1` 为 0）。
+
+## 2026-09-30 补丁：附件面板死链 + 本地模型"回答漏 tool 标签"根治
+
+> 用户两连报：① 附件/拍照/相册上传全坏 + 面板丑；② 本地模型智能体任务
+> 全部失效，回答直接显示 `<tool_call><get_time</tool_call>` 这类原始标签。
+
+**① 附件面板死链（真 bug）**：`_showAttachSheet` 把 `showModalBottomSheet`
+的返回值丢弃（泛型写成 `void`）、靠一个从未赋值的 `_pendingAttachSource`
+分发 → 选完任何项都只关面板、什么都不发生。修复 = 直接消费
+`Future<_AttachSource?>` 返回值；面板重做样式（圆角+把手+着色图标容器+
+副标题，`_AttachOption`）。
+**② tool 标签泄漏机制（真机 uiautomator 抓到实锤）**：2B 级模型输出
+`<tool_call><get_time</tool_call>`（名字前多一个杂散 `<`）→
+`_extractXmlToolCall` 名字正则 `[^<\s]+` 匹配失败 → 三层容错全跳过 →
+"优雅降级为普通文本"把整段原始标签当回答漏给用户，turn 还显示"完成"。
+三层修复：
+- **名字提取容错**：剥掉名字前 `<`/`>`/`/`/空白再提取（守卫 arg_key/
+  arg_value/tool_call 假名）；`</tool_call` 漏 `>` 也能定位块尾；
+  截断判定加宽：含 `</tool_call`（无 `>`）不算截断，交回 XML 容错。
+- **防泄漏兜底 `_noLeakFallback`**：所有容错都解不开但文本含
+  `<tool_call>` 标记 → 抛新失败码 `LlmFailureCode.toolCallSyntax`
+  （可重试，走"上次尝试失败"反思注记），**绝不把原始标签当回答**。
+- **load_skill 教唆门控**：`availableSkillsText({loadSkillAvailable})`，
+  本地档（load_skill 未注册）注入文本不再教唆调用该工具。
+
+排障方法论：真机复现别只盯 logcat（环形缓冲会滚掉）——`uiautomator dump`
+的可见文本直接能抓到泄漏实锤；消息库 `run-as ... cat databases/tongyilite.db`
+拉回本地 sqlite 查最近回合。adb shell 路径参数在 Git Bash 会 mangling，
+`export MSYS_NO_PATHCONV=1`。
+
+回归：test/agent+providers+services **340 项+2 skip 全绿**（协议新增 3 用例：
+杂散 `<` 容错/漏 `>` 闭合/toolCallSyntax；phase5 新增 load_skill 门控用例）。
+debug APK 13:5x 重打包已覆盖安装真机（install -r -t，设备弹窗需手动允许）。
+
+## 2026-09-30 终修：MiniCPM5 工具标记是特殊 token，被原生反解码丢弃（root cause 定案）
+
+> 用户三报"本地模型智能体还是不行"。真机 DB 取证（exec-out run-as cat 免
+> CRLF 翻译）看到 MiniCPM5 回答是 ` name="get_weather">` 这种**掐头碎片**——
+> `<function`/`<parameter`/`<tool_call` 前缀全消失。
+
+**根因（实锤）**：MiniCPM5 系的工具调用标记是**特殊 token**，而
+`tongyilite_jni.cpp` 生成循环 `llama_token_to_piece(..., special=false)`
+把特殊 token 渲染为空 → Dart 侧永远收不到 `<tool_call>` 骨架，只剩普通
+文本碎片 ` name="..."`；任何提示词格式/解析器容错都救不了（信息已在
+原生层丢失）。此前 qwen3.5 漏 `<tool_call><get_time</tool_call>` 是另一
+形态（tag 是普通 token 能到达 Dart，但格式坏+解析不容错）。
+
+**修复（原生+协议双层）**：
+- **原生**：emit_token `special=true` 渲染特殊 token；plain/MTP 两循环
+  停止条件补 `llama_vocab_is_eog` 全集判定（eos 单 id 之外，
+  `<im_end>`/`<end_of_turn>` 等必须挡在 emit 之前，防漏进正文）。
+- **协议**：`_extractFunctionToolCall` 支持属性式
+  `<function name=…><parameter name=…>…</function>`（tool_call 包裹与
+  闭合均可缺省）；`_extractXmlToolCall` 假名守卫加 function/parameter
+  （否则修复后 name 提取会误判成名为 "function" 的工具）；防泄漏正则
+  扩到 function/parameter。
+
+**排障工具链沉淀**：adb shell 输出有 CRLF 翻译（文件变大且 sqlite 损坏），
+用 `adb exec-out`；Git Bash 路径 mangling 用 `MSYS_NO_PATHCONV=1`；python
+读 /tmp 要 `cygpath -w` 对齐；live DB 快照可能撞上写中状态，多拉两次。
+验证原生改动编入：APK 内 libtongyilite_jni.so 搜新日志串（如 `EOS/EOG`）。
+
+回归：342 项+2 skip 全绿（新增属性式格式 2 用例）。debug APK 14:28 重打包
+（libtongyilite_jni.so 已含改动，字符串级验证过），设备断开未装——重连后
+`adb install -r -t`。

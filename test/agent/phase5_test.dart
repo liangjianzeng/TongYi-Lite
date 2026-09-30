@@ -110,12 +110,20 @@ void main() {
 
     test('availableSkillsText 含 <available_skills> 与 load_skill 链路提示', () {
       final p = SkillProvider();
-      final text = p.availableSkillsText();
+      final text = p.availableSkillsText(loadSkillAvailable: true);
       expect(text.trim(), startsWith('<available_skills>'));
       expect(text, contains('</available_skills>'));
       expect(text, contains('web-research'));
       // WP2c：目录之后给出"目录 → load_skill 加载全文"链路说明。
       expect(text, contains('load_skill'));
+    });
+
+    test('load_skill 未注册时注入文本不教唆调用 load_skill（本地档定案）', () {
+      final p = SkillProvider();
+      final text = p.availableSkillsText(loadSkillAvailable: false);
+      expect(text.trim(), startsWith('<available_skills>'));
+      expect(text, contains('web-research'));
+      expect(text, isNot(contains('load_skill')));
     });
 
     test('skillText 含 <skill>', () {

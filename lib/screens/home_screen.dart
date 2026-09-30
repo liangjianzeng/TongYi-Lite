@@ -57,8 +57,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   // 附件面板的暂存选择（bottom sheet 回调里不能直接 await pick，
   // 先落字段、pop 后统一分发）。
-  _AttachSource _pendingAttachSource = _AttachSource.none;
-
   // 会话批量选择状态
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
@@ -281,37 +279,79 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 统一附件入口：图片（拍照/相册）与文件附件（智能体模式）合并为一个
   /// 「+」按钮，点按弹出选择面板——替代此前输入框右侧「图片」+ 前置
   /// 「附件」两个独立按钮，收窄消息发送区。
+  ///
+  /// ⚠️ 此前实现把 `showModalBottomSheet<void>` 的返回值丢弃、靠一个从未
+  /// 赋值的暂存字段分发 → 选完什么都不会发生（"附件/拍照上传全坏"根因）。
+  /// 现改为直接消费面板返回的 [_AttachSource]。
   Future<void> _showAttachSheet() async {
     final agentOn = ref.read(settingsProvider).agentEnabled;
-    await showModalBottomSheet<void>(
+    final theme = Theme.of(context);
+    final source = await showModalBottomSheet<_AttachSource>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt_outlined),
-              title: const Text('拍照'),
-              onTap: () => Navigator.pop(ctx, _AttachSource.camera),
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surface,
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 拖拽把手 + 标题
+                Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 12, bottom: 6),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('添加附件',
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                _AttachOption(
+                  icon: Icons.photo_camera_outlined,
+                  tint: Colors.blue,
+                  title: '拍照',
+                  subtitle: '拍摄一张照片发送（≤10 张）',
+                  onTap: () => Navigator.pop(ctx, _AttachSource.camera),
+                ),
+                _AttachOption(
+                  icon: Icons.photo_library_outlined,
+                  tint: Colors.green,
+                  title: '从相册选择',
+                  subtitle: '可多选图片，一次最多 10 张',
+                  onTap: () => Navigator.pop(ctx, _AttachSource.gallery),
+                ),
+                if (agentOn)
+                  _AttachOption(
+                    icon: Icons.attach_file,
+                    tint: Colors.deepOrange,
+                    title: '文件',
+                    subtitle:
+                        '智能体附件（≤$kMaxAttachments 个）：docx / xlsx / pptx / txt / md / csv 等',
+                    onTap: () => Navigator.pop(ctx, _AttachSource.file),
+                  ),
+                const SizedBox(height: 4),
+              ],
             ),
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined),
-              title: const Text('相册（可多选，≤10 张）'),
-              onTap: () => Navigator.pop(ctx, _AttachSource.gallery),
-            ),
-            if (agentOn)
-              ListTile(
-                leading: const Icon(Icons.attach_file),
-                title: Text(
-                    '文件（智能体附件，≤$kMaxAttachments 个，docx/xlsx/pptx/txt 等）'),
-                onTap: () => Navigator.pop(ctx, _AttachSource.file),
-              ),
-          ],
+          ),
         ),
       ),
     );
-    if (!mounted) return;
-    switch (_pendingAttachSource) {
+    if (!mounted || source == null) return;
+    switch (source) {
       case _AttachSource.camera:
         await _pickImage(ImageSource.camera);
         break;
@@ -324,7 +364,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       case _AttachSource.none:
         break;
     }
-    _pendingAttachSource = _AttachSource.none;
   }
 
   /// 选图后提示：若当前实际路线不支持视觉，图片仅展示、不会发给模型。
@@ -1389,6 +1428,75 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
 /// 统一附件面板的选项（拍照 / 相册 / 文件）。
 enum _AttachSource { none, camera, gallery, file }
+
+/// 附件面板的单行选项：着色圆角图标 + 标题 + 副标题，整行水波纹点按。
+class _AttachOption extends StatelessWidget {
+  final IconData icon;
+  final Color tint;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _AttachOption({
+    required this.icon,
+    required this.tint,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: tint.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, size: 22, color: tint),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 1),
+                      Text(subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right,
+                    size: 18, color: theme.colorScheme.onSurfaceVariant),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 // =========================================================================
 // Model status bottom sheet widget (outside the State class)

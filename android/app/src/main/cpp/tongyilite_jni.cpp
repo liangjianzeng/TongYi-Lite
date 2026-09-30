@@ -1836,8 +1836,13 @@ struct InferenceEngine {
             // false if the UI callback asked to stop (user pressed stop).
             auto emit_token = [&](llama_token tok) -> bool {
                 char buf[256];
-                // special=false: skip control/special tokens (render nothing).
-                int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, false);
+                // special=true（2026-09-30）：MiniCPM5/Hunyuan 系工具调用标记
+                // （<tool_call>/<function>/<parameter>）是特殊 token，此前
+                // special=false 整段渲染为空 → Dart 侧只收到 " name=..." 碎片，
+                // 工具协议解析永远失败（真机实锤）。EOS/EOG 停止在调用方先行
+                // 判定（plain 循环 new_token==eos / EOG 检查，MTP 循环 hit_eos），
+                // 不会走到这里。
+                int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, true);
                 if (n <= 0) return true;
                 gen_tokens.push_back(tok);   // for the next turn's incremental prefill
                 gen_utf8_buf.append(buf, n);
@@ -2012,7 +2017,7 @@ struct InferenceEngine {
                     bool hit_eos = false;
                     for (size_t k = 0; k < ids.size(); ++k) {
                         const llama_token tok = ids[k];
-                        if (tok == eos) { hit_eos = true; break; }
+                        if (tok == eos || llama_vocab_is_eog(vocab, tok)) { hit_eos = true; break; }
                         if (n_gen >= max_tokens) break;
                         if (n_gen < 6) {
                             char pbuf[64];
@@ -2112,8 +2117,11 @@ struct InferenceEngine {
                     LOGI("[DIAG] gen#%d token=%d piece_len=%d piece_hex: %s", n_gen, new_token, pn, phex.c_str());
                 }
 
-                if (new_token == eos) {
-                    LOGI("EOS at gen=%d", n_gen);
+                if (new_token == eos || llama_vocab_is_eog(vocab, new_token)) {
+                    // EOG 全集判定（2026-09-30，配合 emit_token special=true）：
+                    // 特殊 token 现在会渲染为可见文本，必须把 <im_end>/<end_of_turn>
+                    // 等 EOG 家族全部挡在 emit 之前，否则会漏进回答正文。
+                    LOGI("EOS/EOG at gen=%d", n_gen);
                     break;
                 }
 

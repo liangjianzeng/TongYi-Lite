@@ -78,7 +78,10 @@ final class SkillProvider {
   /// ...
   /// </available_skills>
   /// ```
-  String availableSkillsText() {
+  /// [loadSkillAvailable] = load_skill 工具是否已注册（仅 API 档注册）。
+  /// 未注册时**不得**在提示里教唆模型调用 load_skill——否则本地档模型被
+  /// 指向一个不存在的工具，只会产出无效调用（2026-09-30 真机修正）。
+  String availableSkillsText({bool loadSkillAvailable = false}) {
     if (_skills.isEmpty) return '';
     final sb = StringBuffer();
     sb.writeln('<available_skills>');
@@ -88,8 +91,10 @@ final class SkillProvider {
     }
     sb.writeln('</available_skills>');
     // WP2c：目录 → 加载链路说明（正文此前无任何获取途径）。
-    sb.writeln('任务匹配某技能的 whenToUse 时，先调用 load_skill 工具'
-        '（name=技能名）获取完整指引，再按指引执行。');
+    if (loadSkillAvailable) {
+      sb.writeln('任务匹配某技能的 whenToUse 时，先调用 load_skill 工具'
+          '（name=技能名）获取完整指引，再按指引执行。');
+    }
     return sb.toString();
   }
 

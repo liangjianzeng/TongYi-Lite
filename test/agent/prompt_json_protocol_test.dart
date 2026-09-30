@@ -41,6 +41,86 @@ void main() {
       expect(outcome.toolCalls.single.name, 'get_time');
     });
 
+    test('XML 名字前混入杂散 < 仍容错解析（真机 <tool_call><get_time</tool_call> 定案）',
+        () async {
+      const text = '<tool_call><get_time</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+    });
+
+    test('闭合标签漏 > 也能定位块尾', () async {
+      const text = '<tool_call>get_time</tool_call';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+    });
+
+    test('想调工具但格式坏到解不开 → 抛 toolCallSyntax（不再漏标签当回答）',
+        () async {
+      // 无工具名、直接进参数区 → 容错也解不开；旧行为把整段原始标签
+      // 当普通回答漏给用户（"返回都是tool标签"），现在进可重试失败瀑布。
+      const text = '<tool_call><arg_key>query<arg_value>今天天气</tool_call>';
+      await expectLater(
+        protocol.parseStream(tokens(text)),
+        throwsA(isA<LlmFailure>()
+            .having((f) => f.code, 'code', LlmFailureCode.toolCallSyntax)),
+      );
+    });
+
+    test('属性式 <function name=…><parameter name=…>（MiniCPM5 原生格式）',
+        () async {
+      const text = '<tool_call><function name="get_weather">'
+          '<parameter name="city">Nanning</parameter>'
+          '</function></tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_weather');
+      expect(outcome.toolCalls.single.arguments?['city'], 'Nanning');
+    });
+
+    test('属性式带回答前缀：前缀保留、块剔除', () async {
+      const text = '我查一下。\n<function name="get_time"></function>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+      expect(outcome.text, contains('我查一下'));
+      expect(outcome.text, isNot(contains('function')));
+    });
+
+    test('MiniCPM5 特殊标记 <|tool_call_start|>…<|tool_call_end|> 内嵌 JSON',
+        () async {
+      const text = '<|tool_call_start|>'
+          '{"name": "get_weather", "arguments": {"city": "南宁"}}'
+          '<|tool_call_end|>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_weather');
+      expect(outcome.toolCalls.single.arguments?['city'], '南宁');
+      // 标记不残留在可见回答里。
+      expect(outcome.text, isNot(contains('tool_call')));
+    });
+
+    test('MiniCPM5 特殊标记无参数调用', () async {
+      const text = '<|tool_call_start|>get_time<|tool_call_end|>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+    });
+
+    test('纯文本回答不受防泄漏兜底影响', () async {
+      const text = '你好！有什么我可以帮你的吗？';
+      final outcome = await protocol.parseStream(tokens(text));
+      expect(outcome.hasToolCalls, isFalse);
+      expect(outcome.text, text);
+    });
+
     test('XML 未闭合且无任何收尾 → 判截断（抛 toolCallTruncated，不再静默）',
         () async {
       // 旧行为：整段当普通文本 → turn 静默"完成"，任务半途而废无提示。
