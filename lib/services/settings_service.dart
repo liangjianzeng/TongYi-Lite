@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../models/agent_persona.dart';
 import '../models/api_model.dart';
 
 /// 推理引擎相关的用户设置（GPU 加速开??+ 卸载层数 + 后端选择 + 上下文大小）??
@@ -236,6 +237,14 @@ class InferenceSettings {
   /// 覆盖全局默认值（模型目录 agentDefaults 合并到用户设置）??
   final Map<String, Map<String, dynamic>> agentByModel;
 
+  /// 用户自定义智能体人格列表（标准人格恒存在、不落盘，见
+  /// [kStandardPersonaId]）。每个人格 = 名字 + 人设提示词，注入系统提示词。
+  final List<AgentPersona> agentPersonas;
+
+  /// 当前激活的人格 id。标准人格 = [kStandardPersonaId]（默认）；
+  /// 指向的自定义人格不存在时回落标准人格。
+  final String activePersonaId;
+
   // ---- 联网搜索默认值（保持中性：不预置任何个人实例）----
   // 地址默认留空 = 未配置。真机上没有可用实例时，provider 会给??请先??
   // 设置 ??联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己??
@@ -314,11 +323,14 @@ class InferenceSettings {
     this.oomPostHeadroomMb = 1536,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
+    List<AgentPersona>? agentPersonas,
+    this.activePersonaId = kStandardPersonaId,
   })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
-        agentByModel = agentByModel ?? const {};
+        agentByModel = agentByModel ?? const {},
+        agentPersonas = agentPersonas ?? const [];
 
   /// 便捷读取：某个模型是否启??MTP（未配置视为关闭）??
   bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
@@ -336,6 +348,17 @@ class InferenceSettings {
       agentByModel[modelId];
 
   /// 便捷读取：当前激活的 API 模型配置；未激??不存在返??null??
+  /// 便捷读取：当前激活的智能体人格。
+  /// 标准人格返回 null（调用方按“无人格附加指令”处理）；
+  /// 激活 id 指向的自定义人格不存在（已删除/损坏）时回落标准人格。
+  AgentPersona? activePersona() {
+    if (activePersonaId == kStandardPersonaId) return null;
+    for (final persona in agentPersonas) {
+      if (persona.id == activePersonaId) return persona;
+    }
+    return null;
+  }
+
   ApiModelConfig? activeApiModel() {
     if (activeApiModelId == null) return null;
     for (final cfg in apiModels) {
@@ -425,8 +448,11 @@ class InferenceSettings {
       bool? oomGuardEnabled,
       int? oomPreHeadroomMb,
       int? oomPostHeadroomMb,
-      Map<String, List<String>>? agentToolsByModel,
-      Map<String, Map<String, dynamic>>? agentByModel}) {
+    Map<String, List<String>>? agentToolsByModel,
+    Map<String, Map<String, dynamic>>? agentByModel,
+    List<AgentPersona>? agentPersonas,
+    String? activePersonaId,
+  }) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
       gpuLayers: gpuLayers ?? this.gpuLayers,
@@ -506,6 +532,8 @@ class InferenceSettings {
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
+      agentPersonas: agentPersonas ?? this.agentPersonas,
+      activePersonaId: activePersonaId ?? this.activePersonaId,
     );
   }
 
@@ -568,6 +596,8 @@ class InferenceSettings {
         'oomPostHeadroomMb': oomPostHeadroomMb,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
+        'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
+        'activePersonaId': activePersonaId,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -662,7 +692,30 @@ class InferenceSettings {
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
+      agentPersonas: _parsePersonas(json['agentPersonas']),
+      activePersonaId: json['activePersonaId'] as String? ?? kStandardPersonaId,
     );
+  }
+
+  /// 解析自定义人格列表；格式非法时返回空列表（不崩，回落标准人格）。
+  static List<AgentPersona> _parsePersonas(Object? raw) {
+    if (raw is! List) return const [];
+    final list = <AgentPersona>[];
+    for (final e in raw) {
+      if (e is Map<String, dynamic>) {
+        final persona = AgentPersona.fromJson(e);
+        if (persona.id.isNotEmpty && persona.name.isNotEmpty) {
+          list.add(persona);
+        }
+      } else if (e is Map) {
+        final persona =
+            AgentPersona.fromJson(Map<String, dynamic>.from(e));
+        if (persona.id.isNotEmpty && persona.name.isNotEmpty) {
+          list.add(persona);
+        }
+      }
+    }
+    return list;
   }
 
   /// 解析按模型工具清单：`{modelId: [toolName]}`。格式非法时返回??map（不崩）??
