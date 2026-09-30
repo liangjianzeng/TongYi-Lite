@@ -385,6 +385,26 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
 ///
 /// 折叠态压到**最低可见文字高度**（单行 ~22px）：状态图标 + 工具名 +
 /// 参数摘要；点按行内展开完整参数 JSON + 结果。
+/// export_file 工具结果 → 打开目标（content URI/绝对路径 + 源文件回退）。
+/// 顶层函数：工具卡「打开」按钮与回合产物汇总卡共用同一提取规则。
+({String primary, String? fallback})? exportTargetOf({
+  required String toolName,
+  String? result,
+  Map<String, dynamic> arguments = const {},
+}) {
+  if (toolName != 'export_file') return null;
+  final candidates = [result ?? '', arguments['name']?.toString() ?? ''];
+  for (final s in candidates) {
+    final m = RegExp(r'(content://\S+|/storage/emulated/\S+)').firstMatch(s);
+    if (m == null) continue;
+    return (
+      primary: m.group(1)!,
+      fallback: RegExp(r'源文件：(\S+)').firstMatch(s)?.group(1),
+    );
+  }
+  return null;
+}
+
 class ToolActivityCard extends StatefulWidget {
   final ToolActivityUi activity;
   const ToolActivityCard({super.key, required this.activity});
@@ -416,34 +436,21 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     }
   }
 
-  /// WP6：export_file 产物打开目标。
-  /// primary = content:// URI（exportFile 返回值）；
-  /// fallback = 工作区源文件路径（部分 ROM 对 MediaStore URI 授权挑剔，
-  /// Kotlin 侧凭它走 FileProvider 回退——应用自有文件授权必成）。
+  /// WP6：export_file 产物打开目标（复用顶层 [exportTargetOf]）。
   /// live 取 result（工具真实输出），历史取解析后的 summary（落库 🔧 消息）。
-  (String, String?)? get _exportTargetInfo {
-    if (widget.activity.name != 'export_file') return null;
-    final candidates = <String>[
-      widget.activity.result ?? '',
-      widget.activity.arguments['name']?.toString() ?? '',
-    ];
-    for (final s in candidates) {
-      final primary =
-          RegExp(r'(content://\S+|/storage/emulated/\S+)').firstMatch(s);
-      if (primary == null) continue;
-      final fallback =
-          RegExp(r'源文件：(\S+)').firstMatch(s)?.group(1);
-      return (primary.group(1)!, fallback);
-    }
-    return null;
-  }
+  ({String primary, String? fallback})? get _exportTargetInfo =>
+      exportTargetOf(
+        toolName: widget.activity.name,
+        result: widget.activity.result,
+        arguments: widget.activity.arguments,
+      );
 
   Future<void> _openExport() async {
     final info = _exportTargetInfo;
     if (info == null) return;
     try {
       await DeviceFilesService.instance
-          .openFile(info.$1, fallbackPath: info.$2);
+          .openFile(info.primary, fallbackPath: info.fallback);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -875,6 +882,33 @@ class AgentTurnBlock extends StatelessWidget {
   bool get _answerPending =>
       isLive && ui.running && (answer == null || answer!.content.trim().isEmpty);
 
+  /// WP-C：本轮产物汇总（export_file 成功项，按 primary 去重）。
+  /// live 取事件流工具卡，历史取落库 🔧 消息解析结果（steps 已统一类型）。
+  List<ArtifactEntry> get _artifacts {
+    final out = <ArtifactEntry>[];
+    final seen = <String>{};
+    for (final a in [...steps, if (isLive) ...ui.tools]) {
+      final t = exportTargetOf(
+        toolName: a.name,
+        result: a.result,
+        arguments: a.arguments,
+      );
+      if (t == null || !seen.add(t.primary)) continue;
+      // 文件名优先取「（name，size」格式；否则 URI 尾段。
+      final m = RegExp(r'（([^（]+)，').firstMatch(a.result ?? '');
+      final label = m != null
+          ? m.group(1)!
+          : Uri.tryParse(t.primary)?.pathSegments.lastWhere(
+              (s) => s.isNotEmpty,
+              orElse: () => 'export_file 产物',
+            ) ??
+              'export_file 产物';
+      out.add(ArtifactEntry(
+          label: label, primary: t.primary, fallback: t.fallback));
+    }
+    return out;
+  }
+
   /// 「执行中…」占位行只在「智能体确实在推进、答案未开始、且没有工具正在
   /// 执行」时显示（用户定案：这不是"思考"，是任务执行状态过渡，标签写
   /// 执行中）。工具执行中不显示——工具卡片自带「执行中 - 持续了Xs」；
@@ -959,8 +993,130 @@ class AgentTurnBlock extends StatelessWidget {
             // 智能体回答与普通聊天同款：保留 assistant 头像（用户反馈要求）。
             showAvatar: true,
           ),
+        // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
+        if (answer != null && !_answerPending && _artifacts.isNotEmpty)
+          _ArtifactSummaryCard(artifacts: _artifacts),
       ],
     );
+  }
+}
+
+/// 产物汇总条目。
+class ArtifactEntry {
+  final String label;
+  final String primary;
+  final String? fallback;
+  const ArtifactEntry(
+      {required this.label, required this.primary, this.fallback});
+}
+
+/// WP-C：回合最终产物汇总卡——本回合 export_file 交付的文件一屏列出，
+/// 点「打开」直接调系统查看器（openFile 分层回退，见 DeviceFilesService）。
+class _ArtifactSummaryCard extends StatelessWidget {
+  final List<ArtifactEntry> artifacts;
+  const _ArtifactSummaryCard({required this.artifacts});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Material(
+        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.inventory_2, size: 14),
+                  const SizedBox(width: 6),
+                  Text('本轮产物（${artifacts.length}）',
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w700)),
+                ],
+              ),
+              const SizedBox(height: 6),
+              for (final a in artifacts)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Icon(_iconFor(a.label).icon,
+                          size: 14, color: theme.colorScheme.primary),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(a.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12)),
+                      ),
+                      const SizedBox(width: 8),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () async {
+                          try {
+                            await DeviceFilesService.instance
+                                .openFile(a.primary, fallbackPath: a.fallback);
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('打开失败：$e')),
+                              );
+                            }
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.open_in_new,
+                                  size: 12, color: theme.colorScheme.primary),
+                              const SizedBox(width: 3),
+                              Text('打开',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.colorScheme.primary)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Icon _iconFor(String label) {
+    final ext = label.contains('.')
+        ? label.substring(label.lastIndexOf('.')).toLowerCase()
+        : '';
+    switch (ext) {
+      case '.html':
+      case '.htm':
+        return const Icon(Icons.language, size: 14);
+      case '.png':
+      case '.jpg':
+      case '.jpeg':
+      case '.svg':
+        return const Icon(Icons.image, size: 14);
+      case '.pdf':
+        return const Icon(Icons.picture_as_pdf, size: 14);
+      case '.csv':
+      case '.xlsx':
+        return const Icon(Icons.table_chart, size: 14);
+      default:
+        return const Icon(Icons.description, size: 14);
+    }
   }
 }
 

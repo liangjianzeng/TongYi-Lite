@@ -3,11 +3,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
 import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
 import '../providers/model_provider.dart';
 import '../providers/settings_provider.dart' show settingsProvider;
+import '../services/attachment_service.dart'
+    show kMaxAttachments, kSupportedExtensions;
 import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
 import '../models/conversation.dart';
@@ -44,9 +47,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final List<String> _selectedImagePaths = [];
   /// 智能体附件（≤5 个，WP-A）。
   final List<String> _selectedFilePaths = [];
-  /// 兼容别名：首张图（旧链路 imagePath 语义）。
-  String? get _selectedImagePath =>
-      _selectedImagePaths.isNotEmpty ? _selectedImagePaths.first : null;
   final ImagePicker _picker = ImagePicker();
 
   // 语音拾音（按住说话）状态 —— 用 ValueNotifier 而非 setState 驱动，避免
@@ -908,6 +908,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     timestamp: message.timestamp,
                     isStreaming: message.isStreaming && index == units.length - 1,
                     imagePath: message.imagePath,
+                    imagePaths: message.imagePaths,
+                    attachments: message.attachments,
                     audioPath: message.audioPath,
                     inferenceStats: message.inferenceStats,
                   ),
@@ -948,6 +950,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
           child: Row(
         children: [
+          // 智能体附件入口（WP-A）：仅智能体模式显示（≤5 个办公/文本文件，
+          // 解析注入工作区供模型阅读；普通聊天引擎无文件阅读能力）。
+          if (ref.watch(settingsProvider).agentEnabled)
+            IconButton(
+              icon: Badge(
+                isLabelVisible: _selectedFilePaths.isNotEmpty,
+                label: Text('${_selectedFilePaths.length}'),
+                child: Icon(
+                  _selectedFilePaths.isNotEmpty
+                      ? Icons.attach_file
+                      : Icons.attach_file_outlined,
+                  color: _selectedFilePaths.isNotEmpty
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                ),
+              ),
+              tooltip: '添加文件（最多 5 个，支持 docx/xlsx/pptx/txt/md/csv/json 等）',
+              onPressed: isGenerating ? null : _pickAttachmentFiles,
+            ),
           Expanded(
             child: TextField(
               controller: _textController,
@@ -964,11 +985,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      icon: Icon(
-                        _selectedImagePath != null ? Icons.check_circle : Icons.image,
-                        color: _selectedImagePath != null ? Colors.green : null,
+                      icon: Badge(
+                        isLabelVisible: _selectedImagePaths.isNotEmpty,
+                        label: Text('${_selectedImagePaths.length}'),
+                        child: Icon(
+                          _selectedImagePaths.isNotEmpty
+                              ? Icons.photo_library
+                              : Icons.image_outlined,
+                          color: _selectedImagePaths.isNotEmpty
+                              ? Colors.green
+                              : null,
+                        ),
                       ),
-                      tooltip: _selectedImagePath != null ? '已选图片，点击清除' : '添加图片',
+                      tooltip: '添加图片（最多 10 张）',
                       onPressed: isGenerating ? null : _pickImage,
                     ),
                     // 语音拾音：按住说话 → 松手自动发送（模型原生理解音频）。
@@ -1208,7 +1237,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       setState(() {
         _currentConversationId = convs.first.id;
         _followStream = true;
-        _selectedImagePath = null;
+        _selectedImagePaths.clear();
+        _selectedFilePaths.clear();
       });
     }
     if (Navigator.of(context).canPop()) Navigator.of(context).pop();
@@ -1220,7 +1250,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       setState(() {
         _currentConversationId = id;
         _followStream = true;
-        _selectedImagePath = null;
+        _selectedImagePaths.clear();
+        _selectedFilePaths.clear();
       });
     }
     Navigator.of(context).pop();
@@ -1277,7 +1308,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       setState(() {
         _currentConversationId = list.isEmpty ? '' : list.first.id;
         _followStream = true;
-        _selectedImagePath = null;
+        _selectedImagePaths.clear();
+        _selectedFilePaths.clear();
       });
     }
     setState(() {
@@ -1300,7 +1332,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       setState(() {
         _currentConversationId = convs.isEmpty ? '' : convs.first.id;
         _followStream = true;
-        _selectedImagePath = null;
+        _selectedImagePaths.clear();
+        _selectedFilePaths.clear();
       });
     }
   }
