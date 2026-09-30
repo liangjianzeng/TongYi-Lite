@@ -790,3 +790,30 @@ debug APK 13:5x 重打包已覆盖安装真机（install -r -t，设备弹窗需
 预检拒绝 [oom-guard] refuse PRE-load）；OpenCL PTQ1_0 mm/mv 内核完整；
 Vulkan supports_op 无 PTQ1_0/PQ2_0 → fallback CPU。**升级后新坑**：裸 Vulkan 函数
 必须 dispatcher 化（b11267 大重写后混用系统 loader 符号），下次动 Vulkan 先查这类。
+
+## 2026-10-01 Dev Agent 开发模式（Phase A/B/C，已提交待真机验收）
+
+> 用户需求：安卓沙箱限制智能体，能否集成 dartssh 连手机自身 shell 以系统环境做开发（AI 编程）。
+> 评估定案（docs/ssh_agent_environment_2026-10-01.md）：SSH 只传输不授权限（权限边界=服务端进程）；
+> 路线 A（Termux）+ D（远程 PC），root 排除；dartssh(1.0.3) Dart3 不兼容 → 复用 DSH-Phone 的 dartssh2 fork。
+
+**已实施（docs/ai_dev_agent_design_2026-10-01.md 第 11 节实施记录）**：
+- **工作区**：`lib/agent/dev/workspace.dart`（DevWorkspace 多后端 localApp/Termux/remotePc，默认工作区不落盘）
+  + `workspace_store.dart`（DevStore：ApplicationSupport/dev/workspaces|tasks/<id>.json，baseDirOverride 可测）
+  + `dev_controller.dart`（全局单例激活状态）。ToolExecutor 注入 `_workspaceId` 内部键，
+  file/memory 工具按 `effectiveWorkspaceOf(args)` 跟随工作区（projects/<safe-id>/）。
+- **SSH**：`third_party/dartssh2/` vendored fork（2.11.0，pubspec dependency_overrides path）。
+  `ssh_environment.dart`：SSHSocket.connect + SSHClient 认证 + SFTP 读写（8MB 上限）+ TOFU 指纹
+  （**onVerifyHostKey 回调签名 = (typeName: String, fingerprint: Uint8List)，同步回调须先预载内存缓存**；
+  模式组合用 `SftpFileOpenMode.write | .create | .truncate`）+ 解码 UTF-8→latin1。
+- **工具**：ssh_exec/ssh_read_file/ssh_write_file（ssh_tools.dart）、git_status/diff/log/commit/push
+  （git_tools.dart，push 带审批）、plan_create/update/list（plan_tools.dart）、run_tests
+  （verify_tool.dart）；危险命令黑名单 `safety.dart`（deny/ask 策略）。
+- **DevContext**：`dev_context.dart` 注入工作区/计划/记忆段 + 开发循环指引；chat_provider 接线
+  （Dev 模式开启时 workspaceResolver + buildDevContext + AGENTS.md workspacePath）。
+- **设置**：settings_service/provider Dev 字段（devModeEnabled/devWorkspaceId/sshConfig/dangerousCommandPolicy）；
+  settings_screen 开发模式卡（工作区管理/SSH 配置/测试连接/指纹/策略）。
+- **回归**：test/agent+services+providers 全量 **388 项 + 2 skip 全绿**（新增 dev_workspace/plan_tools/ssh_safety/dev_context/settings Dev 组）。
+
+**遗留（明早用户确认）**：真机 Termux sshd 配置与连接/SFTP/git 闭环验证；SSH 密钥明文存储（对齐
+apiModels 先例，后续迁移 secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。
