@@ -10,19 +10,25 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../dev/workspace.dart' show DevWorkspace, sanitizeWorkspaceDirName;
 import '../tool_definition.dart';
 
-/// 记忆文件路径（workspace/memory.json）。
-Future<File> _memoryFile() async {
+/// 记忆文件路径：全局 = workspace/memory.json；
+/// 工作区作用域 = workspace/projects/<safe-id>/memory.json（独立文件）。
+Future<File> _memoryFile(String? workspaceId) async {
   final docs = await getApplicationDocumentsDirectory();
-  final dir = Directory(p.join(docs.path, 'workspace'));
+  final wsId = workspaceId == null || workspaceId == DevWorkspace.kDefaultId
+      ? null
+      : workspaceId;
+  final dir = Directory(p.join(docs.path, 'workspace',
+      wsId == null ? '' : p.join('projects', sanitizeWorkspaceDirName(wsId))));
   if (!await dir.exists()) await dir.create(recursive: true);
   return File(p.join(dir.path, 'memory.json'));
 }
 
-/// 读取现有记忆。
-Future<Map<String, String>> _readAll() async {
-  final file = await _memoryFile();
+/// 读取现有记忆（按工作区作用域）。
+Future<Map<String, String>> _readAll(String? workspaceId) async {
+  final file = await _memoryFile(workspaceId);
   if (!await file.exists()) return <String, String>{};
   try {
     final decoded = jsonDecode(await file.readAsString());
@@ -34,49 +40,59 @@ Future<Map<String, String>> _readAll() async {
 }
 
 /// 写入记忆（原子写 tmp + rename）。
-Future<void> _writeAll(Map<String, String> memory) async {
-  final file = await _memoryFile();
+Future<void> _writeAll(Map<String, String> memory, String? workspaceId) async {
+  final file = await _memoryFile(workspaceId);
   final tmp = File('${file.path}.tmp');
   await tmp.writeAsString(jsonEncode(memory), flush: true);
   await tmp.rename(file.path);
 }
 
-/// 写入一条记忆。参数：`key`、`value`。
+/// 写入一条记忆。参数：`key`、`value`、可选 `workspace`（工作区作用域）。
 ToolDefinition createMemorySetTool() {
   return ToolDefinition(
     name: 'memory_set',
     description:
         '写入一条长期记忆（跨会话保留，如用户偏好/重要事实）。'
-        'key 为记忆名称，value 为内容。同 key 覆盖。',
+        'key 为记忆名称，value 为内容。同 key 覆盖。'
+        '可选 workspace 参数把记忆限定到指定工作区（Dev 开发模式下自动限定当前工作区）。',
     parameters: {
       'type': 'object',
       'properties': {
         'key': {'type': 'string', 'description': '记忆键'},
         'value': {'type': 'string', 'description': '记忆内容'},
+        'workspace': {'type': 'string', 'description': '可选：工作区 id（默认全局记忆）'},
       },
       'required': ['key', 'value'],
     },
     execute: (args) async {
       final key = (args['key'] as String?)?.trim() ?? '';
       final value = (args['value'] as String?)?.trim() ?? '';
+      final workspaceId = (args['workspace'] as String?)?.trim();
       if (key.isEmpty) return ToolResult.error('缺少 key 参数');
       if (value.isEmpty) return ToolResult.error('value 为空');
-      final memory = await _readAll();
+      final memory = await _readAll(workspaceId);
       memory[key] = value;
-      await _writeAll(memory);
+      await _writeAll(memory, workspaceId);
       return ToolResult(content: '已记住：$key = $value');
     },
   );
 }
 
-/// 读取全部记忆。
+/// 读取全部记忆（可选 workspace 作用域）。
 ToolDefinition createMemoryGetTool() {
   return ToolDefinition(
     name: 'memory_get',
-    description: '读取当前全部长期记忆（只读，不修改）。',
-    parameters: const {'type': 'object'},
+    description:
+        '读取长期记忆（只读，不修改）。可选 workspace 参数读取指定工作区记忆。',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'workspace': {'type': 'string', 'description': '可选：工作区 id（默认全局记忆）'},
+      },
+    },
     execute: (args) async {
-      final memory = await _readAll();
+      final workspaceId = (args['workspace'] as String?)?.trim();
+      final memory = await _readAll(workspaceId);
       if (memory.isEmpty) return ToolResult(content: '当前没有长期记忆。');
       final entries = memory.entries.toList()..sort((a, b) => a.key.compareTo(b.key));
       return ToolResult(content: entries.map((e) => '${e.key}: ${e.value}').join('\n'));

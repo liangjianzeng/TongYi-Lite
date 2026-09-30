@@ -17,6 +17,15 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../agent/dev/dev.dart'
+    show
+        DevSessionController,
+        DevWorkspace,
+        SshAuthType,
+        SshConfig,
+        SshEnvironmentService,
+        SshStatus,
+        WorkspaceBackend;
 import '../agent/skills/provider.dart'
     show loadUserSkills, writeUserSkill, deleteUserSkill;
 import '../agent/skills/skill.dart' show Skill, loadBuiltinSkills;
@@ -1683,6 +1692,453 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     );
   }
 
+  // ================= ①c 开发模式（Dev Agent） =================
+
+  /// 开发模式卡：总开关 + 工作区管理 + SSH 开发环境 + 危险命令策略。
+  Widget _buildDevModeCard(BuildContext context, InferenceSettings settings,
+      SettingsNotifier notifier) {
+    final dev = DevSessionController.instance;
+    final ssh = SshEnvironmentService.instance;
+    final sshStatusLabel = switch (ssh.status) {
+      SshStatus.idle => '未连接',
+      SshStatus.connecting => '连接中…',
+      SshStatus.connected => '已连接',
+      SshStatus.failed => '失败',
+    };
+    final sshStatusColor = switch (ssh.status) {
+      SshStatus.connected => Colors.green,
+      SshStatus.connecting => Colors.orange,
+      SshStatus.failed => Colors.red,
+      _ => Colors.grey,
+    };
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildToggleTitle(
+              '🛠️ 开发模式（Dev Agent）',
+              settings.devModeEnabled,
+              (v) async {
+                await notifier.setDevModeEnabled(v);
+                if (mounted) setState(() {});
+              },
+              subtitle: settings.devModeEnabled
+                  ? '开：注册 git/规划/SSH/测试工具，注入工作区上下文，'
+                      '可连接 Termux/远程电脑做 AI 编程'
+                  : '关：现有智能体行为完全不变（默认）',
+            ),
+            // ---- 工作区管理 ----
+            _buildSectionHeader('📁 工作区', context),
+            Text(
+              '文件/记忆工具跟随激活工作区；远端工作区（Termux/电脑）'
+              '用 ssh_exec / ssh_read_file / ssh_write_file 操作',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final ws in dev.workspaces)
+                  ChoiceChip(
+                    label: Text(ws.isDefault ? ws.name : ws.name),
+                    selected: dev.activeWorkspaceId == ws.id,
+                    onSelected: (_) async {
+                      await dev.switchWorkspace(ws.id);
+                      await notifier.setDevWorkspaceId(ws.id);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                TextButton.icon(
+                  onPressed: () => _showWorkspaceDialog(context),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新增'),
+                ),
+              ],
+            ),
+            // ---- SSH 开发环境 ----
+            const SizedBox(height: 8),
+            _buildSectionHeader('🔌 SSH 开发环境', context),
+            Row(
+              children: [
+                Icon(Icons.circle, size: 10, color: sshStatusColor),
+                const SizedBox(width: 6),
+                Text(sshStatusLabel,
+                    style: const TextStyle(fontSize: 12)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    settings.sshConfig == null
+                        ? '未配置（默认目标 Termux：127.0.0.1:8022）'
+                        : '${settings.sshConfig!.username}@'
+                            '${settings.sshConfig!.host}:${settings.sshConfig!.port}',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.grey.shade600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 4,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showSshConfigDialog(context, settings),
+                  icon: const Icon(Icons.settings, size: 18),
+                  label: const Text('配置'),
+                ),
+                TextButton.icon(
+                  onPressed: settings.sshConfig == null
+                      ? null
+                      : () => _testSshConnection(context, settings),
+                  icon: const Icon(Icons.wifi_tethering, size: 18),
+                  label: const Text('测试连接'),
+                ),
+                TextButton.icon(
+                  onPressed: ssh.isConnected
+                      ? () async {
+                          await ssh.disconnect();
+                          if (mounted) setState(() {});
+                        }
+                      : null,
+                  icon: const Icon(Icons.link_off, size: 18),
+                  label: const Text('断开'),
+                ),
+                TextButton.icon(
+                  onPressed: () async {
+                    await ssh.clearHostKeyFingerprints();
+                    if (mounted) setState(() {});
+                  },
+                  icon: const Icon(Icons.fingerprint, size: 18),
+                  label: const Text('清除指纹'),
+                ),
+              ],
+            ),
+            // ---- 危险命令策略 ----
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text('危险命令策略：', style: const TextStyle(fontSize: 12)),
+                const SizedBox(width: 8),
+                ChoiceChip(
+                  label: const Text('拒绝'),
+                  selected: settings.dangerousCommandPolicy == 'deny',
+                  onSelected: (_) => notifier.setDangerousCommandPolicy('deny'),
+                ),
+                const SizedBox(width: 8),
+                ChoiceChip(
+                  label: const Text('每次审批'),
+                  selected: settings.dangerousCommandPolicy == 'ask',
+                  onSelected: (_) => notifier.setDangerousCommandPolicy('ask'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '拒绝 = 黑名单命令直接拦截（rm -rf /、reboot、git push --force 等）；'
+              '每次审批 = 转用户确认。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 新增/编辑工作区对话框。
+  Future<void> _showWorkspaceDialog(BuildContext context,
+      {DevWorkspace? existing}) async {
+    final nameCtrl =
+        TextEditingController(text: existing?.name ?? '');
+    final pathCtrl = TextEditingController(
+        text: existing?.remotePath ?? '');
+    final formKey = GlobalKey<FormState>();
+    WorkspaceBackend backend = existing?.backend ?? WorkspaceBackend.localApp;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(existing == null ? '新增工作区' : '编辑工作区'),
+          content: Form(
+            key: formKey,
+            child: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: nameCtrl,
+                    autofocus: existing == null,
+                    decoration: const InputDecoration(
+                      labelText: '工作区名称',
+                      hintText: '如：TongYi-Lite / 我的博客项目',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写名称' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<WorkspaceBackend>(
+                    value: backend,
+                    decoration: const InputDecoration(
+                      labelText: '后端',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.localApp,
+                        child: Text('本地沙盒（app 内目录）'),
+                      ),
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.termux,
+                        child: Text('Termux（手机 Linux）'),
+                      ),
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.remotePc,
+                        child: Text('远程电脑'),
+                      ),
+                    ],
+                    onChanged: (v) =>
+                        setState(() => backend = v ?? WorkspaceBackend.localApp),
+                  ),
+                  if (backend != WorkspaceBackend.localApp) ...[
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: pathCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '远端路径（绝对路径）',
+                        hintText: '如：/data/data/com.termux/files/home/proj',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '远端路径必填' : null,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final id = existing?.id ??
+        'ws_${DateTime.now().millisecondsSinceEpoch}';
+    await DevSessionController.instance.upsertWorkspace(DevWorkspace(
+      id: id,
+      name: name,
+      backend: backend,
+      remotePath: backend == WorkspaceBackend.localApp
+          ? null
+          : pathCtrl.text.trim(),
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// SSH 配置对话框（host/port/user/auth）。
+  Future<void> _showSshConfigDialog(
+      BuildContext context, InferenceSettings settings) async {
+    final cfg = settings.sshConfig;
+    final hostCtrl = TextEditingController(text: cfg?.host ?? '127.0.0.1');
+    final portCtrl = TextEditingController(
+        text: (cfg?.port ?? 8022).toString());
+    final userCtrl = TextEditingController(text: cfg?.username ?? '');
+    final passCtrl = TextEditingController(text: cfg?.password ?? '');
+    final keyCtrl = TextEditingController(text: cfg?.privateKeyPem ?? '');
+    final formKey = GlobalKey<FormState>();
+    var authType = cfg?.authType ?? SshAuthType.key;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('SSH 开发环境配置'),
+          content: Form(
+            key: formKey,
+            child: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: hostCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '主机',
+                        hintText: '127.0.0.1（Termux 默认）',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '请填写主机' : null,
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: portCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '端口',
+                        hintText: '8022（Termux sshd 默认）',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (int.tryParse(v ?? '') ?? 0) <= 0 ? '端口非法' : null,
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: userCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '用户名',
+                        hintText: 'Termux 用户（手机用户 ID，如 u0_a123）',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '请填写用户名' : null,
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        ChoiceChip(
+                          label: const Text('密钥'),
+                          selected: authType == SshAuthType.key,
+                          onSelected: (_) => setState(
+                              () => authType = SshAuthType.key),
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('密码'),
+                          selected: authType == SshAuthType.password,
+                          onSelected: (_) => setState(
+                              () => authType = SshAuthType.password),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (authType == SshAuthType.key)
+                      TextFormField(
+                        controller: keyCtrl,
+                        minLines: 4,
+                        maxLines: 8,
+                        decoration: const InputDecoration(
+                          labelText: '私钥（PEM / OpenSSH）',
+                          hintText: 'ed25519 私钥内容（含 BEGIN 行）',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? '请填写私钥'
+                            : null,
+                      )
+                    else
+                      TextFormField(
+                        controller: passCtrl,
+                        decoration: const InputDecoration(
+                          labelText: '密码',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? '请填写密码'
+                            : null,
+                      ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '提示：Termux 安装后执行 `pkg install openssh && sshd`，'
+                      '默认监听 127.0.0.1:8022。密钥推荐 ed25519（openssh 新版'
+                      '默认弃用 ssh-rsa）。',
+                      style: TextStyle(
+                          fontSize: 11, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    final notifier = ref.read(settingsProvider.notifier);
+    await notifier.setSshConfig(SshConfig(
+      host: hostCtrl.text.trim(),
+      port: int.tryParse(portCtrl.text.trim()) ?? 8022,
+      username: userCtrl.text.trim(),
+      authType: authType,
+      privateKeyPem:
+          authType == SshAuthType.key ? keyCtrl.text.trim() : null,
+      password:
+          authType == SshAuthType.password ? passCtrl.text.trim() : null,
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// 测试 SSH 连接（不改变连接状态，仅验证认证）。
+  Future<void> _testSshConnection(
+      BuildContext context, InferenceSettings settings) async {
+    final cfg = settings.sshConfig;
+    if (cfg == null) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 16),
+            Text('正在测试 SSH 连接…'),
+          ],
+        ),
+      ),
+    );
+    try {
+      final ssh = SshEnvironmentService.instance;
+      // 复用 connect 的认证路径；测试后断开（不占用连接）。
+      await ssh.connect(cfg);
+      await ssh.disconnect();
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('✅ SSH 连接测试成功')));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ SSH 连接测试失败：$e')));
+    }
+  }
+
   /// 新增/编辑人格对话框。保存走 [SettingsNotifier.upsertPersona]（trim + 校验）。
   Future<void> _showPersonaDialog(BuildContext context,
       SettingsNotifier notifier,
@@ -2050,6 +2506,11 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 
           // ================= ①b 人格（Persona） =================
           _buildPersonaCard(context, settings, notifier),
+
+          const SizedBox(height: 10),
+
+          // ================= ①c 开发模式（Dev Agent） =================
+          _buildDevModeCard(context, settings, notifier),
 
           const SizedBox(height: 10),
 

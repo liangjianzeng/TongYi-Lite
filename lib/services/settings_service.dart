@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../models/agent_persona.dart';
 import '../models/api_model.dart';
 
@@ -249,6 +250,25 @@ class InferenceSettings {
   /// 指向的自定义人格不存在时回落标准人格。
   final String activePersonaId;
 
+  // ---------------------------------------------------------------
+  // 开发模式（Dev Agent）
+  // ---------------------------------------------------------------
+
+  /// 开发模式总开关（默认关闭 = 现有行为零回归）。
+  /// 开启后：注册 Dev 工具组（git/plan/ssh/run_tests）、注入 DevContext、
+  /// 文件/记忆工具跟随激活工作区。
+  final bool devModeEnabled;
+
+  /// 当前激活工作区 id（默认 'default' = app workspace 根目录）。
+  /// 由 DevSessionController 持久化激活态；此处仅保存设置默认值。
+  final String devWorkspaceId;
+
+  /// SSH 开发环境配置（Termux/远程电脑）。null = 未配置。
+  final SshConfig? sshConfig;
+
+  /// 危险命令策略：'deny'（默认，黑名单直接拒绝）/ 'ask'（转用户审批）。
+  final String dangerousCommandPolicy;
+
   // ---- 联网搜索默认值（保持中性：不预置任何个人实例）----
   // 地址默认留空 = 未配置。真机上没有可用实例时，provider 会给??请先??
   // 设置 ??联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己??
@@ -330,7 +350,13 @@ class InferenceSettings {
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
     this.activePersonaId = kStandardPersonaId,
-  })  : mtpEnabledByModel = mtpEnabledByModel ?? const {},
+    // ---- 开发模式（Dev Agent）----
+    this.devModeEnabled = false,
+    this.devWorkspaceId = 'default',
+    SshConfig? sshConfig,
+    this.dangerousCommandPolicy = 'deny',
+  })  : sshConfig = sshConfig ?? null,
+        mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
@@ -458,6 +484,12 @@ class InferenceSettings {
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
     String? activePersonaId,
+    // ---- 开发模式（Dev Agent）----
+    bool? devModeEnabled,
+    String? devWorkspaceId,
+    SshConfig? sshConfig,
+    String? dangerousCommandPolicy,
+    bool clearSshConfig = false,
   }) {
     return InferenceSettings(
       enableGpu: enableGpu ?? this.enableGpu,
@@ -541,6 +573,11 @@ class InferenceSettings {
       agentByModel: agentByModel ?? this.agentByModel,
       agentPersonas: agentPersonas ?? this.agentPersonas,
       activePersonaId: activePersonaId ?? this.activePersonaId,
+      devModeEnabled: devModeEnabled ?? this.devModeEnabled,
+      devWorkspaceId: devWorkspaceId ?? this.devWorkspaceId,
+      sshConfig: clearSshConfig ? null : (sshConfig ?? this.sshConfig),
+      dangerousCommandPolicy:
+          dangerousCommandPolicy ?? this.dangerousCommandPolicy,
     );
   }
 
@@ -606,6 +643,11 @@ class InferenceSettings {
         'agentByModel': agentByModel,
         'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
         'activePersonaId': activePersonaId,
+        // ---- 开发模式（Dev Agent）----
+        'devModeEnabled': devModeEnabled,
+        'devWorkspaceId': devWorkspaceId,
+        'sshConfig': sshConfig?.toJson(),
+        'dangerousCommandPolicy': dangerousCommandPolicy,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -705,6 +747,14 @@ class InferenceSettings {
       agentByModel: _parseAgentByModel(json['agentByModel']),
       agentPersonas: _parsePersonas(json['agentPersonas']),
       activePersonaId: json['activePersonaId'] as String? ?? kStandardPersonaId,
+      // ---- 开发模式（Dev Agent）：旧配置缺字段时默认关闭（向后兼容）----
+      devModeEnabled: json['devModeEnabled'] as bool? ?? false,
+      devWorkspaceId: json['devWorkspaceId'] as String? ?? 'default',
+      sshConfig: json['sshConfig'] is Map<String, dynamic>
+          ? SshConfig.fromJson(json['sshConfig'] as Map<String, dynamic>)
+          : null,
+      dangerousCommandPolicy:
+          json['dangerousCommandPolicy'] as String? ?? 'deny',
     );
   }
 

@@ -124,6 +124,7 @@ class ReactLoopAgent {
     required String systemPrompt,
     String? sessionPath,
     AgentSandboxApprover? sandboxApprover,
+    Future<String?> Function()? workspaceResolver,
     AgentToolActivityCallback? onToolActivity,
     LlmRetry? retry,
     CompactionPlugin? compaction,
@@ -157,6 +158,7 @@ class ReactLoopAgent {
           modelId: modelId,
           timeout: (config ?? AgentConfig()).toolTimeout,
           sandboxApprover: sandboxApprover,
+          workspaceResolver: workspaceResolver,
         ),
         _retry = retry ??
             LlmRetry(

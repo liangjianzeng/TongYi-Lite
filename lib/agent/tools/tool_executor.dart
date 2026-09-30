@@ -7,6 +7,7 @@
 /// 新 loop 与旧 runAgent 共用，避免行为漂移。
 library;
 
+import '../dev/workspace.dart' show kWorkspaceIdArgKey;
 import '../sandbox.dart';
 import '../tool_definition.dart';
 import '../tool_registry.dart';
@@ -18,11 +19,16 @@ final class ToolExecutor {
   final Duration timeout;
   final AgentSandboxApprover? sandboxApprover;
 
+  /// 当前激活工作区 id 解析器（Dev Agent）：null = 不注入（默认工作区，
+  /// 旧行为零回归）。返回 null/空 → 不注入 `_workspaceId` 键。
+  final Future<String?> Function()? workspaceResolver;
+
   const ToolExecutor({
     required this.registry,
     required this.modelId,
     required this.timeout,
     this.sandboxApprover,
+    this.workspaceResolver,
   });
 
   /// 执行一个工具调用；返回 [ToolResult]（失败时 [isError]=true，content 为可读原因）。
@@ -78,6 +84,20 @@ final class ToolExecutor {
       }
     } on FormatException catch (e) {
       return ToolResult.error('工具 "${call.name}" 沙箱升级参数无效：${e.message}');
+    }
+
+    // 3.5 工作区注入（Dev Agent）：把当前激活工作区 id 以内部键传给工具
+    //     执行体（对齐 `_sandboxMode` 模式；模型不感知）。
+    final resolver = workspaceResolver;
+    if (resolver != null) {
+      try {
+        final wsId = await resolver();
+        if (wsId != null && wsId.isNotEmpty) {
+          args[kWorkspaceIdArgKey] = wsId;
+        }
+      } catch (_) {
+        // 解析失败不阻断执行（默认工作区兜底）。
+      }
     }
 
     // 4. 执行 + 超时 + 三层错误防护。
