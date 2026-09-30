@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/agent_persona.dart';
 import '../models/api_model.dart';
@@ -239,6 +240,42 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
           state.agentPersonas.where((p) => p.id != personaId).toList(),
       activePersonaId: wasActive ? kStandardPersonaId : null,
     );
+    await _persist();
+  }
+
+  // ---- 开发模式（Dev Agent）----
+
+  /// 开发模式总开关。开启 = 注册 Dev 工具组 + 注入 DevContext；
+  /// 关闭 = 现有行为零回归。
+  Future<void> setDevModeEnabled(bool value) async {
+    state = state.copyWith(devModeEnabled: value);
+    await _persist();
+  }
+
+  /// 切换激活工作区 id（持久化到设置；DevSessionController 同步切换）。
+  Future<void> setDevWorkspaceId(String value) async {
+    if (value.isEmpty) return;
+    state = state.copyWith(devWorkspaceId: value);
+    await _persist();
+  }
+
+  /// 保存 SSH 开发环境配置。
+  Future<void> setSshConfig(SshConfig config) async {
+    state = state.copyWith(sshConfig: config);
+    await _persist();
+  }
+
+  /// 清除 SSH 配置。
+  Future<void> clearSshConfig() async {
+    state = state.copyWith(sshConfig: null, clearSshConfig: true);
+    await _persist();
+  }
+
+  /// 危险命令策略：'deny'（黑名单直接拒绝）/ 'ask'（转用户审批）。
+  Future<void> setDangerousCommandPolicy(String value) async {
+    const allowed = {'deny', 'ask'};
+    if (!allowed.contains(value)) return;
+    state = state.copyWith(dangerousCommandPolicy: value);
     await _persist();
   }
 

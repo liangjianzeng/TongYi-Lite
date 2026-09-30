@@ -1,0 +1,115 @@
+/// 开发工作区/任务/计划持久化（Dev Agent Phase A/C）。
+///
+/// - 工作区元数据：`ApplicationSupport/dev/workspaces/<safe-id>.json`；
+/// - 开发任务元数据：`ApplicationSupport/dev/tasks/<safe-id>.json`；
+/// - 开发计划：随任务文件存（tasks/<id>.json 内嵌 plan）。
+/// 全部 JSON 明文、单文件、无迁移链（v1）；损坏条目丢弃（fail-loud 于日志）。
+library;
+
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+import 'workspace.dart';
+import 'task.dart';
+
+final class DevStore {
+  DevStore({this.baseDirOverride});
+
+  /// 测试注入：绕过 path_provider 直接指定根目录（null = 真实 ApplicationSupport）。
+  final String? baseDirOverride;
+
+  /// ApplicationSupport/dev/ 根目录（测试时 = override/dev）。
+  Future<String> _devDir() async {
+    if (baseDirOverride != null) return p.join(baseDirOverride!, 'dev');
+    final base = await getApplicationSupportDirectory();
+    return p.join(base.path, 'dev');
+  }
+
+  Future<String> _workspaceDir() async => p.join(await _devDir(), 'workspaces');
+  Future<String> _taskDir() async => p.join(await _devDir(), 'tasks');
+
+  Future<void> _ensureDir(String dir) async {
+    if (!Directory(dir).existsSync()) {
+      Directory(dir).createSync(recursive: true);
+    }
+  }
+
+  String _safe(String id) =>
+      Uri.encodeComponent(id.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '-'));
+
+  // ---------------------------------------------------------------------------
+  // 工作区
+  // ---------------------------------------------------------------------------
+
+  /// 列出全部持久化工作区（默认工作区不落盘，由调用方合成）。
+  Future<List<DevWorkspace>> loadWorkspaces() async {
+    final dir = await _workspaceDir();
+    if (!Directory(dir).existsSync()) return const [];
+    final out = <DevWorkspace>[];
+    await for (final f in Directory(dir).list()) {
+      if (f is! File || !f.path.endsWith('.json')) continue;
+      try {
+        final ws = DevWorkspace.fromJson(
+            jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
+        if (ws != null) out.add(ws);
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  Future<void> saveWorkspace(DevWorkspace ws) async {
+    if (ws.isDefault) return; // 默认工作区不落盘
+    final dir = await _workspaceDir();
+    await _ensureDir(dir);
+    File(p.join(dir, '${_safe(ws.id)}.json'))
+        .writeAsStringSync(jsonEncode(ws.toJson()));
+  }
+
+  Future<void> deleteWorkspace(String id) async {
+    if (id == DevWorkspace.kDefaultId) return;
+    final dir = await _workspaceDir();
+    final f = File(p.join(dir, '${_safe(id)}.json'));
+    if (f.existsSync()) f.deleteSync();
+  }
+
+  /// 工作区本地镜像目录：`documents/workspace/projects/<safe-id>/`。
+  Future<String> workspaceLocalMirror(String id) async {
+    final docs = await getApplicationDocumentsDirectory();
+    return p.join(docs.path, 'workspace', 'projects', _safe(id));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 任务（含计划）
+  // ---------------------------------------------------------------------------
+
+  Future<List<DevTask>> loadTasks() async {
+    final dir = await _taskDir();
+    if (!Directory(dir).existsSync()) return const [];
+    final out = <DevTask>[];
+    await for (final f in Directory(dir).list()) {
+      if (f is! File || !f.path.endsWith('.json')) continue;
+      try {
+        final task = DevTask.fromJson(
+            jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
+        if (task != null) out.add(task);
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  Future<void> saveTask(DevTask task) async {
+    final dir = await _taskDir();
+    await _ensureDir(dir);
+    File(p.join(dir, '${_safe(task.id)}.json'))
+        .writeAsStringSync(jsonEncode(task.toJson()));
+  }
+
+  Future<void> deleteTask(String id) async {
+    final dir = await _taskDir();
+    final f = File(p.join(dir, '${_safe(id)}.json'));
+    if (f.existsSync()) f.deleteSync();
+  }
+}

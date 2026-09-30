@@ -5,11 +5,15 @@ import 'dart:typed_data' show Uint8List;
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 
 import '../agent/agent.dart';
+import '../agent/dev/dev.dart'
+    show DevSessionController, buildDevContext, sanitizeWorkspaceDirName;
+import '../agent/dev/workspace.dart' show DevWorkspace;
 import '../agent/web_search/web_search_provider.dart';
 import '../agent/context_eng/compaction.dart' show DeterministicCompaction;
 import '../agent/loop/agent.dart'
@@ -810,7 +814,7 @@ class ChatNotifier extends StateNotifier<bool> {
         selectProtocol([NativeToolProtocol(), PromptJsonProtocol()], caps);
     // 激活人格（标准 = null，行为不变）；注入系统提示词身份段与人设段。
     final persona = settings.activePersona();
-    final systemPrompt = buildSystemPrompt(
+    var systemPrompt = buildSystemPrompt(
       modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
       registry: registry,
       protocol: protocol,
@@ -818,6 +822,22 @@ class ChatNotifier extends StateNotifier<bool> {
       personaName: persona?.name,
       personaPrompt: persona?.prompt,
     );
+    // ---- Dev Agent：开发模式注入 DevContext（工作区/计划/记忆/开发循环）----
+    // 注入失败静默跳过（不阻断回合）；关闭 = 零注入零回归。
+    if (settings.devModeEnabled) {
+      try {
+        await DevSessionController.instance.init();
+        final devContext = await buildDevContext(
+          workspaceId: DevSessionController.instance.activeWorkspaceId,
+          taskId: DevSessionController.instance.activeTaskId,
+        );
+        if (devContext.trim().isNotEmpty) {
+          systemPrompt = '$systemPrompt\n\n$devContext';
+        }
+      } catch (e) {
+        debugPrint('[Dev] context build failed: $e');
+      }
+    }
     // 双场景档：local/API 各自一套循环参数（API 档吃满云端预算，
     // local 档维持端侧省 token 策略）；档内数值仍可在设置里改。
     final agentProfile = settings.agentProfileFor(useApi: useApi);
@@ -963,10 +983,20 @@ class ChatNotifier extends StateNotifier<bool> {
     });
 
     // ---- Phase 5：hooks / skills / AGENTS.md ----
-    // AGENTS.md（全局；workspace 暂无路径来源，留空）。
+    // AGENTS.md：全局 + 工作区（Dev 模式开启时按激活工作区解析本地路径；
+    // 远端工作区暂不注入远端 AGENTS.md，Phase D 补 SFTP 读取）。
     String? agentsMdText;
     try {
-      final agentsMd = await loadAgentsMd();
+      String? workspacePath;
+      if (settings.devModeEnabled) {
+        final wsId = DevSessionController.instance.activeWorkspaceId;
+        final docs = await getApplicationDocumentsDirectory();
+        workspacePath = wsId == DevWorkspace.kDefaultId
+            ? p.join(docs.path, 'workspace')
+            : p.join(docs.path, 'workspace', 'projects',
+                sanitizeWorkspaceDirName(wsId));
+      }
+      final agentsMd = await loadAgentsMd(workspacePath: workspacePath);
       agentsMdText = agentsMd.content;
     } on Exception catch (_) {}
     // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
@@ -982,6 +1012,10 @@ class ChatNotifier extends StateNotifier<bool> {
       systemPrompt: systemPrompt,
       onToolActivity: session.update,
       sandboxApprover: _ref.read(sandboxApproverProvider),
+      // Dev Agent：开发模式注入工作区解析器（文件/ssh 工具跟随激活工作区）。
+      workspaceResolver: settings.devModeEnabled
+          ? DevSessionController.instance.resolveActiveWorkspaceId
+          : null,
       // Phase 6：pre-execute `ask` → 审批确认框（ApprovalDialog）。
       preApprover: _ref.read(toolPreApproverProvider),
       hooks: hooks,
@@ -1188,9 +1222,17 @@ class ChatNotifier extends StateNotifier<bool> {
       InferenceSettings settings, String modelId) {
     final registry = ToolRegistry();
     // web_search 每回合调用上限来自设置（DSH max_uses 语义，默认 5）。
+    // Dev Agent 工具组（git/plan/ssh/run_tests）：仅开发模式注册。
     for (final tool in createBuiltinTools(
-        webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn)) {
+        webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn,
+        includeDevTools: settings.devModeEnabled)) {
       registry.register(tool);
+    }
+    // 开发模式关闭兜底：不暴露任何 Dev 工具（零回归）。
+    if (!settings.devModeEnabled) {
+      for (final name in kDevToolNames) {
+        registry.unregister(name);
+      }
     }
 
     // 联网搜索：把当前 SearXNG provider 注册到接缝（对齐 DSH ctx.web 的可插拔

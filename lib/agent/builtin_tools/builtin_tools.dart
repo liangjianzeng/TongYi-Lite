@@ -27,7 +27,27 @@ export 'todo_tool.dart' show createTodoListTool, createTodoWriteTool, resetTodoS
 export 'unit_converter_tool.dart' show createUnitConverterTool;
 export 'weather_tool.dart' show createGetWeatherTool;
 export 'web_search_tool.dart' show createWebSearchTool;
+// Dev Agent 工具组（开发模式开启后注册）。
+export '../dev/tools/git_tools.dart'
+    show
+        createGitCommitTool,
+        createGitDiffTool,
+        createGitLogTool,
+        createGitPushTool,
+        createGitStatusTool;
+export '../dev/tools/plan_tools.dart'
+    show createPlanCreateTool, createPlanListTool, createPlanUpdateTool;
+export '../dev/tools/ssh_tools.dart'
+    show
+        createSshExecTool,
+        createSshReadFileTool,
+        createSshWriteFileTool;
+export '../dev/tools/verify_tool.dart' show createRunTestsTool;
 
+import '../dev/tools/git_tools.dart';
+import '../dev/tools/plan_tools.dart';
+import '../dev/tools/ssh_tools.dart';
+import '../dev/tools/verify_tool.dart';
 import '../tool_definition.dart';
 import 'calculator.dart';
 import 'export_file_tool.dart';
@@ -69,11 +89,29 @@ const List<String> kOptionalToolNames = [
   'python_exec',
 ];
 
+/// Dev 开发工具名（开发模式开启后可见；默认关闭）。
+const List<String> kDevToolNames = [
+  'git_status',
+  'git_diff',
+  'git_log',
+  'git_commit',
+  'git_push',
+  'plan_create',
+  'plan_update',
+  'plan_list',
+  'ssh_exec',
+  'ssh_read_file',
+  'ssh_write_file',
+  'run_tests',
+];
+
 /// 创建全部内置工具（全量；接入层按配置过滤启用集）。
 ///
 /// [webSearchMaxSearchesPerTurn]：web_search 每回合调用上限（DSH max_uses
 /// 语义，默认 5），接入层按设置传入。
-List<ToolDefinition> createBuiltinTools({int webSearchMaxSearchesPerTurn = 5}) => [
+/// [includeDevTools]：Dev Agent 工具组（开发模式开启时 true）。
+List<ToolDefinition> createBuiltinTools(
+    {int webSearchMaxSearchesPerTurn = 5, bool includeDevTools = false}) => [
       createGetTimeTool(),
       createCalculatorTool(),
       createTodoWriteTool(),
@@ -94,4 +132,19 @@ List<ToolDefinition> createBuiltinTools({int webSearchMaxSearchesPerTurn = 5}) =
       createGetWeatherTool(),
       createShellExecTool(),
       createPythonExecTool(),
+      // Dev Agent 工具组（开发模式开启后由接入层过滤启用）。
+      if (includeDevTools) ...[
+        createGitStatusTool(),
+        createGitDiffTool(),
+        createGitLogTool(),
+        createGitCommitTool(),
+        createGitPushTool(),
+        createPlanCreateTool(),
+        createPlanUpdateTool(),
+        createPlanListTool(),
+        createSshExecTool(),
+        createSshReadFileTool(),
+        createSshWriteFileTool(),
+        createRunTestsTool(),
+      ],
     ];

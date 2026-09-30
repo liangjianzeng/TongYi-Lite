@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:tongyi_lite/agent/dev/ssh/ssh_credentials.dart';
 import 'package:tongyi_lite/services/settings_service.dart';
 
 void main() {
@@ -172,6 +173,57 @@ void main() {
       expect(old.agentSubagentEnabled, isTrue);
       expect(old.agentCompactEnabled, isTrue);
       expect(old.agentSpillEnabled, isTrue);
+    });
+  });
+
+  group('InferenceSettings 开发模式（Dev Agent）', () {
+    test('默认关闭（零回归）', () {
+      const s = InferenceSettings();
+      expect(s.devModeEnabled, isFalse);
+      expect(s.devWorkspaceId, 'default');
+      expect(s.sshConfig, isNull);
+      expect(s.dangerousCommandPolicy, 'deny');
+    });
+
+    test('toJson → fromJson 往返一致（含 SSH 配置）', () {
+      final s = InferenceSettings(
+        devModeEnabled: true,
+        devWorkspaceId: 'ws_1',
+        sshConfig: SshConfig(
+          host: '127.0.0.1',
+          port: 8022,
+          username: 'u0_a123',
+          authType: SshAuthType.key,
+          privateKeyPem: '-----BEGIN OPENSSH PRIVATE KEY-----',
+        ),
+        dangerousCommandPolicy: 'ask',
+      );
+      final restored = InferenceSettings.fromJson(s.toJson());
+      expect(restored.devModeEnabled, isTrue);
+      expect(restored.devWorkspaceId, 'ws_1');
+      expect(restored.sshConfig!.host, '127.0.0.1');
+      expect(restored.sshConfig!.port, 8022);
+      expect(restored.sshConfig!.username, 'u0_a123');
+      expect(restored.sshConfig!.authType, SshAuthType.key);
+      expect(restored.sshConfig!.privateKeyPem, contains('BEGIN OPENSSH'));
+      expect(restored.dangerousCommandPolicy, 'ask');
+    });
+
+    test('旧配置无 Dev 键 → 默认关闭（向后兼容）', () {
+      final old = InferenceSettings.fromJson({'agentMaxRounds': 3});
+      expect(old.devModeEnabled, isFalse);
+      expect(old.sshConfig, isNull);
+    });
+
+    test('copyWith：clearSshConfig 清空 / 不传保留', () {
+      final s = InferenceSettings(
+        sshConfig: SshConfig(
+          host: 'h', port: 22, username: 'u',
+          authType: SshAuthType.password, password: 'p'),
+      );
+      final cleared = s.copyWith(clearSshConfig: true);
+      expect(cleared.sshConfig, isNull);
+      expect(s.copyWith().sshConfig, isNotNull);
     });
   });
 }

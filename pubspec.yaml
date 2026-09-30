@@ -38,6 +38,13 @@ dependencies:
   flutter_markdown: ^0.7.4+3
 
 
+dependency_overrides:
+  # Dev Agent SSH 开发环境：本地 vendored dartssh2 fork
+  # （含 zlib 压缩/批处理解密优化，源自 DSH-Phone 真机验证的 fork）。
+  dartssh2:
+    path: third_party/dartssh2
+
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

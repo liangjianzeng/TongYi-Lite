@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../dev/workspace.dart' show DevWorkspace, effectiveWorkspaceOf, sanitizeWorkspaceDirName;
 import '../sandbox.dart';
 import '../tool_definition.dart';
 
@@ -19,10 +20,16 @@ const int kWriteFileLimit = 65536;
 /// 搜索结果的单文件最大匹配数。
 const int kGrepPerFileLimit = 20;
 
-/// 解析沙盒工作目录路径（惰性缓存）。
-Future<Directory> _workspaceDir() async {
+/// 解析工作区根目录（Dev Agent）：
+/// - null / 'default' → `documents/workspace`（旧行为零回归）；
+/// - 其他本地工作区 → `documents/workspace/projects/<safe-id>/`（本地镜像）。
+Future<Directory> _workspaceDir([String? workspaceId]) async {
   final docs = await getApplicationDocumentsDirectory();
-  final dir = Directory(p.join(docs.path, 'workspace'));
+  final wsId = workspaceId == null || workspaceId == DevWorkspace.kDefaultId
+      ? null
+      : workspaceId;
+  final dir = Directory(p.join(docs.path, 'workspace',
+      wsId == null ? '' : p.join('projects', sanitizeWorkspaceDirName(wsId))));
   if (!await dir.exists()) {
     await dir.create(recursive: true);
   }
@@ -35,9 +42,11 @@ Future<Directory> _workspaceDir() async {
 ///   防 `../` 逃逸（现有策略）；
 /// - [SandboxMode.dangerFullAccess]（用户批准后）：绝对路径直接使用
 ///   （如 `/sdcard/...`、`/storage/emulated/0/...`，依赖 All-Files-Access），
-///   相对路径仍解析到 workspace。
-Future<String> _resolveSafePath(String rawPath, {SandboxMode? mode}) async {
-  final workspace = await _workspaceDir();
+///   相对路径仍解析到 workspace；
+/// - [workspaceId]：Dev 工作区（null/默认 = 默认工作区）。
+Future<String> _resolveSafePath(String rawPath,
+    {SandboxMode? mode, String? workspaceId}) async {
+  final workspace = await _workspaceDir(workspaceId);
   if (mode == SandboxMode.dangerFullAccess) {
     final trimmed = rawPath.trim();
     if (p.isAbsolute(trimmed)) {
@@ -76,7 +85,7 @@ ToolDefinition createReadFileTool() {
       if (rawPath.isEmpty) return ToolResult.error('缺少 path 参数');
       try {
         final path = await _resolveSafePath(rawPath,
-            mode: effectiveModeOf(args));
+            mode: effectiveModeOf(args), workspaceId: effectiveWorkspaceOf(args));
         final file = File(path);
         if (!await file.exists()) return ToolResult.error('文件不存在：$rawPath');
         final len = await file.length();
@@ -121,7 +130,7 @@ ToolDefinition createWriteFileTool() {
       }
       try {
         final path = await _resolveSafePath(rawPath,
-            mode: effectiveModeOf(args));
+            mode: effectiveModeOf(args), workspaceId: effectiveWorkspaceOf(args));
         await File(path).parent.create(recursive: true);
         await File(path).writeAsString(content, flush: true);
         return ToolResult(content: '已写入 $rawPath（${content.length} 字符）');
@@ -156,7 +165,7 @@ ToolDefinition createEditFileTool() {
       if (oldString.isEmpty) return ToolResult.error('oldString 为空');
       try {
         final path = await _resolveSafePath(rawPath,
-            mode: effectiveModeOf(args));
+            mode: effectiveModeOf(args), workspaceId: effectiveWorkspaceOf(args));
         final file = File(path);
         if (!await file.exists()) return ToolResult.error('文件不存在：$rawPath');
         final content = await file.readAsString();
@@ -189,7 +198,8 @@ ToolDefinition createListFilesTool() {
     },
     execute: (args) async {
       try {
-        final workspace = await _workspaceDir();
+        final workspace =
+            await _workspaceDir(effectiveWorkspaceOf(args));
         final files = <String>[];
         await for (final entity in workspace.list(recursive: true)) {
           if (entity is File) {
@@ -233,7 +243,8 @@ ToolDefinition createSearchTextTool() {
       if (pattern.isEmpty) return ToolResult.error('缺少 pattern 参数');
       try {
         final re = RegExp(pattern);
-        final workspace = await _workspaceDir();
+        final workspace =
+            await _workspaceDir(effectiveWorkspaceOf(args));
         final hits = <String>[];
         await for (final entity in workspace.list(recursive: true)) {
           if (entity is! File) continue;
