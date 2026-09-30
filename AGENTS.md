@@ -654,3 +654,45 @@ analyze 无新增告警。本机 flutter SDK 在 `C:\src\flutter`（不在 PATH�
   app-debug.apk 103901793 B / app-release.apk 53760707 B；字符串级验收过
   （debug kernel `新增技能`/`writeUserSkill` 命中；release libapp.so UTF-16LE
   `新增技能`/`何时触发` 命中）。
+
+## 2026-09-30 UI/体验批量调优 + MiniCPM5-2B 上架（v0.2.8+16 重打包）
+
+> 一批 UI 反馈落地，版本号策略不变（复用 0.2.8，code 16，覆盖安装）。
+
+**① 设置页紧凑化**：卡内 padding 16→12、卡片间距 16→10、`_buildToggleTitle`
+16/12→14/11、滑块行文字 13/12→12/11 且 Slider 包 `SizedBox(height:34)`、
+开关 `shrinkWrap`；推理引擎 tab 的 **OOM 守卫卡片重复渲染两次**已删一处
+（拉取代码时引入的重复块）。
+**② 存储空间 0MB 根因**：`_StorageInfoWidget` 只扫 `appDocs/models`，而模型
+实际存外部主目录（`/storage/emulated/0/TongYiLite/models`）——已改为按
+`ModelStorageService` 候选目录扫描（主目录+内部+app docs，.gguf 列表 +
+.mmproj/.dspark.gguf 计入总量）。
+**③ 推理日志一键复制**：日志页 AppBar + 推理引擎 tab「最近日志」标题行
+复制按钮（全量 `join('\n')`）。
+**④ 智能体 tab**：驱动模型 API 选择显示**配置名**（此前显示 ApiModelConfig
+uuid）；单轮最大步数 24→**100**（slider/provider clamp/config assert 三处同步）。
+**⑤ 输入区合并**：麦克风并入发送键（短按=发送/停止、长按=按住说话松手发送；
+手势区在 FAB 外层 + ValueNotifier 驱动图标防松手丢失）；图片/相机/文件附件
+合并为一个「+」按钮弹底部面板（徽标=已选总数）。
+**⑥ 回合过程总折叠区**：`AgentTurnBlock` 完成后工具卡+思考存档自动收进
+`_TurnProcessSection`（默认收起，"执行过程 · N 工具 · M 思考"点开回看）；
+**思考落库**：turn 结束把 `thinkingHistory` 逐块存为 `💭 ` 前缀消息（与 🔧 同
+规则不入模型上下文，`_isToolActivityMessage` 已扩展匹配 💭），历史回合经
+`groupMessages` 的 `TurnUnit.thinking` 回看——此前思考只活在 live 状态、
+回合结束即消失。
+**⑦ 会话列表**：时间带日期（今天/昨天/MM-DD/YYYY-M-D）。
+**⑧ 回复转发**：气泡新增分享按钮（`ShareService`→`files` channel
+`shareText`→ACTION_SEND chooser，用户选微信等），MainActivity 加 handler。
+**⑨ 对话文字整体缩放**：`chatTextScale`（0.7~1.3 默认 1.0，智能体 tab 滑条），
+home_screen 消息列表包 `MediaQuery(textScaler: TextScaler.linear)` 整体缩放。
+**⑩ catalog**：删 `agents-a1-4b`；新增 `minicpm5-2b-q4_k_m`（1.5GB，sha256
+ec2d…02fd）与 `minicpm5-2b-q8_0`（2.5GB，sha256 c541…b078），ModelScope 主源
+（OpenBMB/MiniCPM5-2B-GGUF，128K 上下文、tool-calling）。**DSpark 草稿头
+（BF16 623MB）用户定案不挂**：仓库无 Q4/Q8 草稿头、fp16 太大。
+
+回归：test/agent+providers+services 全绿 **335 项+2 skip**（phase6 两用例
+更新为总折叠区交互 + 新增 💭 分组/折叠区回看用例）。
+**2026-09-30 13:24 重打包（v0.2.8+16）**：app-debug.apk 105005917 B /
+app-release.apk 53789540 B；字符串级验收过（debug kernel/release libapp.so
+`对话文字大小`/`执行过程` 命中；APK 内 models_catalog.json `minicpm5-2b-q4_k_m`
+命中、`agents-a1` 为 0）。

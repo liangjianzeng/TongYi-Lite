@@ -5,6 +5,7 @@
 // ============================================================
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/model_provider.dart';
 
@@ -21,6 +22,19 @@ class InferenceLogScreen extends ConsumerWidget {
         title: const Text('推理引擎日志'),
         centerTitle: true,
         actions: [
+          // 一键复制：全量日志拼接换行入剪贴板（排障时贴给开发者/模型）。
+          IconButton(
+            icon: const Icon(Icons.copy),
+            onPressed: logs.isEmpty
+                ? null
+                : () {
+                    Clipboard.setData(ClipboardData(text: logs.join('\n')));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('已复制 ${logs.length} 条日志')),
+                    );
+                  },
+            tooltip: '复制全部日志',
+          ),
           // 清空日志：只清展示层列表。此前是空实现按钮；也不要用
           // ref.invalidate(modelManagerProvider) 充当"刷新"——那会把 notifier
           // 重建复位为 idle，让已加载的模型在 UI 上显示成"未加载"。

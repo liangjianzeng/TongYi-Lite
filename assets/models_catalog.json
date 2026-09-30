@@ -561,56 +561,79 @@
       }
     },
     {
-      "id": "agents-a1-4b",
-      "name": "Agents-A1 4B (Q4_K_M 智能体+视觉)",
-      "type": "vision",
+      "id": "minicpm5-2b-q4_k_m",
+      "name": "MiniCPM5 2B (Q4_K_M 智能体)",
+      "type": "text",
       "mirrors": [
         {
-          "url": "https://hf-mirror.com/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
+          "url": "https://modelscope.cn/models/OpenBMB/MiniCPM5-2B-GGUF/resolve/master/MiniCPM5-2B-Q4_K_M.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/OpenBMB/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf",
           "source": "hf-mirror"
         },
         {
-          "url": "https://huggingface.co/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/OpenBMB/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q4_K_M.gguf",
           "source": "huggingface"
-        },
-        {
-          "url": "https://modelscope.cn/api/v1/models/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-Q4_K_M.gguf",
-          "source": "modelscope"
         }
       ],
-      "sizeGB": 2.52,
-      "sizeMBDisplay": "2.5 GB",
+      "sizeGB": 1.45,
+      "sizeMBDisplay": "1.5 GB",
       "recommended": true,
-      "minRamMB": 4096,
-      "sha256Hash": "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+      "minRamMB": 3072,
+      "sha256Hash": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd",
       "tags": [
         "推荐",
         "智能体",
-        "视觉"
+        "速度快"
       ],
-      "mmproj": {
-        "mirrors": [
-          {
-            "url": "https://hf-mirror.com/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
-            "source": "hf-mirror"
-          },
-          {
-            "url": "https://huggingface.co/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
-            "source": "huggingface"
-          },
-          {
-            "url": "https://modelscope.cn/api/v1/models/InternScience/Agents-A1-4B-Q4_K_M-GGUF/resolve/main/Agents-A1-4B-mmproj.gguf",
-            "source": "modelscope"
-          }
-        ],
-        "sizeMB": 641.3,
-        "sizeMBDisplay": "641 MB",
-        "sha256Hash": "254145e7e03e9e8d3120813fac8033ffa04e411eb6d70a198833504935681084"
-      },
       "agentCapabilities": {
         "nativeToolCall": true,
-        "maxContextTokens": 262144,
-        "recommendedNctx": 32768,
+        "maxContextTokens": 131072,
+        "recommendedNctx": 16384,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 512,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
+      "id": "minicpm5-2b-q8_0",
+      "name": "MiniCPM5 2B (Q8_0 智能体)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/OpenBMB/MiniCPM5-2B-GGUF/resolve/master/MiniCPM5-2B-Q8_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/OpenBMB/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q8_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/OpenBMB/MiniCPM5-2B-GGUF/resolve/main/MiniCPM5-2B-Q8_0.gguf",
+          "source": "huggingface"
+        }
+      ],
+      "sizeGB": 2.5,
+      "sizeMBDisplay": "2.5 GB",
+      "recommended": false,
+      "minRamMB": 4096,
+      "sha256Hash": "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078",
+      "tags": [
+        "智能体",
+        "精度更高"
+      ],
+      "agentCapabilities": {
+        "nativeToolCall": true,
+        "maxContextTokens": 131072,
+        "recommendedNctx": 16384,
         "mtpSupported": false
       },
       "agentDefaults": {

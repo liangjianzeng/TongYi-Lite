@@ -135,8 +135,34 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "exportFile" -> handleExportFile(call, result)
                 "openFile"   -> handleOpenFile(call, result)
+                "shareText"  -> handleShareText(call, result)
                 else         -> result.notImplemented()
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 系统分享桥：纯文本 ACTION_SEND（用户在分享面板选微信/QQ 等目标）。
+    // ------------------------------------------------------------------
+
+    private fun handleShareText(call: MethodCall, result: MethodChannel.Result) {
+        val text = call.argument<String>("text").orEmpty()
+        val title = call.argument<String>("title") ?: "分享"
+        if (text.isEmpty()) {
+            result.error("EMPTY", "分享内容为空", null)
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            startActivity(Intent.createChooser(intent, title))
+            logI("handleShareText", "share chooser opened (${text.length} chars)")
+            result.success(true)
+        } catch (e: Exception) {
+            logE("handleShareText", "share failed: ${e.message}", e)
+            result.error("SHARE_FAILED", "分享失败：${e.message}", null)
         }
     }
 

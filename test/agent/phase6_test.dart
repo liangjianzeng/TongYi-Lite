@@ -225,6 +225,21 @@ void main() {
     test('空输入 → 空', () {
       expect(groupMessages([]), isEmpty);
     });
+
+    test('💭 思考存档归入回合 thinking（不入 tools 也不当回答）', () {
+      final units = groupMessages([
+        userMsg('Q1'),
+        asst('💭 第一段思考'),
+        asst('🔧 A ✓ok'),
+        asst('💭 第二段思考'),
+        asst('最终答案'),
+      ]);
+      expect(units.length, 2);
+      final turn = units.last as TurnUnit;
+      expect(turn.thinking, ['第一段思考', '第二段思考']);
+      expect(turn.tools.length, 1);
+      expect(turn.answer?.content, '最终答案');
+    });
   });
 
   group('parseToolActivity 工具活动解析（历史回合步骤回看）', () {
@@ -280,7 +295,8 @@ void main() {
     Future<void> pump(WidgetTester tester, AgentUiState ui,
         {List<ToolActivityUi> steps = const [],
          ChatMessage? answer,
-         bool isLive = false}) async {
+         bool isLive = false,
+         List<String> thinking = const []}) async {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
@@ -290,6 +306,7 @@ void main() {
                 steps: steps,
                 answer: answer,
                 ui: ui,
+                thinking: thinking,
               ),
             ),
           ),
@@ -314,32 +331,63 @@ void main() {
       expect(find.textContaining('执行中'), findsOneWidget);
     });
 
-    testWidgets('完成步骤：展开后显示结果', (tester) async {
+    testWidgets('完成步骤：总折叠区展开后显示结果', (tester) async {
       await pump(
         tester,
         const AgentUiState(running: false),
         steps: [act(status: ToolUiStatus.done, name: 'get_time', result: '12:00', args: {'tz': 'UTC'})],
         isLive: false,
       );
+      // 已完成回合：工具卡收进「执行过程」总折叠区，默认收起不可见。
+      expect(find.textContaining('执行过程'), findsOneWidget);
+      expect(find.textContaining('🔧 get_time'), findsNothing);
+      await tester.tap(find.textContaining('执行过程'));
+      await tester.pump();
       expect(find.textContaining('🔧 get_time'), findsOneWidget);
-      expect(find.textContaining('12:00'), findsNothing); // 未展开
+      expect(find.textContaining('12:00'), findsNothing); // 工具卡未展开
       await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
       expect(find.textContaining('12:00'), findsOneWidget);
       expect(find.textContaining('参数'), findsOneWidget);
     });
 
-    testWidgets('失败步骤：⚠️ 标记 + 结果（展开可见）', (tester) async {
+    testWidgets('失败步骤：⚠️ 标记 + 结果（总折叠区展开可见）', (tester) async {
       await pump(
         tester,
         const AgentUiState(running: false),
         steps: [act(status: ToolUiStatus.failed, name: 'shell', result: 'exit code=1')],
         isLive: false,
       );
+      expect(find.textContaining('执行过程'), findsOneWidget);
+      await tester.tap(find.textContaining('执行过程'));
+      await tester.pump();
       expect(find.textContaining('🔧 shell'), findsOneWidget);
       await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
       expect(find.textContaining('exit code=1'), findsOneWidget);
+    });
+
+    testWidgets('已完成回合：思考存档入总折叠区（展开后可回看）', (tester) async {
+      await pump(
+        tester,
+        const AgentUiState(running: false),
+        steps: [act(status: ToolUiStatus.done, name: 'get_time')],
+        answer: asst('答案'),
+        thinking: const ['思考一', '思考二'],
+        isLive: false,
+      );
+      expect(find.textContaining('1 工具 · 2 思考'), findsOneWidget);
+      expect(find.textContaining('思考 1'), findsNothing);
+      await tester.tap(find.textContaining('执行过程'));
+      await tester.pump();
+      // 展开后呈现思考存档块（块本身仍是折叠条，点开再看正文）。
+      expect(find.textContaining('思考 1'), findsOneWidget);
+      expect(find.textContaining('思考 2'), findsOneWidget);
+      expect(find.textContaining('思考一'), findsNothing);
+      await tester.tap(find.textContaining('思考 1'));
+      await tester.pump();
+      expect(find.textContaining('思考一'), findsOneWidget);
+      expect(find.textContaining('答案'), findsOneWidget);
     });
 
     testWidgets('运行中且无答案 → 执行中…', (tester) async {

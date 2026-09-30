@@ -55,8 +55,8 @@ final class AgentConfig {
     this.contextTokenBudget,
     this.maxTokensFinalRound,
   }) :
-    assert(maxStepsPerTurn >= 1 && maxStepsPerTurn <= 24,
-        'maxStepsPerTurn must be in [1, 24]'),
+    assert(maxStepsPerTurn >= 1 && maxStepsPerTurn <= 100,
+        'maxStepsPerTurn must be in [1, 100]'),
     assert(temperature >= 0.0 && temperature <= 2.0,
         'temperature must be in [0, 2]');
 

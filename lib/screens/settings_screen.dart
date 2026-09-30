@@ -30,6 +30,7 @@ import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
 import '../services/settings_service.dart';
 import '../services/model_manager.dart';
+import '../services/model_storage_service.dart' show modelStorageService;
 import 'inference_log_screen.dart';
 
 /// App-lifetime guard: the local .gguf scan runs **once per app launch**.
@@ -156,7 +157,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Widget _buildModelManagementTab() {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -168,7 +169,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               label: const Text('扫描已有模型'),
               style: ElevatedButton.styleFrom(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
               ),
             ),
           ),
@@ -181,7 +182,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 模型列表（已缓存优先排序）----
           _buildSectionHeader('📦 可用模型', context),
@@ -256,7 +257,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
         // 已缓存模型用蓝色描边 + 浅蓝底色，让「已下载」一眼可辨（区别于未下载的灰边卡片）。
         return Card(
-          margin: const EdgeInsets.only(bottom: 12),
+          margin: const EdgeInsets.only(bottom: 8),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
             side: isCached
@@ -266,7 +267,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           color: isCached ? Colors.blue.shade50.withValues(alpha: 0.4) : null,
           elevation: isCached ? 1.5 : 0,
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(12),
             child: Stack(
               children: [
                 Column(
@@ -281,7 +282,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                           child: Text(
                             cleanModelName(model.name),
                             style: const TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w600),
+                                fontSize: 14, fontWeight: FontWeight.w600),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -924,14 +925,14 @@ class _InferenceEngineTab extends ConsumerWidget {
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ---- GPU 加速设置卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -940,7 +941,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                     gpuSettings.enableGpu,
                     gpuNotifier.setEnableGpu,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                   SegmentedButton<String>(
                     segments: [
                       const ButtonSegment(
@@ -986,7 +987,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                             : 'GPU 已关闭（纯 CPU）'),
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                   Row(
                     children: [
                       Expanded(
@@ -1028,12 +1029,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 思考模式设置卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1052,12 +1053,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- MTP 加速全局开关卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1072,12 +1073,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- dspark 加速全局开关卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1092,12 +1093,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 上下文大小设置卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1137,12 +1138,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 推理引擎扩展设置卡片（视觉投影器 / 资源监控）----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1159,12 +1160,12 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- OOM 内存守卫设置卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1212,65 +1213,13 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
 
-          // ---- OOM 内存守卫设置卡片 ----
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildToggleTitle(
-                    '🛡️ OOM 内存守卫',
-                    gpuSettings.oomGuardEnabled,
-                    gpuNotifier.setOomGuardEnabled,
-                    subtitle: gpuSettings.oomGuardEnabled
-                        ? '加载前预检内存余量，超出则拒绝加载，防止整机硬死机'
-                        : '⚠️ 已关闭：超大模型可强行加载，内存不足时可能整机死机重启',
-                  ),
-                  // 余量滑条仅守卫开启时可调；关闭时置灰直观反映「不生效」。
-                  Opacity(
-                    opacity: gpuSettings.oomGuardEnabled ? 1.0 : 0.45,
-                    child: IgnorePointer(
-                      ignoring: !gpuSettings.oomGuardEnabled,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Divider(height: 24),
-                          _buildHeadroomSlider(
-                            label: '预检余量',
-                            value: gpuSettings.oomPreHeadroomMb,
-                            onChanged: gpuNotifier.setOomPreHeadroomMb,
-                            hint: '加载前可用内存需超出模型体积至少该余量，否则拒绝加载；'
-                                '调小更容易放过极限大模型，调大更保守',
-                          ),
-                          _buildHeadroomSlider(
-                            label: '加载后余量',
-                            value: gpuSettings.oomPostHeadroomMb,
-                            onChanged: gpuNotifier.setOomPostHeadroomMb,
-                            hint: '加载完成后 KV 缓存/图计算缓冲的内存预算 = '
-                                '可用内存 − 该余量；调小给上下文更大空间，调大更保守',
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  Text(
-                    '默认 768 / 1536 MB（与原生层一致）。修改后下次加载模型生效',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1328,7 +1277,7 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ---- 操作按钮 ----
           _buildSectionHeader('⚡ 快捷操作', context),
@@ -1387,8 +1336,17 @@ class _InferenceEngineTab extends ConsumerWidget {
           const SizedBox(height: 24),
 
           // ---- 最近日志摘要 ----
-          _buildSectionHeader('📋 最近日志', context),
-          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(child: _buildSectionHeader('📋 最近日志', context)),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: '复制全部日志',
+                onPressed: () => _copyInferenceLogs(context, ref),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
 
           _RecentLogsWidget(),
         ],
@@ -1445,31 +1403,34 @@ class _InferenceEngineTab extends ConsumerWidget {
     required String hint,
   }) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+              Expanded(child: Text(label, style: const TextStyle(fontSize: 12))),
               SizedBox(
                 width: 88,
                 child: Text(
                   '$value MB',
                   textAlign: TextAlign.right,
                   style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w500),
+                      fontSize: 12, fontWeight: FontWeight.w500),
                 ),
               ),
             ],
           ),
-          Slider(
-            value: value.clamp(0, 4096).toDouble(),
-            min: 0,
-            max: 4096,
-            divisions: 64,
-            label: '$value MB',
-            onChanged: (v) => onChanged((v / 64).round() * 64),
+          SizedBox(
+            height: 34,
+            child: Slider(
+              value: value.clamp(0, 4096).toDouble(),
+              min: 0,
+              max: 4096,
+              divisions: 64,
+              label: '$value MB',
+              onChanged: (v) => onChanged((v / 64).round() * 64),
+            ),
           ),
           Text(hint, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
         ],
@@ -1507,6 +1468,21 @@ class _InferenceEngineTab extends ConsumerWidget {
     }
   }
 
+  /// 一键复制全部推理日志（最近日志摘要与日志页共用语义：全量拼接换行）。
+  void _copyInferenceLogs(BuildContext context, WidgetRef ref) {
+    final logs = ref.read(modelManagerProvider.notifier).loadingLogs;
+    if (logs.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无日志可复制')),
+      );
+      return;
+    }
+    Clipboard.setData(ClipboardData(text: logs.join('\n')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已复制 ${logs.length} 条日志')),
+    );
+  }
+
   bool _gpuLayersEditable(InferenceSettings s) {
     if (!s.enableGpu) return false;
     // CPU 无意义；其余后端（opencl/auto）允许调层数，Vulkan 暂不可调。
@@ -1527,18 +1503,19 @@ class _InferenceEngineTab extends ConsumerWidget {
 
 Widget _buildSectionHeader(String title, BuildContext context) {
   return Padding(
-    padding: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.only(bottom: 6),
     child: Text(
       title,
       style: Theme.of(context)
           .textTheme
-          .titleMedium
+          .titleSmall
           ?.copyWith(fontWeight: FontWeight.bold),
     ),
   );
 }
 
 /// 标题行内嵌开关：标题 + 右侧 Switch，可选副标题。用于节省卡片纵向空间。
+/// 字号紧凑（14/11），开关用 shrinkWrap 减小触点占位。
 Widget _buildToggleTitle(
   String title,
   bool value,
@@ -1554,19 +1531,26 @@ Widget _buildToggleTitle(
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ),
           const SizedBox(width: 8),
-          Switch(value: value, onChanged: onChanged),
+          SizedBox(
+            height: 32,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
         ],
       ),
       if (subtitle != null) ...[
-        const SizedBox(height: 4),
+        const SizedBox(height: 2),
         Text(subtitle,
-            style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
     ],
   );
@@ -1628,7 +1612,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     final active = settings.activePersona();
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1968,7 +1952,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
         : '本地路线能力上限 2 路（prompt-JSON 协议）；实际并发 = min(设置值, 2)';
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1977,7 +1961,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
           // prefill 最小，本地小模型友好；打开才走工具循环。
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: _buildToggleTitle(
                 '🤖 智能体模式',
                 settings.agentEnabled,
@@ -1990,7 +1974,27 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
+
+          // ================= ⓪b 对话区文字大小（不受智能体开关门控）=================
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: _buildSliderRow(
+                label: '对话文字大小',
+                value: (settings.chatTextScale * 100).round(),
+                min: 70,
+                max: 130,
+                divisions: 12,
+                display: '${(settings.chatTextScale * 100).round()}%',
+                onChanged: (v) => notifier.setChatTextScale(v / 100),
+                hint: '对话区文字整体缩放（气泡/思考/工具卡/时间戳），'
+                    '默认 100% = 当前字号，可放大缩小前后 30%',
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
 
           // 关闭总开关时置灰全部子项（不可交互，直观反映"暂不生效"）。
           Opacity(
@@ -2003,7 +2007,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
           // ================= ① 引擎状态（能力总览）=================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2042,17 +2046,17 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ①b 人格（Persona） =================
           _buildPersonaCard(context, settings, notifier),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ② 核心执行参数 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2061,14 +2065,15 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     label: '单轮最大步数',
                     value: profMaxRounds,
                     min: 1,
-                    max: 24,
-                    divisions: 23,
+                    max: 100,
+                    divisions: 99,
                     display: '$profMaxRounds 步',
                     onChanged: (v) => isApi
                         ? notifier.setAgentApiMaxRounds(v)
                         : notifier.setAgentMaxRounds(v),
                     hint: '一次提问内最多几次模型请求（含工具往返）；'
-                        '${isApi ? 'API 档默认 16' : '端侧建议 3–8（默认 12）'}',
+                        '${isApi ? 'API 档默认 16' : '端侧建议 3–12（默认 12）'}，'
+                        '复杂任务可调到 100',
                   ),
                   _buildSliderRow(
                     label: '每回合搜索上限',
@@ -2159,12 +2164,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ③ 上下文管理 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2189,12 +2194,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ④ 能力与并行 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2254,12 +2259,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ⑤ Skills 与指令文件 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2335,12 +2340,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ⑥ 工具 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2397,12 +2402,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
 
           // ================= ⑦ 高级 / 开发者 =================
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2457,7 +2462,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     );
   }
 
-  /// 浮点滑块行（温度）。
+  /// 浮点滑块行（温度）。紧凑排版同 [_buildSliderRow]。
   Widget _buildDoubleSliderRow({
     required String label,
     required double value,
@@ -2469,30 +2474,33 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     String? hint,
   }) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Expanded(
-                  child: Text(label, style: const TextStyle(fontSize: 13))),
+                  child: Text(label, style: const TextStyle(fontSize: 12))),
               Text(display,
                   style: const TextStyle(
-                      fontWeight: FontWeight.w500, fontSize: 13)),
+                      fontWeight: FontWeight.w500, fontSize: 12)),
             ],
           ),
-          Slider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
-            divisions: divisions,
-            label: display,
-            onChanged: onChanged,
+          SizedBox(
+            height: 34,
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              divisions: divisions,
+              label: display,
+              onChanged: onChanged,
+            ),
           ),
           if (hint != null)
             Text(hint,
-                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                style: const TextStyle(fontSize: 11, color: Colors.grey)),
         ],
       ),
     );
@@ -2629,6 +2637,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   }
 
   /// 驱动模型选择器：显示当前选择，点击弹出选择对话框。
+  /// API 模型显示**配置名**（无名称回退模型名）而非内部 id——此前直接显示
+  /// agentModelId（ApiModelConfig 的 uuid），用户看到的是一串 key。
   Widget _buildAgentModelSelector(
       BuildContext context, WidgetRef ref, InferenceSettings settings) {
     final String currentLabel;
@@ -2637,7 +2647,14 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     } else if (settings.agentModelSource == 'local') {
       currentLabel = '本地：${settings.agentModelId}';
     } else {
-      currentLabel = 'API：${settings.agentModelId}';
+      String displayName = settings.agentModelId ?? '';
+      for (final cfg in settings.apiModels) {
+        if (cfg.id == settings.agentModelId) {
+          displayName = cfg.name.isEmpty ? cfg.model : cfg.name;
+          break;
+        }
+      }
+      currentLabel = 'API：$displayName';
     }
 
     return InkWell(
@@ -2741,6 +2758,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 }
 
 /// 通用「标签 + 滑块 + 当前值 + 提示」行，用于设置页数值型配置。
+/// 紧凑排版：文字 12/11，滑块区压到 34px 高，整体比默认省 ~40% 纵向空间。
 Widget _buildSliderRow({
   required String label,
   required int value,
@@ -2752,36 +2770,33 @@ Widget _buildSliderRow({
   String? hint,
 }) {
   return Padding(
-    padding: const EdgeInsets.only(bottom: 12),
+    padding: const EdgeInsets.only(bottom: 6),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
             Expanded(
-              child: Text(label, style: const TextStyle(fontSize: 13)),
+              child: Text(label, style: const TextStyle(fontSize: 12)),
             ),
             Text(display,
                 style: const TextStyle(
-                    fontWeight: FontWeight.w500, fontSize: 13)),
+                    fontWeight: FontWeight.w500, fontSize: 12)),
           ],
         ),
-        Row(
-          children: [
-            Expanded(
-              child: Slider(
-                value: value.toDouble(),
-                min: min.toDouble(),
-                max: max.toDouble(),
-                divisions: divisions,
-                label: '$value',
-                onChanged: (v) => onChanged(v.round()),
-              ),
-            ),
-          ],
+        SizedBox(
+          height: 34,
+          child: Slider(
+            value: value.toDouble(),
+            min: min.toDouble(),
+            max: max.toDouble(),
+            divisions: divisions,
+            label: '$value',
+            onChanged: (v) => onChanged(v.round()),
+          ),
         ),
         if (hint != null)
-          Text(hint, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          Text(hint, style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
     ),
   );
@@ -2804,11 +2819,11 @@ class _buildAboutTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const SingleChildScrollView(
-      padding: EdgeInsets.all(16),
+      padding: EdgeInsets.all(12),
       child: Column(
         children: [
           _AboutCard(),
-          SizedBox(height: 16),
+          SizedBox(height: 10),
           _LicenseCard(),
         ],
       ),
@@ -2843,11 +2858,11 @@ class _AboutCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           children: [
             const Icon(Icons.auto_awesome, size: 64, color: Colors.indigo),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
             const Text(
               'TongYi-Lite',
               style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
@@ -2857,7 +2872,7 @@ class _AboutCard extends StatelessWidget {
               '端侧离线 AI 智能体',
               style: TextStyle(color: Colors.grey, fontSize: 14),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
             _AboutRow(label: '版本', value: _appVersion),
             _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
@@ -2898,7 +2913,7 @@ class _LicenseCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2907,7 +2922,7 @@ class _LicenseCard extends StatelessWidget {
             const Text('MIT License'),
             const SizedBox(height: 8),
             const Text('Copyright (c) 2026 TongYi-Lite Contributors'),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
             const Text(
               '本项目使用 llama.cpp 作为推理引擎，遵循其开源许可协议。',
               style: TextStyle(fontSize: 12, color: Colors.grey),
@@ -2955,7 +2970,7 @@ class _StorageInfoWidget extends ConsumerWidget {
         if (!snapshot.hasData) {
           return const Center(
               child: Padding(
-                  padding: EdgeInsets.all(16),
+                  padding: EdgeInsets.all(12),
                   child: CircularProgressIndicator()));
         }
 
@@ -2965,7 +2980,7 @@ class _StorageInfoWidget extends ConsumerWidget {
 
         return Card(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -3019,25 +3034,46 @@ class _StorageInfoWidget extends ConsumerWidget {
     int totalBytes = 0;
 
     try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final modelsDir = Directory('${appDir.path}/models');
-      if (await modelsDir.exists()) {
-        for (final entity in await modelsDir.list().toList()) {
-          if (entity is File && entity.path.endsWith('.gguf')) {
-            final fileName = p.basenameWithoutExtension(entity.path);
-            final sizeBytes = await entity.length();
+      // 模型实际存储位置与 ModelStorageService 的候选目录一致：
+      // 外部主目录（/storage/emulated/0/TongYiLite/models 等）+ 内部
+      // app_flutter/models + app docs 回退。此前只扫 app docs → 恒 0MB。
+      final dirs = <Directory>[];
+      try {
+        dirs.add(await modelStorageService.getModelsRootDir());
+      } catch (_) {}
+      dirs.add(Directory(
+          '/data/data/com.dgxspark.tongyilite/app_flutter/models'));
+      try {
+        final appDir = await getApplicationDocumentsDirectory();
+        dirs.add(Directory(p.join(appDir.path, 'models')));
+      } catch (_) {}
 
-            String displayName = fileName;
-            try {
-              final allModels = await loadModelCatalog();
-              final match = allModels.where((m) => m.id == fileName).toList();
-              if (match.isNotEmpty) displayName = match.first.name;
-            } catch (_) {}
+      final seenPaths = <String>{};
+      for (final dir in dirs) {
+        if (!seenPaths.add(dir.path)) continue;
+        if (!await dir.exists()) continue;
+        await for (final entity in dir.list(recursive: true)) {
+          if (entity is! File) continue;
+          final isGguf = entity.path.endsWith('.gguf');
+          final isMmproj = entity.path.endsWith('.mmproj');
+          if (!isGguf && !isMmproj) continue;
+          final sizeBytes = await entity.length();
+          totalBytes += sizeBytes;
+          if (!isGguf) continue; // 投影器/草稿头只计入总量，不单列模型行
+          final fileName = p.basenameWithoutExtension(entity.path);
 
-            cachedModels.add(
-                {'name': displayName, 'id': fileName, 'sizeBytes': sizeBytes});
-            totalBytes += sizeBytes;
-          }
+          String displayName = fileName;
+          try {
+            final allModels = await loadModelCatalog();
+            final match = allModels.where((m) => m.id == fileName).toList();
+            if (match.isNotEmpty) displayName = match.first.name;
+          } catch (_) {}
+
+          cachedModels.add({
+            'name': displayName,
+            'id': fileName,
+            'sizeBytes': sizeBytes
+          });
         }
       }
     } catch (e) {
@@ -3160,7 +3196,7 @@ class _ModelLoadProgressDialog extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               const CircularProgressIndicator(),
-              const SizedBox(height: 16),
+              const SizedBox(height: 10),
               Text('正在加载模型…', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
               Text(modelName,
@@ -3228,13 +3264,13 @@ class _ApiTab extends ConsumerWidget {
     final activeId = settings.activeApiModelId;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Row(
                 children: [
                   Icon(Icons.cloud_queue,
@@ -3250,7 +3286,7 @@ class _ApiTab extends ConsumerWidget {
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
           Row(
             children: [
               Expanded(child: _buildSectionHeader('已配置的 API 模型', context)),
@@ -3277,7 +3313,7 @@ class _ApiTab extends ConsumerWidget {
           _buildSectionHeader('当前激活', context),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -3314,7 +3350,7 @@ class _ApiTab extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -3830,7 +3866,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

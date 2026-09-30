@@ -144,6 +144,10 @@ class InferenceSettings {
   /// 不停时会被掐断报"思考超长未闭合"——按模型调大（上限 65536）。
   final int agentThinkingMaxChars;
 
+  /// 对话区文字整体缩放（0.7~1.3，默认 1.0 = 当前字号）。
+  /// 以 TextScaler 作用于消息列表（气泡/思考/工具卡/时间戳整体缩放）。
+  final double chatTextScale;
+
   /// 子代理工具（subagent，spawn/fork）注册开关。默认开??
   /// 不变量固定（深度 ??2 / 子代理审批恒 never / 每层独立预算）??
   final bool agentSubagentEnabled;
@@ -297,6 +301,7 @@ class InferenceSettings {
     this.agentApiAllowParallelTools = true,
     this.agentApiMaxParallel = 4,
     this.agentThinkingMaxChars = 6000,
+    this.chatTextScale = 1.0,
     this.agentSubagentEnabled = true,
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
@@ -426,6 +431,7 @@ class InferenceSettings {
       bool? agentApiAllowParallelTools,
       int? agentApiMaxParallel,
       int? agentThinkingMaxChars,
+      double? chatTextScale,
       bool? agentSubagentEnabled,
       bool? agentCompactEnabled,
       bool? agentSpillEnabled,
@@ -500,6 +506,7 @@ class InferenceSettings {
       agentApiMaxParallel: agentApiMaxParallel ?? this.agentApiMaxParallel,
       agentThinkingMaxChars:
           agentThinkingMaxChars ?? this.agentThinkingMaxChars,
+      chatTextScale: chatTextScale ?? this.chatTextScale,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
@@ -570,6 +577,7 @@ class InferenceSettings {
         'agentApiAllowParallelTools': agentApiAllowParallelTools,
         'agentApiMaxParallel': agentApiMaxParallel,
         'agentThinkingMaxChars': agentThinkingMaxChars,
+        'chatTextScale': chatTextScale,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
@@ -657,6 +665,9 @@ class InferenceSettings {
           (json['agentApiMaxParallel'] as num?)?.toInt() ?? 4,
       agentThinkingMaxChars:
           (json['agentThinkingMaxChars'] as num?)?.toInt() ?? 6000,
+      chatTextScale:
+          ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0)
+              .clamp(0.7, 1.3),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
