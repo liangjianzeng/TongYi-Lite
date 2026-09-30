@@ -26,6 +26,15 @@ std::string common_speculative_type_to_str(enum common_speculative_type type);
 // return the max number of draft tokens based on the speculative parameters
 int32_t common_speculative_n_max(const common_params_speculative * spec);
 
+// return the max number of draft tokens from the initialized implementations
+int32_t common_speculative_n_max(const common_speculative * spec);
+
+// validate and resolve the unconditional synthetic acceptance rates
+std::vector<double> common_speculative_synth_rates_resolve(const common_params_speculative * spec, int32_t n_max);
+
+// return the conditional synthetic acceptance probabilities
+const std::vector<double> & common_speculative_get_synth_probs(const common_speculative * spec);
+
 common_params common_base_params_to_speculative(const common_params & params);
 
 struct common_speculative_output_limits {
@@ -52,7 +61,7 @@ struct common_speculative_draft_params {
     // can be used to constraint the max draft based on the remaining context size
     int32_t n_max = -1;
 
-    llama_pos   n_past;
+    llama_pos   pos0;
     llama_token id_last;
 
     // TODO: remove in the future by keeping track of the prompt from the _begin() call and the consecutive accept calls
@@ -68,13 +77,10 @@ common_speculative_draft_params & common_speculative_get_draft_params(common_spe
 void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt);
 
 // process the batch and update the internal state of the speculative context
-bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
+bool common_speculative_process(common_speculative * spec, const common_batch & batch);
 
-// true if any implementation requires the target's multi-layer tap capture
-// (see llama_set_capture_layers / llama_get_embeddings_capture_ith) -- used by
-// dspark, which conditions on several intermediate target layers concatenated
-// per position rather than a single pre/post-norm embedding.
-bool common_speculative_need_embd_capture(common_speculative * spec);
+// legacy llama_batch input, converted with common_batch_from_llama_batch()
+bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
 
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
@@ -88,26 +94,6 @@ void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec);
-
-// types of the implementations that were actually initialized, in priority order
-std::vector<enum common_speculative_type> common_speculative_get_types(const common_speculative * spec);
-
-// TEST/DEBUG ONLY: directly stage target-tap context rows for the dspark
-// implementation (if registered), bypassing the normal process()-driven
-// capture path, which requires a real target context with
-// llama_set_capture_layers engaged and logits requested on every row. Used by
-// the Phase 2 synthetic-target harness (tests/test-dspark-loop.cpp) to drive
-// the block-draft loop deterministically without a target model.
-// `feat` is [n_rows * n_embd_cap] row-major, `pos` is [n_rows] absolute
-// positions, both appended to the sequence's pending context buffer exactly
-// as process() would have. Returns false if no dspark implementation is
-// registered.
-bool common_speculative_dspark_stage_ctx_test(common_speculative * spec,
-                                              llama_seq_id         seq_id,
-                                              const float *        feat,
-                                              int64_t              n_rows,
-                                              int64_t              n_embd_cap,
-                                              const int32_t *      pos);
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }

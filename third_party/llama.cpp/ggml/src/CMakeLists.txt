@@ -213,7 +213,9 @@ set_target_properties(ggml-base PROPERTIES
     SOVERSION ${GGML_VERSION_MAJOR}
 )
 
-target_include_directories(ggml-base PRIVATE .)
+configure_file(ggml-version.h.in ${CMAKE_CURRENT_BINARY_DIR}/ggml-version.h @ONLY)
+
+target_include_directories(ggml-base PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
 if (GGML_BACKEND_DL)
     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)
 endif()
@@ -441,7 +443,7 @@ function(ggml_add_cpu_backend_variant tag_name)
     # other: OPENMP LLAMAFILE CPU_HBM
     if (GGML_SYSTEM_ARCH STREQUAL "x86")
         foreach (feat NATIVE
-                      SSSE3 SSE42
+                      SSE42
                       AVX AVX2 BMI2 AVX_VNNI FMA F16C
                       AVX512 AVX512_VBMI AVX512_VNNI AVX512_BF16
                       AMX_TILE AMX_INT8 AMX_BF16)
@@ -490,7 +492,6 @@ if (GGML_CPU_ALL_VARIANTS)
     endif()
     if (GGML_SYSTEM_ARCH STREQUAL "x86")
         ggml_add_cpu_backend_variant(x64)
-        ggml_add_cpu_backend_variant(ssse3              SSSE3)
         ggml_add_cpu_backend_variant(sse42              SSE42)
         ggml_add_cpu_backend_variant(sandybridge        SSE42 AVX)
         if (NOT MSVC)

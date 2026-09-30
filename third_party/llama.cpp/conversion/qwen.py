@@ -10,7 +10,7 @@ import torch
 if TYPE_CHECKING:
     from torch import Tensor
 
-from .base import LazyTorchTensor, ModelBase, TextModel, gguf, logger
+from .base import LazyTorchTensor, ModelBase, ModelType, TextModel, get_model_architecture, gguf, logger
 
 
 @ModelBase.register("QWenLMHeadModel")
@@ -379,6 +379,13 @@ class Qwen3NextModel(_QwenMtpMixin, Qwen2MoeModel):
         self.gguf_writer.add_ssm_group_count(self.hparams["linear_num_key_heads"])
         self.gguf_writer.add_ssm_time_step_rank(self.hparams["linear_num_value_heads"])
         self.gguf_writer.add_ssm_inner_size(self.hparams["linear_value_head_dim"] * self.hparams["linear_num_value_heads"])
+        if (layer_types := self.hparams.get("layer_types")) is not None:
+            n_layer = self.hparams["num_hidden_layers"]
+            if len(layer_types) != n_layer:
+                raise ValueError(f"layer_types has {len(layer_types)} entries, expected num_hidden_layers ({n_layer})")
+            recurrent = [t == "linear_attention" for t in layer_types]
+            recurrent += [False] * (self.block_count - n_layer)
+            self.gguf_writer.add_recurrent_layers(recurrent)
         self.gguf_writer.add_full_attention_interval(self.hparams.get("full_attention_interval", 4))
         if (rope_dim := self.hparams.get("head_dim")) is None:
             rope_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
@@ -547,27 +554,17 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
         elif name.endswith((".linear_attn.in_proj_a.weight", ".linear_attn.in_proj_b.weight")):
             weight, scale = reorder_rows(weight, scale, 1)
         elif name.endswith(".linear_attn.out_proj.weight"):
-            if self._hadamard_folds_tensor(name):
-                # folded latent: a column permutation on the rotation axis cannot be
-                # refolded, so keep the training (grouped) order and let the runtime
-                # permute the activation instead
-                self._hadamard_gdn_v_grouped = True
-            else:
-                col_perm = self._reorder_v_heads(
-                    torch.arange(num_v_heads * head_v_dim, dtype=torch.long).unsqueeze(0),
-                    1, num_k_heads, num_v_per_k, head_v_dim,
-                ).squeeze(0)
-                weight, scale = apply_col_perm(weight, scale, col_perm)
+            col_perm = self._reorder_v_heads(
+                torch.arange(num_v_heads * head_v_dim, dtype=torch.long).unsqueeze(0),
+                1, num_k_heads, num_v_per_k, head_v_dim,
+            ).squeeze(0)
+            weight, scale = apply_col_perm(weight, scale, col_perm)
 
         return weight, scale
 
     def _repack_nvfp4(self, name: str, weight: Tensor, scale: Tensor, scale2: Tensor, input_scale: Tensor):
         weight, scale = self._transform_nvfp4_weight(name, weight, scale)
         super()._repack_nvfp4(name, weight, scale, scale2, input_scale)
-
-    def _hadamard_folds_tensor(self, name: str) -> bool:
-        # a manifest entry and `name` may differ only by leading wrapper prefixes
-        return any(name.endswith(n) or n.endswith(name) for n in self.hadamard_folded_names())
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         num_k_heads = self.hparams.get("linear_num_key_heads", 0)
@@ -615,18 +612,8 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
                 data_torch = torch.cat([qk_part, v_part], dim=0)
 
             elif ".out_proj." in name:
-                # wrapper prefixes may already be stripped by the time the name reaches
-                # modify_tensors, so match on the full name modulo those prefixes. Matching
-                # on the tensor-kind suffix alone would treat every layer as folded as soon
-                # as one layer is.
-                if self._hadamard_folds_tensor(name):
-                    # Hadamard-folded latent: the rotation axis must keep the
-                    # training (grouped) V order; the runtime permutes the
-                    # activation tiled->grouped before the transform instead.
-                    self._hadamard_gdn_v_grouped = True
-                else:
-                    # Out projection weight: reorder columns (input dimension)
-                    data_torch = self._reorder_v_heads(data_torch, 1, num_k_heads, num_v_per_k, head_v_dim)
+                # Out projection weight: reorder columns (input dimension)
+                data_torch = self._reorder_v_heads(data_torch, 1, num_k_heads, num_v_per_k, head_v_dim)
 
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -679,7 +666,7 @@ class DFlashModel(Qwen3Model):
         from . import get_model_class
         with open(self.target_model_dir / "config.json", "r", encoding="utf-8") as f:
             target_hparams = json.load(f)
-            target_arch = target_hparams["architectures"][0]
+        target_arch = get_model_architecture(target_hparams, ModelType.TEXT)
         target_cls = get_model_class(target_arch)
 
         if target_cls is not type(self):
@@ -724,18 +711,25 @@ class DFlashModel(Qwen3Model):
         if embedding_scale is not None:
             self.gguf_writer.add_embedding_scale(float(embedding_scale))
 
-        target_layer_ids = dflash_config.get("target_layer_ids", [])
+        target_layer_ids = dflash_config.get("target_layer_ids", self.hparams.get("target_layer_ids", []))
         if target_layer_ids:
             extract_layer_ids = [i + 1 for i in target_layer_ids]
             self.gguf_writer.add_target_layers(extract_layer_ids)
 
-        use_sliding_window = self.hparams.get("use_sliding_window", False)
-        sliding_window = self.hparams.get("sliding_window")
+        use_sliding_window = self.hparams.get("use_sliding_window", False) or dflash_config.get("use_swa", False)
+        sliding_window = dflash_config.get("swa_window_size") or self.hparams.get("sliding_window")
         layer_types = self.hparams.get("layer_types")
-        if use_sliding_window and sliding_window and layer_types:
-            is_swa = [lt == "sliding_attention" for lt in layer_types]
+        if use_sliding_window and sliding_window:
+            is_swa = ([True] * self.block_count if dflash_config.get("use_swa", False)
+                      else [lt == "sliding_attention" for lt in layer_types or []])
             self.gguf_writer.add_sliding_window(sliding_window)
             self.gguf_writer.add_sliding_window_pattern(is_swa)
+
+        causal = self.hparams.get("is_causal")
+        if causal is None:
+            causal = dflash_config.get("causal")
+        if causal is not None:
+            self.gguf_writer.add_causal_attention(bool(causal))
 
         # M-RoPE target: the draft ropes on the temporal dim only, so write
         # degenerate sections [n_rot/2, 0, 0, 0]
@@ -757,6 +751,8 @@ class DFlashModel(Qwen3Model):
         name, gen = item
         if not name.startswith("model."):
             name = "model." + name
+        if "sink" in name and not name.endswith(".weight"):
+            name += ".weight"
         return super().filter_tensors((name, gen))
 
     _ROPE_PERMUTE_SUFFIXES = (
@@ -781,133 +777,6 @@ class DFlashModel(Qwen3Model):
             "model.candidate_selector.successor_codebook",
         ):
             name += ".weight"
-
-        yield from super().modify_tensors(data_torch, name, bid)
-
-
-@ModelBase.register("Qwen3DFlyModel", "Qwen3DSparkDFlareV2Model")
-@ModelBase.example("AngelSlim/Qwen3-8B-DFly-Block8")
-class DFlyModel(DFlashModel):
-    # AngelSpec DFly = DFlash + (a) a per-DRAFT-layer fusion of the raw target-layer features
-    # on top of the shared context projection, and (b) a TreeFlash predecessor correction
-    # applied before the target head. There is no Markov/confidence head, so the runtime reads
-    # it with the DFlash draft reader (block rows 1..n-1), not the DSpark one.
-    model_arch = gguf.MODEL_ARCH.DFLASH
-
-    def __init__(self, dir_model, *args, **kwargs):
-        hparams = kwargs.pop("hparams", None)
-        if hparams is None:
-            hparams = ModelBase.load_hparams(dir_model, False)
-
-        # DFly carries target_layer_ids/mask_token_id flat; normalize to DFlash's nested schema
-        hparams.setdefault("dflash_config", {
-            k: hparams[k] for k in ("target_layer_ids", "mask_token_id") if k in hparams
-        })
-
-        super().__init__(dir_model, *args, hparams=hparams, **kwargs)
-
-        hp = self.hparams
-
-        # The published main-branch config of the reference checkpoint states a target depth and
-        # vocab that do not match the weights (80/120832 against the real 36/151936), which loads
-        # clean and then mis-projects. Refuse instead of converting a checkpoint that lies.
-        target_layers = hp.get("target_num_hidden_layers")
-        layer_ids     = hp.get("target_layer_ids") or []
-
-        # A declared depth cannot police itself: the reference config's 80 is self-consistent with
-        # capture ids up to 33 and still wrong. The target model is the only authoritative shape,
-        # so compare the declared target_* against it and bound the ids by the real depth.
-        real = self._target_shapes()
-        for cfg_key, hp_key in (("num_hidden_layers", "target_num_hidden_layers"),
-                                ("vocab_size",        "target_vocab_size"),
-                                ("hidden_size",       "target_hidden_size")):
-            declared = hp.get(hp_key)
-            if declared is not None and cfg_key in real and int(declared) != real[cfg_key]:
-                raise ValueError(
-                    f"DFly {hp_key} is {declared} but the target model reports "
-                    f"{cfg_key}={real[cfg_key]}. The config metadata does not describe the target "
-                    "-- pin a known-good revision (the reference checkpoint's is 5712926)."
-                )
-        if "num_hidden_layers" in real:
-            target_layers = real["num_hidden_layers"]
-
-        if target_layers and layer_ids and max(layer_ids) >= int(target_layers):
-            raise ValueError(
-                f"DFly target_layer_ids {layer_ids} exceed target_num_hidden_layers {target_layers}. "
-                "The config metadata does not describe the weights -- pin a known-good revision "
-                "(the reference checkpoint's is 5712926)."
-            )
-
-        # an omitted target_hidden_size would default to the draft width and compare equal to itself,
-        # so prefer the target model's own hidden_size whenever it is readable
-        target_hidden = real.get("hidden_size", hp.get("target_hidden_size", hp["hidden_size"]))
-        if int(target_hidden) != int(hp["hidden_size"]):
-            raise ValueError(
-                "DFly residual fusion requires the target hidden_size to equal the drafter's, got "
-                f"{target_hidden} vs {hp['hidden_size']}."
-            )
-
-        if hp.get("markov_rank") or hp.get("enable_confidence_head"):
-            raise ValueError(
-                "DFly does not use the DSpark Markov/confidence head, but this config declares one. "
-                "A drafter reporting a Markov head is read one block row late by the runtime."
-            )
-
-        self._has_correction = bool(hp.get("enable_hidden_correction", True))
-        if self._has_correction:
-            correction_type = hp.get("hidden_correction_type", "swiglu")
-            if correction_type != "swiglu":
-                raise ValueError(f"unsupported hidden_correction_type {correction_type!r} (only 'swiglu')")
-
-        if not bool(hp.get("dspark_bonus_anchor", True)):
-            raise ValueError("DFly requires dspark_bonus_anchor=true; slot 0 is the committed anchor")
-        self._sample_from_anchor = False
-
-    def _target_shapes(self) -> dict[str, int]:
-        """Shapes read from --target-model-dir, for the keys it declares. Empty when unavailable."""
-        if self.target_model_dir is None:
-            return {}  # set_vocab raises on this later; nothing authoritative to compare against
-        try:
-            with open(self.target_model_dir / "config.json", "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            return {}  # unreadable; set_vocab reads the same file and raises
-        if not isinstance(cfg, dict):
-            return {}
-        cfg = {**cfg, **(cfg.get("text_config") or {})}
-        shapes = {}
-        for k in ("num_hidden_layers", "vocab_size", "hidden_size"):
-            try:
-                shapes[k] = int(cfg[k])
-            except (KeyError, ValueError, TypeError):
-                continue  # one unusable value must not disable the other comparisons
-        return shapes
-
-    def set_gguf_parameters(self):
-        super().set_gguf_parameters()
-        self.gguf_writer.add_sample_from_anchor(self._sample_from_anchor)
-
-    def prepare_tensors(self):
-        super().prepare_tensors()
-        if self._has_correction and not self._seen_correction:
-            raise ValueError(
-                "config sets enable_hidden_correction but no hidden_correction.* weights were "
-                "found; the export is incomplete and would draft without the correction."
-            )
-
-    _seen_correction = False
-    _dropped_correction = False
-
-    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if "hidden_correction." in name:
-            # the runtime turns correction on from the presence of hidden_correction.down.weight,
-            # so shipping these while the config disables it silently re-enables the feature
-            if not self._has_correction:
-                if not self._dropped_correction:
-                    logger.info("DFly: enable_hidden_correction is false, dropping hidden_correction.* weights")
-                    self._dropped_correction = True
-                return
-            self._seen_correction = True
 
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -962,32 +831,23 @@ class DSparkModel(DFlashModel):
         super().set_gguf_parameters()
         self.gguf_writer.add_sample_from_anchor(self._sample_from_anchor)
 
+        # confidence head is optional: vanilla-markov exports ship without it
+        has_conf = any("confidence_head.proj" in name for name in self.model_tensors)
+        self.gguf_writer.add_has_confidence_head(has_conf)
+
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
         if item[0] == "t2d":  # not used at runtime
             return None
         return super().filter_tensors(item)
 
-    _ROPE_PERMUTE_SUFFIXES = (
-        "self_attn.q_proj.weight",
-        "self_attn.k_proj.weight",
-        "self_attn.q_norm.weight",
-        "self_attn.k_norm.weight",
-    )
-
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if name == "model.d2t":
             self._d2t = data_torch
             return
 
-        if self._n_vocab_draft == self.hparams["vocab_size"] and name.endswith(("embed_tokens.weight", "lm_head.weight")):
+        if self._n_vocab_draft == self.hparams["vocab_size"] and name.endswith("lm_head.weight"):
             return
-
-        # interleaved-rope checkpoints (rope_is_neox_style = false) -> NeoX layout: per head, even dims first then odd
-        if not self.hparams.get("rope_is_neox_style", True) and name.endswith(self._ROPE_PERMUTE_SUFFIXES):
-            head_dim = self.hparams["head_dim"]
-            shape = data_torch.shape
-            data_torch = data_torch.reshape(-1, head_dim // 2, 2, *shape[1:]).transpose(1, 2).reshape(shape)
 
         yield from super().modify_tensors(data_torch, name, bid)
 

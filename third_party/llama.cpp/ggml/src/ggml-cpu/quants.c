@@ -1450,18 +1450,6 @@ void ggml_vec_dot_iq4_xs_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-// ============================ 4-bit non-linear quants
-
-void quantize_row_iq4_nl(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK4_NL == 0);
-    quantize_row_iq4_nl_ref(x, y, k);
-}
-
-void quantize_row_iq4_xs(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_K == 0);
-    quantize_iq4_xs(x, y, 1, k, NULL);
-}
-
 // PQ2_0 x Q8_K reference dot (tier 2, 2026-09-18): one activation scale per 256 elements instead of per 32, so a
 // 128-weight block's integer dot can be accumulated in one int32 and scaled once. Scalar reference for the x86
 // kernel's tolerance test; also the non-x86 fallback. Two PQ2_0 blocks map onto one Q8_K block (halves).
@@ -1493,4 +1481,16 @@ void ggml_vec_dot_pq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
         sumf += (GGML_CPU_FP16_TO_FP32(x[i].d) * yb->d) * (float) sumi;
     }
     *s = sumf;
+}
+
+// ============================ 4-bit non-linear quants
+
+void quantize_row_iq4_nl(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK4_NL == 0);
+    quantize_row_iq4_nl_ref(x, y, k);
+}
+
+void quantize_row_iq4_xs(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    quantize_iq4_xs(x, y, 1, k, NULL);
 }

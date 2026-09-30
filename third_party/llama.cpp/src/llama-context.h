@@ -11,6 +11,7 @@
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
 
+#include <array>
 #include <map>
 #include <vector>
 
@@ -90,13 +91,6 @@ struct llama_context {
 
     float * get_embeddings_layer_inp(uint32_t lid);
 
-    // multi-layer hidden-state tap (EAGLE3 / dspark target-feature reuse).
-    // get_embeddings_capture_ith returns the concatenated [n_capture * n_embd] row
-    // for output position i, captured layers laid out in capture order.
-    float *  get_embeddings_capture();
-    float *  get_embeddings_capture_ith(int32_t i);
-    uint32_t get_n_capture() const;
-
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -108,6 +102,8 @@ struct llama_context {
 
     const llama_token * get_sampled_candidates_ith(int32_t idx);
     size_t get_sampled_candidates_count(int32_t idx);
+
+    bool get_causal_attn() const;
 
     void attach_threadpool(
             ggml_threadpool_t threadpool,
@@ -121,17 +117,6 @@ struct llama_context {
 
     void set_embeddings (bool value);
     void set_embeddings_nextn(bool value, bool masked);
-
-    // register the ordered set of intermediate layers to capture. pass an empty
-    // list to disable. the concatenation order follows the order of layer_ids.
-    void set_capture_layers(const std::vector<int32_t> & layer_ids);
-
-    // dspark drafter: stage the target-tap context window consumed by the next
-    // decode() call. feat is [n_ctx_rows * n_embd_cap] row-major (row i is
-    // position pos[i]'s raw concatenated multi-layer tap feature, pre dspark.fc).
-    // pass n_ctx_rows <= 0 (or feat == nullptr) to clear the staged context.
-    void set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos);
-
     void set_embeddings_layer_inp(uint32_t lid, bool enable);
     void set_nextn_layer_offset(int32_t offset);
     void set_causal_attn(bool value);
@@ -148,6 +133,12 @@ struct llama_context {
                 int32_t   il_start,
                 int32_t   il_end);
 
+    // dspark drafter: stage the target-tap context window consumed by the next
+    // decode() call. feat is [n_ctx_rows * n_embd_cap] row-major (row i is
+    // position pos[i]'s raw concatenated multi-layer tap feature, pre dspark.fc).
+    // pass n_ctx_rows <= 0 (or feat == nullptr) to clear the staged context.
+    void set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos);
+
     // process a single ubatch with a specific graph type
     // if memory_context is provided, it will be applied first to the context's memory
     // ret contains the status of the graph computation
@@ -158,6 +149,10 @@ struct llama_context {
             llama_memory_context_i * mctx,
                        ggml_status & ret);
 
+    int encode(const llama_batch_ext & batch_inp);
+    int decode(const llama_batch_ext & batch_inp);
+
+    // compat version
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
 
@@ -272,6 +267,8 @@ public:
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
 private:
+    llm_graph_result * get_gf_res_prev();
+
     llm_graph_params graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
@@ -326,11 +323,6 @@ private:
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;
 
-    // concatenated multi-layer hidden states (2-dimensional array:
-    // [n_outputs][n_capture_layers * n_embd]). populated only when
-    // cparams.n_capture_layers > 0 and the model graph filled t_h_capture.
-    buffer_view<float> embd_capture = { nullptr, 0 };
-
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active
         std::map<llama_seq_id, llama_sampler *> samplers;
@@ -357,6 +349,7 @@ private:
     // reuse the batch_allocr to avoid unnecessary memory allocations
     std::unique_ptr<llama_batch_allocr> balloc;
 
+    uint32_t n_input_tensors = 0; // number of tensors marked as input during the last graph reserve
     uint32_t n_outputs = 0; // number of actually-used outputs in the current ubatch or last logical batch
 
     std::vector<int32_t> output_ids; // map batch token positions to ids of the logits and embd buffers
@@ -391,8 +384,14 @@ private:
     std::vector<ggml_backend_buffer_type_t> backend_buft;
     std::vector<size_t>                     backend_buf_exp_size; // expected buffer sizes
 
-    llm_graph_result_ptr gf_res_prev;
+    // Separate arenas give batches with and without outputs distinct CUDA graph cache keys.
+    std::array<llm_graph_result_ptr, 2> gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+
+    llm_graph_result * gf_res_prev_active = nullptr;
+
+    // host buffer for the model output (logits and embeddings)
+    ggml_backend_buffer_ptr buf_output;
 
     // the Hadamard transforms this context's graphs consult: the model's own,
     // plus the target's when the model borrows its token embeddings or output
@@ -402,9 +401,6 @@ private:
 
     // one-time Hadamard transform-coverage check on the first built graph
     bool hadamard_verified = false;
-
-    // host buffer for the model output (logits and embeddings)
-    ggml_backend_buffer_ptr buf_output;
 
     // keep copies of the per-sequence memory on the device
     std::map<llama_seq_id, llama_memory_buffers> mem_storage;
