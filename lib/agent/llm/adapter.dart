@@ -88,6 +88,10 @@ final class GenerateOptions {
   final String? imagePath;
   final String? audioPath;
 
+  /// 多图（WP 多图上传，≤10）：API 路线全量发送 image_url parts；
+  /// 本地引擎视觉仅 [imagePath] 首张。
+  final List<String>? imagePaths;
+
   /// 生成过程状态流（WP5）：adapter 推轻量状态行，UI 据此显示
   /// "正在生成工具调用参数…"等过程反馈。约定格式：
   /// `toolgen|<chars>|<preview>`（工具调用块生成中）/ `toolgen|0|`（结束）。
@@ -102,6 +106,7 @@ final class GenerateOptions {
     required this.modelId,
     this.imagePath,
     this.audioPath,
+    this.imagePaths,
     this.onStatus,
   });
 }

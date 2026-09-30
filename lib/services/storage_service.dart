@@ -21,7 +21,7 @@ class StorageService {
     final path = join(await getDatabasesPath(), 'tongyilite.db');
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -50,6 +50,21 @@ class StorageService {
         "ALTER TABLE messages ADD COLUMN audioPath TEXT",
       );
     }
+    if (oldVersion < 4) {
+      // v3 → v4：多图 + 智能体附件（JSON 数组字符串；缺列时 toMap/fromMap
+      // 已做 null 容错）。列不存在时带多图/附件的 saveMessage 会崩，
+      // 所以 upgrade 与 create 两条建表路径都要有这两列。
+      if (!names.contains('imagePaths')) {
+        await db.execute(
+          "ALTER TABLE messages ADD COLUMN imagePaths TEXT",
+        );
+      }
+      if (!names.contains('attachments')) {
+        await db.execute(
+          "ALTER TABLE messages ADD COLUMN attachments TEXT",
+        );
+      }
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -71,6 +86,8 @@ class StorageService {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         imagePath TEXT,
+        imagePaths TEXT,
+        attachments TEXT,
         audioPath TEXT,
         createdAt INTEGER NOT NULL,
         isStreaming INTEGER DEFAULT 0,
@@ -144,12 +161,25 @@ class StorageService {
   /// 避免两份映射各自漂移——此前 audioPath 缺列、role 崩溃就是漂移的产物）。
   ChatMessage _mapMessageRow(Map<dynamic, dynamic> r) {
     final statsJson = r['inferenceStats'] as String?;
+    List<String>? _decodeList(Object? raw) {
+      if (raw is! String || raw.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List && decoded.isNotEmpty) {
+          return decoded.map((e) => '$e').toList();
+        }
+      } catch (_) {}
+      return null;
+    }
+
     return ChatMessage(
       id: r['id'] as String,
       conversationId: r['conversationId'] as String,
       role: messageRoleFromName(r['role']),
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
+      imagePaths: _decodeList(r['imagePaths']),
+      attachments: _decodeList(r['attachments']),
       audioPath: r['audioPath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
       isStreaming: (r['isStreaming'] as int?) == 1,
@@ -192,6 +222,10 @@ class StorageService {
       'role': msg.role.name,
       'content': msg.content,
       'imagePath': msg.imagePath,
+      'imagePaths':
+          msg.imagePaths == null ? null : jsonEncode(msg.imagePaths),
+      'attachments':
+          msg.attachments == null ? null : jsonEncode(msg.attachments),
       'audioPath': msg.audioPath,
       'createdAt': msg.timestamp.millisecondsSinceEpoch,
       'isStreaming': msg.isStreaming ? 1 : 0,

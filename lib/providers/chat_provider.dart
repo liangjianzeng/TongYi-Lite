@@ -37,6 +37,12 @@ import '../agent/session/store.dart'
 import '../agent/session/event.dart' show kEventAssistantMessage;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
+import '../services/attachment_service.dart'
+    show
+        PreparedAttachment,
+        buildAttachmentPromptBlock,
+        kMaxAttachments,
+        prepareAttachment;
 import '../services/openai_service.dart';
 import '../services/settings_service.dart';
 import '../services/storage_service.dart';
@@ -262,17 +268,28 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// Send a message to the currently loaded model.
   /// Automatically ensures the correct model is loaded first via ModelManager.
+  ///
+  /// [imagePaths] 多图（≤10，首张即 [imagePath]）；[attachmentPaths] 智能体
+  /// 附件（≤5，仅智能体模式消费——普通聊天引擎无文件阅读能力，忽略并提示）。
   Future<String> sendMessage(
     String conversationId,
     String prompt, {
     String? imagePath,
+    List<String>? imagePaths,
+    List<String>? attachmentPaths,
     String? audioPath,
   }) async {
     // 智能体模式：走工具循环（无工具时单轮直答，与普通聊天一致）。
     final settings = _ref.read(settingsProvider);
     if (settings.agentEnabled) {
       return _sendAgentMessage(conversationId, prompt,
-          imagePath: imagePath, audioPath: audioPath);
+          imagePath: imagePath,
+          imagePaths: imagePaths,
+          attachmentPaths: attachmentPaths,
+          audioPath: audioPath);
+    }
+    if (attachmentPaths != null && attachmentPaths.isNotEmpty) {
+      return '[文件附件仅智能体模式支持：请开启右上角智能体模式后再发送文件]';
     }
 
     var targetModelId = _ref.read(currentModelIdProvider);
@@ -596,6 +613,8 @@ class ChatNotifier extends StateNotifier<bool> {
     String conversationId,
     String prompt, {
     String? imagePath,
+    List<String>? imagePaths,
+    List<String>? attachmentPaths,
     String? audioPath,
   }) async {
     final settings = _ref.read(settingsProvider);
@@ -603,6 +622,8 @@ class ChatNotifier extends StateNotifier<bool> {
       conversationId,
       prompt,
       imagePath: imagePath,
+      imagePaths: imagePaths,
+      attachmentPaths: attachmentPaths,
       audioPath: audioPath,
       settings: settings,
     );
@@ -621,9 +642,39 @@ class ChatNotifier extends StateNotifier<bool> {
     String conversationId,
     String prompt, {
     String? imagePath,
+    List<String>? imagePaths,
+    List<String>? attachmentPaths,
     String? audioPath,
     required InferenceSettings settings,
   }) async {
+    // ---- 附件注入（WP-A）：≤5 个，解析→工作区→prompt 指引 ----
+    var effectivePrompt = prompt;
+    List<PreparedAttachment> prepared = const [];
+    if (attachmentPaths != null && attachmentPaths.isNotEmpty) {
+      final errors = <String>[];
+      for (final path in attachmentPaths.take(kMaxAttachments)) {
+        final (att, error) = await prepareAttachment(conversationId, path);
+        if (att != null) {
+          prepared = [...prepared, att];
+        } else if (error != null) {
+          errors.add(error);
+        }
+      }
+      if (prepared.isEmpty) {
+        return '[附件全部无法导入：${errors.join("；")}]';
+      }
+      effectivePrompt = '$prompt${buildAttachmentPromptBlock(prepared)}';
+      if (errors.isNotEmpty) {
+        effectivePrompt = '$effectivePrompt\n[部分附件导入失败：${errors.join("；")}]';
+      }
+    }
+    // 本地引擎单图限制：imagePaths 超 1 张时取首张送视觉，其余如实告知。
+    final firstImage = (imagePaths != null && imagePaths.isNotEmpty)
+        ? imagePaths.first
+        : imagePath;
+    final extraImages =
+        (imagePaths?.length ?? 0) > 1 ? imagePaths!.length - 1 : 0;
+
     // ---- 模型路由（与旧路径一致）----
     var useApi = false;
     ApiModelConfig? activeApi;
@@ -689,6 +740,12 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     }
     _lastGenWasApi = useApi;
+    // 多图本地降级：本地引擎视觉仅支持单张（native 单图），如实告知模型。
+    if (extraImages > 0 && !useApi) {
+      effectivePrompt =
+          '$effectivePrompt\n[注意：用户共上传了 ${extraImages + 1} 张图片，'
+          '本地引擎当前仅支持单张视觉输入，已发送第一张]';
+    }
     debugPrint('[ChatNotifier] new-agent route='
         '${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
 
@@ -815,13 +872,17 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.register(createSubagentTool(subagentProvider));
     }
 
-    // 保存用户消息（UI 立即可见）。
+    // 保存用户消息（UI 立即可见）。附件/多图落库供历史回看（ attachments 存
+    // 原文件名列表；imagePaths 全量，本地引擎视觉只用首张）。
     final userMsg = ChatMessage(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       conversationId: conversationId,
       role: MessageRole.user,
       content: prompt,
-      imagePath: imagePath,
+      imagePath: firstImage,
+      imagePaths: imagePaths,
+      attachments:
+          prepared.map((a) => a.displayName).toList(),
       audioPath: audioPath,
     );
     await _storage.saveMessage(userMsg);
@@ -926,8 +987,9 @@ class ChatNotifier extends StateNotifier<bool> {
     );
     try {
       reason = await agent.kick(
-        prompt,
-        imagePath: imagePath,
+        effectivePrompt,
+        imagePath: firstImage,
+        imagePaths: imagePaths,
         audioPath: audioPath,
         onToken: tokenController,
         onThinking: thinkingController,

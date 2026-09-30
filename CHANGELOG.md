@@ -6,6 +6,97 @@
 
 ---
 
+## [0.2.8] — 2026-09-29（当前版本 · versionCode 16）
+
+### 智能体：执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复
+
+- **① 执行顺序渲染（timeline markers）**：`AgentUiState` 新增 `timeline: List<UiTimelineMarker>`，
+  归约器在事件到达时追加标记（思考落档 → `UiTimelineThinking(i)`；工具卡加入 → `UiTimelineTool(i)`），
+  `AgentTurnBlock._timelineWidgets()` 依序交错渲染——不再"思考一律在前、工具一律在后"。
+  历史回合 timeline 恒空，仍走存储 🔧 消息顺序。
+- **② 思考流式自动展开**：`ThinkingStreamCard` 展开条件改为 `_override ?? (running && !answerVisible)`——
+  流式中自动展开跟随滚动（每次重建 `_followStream` animateTo 底部），答案开始/回合结束自动闭合。
+- **③ 空响应重试（web_search"不行"主因）**：4B 模型思考中途直接 EOS（思考块未闭合被丢弃 → 空响应），
+  本地路线 `emptyResponse` 原本不可重试 → 瀑布直接 giveUp。修复：loop 里 `retryEmptyResponse: true`
+  （两条路线都计入可重试档，maxRetries 有界）。
+- **④ 思考泄漏修复**：`AgentStreamProcessor` 新增"孤立闭合记号"处理——模型偶发在回答中途再输出
+  ` response`（无前置 think），当作**隐式 opener** 重新进入思考态、续写一并丢弃；带保护：
+  ` response` 紧跟英文/数字（如 "API response"）不吞，避免误伤英文词。
+- **⑤ 工具卡 / 思考流滚动**：ToolActivityCard 单行紧凑行；思考流式长内容 150px 滚动区
+  `jumpTo(maxScrollExtent)` 跟随底部，用户上滑暂停。
+
+### Vulkan 全败定案：turnip dlopen 缺 libhardware.so（jniLibs stub 复活）
+
+- **根因**：JNI 把 `GGML_VK_TURNIP` 指向 APK 内置 turnip（libturnip_freedreno.so），dlopen 失败：
+  `library "libhardware.so" not found`——turnip 的 DT_NEEDED 含 `libhardware.so`（Android HAL 库），
+  **App 进程 classloader 命名空间不能 dlopen 系统 HAL 库** → ggml-vulkan init 失败 → Vulkan 回落 CPU。
+  v0.2.6 时代 turnip 验证全在 CLI 测试基建，从没在 App 进程内验证过——入库即埋雷。
+- **修复**：`jniLibs/arm64-v8a/libhardware.so` 极简 stub（源码 `stub_hardware.c`，NDK clang 编译，
+  仅导出 turnip 实际 import 的 `hw_get_module` 返回 -ENOENT）。dlopen turnip 依赖解析在 app 自己的
+  lib 目录命中 stub → 成功。LLM 推理不走 gralloc/AHardwareBuffer 导入路径，-ENOENT 安全。
+  SONAME 必须与系统库同名（`-Wl,-soname,libhardware.so`）。
+- **验收铁证**：logcat `using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so`
+  + `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` + `backend_ptrs.size()=2`
+  + `loadModel result: true`。
+- **坑**：NDK 裸 `clang --target=aarch64-linux-android` 缺 crt 文件，须用带 sysroot 的 wrapper
+  （`aarch64-linux-androidXX-clang.cmd`）编译。
+
+### web_search：并发多关键词 + 每回合搜索上限（DSH max_uses 语义）
+
+- **并发搜索**：`web_search` 加可选 `additional_queries: string[]`（最多 3 个），`Future.wait` 并行
+  搜索全部关键词，合并返回（每关键词一小节 `[搜索：xxx]`，均分 1500 字预算）。描述教模型
+  "一个问题的多个角度一次提交，不必多次调用"。
+- **每回合搜索上限**：每次调用消耗 1 次（含重复）；达上限拒绝联网返回
+  `ToolResult.error('本轮搜索次数已达上限（N 次）…请直接回答，不要再调用 web_search')`。
+- **同内容去重**：主查询归一化（小写/去空白标点）相同 → 直接回缓存结果（`已搜索过，结果同上，
+  未重复联网`），重复同样消耗预算尽快逼模型收敛。
+- **设置项** `agentMaxSearchesPerTurn`（1~10，默认 5）；系统提示加规则：已有足够结果直接回答；
+  收到"已达上限"立即停止调用。
+
+### 智能体回答 tok/s 指标 + 思考流滚动
+
+- agent 路径保存 answer 时补原生 `getInferenceStats()`（末步口径 = 答案步，与普通聊天同公式）；
+  API 路线无原生 stats 不显示；首Tok 对多步回合无单步语义 → `firstTokenMs=0` 时整段省略。
+- ThinkingStreamCard 内部 150px 滚动区 ScrollController + didUpdateWidget 跟随底部。
+
+**验收**：test/agent + test/providers 全绿（259+ 项）；analyze 无新增告警（既有 4 项为旧代码）。
+APK：debug `app-debug.apk` / release `app-release.apk`，字符串级验收过（libhardware.so +
+libturnip_freedreno.so 均在 APK）。
+
+---
+
+## [0.2.7] — 2026-09-29（分支停维护 · 主干统一）
+
+### 分支停维护（用户指令）
+
+- `spike/opencl-bonsai2-ptq1-gemm` 快进合并进 main（含 v0.2.6 + PTQ1_0 GEMM + FWHT hadamard +
+  Turnip 驱动 + agent 内嵌工作流重构），此后所有开发只在 main 做。
+- **主仓 `third_party/llama.cpp` 树 = spike 完整树（fe8156f 基线）；此前「b11028 半升级 +
+  PTQ graft」方向废弃**，别再按那条线排查编译错误。
+
+### API 视觉接通
+
+- kick 把 imagePath 写进 user/message 事件，`deriveModelMessages` 投影，OpenAiAdapter
+  `attachWireImages` 转 image_url part（visionCapable 门控，每 step 重发；
+  OpenAiService.encodeImageFile 带 8 张 FIFO 缓存）。
+
+### 思考流单独展示
+
+- adapter.generate 新增 `onThinking` 通道（全量快照推送）；API 原生路线解析
+  `delta.reasoning_content` / `reasoning` + content 内嵌 ` think` 剥离
+  （OpenAiNativeStreamAssembler 字符状态机，跨分片安全）；本地/文本协议路线走
+  `AgentStreamProcessor.thinking`。chat_provider 节流 120ms 落 `agentUiStateProvider.thinking`；
+  UI = agent_workflow.dart ThinkingStreamCard（live 回合内嵌，自动展开跟随滚动，点按头可手动收起）。
+
+### 工具卡压缩
+
+- ToolActivityCard 从 ExpansionTile 卡改为单行紧凑行（~22px：图标+名+参数摘要+执行中），
+  点按行内展开参数/结果。
+
+**回归**：test/agent 全绿（phase6_test 点按目标同步更新）；新增 test/agent/vision_thinking_test.dart。
+
+---
+
 ## [0.2.6] — 2026-09-28
 
 ### Bonsai-2 双后端补齐 + Turnip 错编双定案
@@ -38,6 +129,92 @@
 - 新增验证记录 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md)
   （双驱动全矩阵：原厂 0800.71 / fork Turnip × 三药）与 `scripts/cl_enum.cs`（免编译器
   OpenCL 平台枚举探针）。
+
+---
+
+## [0.2.5] — 2026-09-27
+
+### OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）
+
+- Bonsai-2 27B 全模型 402 个 PTQ1_0 张量（GGML `type 143`，-1/0/1 三元，28 B/128 值）；上游 OpenCL
+  后端只有 Q4/Q5/Q8 系列 mul_mv 内核 → 此前全部回退 CPU、decode 极慢。
+- 新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约）实现全 GPU decode。
+- **根治 Adreno OpenCL 编译器对 `__constant` 数组变址的误编**（`pow3[4]` 恒读 0 → 每块 16 trit 全解成
+  -1，数据正确但内积系统性偏差）：弃用 `__constant` 数组索引，改三元表达式。
+- 真机 `test-backend-ops` MUL_MAT PTQ1_0 套件 **174/174 通过**（含 67 个奇数尾行与 Bonsai 形状）。
+
+> 块结构 / 编码 / 解码 / 内核并行 / Adreno 陷阱定位过程：
+> [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md)。
+
+---
+
+## [0.2.4] — 2026-09-27（智能体卡死路径根治 · v0.2.4-agent-stall-fix）
+
+### 根因 1：工具调用块被 token 预算截断 → 静默降级成普通回答（主因）
+
+- 模型输出 `{"name":"file_write","arguments":{"content":"……`（写到一半被 `maxTokensPerRound=512`
+  拦断），`prompt_json_protocol` 括号不平衡 → **整段当普通文本返回** → 主循环判定"无工具调用 →
+  本轮完成"，任务没做还显示得像成功。**这是"迭代一两下就停、没结果"的头号元凶。**
+- 修复（`prompt_json_protocol.dart` `_parseText` 第 0 步三分类）：先 `_truncatedToolCall` 判定——
+  ① 断在字符串/参数内容内部 → 抛 `LlmFailureCode.toolCallTruncated`（不可伪造执行）；
+  ② 仅缺收尾括号且能补全 → 自动补括号照常执行（参数无损）；③ 补完仍非法 = 模型自身语法错误 →
+  优雅降级为文本，**不误报截断**误导用户去调设置。`failure.dart` 的 `LlmRetry` 把 toolCallTruncated
+  纳入有限重试预算。
+
+### 根因 2：失败轮回溯历史旧答案冒充本轮回复（"重复问候 bug"）
+
+- 第二轮起 turn 内失败 → UI 又显示第一轮的问候，像"模型只会这一句"。
+- 修复：`ReactLoopAgent._turnAnswer` **只取本轮 append 的 assistant**，失败置空串绝不穿透历史；
+  失败原因走 `_turnError` → chat_provider 明确报「⚠️ 本轮执行失败：…」，不再拿旧回复顶包。
+
+### 根因 3：每轮重建 log 时 system 落在消息中段 → OpenAI 兼容服务端 400 拒收
+
+- 新引擎每轮 importFromMessages 先导入历史，构造 agent 时才 append system → system 不在队首 →
+  API 路线 400、本地 chatml 被中段 system 污染 → 表现为"执行不下去"。
+- 修复：`SessionLog.deriveModelMessages` **system 恒置队首**（纯投影重排，不破坏事件序不变量）。
+
+### 顺带：思考失控守卫 + 天气工具路径形态
+
+- 思考块超长未闭合到阈值即主动止损（`agentThinkingMaxChars`，默认 6000，可调）。
+- `get_weather` 改用 `https://wttr.in/<url-encoded-city>?format=…` 路径形态（`/?q=城市` 返回
+  HTTP 500，路径形态 200）。
+
+**回归防线**：test/agent 全绿 241 项（含截断三分类、toolCallTruncated 有界重试后终态 error、
+lastTurnAnswer 不回溯、system 晚 append 仍恒队首）。
+
+---
+
+## [0.2.3] — 2026-09-27
+
+### Vulkan 在 Adreno 825 重新可用（Turnip 直载）
+
+- 原厂 0800.71 驱动 OTA 回归实锤后（2026-08-05 HyperOS OS3.0.305 OTA 后 7 月原味代码 + 新驱动同样
+  拒建管线），切换 Mesa out-of-tree gen8 Turnip **App 内直载**：免 root、不碰系统分区。该驱动不导出
+  任何 `vk_*` 符号，入口是 Android Vulkan HAL 模块（`hw_module_t → vulkan_device_t`，PFN 表偏移
+  +0x70、GetInstanceProcAddr +0x88，逆向确认）；ggml-vulkan 4 处直接 C 符号调用全部改走 dispatcher，
+  `GGML_VK_TURNIP=<驱动.so>` 指定直载。
+- 数值损坏三根因逐一修复：
+  - ① Turnip gen8 **错编 subgroup 算术归约（subgroupAdd）**——一切含归约的算子数值错 → 设备能力
+    初始化处直接置 `subgroup_arithmetic=false`（一处覆盖全部 op 级选择），tbo f32 MUL_MAT 203/203；
+  - ② 我方 `NO_SUBGROUP` 门控漏网——ssm_scan / gated_delta_net 管线选择直查 `device->subgroup_arithmetic`
+    不走 use_subgroups 门控 → 直置 false 覆盖；
+  - ③ GDN shmem butterfly 的 **S_V=128 lanes 配置错编**（clustered LANES=8 / 全宽 128 均坏）→
+    `!subgroup_arithmetic` 时 lanes 钳 64（与已验证的 S_V=64 布局同构）。
+- 验收：tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5-2.6B 短生成 5/5 连贯（6~10.6 t/s）、Qwen3.5-4B
+  连贯（5.0 t/s）。
+
+---
+
+## [0.2.2] — 2026-09-26
+
+### Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治
+
+- 驱动 0800.71 错编 `unpack8()`（Int8 capability）→ 量化模型输出乱码，另存在 subgroup matvec 管线
+  创建失败、图融合 kernel 输出全零、dp4a 数值错误、decode 部分管线建不出共 5 个独立问题。
+- 修复：shader 层用纯 32 位位操作替换 `unpack8()`（21 处调用点 + q8_0 反量化重写，位模式逐位等价），
+  运行时默认注入 `GGML_VK_NO_SUBGROUP / GGML_VK_DISABLE_FUSION / GGML_VK_NO_MMV /
+  GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`（JNI 层注入，可用 `/storage/emulated/0/TongYiLite/vk_flags.conf`
+  覆盖做 A/B）。
 
 ---
 

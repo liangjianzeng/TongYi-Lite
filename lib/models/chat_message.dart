@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum MessageRole { user, assistant }
 
 /// 解析消息 role：未知值（历史脏数据、将来新增的 role 如 system）回落为
@@ -47,6 +49,12 @@ class ChatMessage {
   final MessageRole role;
   final String content;
   final String? imagePath;
+
+  /// 多图（WP 多图上传，≤10；[imagePath] 恒等于首张，兼容旧链路）。
+  final List<String>? imagePaths;
+
+  /// 智能体附件文件名列表（≤5；本体在 documents/uploads/<convId>/）。
+  final List<String>? attachments;
   final String? audioPath;
   final DateTime timestamp;
   final bool isStreaming;
@@ -58,11 +66,16 @@ class ChatMessage {
     required this.role,
     required this.content,
     this.imagePath,
+    List<String>? imagePaths,
+    this.attachments,
     this.audioPath,
     DateTime? timestamp,
     this.isStreaming = false,
     this.inferenceStats,
-  }) : timestamp = timestamp ?? DateTime.now();
+  })  : imagePaths = (imagePaths != null && imagePaths.isNotEmpty)
+            ? imagePaths
+            : (imagePath != null ? [imagePath] : null),
+        timestamp = timestamp ?? DateTime.now();
 
   Map<String, dynamic> toMap() {
     return {
@@ -71,6 +84,11 @@ class ChatMessage {
       'role': role.name,
       'content': content,
       'imagePath': imagePath,
+      'imagePaths': imagePaths == null
+          ? null
+          : jsonEncode(imagePaths),
+      'attachments':
+          attachments == null ? null : jsonEncode(attachments),
       'audioPath': audioPath,
       'timestamp': timestamp.millisecondsSinceEpoch,
       'isStreaming': isStreaming ? 1 : 0,
@@ -80,12 +98,25 @@ class ChatMessage {
 
   factory ChatMessage.fromMap(Map<String, dynamic> map) {
     final stats = map['inferenceStats'];
+    List<String>? _decodeList(Object? raw) {
+      if (raw is! String || raw.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List && decoded.isNotEmpty) {
+          return decoded.map((e) => '$e').toList();
+        }
+      } catch (_) {}
+      return null;
+    }
+
     return ChatMessage(
       id: map['id'] as String,
       conversationId: map['conversationId'] as String,
       role: messageRoleFromName(map['role']),
       content: map['content'] as String,
       imagePath: map['imagePath'] as String?,
+      imagePaths: _decodeList(map['imagePaths']),
+      attachments: _decodeList(map['attachments']),
       audioPath: map['audioPath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),
       isStreaming: (map['isStreaming'] as int?) == 1,
@@ -97,6 +128,7 @@ class ChatMessage {
     String? content,
     bool? isStreaming,
     InferenceStats? inferenceStats,
+    List<String>? attachments,
   }) {
     return ChatMessage(
       id: id,
@@ -104,6 +136,8 @@ class ChatMessage {
       role: role,
       content: content ?? this.content,
       imagePath: imagePath,
+      imagePaths: imagePaths,
+      attachments: attachments ?? this.attachments,
       audioPath: audioPath,
       timestamp: timestamp,
       isStreaming: isStreaming ?? this.isStreaming,

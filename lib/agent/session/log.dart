@@ -205,6 +205,13 @@ final class SessionLog {
             // 本地路线转换器只取 role/content，此键不透传给 native。
             if (e.data['imagePath'] is String)
               'imagePath': e.data['imagePath'] as String,
+            // 多图（WP 多图上传）：API 路线全量发送；首张与 imagePath 重合，
+            // adapter 需去重。
+            if (e.data['imagePaths'] is List &&
+                (e.data['imagePaths'] as List).isNotEmpty)
+              'imagePaths': (e.data['imagePaths'] as List)
+                  .map((p) => '$p')
+                  .toList(),
           });
           break;
         case kEventAssistantMessage:

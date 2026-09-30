@@ -41,7 +41,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _followStream = true;
 
   // Image picker state
-  String? _selectedImagePath;
+  final List<String> _selectedImagePaths = [];
+  /// 智能体附件（≤5 个，WP-A）。
+  final List<String> _selectedFilePaths = [];
+  /// 兼容别名：首张图（旧链路 imagePath 语义）。
+  String? get _selectedImagePath =>
+      _selectedImagePaths.isNotEmpty ? _selectedImagePaths.first : null;
   final ImagePicker _picker = ImagePicker();
 
   // 语音拾音（按住说话）状态 —— 用 ValueNotifier 而非 setState 驱动，避免
@@ -155,18 +160,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  /// Pick image from camera or gallery
+  /// Pick image from camera or gallery（多图，≤10）
   Future<void> _pickImage() async {
-    if (_selectedImagePath != null) {
-      // Clear selected image
-      setState(() => _selectedImagePath = null);
-      return;
-    }
-
     final source = await showDialog<ImageSource>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('选择图片来源'),
+        title: const Text('选择图片来源（最多 10 张）'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -190,7 +189,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.photo_library),
-              title: const Text('相册'),
+              title: const Text('相册（可多选）'),
               onTap: () => Navigator.pop(ctx, ImageSource.gallery),
             ),
           ],
@@ -205,21 +204,70 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // 真机实测：1920px 大图进视觉塔 → 单张图产出 ~2717 个 image token，
       // 视觉编码内存飙到 2.6GB+，推理卡死（消息一直转圈无输出）后被系统杀掉。
       // 压到 768px 后 token 数骤减（~300+），编码内存/耗时都大幅下降。
-      final XFile? image = await _picker.pickImage(
-        source: source,
-        maxWidth: 768,
-        maxHeight: 768,
-        imageQuality: 85,
-      );
-
-      if (image != null) {
-        setState(() => _selectedImagePath = image.path);
-        _warnIfImageDropped();
+      if (source == ImageSource.gallery) {
+        final images = await _picker.pickMultiImage(
+          maxWidth: 768,
+          maxHeight: 768,
+          imageQuality: 85,
+        );
+        if (images.isEmpty) return;
+        setState(() {
+          for (final image in images) {
+            if (_selectedImagePaths.length >= 10) break;
+            _selectedImagePaths.add(image.path);
+          }
+        });
+      } else {
+        final XFile? image = await _picker.pickImage(
+          source: source,
+          maxWidth: 768,
+          maxHeight: 768,
+          imageQuality: 85,
+        );
+        if (image != null) {
+          setState(() {
+            if (_selectedImagePaths.length < 10) {
+              _selectedImagePaths.add(image.path);
+            }
+          });
+        }
       }
+      if (_selectedImagePaths.length == 10 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('最多 10 张，超出的未添加')),
+        );
+      }
+      _warnIfImageDropped();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('选择图片失败: $e')),
+      );
+    }
+  }
+
+  /// 智能体附件选择（WP-A）：≤5 个，白名单办公/文本格式。
+  Future<void> _pickAttachmentFiles() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      type: FileType.custom,
+      allowedExtensions: kSupportedExtensions
+          .map((e) => e.replaceFirst('.', ''))
+          .toList(),
+    );
+    if (result == null || result.files.isEmpty) return;
+    setState(() {
+      for (final f in result.files) {
+        if (_selectedFilePaths.length >= kMaxAttachments) break;
+        final path = f.path;
+        if (path != null && !_selectedFilePaths.contains(path)) {
+          _selectedFilePaths.add(path);
+        }
+      }
+    });
+    if (mounted && result.files.length > kMaxAttachments) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('最多 $kMaxAttachments 个文件，超出的未添加')),
       );
     }
   }
@@ -342,13 +390,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// Send message with optional image / audio
+  /// Send message with optional images / attachments / audio
   Future<void> _sendMessage({String? audioPath}) async {
     final text = _textController.text.trim();
-    final imagePath = _selectedImagePath;
+    final imagePaths = List<String>.from(_selectedImagePaths);
+    final attachmentPaths = List<String>.from(_selectedFilePaths);
+    final hasContent =
+        text.isNotEmpty || imagePaths.isNotEmpty || audioPath != null;
 
-    // 语音消息可仅带音频（无文字）；普通文本/图片必须有内容。
-    if (text.isEmpty && imagePath == null && audioPath == null) return;
+    // 语音消息可仅带音频（无文字）；普通文本/图片/附件必须有内容。
+    if (!hasContent) return;
     // 语音消息若附带文字则一并发送；否则提示为空文本（模型仍收到音频）。
     if (audioPath != null && text.isEmpty) {
       // 允许：仅语音，无文字。
@@ -370,16 +421,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // the box until the whole reply finishes is confusing — it should empty
     // the moment the message is sent. 语音消息同样清空输入框（文字已随语音发送）。
     _textController.clear();
-    setState(() => _selectedImagePath = null);
+    setState(() {
+      _selectedImagePaths.clear();
+      _selectedFilePaths.clear();
+    });
     try {
       await notifier.sendMessage(_currentConversationId, text,
-          imagePath: imagePath, audioPath: audioPath);
+          imagePath: imagePaths.isNotEmpty ? imagePaths.first : null,
+          imagePaths: imagePaths,
+          attachmentPaths: attachmentPaths,
+          audioPath: audioPath);
     } catch (e) {
       // The send failed before leaving the client — restore the input so the
       // user can retry. (If it failed mid-generation the message is already
       // persisted and shown in the chat, so no restore needed there.)
       _textController.text = text;
-      if (imagePath != null) setState(() => _selectedImagePath = imagePath);
+      setState(() {
+        _selectedImagePaths
+          ..clear()
+          ..addAll(imagePaths);
+        _selectedFilePaths
+          ..clear()
+          ..addAll(attachmentPaths);
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('发送失败: $e', style: const TextStyle(color: Colors.white))),
       );
@@ -459,37 +523,95 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 : const Center(child: CircularProgressIndicator()),
           ),
 
-          // Image preview (if selected)
-          if (_selectedImagePath != null)
+          // 已选图片（≤10，横向缩略）+ 附件（≤5）预览
+          if (_selectedImagePaths.isNotEmpty || _selectedFilePaths.isNotEmpty)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Stack(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.file(
-                      File(_selectedImagePath!),
-                      height: 100,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  Positioned(
-                    top: 4,
-                    right: 4,
-                    child: Material(
-                      color: Colors.black54,
-                      borderRadius: BorderRadius.circular(12),
-                      child: IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white, size: 18),
-                        onPressed: () => setState(() => _selectedImagePath = null),
+              child: SizedBox(
+                height: 108,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    for (var i = 0; i < _selectedImagePaths.length; i++)
+                      _buildRemovableThumb(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(_selectedImagePaths[i]),
+                            height: 100,
+                            width: 100,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        onRemove: () =>
+                            setState(() => _selectedImagePaths.removeAt(i)),
                       ),
-                    ),
-                  ),
-                ],
+                    for (var i = 0; i < _selectedFilePaths.length; i++)
+                      _buildRemovableThumb(
+                        child: Container(
+                          width: 100,
+                          height: 100,
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.description, size: 28),
+                              const SizedBox(height: 4),
+                              Text(
+                                _fileNameOf(_selectedFilePaths[i]),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 10),
+                              ),
+                            ],
+                          ),
+                        ),
+                        onRemove: () =>
+                            setState(() => _selectedFilePaths.removeAt(i)),
+                      ),
+                  ],
+                ),
               ),
             ),
 
           _buildInputBar(isGenerating),
+        ],
+      ),
+    );
+  }
+
+  String _fileNameOf(String path) {
+    final i = path.lastIndexOf('/');
+    return i == -1 ? path : path.substring(i + 1);
+  }
+
+  Widget _buildRemovableThumb(
+      {required Widget child, required VoidCallback onRemove}) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Stack(
+        children: [
+          child,
+          Positioned(
+            top: 4,
+            right: 4,
+            child: Material(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.close, color: Colors.white, size: 18),
+                onPressed: onRemove,
+              ),
+            ),
+          ),
         ],
       ),
     );
