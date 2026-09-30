@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../models/chat_message.dart';
+import '../services/share_service.dart';
 
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
@@ -315,6 +316,31 @@ class ChatBubble extends StatelessWidget {
                           padding: const EdgeInsets.all(2),
                           child: Icon(
                             Icons.content_copy,
+                            size: 15,
+                            color: Colors.grey.shade400,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      // 转发/分享：经系统分享面板（微信/QQ/邮件等均可选）。
+                      InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () async {
+                          final ok = await ShareService.instance
+                              .shareText(content, title: '分享回复');
+                          if (context.mounted && !ok) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('未找到可用的分享入口'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(
+                            Icons.share,
                             size: 15,
                             color: Colors.grey.shade400,
                           ),

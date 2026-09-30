@@ -242,9 +242,9 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 工具循环轮次上限??~24，与引擎 AgentConfig assert 对齐）??
+  /// 工具循环轮次上限（1~100，与引擎 AgentConfig assert 对齐；复杂任务可到 100）。
   Future<void> setAgentMaxRounds(int value) async {
-    final clamped = value.clamp(1, 24);
+    final clamped = value.clamp(1, 100);
     state = state.copyWith(agentMaxRounds: clamped);
     await _persist();
   }
@@ -291,9 +291,9 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   // ---- API 档智能体参数（双场景档分流；local 档用上面的平铺 setter）----
 
-  /// API 档轮次上限（1~24，与引擎 AgentConfig assert 对齐）。
+  /// API 档轮次上限（1~100，与引擎 AgentConfig assert 对齐）。
   Future<void> setAgentApiMaxRounds(int value) async {
-    state = state.copyWith(agentApiMaxRounds: value.clamp(1, 24));
+    state = state.copyWith(agentApiMaxRounds: value.clamp(1, 100));
     await _persist();
   }
 
@@ -330,6 +330,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   /// 思考失控守卫阈值（1000~65536 字符；默认 6000）。
   Future<void> setAgentThinkingMaxChars(int value) async {
     state = state.copyWith(agentThinkingMaxChars: value.clamp(1000, 65536));
+    await _persist();
+  }
+
+  /// 对话区文字整体缩放（0.7~1.3，1.0 = 默认字号）。
+  Future<void> setChatTextScale(double value) async {
+    state = state.copyWith(chatTextScale: value.clamp(0.7, 1.3));
     await _persist();
   }
 

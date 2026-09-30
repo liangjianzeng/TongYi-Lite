@@ -44,25 +44,35 @@ class TurnUnit extends RenderUnit {
   /// 本回合的 assistant 回答（可能为空：中断且未产出答案）。
   final ChatMessage? answer;
 
-  const TurnUnit(this.tools, this.answer);
+  /// 存储的 💭 思考存档消息文本（已去前缀；历史回合过程痕迹回看）。
+  final List<String> thinking;
+
+  const TurnUnit(this.tools, this.answer, {this.thinking = const []});
 }
 
 /// 把原始消息流按回合重排为展示单元。
 ///
-/// 规则：user 消息是分界；user 之后的非 🔧 assistant 消息 = 回答；
-/// 🔧 前缀的 assistant 消息 = 工具步骤。无论存储顺序如何，都重排为
-/// [工具… → 回答]，与 [AgentTurnBlock] 的渲染顺序一致。
+/// 规则：user 消息是分界；user 之后的非 🔧/💭 assistant 消息 = 回答；
+/// 🔧 前缀的 assistant 消息 = 工具步骤；💭 前缀 = 思考存档。无论存储顺序
+/// 如何，都重排为 [工具… → 回答]，与 [AgentTurnBlock] 的渲染顺序一致。
 List<RenderUnit> groupMessages(List<ChatMessage> messages) {
   final units = <RenderUnit>[];
   final pendingTools = <ChatMessage>[];
+  final pendingThinking = <String>[];
   ChatMessage? pendingAnswer;
 
   void flush() {
-    if (pendingTools.isEmpty && pendingAnswer == null) return;
+    if (pendingTools.isEmpty &&
+        pendingThinking.isEmpty &&
+        pendingAnswer == null) {
+      return;
+    }
     // 必须拷贝：TurnUnit 保存的列表引用若直接复用 pendingTools，
     // 随后的 pendingTools.clear() 会把已入队的 tools 一并清空。
-    units.add(TurnUnit([...pendingTools], pendingAnswer));
+    units.add(TurnUnit([...pendingTools], pendingAnswer,
+        thinking: [...pendingThinking]));
     pendingTools.clear();
+    pendingThinking.clear();
     pendingAnswer = null;
   }
 
@@ -72,6 +82,11 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
       units.add(UserUnit(m));
     } else if (_isToolActivityMessage(m)) {
       pendingTools.add(m);
+    } else if (_isThinkingArchiveMessage(m)) {
+      final t = m.content.startsWith('💭 ')
+          ? m.content.substring('💭 '.length)
+          : m.content.substring('💭'.length);
+      if (t.trim().isNotEmpty) pendingThinking.add(t);
     } else {
       pendingAnswer = m;
     }
@@ -83,6 +98,10 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
 /// 🔧 前缀的 assistant 消息 = 工具活动消息（仅 UI 展示，不入模型上下文）。
 bool _isToolActivityMessage(ChatMessage msg) =>
     msg.role == MessageRole.assistant && msg.content.startsWith('🔧');
+
+/// 💭 前缀的 assistant 消息 = 思考存档（仅 UI 展示，不入模型上下文）。
+bool _isThinkingArchiveMessage(ChatMessage msg) =>
+    msg.role == MessageRole.assistant && msg.content.startsWith('💭');
 
 /// 把 🔧 活动消息内容解析为卡片数据（历史回合步骤回看）。
 ///
@@ -859,10 +878,12 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
 
 /// 智能体回合内嵌工作流块（对话内一步步向下渲染）：
 ///
-/// [重试/压缩横幅（仅运行中回合）]
-/// → [🔧 工具卡片 ×N（逐步）]
-/// → [思考中…（运行中且尚无答案文本）]
-/// → [最终回答 ChatBubble（保留 assistant 头像/统计/复制）]。
+/// 运行中回合（inline）：
+/// [重试/压缩横幅] → [思考流/工具卡按执行次序交错] → [思考中…] → [最终回答]。
+///
+/// 已完成回合（折叠）：工具调用 + 思考存档全部收进**总折叠区**
+/// [执行过程 · N 工具 · M 思考]（默认收起，点按展开回看），回答直接可见
+/// ——过程痕迹保留但不再占屏（用户定案：完成即折叠、可点开）。
 class AgentTurnBlock extends StatelessWidget {
   final List<ToolActivityUi> steps;
   final ChatMessage? answer;
@@ -870,12 +891,16 @@ class AgentTurnBlock extends StatelessWidget {
   /// 是否当前运行中回合（决定横幅/思考行/流式点是否显示）。
   final bool isLive;
 
+  /// 历史回合的思考存档文本（解析自存储 💭 消息；仅已完成回合折叠区使用）。
+  final List<String> thinking;
+
   const AgentTurnBlock({
     super.key,
     required this.steps,
     required this.answer,
     required this.ui,
     required this.isLive,
+    this.thinking = const [],
   });
 
   /// 答案占位中：live 智能体回合、答案还没有任何文本。
@@ -949,6 +974,7 @@ class AgentTurnBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final running = isLive && ui.running;
     // live 回合：思考存档与工具卡按**执行顺序**交错渲染（timeline 由归约器
     // 按事件到达次序生成）——不再"思考一律在前、工具一律在后"。流式思考卡
     // = 当前正在进行的思考，位于时间线末尾。
@@ -956,15 +982,50 @@ class AgentTurnBlock extends StatelessWidget {
     final stepWidgets = (isLive && ui.timeline.isNotEmpty)
         ? _timelineWidgets()
         : steps.map((s) => ToolActivityCard(activity: s)).toList();
+
+    // ---- 已完成回合：过程痕迹（工具卡 + 思考存档）收进总折叠区 ----
+    if (!running) {
+      final historyThinkingWidgets = <Widget>[
+        for (var i = 0; i < thinking.length; i++)
+          _ThinkingBlockCard(text: thinking[i], index: i + 1),
+      ];
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (stepWidgets.isNotEmpty || historyThinkingWidgets.isNotEmpty)
+            _TurnProcessSection(
+              toolCount: steps.length,
+              thinkingCount: thinking.length,
+              children: [...stepWidgets, ...historyThinkingWidgets],
+            ),
+          if (answer != null)
+            ChatBubble(
+              role: 'assistant',
+              content: answer!.content,
+              timestamp: answer!.timestamp,
+              imagePath: answer!.imagePath,
+              audioPath: answer!.audioPath,
+              inferenceStats: answer!.inferenceStats,
+              // 智能体回答与普通聊天同款：保留 assistant 头像（用户反馈要求）。
+              showAvatar: true,
+            ),
+          // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
+          if (answer != null && _artifacts.isNotEmpty)
+            _ArtifactSummaryCard(artifacts: _artifacts),
+        ],
+      );
+    }
+
+    // ---- 运行中回合：过程全部内联展开（结束即自动折叠为总折叠区） ----
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // 横幅/思考行必须属于「正在跑的这一个回合」：retry/compacted 残留
         // 状态要等下一次 attach 才清，加 ui.running 防串台到普通聊天。
-        if (isLive && ui.running && ui.retryAttempt > 0)
-          RetryIndicator(attempt: ui.retryAttempt),
-        if (isLive && ui.running && ui.compacted) const CompactionBanner(),
+        if (running && ui.retryAttempt > 0) RetryIndicator(attempt: ui.retryAttempt),
+        if (running && ui.compacted) const CompactionBanner(),
         ...stepWidgets,
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
@@ -973,7 +1034,7 @@ class AgentTurnBlock extends StatelessWidget {
           ),
         // WP5：工具调用参数生成期反馈（大 HTML/长文本写文件时思考与可见
         // 流都为空，此前只能干转圈）——显示已生成字数 + 开头预览。
-        if (isLive && ui.running && ui.toolGen != null)
+        if (running && ui.toolGen != null)
           _ToolGenIndicator(
             chars: ui.toolGen!.chars,
             preview: ui.toolGen!.preview,
@@ -997,6 +1058,103 @@ class AgentTurnBlock extends StatelessWidget {
         if (answer != null && !_answerPending && _artifacts.isNotEmpty)
           _ArtifactSummaryCard(artifacts: _artifacts),
       ],
+    );
+  }
+}
+
+/// _TurnProcessSection —— 已完成回合的过程痕迹总折叠区（用户定案）。
+///
+/// 回合完成后，工具调用卡与思考存档卡**自动折叠**进这个总区域：
+/// 默认只显示一行摘要头（步骤数），点按展开再呈现各工具/思考块——
+/// 过程可回看、但不再占屏。
+class _TurnProcessSection extends StatefulWidget {
+  final int toolCount;
+  final int thinkingCount;
+  final List<Widget> children;
+
+  const _TurnProcessSection({
+    required this.toolCount,
+    required this.thinkingCount,
+    required this.children,
+  });
+
+  @override
+  State<_TurnProcessSection> createState() => _TurnProcessSectionState();
+}
+
+class _TurnProcessSectionState extends State<_TurnProcessSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final labelParts = <String>[
+      if (widget.toolCount > 0) '${widget.toolCount} 工具',
+      if (widget.thinkingCount > 0) '${widget.thinkingCount} 思考',
+    ];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: Container(
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                child: Row(
+                  children: [
+                    Icon(Icons.account_tree_outlined,
+                        size: 14,
+                        color: theme.colorScheme.primary.withValues(alpha: 0.8)),
+                    const SizedBox(width: 6),
+                    Text(
+                      '执行过程'
+                      '${labelParts.isEmpty ? '' : ' · ${labelParts.join(' · ')}'}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      _expanded ? '收起' : '展开',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 15,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_expanded)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: widget.children,
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

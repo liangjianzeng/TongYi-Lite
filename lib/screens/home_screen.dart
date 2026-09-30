@@ -55,6 +55,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final ValueNotifier<int> _recordingSecondsNotifier = ValueNotifier<int>(0);
   Timer? _recordingTimer;
 
+  // 附件面板的暂存选择（bottom sheet 回调里不能直接 await pick，
+  // 先落字段、pop 后统一分发）。
+  _AttachSource _pendingAttachSource = _AttachSource.none;
+
   // 会话批量选择状态
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
@@ -160,9 +164,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  /// Pick image from camera or gallery（多图，≤10）
-  Future<void> _pickImage() async {
-    final source = await showDialog<ImageSource>(
+  /// Pick image from camera or gallery（多图，≤10）。
+  /// [source] 为空时弹选择对话框（拍照/相册）；已指定则直接走对应来源。
+  Future<void> _pickImage([ImageSource? source]) async {
+    source ??= await showDialog<ImageSource>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('选择图片来源（最多 10 张）'),
@@ -172,20 +177,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ListTile(
               leading: const Icon(Icons.camera_alt),
               title: const Text('拍照'),
-              onTap: () async {
-                // Check camera permission before proceeding
-                final hasPermission = await StoragePermissionService.requestCameraPermission();
-                if (!hasPermission) {
-                  Navigator.pop(ctx);
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('相机权限被拒绝，请在设置中授予')),
-                    );
-                  }
-                  return;
-                }
-                Navigator.pop(ctx, ImageSource.camera);
-              },
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
             ),
             ListTile(
               leading: const Icon(Icons.photo_library),
@@ -198,6 +190,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
 
     if (source == null) return;
+
+    // 相机需要权限（无论从哪个入口进入都先检查）。
+    if (source == ImageSource.camera) {
+      final hasPermission =
+          await StoragePermissionService.requestCameraPermission();
+      if (!hasPermission) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('相机权限被拒绝，请在设置中授予')),
+          );
+        }
+        return;
+      }
+    }
 
     try {
       // 端侧视觉：把用户选图先「下采样」再喂模型，而不是原图直喂。
@@ -270,6 +276,55 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         SnackBar(content: Text('最多 $kMaxAttachments 个文件，超出的未添加')),
       );
     }
+  }
+
+  /// 统一附件入口：图片（拍照/相册）与文件附件（智能体模式）合并为一个
+  /// 「+」按钮，点按弹出选择面板——替代此前输入框右侧「图片」+ 前置
+  /// 「附件」两个独立按钮，收窄消息发送区。
+  Future<void> _showAttachSheet() async {
+    final agentOn = ref.read(settingsProvider).agentEnabled;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('相册（可多选，≤10 张）'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.gallery),
+            ),
+            if (agentOn)
+              ListTile(
+                leading: const Icon(Icons.attach_file),
+                title: Text(
+                    '文件（智能体附件，≤$kMaxAttachments 个，docx/xlsx/pptx/txt 等）'),
+                onTap: () => Navigator.pop(ctx, _AttachSource.file),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (_pendingAttachSource) {
+      case _AttachSource.camera:
+        await _pickImage(ImageSource.camera);
+        break;
+      case _AttachSource.gallery:
+        await _pickImage(ImageSource.gallery);
+        break;
+      case _AttachSource.file:
+        await _pickAttachmentFiles();
+        break;
+      case _AttachSource.none:
+        break;
+    }
+    _pendingAttachSource = _AttachSource.none;
   }
 
   /// 选图后提示：若当前实际路线不支持视觉，图片仅展示、不会发给模型。
@@ -893,34 +948,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // [工具步骤… → 最终回答]；运行中步骤取事件流实时数据，历史步骤
         // 解析自存储 🔧 活动消息（groupMessages / parsedToolActivities）。
         final units = groupMessages(rawMessages);
-        return ListView.builder(
-          controller: _scrollController,
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: units.length,
-          itemBuilder: (context, index) {
-            final unit = units[index];
-            final isLiveTurn =
-                (uiState.running || generating) && index == units.length - 1;
-            return switch (unit) {
-              UserUnit(:final message) => ChatBubble(
-                    role: message.role.name,
-                    content: message.content,
-                    timestamp: message.timestamp,
-                    isStreaming: message.isStreaming && index == units.length - 1,
-                    imagePath: message.imagePath,
-                    imagePaths: message.imagePaths,
-                    attachments: message.attachments,
-                    audioPath: message.audioPath,
-                    inferenceStats: message.inferenceStats,
-                  ),
-              TurnUnit(:final tools, :final answer) => AgentTurnBlock(
-                    isLive: isLiveTurn,
-                    steps: _stepsFor(uiState, tools, isLiveTurn),
-                    answer: answer,
-                    ui: uiState,
-                  ),
-            };
-          },
+        // 对话区文字整体缩放（设置→智能体→对话文字大小，0.7~1.3）。
+        final textScale = ref.watch(settingsProvider).chatTextScale;
+        return MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(textScale)),
+          child: ListView.builder(
+            controller: _scrollController,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: units.length,
+            itemBuilder: (context, index) {
+              final unit = units[index];
+              final isLiveTurn =
+                  (uiState.running || generating) && index == units.length - 1;
+              return switch (unit) {
+                UserUnit(:final message) => ChatBubble(
+                      role: message.role.name,
+                      content: message.content,
+                      timestamp: message.timestamp,
+                      isStreaming:
+                          message.isStreaming && index == units.length - 1,
+                      imagePath: message.imagePath,
+                      imagePaths: message.imagePaths,
+                      attachments: message.attachments,
+                      audioPath: message.audioPath,
+                      inferenceStats: message.inferenceStats,
+                    ),
+                TurnUnit(:final tools, :final answer, :final thinking) =>
+                  AgentTurnBlock(
+                      isLive: isLiveTurn,
+                      steps: _stepsFor(uiState, tools, isLiveTurn),
+                      answer: answer,
+                      ui: uiState,
+                      thinking: thinking,
+                    ),
+              };
+            },
+          ),
         );
       },
     );
@@ -943,32 +1007,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // 录音中：波形动画 + 计时 + 「松手发送」提示（独立 widget，不重建手势区）。
         _buildRecordingBanner(),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,
             boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
           ),
           child: Row(
         children: [
-          // 智能体附件入口（WP-A）：仅智能体模式显示（≤5 个办公/文本文件，
-          // 解析注入工作区供模型阅读；普通聊天引擎无文件阅读能力）。
-          if (ref.watch(settingsProvider).agentEnabled)
-            IconButton(
-              icon: Badge(
-                isLabelVisible: _selectedFilePaths.isNotEmpty,
-                label: Text('${_selectedFilePaths.length}'),
-                child: Icon(
-                  _selectedFilePaths.isNotEmpty
-                      ? Icons.attach_file
-                      : Icons.attach_file_outlined,
-                  color: _selectedFilePaths.isNotEmpty
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                ),
-              ),
-              tooltip: '添加文件（最多 5 个，支持 docx/xlsx/pptx/txt/md/csv/json 等）',
-              onPressed: isGenerating ? null : _pickAttachmentFiles,
+          // 统一附件入口：图片（拍照/相册）+ 文件附件合并为一个「+」按钮，
+          // 徽标显示已选总数（图片 + 文件）。
+          IconButton(
+            icon: Badge(
+              isLabelVisible:
+                  _selectedImagePaths.isNotEmpty || _selectedFilePaths.isNotEmpty,
+              label: Text(
+                  '${_selectedImagePaths.length + _selectedFilePaths.length}'),
+              child: const Icon(Icons.add_circle_outline),
             ),
+            tooltip: '添加图片 / 文件',
+            onPressed: isGenerating ? null : _showAttachSheet,
+          ),
           Expanded(
             child: TextField(
               controller: _textController,
@@ -981,58 +1039,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 filled: true,
                 fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: Badge(
-                        isLabelVisible: _selectedImagePaths.isNotEmpty,
-                        label: Text('${_selectedImagePaths.length}'),
-                        child: Icon(
-                          _selectedImagePaths.isNotEmpty
-                              ? Icons.photo_library
-                              : Icons.image_outlined,
-                          color: _selectedImagePaths.isNotEmpty
-                              ? Colors.green
-                              : null,
-                        ),
-                      ),
-                      tooltip: '添加图片（最多 10 张）',
-                      onPressed: isGenerating ? null : _pickImage,
-                    ),
-                    // 语音拾音：按住说话 → 松手自动发送（模型原生理解音频）。
-                    // 注意：不要再包 Tooltip —— Tooltip 自身用「长按」弹提示，会抢走
-                    // 录音手势（此前表现为只弹「按住说话」、无任何录制效果）。
-                    // 用 ValueNotifier 驱动图标颜色/波形，避免录音中重建本 GestureDetector。
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onLongPressStart: isGenerating
-                          ? null
-                          : (_) {
-                              _startRecording();
-                            },
-                      onLongPressEnd: isGenerating
-                          ? null
-                          : (_) {
-                              _stopRecording(send: true);
-                            },
-                      onLongPressCancel: () {
-                        // 按住后滑出按钮/被打断 → 放弃并停止录音（不发送）。
-                        if (_recordingNotifier.value) _stopRecording(send: false);
-                      },
-                      child: ValueListenableBuilder<bool>(
-                        valueListenable: _recordingNotifier,
-                        builder: (_, recording, __) => Padding(
-                          padding: const EdgeInsets.all(10),
-                          child: Icon(
-                            recording ? Icons.mic : Icons.mic_none,
-                            color: recording ? Colors.red : null,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
               ),
               onSubmitted: (_) {
                 // Ignore Enter while a reply is streaming — the send button
@@ -1044,18 +1050,47 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
           const SizedBox(width: 8),
-          FloatingActionButton(
-            onPressed: isGenerating ? _stopGeneration : _sendMessage,
-            mini: true,
-            tooltip: isGenerating ? '停止回复' : '发送',
-            child: isGenerating
-                ? const Icon(Icons.stop, size: 24)
-                : const Icon(Icons.send),
-          ),
+          _buildSendButton(isGenerating),
         ],
       ),
       ),
     ],
+    );
+  }
+
+  /// 发送/停止/录音三合一按钮（发送区收窄定案）：
+  /// - **短按**：发送消息；生成中 → 停止回复；
+  /// - **长按**：按住说话（麦克风），松手自动发送语音。
+  /// 手势区在 FAB 外层；录音态用 ValueNotifier 驱动图标（不 setState），
+  /// 避免录音中重建 GestureDetector 导致「松手」事件丢失。
+  Widget _buildSendButton(bool isGenerating) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPressStart:
+          isGenerating ? null : (_) => _startRecording(),
+      onLongPressEnd:
+          isGenerating ? null : (_) => _stopRecording(send: true),
+      onLongPressCancel: () {
+        // 按住后滑出按钮/被打断 → 放弃并停止录音（不发送）。
+        if (_recordingNotifier.value) _stopRecording(send: false);
+      },
+      child: ValueListenableBuilder<bool>(
+        valueListenable: _recordingNotifier,
+        builder: (_, recording, __) => FloatingActionButton(
+          mini: true,
+          tooltip: recording
+              ? '松手发送'
+              : (isGenerating ? '停止回复' : '发送（长按说话）'),
+          onPressed: recording
+              ? () => _stopRecording(send: true)
+              : (isGenerating ? _stopGeneration : _sendMessage),
+          child: recording
+              ? const Icon(Icons.mic, color: Colors.red)
+              : (isGenerating
+                  ? const Icon(Icons.stop, size: 24)
+                  : const Icon(Icons.send)),
+        ),
+      ),
     );
   }
 
@@ -1340,19 +1375,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   String _formatTime(DateTime t) {
     final now = DateTime.now();
-    final diff = now.difference(t);
-    if (diff.inDays == 0) {
-      final h = t.hour.toString().padLeft(2, '0');
-      final m = t.minute.toString().padLeft(2, '0');
-      return '$h:$m';
-    } else if (diff.inDays == 1) {
-      return '昨天';
-    } else if (diff.inDays < 7) {
-      return '${diff.inDays} 天前';
-    }
-    return '${t.month}/${t.day}';
+    final hhmm =
+        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+    final day = DateTime(t.year, t.month, t.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = today.difference(day).inDays;
+    if (diff == 0) return '今天 $hhmm';
+    if (diff == 1) return '昨天 $hhmm';
+    if (t.year == now.year) return '${t.month}/${t.day} $hhmm';
+    return '${t.year}/${t.month}/${t.day} $hhmm';
   }
 }
+
+/// 统一附件面板的选项（拍照 / 相册 / 文件）。
+enum _AttachSource { none, camera, gallery, file }
 
 // =========================================================================
 // Model status bottom sheet widget (outside the State class)

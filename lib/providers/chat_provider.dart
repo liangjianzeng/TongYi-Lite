@@ -1094,6 +1094,24 @@ class ChatNotifier extends StateNotifier<bool> {
         );
       }
     }
+    // 思考存档落库（💭 前缀，仅 UI 展示不入模型上下文）：turn 事件流结束时
+    // 各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程痕迹消息
+    // ——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
+    // timestamp 取回答前偏移，保证排序为 [工具活动] → [思考存档] → [回答]。
+    final finishedThinking = List<String>.from(agentUi.state.thinkingHistory);
+    for (var i = 0; i < finishedThinking.length; i++) {
+      final block = finishedThinking[i].trim();
+      if (block.isEmpty) continue;
+      await _storage.saveMessage(ChatMessage(
+        id: '${assistantMsg.id}-think-$i',
+        conversationId: conversationId,
+        role: MessageRole.assistant,
+        content: '💭 $block',
+        isStreaming: false,
+        timestamp:
+            assistantMsg.timestamp.subtract(Duration(milliseconds: 3 + i)),
+      ));
+    }
     // WP1a：本轮工具轮轨迹以信封消息落库，下一轮导入时还原为真实
     // assistant(toolCalls)/tool/result 事件——修"turn 间失忆"（模型每轮
     // 忘掉上一轮调过什么工具）。createdAt 置于最终回答之前 1ms，
@@ -1263,10 +1281,11 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// tells the native engine to set should_stop (or cancels the API SSE
   /// request for the API fallback path), which makes the completion loop
-  /// 是否为智能体工具活动消息（🔧 前缀）。此类消息仅用于 UI 展示，
-  /// 不入模型上下文（history 构建时排除）。
+  /// 是否为智能体过程活动消息（🔧 工具 / 💭 思考存档前缀）。此类消息仅用于
+  /// UI 展示（过程痕迹回看），不入模型上下文（history 构建时排除）。
   static bool _isToolActivityMessage(ChatMessage msg) =>
-      msg.role == MessageRole.assistant && msg.content.startsWith('🔧');
+      msg.role == MessageRole.assistant &&
+      (msg.content.startsWith('🔧') || msg.content.startsWith('💭'));
 
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
