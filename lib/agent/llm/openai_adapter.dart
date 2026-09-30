@@ -101,6 +101,8 @@ List<Map<String, dynamic>> toOpenAiWireMessages(
 /// [toOpenAiWireMessages] / [convertApiMessages] 均为 1:1 投影，[wire] 与
 /// [messages] 按下标对齐；图片读取失败时跳过该条（降级为纯文本），不影响整轮。
 /// 调用方须先确认端点 visionCapable，否则历史里的图片永不发出。
+///
+/// 多图（WP 多图上传）：`imagePaths` 全量发送（首张与 imagePath 重合时去重）。
 Future<List<Map<String, dynamic>>> attachWireImages(
   List<Map<String, dynamic>> wire,
   List<Map<String, dynamic>> messages,
@@ -108,16 +110,30 @@ Future<List<Map<String, dynamic>>> attachWireImages(
   for (var i = 0; i < wire.length && i < messages.length; i++) {
     final src = messages[i];
     if (src['role'] != 'user') continue;
-    final p = src['imagePath'];
-    if (p is! String || p.isEmpty) continue;
-    final b64 = await OpenAiService.encodeImageFile(p);
-    if (b64 == null) continue;
-    final parts = <Map<String, dynamic>>[
-      {
+    final paths = <String>[];
+    final multi = src['imagePaths'];
+    if (multi is List && multi.isNotEmpty) {
+      paths.addAll(multi.map((e) => '$e'));
+    }
+    final single = src['imagePath'];
+    if (paths.isEmpty && single is String && single.isNotEmpty) {
+      paths.add(single);
+    } else if (single is String &&
+        single.isNotEmpty &&
+        !paths.contains(single)) {
+      paths.insert(0, single);
+    }
+    if (paths.isEmpty) continue;
+    final parts = <Map<String, dynamic>>[];
+    for (final p in paths) {
+      final b64 = await OpenAiService.encodeImageFile(p);
+      if (b64 == null) continue;
+      parts.add({
         'type': 'image_url',
         'image_url': {'url': 'data:image/jpeg;base64,$b64'},
-      },
-    ];
+      });
+    }
+    if (parts.isEmpty) continue;
     final content = wire[i]['content'];
     if (content is String && content.isNotEmpty) {
       parts.insert(0, {'type': 'text', 'text': content});

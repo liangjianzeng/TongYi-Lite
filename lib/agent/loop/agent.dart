@@ -235,6 +235,7 @@ class ReactLoopAgent {
   Future<TurnEndReason> kick(
     String userMessage, {
     String? imagePath,
+    List<String>? imagePaths,
     String? audioPath,
     StreamController<String>? onToken,
     StreamController<String>? onThinking,
@@ -255,6 +256,10 @@ class ReactLoopAgent {
       {
         'content': userMessage,
         if (imagePath != null) 'imagePath': imagePath,
+        // 多图（WP 多图上传）：本地引擎视觉仍只用 imagePath 首张；
+        // API 路线由投影/adapter 全量发送。
+        if (imagePaths != null && imagePaths.length > 1)
+          'imagePaths': imagePaths,
       },
       source: const {'kind': 'user'},
     );
@@ -302,7 +307,7 @@ class ReactLoopAgent {
           try {
             final options =
                 _buildRequest(turn, step, imagePath, audioPath,
-                    onStatus: onStatus);
+                    onStatus: onStatus, imagePaths: imagePaths);
             final result = await _adapter.generate(
                 options,
                 onToken: onToken,
@@ -381,6 +386,7 @@ class ReactLoopAgent {
     String? imagePath,
     String? audioPath, {
     StreamController<String>? onStatus,
+    List<String>? imagePaths,
   }) {
     final messages = _session.deriveModelMessages();
     final tools = _registry.visibleFor(_modelId);
@@ -401,6 +407,7 @@ class ReactLoopAgent {
       modelId: _modelId,
       imagePath: imagePath,
       audioPath: audioPath,
+      imagePaths: imagePaths,
       onStatus: onStatus,
     );
     // G12 不变量（开发期 assert）：独立重建比对，请求必须能纯投影自 log。
