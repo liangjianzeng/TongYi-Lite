@@ -11,9 +11,9 @@
 >
 > - **🤖 端侧智能体引擎**——事件日志唯一真相源 + ReactLoopAgent 主循环 + 六段工具流水线 +
 >   子代理 / Skills / Hooks / `AGENTS.md`，模型按需调用工具、工具真实执行并回填结果；
-> - **⚙️ 端侧模型引擎**——llama.cpp fork（XHToken `spark2_5`）JNI 直调 · Vulkan / OpenCL GPU 加速
->   （Adreno 825 支持 Turnip 直载）+ KleidiAI CPU 加速 · PTQ1_0 三元量化内核 · MTP / dspark 投机解码 ·
->   mtmd 视觉 / 语音 · OOM 内存守卫。
+> - **⚙️ 端侧模型引擎**——llama.cpp 上游 `b11267`（0.5.0）+ fork 增强（`spark2_5` / dspark 投机 /
+>   PTQ1_0 三元内核 / FWHT / Turnip 直载）JNI 直调 · Vulkan / OpenCL GPU 加速（Adreno 825 支持
+>   Turnip 直载）+ KleidiAI CPU 加速 · MTP / dspark 投机解码 · mtmd 视觉 / 语音 · OOM 内存守卫。
 >
 > 另有 OpenAI 兼容远程模型接入与用户自建 SearXNG 联网搜索。**数据不出设备，隐私安全无忧。**
 
@@ -42,7 +42,7 @@ TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模�
 | 能力 | 说明 |
 |------|------|
 | **🤖 端侧智能体引擎** | 事件日志唯一真相源 + ReactLoopAgent 主循环（失败自动恢复）+ 六段工具流水线 + **子代理**（spawn/fork）+ Skills/Hooks/`AGENTS.md`；19 个内置工具 + `subagent`/`load_skill`，沙箱授权 + 逐次审批；**可一键关闭**（关闭 = 简单聊天，本地小模型友好） |
-| **⚙️ 端侧模型引擎** | llama.cpp fork（XHToken `spark2_5`）JNI 直调（无 HTTP Server）、mmap 加载、批量 prefill、内置采样器；纯 CPU 也可跑，数据零外传 |
+| **⚙️ 端侧模型引擎** | llama.cpp 上游 `b11267`（0.5.0）+ fork 增强（`spark2_5` / dspark / PTQ1_0）JNI 直调（无 HTTP Server）、mmap 加载、批量 prefill、内置采样器；纯 CPU 也可跑，数据零外传 |
 | **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 825 上 Vulkan 经 **Turnip（Mesa gen8）App 内直载** 重新可用；PTQ1_0 三元量化（Bonsai-2 27B）专用 GPU 内核（详见[技术架构](#技术架构)） |
 | **投机解码** | **MTP**（多 token 预测）+ **dspark**（整块投机），部分模型支持，设置页按模型单独开启 |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描 |
@@ -71,8 +71,9 @@ flutter build apk --debug
 flutter run -d <device_id>
 ```
 
-> ✅ **三方依赖已全部直接入库**：llama.cpp（XHToken 官方 fork，`spark2_5` 架构 + function-calling）、
-> KleidiAI（v1.24.0）、OpenCL-Headers、opencl-stub 源码都在 `third_party/` 下，clone 后即可编译，
+> ✅ **三方依赖已全部直接入库**：llama.cpp（上游 `b11267` 0.5.0 + fork 增强：`spark2_5` /
+> dspark 投机 / PTQ1_0 内核 / FWHT / Turnip 直载）、KleidiAI（v1.24.0）、OpenCL-Headers、
+> opencl-stub 源码都在 `third_party/` 下，clone 后即可编译，
 > 不再需要 `git submodule update --init --recursive`。
 
 > **真机覆盖安装铁律**：始终 `adb install -r app-debug.apk`（`-r` 覆盖更新，保留已下载的端侧模型缓存）；
@@ -234,7 +235,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 ## 模型列表
 
-> 以下模型以 `assets/models_catalog.json` 为准（当前 **17 个**，配置驱动、JSON 增改即生效）。视觉模型
+> 以下模型以 `assets/models_catalog.json` 为准（当前 **18 个**，配置驱动、JSON 增改即生效）。视觉模型
 > （`vision`）含投影器 `mmproj`，总下载体积 = 主模型 + 投影器。
 
 | 模型 | 大小 | 类型 | 最低 RAM | 标签 |
@@ -252,7 +253,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 | Spark-X2.5 4B (Q4_K_M) | 2.4 GB | text | 4 GB | ⭐ 推荐 · 🤖 智能体 · 原生工具调用 · 百万上下文 |
 | Bonsai-8B (Q1_0) | 1.2 GB | text | 2 GB | ⭐ 推荐 · 🤖 智能体 · 轻量 |
 | NeoHorse-1 4B (Q4_K_M) | 2.5 GB | text | 4 GB | ⭐ 推荐 · 🤖 智能体 · 原生工具调用 |
-| Agents-A1 4B (Q4_K_M) | 2.5 GB (+641 mmproj) | vision | 4 GB | ⭐ 推荐 · 🤖 智能体 · 原生工具调用 · 🖼️ 视觉 |
+| MiniCPM5-2B (Q4_K_M) | 1.5 GB | text | 3 GB | ⭐ 推荐 · 🤖 智能体 · 原生工具调用 · ⚡ 速度快 |
+| MiniCPM5-2B (Q8_0) | 2.5 GB | text | 4 GB | ⚠️ 不推荐 · 🤖 智能体 · 原生工具调用 · 精度更高 |
 | Bonsai-2 27B (PTQ1_0 1.58-bit) | 5.95 GB | text | 16 GB | ⚠️ 不推荐 · 1.58-bit · 🛡️ 需 OOM 守卫（11GB 机 GPU 加载必死机） |
 | Bonsai 27B (Q1_0 1-bit) | 3.8 GB | text | 6 GB | 👑 限高端旗舰 · 探索用 |
 | Bonsai 27B (Ternary 1.58-bit) | 7.2 GB | text | 10 GB | ⚠️ 不推荐 · 👑 限高端旗舰 |
@@ -261,10 +263,11 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 `🖼️ 视觉`、`🎧 语音`、`⚡ CPU 加速`、`⚡ 速度快`、`🤖 智能体`、`MTP`（多 token 预测投机解码）、
 `原生工具调用`（模型自带 function-calling，智能体走原生协议）。
 
-**智能体模型**（LFM 2.5 2.6B / LFM 2.5 8B-A1B / Spark-X2.5 4B / Bonsai-8B / NeoHorse-1 4B / Agents-A1 4B）
+**智能体模型**（LFM 2.5 2.6B / LFM 2.5 8B-A1B / Spark-X2.5 4B / Bonsai-8B / NeoHorse-1 4B /
+MiniCPM5-2B Q4/Q8）
 内置 `agentCapabilities` 声明（最大上下文、推荐 `n_ctx`、默认开启工具），为端侧 Agent 场景优化；
-其中 **Spark-X2.5 4B**（`maxContextTokens=1000000`）与 **NeoHorse-1 / Agents-A1**（`nativeToolCall: true`）
-支持原生工具调用协议，智能体自动切换原生路线。
+其中 **Spark-X2.5 4B**（`maxContextTokens=1000000`）与 **NeoHorse-1 / MiniCPM5-2B**
+（`nativeToolCall: true`）支持原生工具调用协议，智能体自动切换原生路线。
 
 > 端侧 1-bit / 1.58-bit 量化（Bonsai-27B / Bonsai-2 27B）：Q1_0 / Q2_0 / PTQ1_0 体积小，但解码速度有限
 > （Q1_0 约 2.7–2.9 tok/s，PTQ1_0 依赖专用 GPU 内核 + OOM 守卫），适合大上下文/探索用，日常问答优先选
@@ -302,8 +305,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 │       无 HTTP Server · OpenAI 兼容 API 走 Dio（可选）                        │
 ├────────────────────────────────────────────────────────────────────────────┤
 │ Android 原生层：Kotlin (InferenceService/MainActivity) → JNI                │
-│  └─ third_party/ 全量入库：llama.cpp fork · KleidiAI · OpenCL-Headers ·     │
-│     opencl-stub · turnip 驱动（clone 即可编译，无需子模块/联网）             │
+│  └─ third_party/ 全量入库：llama.cpp b11267+增强 · KleidiAI · OpenCL-Headers│
+│     · opencl-stub · turnip 驱动（clone 即可编译，无需子模块/联网）          │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -322,7 +325,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   扩展生态；`context_eng/` 上下文压缩 + 输出溢写；`web_search/` 自建 SearXNG + 每回合搜索上限
   （DSH `max_uses` 语义）+ 同内容去重。
 
-**② 端侧模型引擎（llama.cpp fork · JNI 直调）** — 全部推理在本机完成：
+**② 端侧模型引擎（llama.cpp b11267 + fork 增强 · JNI 直调）** — 全部推理在本机完成：
 
 - **多后端**：ggml-cpu（+ KleidiAI dotprod）、ggml-vulkan（Adreno 825 可经 **Turnip Mesa gen8 直载**）、
   ggml-opencl（+ PTQ1_0 三元量化专用内核，Bonsai-2 27B 全 GPU decode/prefill）；启动探测 + 设置选择，
@@ -357,7 +360,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 #### 骁龙 8s Gen 4（SM8735 / Adreno 825）Vulkan 专项
 
-经历「原厂驱动修复 → OTA 回归弃用 → Turnip 直载 → App 进程内直载打通」四个阶段：
+经历「原厂驱动修复 → OTA 回归弃用 → Turnip 直载 → App 进程内直载打通 → llama.cpp b11267 升级回归」五个阶段：
 
 1. **v0.2.2（2026-09-26）原厂驱动（0800.71）修复**：E031 编译器错误编译 shader 的 `unpack8()`
    （Int8 capability）导致量化模型输出乱码，另存在 subgroup matvec 管线创建失败、图融合 kernel 输出全零、
@@ -385,7 +388,22 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
    dlopen turnip 依赖解析命中 stub → 加载成功。验收铁证：logcat `using Vulkan HAL GetInstanceProcAddr
    from .../libturnip_freedreno.so` + `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` +
    `backend_ptrs.size()=2` + `loadModel result: true`。
-5. **当前定位**：Turnip 直载在 App 内**已可用**（libturnip_freedreno.so + libhardware.so stub 已入库），
+5. **v0.2.8 后续（2026-09-30）llama.cpp b11267 升级 Vulkan 回归修复**：升级到上游
+   `b11267`（0.5.0）后 Vulkan 全模型转圈/空输出（三层根因逐一移植修复）：
+   - ① 上游移除 `GGML_VK_TURNIP` env → 移植 fork 的 turnip HAL 直载（dlopen + dlsym
+     ICD→HAL，HAL 偏移 0x70 PFN 表，`GGML_VK_TURNIP` env 触发）；
+   - ② 上游移除 `GGML_VK_NO_SUBGROUP` / `GGML_VK_NO_MMV` → 移植两 env
+     （use_subgroups / ggml_vk_should_use_mmvq 首部检查）；
+   - ③ b11267 混用裸 Vulkan C 函数（系统 loader 符号）→ turnip device 传入系统函数
+     SIGSEGV 启动崩溃 → **11 处裸调用全部 dispatcher 化**
+     （`vkGetPhysicalDeviceFeatures2` ×3 / `vkGetInstanceProcAddr` ×7 /
+     `vkGetDeviceProcAddr` ×1 → `ggml_vk_default_dispatcher()`）。
+   - 验收铁证：`using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so` +
+     `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` +
+     `backend_ptrs.size()=2` + `loadModel result: true` → Vulkan 正常输出（用户确认）。
+   - **升级后新坑提示**：b11267 大重写后混用系统 loader 符号，裸 Vulkan 函数必须
+     dispatcher 化；下次动 Vulkan 先查这类。
+6. **当前定位**：Turnip 直载在 App 内**已可用**（libturnip_freedreno.so + libhardware.so stub 已入库），
    Adreno 825 日常 GPU 推理默认仍走 OpenCL（吞吐等价、无 Turnip 遗留项）；CONV_2D f32 / FA hsk=192
    为 Turnip 独立勘探遗留，不影响主链路。
 
@@ -456,12 +474,13 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 ## 版本更新
 
 > 版本历史依据 git 提交维护，详细变更见 [`CHANGELOG.md`](CHANGELOG.md)（0.2.8 起已同步补齐）。
-> ⚠️ 引擎版本口径：当前 `third_party/llama.cpp` 为 **XHToken fork（fe8156f 基线 + spike 增强树）**；
-> v0.2.1 曾短时升级 b11028，后在分支合并时废弃回退，以主仓实际树为准。
+> ⚠️ 引擎版本口径：当前 `third_party/llama.cpp` 为 **上游 `b11267`（0.5.0）+ fork 增强树**
+> （fe8156f → b11267 一步到位升级，commit `0909603`，保留全部 fork 资产：dspark/spark2_5、
+> PTQ1_0 内核、FWHT、Turnip 直载、KleidiAI vendored、MTP）。
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| **v0.2.8**（当前） | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（DSH `max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16 |
+| **v0.2.8**（当前） | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（DSH `max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
 | **v0.2.7** | 2026-09-29 | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向 |
 | **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（`mul_mm_ptq1_0_f32_l4_lm`，raw 块布局 + staged 三进制解码；桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控 + `GGML_VK_FWHT_SUBGROUP` A/B 开关——真机实锤 Turnip shuffle 错编（8/27）原厂无罪（27/27），门控恰好兜住；③ **Turnip e2e 乱码根因定案**：GEMM 大 n（≥48）编译器错编（f16+MMQ 双中招，ERR≈1.0；原厂 16/16 全绿）——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界（`-ub 16` e2e 连贯闭环）；④ tbo 增补 hadamard 4096/8192、PTQ1_0 二分/大 batch、f16 大 n 用例防回归；⑤ 双驱动真机全矩阵验证（原厂 0800.71 / fork Turnip × 三药）记录于 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) |
 | **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复（三元表达式替代数组索引）；真机 174/174 通过 |
@@ -500,6 +519,26 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
   强制基于既有结果回答；同内容去重不重复联网。
 - **⑥ 智能体回答 tok/s 指标**：回合结束后读原生 `getInferenceStats()`，末步口径与普通聊天同公式。
 - **验收**：test/agent + test/providers 全绿（259+ 项）；analyze 无新增告警。
+
+**2026-09-30 补丁（llama.cpp b11267 升级 + Vulkan 回归修复，commit `0909603`，v0.2.8 同版本号）：**
+
+- **llama.cpp `fe8156f` → 上游 `b11267`（0.5.0）一步到位升级**，保留全部本地 fork 资产：
+  dspark/spark2_5 投机解码、PTQ1_0 三元量化内核（OpenCL mm/mv）、FWHT hadamard、
+  Turnip（Mesa gen8）直载、KleidiAI vendored（third_party/kleidiai）、MTP。
+- **Vulkan 回归修复（升级后全模型转圈/空输出，三层根因）**：
+  - ① 上游移除 `GGML_VK_TURNIP` env → 移植 fork 的 turnip HAL 直载（dlopen + dlsym
+    ICD→HAL，HAL 偏移 0x70 PFN 表，`GGML_VK_TURNIP` env 触发）；
+  - ② 上游移除 `GGML_VK_NO_SUBGROUP` / `GGML_VK_NO_MMV` → 移植两 env
+    （use_subgroups / ggml_vk_should_use_mmvq 首部检查）；
+  - ③ b11267 混用裸 Vulkan C 函数（系统 loader 符号）→ turnip device 传入系统函数
+    SIGSEGV 启动崩溃 → **11 处裸调用全部 dispatcher 化**。
+- **验收铁证**：`using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so` +
+  `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` + `backend_ptrs.size()=2` +
+  `loadModel result: true` → Vulkan 正常输出（真机确认）。
+- **Bonsai-2 27B（PTQ1_0 5.95GB）OOM 守卫定案**：11GB 机器 GPU 全载物理不可能
+  （OOM 守卫预检拒绝，宁拒绝不死机）；旁路（守卫关）加载即内存耗尽被 lmk 杀
+  （非 bug，物理限制）；OpenCL PTQ1_0 mm/mv 内核完整，Vulkan supports_op 无
+  PTQ1_0/PQ2_0 → fallback CPU。
 
 **v0.2.7 详细变更**（2026-09-29，分支停维护 + 主干统一）：
 
@@ -665,6 +704,7 @@ llama.cpp 大幅重写了 API，`llama_model*` 相关调用需改用 `llama_voca
 - [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) — 双驱动真机验证矩阵（v0.2.6）
 - [`docs/opencl_hadamard_fwht_handoff_2026-09-28.md`](docs/opencl_hadamard_fwht_handoff_2026-09-28.md) — OpenCL FWHT（hadamard）实现交接
 - [`docs/bonsai2_vulkan_research_2026-09-27.md`](docs/bonsai2_vulkan_research_2026-09-27.md) — Bonsai-2 Vulkan 调研
+- [`docs/llama_cpp_upgrade_plan_b11267.md`](docs/llama_cpp_upgrade_plan_b11267.md) — llama.cpp b11267 升级计划与四道门验收记录（`0909603`）
 - [`docs/python_support.md`](docs/python_support.md) — `python_exec` 支持说明
 - [`docs/agent_accessibility_方案.md`](docs/agent_accessibility_方案.md) — 智能体无障碍方案
 

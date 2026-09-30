@@ -761,3 +761,32 @@ debug APK 13:5x 重打包已覆盖安装真机（install -r -t，设备弹窗需
 回归：342 项+2 skip 全绿（新增属性式格式 2 用例）。debug APK 14:28 重打包
 （libtongyilite_jni.so 已含改动，字符串级验证过），设备断开未装——重连后
 `adb install -r -t`。
+
+## 2026-09-30 llama.cpp b11267 升级 Vulkan 修复定案（commit 0909603，已推送 main）
+
+> fork 基线 fe8156f → 上游 b11267（0.5.0）一步到位升级，保留全部 fork 资产
+> （dspark/spark2_5、PTQ1_0 内核、FWHT、turnip 直载、KleidiAI vendored、MTP）。
+> 升级后真机三连败 → 定案修复（全部验证通过，用户确认）。
+
+**Vulkan 全模型转圈/空输出（根因三层）**：
+1. **GGML_VK_TURNIP env 被上游移除**（大重写后无该 env）→ JNI 内置 turnip 直载失效
+   → 系统 stock 驱动 → 空输出。修复：移植 fork 的 turnip HAL 直载
+   （dlopen + dlsym ICD→HAL，HAL 偏移 0x70 PFN 表），GGML_VK_TURNIP env 触发。
+2. **NO_SUBGROUP / NO_MMV env 被上游移除** → fork 的 Adreno 825 适配失效。
+   修复：移植两 env（use_subgroups / ggml_vk_should_use_mmvq 首部检查）。
+3. **b11267 混用裸 Vulkan C 函数**（系统 loader 符号）→ turnip 创建的 device 传入
+   系统函数 → SIGSEGV 启动崩溃（ggml_vk_device_is_supported @16306，fault 0x1cdc16e）。
+   修复：**11 处裸调用全部 dispatcher 化**（vkGetPhysicalDeviceFeatures2 ×3 /
+   vkGetInstanceProcAddr ×7 / vkGetDeviceProcAddr ×1 → ggml_vk_default_dispatcher()）。
+
+**验收铁证**：using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so
++ Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver) + ackend_ptrs.size()=2
++ loadModel result: true → Vulkan 正常输出（用户确认）。
+
+**一代 Bonsai 27B（Q1_0）OpenCL 偶发答非所问**：无 dspark 头、Q1_0 内核与 fork 字节
+相同；Vulkan 修复后用户真机复测 OpenCL + Vulkan 均正常（偶发未再现）。
+
+**Bonsai-2 27B（PTQ1_0 5.95GB）OOM 守卫**：11GB 机器 GPU 全载物理不可能（OOM 守卫
+预检拒绝 [oom-guard] refuse PRE-load）；OpenCL PTQ1_0 mm/mv 内核完整；
+Vulkan supports_op 无 PTQ1_0/PQ2_0 → fallback CPU。**升级后新坑**：裸 Vulkan 函数
+必须 dispatcher 化（b11267 大重写后混用系统 loader 符号），下次动 Vulkan 先查这类。

@@ -1,6 +1,6 @@
 # llama.cpp 升级到上游最新（b11267）安全方案 —— 补丁外置化 + 四道门验收
 
-> 状态：**执行中（worktree `wt/upgrade-b11267`，branch `upgrade-b11267`）** · 基线：上游 `fe8156f`（2026-08-19，≈b1017x）· 目标：上游 `b11267`（HEAD `19e28a2`）
+> 状态：**已完成并提交推送（main `0909603`，2026-09-30）** · 基线：上游 `fe8156f`（2026-08-19，≈b1017x）· 目标：上游 `b11267`（HEAD `19e28a2`）
 > 原则：**先算补丁面、再动手；补丁外置化；不整树替换硬打；四道门验收；失败可回滚零损失。**
 
 ---
@@ -308,7 +308,7 @@ robocopy <b11267树> third_party/llama.cpp /MIR   # AGENTS.md 已验证：roboco
 - 全树 SHA256 复验：主仓 = worktree 一致（tools/ui 特殊路径文件是脚本通配符误报，
   实际 hash 相同）。
 
-### 真机验收步骤（待设备连接，Xiaomi 25053RT47C / 8 Elite）
+### 真机验收步骤（Xiaomi 25053RT47C / 8 Elite）
 1. `adb install -r app-debug.apk`（覆盖更新，不清数据）。
 2. **参数门**：logcat 抓 `[handleLoadModel]`（JNI 504 行 LOGI "n_gpu_layers = %d"），
    与升级前逐项 diff：`n_gpu_layers=100` / `n_ubatch`（CPU=16、GPU=512）/ `flash_attn=DISABLED` /
@@ -319,6 +319,46 @@ robocopy <b11267树> third_party/llama.cpp /MIR   # AGENTS.md 已验证：roboco
 5. **基准门**：同 prompt 三后端各 3 轮，tok/s 对 8-04 基线（Vulkan 8.60 / OpenCL 8.77 /
    CPU 4.33），偏差 >±10% 不收工。
 6. 全过 → 合并回 main（worktree `upgrade-b11267` 分支）+ 提交推送。
+
+> **2026-09-30 基准门状态**：用户真机确认 Vulkan/OpenCL/一代 Bonsai 推理正常
+> （功能验证 ✓），但用户不想反复测试（「不用反复测试了」），基准门精确 tok/s
+> 待用户方便时一次测试（OpenCL + Vulkan 各 1 轮，对比 8-04 基线 ±10%）。
+
+### 2026-09-30 真机定案（已提交 `0909603`）
+
+**Vulkan 全模型转圈/空输出 —— 根因三层 + 修复（全部验证通过）**：
+1. **GGML_VK_TURNIP env 被上游 b11267 移除**（大重写后无该 env）→ JNI 内置 turnip
+   直载失效 → 走系统 stock 驱动（0800.71）→ 空输出/转圈。修复：移植 fork 的 turnip
+   HAL 直载（dlopen + dlsym ICD→HAL，HAL 偏移 0x70 PFN 表），`GGML_VK_TURNIP` env
+   触发。
+2. **NO_SUBGROUP / NO_MMV env 被上游移除** → fork 的 Adreno 825 适配失效。修复：
+   移植两 env（`use_subgroups` / `ggml_vk_should_use_mmvq` 首部检查）。
+3. **b11267 混用裸 Vulkan C 函数**（系统 loader 符号）→ turnip 创建的 device/instance
+   传入系统函数 → SIGSEGV（启动崩溃，fault addr 0x1cdc16e，`ggml_vk_device_is_supported`
+   @16306）。修复：**11 处裸调用全部 dispatcher 化**
+   （`ggml_vk_default_dispatcher().vkGetPhysicalDeviceFeatures2/GetInstanceProcAddr/
+   GetDeviceProcAddr`——turnip GIPA 解析）。
+
+**真机验收铁证**（logcat）：`using Vulkan HAL GetInstanceProcAddr from .../libturnip_freedreno.so`
++ `Found 1 Vulkan devices: Adreno (TM) 825 (turnip Mesa driver)` + `backend_ptrs.size()=2`
++ `loadModel result: true` → Vulkan 正常输出（用户确认）。
+
+**一代 Bonsai 27B（Q1_0）OpenCL 偶发答非所问 —— 已恢复**：无 dspark 头、Q1_0 内核与
+fork 字节相同（diff 确认）；Vulkan 修复后用户真机复测 OpenCL + Vulkan 均正常。
+
+**Bonsai-2 27B（PTQ1_0 5.95GB）—— OOM 守卫定案**：11GB 机器（MemAvailable ≈3.5-5GB）
+GPU 全载物理不可能（AGENTS.md 已记录死机案）；OOM 守卫预检拒绝
+（`[oom-guard] refuse PRE-load`），宁拒绝不死机。OpenCL PTQ1_0 mm/mv 内核完整
+（`mul_mm_ptq1_0_f32_l4_lm` / `mul_mv_ptq1_0_f32`）；Vulkan supports_op 显式类型列表
+不含 PTQ1_0/PQ2_0 → fallback CPU。
+
+**2026-09-30 旁路崩溃定案（用户故意关闭守卫验证物理限制）**：用户设置
+`oomGuardEnabled=false`（默认 true——settings_service.dart:326）→
+`nativeSetOomGuardParams(guard=false)` → `TONGYILITE_NO_OOM_GUARD=1` → 旁路预检 →
+bonsai2 加载（5.95GB + mmap 工作集）→ 内存耗尽（20:03:25 lmk 延迟）→
+20:03:27 `lmk 杀 app`（`Process com.dgxspark.tongyilite (pid 14442) has died: fg TOP`，
+uptime 1 天——非整机重启）。**结论：11GB 机器旁路 bonsai2 加载即内存耗尽（lmk），
+推理阶段需求更大必整机死机——旁路无意义，物理不可能，宁拒绝不死机。**
 
 ---
 
