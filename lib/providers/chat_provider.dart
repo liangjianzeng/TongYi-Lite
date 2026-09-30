@@ -234,6 +234,11 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 否则普通聊天会续跑在被大提示词污染的 KV 上（prefill 白白翻倍）。
   bool _currentKvWasAgentMode = false;
 
+  /// 当前 KV 缓存装载的智能体人格 id（系统提示词前缀组成部分）。
+  /// 同一会话内切换人格必须 resetContext，否则新人格回合会续跑在
+  /// 旧人格系统提示词的 KV 前缀上（提示词错配）。
+  String? _currentKvPersonaId;
+
   /// 上一轮生成是否走了 API 后备（用于 stopGeneration 分支到 openai 取消）。
   bool _lastGenWasApi = false;
 
@@ -339,6 +344,7 @@ class ChatNotifier extends StateNotifier<bool> {
       await _inference.resetContext();
     }
     _currentKvWasAgentMode = false;
+    _currentKvPersonaId = null;
 
     try {
       // Step 2: Save user message first (so it's available in history for template)
@@ -753,6 +759,8 @@ class ChatNotifier extends StateNotifier<bool> {
     _ref.read(isGeneratingProvider.notifier).state = true;
 
     // 会话切换时重置原生 KV 缓存（沿用现有策略）。
+    // 激活人格是系统提示词前缀的组成部分：同会话内切换人格也必须重置。
+    final personaId = settings.activePersonaId;
     if (_currentKvConvId != conversationId) {
       debugPrint(
           '[ChatNotifier] new-agent conversation changed: resetContext()');
@@ -764,8 +772,14 @@ class ChatNotifier extends StateNotifier<bool> {
       debugPrint(
           '[ChatNotifier] plain→agent mode switch: resetContext()');
       await _inference.resetContext();
+    } else if (_currentKvPersonaId != personaId) {
+      // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
+      debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
+          '$personaId): resetContext()');
+      await _inference.resetContext();
     }
     _currentKvWasAgentMode = true;
+    _currentKvPersonaId = personaId;
 
     // ---- 构建组件（复用旧路径共享件）----
     // 智能体模型标识：本地=模型 id；API=API 模型名。工具可见性过滤、
@@ -794,11 +808,15 @@ class ChatNotifier extends StateNotifier<bool> {
     final caps = _engineCapabilitiesFor(agentModelKey, activeApi);
     final protocol =
         selectProtocol([NativeToolProtocol(), PromptJsonProtocol()], caps);
+    // 激活人格（标准 = null，行为不变）；注入系统提示词身份段与人设段。
+    final persona = settings.activePersona();
     final systemPrompt = buildSystemPrompt(
       modelName: useApi ? (activeApi?.name ?? 'API 模型') : targetModelId,
       registry: registry,
       protocol: protocol,
       modelId: agentModelKey,
+      personaName: persona?.name,
+      personaPrompt: persona?.prompt,
     );
     // 双场景档：local/API 各自一套循环参数（API 档吃满云端预算，
     // local 档维持端侧省 token 策略）；档内数值仍可在设置里改。

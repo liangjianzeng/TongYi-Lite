@@ -153,3 +153,104 @@ Future<List<Skill>> loadUserSkills({String? skillsDirOverride}) async {
     return const [];
   }
 }
+
+// ---------------------------------------------------------------
+// 用户技能落盘（设置页技能管理 UI 用）：直接写标准 SKILL.md，
+// 与 loadUserSkills 扫描链路共用同一目录，无需额外存储。
+// ---------------------------------------------------------------
+
+/// 用户技能根目录路径（`ApplicationSupport/skills`）。
+Future<String> userSkillsDirPath() async =>
+    _join((await getApplicationSupportDirectory()).path, 'skills');
+
+/// 技能名 → 安全目录名：压缩空白为 `-`，剔除路径/非法字符。
+/// 剔除后为空（如纯符号名）返回 null，由调用方报错。
+String? sanitizeSkillDirName(String raw) {
+  var s = raw.trim();
+  s = s.replaceAll(RegExp(r'\s+'), '-');
+  s = s.replaceAll(RegExp(r'[\\/:*?"<>|.]'), '');
+  while (s.startsWith('-')) {
+    s = s.substring(1);
+  }
+  while (s.endsWith('-')) {
+    s = s.substring(0, s.length - 1);
+  }
+  return s.isEmpty ? null : s;
+}
+
+/// 生成 SKILL.md 文本。格式与 [Skill.parse] 兼容：
+/// meta 行（description/whenToUse/invocation）在前，`---` 之后是正文。
+String buildSkillMarkdown({
+  required String description,
+  required String whenToUse,
+  String? invocation,
+  required String body,
+}) {
+  final sb = StringBuffer();
+  sb.writeln('description: $description');
+  sb.writeln('whenToUse: $whenToUse');
+  if (invocation != null && invocation.trim().isNotEmpty) {
+    sb.writeln('invocation: ${invocation.trim()}');
+  }
+  sb.writeln('---');
+  sb.write(body.trim());
+  return sb.toString();
+}
+
+/// 写入/更新用户技能（目录名 = [name]）。
+///
+/// [previousName] 非空且不同于 [name] 时视为改名：先把旧目录整个搬过来
+/// （保留用户手放的其它文件），再重写 SKILL.md。
+/// 返回技能的实际目录名（经 sanitize，可能与传入不同）。
+Future<String> writeUserSkill({
+  required String name,
+  required String description,
+  required String whenToUse,
+  String? invocation,
+  required String body,
+  String? previousName,
+  String? skillsDirOverride,
+}) async {
+  final dirName = sanitizeSkillDirName(name);
+  if (dirName == null) {
+    throw ArgumentError('技能名无效（剔除非法字符后为空）');
+  }
+  final root = skillsDirOverride ??
+      _join((await getApplicationSupportDirectory()).path, 'skills');
+  final skillDir = Directory(_join(root, dirName));
+  skillDir.createSync(recursive: true);
+  if (previousName != null) {
+    final prevDirName = sanitizeSkillDirName(previousName);
+    if (prevDirName != null && prevDirName != dirName) {
+      final prevDir = Directory(_join(root, prevDirName));
+      if (prevDir.existsSync()) {
+        // 目录已存在时先删（改名目标同名覆盖）。
+        if (skillDir.existsSync()) {
+          skillDir.deleteSync(recursive: true);
+        }
+        prevDir.renameSync(skillDir.path);
+      }
+    }
+  }
+  final markdown = buildSkillMarkdown(
+    description: description.trim(),
+    whenToUse: whenToUse.trim(),
+    invocation: invocation,
+    body: body,
+  );
+  await File(_join(skillDir.path, 'SKILL.md')).writeAsString(markdown);
+  return dirName;
+}
+
+/// 删除用户技能目录（整个目录递归删，含 SKILL.md 与用户附加文件）。
+/// 返回是否发生了删除（目录不存在返回 false）。
+Future<bool> deleteUserSkill(String name, {String? skillsDirOverride}) async {
+  final dirName = sanitizeSkillDirName(name);
+  if (dirName == null) return false;
+  final root = skillsDirOverride ??
+      _join((await getApplicationSupportDirectory()).path, 'skills');
+  final dir = Directory(_join(root, dirName));
+  if (!dir.existsSync()) return false;
+  dir.deleteSync(recursive: true);
+  return true;
+}

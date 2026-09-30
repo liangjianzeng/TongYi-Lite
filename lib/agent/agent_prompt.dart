@@ -13,18 +13,32 @@ import 'tool_registry.dart';
 /// [modelName] 模型名（身份段变量注入）；
 /// [registry] 工具注册表；
 /// [protocol] 决定工具呈现方式（原生 tools 协议可返回空段，工具走请求体）；
-/// [modelId] 按模型渲染可见工具清单。
+/// [modelId] 按模型渲染可见工具清单；
+/// [personaName]/[personaPrompt] 自定义人格（null = 标准人格，行为不变）：
+/// 身份段改为以人格自称开头，人设提示词作为独立分段插在身份段与工具指引之间。
 String buildSystemPrompt({
   required String modelName,
   required ToolRegistry registry,
   required ToolProtocol protocol,
   String modelId = '',
+  String? personaName,
+  String? personaPrompt,
 }) {
   final toolSection = protocol.buildToolSection(registry, modelId: modelId);
+  final hasPersona = personaName != null && personaName.trim().isNotEmpty;
+  final identity = hasPersona
+      ? '你是「${personaName.trim()}」——TongYi-Lite 智能体，由 $modelName 模型驱动，'
+          '能调用工具获取真实信息或精确计算结果。'
+      : '你是 TongYi-Lite 智能体，由 $modelName 模型驱动。'
+          '你能调用工具获取真实信息或精确计算结果。';
+  final personaSection = (personaPrompt ?? '').trim();
   final sections = <String>[
-    // 身份段：明确「工具型智能体」定位。
-    '你是 TongYi-Lite 智能体，由 $modelName 模型驱动。'
-    '你能调用工具获取真实信息或精确计算结果。',
+    // 身份段：明确「工具型智能体」定位；自定义人格时以人格自称开头。
+    identity,
+    // 人设段：用户自定义人格的附加指令（语气/专长/行为边界）。
+    // 工具规则在后，人设不覆盖工具调用纪律。
+    if (personaSection.isNotEmpty)
+      '【人格设定】\n$personaSection',
 
     // 工具指引段：给出触发规则（覆盖所有工具场景，强调「必须调用」而非
     // "假装执行"——小模型常见的错误是只在回答里描述操作而不真正调用）。

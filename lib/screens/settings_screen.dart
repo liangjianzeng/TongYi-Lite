@@ -17,12 +17,14 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
-import '../agent/skills/provider.dart' show loadUserSkills;
+import '../agent/skills/provider.dart'
+    show loadUserSkills, writeUserSkill, deleteUserSkill;
 import '../agent/skills/skill.dart' show Skill, loadBuiltinSkills;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
 import '../models/api_model.dart';
+import '../models/agent_persona.dart';
 import '../providers/index.dart';
 import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
@@ -1618,6 +1620,322 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     });
   }
 
+  // ================= ①b 人格（Persona） =================
+
+  Widget _buildPersonaCard(BuildContext context, InferenceSettings settings,
+      SettingsNotifier notifier) {
+    final activeId = settings.activePersonaId;
+    final active = settings.activePersona();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('🎭 人格（Persona）', context),
+            const Text(
+              '为不同场景切换不同人格：标准人格保持默认行为；自定义人格的人设'
+              '提示词会注入智能体系统提示词（语气/专长/行为边界）',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text('标准'),
+                  selected: activeId == kStandardPersonaId,
+                  onSelected: (_) =>
+                      notifier.setActivePersona(kStandardPersonaId),
+                ),
+                for (final persona in settings.agentPersonas)
+                  ChoiceChip(
+                    label: Text(persona.name),
+                    selected: activeId == persona.id,
+                    onSelected: (_) => notifier.setActivePersona(persona.id),
+                  ),
+              ],
+            ),
+            if (active != null && active.prompt.trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  active.prompt,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 4,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showPersonaDialog(context, notifier),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新增人格'),
+                ),
+                if (active != null) ...[
+                  TextButton.icon(
+                    onPressed: () =>
+                        _showPersonaDialog(context, notifier, existing: active),
+                    icon: const Icon(Icons.edit, size: 18),
+                    label: const Text('编辑'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () =>
+                        _confirmDeletePersona(context, notifier, active.id),
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('删除'),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 新增/编辑人格对话框。保存走 [SettingsNotifier.upsertPersona]（trim + 校验）。
+  Future<void> _showPersonaDialog(BuildContext context,
+      SettingsNotifier notifier,
+      {AgentPersona? existing}) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final promptCtrl = TextEditingController(text: existing?.prompt ?? '');
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(existing == null ? '新增人格' : '编辑人格'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: nameCtrl,
+                  autofocus: existing == null,
+                  decoration: const InputDecoration(
+                    labelText: '人格名称',
+                    hintText: '如：写作助手 / 严谨学者 / 翻译官',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? '请填写名称' : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: promptCtrl,
+                  minLines: 4,
+                  maxLines: 8,
+                  decoration: const InputDecoration(
+                    labelText: '人设提示词',
+                    hintText: '描述该人格的语气、专长与行为边界，例如：'
+                        '你是一名资深中文编辑，回答精炼、语气克制，'
+                        '擅长润色与改写，改写时保留原意……',
+                    border: OutlineInputBorder(),
+                    alignLabelWithHint: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    await notifier.upsertPersona(AgentPersona(
+      id: existing?.id ?? const Uuid().v4(),
+      name: nameCtrl.text,
+      prompt: promptCtrl.text,
+    ));
+  }
+
+  Future<void> _confirmDeletePersona(BuildContext context,
+      SettingsNotifier notifier, String personaId) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除人格'),
+        content: const Text('删除后无法恢复；若为当前激活人格，将回落到标准人格。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await notifier.deletePersona(personaId);
+    }
+  }
+
+  // ================= ⑤ 用户技能管理（直接落盘 SKILL.md） =================
+
+  /// 新增/编辑用户技能对话框。保存 = 写标准 SKILL.md 到用户技能目录，
+  /// 随后重新扫描；与手动放文件完全同构。
+  Future<void> _showUserSkillDialog({Skill? existing}) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final descCtrl = TextEditingController(text: existing?.description ?? '');
+    final whenCtrl = TextEditingController(text: existing?.whenToUse ?? '');
+    final bodyCtrl = TextEditingController(text: existing?.body ?? '');
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(existing == null ? '新增技能' : '编辑技能：${existing.name}'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: nameCtrl,
+                    autofocus: existing == null,
+                    enabled: existing == null,
+                    decoration: const InputDecoration(
+                      labelText: '技能名（唯一标识，保存后不可改）',
+                      hintText: '如：法律文书助手 / 旅行规划 / 周报生成',
+                      border: OutlineInputBorder(),
+                      helperText: '中英文均可，自动去除非法字符',
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写技能名' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: descCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '一句话描述',
+                      hintText: '这个技能做什么（显示在技能目录里）',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写描述' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: whenCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '何时触发（whenToUse）',
+                      hintText: '什么请求应该用这个技能，'
+                          '如：用户要求起草合同、协议类文书',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写触发条件' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: bodyCtrl,
+                    minLines: 5,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      labelText: '技能正文（执行指引）',
+                      hintText: '模型命中该技能后按此执行：步骤、格式要求、'
+                          '注意事项。可用工具名（read_file/web_search/'
+                          'python_exec/todo_write/export_file…）',
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写正文' : null,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    try {
+      await writeUserSkill(
+        name: nameCtrl.text,
+        previousName: existing?.name,
+        description: descCtrl.text,
+        whenToUse: whenCtrl.text,
+        body: bodyCtrl.text,
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存失败：${e.message}')));
+      return;
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
+    await _rescanSkills();
+  }
+
+  Future<void> _confirmDeleteUserSkill(Skill skill) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除技能：${skill.name}'),
+        content: const Text('将从技能目录删除该技能（含其目录下的全部文件），'
+            '删除后无法恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await deleteUserSkill(skill.name);
+    await _rescanSkills();
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
@@ -1723,6 +2041,11 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
               ),
             ),
           ),
+
+          const SizedBox(height: 16),
+
+          // ================= ①b 人格（Persona） =================
+          _buildPersonaCard(context, settings, notifier),
 
           const SizedBox(height: 16),
 
@@ -1948,11 +2271,26 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     const Text('正在扫描用户技能…',
                         style: TextStyle(fontSize: 12, color: Colors.grey))
                   else if (_userSkills!.isEmpty)
-                    _kvLine('用户技能',
-                        '暂无。放置 SKILL.md 到技能目录后点「重新扫描」')
+                    _kvLine('用户技能', '暂无。点「新增技能」直接创建，'
+                        '无需手动放文件')
                   else
                     for (final s in _userSkills!)
-                      _kvLine('用户 · ${s.name}', s.description),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        leading: const Icon(Icons.extension_outlined,
+                            size: 20),
+                        title: Text('用户 · ${s.name}',
+                            style: const TextStyle(fontSize: 14)),
+                        subtitle: Text(s.description,
+                            style: const TextStyle(fontSize: 12)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          tooltip: '删除技能',
+                          onPressed: () => _confirmDeleteUserSkill(s),
+                        ),
+                        onTap: () => _showUserSkillDialog(existing: s),
+                      ),
                   Row(
                     children: [
                       TextButton.icon(
@@ -1960,16 +2298,21 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                         icon: const Icon(Icons.refresh, size: 16),
                         label: const Text('重新扫描'),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '目录：ApplicationSupport/skills/<名称>/SKILL.md',
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey.shade500),
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                      const SizedBox(width: 4),
+                      TextButton.icon(
+                        onPressed: () => _showUserSkillDialog(),
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text('新增技能'),
                       ),
                     ],
+                  ),
+                  Text(
+                    '技能 = 提示词模板：按 whenToUse 自动触发'
+                    '（API 模式可经 load_skill 拉全文）。'
+                    '也可从网上复制现成 SKILL.md 放进'
+                    ' ApplicationSupport/skills/<名称>/ 后点「重新扫描」。',
+                    style: TextStyle(
+                        fontSize: 11, color: Colors.grey.shade500),
                   ),
                   const Divider(height: 20),
                   ListTile(

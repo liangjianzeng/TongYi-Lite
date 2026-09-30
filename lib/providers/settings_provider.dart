@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../agent/web_search/web_search_provider.dart';
+import '../models/agent_persona.dart';
 import '../models/api_model.dart';
 import '../services/settings_service.dart';
 
@@ -194,6 +195,50 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   Future<void> setAgentNctx(int value) async {
     final clamped = value.clamp(1, 65536);
     state = state.copyWith(agentNctx: clamped);
+    await _persist();
+  }
+
+  // ---- 智能体人格（Persona：标准 + 自定义，见 AgentPersona）----
+
+  /// 激活某个人格。仅允许标准人格 id 或列表内存在的自定义 id；
+  /// 无效 id 忽略（保持当前激活不变）。
+  Future<void> setActivePersona(String personaId) async {
+    final valid = personaId == kStandardPersonaId ||
+        state.agentPersonas.any((p) => p.id == personaId);
+    if (!valid || state.activePersonaId == personaId) return;
+    state = state.copyWith(activePersonaId: personaId);
+    await _persist();
+  }
+
+  /// 新增或更新自定义人格（按 [persona.id] 定位；不存在则追加）。
+  Future<void> upsertPersona(AgentPersona persona) async {
+    if (persona.id.isEmpty || persona.name.trim().isEmpty) return;
+    final trimmed = persona.copyWith(
+      name: persona.name.trim(),
+      prompt: persona.prompt.trim(),
+    );
+    final exists = state.agentPersonas.any((p) => p.id == persona.id);
+    state = state.copyWith(
+      agentPersonas: exists
+          ? [
+              for (final p in state.agentPersonas)
+                if (p.id == persona.id) trimmed else p,
+            ]
+          : [...state.agentPersonas, trimmed],
+    );
+    await _persist();
+  }
+
+  /// 删除自定义人格；删除的是当前激活人格时回落标准人格。
+  Future<void> deletePersona(String personaId) async {
+    if (personaId == kStandardPersonaId) return;
+    if (!state.agentPersonas.any((p) => p.id == personaId)) return;
+    final wasActive = state.activePersonaId == personaId;
+    state = state.copyWith(
+      agentPersonas:
+          state.agentPersonas.where((p) => p.id != personaId).toList(),
+      activePersonaId: wasActive ? kStandardPersonaId : null,
+    );
     await _persist();
   }
 

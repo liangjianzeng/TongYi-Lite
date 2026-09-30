@@ -70,6 +70,12 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 - **2026-09-29 15:12 最新构建（23049c5）**：app-debug.apk 100701814 B、
   app-release.apk 53408334 B，均在上述目录；字符串级验收过（debug kernel_blob
   UTF-8 / release libapp.so UTF-16LE 均命中新 UI 串）。
+- **2026-09-30 10:16 最新构建（工作区未提交，v0.2.8+16 智能体多人格）**：
+  本机目录 `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` —
+  app-debug.apk 103890496 B、app-release.apk 53755911 B；字符串级验收过
+  （debug kernel UTF-8 `人格设定`/`_showPersonaDialog` 命中；release libapp.so
+  UTF-16LE `人格设定`/`新增人格` 命中）。flutter SDK 本机在 `C:\src\flutter`；
+  PATH 无 python，用 `$LOCALAPPDATA/Programs/Python/Python310/python.exe`。
 - wt/ 工作区构建产物在 `wt\<name>\build\app\outputs\flutter-apk\`，不在主仓 build/
   （2026-09-28 v0.2.6 实测，另一台开发机用 wt 工作区，别看错目录）。
 - 构建后**必须**列出该目录的 APK 名/大小/时间，并把目录地址发给用户。
@@ -560,3 +566,91 @@ release libapp.so `_followStream` 单字节 ASCII 命中；libhardware.so + libt
 - 回归：test/agent 245 + providers 20 全绿（新增去重/预算/重复消耗 3 测试）。
 - 验收：APK 字符串级（debug kernel UTF-8 / release libapp.so UTF-16LE 均命中
   `已达上限`/`每回合搜索上限`）；app-debug.apk 100715376B / app-release.apk 53416056B。
+
+## 2026-09-30 智能体多人格（Persona）：标准 + 用户自定义，按场景切换
+
+> 用户需求：智能体不再只有一种人格；保留标准人格（行为不变），支持用户新增
+> 多个人格，针对不同场景（写作/翻译/严谨问答…）切换不同智能体。
+
+**数据模型**（`lib/models/agent_persona.dart`）：
+- `AgentPersona {id, name, prompt}`（toJson/fromJson）；内置常量
+  `kStandardPersonaId = 'standard'`，标准人格**不落盘**、不进列表。
+- `InferenceSettings` 新增 `agentPersonas: List<AgentPersona>`（默认 const []）
+  + `activePersonaId`（默认 standard），toJson/fromJson/copyWith 全链路；
+  `_parsePersonas` 丢弃缺 id/name 的非法条目；便捷读取 `activePersona()`：
+  标准人格返回 null（= 行为与旧版完全一致），激活 id 悬空（已删除）回落 null。
+
+**提示词注入**（`agent_prompt.dart` buildSystemPrompt 新增可选参
+`personaName/personaPrompt`）：
+- 自定义人格：身份段改为「你是「{name}」——TongYi-Lite 智能体，由 X 模型驱动…」，
+  人设指令作为独立【人格设定】段插在身份段与【工具调用规则】之间
+  （人设不覆盖工具纪律）；prompt 为空只换自称不插段。
+- 不传参 = 标准人格，逐字与旧版一致。
+- 子代理（InProcessSubagentProvider）复用同一 systemPrompt，人格自动跟随。
+
+**KV 不变量（重要）**：激活人格是系统提示词前缀的组成部分 → 同会话**切换人格
+必须 resetContext**。chat_provider 新增 `_currentKvPersonaId` 标记，agent 路径
+三段判断：会话变了 / 非 agent→agent / 人格变了，任一命中都 reset；普通聊天
+路径把标记清 null。
+
+**设置 UI**（settings_screen._AgentTab，①驱动模型与②执行参数之间新卡
+「🎭 人格（Persona）」）：ChoiceChip 选择（标准 + 自定义），当前人格 prompt
+预览（≤3 行省略）；新增/编辑走 `_showPersonaDialog`（名称必填 + 多行人设提示词，
+保存 trim），删除有确认框；删除激活人格自动回落标准。
+settings_provider 新增 `setActivePersona`（校验 id 存在）/`upsertPersona`/
+`deletePersona`（删激活 → 回落 standard）。
+
+**回归**：`test/agent/persona_test.dart` 新增 10 项（标准不变/自称+人设段注入/
+段序/空 prompt/序列化往返/默认值/悬空 id 回落/旧配置兼容/非法条目丢弃/copyWith）；
+`flutter test test/agent test/services test/providers` 全绿 **323 项 + 2 skip**，
+analyze 无新增告警。本机 flutter SDK 在 `C:\src\flutter`（不在 PATH，直接用
+绝对路径调 flutter.bat）。
+
+## 2026-09-30 内置通用技能扩充（10 个；API 模式 load_skill 可启用）
+
+> 用户需求：通用常用的 skill 搞一些进来，针对 API 模式接入智能体场景可启用。
+
+- `lib/agent/skills/skill.dart` loadBuiltinSkills 从 2 个（web-research/code-review）
+  扩到 **10 个**，新增 8 个通用技能：translation（翻译）、writing-polish（写作润色）、
+  summarize（长文摘要）、data-analysis（数据分析，python_exec 统计+export_file 交付）、
+  email-draft（邮件/文书）、explain-code（代码讲解/报错排查）、plan-todo（任务拆解，
+  todo_write）、file-report（报告/网页产物，write_file+export_file）。
+- 生效链路不变：`<available_skills>` 目录（name/description/whenToUse）每回合注入
+  系统提示词（本地/API 都注入）；**load_skill 工具仅 API 模式注册**（useApi 门控，
+  本地档省 prefill 不开）——模型按 whenToUse 命中后调用 load_skill 拉全文执行。
+  用户技能目录 ApplicationSupport/skills/<name>/SKILL.md（rank 200）同名覆盖内置。
+- 每个技能 body 都绑定本 app 真实工具集（read_file/python_exec/todo_write/
+  export_file/web_search），不写空泛指引。
+- 回归：`test/agent/skills_builtin_test.dart` 新增 4 项（清单/逐技能 load_skill
+  拉全文/目录注入/用户同名覆盖）；test/agent+services+providers 全绿
+  **327 项 + 2 skip**。
+- **2026-09-30 11:07 重打包（v0.2.8+16，多人格+通用技能）**：
+  app-debug.apk 103893384 B / app-release.apk 53759231 B；字符串级验收过
+  （debug kernel `writing-polish`/`人格设定` 命中；release libapp.so UTF-16LE
+  `高质量翻译`/`数据统计与分析`/`人格设定` 命中）。
+
+## 2026-09-30 设置页用户技能管理 UI（新增技能不再手放文件）
+
+> 用户需求："想加技能去哪找？能不能简单添加，别像现在那么麻烦"（原方式 = 手机上
+> 手写 ApplicationSupport/skills/<name>/SKILL.md，根本没法操作）。
+
+- **provider.dart 新增落盘函数**（直接写标准 SKILL.md，与扫描链路同构、零新存储）：
+  `userSkillsDirPath()` / `sanitizeSkillDirName()`（空白→`-`、剔除
+  `\/:*?"<>|.` 与首尾 `-`）/ `buildSkillMarkdown()`（meta 在 `---` 前，
+  Skill.parse 兼容）/ `writeUserSkill()`（previousName 非空 = 改名迁移目录）/
+  `deleteUserSkill()`（递归删目录）。
+- **设置 UI**（智能体 Tab ⑤ Skills 卡）：用户技能列表行可点按编辑 +
+  尾随删除按钮（确认框）；「新增技能」对话框四字段——技能名（编辑态锁定，
+  保存后不可改）/ 一句话描述 / 何时触发 whenToUse / 技能正文（多行）；
+  保存即写 SKILL.md + 自动重扫描。卡内附提示：网上现成 SKILL.md 复制进
+  目录后「重新扫描」同样有效。
+- **去哪找技能**：技能本质是纯文本提示词模板——① 设置页直接写；
+  ② 从社区（GitHub anthropics/skills、awesome-claude-skills 等）复制 SKILL.md
+  放入技能目录；③ 直接让智能体自己起草一份写入技能目录。
+- 回归：`test/agent/user_skill_store_test.dart` 新增 6 项（写入→扫描往返/
+  更新覆盖/改名迁移/删除/ sanitize/ buildSkillMarkdown↔Skill.parse 兼容）；
+  全量 333 项 + 2 skip 全绿，analyze 0 error。
+- **2026-09-30 11:15 重打包（v0.2.8+16，多人格+通用技能+技能管理 UI）**：
+  app-debug.apk 103901793 B / app-release.apk 53760707 B；字符串级验收过
+  （debug kernel `新增技能`/`writeUserSkill` 命中；release libapp.so UTF-16LE
+  `新增技能`/`何时触发` 命中）。
