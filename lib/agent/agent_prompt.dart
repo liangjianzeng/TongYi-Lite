@@ -58,7 +58,10 @@ String buildSystemPrompt({
     '把完整内容写入工作区文件（如 report.html），然后**必须调用 export_file** '
     '把它导出到下载目录，并在回答里告知文件名与内容摘要。'
     '不要把大段 HTML/长文档直接输出在回答里。\n'
-    '10. 不需要工具时直接回答用户。',
+    '10. 用户消息带「[用户上传了 N 个附件]」时：短附件内容已直接给出；'
+    '指向 workspace/_uploads/ 的附件必须先用 read_file 完整阅读，'
+    '再按用户要求分析/总结，绝不在未读文件的情况下凭空作答。\n'
+    '11. 不需要工具时直接回答用户。',
     if (toolSection.isNotEmpty) toolSection,
   ];
   return sections.join('\n\n');

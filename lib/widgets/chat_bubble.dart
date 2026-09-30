@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import '../models/chat_message.dart';
 
 class ChatBubble extends StatelessWidget {
@@ -10,6 +11,8 @@ class ChatBubble extends StatelessWidget {
   final bool isStreaming;
   final bool showAvatar;
   final String? imagePath;
+  final List<String>? imagePaths;
+  final List<String>? attachments;
   final String? audioPath;
   final InferenceStats? inferenceStats;
 
@@ -21,6 +24,8 @@ class ChatBubble extends StatelessWidget {
     this.isStreaming = false,
     this.showAvatar = true,
     this.imagePath,
+    this.imagePaths,
+    this.attachments,
     this.audioPath,
     this.inferenceStats,
   });
@@ -97,7 +102,7 @@ class ChatBubble extends StatelessWidget {
                         ),
                         const SizedBox(height: 6),
                       ],
-                      // Show image if present (user messages only)
+                      // Show image if present (user messages only)；多图 ≤10 依次展示。
                       if (imagePath != null && imagePath!.isNotEmpty) ...[
                         ClipRRect(
                           borderRadius: BorderRadius.circular(8),
@@ -108,6 +113,49 @@ class ChatBubble extends StatelessWidget {
                               fit: BoxFit.cover,
                             ),
                           ),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                      if (imagePaths != null && imagePaths!.length > 1) ...[
+                        SizedBox(
+                          height: 110,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: [
+                              for (final path in imagePaths!.skip(1))
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.file(
+                                      File(path),
+                                      height: 100,
+                                      width: 100,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                      // 智能体附件（WP-A）：文件名 chips 展示。
+                      if (attachments != null && attachments!.isNotEmpty) ...[
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            for (final name in attachments!)
+                              Chip(
+                                visualDensity: VisualDensity.compact,
+                                avatar: const Icon(Icons.description, size: 16),
+                                label: Text(
+                                  name,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                          ],
                         ),
                         const SizedBox(height: 8),
                       ],
@@ -161,16 +209,54 @@ class ChatBubble extends StatelessWidget {
                             ],
                           ),
                         ] else if (content.isNotEmpty) ...[
-                          Text(
-                            content,
-                            style: TextStyle(
-                              color: _isUser
-                                  ? theme.colorScheme.onPrimary
-                                  : theme.colorScheme.onSurfaceVariant,
-                              fontSize: 15,
-                              height: 1.5,
+                          if (_isUser)
+                            Text(
+                              content,
+                              style: TextStyle(
+                                color: theme.colorScheme.onPrimary,
+                                fontSize: 15,
+                                height: 1.5,
+                              ),
+                            )
+                          else
+                            // 智能体回答 markdown 美化渲染（WP-B）：标题/列表/
+                            // 代码块/表格/加粗等结构化排版。流式期间部分 MD
+                            // 也能渐进渲染；纯文本行不受影响。
+                            MarkdownBody(
+                              data: content,
+                              selectable: true,
+                              softLineBreak: true,
+                              styleSheet: MarkdownStyleSheet.fromTheme(
+                                theme,
+                              ).copyWith(
+                                p: TextStyle(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  fontSize: 15,
+                                  height: 1.5,
+                                ),
+                                h1: theme.textTheme.titleLarge
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                                h2: theme.textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                                h3: theme.textTheme.titleSmall
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                                codeblockDecoration: BoxDecoration(
+                                  color: theme.colorScheme.surfaceContainerHighest
+                                      .withValues(alpha: 0.7),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                code: TextStyle(
+                                  fontSize: 13,
+                                  fontFamily: 'monospace',
+                                  backgroundColor: theme
+                                      .colorScheme.surfaceContainerHighest
+                                      .withValues(alpha: 0.7),
+                                ),
+                                tableBorder: TableBorder.all(
+                                  color: theme.dividerColor,
+                                ),
+                              ),
                             ),
-                          ),
                         ],
                         if (isStreaming && !_isThinkingPlaceholder) ...[
                           const SizedBox(height: 4),

@@ -100,7 +100,7 @@ Future<(PreparedAttachment?, String?)> prepareAttachment(
   if (ext == '.pdf') {
     note = 'PDF 暂不支持文本解析（v1），已原样保存';
   } else if (ext == '.docx') {
-    text = _docxToText(storedPath);
+    text = docxToText(storedPath);
   } else if (ext == '.pptx') {
     text = _pptxToText(storedPath);
   } else if (ext == '.xlsx') {
@@ -178,7 +178,7 @@ String buildAttachmentPromptBlock(List<PreparedAttachment> attachments) {
 // ---------------------------------------------------------------------------
 
 /// docx：word/document.xml，段落 `</w:p>` 换行，剥其余标签。
-String? _docxToText(String path) {
+String? docxToText(String path) {
   final xml = _readZipEntry(path, 'word/document.xml');
   if (xml == null) return null;
   return _xmlToText(xml, paragraphTags: ['</w:p>', '<w:br/>', '<w:br />']);
