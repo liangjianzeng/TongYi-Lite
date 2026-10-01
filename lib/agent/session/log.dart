@@ -248,7 +248,10 @@ final class SessionLog {
           out.add({
             'role': 'tool',
             'tool_call_id': e.data['callId'] as String? ?? '',
-            'content': e.data['content'] as String? ?? '',
+            // 投影剪枝（对照 DSH tool-result-pruner）：超长工具结果在**模型
+            // 可见投影**里截成头+尾，原文仍在事件日志（UI 视图完整显示）。
+            // 没有这层，API 档工具结果内联后永不裁剪，长会话历史无界增长。
+            'content': _pruneToolResult(e.data['content'] as String? ?? ''),
           });
           break;
         case kEventCompactionSummary:
@@ -273,6 +276,25 @@ final class SessionLog {
     }
     // system 恒在最前（见上方说明）；其余保持事件序。
     return <Map<String, dynamic>>[...systemMsgs, ...out];
+  }
+
+  // ---------------------------------------------------------------------------
+  // 投影剪枝（对照 DSH tool-result-pruner，Phase E-ctx）
+  // ---------------------------------------------------------------------------
+
+  /// 单条工具结果的投影剪枝阈值（字符）。超过则模型只看到头/尾片段。
+  static const int _pruneThreshold = 8192;
+  static const int _pruneHead = 4096;
+  static const int _pruneTail = 1024;
+
+  /// 超长工具结果 → 头 4096 + 省略标记（含被省略字符数）+ 尾 1024。
+  /// 只作用于模型可见投影：存储原文不动，UI 视图（deriveChatMessages）完整。
+  static String _pruneToolResult(String content) {
+    if (content.length <= _pruneThreshold) return content;
+    final omitted = content.length - _pruneHead - _pruneTail;
+    final head = content.substring(0, _pruneHead);
+    final tail = content.substring(content.length - _pruneTail);
+    return '$head\n[…中间省略 $omitted 字符，完整结果见会话日志…]\n$tail';
   }
 
   /// 派生 UI 视图（ChatMessage 投影）。

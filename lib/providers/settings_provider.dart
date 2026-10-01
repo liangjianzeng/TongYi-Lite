@@ -139,8 +139,7 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   /// 路由策略：本地模型优先，仅当本地不可用时才走激活的 API??
   Future<void> setActiveApiModel(String? modelId) async {
     // 校验：仅允许激活列表内存在??id（或 null 停用）??
-    if (modelId != null &&
-        !state.apiModels.any((m) => m.id == modelId)) {
+    if (modelId != null && !state.apiModels.any((m) => m.id == modelId)) {
       return;
     }
     if (state.activeApiModelId == modelId) return;
@@ -187,8 +186,7 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     if (state.agentModelSource == source && state.agentModelId == modelId) {
       return;
     }
-    state = state.copyWith(
-        agentModelSource: source, agentModelId: modelId);
+    state = state.copyWith(agentModelSource: source, agentModelId: modelId);
     await _persist();
   }
 
@@ -312,6 +310,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   Future<void> setAgentMaxConcurrentTurns(int value) async {
     final clamped = value.clamp(1, 4);
     state = state.copyWith(agentMaxConcurrentTurns: clamped);
+    await _persist();
+  }
+
+  /// API 档主动压缩预算（token 估算，4096~200000，默认 32768）。
+  Future<void> setAgentApiContextBudget(int value) async {
+    final clamped = value.clamp(4096, 200000);
+    state = state.copyWith(agentApiContextBudget: clamped);
     await _persist();
   }
 
@@ -468,16 +473,28 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   /// 单次搜索超时（毫秒，3s~120s）??
   Future<void> setWebSearchSearXngTimeoutMs(int value) async {
-    state = state.copyWith(webSearchSearXngTimeoutMs: value.clamp(3000, 120000));
+    state =
+        state.copyWith(webSearchSearXngTimeoutMs: value.clamp(3000, 120000));
     await _persist();
     _reapplyWebSearchProvider();
   }
 
-  /// 按当前设置重建联网搜??provider（内容未变时 [applySearXNGProviderFromSettings]
-  /// 直接复用现有实例，不会打断连接池）??
+  /// 联网搜索模式：'direct'（默认，手机直连搜索引擎）/ 'searxng'（自建实例）。
+  Future<void> setWebSearchMode(String value) async {
+    final mode = value == 'searxng' ? 'searxng' : 'direct';
+    state = state.copyWith(webSearchMode: mode);
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 按当前设置重建联网搜??provider（内容未变时复用现有实例，不会打断连接池）??
   void _reapplyWebSearchProvider() {
     try {
-      applySearXNGProviderFromSettings(state);
+      if (state.webSearchMode == 'searxng') {
+        applySearXNGProviderFromSettings(state);
+      } else {
+        applyDirectSearchProviderFromSettings(state);
+      }
     } catch (_) {
       // 热更新失败不影响设置本身的保存：下一轮对话构建注册表时会再试一次??
     }
@@ -518,6 +535,7 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     state = state.copyWith(showResourceMonitor: value);
     await _persist();
   }
+
   /// OOM 内存守卫总开关。关??= 加载前不再拒绝超大模型（有整机死机风险）??
   Future<void> setOomGuardEnabled(bool value) async {
     state = state.copyWith(oomGuardEnabled: value);
@@ -537,7 +555,6 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     state = state.copyWith(oomPostHeadroomMb: value.clamp(0, 4096));
     await _persist();
   }
-
 
   /// 占用率采样周期（秒，0~30?? = 仅推理时采样）??
   Future<void> setResourceSampleIntervalSec(int value) async {

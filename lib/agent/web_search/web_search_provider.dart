@@ -18,81 +18,30 @@ import 'dart:io' show SocketException;
 import 'package:dio/dio.dart';
 
 import '../../services/settings_service.dart';
+import '../../web_search/web_search_core.dart'
+    show
+        WebSearchProvider,
+        WebSearchResult,
+        WebSearchSource,
+        WebSearchProviderError,
+        normalizeSourceUrl;
+import '../../web_search/direct_search_config.dart' show DirectSearchConfig;
+import '../../web_search/direct_search_provider.dart';
 import 'web_search_seam.dart';
 
-/// 搜索 provider 统一接口（对齐 DSH ctx.web 的可插拔搜索能力）。
-abstract class WebSearchProvider {
-  /// 该 provider 的稳定 id（如 "searxng"）。
-  String get id;
-
-  /// 该 provider 的名字（用于诊断/展示）。
-  String get name;
-
-  /// 廉价可用性探测：仅本地校验（如 URL 合法性），不联网。
-  /// 返回 null 表示可用；返回非空字符串表示不可用及原因。
-  String? available();
-
-  /// 执行一次搜索。失败抛 [WebSearchProviderError]。
-  ///
-  /// [timeout] 为 null 时使用 provider 自身配置的超时——调用方**不要**传自己的
-  /// 默认值进来，否则设置项里的超时会静默失效（本文件曾踩此坑）。
-  Future<WebSearchResult> search(String query, {Duration? timeout});
-
-  /// 释放资源（如 HttpClient / Dio）。
-  void dispose();
-}
-
-/// 标准化搜索结果（对齐 DSH WebSearchResult）。
-class WebSearchResult {
-  final List<WebSearchSource> sources;
-
-  /// 是否因超出 maxResults 丢弃过结果（此前该字段恒为 false）。
-  final bool truncated;
-
-  /// 0 结果时的引擎诊断（哪些引擎 timeout/CAPTCHA/静默 0 条），
-  /// 供工具层转成可行动的报错——"查询不到"必须能看出是实例挂了。
-  final String? diagnostics;
-  const WebSearchResult({
-    required this.sources,
-    this.truncated = false,
-    this.diagnostics,
-  });
-}
-
-/// 标准化搜索结果中的一条来源（对齐 DSH WebSearchSource）。
-class WebSearchSource {
-  final String url;
-  final String? title;
-  final String? snippet;
-  final String? publishedAt;
-
-  /// 来源引擎（SearXNG `engine`；定位"哪个引擎给的结果"很有用）。
-  final String? engine;
-
-  /// 相关性得分（SearXNG `score`，越大越相关；缺失为 null）。
-  final double? score;
-  const WebSearchSource({
-    required this.url,
-    this.title,
-    this.snippet,
-    this.publishedAt,
-    this.engine,
-    this.score,
-  });
-}
+// 转发核心类型：外部代码 import 本文件即可拿到标准化类型（兼容旧接缝）。
+export '../../web_search/web_search_core.dart'
+    show
+        WebSearchProvider,
+        WebSearchResult,
+        WebSearchSource,
+        WebSearchProviderError,
+        normalizeSourceUrl;
+export '../../web_search/direct_search_provider.dart' show DirectSearchProvider;
 
 /// 内部错误码：实例拒绝了 `engines=`（400/422）。仅用于触发"去引擎重试"，
 /// 不会外泄给模型（对外仍是 WEB_PROVIDER_ERROR / WEB_ABORTED 两类）。
 const String kWebEngineRejected = 'WEB_ENGINE_REJECTED';
-
-/// 结构化搜索错误（对齐 DSH WEB_PROVIDER_ERROR / WEB_ABORTED）。
-class WebSearchProviderError {
-  /// 'WEB_PROVIDER_ERROR'（不可用/出错）| 'WEB_ABORTED'（超时/取消）
-  /// | 'WEB_ENGINE_REJECTED'（实例不接受 engines 参数，触发去引擎重试）。
-  final String kind;
-  final String message;
-  const WebSearchProviderError(this.kind, this.message);
-}
 
 /// SearXNG 搜索 provider（对齐 DSH `@deepseek-ai/dsh-web-search-searxng`）。
 ///
@@ -244,7 +193,8 @@ class SearXNGSearchProvider implements WebSearchProvider {
       'q': query,
       'format': 'json',
     };
-    if (language != null && language!.isNotEmpty) params['language'] = language!;
+    if (language != null && language!.isNotEmpty)
+      params['language'] = language!;
     if (categories != null && categories!.isNotEmpty) {
       params['categories'] = categories!;
     }
@@ -300,13 +250,15 @@ class SearXNGSearchProvider implements WebSearchProvider {
       }
       final body = resp.data ?? '';
       // Content-Type 明确不是 JSON → 实例没开 format=json。
-      final ct =
-          (resp.headers.value(Headers.contentTypeHeader) ?? '').split(';').first.trim();
+      final ct = (resp.headers.value(Headers.contentTypeHeader) ?? '')
+          .split(';')
+          .first
+          .trim();
       if (ct.isNotEmpty && !_isJsonMime(ct)) {
         throw WebSearchProviderError(
           'WEB_PROVIDER_ERROR',
           'SearXNG 返回 $ct 而非 JSON：需在实例 settings.yml 的 search.formats '
-          '里加上 json（用时 ${sw.elapsedMilliseconds}ms）',
+              '里加上 json（用时 ${sw.elapsedMilliseconds}ms）',
         );
       }
       final Map<String, dynamic> data;
@@ -325,8 +277,7 @@ class SearXNGSearchProvider implements WebSearchProvider {
       return WebSearchResult(
         sources: mapped,
         truncated: rawCount > mapped.length,
-        diagnostics:
-            mapped.isEmpty ? _describeEmpty(data) : null,
+        diagnostics: mapped.isEmpty ? _describeEmpty(data) : null,
       );
     } on WebSearchProviderError {
       rethrow;
@@ -348,9 +299,10 @@ class SearXNGSearchProvider implements WebSearchProvider {
         return WebSearchProviderError('WEB_ABORTED',
             '连接 SearXNG 超时（$target，${ms}ms）：检查实例是否开机、Tailscale 是否在线');
       case DioExceptionType.receiveTimeout:
-        return WebSearchProviderError('WEB_ABORTED',
+        return WebSearchProviderError(
+            'WEB_ABORTED',
             'SearXNG 响应超时（$target，已等 ${ms}ms）：引擎过多/过慢，'
-            '考虑在「联网搜索」里指定引擎（如实例只留本域可达的引擎）');
+                '考虑在「联网搜索」里指定引擎（如实例只留本域可达的引擎）');
       case DioExceptionType.sendTimeout:
         return WebSearchProviderError('WEB_ABORTED', 'SearXNG 请求发送超时（$target）');
       case DioExceptionType.badResponse:
@@ -362,13 +314,15 @@ class SearXNGSearchProvider implements WebSearchProvider {
       case DioExceptionType.cancel:
         return const WebSearchProviderError('WEB_ABORTED', '搜索已取消');
       case DioExceptionType.connectionError:
-        return WebSearchProviderError('WEB_PROVIDER_ERROR',
+        return WebSearchProviderError(
+            'WEB_PROVIDER_ERROR',
             '连不上 SearXNG（$target，${ms}ms）：${_underlying(e) ?? '网络不通'}；'
-            '检查地址/端口是否正确、实例是否在线、手机与实例是否在同一网络或 Tailscale');
+                '检查地址/端口是否正确、实例是否在线、手机与实例是否在同一网络或 Tailscale');
       default:
-        return WebSearchProviderError('WEB_PROVIDER_ERROR',
+        return WebSearchProviderError(
+            'WEB_PROVIDER_ERROR',
             'SearXNG 请求失败（$target，${ms}ms）：${e.message ?? e.type}'
-            '${_underlying(e) == null ? '' : ' / ${_underlying(e)}'}');
+                '${_underlying(e) == null ? '' : ' / ${_underlying(e)}'}');
     }
   }
 
@@ -378,7 +332,9 @@ class SearXNGSearchProvider implements WebSearchProvider {
     final err = e.error;
     if (err is SocketException) {
       final os = err.osError;
-      return os == null ? err.message : '${err.message}(${os.errorCode} ${os.message})';
+      return os == null
+          ? err.message
+          : '${err.message}(${os.errorCode} ${os.message})';
     }
     return err?.toString();
   }
@@ -409,9 +365,8 @@ class SearXNGSearchProvider implements WebSearchProvider {
     final parts = <String>[];
     if (unresponsive is List && unresponsive.isNotEmpty) {
       final items = unresponsive
-          .map((e) => e is List && e.length >= 2
-              ? '${e[0]}(${e[1]})'
-              : e.toString())
+          .map((e) =>
+              e is List && e.length >= 2 ? '${e[0]}(${e[1]})' : e.toString())
           .take(8)
           .join('、');
       parts.add('实例侧引擎状态：$items');
@@ -476,30 +431,6 @@ class SearXNGSearchProvider implements WebSearchProvider {
   }
 }
 
-/// 去掉跟踪参数/fragment/尾斜杠并小写 host，用于跨引擎的同源去重。
-String normalizeSourceUrl(String raw) {
-  final uri = Uri.tryParse(raw.trim());
-  if (uri == null || uri.host.isEmpty) return raw.trim();
-  final params = uri.queryParameters.entries
-      .where((e) => !e.key.toLowerCase().startsWith('utm_'))
-      .where((e) => e.key.toLowerCase() != 'from')
-      .toList()
-    ..sort((a, b) => a.key.compareTo(b.key));
-  var path = uri.path;
-  if (path.length > 1 && path.endsWith('/')) {
-    path = path.substring(0, path.length - 1);
-  }
-  final query = params.map((e) => '${e.key}=${e.value}').join('&');
-  final normalized = Uri(
-    scheme: uri.scheme.toLowerCase(),
-    host: uri.host.toLowerCase(),
-    port: uri.hasPort ? uri.port : null,
-    path: path.isEmpty ? '/' : path,
-    query: query.isEmpty ? null : query,
-  );
-  return normalized.toString();
-}
-
 /// 用持久化设置（重新）构建并注册当前 SearXNG provider 到 [WebSearchSeam]。
 ///
 /// 在设置变更时调用即可热切换搜索源，无需重启应用。
@@ -516,4 +447,27 @@ void applySearXNGProviderFromSettings(InferenceSettings settings) {
     return; // 配置没变：连 provider 带连接池一起留着。
   }
   seam.registerProvider(SearXNGSearchProvider.fromSettings(settings));
+}
+
+/// 用真实浏览器 UA 构建并注册手机直连搜索 provider 到 [WebSearchSeam]。
+///
+/// 手机 IP 随网络经常变化，反爬标记远少于固定数据中心 IP——直接请求
+/// 搜索引擎（bing/百度/360/搜狗）即可规避国内引擎对固定 IP 的 CAPTCHA，
+/// 无需自建 SearXNG 实例。
+///
+/// 配置未变时复用现有实例（连接池不废）；切换时释放旧 provider。
+void applyDirectSearchProviderFromSettings(InferenceSettings settings) {
+  final seam = WebSearchSeam.instance;
+  final current = seam.provider;
+  // 从设置构建直连配置：复用联网搜索的超时与 maxResults 设置。
+  final config = DirectSearchConfig(
+    maxResults: settings.webSearchSearXngMaxResults,
+    timeout: Duration(milliseconds: settings.webSearchSearXngTimeoutMs),
+    language: settings.webSearchSearXngLanguage,
+  );
+  if (current is DirectSearchProvider &&
+      current.configSignature == config.configSignature) {
+    return; // 配置没变：连 provider 带连接池一起留着。
+  }
+  seam.registerProvider(DirectSearchProvider(config: config));
 }

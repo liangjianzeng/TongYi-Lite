@@ -86,6 +86,13 @@ class ReactLoopAgent {
   final SkillProvider? _skills;
   /// Phase 5 AGENTS.md guidance（注入 workspace:guidance section）。
   final String? _agentsMd;
+  /// 环境快照（当前时间等），注入系统提示最末（cache 友好；null = 不注入）。
+  final String? _environmentNote;
+
+  /// 通用重复调用守护（DSH repeat-tool-reminder 语义）：同一工具本回合
+  /// 调用次数命中 [kRepeatReminderSteps] 时，在结果尾部追加渐进提醒，
+  /// 逼模型收敛（配合签名去重的"回缓存"双保险）。
+  static const Set<int> kRepeatReminderSteps = {3, 5, 8};
 
   final ToolExecutor _executor;
   final LlmRetry _retry;
@@ -140,6 +147,10 @@ class ReactLoopAgent {
     // ---- Phase 5：skills + AGENTS.md ----
     SkillProvider? skills,
     String? agentsMd,
+    // ---- 环境快照（当前时间等）：置于系统提示**最末**（skills/AGENTS.md
+    // 之后）——稳定前缀在前、易变快照在后，API 端 prompt cache 友好
+    // （DSH section ordering）；local 档不传，系统提示逐字节稳定保 KV。
+    String? environmentNote,
   })  : _session = session,
         _adapter = adapter,
         _registry = registry,
@@ -153,6 +164,7 @@ class ReactLoopAgent {
         _hooks = hooks,
         _skills = skills,
         _agentsMd = agentsMd,
+        _environmentNote = environmentNote,
         _executor = ToolExecutor(
           registry: registry,
           modelId: modelId,
@@ -180,10 +192,14 @@ class ReactLoopAgent {
     // 不存在的工具），按注册表实际可见性门控。
     String systemContent = _systemPrompt;
     if (_skills != null) {
-      final loadSkillVisible =
-          _registry.visibleFor(_modelId).any((t) => t.name == 'load_skill');
-      final skillText =
-          _skills.availableSkillsText(loadSkillAvailable: loadSkillVisible);
+      // 教唆门控按注册表实际可见性：load_skill/save_skill 未注册的路线
+      // 不在提示里提（防指向不存在的工具）。
+      final visibleNames =
+          _registry.visibleFor(_modelId).map((t) => t.name).toSet();
+      final skillText = _skills.availableSkillsText(
+        loadSkillAvailable: visibleNames.contains('load_skill'),
+        saveSkillAvailable: visibleNames.contains('save_skill'),
+      );
       if (skillText.trim().isNotEmpty) {
         systemContent += '\n\n$skillText';
       }
@@ -193,6 +209,13 @@ class ReactLoopAgent {
       if (am.isNotEmpty) {
         systemContent += '\n\n<workspace:guidance>\n$am\n</workspace:guidance>';
       }
+    }
+    // 环境快照恒置系统提示最末：稳定前缀（身份/规则/工具/技能/AGENTS.md）
+    // 在前、易变快照在后，API 端 prompt cache 命中率最大化（DSH section
+    // ordering 思想）。local 档不传 → 系统提示逐字节稳定，KV 前缀复用。
+    final env = _environmentNote?.trim();
+    if (env != null && env.isNotEmpty) {
+      systemContent += '\n\n【环境】$env';
     }
 
     _session.append(
@@ -260,6 +283,7 @@ class ReactLoopAgent {
     // 回合内重复调用去重（2026-09-30 定案）：端侧 2B 模型拿到结果后常原样
     // 重发同一调用不收敛。签名 → 首次结果缓存，回合开始时清空。
     _turnToolCallCache.clear();
+    _turnToolCallCounts.clear();
     // imagePath 入事件（store.dart importFromMessages 同款键名）：API 路线
     // 无状态，每个 step 重放历史时都要把图片重发；不入 log 则后续 step 丢图。
     final userSeq = _session.append(
@@ -577,6 +601,9 @@ class ReactLoopAgent {
   /// 收敛提示，逼模型直接回答。
   final Map<String, ToolResult> _turnToolCallCache = {};
 
+  /// 本回合各工具调用计数（重复守护用），kick 时清空。
+  final Map<String, int> _turnToolCallCounts = {};
+
   /// 单次工具调用安全包装（流水线异常不逃逸，转 ToolResult）。
   Future<ToolResult> _safeExecute(ToolCall call) async {
     try {
@@ -650,17 +677,26 @@ class ReactLoopAgent {
     }
 
     // ---- 3. 按模型顺序记 tool/result + 触发 done/failed ----
-
-    // ---- 3. 按模型顺序记 tool/result + 触发 done/failed ----
     for (var i = 0; i < calls.length; i++) {
       final call = calls[i];
       final result = results[i];
+      // 通用重复守护：计数命中 3/5/8 → 结果尾部追加渐进提醒（DSH
+      // repeat-tool-reminder 语义，advisory 不阻断）。
+      final n = (_turnToolCallCounts[call.name] ?? 0) + 1;
+      _turnToolCallCounts[call.name] = n;
+      var content = result.content;
+      if (kRepeatReminderSteps.contains(n)) {
+        content = '${content.isEmpty ? '' : '$content\n'}'
+            '[提醒：这是本回合第 $n 次调用 ${call.name}。'
+            '先检查上面已有的调用结果：结果已足够就直接回答用户；'
+            '结果无效就换方法/换参数，不要继续重复同样的调用]';
+      }
       _session.append(kEventToolResult, {
         'callId': call.id,
         'name': call.name,
         'turn': turn,
         'step': step,
-        'content': result.content,
+        'content': content,
         'isError': result.isError,
       });
       // Phase 5：tools/result hook（read-only 同步通知）。
@@ -670,7 +706,7 @@ class ReactLoopAgent {
             ToolActivity(
                 name: call.name,
                 status: result.isError ? 'failed' : 'done',
-                result: result.content));
+                result: content));
       }
     }
   }
