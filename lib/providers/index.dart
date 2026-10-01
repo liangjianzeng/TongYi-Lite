@@ -11,6 +11,7 @@ export 'chat_provider.dart' show
     currentConversationProvider,
     messagesProvider,
     isGeneratingProvider,
+    runningTurnsProvider,
     chatNotifierProvider,
     kLocalVisionSupported;
 

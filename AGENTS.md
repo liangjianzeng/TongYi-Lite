@@ -900,3 +900,43 @@ release 内 libtongyilite_jni/libturnip_freedreno/libhardware/libggml-* 全在�
 
 > **遗留（明早用户确认）**：真机 Termux 一键命令闭环 + SFTP/git 验证；SSH 密钥明文存储（后续迁
 > secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。
+
+## 2026-10-01 多会话并发（并发会话槽位）：AgentUiState 按会话分键 + 槽位门控
+
+> 用户需求：智能体可能多对话并行，发送键不应被单一会话的"执行中"锁死整个 App；
+> 在智能体 Tab 用「并发会话槽位」控制同时允许执行回合的会话数量。
+
+**设置**：`agentMaxConcurrentTurns`（1~4，默认 1 = 与旧版行为完全一致），
+智能体 Tab → 执行参数 →「并发会话槽位」滑条；fromJson 解析夹紧 1~4。
+
+**核心机制（chat_provider）**：
+- `runningTurnsProvider`（Map<convId, 是否本地路线>）= 多会话并发的唯一真相；
+  `isGeneratingProvider` 变为其派生（任意会话在跑）。**UI 判"当前会话生成中"
+  一律用 `runningTurnsProvider[当前会话id]`，不要再用全局 bool**。
+- `ChatNotifier._activeTurns`（convId → `_ActiveTurn`，含 agent 引用/local 标记/
+  started/userCancelled）：sendMessage **顶部同步注册占位**（检查与注册之间无
+  await，防双开竞态），顶层 finally 统一注销；`started=false` 的占位不进 UI 态。
+- 门控纯函数 `checkTurnAdmission`：① 本地引擎（权重+KV）单实例 → **本地回合
+  彼此互斥**（与槽位无关）；② 总活跃回合数 ≤ 槽位（API 会话可真正并行）。
+  拒绝文案经 `_rejectTurn` **落库为 assistant 消息**（sendMessage 返回值无人
+  消费，不落库用户永远看不到被拒原因）。
+- **KV 仅本地路线管理**：两条发送路径的 resetContext/KV 标记块都加了
+  `if (!useApi)` 守卫——否则后台 API 回合启动会把并行运行中的本地回合
+  KV 上下文重置掉（静默污染）。
+- `stopGeneration({conversationId})`：传 id 只停该会话（聊天页停止键）；
+  不传停**全部**（模型卸载/重载前，settings_screen、home_screen 弹窗用）。
+  停止标记（userCancelled）随 `_ActiveTurn` 走，`_suppressUserCancelled` 按
+  回合句柄判断。
+
+**AgentUiState 按会话分键（agent_state_provider）**：
+- `AgentUiStateNotifier` 的 state 改为 `Map<String, AgentUiState>`；
+  `attach(convId, log)`/`detach(convId)`/`setThinking(convId,…)`/
+  `setToolGen(convId,…)`/`onEvent(convId, e)` 全部带会话键；detach 仍保留末态。
+- home_screen 取 `agentUiStateProvider[当前会话id] ?? const AgentUiState()`。
+- ⚠️ 事件归约器必须 `if (!mounted) return;` 守卫 + dispose 时取消全部订阅
+  （后台回合的订阅可能在 notifier 被丢弃后仍推事件，StateNotifier 置 state
+  会抛 StateError）。
+
+**回归**：test/agent+services+providers 全量 **402 项 + 2 skip 全绿**（新增
+phase6 双会话隔离用例、settings 槽位往返/夹紧、checkTurnAdmission 5 用例）；
+analyze 0 error（剩余 warning 均为旧代码既有）。

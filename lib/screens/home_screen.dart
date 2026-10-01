@@ -6,7 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
-import '../providers/index.dart' show chatNotifierProvider, isGeneratingProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
+import '../providers/index.dart' show chatNotifierProvider, runningTurnsProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
 import '../providers/model_provider.dart';
 import '../providers/settings_provider.dart' show settingsProvider;
 import '../services/attachment_service.dart'
@@ -93,7 +93,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // if we let those intermediate positions flip _followStream off, the
     // following stops and the incoming assistant message piles up off-screen.
     // So during generation we pin _followStream = true and ignore position.
-    if (ref.read(isGeneratingProvider)) {
+    if (ref.read(runningTurnsProvider)[_currentConversationId] ?? false) {
       if (!_followStream) setState(() => _followStream = true);
       return;
     }
@@ -564,7 +564,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// back to false (so the button reverts to send mode automatically).
   Future<void> _stopGeneration() async {
     try {
-      await ref.read(chatNotifierProvider.notifier).stopGeneration();
+      // 只停当前会话的回合（其他会话的并发回合不受影响）。
+      await ref
+          .read(chatNotifierProvider.notifier)
+          .stopGeneration(conversationId: _currentConversationId);
     } catch (e) {
       debugPrint('[HomeScreen] stopGeneration failed: $e');
     }
@@ -572,7 +575,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isGenerating = ref.watch(isGeneratingProvider);
+    // 生成态按「当前会话」判定：多会话并发时，别的会话在跑不影响本会话
+    // 的发送按钮（本会话自己在跑才显示停止键）。
+    final isGenerating =
+        ref.watch(runningTurnsProvider)[_currentConversationId] ?? false;
     final modelState = ref.watch(modelManagerProvider);
 
     return Scaffold(
@@ -814,8 +820,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           final id = ms.modelId;
           if (id != null) {
             Navigator.pop(ctx);
-            // 若正在推理，先停止生成，避免卸载/重载时原生引擎崩溃（红屏）。
-            if (ref.read(isGeneratingProvider)) {
+            // 若正在推理，先停止生成（全部回合，模型即将重载），
+            // 避免卸载/重载时原生引擎崩溃（红屏）。
+            if (ref.read(runningTurnsProvider).isNotEmpty) {
               try {
                 await ref.read(chatNotifierProvider.notifier).stopGeneration();
               } catch (_) {}
@@ -937,10 +944,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // =========================================================================
 
   Widget _buildMessagesList() {
-    final uiState = ref.watch(agentUiStateProvider);
+    // 多会话并发：live 回合 UI 状态按当前会话取自己的快照（事件流不串台）。
+    final uiState = ref.watch(agentUiStateProvider)[_currentConversationId] ??
+        const AgentUiState();
     // 普通聊天（非智能体回合）也要让最后一组进入 live 态：
     // 空答案气泡才会显示唯一的「思考中…」占位、流式光标才会出现。
-    final generating = ref.watch(isGeneratingProvider);
+    final generating =
+        ref.watch(runningTurnsProvider)[_currentConversationId] ?? false;
     final messagesAsync = ref.watch(messagesProvider(_currentConversationId));
 
     return messagesAsync.when(

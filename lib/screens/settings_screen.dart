@@ -833,7 +833,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   Future<void> _handleLoadModel(ModelConfig model) async {
     final manager = ref.read(modelManagerProvider.notifier);
-    final isGenerating = ref.read(isGeneratingProvider);
+    // 模型重载影响本地引擎：任何会话（含后台并发回合）在跑都算。
+    final isGenerating = ref.read(runningTurnsProvider).isNotEmpty;
 
     // 1) 已有一个不同模型在内存中（可能正在推理）→ 友好提醒，确认后再切换。
     if (manager.isLoadedState && manager.modelId != model.id) {
@@ -867,8 +868,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       if (confirm != true) return;
     }
 
-    // 2) 若正在推理，必须先停止生成，否则卸载模型会令原生引擎崩溃（红屏）。
-    if (ref.read(isGeneratingProvider)) {
+    // 2) 若正在推理，必须先停止全部回合，否则卸载模型会令原生引擎崩溃（红屏）。
+    if (ref.read(runningTurnsProvider).isNotEmpty) {
       try {
         await ref.read(chatNotifierProvider.notifier).stopGeneration();
       } catch (_) {
@@ -2108,6 +2109,19 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     hint: '一次提问内最多几次模型请求（含工具往返）；'
                         '${isApi ? 'API 档默认 16' : '端侧建议 3–12（默认 12）'}，'
                         '复杂任务可调到 100',
+                  ),
+                  _buildSliderRow(
+                    label: '并发会话槽位',
+                    value: settings.agentMaxConcurrentTurns,
+                    min: 1,
+                    max: 4,
+                    divisions: 3,
+                    display: '${settings.agentMaxConcurrentTurns} 个',
+                    onChanged: (v) =>
+                        notifier.setAgentMaxConcurrentTurns(v),
+                    hint: '同时允许执行回合的会话数量（默认 1）。'
+                        'API 驱动可真正并行；本地模型受引擎限制，'
+                        '同一时刻仍只能跑一个会话，其余会提示槽位已满',
                   ),
                   _buildSliderRow(
                     label: '每回合搜索上限',
