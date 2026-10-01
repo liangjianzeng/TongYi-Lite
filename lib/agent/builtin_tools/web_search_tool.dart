@@ -43,6 +43,21 @@ const int kInternalBatch = 3;
 /// 合并结果达到此条数即提前停止继续搜索（够了就不用搜剩余变体）。
 const int kCollectTarget = 12;
 
+/// 时效评分：3=今天/昨日/X小时前/X天前，2=当前年，1=无时间标记，
+/// 0=明确往年（如 2025/2024）旧闻。用于过滤旧闻 + 近期优先排序。
+int _recencyScore(WebSearchSource s, int currentYear) {
+  final t = s.publishedAt ?? '';
+  if (t.contains('今天') || t.contains('昨日') || t.contains('昨天') ||
+      RegExp(r'\d+小时前|\d+天前').hasMatch(t)) {
+    return 3;
+  }
+  final m = RegExp(r'(20\d{2})').firstMatch(t);
+  if (m != null) {
+    return int.parse(m.group(1)!) == currentYear ? 2 : 0;
+  }
+  return 1;
+}
+
 /// 归一化查询：小写 + 只留中英文/数字，用于同回合重复搜索判定
 ///（"华为大会 " / "华为 大会" / "华为大会。" 视为同一关键词）。
 String _normalizeQuery(String q) {
@@ -83,6 +98,10 @@ ToolDefinition createWebSearchTool({int maxSearchesPerTurn = kMaxSearchesPerTurn
         '联网搜索，返回相关网页的标题与摘要（含来源链接）。'
         '结果头部会标注当前时间，按它判断信息新旧；查新闻/时效性内容时'
         '关键词带上时间词（今天/昨天/最近）。'
+        '注意：搜索引擎对本地（某地）近几天的实时新闻覆盖有限，结果多为'
+        '百科/攻略/政策页。若无近期新闻条目，请如实说明，并结合能确认的'
+        '时效信息（天气/活动/政策，标注日期）回答，不要拿百科/旧攻略'
+        '冒充最新新闻。'
         '一个问题的多个角度可一次提交：把想查的其他关键词放进'
         'additional_queries（最多 3 个），工具会并发搜索并合并结果一次返回，'
         '不必多次调用。'
@@ -181,6 +200,12 @@ ToolDefinition createWebSearchTool({int maxSearchesPerTurn = kMaxSearchesPerTurn
             }
           }
         }
+
+        // 时效过滤：剔除明确往年的旧闻，近期条目优先——避免模型拿 2025/2024
+        // 旧闻当"最新"回答。无时间标记的条目保留（排后）。
+        merged.removeWhere((s) => _recencyScore(s, now.year) == 0);
+        merged.sort((a, b) =>
+            _recencyScore(b, now.year).compareTo(_recencyScore(a, now.year)));
 
         final truncated = merged.length > kCollectTarget;
         final result = _formatResult(

@@ -61,7 +61,14 @@ class Quake360Engine implements SearchEngine {
               caseSensitive: false, dotAll: true)
           .firstMatch(block);
       if (desc != null) snippet = _text(desc.group(1)!);
-      hits.add(EngineHit(url: url, title: title, snippet: snippet));
+      // 时间标记：res-desc 摘要里常带"6小时前 / 2026年X月X日"。
+      final publishedAt =
+          desc == null ? '' : extractDateMarker(desc.group(1)!);
+      hits.add(EngineHit(
+          url: url,
+          title: title,
+          snippet: snippet,
+          publishedAt: publishedAt.isEmpty ? null : publishedAt));
     }
     return hits;
   }

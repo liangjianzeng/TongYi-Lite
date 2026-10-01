@@ -166,6 +166,28 @@ void main() {
       }
     });
 
+    test('时效过滤：剔除往年年份旧闻，近期条目优先', () async {
+      final prevYear = (DateTime.now().year - 1).toString();
+      final provider = _FakeSearchProvider({
+        '国庆': [
+          WebSearchSource(
+              url: 'http://old', title: '旧闻', publishedAt: '$prevYear年2月5日'),
+          const WebSearchSource(
+              url: 'http://new', title: '近期新闻', publishedAt: '今天'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final result = await createWebSearchTool().execute({'query': '国庆'});
+        // 往年年份旧闻被过滤；无时间/近期条目保留。
+        expect(result.content, contains('近期新闻'));
+        expect(result.content, isNot(contains('旧闻')));
+        expect(result.isError, isFalse);
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
     test('结果够数提前停：首批收集足够后不再搜剩余变体', () async {
       final year = DateTime.now().year.toString();
       final provider = _FakeSearchProvider({

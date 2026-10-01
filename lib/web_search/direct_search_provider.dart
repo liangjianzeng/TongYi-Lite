@@ -130,13 +130,24 @@ class DirectSearchProvider implements WebSearchProvider {
     );
   }
 
-  /// 请求单个引擎并解析；返回 null = 请求失败/超时。
+  /// 请求单个引擎并解析；返回 null = 请求失败/超时，空列表 = 反爬/无匹配。
   Future<List<EngineHit>?> _fetchEngine(
     SearchEngine engine,
     String query,
     Duration t,
   ) async {
     final uri = engine.buildUrl(query, language: config.language);
+    var result = await _request(engine, uri, t);
+    // 空/反爬/连接失败：重试一次。手机 IP 多变，换一次连接可能绕过
+    // antispider；瞬时连接失败重试大概率能成。重试只补一次，控制延迟。
+    if (result == null || result.isEmpty) {
+      result = await _request(engine, uri, t);
+    }
+    return result;
+  }
+
+  Future<List<EngineHit>?> _request(
+      SearchEngine engine, Uri uri, Duration t) async {
     try {
       final resp = await _dio.get<String>(
         uri.toString(),

@@ -58,7 +58,14 @@ class SogouEngine implements SearchEngine {
               dotAll: true)
           .firstMatch(block);
       if (desc != null) snippet = _text(desc.group(1)!);
-      hits.add(EngineHit(url: url, title: title, snippet: snippet));
+      // 时间标记：vrwrap 摘要/标题里常带日期（含标题兜底）。
+      final raw = (desc?.group(1) ?? '') + (h3?.group(1) ?? '');
+      final publishedAt = extractDateMarker(raw);
+      hits.add(EngineHit(
+          url: url,
+          title: title,
+          snippet: snippet,
+          publishedAt: publishedAt.isEmpty ? null : publishedAt));
     }
     return hits;
   }

@@ -4,6 +4,16 @@
 /// 解析失败/被反爬时返回空列表，由直连 provider 合并去重。
 library;
 
+/// 从结果块文本提取时效标记（年份/月日/相对时间），返回首个匹配片段。
+/// 用于各引擎把发布时间挂到 [EngineHit.publishedAt]，供工具层过滤旧闻、
+/// 近期优先排序。无匹配返回空串。
+String extractDateMarker(String text) {
+  final re = RegExp(
+      r'(今天|昨日|昨天|近日|[0-9]+小时前|[0-9]+天前|'
+      r'20\d{2}年?[0-9]{1,2}[月\-/][0-9]{1,2}|[0-9]{1,2}月[0-9]{1,2}日)');
+  return re.firstMatch(text)?.group(0) ?? '';
+}
+
 /// 单条原始结果（解析出的标题/URL/摘要）。
 class EngineHit {
   final String url;
