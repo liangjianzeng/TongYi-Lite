@@ -3558,6 +3558,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
     var command = '';
     var userName = '';
     var connecting = false;
+    var probeStarted = false;
 
     await showDialog<void>(
       context: context,
@@ -3598,6 +3599,14 @@ class _DevTabState extends ConsumerState<_DevTab> {
             }
             connecting = false;
             if (ctx.mounted) Navigator.pop(ctx);
+          }
+
+          // 首次构建自动启动探测（否则 step 0 永远转圈：探测从未触发）。
+          if (!probeStarted) {
+            probeStarted = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (ctx.mounted) probeAndGen();
+            });
           }
 
           final dialog = AlertDialog(
@@ -4020,9 +4029,12 @@ class _DevTabState extends ConsumerState<_DevTab> {
       ),
     );
     if (saved != true) return;
+    // 兜底：existing 无稳定 id（旧配置迁移遗漏）→ 分配新 id，避免 upsert 追加。
+    final stableId = (existing?.id.trim().isNotEmpty ?? false)
+        ? existing!.id.trim()
+        : 'ssh_${DateTime.now().millisecondsSinceEpoch}';
     await notifier.upsertSshConfig(SshConfig(
-      id: existing?.id ??
-          'ssh_${DateTime.now().millisecondsSinceEpoch}',
+      id: stableId,
       name: nameCtrl.text.trim(),
       host: hostCtrl.text.trim(),
       port: int.tryParse(portCtrl.text.trim()) ?? 8022,

@@ -308,6 +308,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 并发会话槽位（1~4）：同时允许执行回合的会话数量。
+  Future<void> setAgentMaxConcurrentTurns(int value) async {
+    final clamped = value.clamp(1, 4);
+    state = state.copyWith(agentMaxConcurrentTurns: clamped);
+    await _persist();
+  }
+
   /// 每轮生成 token 预算??28~16384??6k 上限按需配置）??
   Future<void> setAgentTokensPerRound(int value) async {
     final clamped = value.clamp(128, 16384);

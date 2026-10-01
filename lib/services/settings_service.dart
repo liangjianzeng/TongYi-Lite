@@ -103,6 +103,11 @@ class InferenceSettings {
   /// ???壺?ﵽ???޺? web_search ?ܾ???????????????ָ??ž???????????
   final int agentMaxSearchesPerTurn;
 
+  /// 并发会话槽位（1~4，默认 1）：同时允许执行回合的会话数量。
+  /// 智能体/API 会话可真正并行；本地模型路线受引擎单实例约束，
+  /// 同一时刻仍只允许一个本地回合（见 chat_provider 门控）。
+  final int agentMaxConcurrentTurns;
+
   /// 每轮生成??token 预算。默??512：足够输出一次工具调??JSON 或一段回答??
   final int agentTokensPerRound;
 
@@ -310,6 +315,7 @@ class InferenceSettings {
     // fromJson 一次性迁移到新默认。
     this.agentMaxRounds = 12,
     this.agentMaxSearchesPerTurn = 5,
+    this.agentMaxConcurrentTurns = 1,
     this.agentTokensPerRound = 1024,
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
@@ -455,6 +461,7 @@ class InferenceSettings {
       int? agentNctx,
       int? agentMaxRounds,
       int? agentMaxSearchesPerTurn,
+      int? agentMaxConcurrentTurns,
       int? agentTokensPerRound,
       int? agentToolTimeoutMs,
       bool? agentAllowParallelTools,
@@ -531,6 +538,8 @@ class InferenceSettings {
       agentMaxRounds: agentMaxRounds ?? this.agentMaxRounds,
       agentMaxSearchesPerTurn:
           agentMaxSearchesPerTurn ?? this.agentMaxSearchesPerTurn,
+      agentMaxConcurrentTurns:
+          agentMaxConcurrentTurns ?? this.agentMaxConcurrentTurns,
       agentTokensPerRound: agentTokensPerRound ?? this.agentTokensPerRound,
       agentToolTimeoutMs: agentToolTimeoutMs ?? this.agentToolTimeoutMs,
       agentAllowParallelTools:
@@ -612,6 +621,7 @@ class InferenceSettings {
         'agentNctx': agentNctx,
         'agentMaxRounds': agentMaxRounds,
         'agentMaxSearchesPerTurn': agentMaxSearchesPerTurn,
+        'agentMaxConcurrentTurns': agentMaxConcurrentTurns,
         'agentTokensPerRound': agentTokensPerRound,
         'agentToolTimeoutMs': agentToolTimeoutMs,
         'agentAllowParallelTools': agentAllowParallelTools,
@@ -693,6 +703,9 @@ class InferenceSettings {
               oldDefault: 5, newDefault: 12),
       agentMaxSearchesPerTurn:
           (json['agentMaxSearchesPerTurn'] as num?)?.toInt() ?? 5,
+      agentMaxConcurrentTurns:
+          ((json['agentMaxConcurrentTurns'] as num?)?.toInt() ?? 1)
+              .clamp(1, 4),
       agentTokensPerRound: _migrateOldDefault(
           (json['agentTokensPerRound'] as num?)?.toInt(),
           oldDefault: 512,
@@ -768,28 +781,43 @@ class InferenceSettings {
   }
 
   /// 解析 SSH 配置列表；缺列表时回退旧版单配置（迁移为列表首项）。
+  ///
+  /// 旧配置（无 `id` 字段）迁移后 id 为空 → 编辑/删除会失效（空 id 删除被
+  /// 忽略、upsert 变追加），此处一次性补稳定 id（补完即持久化，下次幂等）。
   static List<SshConfig> _parseSshConfigs(Object? raw, Object? legacy) {
+    List<SshConfig>? parsed;
     if (raw is List) {
-      final list = <SshConfig>[];
+      parsed = <SshConfig>[];
       for (final e in raw) {
         if (e is Map<String, dynamic>) {
           final c = SshConfig.fromJson(e);
-          if (c != null) list.add(c);
+          if (c != null) parsed.add(c);
         } else if (e is Map) {
           final c = SshConfig.fromJson(Map<String, dynamic>.from(e));
-          if (c != null) list.add(c);
+          if (c != null) parsed.add(c);
         }
       }
-      return list;
-    }
-    if (legacy is Map<String, dynamic>) {
+    } else if (legacy is Map<String, dynamic>) {
       final c = SshConfig.fromJson(legacy);
-      if (c != null) return [c];
+      if (c != null) parsed = [c];
     } else if (legacy is Map) {
       final c = SshConfig.fromJson(Map<String, dynamic>.from(legacy));
-      if (c != null) return [c];
+      if (c != null) parsed = [c];
+    } else {
+      return const [];
     }
-    return const [];
+    // 空 id → 分配稳定 id（时间戳 + 序号），幂等：补完持久化后不再补。
+    final list = parsed ?? const <SshConfig>[];
+    for (var i = 0; i < list.length; i++) {
+      final c = list[i];
+      if (c.id.trim().isEmpty) {
+        list[i] = c.copyWith(
+          id: 'ssh_legacy_${DateTime.now().millisecondsSinceEpoch}_$i',
+          name: c.name.trim().isEmpty ? '${c.host}:${c.port}' : c.name,
+        );
+      }
+    }
+    return list;
   }
 
   /// 解析自定义人格列表；格式非法时返回空列表（不崩，回落标准人格）。

@@ -871,3 +871,32 @@ release 内 libtongyilite_jni/libturnip_freedreno/libhardware/libggml-* 全在�
 
 > **遗留（明早用户确认）**：真机 Termux 一键命令闭环 + SFTP/git 验证；SSH 密钥明文存储（后续迁
 > secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。
+
+## 2026-10-01 Phase E 真机三 bug 定案修复（迁移补 id + 向导自动探测）
+
+> 用户真机三报：① 已配置删不掉（点删除没反应）；② 编辑改名字又多一条出来；③ 点「连接 Termux」
+> 一直转圈。真机取证（run-as 读 inference_settings.json）：用户 JSON 里 sshConfigs 两条**都缺 id**
+> （旧配置迁移 + 编辑改名追加），完全吻合。
+
+**根因**：
+- 旧配置（无 `id` 字段）迁移后 id='' → `removeSshConfig('')` 直接 return（删不掉）；
+  `upsertSshConfig` 空 id 走追加分支（编辑改名 = 复制一条）。
+- Termux 向导 `probeAndGen` 定义了但**从未被调用**（打开对话框 step 0 转圈恒 true）。
+
+**修复**（commit 待推送）：
+1. `settings_service._parseSshConfigs`：迁移时**空 id 一律补稳定 id**
+   （`ssh_legacy_<毫秒>_<index>`，无 name 的补 `host:port` 显示名）；加载即生效，
+   编辑/删除用内存 id 操作正确；用户下次改动设置 persist 后 JSON 永久稳定。
+2. 编辑对话框保存兜底：existing.id 空 → 分配新 id（防迁移遗漏路径）。
+3. Termux 向导：StatefulBuilder 首次构建 `addPostFrameCallback` 自动启动探测
+   （注意 Dart 局部函数必须先声明后引用——启动块放 probeAndGen 定义之后）。
+
+**回归**：settings_service_test 新增迁移补 id（非空断言）+ 幂等（补完持久化二次加载
+不变 + 空 id 列表全补齐且互异）2 项；全量 **395 项 + 2 skip 全绿**，analyze 0 error。
+**2026-10-01 10:36 重打包（v0.2.8+16）**：app-debug.apk 140171564 B / app-release.apk
+47343199 B；字符串级验收过（debug/release `ssh_legacy` 命中）；真机已覆盖安装成功。
+**排障沉淀**：设备屏幕/前台状态不稳时 uiautomator dump 会抓到 systemui 或别的 app——
+验证优先走文本通道（run-as 读设置 JSON 直接取证配置数据），UI dump 仅作辅助。
+
+> **遗留（明早用户确认）**：真机 Termux 一键命令闭环 + SFTP/git 验证；SSH 密钥明文存储（后续迁
+> secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。
