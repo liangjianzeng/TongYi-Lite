@@ -213,6 +213,48 @@ final messagesProvider = StreamProvider.autoDispose.family<List<ChatMessage>,
 
 final isGeneratingProvider = StateProvider<bool>((ref) => false);
 
+/// 各会话正在执行回合（convId → 是否本地路线）。多会话并发的唯一真相：
+/// UI 判「当前会话生成中」、槽位门控计数、模型卸载前停全部都以它为准。
+final runningTurnsProvider =
+    StateProvider<Map<String, bool>>((ref) => const {});
+
+/// 槽位门控纯函数（可测）：能否在现有活跃回合之上再开一个回合。
+/// 返回 null = 允许；否则为拒绝文案（直接作为 sendMessage 返回值）。
+///
+/// 规则：① 本地引擎（权重+KV）单实例 → 本地回合彼此互斥，与槽位无关；
+/// ② 总活跃回合数不得超过并发会话槽位（API 会话可真正并行）。
+String? checkTurnAdmission({
+  required int activeCount,
+  required bool activeHasLocal,
+  required bool newIsLocal,
+  required int slots,
+}) {
+  if (newIsLocal && activeHasLocal) {
+    return '[本地模型同一时间只能执行一个会话：请等待其他会话完成，'
+        '或到对应会话点停止]';
+  }
+  if (activeCount >= slots) {
+    return '[并发槽位已满（$activeCount/$slots）：其他会话正在执行，'
+        '请等待完成或到对应会话点停止]';
+  }
+  return null;
+}
+
+/// 一个正在执行的回合（多会话并发下的句柄）。
+class _ActiveTurn {
+  /// 是否本地路线：本地回合彼此互斥（引擎单实例）。路由确定后回填。
+  bool local = false;
+
+  /// 智能体回合的主循环（可 cancel）；普通聊天为 null。
+  ReactLoopAgent? agent;
+
+  /// 已进入生成阶段（顶部注册只占槽位；路由/模型就绪后才进 UI 生成态）。
+  bool started = false;
+
+  /// 用户主动停止：API 侧 cancel 抛 DioException 时静默用。
+  bool userCancelled = false;
+}
+
 // ---------------------------------------------------------------------------
 // Chat logic — model loading + streaming completion
 // ---------------------------------------------------------------------------
@@ -243,17 +285,44 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 旧人格系统提示词的 KV 前缀上（提示词错配）。
   String? _currentKvPersonaId;
 
-  /// 上一轮生成是否走了 API 后备（用于 stopGeneration 分支到 openai 取消）。
-  bool _lastGenWasApi = false;
+  /// 活跃回合表（多会话并发）：convId → 回合句柄。
+  /// sendMessage 顶部同步注册占位（防双开竞态），finally 注销。
+  final Map<String, _ActiveTurn> _activeTurns = {};
 
-  /// 用户是否主动点过「停止」。用户主动停止时 API 侧会抛
-  /// `DioException [request cancelled]`，属正常停止信号而非错误——
-  /// 此标记用于区分二者，避免把「用户停止」误报成「发送失败」。
-  bool _userCancelled = false;
+  void _registerTurn(String conversationId, _ActiveTurn turn) {
+    _activeTurns[conversationId] = turn;
+    _syncRunningState();
+  }
 
-  /// 新智能体模式的当前主循环（Phase 0+）。非 null 且 running 时，
-  /// [stopGeneration] 走 agent.cancel()；turn 结束置 null。
-  ReactLoopAgent? _currentAgent;
+  void _unregisterTurn(String conversationId) {
+    if (_activeTurns.remove(conversationId) == null) return;
+    _syncRunningState();
+  }
+
+  /// 门控拒绝：文案落一条 assistant 消息（sendMessage 返回值无人消费，
+  /// 只有落库用户才能在对话里看到被拒原因）。
+  Future<String> _rejectTurn(String conversationId, String message) async {
+    await _storage.saveMessage(ChatMessage(
+      id: 'gate_${DateTime.now().millisecondsSinceEpoch}',
+      conversationId: conversationId,
+      role: MessageRole.assistant,
+      content: message,
+    ));
+    await _refreshConversationMeta(conversationId);
+    return message;
+  }
+
+  /// 把活跃回合投影到 runningTurnsProvider / isGeneratingProvider /
+  /// ChatNotifier.state（任意生成中）。started=false 的占位回合不进 UI 态。
+  void _syncRunningState() {
+    final map = <String, bool>{
+      for (final e in _activeTurns.entries)
+        if (e.value.started) e.key: e.value.local,
+    };
+    _ref.read(runningTurnsProvider.notifier).state = map;
+    _ref.read(isGeneratingProvider.notifier).state = map.isNotEmpty;
+    state = map.isNotEmpty;
+  }
 
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
@@ -288,6 +357,38 @@ class ChatNotifier extends StateNotifier<bool> {
     List<String>? attachmentPaths,
     String? audioPath,
   }) async {
+    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
+    // 路由未定时先按纯槽位计数预检；路由确定后再补「本地互斥」校验。
+    final settings = _ref.read(settingsProvider);
+    final admission = checkTurnAdmission(
+      activeCount: _activeTurns.length,
+      activeHasLocal: false,
+      newIsLocal: false,
+      slots: settings.agentMaxConcurrentTurns,
+    );
+    if (admission != null) return _rejectTurn(conversationId, admission);
+    final turn = _ActiveTurn();
+    _registerTurn(conversationId, turn);
+    try {
+      return await _dispatchMessage(conversationId, prompt, turn,
+          imagePath: imagePath,
+          imagePaths: imagePaths,
+          attachmentPaths: attachmentPaths,
+          audioPath: audioPath);
+    } finally {
+      _unregisterTurn(conversationId);
+    }
+  }
+
+  Future<String> _dispatchMessage(
+    String conversationId,
+    String prompt,
+    _ActiveTurn turn, {
+    String? imagePath,
+    List<String>? imagePaths,
+    List<String>? attachmentPaths,
+    String? audioPath,
+  }) async {
     // 智能体模式：走工具循环（无工具时单轮直答，与普通聊天一致）。
     final settings = _ref.read(settingsProvider);
     if (settings.agentEnabled) {
@@ -295,7 +396,8 @@ class ChatNotifier extends StateNotifier<bool> {
           imagePath: imagePath,
           imagePaths: imagePaths,
           attachmentPaths: attachmentPaths,
-          audioPath: audioPath);
+          audioPath: audioPath,
+          turn: turn);
     }
     if (attachmentPaths != null && attachmentPaths.isNotEmpty) {
       return '[文件附件仅智能体模式支持：请开启右上角智能体模式后再发送文件]';
@@ -325,30 +427,41 @@ class ChatNotifier extends StateNotifier<bool> {
         return '[模型加载失败，请在设置中重新下载并加载]';
       }
     }
-    _lastGenWasApi = useApi;
-    _userCancelled = false;
+    // 路由已定 → 补本地互斥校验（本地引擎单实例，本地回合彼此互斥）。
+    if (!useApi && _activeTurns.values.any((t) => t.local && t != turn)) {
+      return _rejectTurn(
+          conversationId,
+          '[本地模型同一时间只能执行一个会话：请等待其他会话完成，'
+          '或到对应会话点停止]');
+    }
+    turn.local = !useApi;
+    turn.userCancelled = false;
 
     debugPrint('[ChatNotifier] sendMessage: convId=$conversationId prompt="$prompt"'
         ' route=${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
-    state = true;
-    _ref.read(isGeneratingProvider.notifier).state = true;
+    turn.started = true;
+    _syncRunningState();
 
     // If this is a DIFFERENT conversation than what's in the native KV cache,
     // reset the cache first so the previous chat does not bleed in. (The KV
     // cache uses append-only multi-turn caching; a fresh conversation must start
     // from a clean cache.)
-    if (_currentKvConvId != conversationId) {
-      debugPrint('[ChatNotifier] Conversation changed ($_currentKvConvId -> $conversationId): resetContext()');
-      await _inference.resetContext();
-      _currentKvConvId = conversationId;
-    } else if (_currentKvWasAgentMode) {
-      // 智能体 → 普通聊天（模式切换）：KV 里是系统提示词 + 工具轮，必须重置，
-      // 本轮以最小 prefill 重放纯对话历史。
-      debugPrint('[ChatNotifier] Agent→plain mode switch: resetContext()');
-      await _inference.resetContext();
+    // KV 归属本地引擎：仅本地路线管理（API 回合不动 KV 状态，避免把
+    // 并行运行中的本地回合上下文重置掉）。
+    if (!useApi) {
+      if (_currentKvConvId != conversationId) {
+        debugPrint('[ChatNotifier] Conversation changed ($_currentKvConvId -> $conversationId): resetContext()');
+        await _inference.resetContext();
+        _currentKvConvId = conversationId;
+      } else if (_currentKvWasAgentMode) {
+        // 智能体 → 普通聊天（模式切换）：KV 里是系统提示词 + 工具轮，必须重置，
+        // 本轮以最小 prefill 重放纯对话历史。
+        debugPrint('[ChatNotifier] Agent→plain mode switch: resetContext()');
+        await _inference.resetContext();
+      }
+      _currentKvWasAgentMode = false;
+      _currentKvPersonaId = null;
     }
-    _currentKvWasAgentMode = false;
-    _currentKvPersonaId = null;
 
     try {
       // Step 2: Save user message first (so it's available in history for template)
@@ -462,7 +575,7 @@ class ChatNotifier extends StateNotifier<bool> {
         debugPrint('[ChatNotifier] Listening to token stream...');
         // 过滤「用户主动停止」产生的 DioException：点停止时 API 会抛
         // [request cancelled]，属正常停止信号，静默丢弃而非当成发送失败。
-        final tokenStream = _suppressUserCancelled(stream);
+        final tokenStream = _suppressUserCancelled(stream, turn);
 
         // --- Streaming thinking-tag filter (stateful, token-by-token) ---
         // `visible` holds the response shown to the user. Anything inside
@@ -610,8 +723,7 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     } finally {
       debugPrint('[ChatNotifier] sendMessage done, isGenerating=false');
-      state = false;
-      _ref.read(isGeneratingProvider.notifier).state = false;
+      _syncRunningState(); // 真正的注销由 sendMessage 顶层 finally 统一做
     }
   }
 
@@ -626,6 +738,7 @@ class ChatNotifier extends StateNotifier<bool> {
     List<String>? imagePaths,
     List<String>? attachmentPaths,
     String? audioPath,
+    required _ActiveTurn turn,
   }) async {
     final settings = _ref.read(settingsProvider);
     return _sendAgentMessageNew(
@@ -636,6 +749,7 @@ class ChatNotifier extends StateNotifier<bool> {
       attachmentPaths: attachmentPaths,
       audioPath: audioPath,
       settings: settings,
+      turn: turn,
     );
   }
 
@@ -656,6 +770,7 @@ class ChatNotifier extends StateNotifier<bool> {
     List<String>? attachmentPaths,
     String? audioPath,
     required InferenceSettings settings,
+    required _ActiveTurn turn,
   }) async {
     // ---- 附件注入（WP-A）：≤5 个，解析→工作区→prompt 指引 ----
     var effectivePrompt = prompt;
@@ -749,7 +864,14 @@ class ChatNotifier extends StateNotifier<bool> {
         }
       }
     }
-    _lastGenWasApi = useApi;
+    // 路由已定 → 补本地互斥校验（本地引擎单实例，本地回合彼此互斥）。
+    if (!useApi && _activeTurns.values.any((t) => t.local && t != turn)) {
+      return _rejectTurn(
+          conversationId,
+          '[本地模型同一时间只能执行一个会话：请等待其他会话完成，'
+          '或到对应会话点停止]');
+    }
+    turn.local = !useApi;
     // 多图本地降级：本地引擎视觉仅支持单张（native 单图），如实告知模型。
     if (extraImages > 0 && !useApi) {
       effectivePrompt =
@@ -759,31 +881,35 @@ class ChatNotifier extends StateNotifier<bool> {
     debugPrint('[ChatNotifier] new-agent route='
         '${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
 
-    state = true;
-    _ref.read(isGeneratingProvider.notifier).state = true;
+    turn.started = true;
+    _syncRunningState();
 
     // 会话切换时重置原生 KV 缓存（沿用现有策略）。
     // 激活人格是系统提示词前缀的组成部分：同会话内切换人格也必须重置。
+    // KV 归属本地引擎：仅本地路线管理（API 回合不动 KV 状态，避免把
+    // 并行运行中的本地回合上下文重置掉）。
     final personaId = settings.activePersonaId;
-    if (_currentKvConvId != conversationId) {
-      debugPrint(
-          '[ChatNotifier] new-agent conversation changed: resetContext()');
-      await _inference.resetContext();
-      _currentKvConvId = conversationId;
-    } else if (!_currentKvWasAgentMode) {
-      // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
-      // 由主循环带系统提示词/工具协议重建。
-      debugPrint(
-          '[ChatNotifier] plain→agent mode switch: resetContext()');
-      await _inference.resetContext();
-    } else if (_currentKvPersonaId != personaId) {
-      // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
-      debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
-          '$personaId): resetContext()');
-      await _inference.resetContext();
+    if (!useApi) {
+      if (_currentKvConvId != conversationId) {
+        debugPrint(
+            '[ChatNotifier] new-agent conversation changed: resetContext()');
+        await _inference.resetContext();
+        _currentKvConvId = conversationId;
+      } else if (!_currentKvWasAgentMode) {
+        // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
+        // 由主循环带系统提示词/工具协议重建。
+        debugPrint(
+            '[ChatNotifier] plain→agent mode switch: resetContext()');
+        await _inference.resetContext();
+      } else if (_currentKvPersonaId != personaId) {
+        // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
+        debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
+            '$personaId): resetContext()');
+        await _inference.resetContext();
+      }
+      _currentKvWasAgentMode = true;
+      _currentKvPersonaId = personaId;
     }
-    _currentKvWasAgentMode = true;
-    _currentKvPersonaId = personaId;
 
     // ---- 构建组件（复用旧路径共享件）----
     // 智能体模型标识：本地=模型 id；API=API 模型名。工具可见性过滤、
@@ -892,7 +1018,7 @@ class ChatNotifier extends StateNotifier<bool> {
         _sessionStore.importFromMessages(conversationId, history);
 
     // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
-    _ref.read(agentUiStateProvider.notifier).attach(sessionLog);
+    _ref.read(agentUiStateProvider.notifier).attach(conversationId, sessionLog);
 
     // ---- 子代理接缝（Phase 4）：in-process spawn/fork（设置可关）----
     // 复用当前 registry/adapter/模型/系统提示（同模型、同工具集，§10.6）。
@@ -937,7 +1063,7 @@ class ChatNotifier extends StateNotifier<bool> {
       final now = DateTime.now();
       if (now.difference(lastThinkingPush).inMilliseconds < 120) return;
       lastThinkingPush = now;
-      agentUi.setThinking(thinking);
+      agentUi.setThinking(conversationId, thinking);
     });
     // WP5：生成过程状态流（toolgen|chars|preview）——工具调用参数生成期
     // 可见流/思考流都为空，UI 靠它显示"正在生成工具调用参数…已 N 字"。
@@ -947,7 +1073,7 @@ class ChatNotifier extends StateNotifier<bool> {
       final parts = line.split('|');
       final chars = int.tryParse(parts.length > 1 ? parts[1] : '') ?? 0;
       final preview = parts.length > 2 ? parts[2] : '';
-      agentUi.setToolGen(chars: chars, preview: preview);
+      agentUi.setToolGen(conversationId, chars: chars, preview: preview);
     });
     final session = _AgentActivitySession(
       conversationId: conversationId,
@@ -1028,7 +1154,7 @@ class ChatNotifier extends StateNotifier<bool> {
       // 超长工具输出溢写：写 ApplicationSupport/agent_spill/，模型侧留摘要。
       spillStore: settings.agentSpillEnabled ? _writeSpillFile : null,
     );
-    _currentAgent = agent;
+    turn.agent = agent;
     String answer = '';
     TurnEndReason? reason;
     // 推理日志：本轮路由与请求规模（「推理日志」页可见，配合排障）。
@@ -1057,12 +1183,11 @@ class ChatNotifier extends StateNotifier<bool> {
       debugPrint('[ChatNotifier] new-agent error: $e\n$s');
     } finally {
       // 收尾（无论正常/异常/取消）：重置 UI 生成态 + 清 agent 引用 + 收流。
-      _currentAgent = null;
-      state = false;
-      _ref.read(isGeneratingProvider.notifier).state = false;
+      turn.agent = null;
+      _syncRunningState(); // 真正的注销由 sendMessage 顶层 finally 统一做
       // Phase 6：停止订阅本 turn 事件流（状态保留供面板展示本轮末态）。
-      _ref.read(agentUiStateProvider.notifier).detach();
-      agentUi.setToolGen(chars: 0); // WP5：清工具参数生成提示
+      _ref.read(agentUiStateProvider.notifier).detach(conversationId);
+      agentUi.setToolGen(conversationId, chars: 0); // WP5：清工具参数生成提示
       sub?.cancel();
       await thinkingSub.cancel();
       await statusSub.cancel();
@@ -1132,7 +1257,8 @@ class ChatNotifier extends StateNotifier<bool> {
     // 各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程痕迹消息
     // ——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
     // timestamp 取回答前偏移，保证排序为 [工具活动] → [思考存档] → [回答]。
-    final finishedThinking = List<String>.from(agentUi.state.thinkingHistory);
+    final finishedThinking = List<String>.from(
+        agentUi.state[conversationId]?.thinkingHistory ?? const []);
     for (var i = 0; i < finishedThinking.length; i++) {
       final block = finishedThinking[i].trim();
       if (block.isEmpty) continue;
@@ -1332,35 +1458,48 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
-  Future<void> stopGeneration() async {
-    // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
-    // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
-    _userCancelled = true;
-    // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
-    final agent = _currentAgent;
-    if (agent != null && agent.isRunning) {
-      debugPrint('[ChatNotifier] stopGeneration: cancel agent turn');
-      await agent.cancel();
-      return;
-    }
-    // 普通聊天：直接中止 native/API。
-    if (_lastGenWasApi) {
-      _ref.read(openAiServiceProvider).stop();
-    } else {
-      await _inference.stopGeneration();
+  ///
+  /// 多会话并发：[conversationId] 非空只停该会话的回合（聊天页停止按钮）；
+  /// 为空停**全部**活跃回合（模型卸载前调用，避免引擎被并行回合占用）。
+  Future<void> stopGeneration({String? conversationId}) async {
+    final ids = conversationId != null
+        ? (_activeTurns.containsKey(conversationId)
+            ? [conversationId]
+            : const <String>[])
+        : _activeTurns.keys.toList();
+    for (final id in ids) {
+      final turn = _activeTurns[id];
+      if (turn == null) continue;
+      // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
+      // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
+      turn.userCancelled = true;
+      // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
+      final agent = turn.agent;
+      if (agent != null && agent.isRunning) {
+        debugPrint('[ChatNotifier] stopGeneration: cancel agent turn conv=$id');
+        await agent.cancel();
+        continue;
+      }
+      // 普通聊天：直接中止 native/API。
+      if (turn.local) {
+        await _inference.stopGeneration();
+      } else {
+        _ref.read(openAiServiceProvider).stop();
+      }
     }
   }
 
   /// 过滤掉「用户主动停止」产生的 [DioException] 取消异常。
   /// 用户点停止时 API 会抛 `request cancelled`，属正常停止信号；仅在此情况
   /// 下静默丢弃，否则原样重抛由调用方兜底（真实网络/服务端错误仍会上报）。
-  Stream<String> _suppressUserCancelled(Stream<String> source) async* {
+  Stream<String> _suppressUserCancelled(
+      Stream<String> source, _ActiveTurn turn) async* {
     try {
       await for (final token in source) {
         yield token;
       }
     } on DioException {
-      if (_userCancelled) return;
+      if (turn.userCancelled) return;
       rethrow;
     }
   }

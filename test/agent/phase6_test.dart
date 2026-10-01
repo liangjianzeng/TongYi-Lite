@@ -3,7 +3,6 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/session/event.dart';
 import 'package:tongyi_lite/agent/session/log.dart';
@@ -66,39 +65,44 @@ void main() {
   });
 
   group('AgentUiStateNotifier reducer', () {
+    // 多会话并发（槽位）：状态按会话分键，测试统一取 conv-a 的快照。
+    const kConv = 'conv-a';
     late SessionLog log;
     late AgentUiStateNotifier n;
+
+    AgentUiState st([String conv = kConv]) =>
+        n.state[conv] ?? const AgentUiState();
 
     setUp(() {
       log = SessionLog.fromEvents([]);
       n = AgentUiStateNotifier();
-      n.attach(log);
+      n.attach(kConv, log);
     });
 
     tearDown(() {
-      n.detach();
+      n.detach(kConv);
       log.dispose();
     });
 
     test('step 边界把流式思考落档为历史块（工作流可回看）', () {
-      n.setThinking('第一步思考内容');
+      n.setThinking(kConv, '第一步思考内容');
       log.append(kEventStepStart, {'turn': 1, 'step': 2});
-      expect(n.state.thinkingHistory, ['第一步思考内容']);
-      expect(n.state.thinking, isEmpty);
+      expect(st().thinkingHistory, ['第一步思考内容']);
+      expect(st().thinking, isEmpty);
 
-      n.setThinking('第二步思考');
+      n.setThinking(kConv, '第二步思考');
       log.append(kEventTurnEnd, {'reason': 'completed'});
-      expect(n.state.thinkingHistory, ['第一步思考内容', '第二步思考']);
-      expect(n.state.thinking, isEmpty);
-      expect(n.state.running, isFalse);
+      expect(st().thinkingHistory, ['第一步思考内容', '第二步思考']);
+      expect(st().thinking, isEmpty);
+      expect(st().running, isFalse);
     });
 
     test('turn/start → running + turn；step/start → step', () {
       log.append(kEventTurnStart, {'turn': 3});
-      expect(n.state.running, isTrue);
-      expect(n.state.turn, 3);
+      expect(st().running, isTrue);
+      expect(st().turn, 3);
       log.append(kEventStepStart, {'turn': 3, 'step': 2});
-      expect(n.state.step, 2);
+      expect(st().step, 2);
     });
 
     test('tool/call → 卡片（含参数）；tool/result → done', () {
@@ -107,41 +111,41 @@ void main() {
         'name': 'get_time',
         'arguments': {'tz': 'Asia/Shanghai'},
       });
-      expect(n.state.tools.length, 1);
-      expect(n.state.tools.first.status, ToolUiStatus.executing);
-      expect(n.state.tools.first.arguments['tz'], 'Asia/Shanghai');
+      expect(st().tools.length, 1);
+      expect(st().tools.first.status, ToolUiStatus.executing);
+      expect(st().tools.first.arguments['tz'], 'Asia/Shanghai');
 
       log.append(kEventToolResult,
           {'callId': 'c1', 'name': 'get_time', 'content': '12:00', 'isError': false});
-      expect(n.state.tools.first.status, ToolUiStatus.done);
-      expect(n.state.tools.first.result, '12:00');
+      expect(st().tools.first.status, ToolUiStatus.done);
+      expect(st().tools.first.result, '12:00');
     });
 
     test('tool/result isError → failed', () {
       log.append(kEventToolCall, {'callId': 'c2', 'name': 'shell'});
       log.append(kEventToolResult,
           {'callId': 'c2', 'name': 'shell', 'content': 'boom', 'isError': true});
-      expect(n.state.tools.first.status, ToolUiStatus.failed);
-      expect(n.state.tools.first.isError, isTrue);
+      expect(st().tools.first.status, ToolUiStatus.failed);
+      expect(st().tools.first.isError, isTrue);
     });
 
     test('llm/retry → retryAttempt；turn/end 清零', () {
       log.append(kEventLlmRetry, {'turn': 1, 'step': 1, 'retries': 2});
-      expect(n.state.retryAttempt, 2);
+      expect(st().retryAttempt, 2);
       log.append(kEventTurnEnd, {'turn': 1, 'reason': 'completed'});
-      expect(n.state.running, isFalse);
-      expect(n.state.retryAttempt, 0);
-      expect(n.state.lastError, isNull);
+      expect(st().running, isFalse);
+      expect(st().retryAttempt, 0);
+      expect(st().lastError, isNull);
     });
 
     test('compaction/summary → compacted', () {
       log.append(kEventCompactionSummary, {'content': '摘要'});
-      expect(n.state.compacted, isTrue);
+      expect(st().compacted, isTrue);
     });
 
     test('turn/end reason=error（String 形态）→ lastError', () {
       log.append(kEventTurnEnd, {'turn': 1, 'reason': 'error'});
-      expect(n.state.lastError, isNotNull);
+      expect(st().lastError, isNotNull);
     });
 
     test('turn/end reason=Map 形态（崩溃修复）兼容', () {
@@ -149,25 +153,56 @@ void main() {
         'turn': 1,
         'reason': {'kind': 'interrupted'},
       });
-      expect(n.state.running, isFalse);
-      expect(n.state.lastError, isNull);
+      expect(st().running, isFalse);
+      expect(st().lastError, isNull);
     });
 
     test('detach 后事件不再进 state（状态保留）', () {
       log.append(kEventTurnStart, {'turn': 1});
-      n.detach();
+      n.detach(kConv);
       log.append(kEventToolCall, {'callId': 'cX', 'name': 'x'});
-      expect(n.state.tools, isEmpty);
-      expect(n.state.running, isTrue); // 末态保留
+      expect(st().tools, isEmpty);
+      expect(st().running, isTrue); // 末态保留
     });
 
     test('attach 新 log 重置状态', () {
       log.append(kEventTurnStart, {'turn': 9});
       final log2 = SessionLog.fromEvents([]);
-      n.attach(log2);
-      expect(n.state.turn, 0);
-      expect(n.state.running, isFalse);
+      n.attach(kConv, log2);
+      expect(st().turn, 0);
+      expect(st().running, isFalse);
       log2.dispose();
+    });
+
+    test('多会话并发：两个会话的事件流互不串台', () {
+      const kConvB = 'conv-b';
+      final logB = SessionLog.fromEvents([]);
+      n.attach(kConvB, logB);
+      try {
+        log.append(kEventTurnStart, {'turn': 1});
+        log.append(kEventToolCall, {'callId': 'a1', 'name': 'web_search'});
+        logB.append(kEventTurnStart, {'turn': 5});
+        logB.append(kEventToolCall, {'callId': 'b1', 'name': 'get_time'});
+
+        expect(st().turn, 1);
+        expect(st().tools.single.name, 'web_search');
+        expect(st(kConvB).turn, 5);
+        expect(st(kConvB).tools.single.name, 'get_time');
+
+        // 思考流同样分键。
+        n.setThinking(kConv, 'A 思考');
+        n.setThinking(kConvB, 'B 思考');
+        expect(st().thinking, 'A 思考');
+        expect(st(kConvB).thinking, 'B 思考');
+
+        // 会话 B 结束不影响会话 A 的 running 态。
+        logB.append(kEventTurnEnd, {'reason': 'completed'});
+        expect(st(kConvB).running, isFalse);
+        expect(st().running, isTrue);
+      } finally {
+        n.detach(kConvB);
+        logB.dispose();
+      }
     });
   });
 

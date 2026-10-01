@@ -90,6 +90,28 @@ void main() {
           {'maxRounds': 4, 'nctx': 32768});
     });
 
+    test('并发会话槽位：默认 1，往返一致，解析夹紧 1~4', () {
+      const s = InferenceSettings();
+      expect(s.agentMaxConcurrentTurns, 1);
+      final restored = InferenceSettings.fromJson(s.toJson());
+      expect(restored.agentMaxConcurrentTurns, 1);
+
+      final custom = InferenceSettings.fromJson(
+          {'agentMaxConcurrentTurns': 3});
+      expect(custom.agentMaxConcurrentTurns, 3);
+      expect(InferenceSettings.fromJson(custom.toJson()).agentMaxConcurrentTurns,
+          3);
+      // 越界值夹紧（手改 JSON 防御）。
+      expect(
+          InferenceSettings.fromJson({'agentMaxConcurrentTurns': 99})
+              .agentMaxConcurrentTurns,
+          4);
+      expect(
+          InferenceSettings.fromJson({'agentMaxConcurrentTurns': 0})
+              .agentMaxConcurrentTurns,
+          1);
+    });
+
     test('旧配置（无 agent 字段）加载 → 默认值，向后兼容', () {
       final old = InferenceSettings.fromJson({
         'enableGpu': true,
