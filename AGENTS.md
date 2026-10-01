@@ -940,3 +940,56 @@ release 内 libtongyilite_jni/libturnip_freedreno/libhardware/libggml-* 全在�
 **回归**：test/agent+services+providers 全量 **402 项 + 2 skip 全绿**（新增
 phase6 双会话隔离用例、settings 槽位往返/夹紧、checkTurnAdmission 5 用例）；
 analyze 0 error（剩余 warning 均为旧代码既有）。
+
+- **2026-10-01 13:13 最新构建（cbf8a6e：多会话并发槽位 + PDF PdfBox 原生桥合并后）**：
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` —
+  app-debug.apk 140193795 B（已装小米13：Tailscale 100.70.7.18:5555，无线 adb，
+  全新安装 versionCode=16 / 0.2.8）、app-release.apk 59848057 B（含 pdfbox 依赖变大）。
+  字符串级验收过：debug kernel UTF-8 `并发会话槽位`5/`checkTurnAdmission`3/
+  `NativePdfService`3；release libapp.so UTF-16LE `并发会话槽位`1/`无文本层`1 +
+  ASCII `runningTurnsProvider`2；dex 含 PdfExtracter + `com.dgxspark.tongyilite/pdf`
+  channel；签名 CN=TongYiLite 核对过。**小米13 无线 adb 址录**：Tailscale peer
+  `xiaomi-13` = 100.70.7.18（首连需手机点允许 USB 调试授权）。
+
+## 2026-10-01 Dev Agent SSH 定案：dartssh2↔openssh 10.5 全链路打通 + SshKeyGen 四处格式 bug 修复
+
+> 接 Phase E 遗留真机验证。对照实验（dartssh2 fork 连开发机 openssh 9.5 全握手通过、
+> 连手机 Termux openssh 10.5 无响应）后继续排查，终局全链路 `AUTHED` + `echo ok` 通过。
+
+**① "sshd 无响应" = per-source penalty，不是 dartssh2 bug**：OpenSSH 10.x
+`PerSourcePenalties` 默认开，认证失败（authfail）/未认证即断（noauth）都会给源 IP
+记内存态惩罚，被罚期间**接受 TCP 但不发 banner**（表现 = 连上后 20s 超时）。
+手机场景所有连接源都是 127.0.0.1（adb forward / 本机 nc 皆然），且**反复探测会续罚**，
+等 1-2 分钟不够（crash 类单次 90s、上限 5×）。**重启 sshd 即清零**（force-stop
+com.termux + 拉起后 adb 注入 `sshd` 即可），重启后 banner 秒回。
+⚠️ 排障时别用连接探测轰炸被罚的 sshd；判别方法 = 换源 IP 连通性对照。
+
+**② SshKeyGen/解码层四处格式 bug（逐一实锤 + 修复，全部已过 OpenSSH 验收）**：
+- **checkint 是两个相同 uint32（共 8 字节），不是 uint64×2**。Phase E 曾把
+  dartssh2 fork 改成 `readUint64 ×2` 迁就 SshKeyGen 的 `_u64×2` 坏输出——**修错了层**：
+  生成器+读取器自洽（app 内测试连接能过）但与 OpenSSH 官方（sshkey.c
+  `buffer_get_int ×2`）及 fork 自己 encode 端（`writeUint32 ×2`）全冲突，官方密钥
+  被拒、ssh 工具链不认。已双向改回 uint32 规范（ssh_credentials.dart +
+  dartssh2/ssh_key_pair.dart）。
+- **padding 字节必须 = 1,2,3,…N**（原来填常量 padLen=0x05×N；新版 OpenSSH 逐字节校验）。
+- **公钥单行少内层长度前缀**：`_encodeOpenSshPublic` 原来 `b.add(pub)` 裸拼，
+  authorized_keys 行 = string(type)+string(pub) 共 51 字节；坏行（47B）sshd 直接拒 →
+  **这就是认证失败的直接根因**（真机 authorized_keys 里装的正是坏格式旧公钥）。
+- **PEM 末尾必须有换行符**（`-----END…-----\n`），否则 OpenSSH 10.3p1+OpenSSL 3.5
+  报 `error in libcrypto: unsupported`。
+
+**验收链**：`ssh-keygen -y -f <pem>` 输出与 .pub 逐字一致（此前恒拒）；真机
+authorized_keys 覆盖装新公钥 → dartssh2 fork 完整 KEX/认证/`echo ok` 全通；
+test/services/settings_service_test 两个钉死坏格式的断言已改为规范断言
+（公钥 blob 47→51 字节 + 内层 32 长度前缀；PEM 尾换行）。全量 test/agent+services+
+providers **402 项 + 2 skip 全绿**。
+
+**真机取证工具链（本次新增）**：Termux 无存储授权时 /sdcard 写不进——先
+`appops set com.termux MANAGE_EXTERNAL_STORAGE allow` 再注入命令导出到 /sdcard 用 adb 读；
+uiautomator 读不到 Termux 终端文本；注入前先 `input keyevent 66` 清半行/确认 shell 就绪，
+Termux 冷启动要等 5-6s 再注入；`cat ~/.ssh/...` 在 adb shell 身份下看不到 Termux home。
+无线 adb 瞬断会吞 adb forward（forward --list 看着在但连 18022 被拒）——remove 再 add。
+临时复现测试 test/ssh_repro_live_test.dart、ssh_keygen_regen_test.dart 已按约定删除；
+复现密钥留存 build/ssh_repro_key.pem/.pub（真机 authorized_keys 已装对应公钥）。
+- **坑总结文档**：dartssh2 fork / SshKeyGen / Termux sshd 全部坑点与验收工具链
+  已整理进 `docs/dartssh2_termux_pitfalls_2026-10-01.md`（SSH 排障先读它）。

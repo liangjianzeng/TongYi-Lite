@@ -174,18 +174,20 @@ final class SshKeyGen {
     //   checkint×2（同一 64 位随机；openssh 官方为 32 位随机转 64 位）
     //   + string(type) + string(pub) + string(priv) + comment + padding
     final privBlob = BytesBuilder(copy: false);
-    final check = Random.secure().nextInt(0x7FFFFFFF);
-    privBlob.add(_u64(check));
-    privBlob.add(_u64(check));
+    // checkint = 同一 32 位随机写两次（openssh-key-v1 规范，非 uint64）
+    final check = Random.secure().nextInt(0xFFFFFFFF);
+    privBlob.add(_u32(check));
+    privBlob.add(_u32(check));
     final priv = Uint8List.fromList([...seed, ...pub]);
     _writeString(privBlob, _type);
     _writeString(privBlob, pub);
     _writeString(privBlob, priv);
     _writeString(privBlob, '');
-    // padding：填充至 8 字节块（至少 1 字节，值 = 填充字节数）
+    // padding：填充至 8 字节块（至少 1 字节），第 i 字节值 = i+1
+    // （openssh-key-v1 规范如此，新版 OpenSSH 会逐字节校验，填错直接拒收）
     final padLen = 8 - (privBlob.length % 8);
     for (var i = 0; i < padLen; i++) {
-      privBlob.addByte(padLen);
+      privBlob.addByte(i + 1);
     }
     _writeString(b, privBlob.toBytes());
     final body = base64Encode(b.toBytes());
@@ -196,14 +198,14 @@ final class SshKeyGen {
     ];
     return '-----BEGIN OPENSSH PRIVATE KEY-----\n'
         '${lines.join('\n')}\n'
-        '-----END OPENSSH PRIVATE KEY-----';
+        '-----END OPENSSH PRIVATE KEY-----\n';
   }
 
-  /// OpenSSH 公钥格式：`ssh-ed25519 <base64(类型串 + 公钥)>`。
+  /// OpenSSH 公钥格式：`ssh-ed25519 <base64(string(type) + string(pub))>`。
   static String _encodeOpenSshPublic(Uint8List pub) {
     final b = BytesBuilder(copy: false);
     _writeString(b, _type);
-    b.add(pub);
+    _writeString(b, pub);
     return '$_type ${base64Encode(b.toBytes())}';
   }
 
@@ -220,17 +222,6 @@ final class SshKeyGen {
         (v >> 24) & 0xFF,
         (v >> 16) & 0xFF,
         (v >> 8) & 0xFF,
-        v & 0xFF,
-      ]);
-
-  static Uint8List _u64(int v) => Uint8List.fromList([
-        ((v >> 56) & 0xFF),
-        ((v >> 48) & 0xFF),
-        ((v >> 40) & 0xFF),
-        ((v >> 32) & 0xFF),
-        ((v >> 24) & 0xFF),
-        ((v >> 16) & 0xFF),
-        ((v >> 8) & 0xFF),
         v & 0xFF,
       ]);
 }
