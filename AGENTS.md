@@ -993,3 +993,12 @@ Termux 冷启动要等 5-6s 再注入；`cat ~/.ssh/...` 在 adb shell 身份下
 复现密钥留存 build/ssh_repro_key.pem/.pub（真机 authorized_keys 已装对应公钥）。
 - **坑总结文档**：dartssh2 fork / SshKeyGen / Termux sshd 全部坑点与验收工具链
   已整理进 `docs/dartssh2_termux_pitfalls_2026-10-01.md`（SSH 排障先读它）。
+- **2026-10-01 14:55 最新构建（5afdccd：SSH 密钥格式修复）**：
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` —
+  app-debug.apk 140191854 B（已覆盖安装小米13，versionCode=16 / 0.2.8，Success）、
+  app-release.apk 59847585 B。验收：debug kernel 与 intermediates 副本**字节一致**、
+  标记 `并发会话槽位`5/`sshConfigs`62/`开发者`11 命中；release libapp.so 与
+  flutter-assemble/app.so 仅 ELF section 头顺序不同（gradle strip 重排，代码 section
+  一致非陈旧产物），UTF-16LE `并发会话槽位`1/`开发者`4 + ASCII `checkTurnAdmission`1
+  命中；签名 CN=TongYiLite 核对过。本次修复为纯逻辑改动、无新增运行时字符串，
+  行为级验收 = 真机 dartssh2↔openssh 10.5 全链路 AUTHED + echo ok（见上节）。
