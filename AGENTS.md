@@ -817,3 +817,57 @@ Vulkan supports_op 无 PTQ1_0/PQ2_0 → fallback CPU。**升级后新坑**：裸
 
 **遗留（明早用户确认）**：真机 Termux sshd 配置与连接/SFTP/git 闭环验证；SSH 密钥明文存储（对齐
 apiModels 先例，后续迁移 secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。
+
+## 2026-10-01 Dev Agent 配置自动化（独立开发者 Tab + 自动向导 + 连接可靠性，Phase E）
+
+> 用户纠偏："你能自己做的，千万不要让我自己去配置操作…你本来是个AI" + "把这个设置页单独做
+> 个开发者 tab，优化设置项智能友好些，远程 pc 根本没地方配置" + bug："测试连接成功但页面一直
+> 显示未连接 / 123.py 创建报成功是假的"。
+
+**① 独立「开发者」Tab**（settings_screen `_DevTab`，智能体与关于之间）：开发模式开关卡 +
+连接配置卡（Termux/远程PC 各自独立入口）+ 工作区卡 + 危险命令策略卡。Dev 方法块从
+_AgentTabState 整体迁出（备份 build/dev_block.dart，已弃用）。
+
+**② 多 SSH 配置**：`SshConfig` 加 `id`/`name`；settings_service 单 `sshConfig` → `List<SshConfig>
+sshConfigs`（旧单配置 JSON 自动迁移为列表首项）；settings_provider 改 `upsertSshConfig`（按 id
+覆盖）/`removeSshConfig`；DevWorkspace 加 `sshConfigId` 绑定配置（工作区 ↔ 连接目标）。
+
+**③ 自动配置向导（唯一人工动作 = 复制粘贴一条命令）**：
+- `SshKeyGen`（pinenacl 生成 ed25519 seed+pub，手编 openssh-key-v1 私钥：magic+none/none/empty
+  kdf、nkeys=1、checkint=同一 uint64 ×2、string(type)+string(pub)+string(priv)+comment、8B 块
+  padding、70 列 base64）。
+- **Termux 向导**：探测 127.0.0.1:8022 → 自动生成密钥 → 显示一键安装命令（`pkg install -y
+  openssh && sshd && mkdir -p ~/.ssh && echo '<pubkey>' > ~/.ssh/authorized_keys && chmod 600 …;
+  echo "USER=$(whoami)" > /sdcard/tongyilite_ssh_user.txt …; echo ALL_DONE`，分号+`|| true` 兜底）
+  → 自动读取共享文件用户名（MANAGE_EXTERNAL_STORAGE 已有，读
+  /storage/emulated/0/tongyilite_ssh_user.txt，失败回退对话框预填 u0_ 提示）→ 保存配置自动连接。
+- **远程 PC 向导**：host/port（host 唯一必填）→ 自动生成密钥 → 显示公钥追加命令
+  （`echo '<pubkey>' >> ~/.ssh/authorized_keys`）→ 用户名 → 保存并连接。
+- **工作区自动建目录**：连接后 `echo $HOME` → `mkdir -p $HOME/projects/<sanitize>` → remotePath
+  自动填入；后端下拉绑定 `sshConfigId`。
+- 连接状态监听：_DevTabState 复用 _devStateListener（SshEnvironmentService +
+  DevSessionController），否则"测试成功但页面未连接"复现。
+
+**④ 连接可靠性（防幻觉成功）**：工具执行前 `ensureConnected`（按工作区 sshConfigId 自动连接，
+复用已连接配置）；执行失败断连自动重连一次重试；错误统一 `[SSH]` 前缀区分未配置/连接失败/执行
+失败；dev_context 加【如实报告铁律】——工具返回 error 必须如实复述，未确认结果不得编造"已创建/
+已提交/已验证"。ssh_exec/read/write 超时 15s→30s。
+
+**⑤ dartssh2 fork 两处修复（本次抓到，openssh 密钥解析错位）**：
+- checkint 是同一 **uint64 写两次**（openssh 官方 = `arc4random_uniform(2^32)` 转 uint64 → 高
+  32 位为 0），fork 原用 readUint32 ×2 读高/低半字节 → 官方密钥恒报 Invalid private key；
+  改 readUint64 ×2（SshKeyGen 生成全量 64 位随机同样兼容）。
+- openssh-key-v1 的 publicKeys 数组元素是**嵌套 blob** = string(type)+string(pub)，不是裸
+  type 串 → 编码时 `_writeString(b, pubBlob.toBytes())`；privateKeysBlob 整体包成一个 string
+  （checkint×2+type+pub+priv+comment+padding 内嵌）。
+
+**回归**：test/agent+services+providers 全量 **393 项 + 2 skip 全绿**（新增 SshKeyGen 3 项
+（fromPem 往返/公钥 47B 解码/每次随机）、settings Dev 组多配置+迁移、dev_workspace
+sshConfigId roundtrip/清除/旧 JSON 兼容）；analyze 0 error。
+**2026-10-01 09:51 重打包（v0.2.8+16）**：app-debug.apk 140176027 B / app-release.apk
+47340915 B；字符串级验收过（debug kernel UTF-8 `开发者`11/`自动配置`4/`连接 Termux`2/`sshConfigs`62/
+`_DevTab`9；release libapp.so UTF-16LE `开发者`4/`连接 Termux`1 + 单字节 `_DevTab`2/`sshConfigs`1；
+release 内 libtongyilite_jni/libturnip_freedreno/libhardware/libggml-* 全在）。
+
+> **遗留（明早用户确认）**：真机 Termux 一键命令闭环 + SFTP/git 验证；SSH 密钥明文存储（后续迁
+> secure storage）；远端 AGENTS.md 读取（Phase D SFTP）；Dev 工具逐个开关（MVP 只做总开关）。

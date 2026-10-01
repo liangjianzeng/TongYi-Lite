@@ -36,6 +36,8 @@ dependencies:
   archive: ^3.6.1
   # 智能体回答 markdown 美化渲染
   flutter_markdown: ^0.7.4+3
+  # Dev Agent：自动生成 ed25519 SSH 密钥对（TweetNaCl 移植，无外部依赖）
+  pinenacl: ^0.6.0
 
 
 dependency_overrides:

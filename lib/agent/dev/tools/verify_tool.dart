@@ -5,10 +5,11 @@
 library;
 
 import '../../tool_definition.dart';
+import '../ssh/ssh_credentials.dart' show SshConfig;
 import 'ssh_tools.dart' show sshRunInWorkspace;
 
 /// run_tests：执行测试/构建命令。
-ToolDefinition createRunTestsTool() {
+ToolDefinition createRunTestsTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'run_tests',
     description:
@@ -37,7 +38,7 @@ ToolDefinition createRunTestsTool() {
         return cwd.isEmpty
             ? 'cd $root && $command'
             : 'cd $root/$cwd && $command';
-      }, timeout: const Duration(seconds: 60));
+      }, timeout: const Duration(seconds: 60), sshConfigs: sshConfigs);
     },
   );
 }

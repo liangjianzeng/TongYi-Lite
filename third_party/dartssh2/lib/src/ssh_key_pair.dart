@@ -154,8 +154,12 @@ class OpenSSHKeyPairs {
     }
 
     final reader = SSHMessageReader(unencryptedKeys);
-    final checkInt1 = reader.readUint32();
-    final checkInt2 = reader.readUint32();
+    // openssh-key-v1 的 checkint 是同一 uint64 写两次（openssh 官方：
+    // `arc4random_uniform(2^32)` 转 uint64 → 高 32 位为 0；SshKeyGen 生成
+    // 全量 64 位随机）。此前用 readUint32 读两次会把高/低半字节误判为
+    // 两个 checkint → 官方密钥恒报 Invalid private key（2026-10-01 定案）。
+    final checkInt1 = reader.readUint64();
+    final checkInt2 = reader.readUint64();
     if (checkInt1 != checkInt2) {
       if (isEncrypted) {
         throw SSHKeyDecryptError('Invalid passphrase');

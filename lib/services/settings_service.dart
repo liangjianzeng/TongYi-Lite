@@ -263,8 +263,9 @@ class InferenceSettings {
   /// 由 DevSessionController 持久化激活态；此处仅保存设置默认值。
   final String devWorkspaceId;
 
-  /// SSH 开发环境配置（Termux/远程电脑）。null = 未配置。
-  final SshConfig? sshConfig;
+  /// SSH 开发环境配置列表（Termux / 远程电脑可各一条，按 [SshConfig.id] 区分）。
+  /// 空列表 = 未配置。旧版单配置 [SshConfig] 自动迁移为列表首项。
+  final List<SshConfig> sshConfigs;
 
   /// 危险命令策略：'deny'（默认，黑名单直接拒绝）/ 'ask'（转用户审批）。
   final String dangerousCommandPolicy;
@@ -353,15 +354,24 @@ class InferenceSettings {
     // ---- 开发模式（Dev Agent）----
     this.devModeEnabled = false,
     this.devWorkspaceId = 'default',
-    SshConfig? sshConfig,
+    List<SshConfig>? sshConfigs,
     this.dangerousCommandPolicy = 'deny',
-  })  : sshConfig = sshConfig ?? null,
+  })  : sshConfigs = sshConfigs ?? const [],
         mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
         agentByModel = agentByModel ?? const {},
         agentPersonas = agentPersonas ?? const [];
+
+  /// 便捷读取：按 id 取 SSH 配置（空 id / 找不到 → null）。
+  SshConfig? sshConfigFor(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final c in sshConfigs) {
+      if (c.id == id) return c;
+    }
+    return null;
+  }
 
   /// 便捷读取：某个模型是否启??MTP（未配置视为关闭）??
   bool mtpEnabled(String modelId) => mtpEnabledByModel[modelId] ?? false;
@@ -487,7 +497,7 @@ class InferenceSettings {
     // ---- 开发模式（Dev Agent）----
     bool? devModeEnabled,
     String? devWorkspaceId,
-    SshConfig? sshConfig,
+    List<SshConfig>? sshConfigs,
     String? dangerousCommandPolicy,
     bool clearSshConfig = false,
   }) {
@@ -575,7 +585,7 @@ class InferenceSettings {
       activePersonaId: activePersonaId ?? this.activePersonaId,
       devModeEnabled: devModeEnabled ?? this.devModeEnabled,
       devWorkspaceId: devWorkspaceId ?? this.devWorkspaceId,
-      sshConfig: clearSshConfig ? null : (sshConfig ?? this.sshConfig),
+      sshConfigs: clearSshConfig ? const [] : (sshConfigs ?? this.sshConfigs),
       dangerousCommandPolicy:
           dangerousCommandPolicy ?? this.dangerousCommandPolicy,
     );
@@ -646,7 +656,7 @@ class InferenceSettings {
         // ---- 开发模式（Dev Agent）----
         'devModeEnabled': devModeEnabled,
         'devWorkspaceId': devWorkspaceId,
-        'sshConfig': sshConfig?.toJson(),
+        'sshConfigs': [for (final c in sshConfigs) c.toJson()],
         'dangerousCommandPolicy': dangerousCommandPolicy,
       };
 
@@ -750,12 +760,36 @@ class InferenceSettings {
       // ---- 开发模式（Dev Agent）：旧配置缺字段时默认关闭（向后兼容）----
       devModeEnabled: json['devModeEnabled'] as bool? ?? false,
       devWorkspaceId: json['devWorkspaceId'] as String? ?? 'default',
-      sshConfig: json['sshConfig'] is Map<String, dynamic>
-          ? SshConfig.fromJson(json['sshConfig'] as Map<String, dynamic>)
-          : null,
+      // 新版列表优先；旧版单配置自动迁移为列表首项。
+      sshConfigs: _parseSshConfigs(json['sshConfigs'], json['sshConfig']),
       dangerousCommandPolicy:
           json['dangerousCommandPolicy'] as String? ?? 'deny',
     );
+  }
+
+  /// 解析 SSH 配置列表；缺列表时回退旧版单配置（迁移为列表首项）。
+  static List<SshConfig> _parseSshConfigs(Object? raw, Object? legacy) {
+    if (raw is List) {
+      final list = <SshConfig>[];
+      for (final e in raw) {
+        if (e is Map<String, dynamic>) {
+          final c = SshConfig.fromJson(e);
+          if (c != null) list.add(c);
+        } else if (e is Map) {
+          final c = SshConfig.fromJson(Map<String, dynamic>.from(e));
+          if (c != null) list.add(c);
+        }
+      }
+      return list;
+    }
+    if (legacy is Map<String, dynamic>) {
+      final c = SshConfig.fromJson(legacy);
+      if (c != null) return [c];
+    } else if (legacy is Map) {
+      final c = SshConfig.fromJson(Map<String, dynamic>.from(legacy));
+      if (c != null) return [c];
+    }
+    return const [];
   }
 
   /// 解析自定义人格列表；格式非法时返回空列表（不崩，回落标准人格）。

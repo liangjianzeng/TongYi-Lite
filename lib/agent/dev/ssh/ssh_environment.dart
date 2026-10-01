@@ -9,6 +9,7 @@
 /// 不暴露任何服务端口。连接层不感知工具/沙箱，工具层负责护栏。
 library;
 
+import 'dart:async' show TimeoutException;
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -52,6 +53,13 @@ final class SshEnvironmentService extends ChangeNotifier {
   /// 是否已认证连接。
   bool get isConnected =>
       _status == SshStatus.connected && _client != null;
+
+  /// 确保连接：未连接 → 连接；配置不同 → 自动切换；配置相同 → 复用。
+  /// 返回是否处于已连接状态；失败原因见 [lastError]。
+  Future<bool> ensureConnected(SshConfig config) async {
+    await connect(config);
+    return isConnected;
+  }
 
   /// 建立连接（幂等：已连接且配置相同则跳过）。
   Future<void> connect(SshConfig config) async {
@@ -153,12 +161,24 @@ final class SshEnvironmentService extends ChangeNotifier {
   ///
   /// 注意（DSH-Phone 教训）：`client.run` 本身就是经远程 bash 执行，
   /// 不要再包一层 `sh -c '...'`（单引号嵌套冲突）。
+  ///
+  /// 超时处理（真机教训）：`client.run` 等待 stdout+stderr 双流 EOF，
+  /// 命令 fork 后台进程等会让 stderr 不关 → future 永久挂起；超时后必须
+  /// 断开连接（触发底层流关闭，释放泄漏的 session 通道），并把状态标记
+  /// 断开，提示接入层"已断开可重连"。
   Future<String?> run(String command,
       {Duration timeout = const Duration(seconds: 15)}) async {
     final client = _client;
     if (client == null) throw const SocketException('SSH 未连接');
-    final bytes = await client.run(command).timeout(timeout);
-    return _decode(bytes);
+    try {
+      final bytes = await client.run(command).timeout(timeout);
+      return _decode(bytes);
+    } on TimeoutException {
+      debugPrint('[SSH] run timeout: $command');
+      _onTransportClosed(client, failed: true);
+      throw const SocketException(
+          'SSH 命令执行超时，连接已断开（可重新连接后重试）');
+    }
   }
 
   /// 远程读取文件（SFTP），上限 [kSshMaxReadBytes]；失败抛异常。

@@ -43,6 +43,10 @@ final class DevWorkspace {
   final WorkspaceBackend backend;
   final String? remotePath;
   final String? localMirror;
+
+  /// 绑定的 SSH 连接配置 id（仅远端后端；空 = 使用当前/默认配置）。
+  final String? sshConfigId;
+
   final bool gitManaged;
   final String? repoUrl;
   final String? currentBranch;
@@ -54,6 +58,7 @@ final class DevWorkspace {
     this.backend = WorkspaceBackend.localApp,
     this.remotePath,
     this.localMirror,
+    this.sshConfigId,
     this.gitManaged = false,
     this.repoUrl,
     this.currentBranch,
@@ -72,12 +77,14 @@ final class DevWorkspace {
     WorkspaceBackend? backend,
     String? remotePath,
     String? localMirror,
+    String? sshConfigId,
     bool? gitManaged,
     String? repoUrl,
     String? currentBranch,
     DateTime? lastSyncedAt,
     bool clearRemotePath = false,
     bool clearLocalMirror = false,
+    bool clearSshConfigId = false,
     bool clearRepoUrl = false,
     bool clearBranch = false,
   }) {
@@ -87,6 +94,8 @@ final class DevWorkspace {
       backend: backend ?? this.backend,
       remotePath: clearRemotePath ? null : (remotePath ?? this.remotePath),
       localMirror: clearLocalMirror ? null : (localMirror ?? this.localMirror),
+      sshConfigId:
+          clearSshConfigId ? null : (sshConfigId ?? this.sshConfigId),
       gitManaged: gitManaged ?? this.gitManaged,
       repoUrl: clearRepoUrl ? null : (repoUrl ?? this.repoUrl),
       currentBranch: clearBranch ? null : (currentBranch ?? this.currentBranch),
@@ -100,6 +109,7 @@ final class DevWorkspace {
         'backend': backend.name,
         if (remotePath != null) 'remotePath': remotePath,
         if (localMirror != null) 'localMirror': localMirror,
+        if (sshConfigId != null && sshConfigId!.isNotEmpty) 'sshConfigId': sshConfigId,
         'gitManaged': gitManaged,
         if (repoUrl != null) 'repoUrl': repoUrl,
         if (currentBranch != null) 'currentBranch': currentBranch,
@@ -120,6 +130,7 @@ final class DevWorkspace {
       backend: backend,
       remotePath: (json['remotePath'] as String?)?.trim(),
       localMirror: (json['localMirror'] as String?)?.trim(),
+      sshConfigId: (json['sshConfigId'] as String?)?.trim(),
       gitManaged: (json['gitManaged'] as bool?) ?? false,
       repoUrl: (json['repoUrl'] as String?)?.trim(),
       currentBranch: (json['currentBranch'] as String?)?.trim(),
