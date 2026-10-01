@@ -71,9 +71,9 @@ void main() {
     final pdf = PreparedAttachment(
       displayName: 'scan.pdf',
       storedPath: '/x/scan.pdf',
-      note: 'PDF 暂不支持文本解析（v1），已原样保存',
+      note: 'PDF 无文本层（可能是扫描件/图片型），已原样保存',
     );
-    expect(buildAttachmentPromptBlock([pdf]), contains('暂不支持文本解析'));
+    expect(buildAttachmentPromptBlock([pdf]), contains('已原样保存'));
 
     expect(buildAttachmentPromptBlock(const []), isEmpty);
   });

@@ -70,6 +70,15 @@ android {
         jvmTarget = "17"
     }
 
+    // PdfBox-Android 是 Android 库，PDFParser 内部调 android.util.Log.d（stubbed）。
+    // isReturnDefaultValues=true 让未 mock 的 Android 方法返回默认值（0）而非抛
+    // "Method d in android.util.Log not mocked"，从而可在纯 JVM 单测中跑 PdfBox。
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
     // CMake native build
     externalNativeBuild {
         cmake {
@@ -114,6 +123,14 @@ extensions.configure<ChaquopyExtension>("chaquopy") {
             // 涓嶅０鏄庝换浣曚緷璧栵細CPython 鏍囧噯搴撳嵆鍙窇鑴氭湰锛坖son/re/urllib 绛夛級銆?
         }
     }
+}
+
+dependencies {
+    // PDF 文本抽取：TomRoush/PdfBox-Android（Apache PDFBox 2.0.27 移植，类包名 com.tom_roush.pdfbox）。
+    // 替代原手搓纯 Dart 解析器（2026-09-30 已删）；纯 JVM 依赖，不碰 NDK。
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    // PdfExtracter 的 JVM 单测（fixture PDF 在 src/test/resources）。
+    testImplementation("junit:junit:4.13.2")
 }
 
 flutter {

@@ -1,0 +1,3 @@
+# PDF 是二进制：禁止 autocrlf 改写字节（xref/流 Length 会错位，测试 fixture 会坏）
+*.pdf binary
+*.afm -text

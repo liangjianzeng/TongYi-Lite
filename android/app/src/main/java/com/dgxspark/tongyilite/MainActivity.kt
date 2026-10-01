@@ -32,6 +32,8 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import org.json.JSONObject
 
 
@@ -137,6 +139,18 @@ class MainActivity : FlutterActivity() {
                 "openFile"   -> handleOpenFile(call, result)
                 "shareText"  -> handleShareText(call, result)
                 else         -> result.notImplemented()
+            }
+        }
+
+        // PDF 文本抽取桥（WP-PDF）：智能体附件 PDF 解析。TomRoush/PdfBox-Android，
+        // 替代原手搓纯 Dart 解析器；PDFBoxResourceLoader.init 惰性确保初始化。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/pdf"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "extractPdfText" -> handleExtractPdfText(call, result)
+                else             -> result.notImplemented()
             }
         }
     }
@@ -317,6 +331,18 @@ class MainActivity : FlutterActivity() {
     // python_exec：单线程池执行脚本（串行防 GIL 争用），超时由 Future.get 兜底。
     private val pythonExecutor = Executors.newSingleThreadExecutor()
 
+    // pdf：PDF 抽取（TomRoush/PdfBox-Android）。
+    // 单线程池执行 load+getText（原生/阻塞），主线程只收回调；init 惰性且只一次。
+    private val pdfExecutor = Executors.newSingleThreadExecutor()
+    private var pdfBoxInited = false
+
+    private fun ensurePdfBoxInit() {
+        if (!pdfBoxInited) {
+            PDFBoxResourceLoader.init(this)
+            pdfBoxInited = true
+        }
+    }
+
     /**
      * 确保 Chaquopy 已显式启动：文档要求 Android 上必须
      * `Python.start(AndroidPlatform(context))`，仅靠 getInstance() 的
@@ -352,6 +378,28 @@ class MainActivity : FlutterActivity() {
             }
             runOnMain { result.success(probe) }
         }.start()
+    }
+
+    private fun handleExtractPdfText(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("path")
+        if (path.isNullOrBlank()) {
+            result.error("NO_PATH", "缺少 path 参数", null)
+            return
+        }
+        pdfExecutor.submit {
+            try {
+                ensurePdfBoxInit()
+                val res = PdfExtracter.extract(path)
+                runOnMain {
+                    result.success(mapOf("ok" to true, "pageCount" to res.pageCount, "pages" to listOf(res.text)))
+                }
+            } catch (e: InvalidPasswordException) {
+                runOnMain { result.error("ENCRYPTED", "PDF 加密且需要密码", null) }
+            } catch (e: Exception) {
+                logE("handleExtractPdfText", "extractPdfText error: ${e.message}", e)
+                runOnMain { result.error("PDF_ERROR", e.message, null) }
+            }
+        }
     }
 
     private fun handleRunPythonScript(call: MethodCall, result: MethodChannel.Result) {
