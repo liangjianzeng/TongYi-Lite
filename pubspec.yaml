@@ -31,8 +31,8 @@ dependencies:
   # 智能体文件上传（办公格式附件注入，≤5 个）
   file_picker: ^8.1.2
   # 附件解析：docx/xlsx/pptx 本质是 zip（纯 Dart 解包抽 XML 文本）。
-  # PDF 全文抽取暂缺纯 Dart 可行方案（pdf_text_extraction 与 SDK 约束冲突），
-  # v1 对 PDF 原样保存并在提示词中明确告知模型不可解析。
+  # PDF 全文抽取走 TomRoush/PdfBox-Android 原生桥（Kotlin，见 native_pdf_service.dart），
+  # 已替代原手搓纯 Dart 解析器（pdf_text_extractor，2026-09-30 弃用删除）。
   archive: ^3.6.1
   # 智能体回答 markdown 美化渲染
   flutter_markdown: ^0.7.4+3

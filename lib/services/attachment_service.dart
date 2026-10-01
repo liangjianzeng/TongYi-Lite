@@ -3,7 +3,8 @@
 /// - 白名单格式（常用办公/文本），单会话 ≤[kMaxAttachments] 个、单个 ≤20MB；
 /// - 原件复制到 `documents/uploads/<convId>/`（会话可追溯）；
 /// - 解析出纯文本：txt/md/csv/json/log/代码类直接读；docx/pptx/xlsx 是 zip，
-///   经 archive 解包抽 XML 文本；pdf 无纯 Dart 可行解析（v1 原样保留并注明）；
+///   经 archive 解包抽 XML 文本；pdf 走 TomRoush/PdfBox-Android 原生桥
+///   （MethodChannel com.dgxspark.tongyilite/pdf，见 native_pdf_service.dart）；
 /// - 解析文本写入 `workspace/_uploads/<名>.txt` 供模型 read_file 阅读，
 ///   短文本（≤[kInlineChars]）由调用方内联进 prompt 让模型立即看到。
 library;
@@ -14,6 +15,8 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+
+import 'native_pdf_service.dart';
 
 /// 单会话附件上限。
 const int kMaxAttachments = 5;
@@ -94,11 +97,21 @@ Future<(PreparedAttachment?, String?)> prepareAttachment(
   final storedPath = p.join(uploadDir.path, storedName);
   file.copySync(storedPath);
 
-  // 2) 解析文本（pdf 除外）。
+  // 2) 解析文本。
   String? text;
   String? note;
   if (ext == '.pdf') {
-    note = 'PDF 暂不支持文本解析（v1），已原样保存';
+    final r = await NativePdfService.extractText(storedPath);
+    if (!r.ok) {
+      text = null;
+      note = r.note ?? 'PDF 解析失败，已原样保存';
+    } else {
+      text = r.joined.trim();
+      if (text.isEmpty) {
+        text = null;
+        note = 'PDF 无文本层（可能是扫描件/图片型），已原样保存';
+      }
+    }
   } else if (ext == '.docx') {
     text = docxToText(storedPath);
   } else if (ext == '.pptx') {
