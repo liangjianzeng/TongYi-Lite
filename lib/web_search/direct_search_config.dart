@@ -33,9 +33,11 @@ class DirectSearchConfig {
   final String userAgent;
 
   const DirectSearchConfig({
+    // 默认引擎：sogou + 360 真机验证返回真实时效新闻（含"6小时前"等），
+    // bing 作百科/通用补充。baidu 真机被反爬（536 字节验证页）故不放默认。
     this.engines = const [
       DirectEngine.bing,
-      DirectEngine.baidu,
+      DirectEngine.sogou,
       DirectEngine.quake
     ],
     this.maxResults = 8,
