@@ -1225,7 +1225,8 @@ class ChatNotifier extends StateNotifier<bool> {
     // Dev Agent 工具组（git/plan/ssh/run_tests）：仅开发模式注册。
     for (final tool in createBuiltinTools(
         webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn,
-        includeDevTools: settings.devModeEnabled)) {
+        includeDevTools: settings.devModeEnabled,
+        devSshConfigs: settings.sshConfigs)) {
       registry.register(tool);
     }
     // 开发模式关闭兜底：不暴露任何 Dev 工具（零回归）。

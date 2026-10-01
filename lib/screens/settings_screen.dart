@@ -20,12 +20,15 @@ import 'package:uuid/uuid.dart';
 import '../agent/dev/dev.dart'
     show
         DevSessionController,
+        DevStore,
         DevWorkspace,
         SshAuthType,
         SshConfig,
         SshEnvironmentService,
+        SshKeyGen,
         SshStatus,
-        WorkspaceBackend;
+        WorkspaceBackend,
+        sanitizeWorkspaceDirName;
 import '../agent/skills/provider.dart'
     show loadUserSkills, writeUserSkill, deleteUserSkill;
 import '../agent/skills/skill.dart' show Skill, loadBuiltinSkills;
@@ -143,6 +146,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             Tab(icon: Icon(Icons.cloud, size: 18), text: 'API 接入'),
             Tab(icon: Icon(Icons.memory, size: 18), text: '推理引擎'),
             Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
+            Tab(icon: Icon(Icons.construction, size: 18), text: '开发者'),
             Tab(icon: Icon(Icons.info, size: 18), text: '关于'),
           ],
         ),
@@ -154,6 +158,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _ApiTab(),
           const _InferenceEngineTab(),
           const _AgentTab(),
+          const _DevTab(),
           const _buildAboutTab(),
         ],
       ),
@@ -1590,11 +1595,31 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   String? _agentsMdPath;
   int _agentsMdLen = -1;
 
+  /// 开发模式状态监听：SSH 连接/工作区激活是异步后台变化，
+  /// 必须监听 ChangeNotifier 才能实时刷新（否则"测试连接成功但页面显示未连接"）。
+  VoidCallback? _devStateListener;
+
   @override
   void initState() {
     super.initState();
     _rescanSkills();
     _loadAgentsMdInfo();
+    final listener = () {
+      if (mounted) setState(() {});
+    };
+    _devStateListener = listener;
+    SshEnvironmentService.instance.addListener(listener);
+    DevSessionController.instance.addListener(listener);
+  }
+
+  @override
+  void dispose() {
+    final listener = _devStateListener;
+    if (listener != null) {
+      SshEnvironmentService.instance.removeListener(listener);
+      DevSessionController.instance.removeListener(listener);
+    }
+    super.dispose();
   }
 
   Future<void> _rescanSkills() async {
@@ -1690,453 +1715,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
         ),
       ),
     );
-  }
-
-  // ================= ①c 开发模式（Dev Agent） =================
-
-  /// 开发模式卡：总开关 + 工作区管理 + SSH 开发环境 + 危险命令策略。
-  Widget _buildDevModeCard(BuildContext context, InferenceSettings settings,
-      SettingsNotifier notifier) {
-    final dev = DevSessionController.instance;
-    final ssh = SshEnvironmentService.instance;
-    final sshStatusLabel = switch (ssh.status) {
-      SshStatus.idle => '未连接',
-      SshStatus.connecting => '连接中…',
-      SshStatus.connected => '已连接',
-      SshStatus.failed => '失败',
-    };
-    final sshStatusColor = switch (ssh.status) {
-      SshStatus.connected => Colors.green,
-      SshStatus.connecting => Colors.orange,
-      SshStatus.failed => Colors.red,
-      _ => Colors.grey,
-    };
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildToggleTitle(
-              '🛠️ 开发模式（Dev Agent）',
-              settings.devModeEnabled,
-              (v) async {
-                await notifier.setDevModeEnabled(v);
-                if (mounted) setState(() {});
-              },
-              subtitle: settings.devModeEnabled
-                  ? '开：注册 git/规划/SSH/测试工具，注入工作区上下文，'
-                      '可连接 Termux/远程电脑做 AI 编程'
-                  : '关：现有智能体行为完全不变（默认）',
-            ),
-            // ---- 工作区管理 ----
-            _buildSectionHeader('📁 工作区', context),
-            Text(
-              '文件/记忆工具跟随激活工作区；远端工作区（Termux/电脑）'
-              '用 ssh_exec / ssh_read_file / ssh_write_file 操作',
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final ws in dev.workspaces)
-                  ChoiceChip(
-                    label: Text(ws.isDefault ? ws.name : ws.name),
-                    selected: dev.activeWorkspaceId == ws.id,
-                    onSelected: (_) async {
-                      await dev.switchWorkspace(ws.id);
-                      await notifier.setDevWorkspaceId(ws.id);
-                      if (mounted) setState(() {});
-                    },
-                  ),
-                TextButton.icon(
-                  onPressed: () => _showWorkspaceDialog(context),
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('新增'),
-                ),
-              ],
-            ),
-            // ---- SSH 开发环境 ----
-            const SizedBox(height: 8),
-            _buildSectionHeader('🔌 SSH 开发环境', context),
-            Row(
-              children: [
-                Icon(Icons.circle, size: 10, color: sshStatusColor),
-                const SizedBox(width: 6),
-                Text(sshStatusLabel,
-                    style: const TextStyle(fontSize: 12)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    settings.sshConfig == null
-                        ? '未配置（默认目标 Termux：127.0.0.1:8022）'
-                        : '${settings.sshConfig!.username}@'
-                            '${settings.sshConfig!.host}:${settings.sshConfig!.port}',
-                    style: TextStyle(
-                        fontSize: 12, color: Colors.grey.shade600),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 4,
-              children: [
-                TextButton.icon(
-                  onPressed: () => _showSshConfigDialog(context, settings),
-                  icon: const Icon(Icons.settings, size: 18),
-                  label: const Text('配置'),
-                ),
-                TextButton.icon(
-                  onPressed: settings.sshConfig == null
-                      ? null
-                      : () => _testSshConnection(context, settings),
-                  icon: const Icon(Icons.wifi_tethering, size: 18),
-                  label: const Text('测试连接'),
-                ),
-                TextButton.icon(
-                  onPressed: ssh.isConnected
-                      ? () async {
-                          await ssh.disconnect();
-                          if (mounted) setState(() {});
-                        }
-                      : null,
-                  icon: const Icon(Icons.link_off, size: 18),
-                  label: const Text('断开'),
-                ),
-                TextButton.icon(
-                  onPressed: () async {
-                    await ssh.clearHostKeyFingerprints();
-                    if (mounted) setState(() {});
-                  },
-                  icon: const Icon(Icons.fingerprint, size: 18),
-                  label: const Text('清除指纹'),
-                ),
-              ],
-            ),
-            // ---- 危险命令策略 ----
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Text('危险命令策略：', style: const TextStyle(fontSize: 12)),
-                const SizedBox(width: 8),
-                ChoiceChip(
-                  label: const Text('拒绝'),
-                  selected: settings.dangerousCommandPolicy == 'deny',
-                  onSelected: (_) => notifier.setDangerousCommandPolicy('deny'),
-                ),
-                const SizedBox(width: 8),
-                ChoiceChip(
-                  label: const Text('每次审批'),
-                  selected: settings.dangerousCommandPolicy == 'ask',
-                  onSelected: (_) => notifier.setDangerousCommandPolicy('ask'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '拒绝 = 黑名单命令直接拦截（rm -rf /、reboot、git push --force 等）；'
-              '每次审批 = 转用户确认。',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 新增/编辑工作区对话框。
-  Future<void> _showWorkspaceDialog(BuildContext context,
-      {DevWorkspace? existing}) async {
-    final nameCtrl =
-        TextEditingController(text: existing?.name ?? '');
-    final pathCtrl = TextEditingController(
-        text: existing?.remotePath ?? '');
-    final formKey = GlobalKey<FormState>();
-    WorkspaceBackend backend = existing?.backend ?? WorkspaceBackend.localApp;
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setState) => AlertDialog(
-          title: Text(existing == null ? '新增工作区' : '编辑工作区'),
-          content: Form(
-            key: formKey,
-            child: SizedBox(
-              width: 420,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: nameCtrl,
-                    autofocus: existing == null,
-                    decoration: const InputDecoration(
-                      labelText: '工作区名称',
-                      hintText: '如：TongYi-Lite / 我的博客项目',
-                      border: OutlineInputBorder(),
-                    ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? '请填写名称' : null,
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<WorkspaceBackend>(
-                    value: backend,
-                    decoration: const InputDecoration(
-                      labelText: '后端',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(
-                        value: WorkspaceBackend.localApp,
-                        child: Text('本地沙盒（app 内目录）'),
-                      ),
-                      DropdownMenuItem(
-                        value: WorkspaceBackend.termux,
-                        child: Text('Termux（手机 Linux）'),
-                      ),
-                      DropdownMenuItem(
-                        value: WorkspaceBackend.remotePc,
-                        child: Text('远程电脑'),
-                      ),
-                    ],
-                    onChanged: (v) =>
-                        setState(() => backend = v ?? WorkspaceBackend.localApp),
-                  ),
-                  if (backend != WorkspaceBackend.localApp) ...[
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: pathCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '远端路径（绝对路径）',
-                        hintText: '如：/data/data/com.termux/files/home/proj',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? '远端路径必填' : null,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                if (!formKey.currentState!.validate()) return;
-                Navigator.pop(ctx, true);
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (saved != true) return;
-    final name = nameCtrl.text.trim();
-    if (name.isEmpty) return;
-    final id = existing?.id ??
-        'ws_${DateTime.now().millisecondsSinceEpoch}';
-    await DevSessionController.instance.upsertWorkspace(DevWorkspace(
-      id: id,
-      name: name,
-      backend: backend,
-      remotePath: backend == WorkspaceBackend.localApp
-          ? null
-          : pathCtrl.text.trim(),
-    ));
-    if (mounted) setState(() {});
-  }
-
-  /// SSH 配置对话框（host/port/user/auth）。
-  Future<void> _showSshConfigDialog(
-      BuildContext context, InferenceSettings settings) async {
-    final cfg = settings.sshConfig;
-    final hostCtrl = TextEditingController(text: cfg?.host ?? '127.0.0.1');
-    final portCtrl = TextEditingController(
-        text: (cfg?.port ?? 8022).toString());
-    final userCtrl = TextEditingController(text: cfg?.username ?? '');
-    final passCtrl = TextEditingController(text: cfg?.password ?? '');
-    final keyCtrl = TextEditingController(text: cfg?.privateKeyPem ?? '');
-    final formKey = GlobalKey<FormState>();
-    var authType = cfg?.authType ?? SshAuthType.key;
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setState) => AlertDialog(
-          title: const Text('SSH 开发环境配置'),
-          content: Form(
-            key: formKey,
-            child: SizedBox(
-              width: 460,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextFormField(
-                      controller: hostCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '主机',
-                        hintText: '127.0.0.1（Termux 默认）',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? '请填写主机' : null,
-                    ),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: portCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: '端口',
-                        hintText: '8022（Termux sshd 默认）',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (v) =>
-                          (int.tryParse(v ?? '') ?? 0) <= 0 ? '端口非法' : null,
-                    ),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: userCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '用户名',
-                        hintText: 'Termux 用户（手机用户 ID，如 u0_a123）',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? '请填写用户名' : null,
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        ChoiceChip(
-                          label: const Text('密钥'),
-                          selected: authType == SshAuthType.key,
-                          onSelected: (_) => setState(
-                              () => authType = SshAuthType.key),
-                        ),
-                        const SizedBox(width: 8),
-                        ChoiceChip(
-                          label: const Text('密码'),
-                          selected: authType == SshAuthType.password,
-                          onSelected: (_) => setState(
-                              () => authType = SshAuthType.password),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    if (authType == SshAuthType.key)
-                      TextFormField(
-                        controller: keyCtrl,
-                        minLines: 4,
-                        maxLines: 8,
-                        decoration: const InputDecoration(
-                          labelText: '私钥（PEM / OpenSSH）',
-                          hintText: 'ed25519 私钥内容（含 BEGIN 行）',
-                          border: OutlineInputBorder(),
-                          alignLabelWithHint: true,
-                        ),
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? '请填写私钥'
-                            : null,
-                      )
-                    else
-                      TextFormField(
-                        controller: passCtrl,
-                        decoration: const InputDecoration(
-                          labelText: '密码',
-                          border: OutlineInputBorder(),
-                        ),
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? '请填写密码'
-                            : null,
-                      ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '提示：Termux 安装后执行 `pkg install openssh && sshd`，'
-                      '默认监听 127.0.0.1:8022。密钥推荐 ed25519（openssh 新版'
-                      '默认弃用 ssh-rsa）。',
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey.shade600),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                if (!formKey.currentState!.validate()) return;
-                Navigator.pop(ctx, true);
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (saved != true) return;
-    final notifier = ref.read(settingsProvider.notifier);
-    await notifier.setSshConfig(SshConfig(
-      host: hostCtrl.text.trim(),
-      port: int.tryParse(portCtrl.text.trim()) ?? 8022,
-      username: userCtrl.text.trim(),
-      authType: authType,
-      privateKeyPem:
-          authType == SshAuthType.key ? keyCtrl.text.trim() : null,
-      password:
-          authType == SshAuthType.password ? passCtrl.text.trim() : null,
-    ));
-    if (mounted) setState(() {});
-  }
-
-  /// 测试 SSH 连接（不改变连接状态，仅验证认证）。
-  Future<void> _testSshConnection(
-      BuildContext context, InferenceSettings settings) async {
-    final cfg = settings.sshConfig;
-    if (cfg == null) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => const AlertDialog(
-        content: Row(
-          children: [
-            SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            SizedBox(width: 16),
-            Text('正在测试 SSH 连接…'),
-          ],
-        ),
-      ),
-    );
-    try {
-      final ssh = SshEnvironmentService.instance;
-      // 复用 connect 的认证路径；测试后断开（不占用连接）。
-      await ssh.connect(cfg);
-      await ssh.disconnect();
-      if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('✅ SSH 连接测试成功')));
-    } catch (e) {
-      if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ SSH 连接测试失败：$e')));
-    }
   }
 
   /// 新增/编辑人格对话框。保存走 [SettingsNotifier.upsertPersona]（trim + 校验）。
@@ -2506,11 +2084,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 
           // ================= ①b 人格（Persona） =================
           _buildPersonaCard(context, settings, notifier),
-
-          const SizedBox(height: 10),
-
-          // ================= ①c 开发模式（Dev Agent） =================
-          _buildDevModeCard(context, settings, notifier),
 
           const SizedBox(height: 10),
 
@@ -3714,6 +3287,1024 @@ Future<void> unloadModelAndNotify(
 // =========================================================================
 // Tab 2: API 接入（OpenAI 兼容远程模型）
 // =========================================================================
+
+// =========================================================================
+// 开发者 Tab：开发模式 + SSH 自动连接向导 + 工作区管理 + 危险命令策略。
+// 设计目标（用户反馈）：能自动的绝不手填——密钥自动生成、命令一键复制、
+// 连接自动建立、Termux 项目目录自动创建。用户只做"复制粘贴一条命令"。
+// =========================================================================
+class _DevTab extends ConsumerStatefulWidget {
+  const _DevTab();
+
+  @override
+  ConsumerState<_DevTab> createState() => _DevTabState();
+}
+
+class _DevTabState extends ConsumerState<_DevTab> {
+  /// SSH 连接/工作区激活是异步后台变化，监听 ChangeNotifier 实时刷新。
+  VoidCallback? _devStateListener;
+
+  @override
+  void initState() {
+    super.initState();
+    final listener = () {
+      if (mounted) setState(() {});
+    };
+    _devStateListener = listener;
+    SshEnvironmentService.instance.addListener(listener);
+    DevSessionController.instance.addListener(listener);
+  }
+
+  @override
+  void dispose() {
+    final listener = _devStateListener;
+    if (listener != null) {
+      SshEnvironmentService.instance.removeListener(listener);
+      DevSessionController.instance.removeListener(listener);
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildModeCard(settings, notifier),
+          const SizedBox(height: 10),
+          _buildConnectionsCard(settings, notifier),
+          const SizedBox(height: 10),
+          _buildWorkspacesCard(settings, notifier),
+          const SizedBox(height: 10),
+          _buildSafetyCard(settings, notifier),
+        ],
+      ),
+    );
+  }
+
+  // ---------------- 总开关 ----------------
+
+  Widget _buildModeCard(InferenceSettings settings, SettingsNotifier notifier) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildToggleTitle(
+              '🛠️ 开发模式（Dev Agent）',
+              settings.devModeEnabled,
+              (v) async {
+                await notifier.setDevModeEnabled(v);
+                if (mounted) setState(() {});
+              },
+              subtitle: settings.devModeEnabled
+                  ? '开：注册 git/规划/SSH/测试工具，可连 Termux/远程电脑做 AI 编程'
+                  : '关：现有智能体行为完全不变（默认）',
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '开启后：对话里的智能体可直接读写手机 Termux / 远程电脑上的项目，'
+              '执行 git 提交、跑测试。连接与密钥由下方向导自动完成。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------------- 连接配置（多目标：Termux / 远程电脑） ----------------
+
+  Widget _buildConnectionsCard(
+      InferenceSettings settings, SettingsNotifier notifier) {
+    final ssh = SshEnvironmentService.instance;
+    final sshStatusLabel = switch (ssh.status) {
+      SshStatus.idle => '未连接',
+      SshStatus.connecting => '连接中…',
+      SshStatus.connected => '已连接',
+      SshStatus.failed => '失败',
+    };
+    final sshStatusColor = switch (ssh.status) {
+      SshStatus.connected => Colors.green,
+      SshStatus.connecting => Colors.orange,
+      SshStatus.failed => Colors.red,
+      _ => Colors.grey,
+    };
+    final configs = settings.sshConfigs;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('🔌 SSH 连接（自动配置向导）', context),
+            Row(
+              children: [
+                Icon(Icons.circle, size: 10, color: sshStatusColor),
+                const SizedBox(width: 6),
+                Text(sshStatusLabel, style: const TextStyle(fontSize: 12)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    ssh.isConnected
+                        ? '${ssh.activeConfig?.name ?? ''} '
+                            '${ssh.activeConfig?.username ?? ''}@'
+                            '${ssh.activeConfig?.host ?? ''}:'
+                            '${ssh.activeConfig?.port ?? ''}'
+                        : '未连接（向导自动完成，无需手填密钥）',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.grey.shade600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // 自动向导入口：Termux / 远程电脑 各一个。
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: () => _showTermuxSetupDialog(context, notifier),
+                  icon: const Icon(Icons.smartphone, size: 16),
+                  label: const Text('📱 连接 Termux'),
+                ),
+                FilledButton.icon(
+                  onPressed: () => _showRemotePcSetupDialog(context, notifier),
+                  icon: const Icon(Icons.desktop_windows, size: 16),
+                  label: const Text('💻 连接远程电脑'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '向导会自动生成 ed25519 密钥、给出"复制即用"的安装命令，'
+              '并自动连接。Termux 无需 root。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            // 配置列表（已保存的连接目标）。
+            if (configs.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final cfg in configs)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${cfg.name.isEmpty ? '配置' : cfg.name} · '
+                          '${cfg.username.isEmpty ? '?' : cfg.username}@'
+                          '${cfg.host}:${cfg.port}',
+                          style: const TextStyle(fontSize: 12),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () =>
+                            _showSshConfigDialog(context, notifier, existing: cfg),
+                        child: const Text('编辑'),
+                      ),
+                      TextButton(
+                        onPressed: () async {
+                          await notifier.removeSshConfig(cfg.id);
+                          if (ssh.activeConfig?.id == cfg.id) {
+                            await ssh.disconnect();
+                          }
+                          if (mounted) setState(() {});
+                        },
+                        child: const Text('删除'),
+                      ),
+                      TextButton(
+                        onPressed: () async {
+                          await _connectTo(cfg);
+                          if (mounted) setState(() {});
+                        },
+                        child: const Text('连接'),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            if (ssh.isConnected) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 4,
+                children: [
+                  TextButton.icon(
+                    onPressed: () async {
+                      await ssh.disconnect();
+                      if (mounted) setState(() {});
+                    },
+                    icon: const Icon(Icons.link_off, size: 18),
+                    label: const Text('断开'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () async {
+                      await ssh.clearHostKeyFingerprints();
+                      if (mounted) setState(() {});
+                    },
+                    icon: const Icon(Icons.fingerprint, size: 18),
+                    label: const Text('清除指纹'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 连接（保持连接；配置相同幂等复用，不同自动切换）。
+  Future<void> _connectTo(SshConfig cfg) async {
+    if (!cfg.isComplete) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('配置不完整：请先编辑补全用户名/密钥或密码')));
+      }
+      return;
+    }
+    try {
+      await SshEnvironmentService.instance.connect(cfg);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('✅ 已连接 ${cfg.name}')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('❌ 连接失败：$e')));
+      }
+    }
+  }
+
+  // ---------------- Termux 自动向导 ----------------
+
+  /// Termux 向导：探测 → 自动生成密钥 → 一键命令 → 用户名 → 自动连接。
+  Future<void> _showTermuxSetupDialog(
+      BuildContext context, SettingsNotifier notifier) async {
+    var step = 0; // 0: 探测+密钥准备  1: 显示命令  2: 用户名+连接
+    var probing = true;
+    var reachable = false;
+    var generated = false;
+    String? publicKey;
+    String? privateKeyPem;
+    var command = '';
+    var userName = '';
+    var connecting = false;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          Future<void> probeAndGen() async {
+            setState(() => probing = true);
+            // 探测 Termux sshd 默认端口。
+            reachable = await _probeTcp('127.0.0.1', 8022);
+            if (!generated) {
+              final keys = SshKeyGen.generate();
+              if (keys != null) {
+                generated = true;
+                publicKey = keys.publicKey;
+                privateKeyPem = keys.privateKeyPem;
+                command = _buildTermuxInstallCommand(keys.publicKey);
+              }
+            }
+            probing = false;
+            step = 1;
+            setState(() {});
+          }
+
+          Future<void> finishConnect() async {
+            setState(() => connecting = true);
+            userName = userName.trim();
+            final cfg = SshConfig.termuxTemplate.copyWith(
+              username: userName,
+              privateKeyPem: privateKeyPem,
+              authType: SshAuthType.key,
+            );
+            await notifier.upsertSshConfig(cfg);
+            try {
+              await SshEnvironmentService.instance.connect(cfg);
+            } catch (e) {
+              debugPrint('[Dev] termux connect failed: $e');
+            }
+            connecting = false;
+            if (ctx.mounted) Navigator.pop(ctx);
+          }
+
+          final dialog = AlertDialog(
+            title: const Text('📱 Termux 自动连接向导'),
+            content: SizedBox(
+              width: 480,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (step == 0)
+                      const Row(children: [
+                        SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2)),
+                        SizedBox(width: 12),
+                        Text('正在检测 Termux sshd（127.0.0.1:8022）…'),
+                      ])
+                    else if (step == 1) ...[
+                      Text(
+                        reachable
+                            ? '✅ 检测到 Termux sshd 正在运行'
+                            : '⚠️ 未检测到 sshd。请在 Termux 里执行：',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      if (!reachable) ...[
+                        const SizedBox(height: 6),
+                        _copyableCommand(ctx, 'pkg install -y openssh && sshd'),
+                      ],
+                      const SizedBox(height: 10),
+                      Text('🔑 已自动生成 ed25519 密钥。接下来只需做一件事：',
+                          style: const TextStyle(fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Text('在 Termux 里粘贴执行下面这条命令（安装公钥 + 写入用户名）：',
+                          style: const TextStyle(fontSize: 12)),
+                      const SizedBox(height: 6),
+                      _copyableCommand(ctx, command),
+                      const SizedBox(height: 10),
+                      Text('执行完成后，点下方「下一步」继续。',
+                          style: const TextStyle(fontSize: 12)),
+                    ] else ...[
+                      Text('输入 Termux 用户名，然后自动连接：',
+                          style: const TextStyle(fontSize: 13)),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: TextEditingController(text: userName),
+                        onChanged: (v) => userName = v,
+                        decoration: const InputDecoration(
+                          labelText: '用户名',
+                          hintText: '通常为 u0_aXXX（命令输出已自动写入，一般无需改）',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '命令会在 Termux 里把用户名写入共享文件，这里通常已自动填好。',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.grey.shade600),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              if (step == 1)
+                TextButton(
+                  onPressed: () {
+                    userName = _readSharedUserName() ?? '';
+                    setState(() {});
+                  },
+                  child: const Text('自动读取用户名'),
+                ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(step == 0 ? '取消' : '稍后再说'),
+              ),
+              if (step == 1)
+                FilledButton(
+                  onPressed: () => setState(() => step = 2),
+                  child: const Text('下一步'),
+                ),
+              if (step == 2)
+                FilledButton(
+                  onPressed: connecting ? null : finishConnect,
+                  child: Text(connecting ? '连接中…' : '✅ 连接'),
+                ),
+            ],
+          );
+          return dialog;
+        },
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
+  /// 远程电脑向导：host/port（唯一必填）+ 自动密钥 + 公钥命令 + 连接。
+  Future<void> _showRemotePcSetupDialog(
+      BuildContext context, SettingsNotifier notifier) async {
+    final hostCtrl = TextEditingController(text: '192.168.1.100');
+    final portCtrl = TextEditingController(text: '22');
+    final userCtrl = TextEditingController();
+    var generated = false;
+    String? publicKey;
+    String? privateKeyPem;
+    var command = '';
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('💻 远程电脑自动配置'),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: hostCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '电脑地址（唯一必填）',
+                      hintText: '局域网 IP 或主机名，如 192.168.1.100',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    controller: portCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '端口（默认 22）',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    controller: userCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '电脑用户名',
+                      hintText: '如：yourname（登录电脑的用户名）',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (!generated)
+                    FilledButton.icon(
+                      onPressed: () {
+                        final keys = SshKeyGen.generate();
+                        if (keys != null) {
+                          generated = true;
+                          publicKey = keys.publicKey;
+                          privateKeyPem = keys.privateKeyPem;
+                          command = _buildRemoteInstallCommand(keys.publicKey);
+                          setState(() {});
+                        }
+                      },
+                      icon: const Icon(Icons.key, size: 16),
+                      label: const Text('🔑 自动生成密钥'),
+                    )
+                  else ...[
+                    Text('在电脑上执行这条命令（添加公钥到 authorized_keys）：',
+                        style: const TextStyle(fontSize: 12)),
+                    const SizedBox(height: 6),
+                    _copyableCommand(ctx, command),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: generated
+                  ? () async {
+                      final host = hostCtrl.text.trim();
+                      final user = userCtrl.text.trim();
+                      if (host.isEmpty || user.isEmpty) {
+                        ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                            content: Text('请填写电脑地址与用户名')));
+                        return;
+                      }
+                      final cfg = SshConfig.remotePcTemplate.copyWith(
+                        host: host,
+                        port: int.tryParse(portCtrl.text.trim()) ?? 22,
+                        username: user,
+                        privateKeyPem: privateKeyPem,
+                        authType: SshAuthType.key,
+                      );
+                      await notifier.upsertSshConfig(cfg);
+                      Navigator.pop(ctx);
+                      await _connectTo(cfg);
+                    }
+                  : null,
+              child: const Text('保存并连接'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
+  /// 可复制的命令块（选中即复制）。
+  Widget _copyableCommand(BuildContext ctx, String command) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade900,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: SelectableText(
+              command,
+              style: const TextStyle(fontSize: 12, color: Colors.white),
+            ),
+          ),
+          IconButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: command));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('已复制，去粘贴执行即可')));
+              }
+            },
+            icon: const Icon(Icons.copy, size: 16, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// TCP 探测：目标地址是否可达（不认证，仅看 socket 能否连上）。
+  Future<bool> _probeTcp(String host, int port) async {
+    try {
+      final socket = await Socket.connect(host, port,
+          timeout: const Duration(seconds: 3));
+      socket.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 读取 Termux 写入共享文件的用户名（/sdcard/tongyilite_ssh_user.txt）。
+  String? _readSharedUserName() {
+    try {
+      final f = File('/storage/emulated/0/tongyilite_ssh_user.txt');
+      if (!f.existsSync()) return null;
+      final v = f.readAsStringSync().trim();
+      return v.isEmpty ? null : v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Termux 安装公钥 + 写用户名（一条复制即用；无存储权限不影响公钥安装）。
+  String _buildTermuxInstallCommand(String publicKey) {
+    return 'pkg install -y openssh 2>/dev/null; sshd 2>/dev/null; '
+        'mkdir -p ~/.ssh && echo "$publicKey" > ~/.ssh/authorized_keys && '
+        'chmod 600 ~/.ssh/authorized_keys; '
+        'echo "USER=\$(whoami)" > /sdcard/tongyilite_ssh_user.txt 2>/dev/null || true; '
+        'echo ALL_DONE';
+  }
+
+  /// 远程电脑添加公钥命令（追加，不覆盖已有公钥）。
+  String _buildRemoteInstallCommand(String publicKey) {
+    return 'mkdir -p ~/.ssh && echo "$publicKey" >> ~/.ssh/authorized_keys && '
+        'chmod 600 ~/.ssh/authorized_keys && echo ALL_DONE';
+  }
+
+  // ---------------- SSH 配置编辑 ----------------
+
+  /// 编辑指定配置（existing 为空则新建）。
+  Future<void> _showSshConfigDialog(BuildContext context,
+      SettingsNotifier notifier,
+      {SshConfig? existing}) async {
+    final cfg = existing;
+    final nameCtrl = TextEditingController(text: cfg?.name ?? '');
+    final hostCtrl = TextEditingController(text: cfg?.host ?? '127.0.0.1');
+    final portCtrl =
+        TextEditingController(text: (cfg?.port ?? 8022).toString());
+    final userCtrl = TextEditingController(text: cfg?.username ?? '');
+    final passCtrl = TextEditingController(text: cfg?.password ?? '');
+    final keyCtrl = TextEditingController(text: cfg?.privateKeyPem ?? '');
+    final formKey = GlobalKey<FormState>();
+    var authType = cfg?.authType ?? SshAuthType.key;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(existing == null ? '新增连接配置' : '编辑连接配置'),
+          content: Form(
+            key: formKey,
+            child: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '配置名称',
+                        hintText: '如：Termux / 家里电脑',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: hostCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '主机',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '请填写主机' : null,
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: portCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '端口',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (int.tryParse(v ?? '') ?? 0) <= 0 ? '端口非法' : null,
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: userCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '用户名',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '请填写用户名' : null,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        ChoiceChip(
+                          label: const Text('密钥'),
+                          selected: authType == SshAuthType.key,
+                          onSelected: (_) =>
+                              setState(() => authType = SshAuthType.key),
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('密码'),
+                          selected: authType == SshAuthType.password,
+                          onSelected: (_) => setState(
+                              () => authType = SshAuthType.password),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    if (authType == SshAuthType.key)
+                      TextFormField(
+                        controller: keyCtrl,
+                        minLines: 4,
+                        maxLines: 8,
+                        decoration: const InputDecoration(
+                          labelText: '私钥（PEM / OpenSSH）',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? '请填写私钥'
+                            : null,
+                      )
+                    else
+                      TextFormField(
+                        controller: passCtrl,
+                        decoration: const InputDecoration(
+                          labelText: '密码',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? '请填写密码'
+                            : null,
+                      ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '提示：密钥认证更安全。也可点「自动生成」让 app 生成 ed25519 密钥，'
+                      '再用向导里的命令把公钥装到对端。',
+                      style: TextStyle(
+                          fontSize: 11, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    await notifier.upsertSshConfig(SshConfig(
+      id: existing?.id ??
+          'ssh_${DateTime.now().millisecondsSinceEpoch}',
+      name: nameCtrl.text.trim(),
+      host: hostCtrl.text.trim(),
+      port: int.tryParse(portCtrl.text.trim()) ?? 8022,
+      username: userCtrl.text.trim(),
+      authType: authType,
+      privateKeyPem:
+          authType == SshAuthType.key ? keyCtrl.text.trim() : null,
+      password:
+          authType == SshAuthType.password ? passCtrl.text.trim() : null,
+    ));
+    if (mounted) setState(() {});
+  }
+
+  // ---------------- 工作区 ----------------
+
+  Widget _buildWorkspacesCard(
+      InferenceSettings settings, SettingsNotifier notifier) {
+    final dev = DevSessionController.instance;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('📁 工作区', context),
+            Text(
+              '文件/记忆工具跟随激活工作区；远端工作区（Termux/电脑）'
+              '用 ssh_exec / ssh_read_file / ssh_write_file 操作。'
+              '新增 Termux 工作区时可自动建目录。',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final ws in dev.workspaces)
+                  ChoiceChip(
+                    label: Text(ws.isDefault ? ws.name : ws.name),
+                    selected: dev.activeWorkspaceId == ws.id,
+                    onSelected: (_) async {
+                      await dev.switchWorkspace(ws.id);
+                      await notifier.setDevWorkspaceId(ws.id);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                TextButton.icon(
+                  onPressed: () => _showWorkspaceDialog(context, notifier),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新增'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 新增/编辑工作区对话框。
+  Future<void> _showWorkspaceDialog(BuildContext context,
+      SettingsNotifier notifier,
+      {DevWorkspace? existing}) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final pathCtrl =
+        TextEditingController(text: existing?.remotePath ?? '');
+    final formKey = GlobalKey<FormState>();
+    var backend = existing?.backend ?? WorkspaceBackend.localApp;
+    var sshConfigId = existing?.sshConfigId;
+    var creatingDir = false;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(existing == null ? '新增工作区' : '编辑工作区'),
+          content: Form(
+            key: formKey,
+            child: SizedBox(
+              width: 460,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: nameCtrl,
+                    autofocus: existing == null,
+                    decoration: const InputDecoration(
+                      labelText: '工作区名称',
+                      hintText: '如：TongYi-Lite / 我的博客项目',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写名称' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<WorkspaceBackend>(
+                    value: backend,
+                    decoration: const InputDecoration(
+                      labelText: '后端',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.localApp,
+                        child: Text('本地沙盒（app 内目录）'),
+                      ),
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.termux,
+                        child: Text('Termux（手机 Linux）'),
+                      ),
+                      DropdownMenuItem(
+                        value: WorkspaceBackend.remotePc,
+                        child: Text('远程电脑'),
+                      ),
+                    ],
+                    onChanged: (v) => setState(() =>
+                        backend = v ?? WorkspaceBackend.localApp),
+                  ),
+                  if (backend != WorkspaceBackend.localApp) ...[
+                    const SizedBox(height: 12),
+                    // 绑定连接配置。
+                    DropdownButtonFormField<String?>(
+                      value: sshConfigId,
+                      decoration: const InputDecoration(
+                        labelText: '绑定连接配置',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text('自动（第一份可用配置）'),
+                        ),
+                        for (final cfg in ref.read(settingsProvider).sshConfigs)
+                          DropdownMenuItem<String?>(
+                            value: cfg.id,
+                            child: Text('${cfg.name}（${cfg.host}:${cfg.port}）'),
+                          ),
+                      ],
+                      onChanged: (v) => setState(() => sshConfigId = v),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: pathCtrl,
+                      decoration: const InputDecoration(
+                        labelText: '远端路径（绝对路径）',
+                        hintText: '可手填，或点下方「自动创建目录」',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? '远端路径必填' : null,
+                    ),
+                    const SizedBox(height: 8),
+                    // 自动创建：连接后建 ~/projects/<名称> 并把路径填上。
+                    FilledButton.icon(
+                      onPressed: creatingDir
+                          ? null
+                          : () async {
+                              setState(() => creatingDir = true);
+                              try {
+                                final dir =
+                                    await _autoCreateRemoteDir(nameCtrl.text);
+                                if (dir != null && ctx.mounted) {
+                                  pathCtrl.text = dir;
+                                } else if (ctx.mounted) {
+                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                      const SnackBar(content: Text(
+                                          '自动创建失败：请先连接开发环境，'
+                                          '或检查用户名/密钥')));
+                                }
+                              } finally {
+                                setState(() => creatingDir = false);
+                              }
+                            },
+                      icon: const Icon(Icons.folder_open, size: 16),
+                      label: Text(creatingDir ? '创建中…' : '🔍 自动创建目录'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final id = existing?.id ?? 'ws_${DateTime.now().millisecondsSinceEpoch}';
+    await DevSessionController.instance.upsertWorkspace(DevWorkspace(
+      id: id,
+      name: name,
+      backend: backend,
+      remotePath: backend == WorkspaceBackend.localApp
+          ? null
+          : pathCtrl.text.trim(),
+      sshConfigId: backend == WorkspaceBackend.localApp ? null : sshConfigId,
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// 自动创建远端目录：连接后 `echo $HOME` + `mkdir -p ~/projects/<safe>`。
+  Future<String?> _autoCreateRemoteDir(String name) async {
+    final settings = ref.read(settingsProvider);
+    final ssh = SshEnvironmentService.instance;
+    // 找一份可用配置（已连接优先）。
+    SshConfig? cfg;
+    if (ssh.isConnected) {
+      cfg = ssh.activeConfig;
+    } else {
+      for (final c in settings.sshConfigs) {
+        if (c.isComplete) {
+          cfg = c;
+          break;
+        }
+      }
+    }
+    if (cfg == null) return null;
+    if (!await ssh.ensureConnected(cfg)) return null;
+    final safe = sanitizeWorkspaceDirName(name);
+    final home =
+        (await ssh.run('echo \$HOME', timeout: const Duration(seconds: 30)))
+            ?.trim() ??
+        '';
+    if (home.isEmpty) return null;
+    final dir = '$home/projects/$safe';
+    final out = await ssh.run('mkdir -p "$dir" && echo OK',
+        timeout: const Duration(seconds: 30));
+    if ((out?.trim() ?? '') != 'OK') return null;
+    return dir;
+  }
+
+  // ---------------- 安全策略 ----------------
+
+  Widget _buildSafetyCard(InferenceSettings settings, SettingsNotifier notifier) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('🛡️ 危险命令策略', context),
+            Row(
+              children: [
+                ChoiceChip(
+                  label: const Text('拒绝'),
+                  selected: settings.dangerousCommandPolicy == 'deny',
+                  onSelected: (_) =>
+                      notifier.setDangerousCommandPolicy('deny'),
+                ),
+                const SizedBox(width: 8),
+                ChoiceChip(
+                  label: const Text('每次审批'),
+                  selected: settings.dangerousCommandPolicy == 'ask',
+                  onSelected: (_) =>
+                      notifier.setDangerousCommandPolicy('ask'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '拒绝 = 黑名单命令直接拦截（rm -rf /、reboot、git push --force 等）；'
+              '每次审批 = 转用户确认。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _ApiTab extends ConsumerWidget {
   const _ApiTab();

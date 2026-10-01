@@ -3,17 +3,19 @@
 /// 安全：commit 本地操作默认允许；push 属"影响远端"操作，工具声明
 /// sandbox_permissions 升级字段，模型须带 justification 请求用户批准。
 /// 破坏性命令（reset --hard / push --force）被黑名单拒绝。
+/// 连接自动建立（按工作区绑定的配置），无需用户手动连接。
 library;
 
 import '../../sandbox.dart' show withEscalationFields;
 import '../../tool_definition.dart';
+import '../ssh/ssh_credentials.dart' show SshConfig;
 import 'ssh_tools.dart' show sshRunInWorkspace;
 
 /// bash 单引号转义（message 安全入 `git commit -m '...'`）。
 String _singleQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 
 /// git_status：分支 + 改动概览。
-ToolDefinition createGitStatusTool() {
+ToolDefinition createGitStatusTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_status',
     description:
@@ -25,13 +27,13 @@ ToolDefinition createGitStatusTool() {
       return sshRunInWorkspace(args, (root) {
         return 'cd $root && git status --short --branch 2>/dev/null || '
             'echo "NOT_A_GIT_REPO"';
-      });
+      }, sshConfigs: sshConfigs);
     },
   );
 }
 
 /// git_diff：查看改动内容（默认未暂存）。
-ToolDefinition createGitDiffTool() {
+ToolDefinition createGitDiffTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_diff',
     description:
@@ -54,13 +56,13 @@ ToolDefinition createGitDiffTool() {
         final fileArg = file.isEmpty ? '' : ' $file';
         return 'cd $root && git diff $scope$fileArg --stat && '
             'echo "---" && git diff $scope$fileArg';
-      });
+      }, sshConfigs: sshConfigs);
     },
   );
 }
 
 /// git_log：最近提交。
-ToolDefinition createGitLogTool() {
+ToolDefinition createGitLogTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_log',
     description:
@@ -78,13 +80,13 @@ ToolDefinition createGitLogTool() {
       return sshRunInWorkspace(args, (root) {
         return 'cd $root && git log --oneline -$n 2>/dev/null || '
             'echo "NOT_A_GIT_REPO"';
-      });
+      }, sshConfigs: sshConfigs);
     },
   );
 }
 
 /// git_commit：暂存并提交（本地操作，默认允许）。
-ToolDefinition createGitCommitTool() {
+ToolDefinition createGitCommitTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_commit',
     description:
@@ -117,13 +119,13 @@ ToolDefinition createGitCommitTool() {
       return sshRunInWorkspace(args, (root) {
         final addArgs = files.join(' ');
         return 'cd $root && git add $addArgs && git commit -m ${_singleQuote(message)}';
-      });
+      }, sshConfigs: sshConfigs);
     },
   );
 }
 
 /// git_push：推送远端（影响远端 → 需用户批准，走沙箱升级通道）。
-ToolDefinition createGitPushTool() {
+ToolDefinition createGitPushTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_push',
     description:
@@ -144,7 +146,7 @@ ToolDefinition createGitPushTool() {
         final branch = (args['branch'] as String?)?.trim() ?? '';
         final branchArg = branch.isEmpty ? '' : ' $branch';
         return 'cd $root && git push $remote$branchArg';
-      }, timeout: const Duration(seconds: 30));
+      }, timeout: const Duration(seconds: 30), sshConfigs: sshConfigs);
     },
   );
 }

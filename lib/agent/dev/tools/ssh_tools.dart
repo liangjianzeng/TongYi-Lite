@@ -1,7 +1,9 @@
 /// SSH 开发环境工具（Dev Agent Phase B）—— 默认不注册，设置开启后挂载。
 ///
-/// 依赖 `SshEnvironmentService`（已连接）；未连接返回明确错误并提示
-/// 模型/用户先建立连接。命令走危险命令黑名单（deny/ask 策略）。
+/// 连接策略（真机教训：别让用户手动连接）：
+/// - 工具执行前按工作区绑定的配置**自动连接**（配置不完整/缺失给出明确诊断）；
+/// - 执行中连接断开 → 自动重连一次并重试；
+/// - 错误信息带 `[SSH]` 前缀并区分未配置/连接失败/执行失败，防模型幻觉成功。
 /// 路径以"相对当前工作区"呈现，执行层映射到远端根目录。
 library;
 
@@ -12,6 +14,7 @@ import '../../builtin_tools/shell_tool.dart'
 import '../../sandbox.dart' show withEscalationFields;
 import '../../tool_definition.dart';
 import '../safety.dart';
+import '../ssh/ssh_credentials.dart' show SshConfig;
 import '../ssh/ssh_environment.dart';
 import '../workspace.dart';
 import '../workspace_store.dart';
@@ -57,20 +60,66 @@ String _toRemotePath(String root, String rawPath) {
   return '$root/${trimmed.replaceAll(RegExp(r'^\./'), '')}';
 }
 
+/// 确保 SSH 连接（按工作区绑定的配置自动连接/切换）。
+///
+/// 返回错误信息（null = 已连接可用）。
+Future<String?> _ensureSshConnection(
+    SshEnvironmentService ssh, DevWorkspace ws, List<SshConfig> sshConfigs) async {
+  // 已连接且配置匹配（都未绑定或绑定相同）：直接复用。
+  if (ssh.isConnected) {
+    final activeId = ssh.activeConfig?.id;
+    final wsId = ws.sshConfigId;
+    if (wsId == null || wsId.isEmpty || activeId == wsId) return null;
+    // 绑定不同配置：需要切换。
+  }
+  SshConfig? cfg;
+  final wsId = ws.sshConfigId;
+  if (wsId == null || wsId.isEmpty) {
+    // 未绑定配置：自动取列表里第一份完整配置。
+    for (final c in sshConfigs) {
+      if (c.isComplete) {
+        cfg = c;
+        break;
+      }
+    }
+    if (cfg == null) {
+      return 'SSH 未配置：请在「设置 → 开发者」中配置 Termux/远程电脑连接（自动生成密钥即可）';
+    }
+  } else {
+    for (final c in sshConfigs) {
+      if (c.id == wsId) {
+        cfg = c;
+        break;
+      }
+    }
+    if (cfg == null || !cfg.isComplete) {
+      return 'SSH 配置不完整：工作区「${ws.name}」绑定的连接配置缺失或未填完整，请在「设置 → 开发者」中补全';
+    }
+  }
+  if (!await ssh.ensureConnected(cfg)) {
+    return 'SSH 连接失败：${ssh.lastError ?? '未知原因'}'
+        '（请确认 Termux 已安装 openssh 且已执行 sshd）';
+  }
+  return null;
+}
+
 /// 共享：在远端工作区执行命令（git/verify/ssh 工具共用）。
 ///
 /// [buildCommand]：接收远端根目录，返回要执行的完整命令。
-/// 内部做：工作区解析 → 危险命令黑名单 → 连接检查 → 执行 → 截断。
+/// 内部做：工作区解析 → 自动连接 → 危险命令黑名单 → 执行 → 断连重连重试 → 截断。
 Future<ToolResult> sshRunInWorkspace(
   Map<String, dynamic> args,
   String Function(String root) buildCommand, {
-  Duration timeout = const Duration(seconds: 15),
+  List<SshConfig> sshConfigs = const [],
+  Duration timeout = const Duration(seconds: 30),
   int outputLimit = kShellOutputLimit,
 }) async {
   String fullCommand;
+  DevWorkspace ws;
   try {
     final wsId = effectiveWorkspaceOf(args);
     final remote = await _resolveRemoteRoot(wsId);
+    ws = remote.workspace;
     fullCommand = buildCommand(remote.root);
   } on StateError catch (e) {
     return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
@@ -80,30 +129,41 @@ Future<ToolResult> sshRunInWorkspace(
     return ToolResult.error('危险命令被拒绝：$danger');
   }
   final ssh = SshEnvironmentService.instance;
-  if (!ssh.isConnected) {
-    return ToolResult.error('SSH 未连接：${ssh.lastError ?? '请先在设置中连接开发环境'}');
+  final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+  if (connError != null) {
+    return ToolResult.error('[SSH] $connError');
   }
-  try {
-    final output = await ssh.run(fullCommand, timeout: timeout);
-    final trimmed = (output ?? '').trim();
-    final truncated = trimmed.length > outputLimit
-        ? '${trimmed.substring(0, outputLimit)}\n…（已截断）'
-        : trimmed;
-    return ToolResult(content: truncated.isEmpty ? '（无输出）' : truncated);
-  } catch (e) {
-    return ToolResult.error('SSH 命令执行失败：$e');
+  // 执行；连接类失败自动重连一次。
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      final output = await ssh.run(fullCommand, timeout: timeout);
+      final trimmed = (output ?? '').trim();
+      final truncated = trimmed.length > outputLimit
+          ? '${trimmed.substring(0, outputLimit)}\n…（已截断）'
+          : trimmed;
+      return ToolResult(content: truncated.isEmpty ? '（无输出）' : truncated);
+    } catch (e) {
+      if (!ssh.isConnected && attempt == 0) {
+        // 连接断了：自动重连一次再试。
+        final retry = await _ensureSshConnection(ssh, ws, sshConfigs);
+        if (retry == null) continue;
+      }
+      return ToolResult.error('[SSH] 命令执行失败：$e');
+    }
   }
+  return ToolResult.error('[SSH] 命令执行失败（已重试一次）');
 }
 
 /// ssh_exec：在远端执行命令（cwd 相对工作区）。
-ToolDefinition createSshExecTool() {
+ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'ssh_exec',
     description:
         '在 SSH 开发环境（Termux/远程电脑）执行 shell 命令。'
-        '命令默认在工作区远端根目录下运行。输出截断到 ${kShellOutputLimit} 字符，超时 15s。'
+        '命令默认在工作区远端根目录下运行。输出截断到 ${kShellOutputLimit} 字符，超时 30s。'
         '需要完整文件系统访问时带 sandbox_permissions 请求用户批准。'
-        '危险命令（rm -rf /、reboot、git push --force 等）会被拒绝。',
+        '危险命令（rm -rf /、reboot、git push --force 等）会被拒绝。'
+        '连接会自动建立，无需手动操作。',
     parameters: withEscalationFields({
       'type': 'object',
       'properties': {
@@ -112,7 +172,7 @@ ToolDefinition createSshExecTool() {
       },
       'required': ['command'],
     }),
-    timeout: const Duration(seconds: 15),
+    timeout: const Duration(seconds: 30),
     execute: (args) async {
       final command = (args['command'] as String?)?.trim() ?? '';
       if (command.isEmpty) return ToolResult.error('缺少 command 参数');
@@ -125,42 +185,52 @@ ToolDefinition createSshExecTool() {
         fullCommand = cwd.isEmpty
             ? 'cd ${remote.root} && $command'
             : 'cd ${_toRemotePath(remote.root, cwd)} && $command';
+        final ssh = SshEnvironmentService.instance;
+        final connError =
+            await _ensureSshConnection(ssh, remote.workspace, sshConfigs);
+        if (connError != null) {
+          return ToolResult.error('[SSH] $connError');
+        }
+        // 危险命令黑名单（连接后执行前检查）。
+        final danger = checkDangerousCommand(fullCommand);
+        if (danger != null) {
+          return ToolResult.error('危险命令被拒绝：$danger。'
+              '请改用安全的等价操作，或向用户说明需求');
+        }
+        for (var attempt = 0; attempt < 2; attempt++) {
+          try {
+            final output = await ssh.run(fullCommand,
+                timeout: const Duration(seconds: 30));
+            final trimmed = (output ?? '').trim();
+            final truncated = trimmed.length > kShellOutputLimit
+                ? '${trimmed.substring(0, kShellOutputLimit)}\n…（已截断）'
+                : trimmed;
+            return ToolResult(
+                content: truncated.isEmpty ? '（无输出）' : truncated);
+          } catch (e) {
+            if (!ssh.isConnected && attempt == 0) {
+              final retry =
+                  await _ensureSshConnection(ssh, remote.workspace, sshConfigs);
+              if (retry == null) continue;
+            }
+            return ToolResult.error('[SSH] 命令执行失败：$e');
+          }
+        }
+        return ToolResult.error('[SSH] 命令执行失败（已重试一次）');
       } on StateError catch (e) {
         return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
-      }
-      // 危险命令黑名单。
-      final danger = checkDangerousCommand(fullCommand);
-      if (danger != null) {
-        return ToolResult.error('危险命令被拒绝：$danger。'
-            '请改用安全的等价操作，或向用户说明需求');
-      }
-      // 连接检查。
-      final ssh = SshEnvironmentService.instance;
-      if (!ssh.isConnected) {
-        return ToolResult.error('SSH 未连接：${ssh.lastError ?? '请先在设置中连接开发环境'}');
-      }
-      try {
-        final output = await ssh.run(fullCommand,
-            timeout: const Duration(seconds: 15));
-        final trimmed = (output ?? '').trim();
-        final truncated = trimmed.length > kShellOutputLimit
-            ? '${trimmed.substring(0, kShellOutputLimit)}\n…（已截断）'
-            : trimmed;
-        return ToolResult(content: truncated.isEmpty ? '（无输出）' : truncated);
-      } catch (e) {
-        return ToolResult.error('SSH 命令执行失败：$e');
       }
     },
   );
 }
 
 /// ssh_read_file：远端读文件（SFTP）。
-ToolDefinition createSshReadFileTool() {
+ToolDefinition createSshReadFileTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'ssh_read_file',
     description:
         '读取 SSH 开发环境中当前工作区文件的内容。path 为相对工作区的路径。'
-        '读取前 ${kSshReadFileLimit} 字符，超过部分截断。',
+        '读取前 ${kSshReadFileLimit} 字符，超过部分截断。连接自动建立。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -168,21 +238,24 @@ ToolDefinition createSshReadFileTool() {
       },
       'required': ['path'],
     },
-    timeout: const Duration(seconds: 15),
+    timeout: const Duration(seconds: 30),
     execute: (args) async {
       final rawPath = (args['path'] as String?)?.trim() ?? '';
       if (rawPath.isEmpty) return ToolResult.error('缺少 path 参数');
       String remotePath;
+      DevWorkspace ws;
       try {
         final wsId = effectiveWorkspaceOf(args);
         final remote = await _resolveRemoteRoot(wsId);
+        ws = remote.workspace;
         remotePath = _toRemotePath(remote.root, rawPath);
       } on StateError catch (e) {
         return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
       }
       final ssh = SshEnvironmentService.instance;
-      if (!ssh.isConnected) {
-        return ToolResult.error('SSH 未连接：${ssh.lastError ?? '请先在设置中连接开发环境'}');
+      final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+      if (connError != null) {
+        return ToolResult.error('[SSH] $connError');
       }
       try {
         final bytes = await ssh.readFileBytes(remotePath);
@@ -193,19 +266,19 @@ ToolDefinition createSshReadFileTool() {
               : '${content.substring(0, kSshReadFileLimit)}\n…（已截断）',
         );
       } catch (e) {
-        return ToolResult.error('远端读取失败：$e');
+        return ToolResult.error('[SSH] 远端读取失败：$e');
       }
     },
   );
 }
 
 /// ssh_write_file：远端写文件（SFTP，覆盖截断）。
-ToolDefinition createSshWriteFileTool() {
+ToolDefinition createSshWriteFileTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'ssh_write_file',
     description:
         '写入文本到 SSH 开发环境中当前工作区文件（覆盖，目录自动创建）。'
-        'path 为相对工作区的路径，单次上限 ${kSshWriteFileLimit ~/ 1024}KB。',
+        'path 为相对工作区的路径，单次上限 ${kSshWriteFileLimit ~/ 1024}KB。连接自动建立。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -214,7 +287,7 @@ ToolDefinition createSshWriteFileTool() {
       },
       'required': ['path', 'content'],
     },
-    timeout: const Duration(seconds: 15),
+    timeout: const Duration(seconds: 30),
     execute: (args) async {
       final rawPath = (args['path'] as String?)?.trim() ?? '';
       final content = (args['content'] as String?) ?? '';
@@ -224,22 +297,25 @@ ToolDefinition createSshWriteFileTool() {
         return ToolResult.error('内容过大（>${kSshWriteFileLimit ~/ 1024}KB）');
       }
       String remotePath;
+      DevWorkspace ws;
       try {
         final wsId = effectiveWorkspaceOf(args);
         final remote = await _resolveRemoteRoot(wsId);
+        ws = remote.workspace;
         remotePath = _toRemotePath(remote.root, rawPath);
       } on StateError catch (e) {
         return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
       }
       final ssh = SshEnvironmentService.instance;
-      if (!ssh.isConnected) {
-        return ToolResult.error('SSH 未连接：${ssh.lastError ?? '请先在设置中连接开发环境'}');
+      final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+      if (connError != null) {
+        return ToolResult.error('[SSH] $connError');
       }
       try {
         await ssh.writeFileBytes(remotePath, utf8.encode(content));
         return ToolResult(content: '已写入 $rawPath（${content.length} 字符）');
       } catch (e) {
-        return ToolResult.error('远端写入失败：$e');
+        return ToolResult.error('[SSH] 远端写入失败：$e');
       }
     },
   );

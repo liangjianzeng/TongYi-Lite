@@ -259,15 +259,30 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// 保存 SSH 开发环境配置。
-  Future<void> setSshConfig(SshConfig config) async {
-    state = state.copyWith(sshConfig: config);
+  /// 保存/覆盖一条 SSH 配置（按 id 匹配；id 为空则追加）。
+  Future<void> upsertSshConfig(SshConfig config) async {
+    var list = [...state.sshConfigs];
+    final index = list.indexWhere((c) => c.id.isNotEmpty && c.id == config.id);
+    if (index >= 0) {
+      list[index] = config;
+    } else {
+      list.add(config);
+    }
+    state = state.copyWith(sshConfigs: list);
     await _persist();
   }
 
-  /// 清除 SSH 配置。
+  /// 删除一条 SSH 配置（按 id）。
+  Future<void> removeSshConfig(String id) async {
+    if (id.isEmpty) return;
+    state = state.copyWith(
+        sshConfigs: state.sshConfigs.where((c) => c.id != id).toList());
+    await _persist();
+  }
+
+  /// 清除全部 SSH 配置。
   Future<void> clearSshConfig() async {
-    state = state.copyWith(sshConfig: null, clearSshConfig: true);
+    state = state.copyWith(clearSshConfig: true);
     await _persist();
   }
 

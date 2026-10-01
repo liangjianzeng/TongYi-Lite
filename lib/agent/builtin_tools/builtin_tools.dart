@@ -44,6 +44,7 @@ export '../dev/tools/ssh_tools.dart'
         createSshWriteFileTool;
 export '../dev/tools/verify_tool.dart' show createRunTestsTool;
 
+import '../dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../dev/tools/git_tools.dart';
 import '../dev/tools/plan_tools.dart';
 import '../dev/tools/ssh_tools.dart';
@@ -110,8 +111,11 @@ const List<String> kDevToolNames = [
 /// [webSearchMaxSearchesPerTurn]：web_search 每回合调用上限（DSH max_uses
 /// 语义，默认 5），接入层按设置传入。
 /// [includeDevTools]：Dev Agent 工具组（开发模式开启时 true）。
-List<ToolDefinition> createBuiltinTools(
-    {int webSearchMaxSearchesPerTurn = 5, bool includeDevTools = false}) => [
+/// [devSshConfigs]：SSH 连接配置快照（回合级），Dev 工具据此自动连接。
+List<ToolDefinition> createBuiltinTools({
+    int webSearchMaxSearchesPerTurn = 5,
+    bool includeDevTools = false,
+    List<SshConfig> devSshConfigs = const []}) => [
       createGetTimeTool(),
       createCalculatorTool(),
       createTodoWriteTool(),
@@ -134,17 +138,17 @@ List<ToolDefinition> createBuiltinTools(
       createPythonExecTool(),
       // Dev Agent 工具组（开发模式开启后由接入层过滤启用）。
       if (includeDevTools) ...[
-        createGitStatusTool(),
-        createGitDiffTool(),
-        createGitLogTool(),
-        createGitCommitTool(),
-        createGitPushTool(),
+        createGitStatusTool(sshConfigs: devSshConfigs),
+        createGitDiffTool(sshConfigs: devSshConfigs),
+        createGitLogTool(sshConfigs: devSshConfigs),
+        createGitCommitTool(sshConfigs: devSshConfigs),
+        createGitPushTool(sshConfigs: devSshConfigs),
         createPlanCreateTool(),
         createPlanUpdateTool(),
         createPlanListTool(),
-        createSshExecTool(),
-        createSshReadFileTool(),
-        createSshWriteFileTool(),
-        createRunTestsTool(),
+        createSshExecTool(sshConfigs: devSshConfigs),
+        createSshReadFileTool(sshConfigs: devSshConfigs),
+        createSshWriteFileTool(sshConfigs: devSshConfigs),
+        createRunTestsTool(sshConfigs: devSshConfigs),
       ],
     ];

@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:dartssh2/dartssh2.dart' show SSHKeyPair;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/dev/ssh/ssh_credentials.dart';
@@ -181,49 +184,121 @@ void main() {
       const s = InferenceSettings();
       expect(s.devModeEnabled, isFalse);
       expect(s.devWorkspaceId, 'default');
-      expect(s.sshConfig, isNull);
+      expect(s.sshConfigs, isEmpty);
       expect(s.dangerousCommandPolicy, 'deny');
     });
 
-    test('toJson → fromJson 往返一致（含 SSH 配置）', () {
+    test('toJson → fromJson 往返一致（含多 SSH 配置）', () {
       final s = InferenceSettings(
         devModeEnabled: true,
         devWorkspaceId: 'ws_1',
-        sshConfig: SshConfig(
-          host: '127.0.0.1',
-          port: 8022,
-          username: 'u0_a123',
-          authType: SshAuthType.key,
-          privateKeyPem: '-----BEGIN OPENSSH PRIVATE KEY-----',
-        ),
+        sshConfigs: [
+          const SshConfig(
+            id: 'termux',
+            name: 'Termux',
+            host: '127.0.0.1',
+            port: 8022,
+            username: 'u0_a123',
+            authType: SshAuthType.key,
+            privateKeyPem: '-----BEGIN OPENSSH PRIVATE KEY-----',
+          ),
+          const SshConfig(
+            id: 'remote-pc',
+            name: '远程电脑',
+            host: '192.168.1.100',
+            port: 22,
+            username: 'me',
+            authType: SshAuthType.password,
+            password: 'pw',
+          ),
+        ],
         dangerousCommandPolicy: 'ask',
       );
       final restored = InferenceSettings.fromJson(s.toJson());
       expect(restored.devModeEnabled, isTrue);
       expect(restored.devWorkspaceId, 'ws_1');
-      expect(restored.sshConfig!.host, '127.0.0.1');
-      expect(restored.sshConfig!.port, 8022);
-      expect(restored.sshConfig!.username, 'u0_a123');
-      expect(restored.sshConfig!.authType, SshAuthType.key);
-      expect(restored.sshConfig!.privateKeyPem, contains('BEGIN OPENSSH'));
+      expect(restored.sshConfigs.length, 2);
+      expect(restored.sshConfigFor('termux')!.host, '127.0.0.1');
+      expect(restored.sshConfigFor('termux')!.port, 8022);
+      expect(restored.sshConfigFor('termux')!.username, 'u0_a123');
+      expect(restored.sshConfigFor('termux')!.privateKeyPem,
+          contains('BEGIN OPENSSH'));
+      expect(restored.sshConfigFor('remote-pc')!.password, 'pw');
+      expect(restored.sshConfigFor('missing'), isNull);
       expect(restored.dangerousCommandPolicy, 'ask');
+    });
+
+    test('旧版单配置 sshConfig 自动迁移为列表首项（向后兼容）', () {
+      final migrated = InferenceSettings.fromJson({
+        'sshConfig': {
+          'host': '127.0.0.1',
+          'port': 8022,
+          'username': 'u0_a1',
+          'authType': 'key',
+          'privateKeyPem': 'KEY',
+        },
+      });
+      expect(migrated.sshConfigs.length, 1);
+      expect(migrated.sshConfigs.first.host, '127.0.0.1');
+      expect(migrated.sshConfigs.first.username, 'u0_a1');
     });
 
     test('旧配置无 Dev 键 → 默认关闭（向后兼容）', () {
       final old = InferenceSettings.fromJson({'agentMaxRounds': 3});
       expect(old.devModeEnabled, isFalse);
-      expect(old.sshConfig, isNull);
+      expect(old.sshConfigs, isEmpty);
     });
 
     test('copyWith：clearSshConfig 清空 / 不传保留', () {
       final s = InferenceSettings(
-        sshConfig: SshConfig(
-          host: 'h', port: 22, username: 'u',
-          authType: SshAuthType.password, password: 'p'),
+        sshConfigs: const [
+          SshConfig(
+              id: 'a', host: 'h', port: 22, username: 'u',
+              authType: SshAuthType.password, password: 'p'),
+        ],
       );
       final cleared = s.copyWith(clearSshConfig: true);
-      expect(cleared.sshConfig, isNull);
-      expect(s.copyWith().sshConfig, isNotNull);
+      expect(cleared.sshConfigs, isEmpty);
+      expect(s.copyWith().sshConfigs.length, 1);
+    });
+
+    test('sshConfigFor：空 id / 找不到返回 null', () {
+      const s = InferenceSettings();
+      expect(s.sshConfigFor(null), isNull);
+      expect(s.sshConfigFor(''), isNull);
+      expect(s.sshConfigFor('nope'), isNull);
+    });
+  });
+
+  group('SshKeyGen 自动生成 ed25519 密钥', () {
+    test('生成 OpenSSH 私钥 + ssh-ed25519 公钥', () {
+      final keys = SshKeyGen.generate();
+      expect(keys, isNotNull);
+      expect(keys!.privateKeyPem, startsWith('-----BEGIN OPENSSH PRIVATE KEY-----'));
+      expect(keys.privateKeyPem, endsWith('-----END OPENSSH PRIVATE KEY-----'));
+      expect(keys.publicKey, startsWith('ssh-ed25519 '));
+      // 每次生成不同（随机种子）。
+      final keys2 = SshKeyGen.generate();
+      expect(keys2!.publicKey, isNot(keys.publicKey));
+    });
+
+    test('私钥可被 dartssh2 解析（SSHKeyPair.fromPem 往返）', () {
+      final keys = SshKeyGen.generate();
+      expect(keys, isNotNull);
+      final pairs = SSHKeyPair.fromPem(keys!.privateKeyPem);
+      expect(pairs, isNotEmpty);
+    });
+
+    test('公钥含 32 字节 ed25519（base64 解码校验）', () {
+      final keys = SshKeyGen.generate();
+      expect(keys, isNotNull);
+      final parts = keys!.publicKey.split(' ');
+      expect(parts.length, 2);
+      expect(parts[0], 'ssh-ed25519');
+      final decoded = base64Decode(parts[1]);
+      // uint32 长度前缀（4）+ 类型串 "ssh-ed25519"（11）+ 32 字节公钥。
+      expect(decoded.length, 4 + 11 + 32);
+      expect(utf8.decode(decoded.sublist(4, 4 + 11)), 'ssh-ed25519');
     });
   });
 }

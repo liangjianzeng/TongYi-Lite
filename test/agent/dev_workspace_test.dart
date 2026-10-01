@@ -35,6 +35,7 @@ void main() {
         gitManaged: true,
         repoUrl: 'https://example.com/r.git',
         currentBranch: 'main',
+        sshConfigId: 'termux',
       );
       final restored = DevWorkspace.fromJson(ws.toJson());
       expect(restored, isNotNull);
@@ -44,19 +45,40 @@ void main() {
       expect(restored.remotePath, '/data/data/com.termux/files/home/proj');
       expect(restored.gitManaged, isTrue);
       expect(restored.currentBranch, 'main');
+      expect(restored.sshConfigId, 'termux');
     });
 
-    test('copyWith 只改指定字段', () {
+    test('sshConfigId 空/缺失 → 不落盘、回落 null（向后兼容）', () {
+      const ws = DevWorkspace(
+        id: 'ws_2',
+        name: '本地',
+        backend: WorkspaceBackend.localApp,
+      );
+      final restored = DevWorkspace.fromJson(ws.toJson());
+      expect(restored!.sshConfigId, isNull);
+      expect(ws.toJson().containsKey('sshConfigId'), isFalse);
+      // 旧 JSON 无该键 → fromJson 不崩。
+      final legacy = DevWorkspace.fromJson({
+        'id': 'ws_3', 'name': '旧', 'backend': 'termux',
+        'remotePath': '/home/x',
+      });
+      expect(legacy!.sshConfigId, isNull);
+    });
+
+    test('copyWith 只改指定字段（含 sshConfigId 清除）', () {
       const ws = DevWorkspace(
         id: 'ws_1',
         name: 'A',
         backend: WorkspaceBackend.localApp,
+        sshConfigId: 'termux',
       );
       final updated = ws.copyWith(name: 'B', currentBranch: 'dev');
       expect(updated.name, 'B');
       expect(updated.id, 'ws_1');
       expect(updated.backend, WorkspaceBackend.localApp);
       expect(updated.currentBranch, 'dev');
+      expect(updated.sshConfigId, 'termux');
+      expect(ws.copyWith(clearSshConfigId: true).sshConfigId, isNull);
     });
   });
 
