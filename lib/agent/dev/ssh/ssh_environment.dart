@@ -82,12 +82,21 @@ final class SshEnvironmentService extends ChangeNotifier {
       final socket = await SSHSocket.connect(config.host, config.port,
           timeout: kSshConnectTimeout);
 
-      final List<SSHKeyPair>? identities = config.authType == SshAuthType.key
-          ? SSHKeyPair.fromPem(config.privateKeyPem ?? '',
+      final List<SSHKeyPair>? identities;
+      if (config.authType == SshAuthType.key) {
+        try {
+          identities = SSHKeyPair.fromPem(config.privateKeyPem ?? '',
               (config.keyPassphrase ?? '').isEmpty
                   ? null
-                  : config.keyPassphrase)
-          : null;
+                  : config.keyPassphrase);
+        } catch (_) {
+          // 旧版向导曾生成 checkint/公钥格式错误的密钥，永远无法认证。
+          throw const FormatException(
+              '密钥无法解析——旧版向导生成的坏格式密钥，请重跑「连接 Termux / 远程电脑」向导重新生成并安装');
+        }
+      } else {
+        identities = null;
+      }
 
       client = SSHClient(
         socket,

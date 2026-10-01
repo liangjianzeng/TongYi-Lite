@@ -3430,9 +3430,15 @@ class _DevTabState extends ConsumerState<_DevTab> {
                             '${ssh.activeConfig?.username ?? ''}@'
                             '${ssh.activeConfig?.host ?? ''}:'
                             '${ssh.activeConfig?.port ?? ''}'
-                        : '未连接（向导自动完成，无需手填密钥）',
+                        : (ssh.status == SshStatus.failed &&
+                                (ssh.lastError?.isNotEmpty ?? false))
+                            ? ssh.lastError!
+                            : '未连接（向导自动完成，无需手填密钥）',
                     style: TextStyle(
-                        fontSize: 12, color: Colors.grey.shade600),
+                        fontSize: 12,
+                        color: ssh.status == SshStatus.failed
+                            ? Colors.red.shade700
+                            : Colors.grey.shade600),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -3536,6 +3542,9 @@ class _DevTabState extends ConsumerState<_DevTab> {
   }
 
   /// 连接（保持连接；配置相同幂等复用，不同自动切换）。
+  ///
+  /// 注意：`SshEnvironmentService.connect` 失败只置内部状态不抛异常，
+  /// 必须用 `isConnected` 判定结果，不能依赖 try/catch（否则永远弹"已连接"）。
   Future<void> _connectTo(SshConfig cfg) async {
     if (!cfg.isComplete) {
       if (mounted) {
@@ -3544,18 +3553,14 @@ class _DevTabState extends ConsumerState<_DevTab> {
       }
       return;
     }
-    try {
-      await SshEnvironmentService.instance.connect(cfg);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('✅ 已连接 ${cfg.name}')));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('❌ 连接失败：$e')));
-      }
-    }
+    final ssh = SshEnvironmentService.instance;
+    await ssh.connect(cfg);
+    if (!mounted) return;
+    final ok = ssh.isConnected;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok
+            ? '✅ 已连接 ${cfg.name}'
+            : '❌ 连接失败：${ssh.lastError ?? '未知错误（状态 ${ssh.status}）'}')));
   }
 
   // ---------------- Termux 自动向导 ----------------
@@ -3606,13 +3611,19 @@ class _DevTabState extends ConsumerState<_DevTab> {
               authType: SshAuthType.key,
             );
             await notifier.upsertSshConfig(cfg);
-            try {
-              await SshEnvironmentService.instance.connect(cfg);
-            } catch (e) {
-              debugPrint('[Dev] termux connect failed: $e');
-            }
+            final ssh = SshEnvironmentService.instance;
+            await ssh.connect(cfg);
             connecting = false;
-            if (ctx.mounted) Navigator.pop(ctx);
+            if (!ctx.mounted) return;
+            Navigator.pop(ctx);
+            if (!ssh.isConnected) {
+              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+                  backgroundColor: Colors.red.shade700,
+                  content: Text(
+                      '❌ 自动连接失败：${ssh.lastError ?? '未知错误'}\n'
+                      '请确认已把安装命令粘贴进 Termux 并回车执行',
+                      style: const TextStyle(fontSize: 12))));
+            }
           }
 
           // 首次构建自动启动探测（否则 step 0 永远转圈：探测从未触发）。
