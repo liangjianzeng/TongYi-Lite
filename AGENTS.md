@@ -1002,3 +1002,8 @@ Termux 冷启动要等 5-6s 再注入；`cat ~/.ssh/...` 在 adb shell 身份下
   一致非陈旧产物），UTF-16LE `并发会话槽位`1/`开发者`4 + ASCII `checkTurnAdmission`1
   命中；签名 CN=TongYiLite 核对过。本次修复为纯逻辑改动、无新增运行时字符串，
   行为级验收 = 真机 dartssh2↔openssh 10.5 全链路 AUTHED + echo ok（见上节）。
+- **2026-10-01 15:2x 双机覆盖安装**：5afdccd 的 app-debug.apk 已装两台——
+  小米13（100.70.7.18:5555，Tailscale 直连）与 小米25053RT47C 8 Elite
+  （100.123.25.54:5555，DERP sin 中继，140MB 传输约 20 分钟，install -r -t 均 Success，
+  双机 versionCode=16 / 0.2.8）。8 Elite 无线 adb 址录：Tailscale peer
+  `xiaomi-25053rt47c-1` = 100.123.25.54。
