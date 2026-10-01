@@ -19,21 +19,29 @@ library;
 
 import '../tool_definition.dart';
 import '../web_search/web_search_seam.dart';
+import '../../web_search/query_expander.dart';
 
 /// 回填给模型的文本预算（端侧上下文很贵：n_ctx 常见 8k，工具结果越大、
 /// 手机 prefill 越慢）。摘要按条截断、总量按此上限截断。
 const int kSnippetMaxChars = 200;
 const int kResultMaxChars = 1500;
 
-/// 一次调用最多搜索的关键词数（query + additional_queries）。
+/// 一次调用最多提交的关键词数（query + additional_queries）。
 const int kMaxQueriesPerCall = 4;
 
 /// 每回合 web_search 最多调用次数（对齐 DSH `max_uses` 默认 5；可经设置调整）。
 /// 每次调用消耗 1 次预算（含重复关键词），达到上限即拒绝联网、强制收敛。
 const int kMaxSearchesPerTurn = 5;
 
-/// 查询里已含年份数字（20xx）时不再补——避免"2025 发布会 2026"这类冗余。
-final RegExp _yearInQuery = RegExp(r'20\d{2}');
+/// 意图扩展后，单次调用内部最多搜索的关键词组数（主查询 + 附加查询的
+/// 时效变体）。内部扩展搜索不消耗 max_uses（模型调用仍只消耗 1 次）。
+const int kInternalMaxQueries = 6;
+
+/// 内部搜索分批并发数：控制单次调用耗时（每批并行，串行分批）。
+const int kInternalBatch = 3;
+
+/// 合并结果达到此条数即提前停止继续搜索（够了就不用搜剩余变体）。
+const int kCollectTarget = 12;
 
 /// 归一化查询：小写 + 只留中英文/数字，用于同回合重复搜索判定
 ///（"华为大会 " / "华为 大会" / "华为大会。" 视为同一关键词）。
@@ -131,24 +139,60 @@ ToolDefinition createWebSearchTool({int maxSearchesPerTurn = kMaxSearchesPerTurn
       }
 
       session.used++;
-      // 时间注入：模型经常不知道今天几号，查"最新/今天"类内容会拿到旧闻。
-      // 查询缺年份时补当前年份；结果头部再带完整当前时间兜底。
       final now = DateTime.now();
+      // ---- 意图理解 + 关键词扩展：把主查询和附加查询扩展成候选关键词池
+      // （补"新闻 / 最新 / 年份"等时效变体），按优先级从高到低。工具内部
+      // 循环搜索多组关键词、跨关键词合并去重——单次调用即覆盖多个角度与
+      // 时效变体，充分利用每回合搜索预算。内部扩展搜索不消耗 max_uses
+      // （模型调用仍只消耗 1 次）。----
       final queries = <String>[];
       if (raw.isNotEmpty) queries.add(raw);
       queries.addAll(extras);
-      final prepared = queries
-          .map((q) => _yearInQuery.hasMatch(q) ? q : '$q ${now.year}')
-          .toList();
+      final candidates =
+          expandKeywords(queries, now: now, cap: kInternalMaxQueries);
+
       try {
-        // 并行搜索：总耗时 ≈ 最慢单次，而非串行求和。不传 timeout：用
-        // provider（设置项）里配置的超时。传了会覆盖设置值。
-        final results = await Future.wait(
-          prepared.map((q) => WebSearchSeam.instance.search(q)),
+        // ---- 内部循环搜索：分批并发，跨关键词合并去重，够条数提前停。
+        // 每个关键词走 provider（内部再并发多引擎），单次调用内即可覆盖
+        // 多个关键词变体，信息量远大于只搜一次。----
+        final seen = <String>{};
+        final merged = <WebSearchSource>[];
+        final failedDiags = <String>{};
+        for (var i = 0;
+            i < candidates.length && merged.length < kCollectTarget;
+            i += kInternalBatch) {
+          final end = (i + kInternalBatch).clamp(0, candidates.length);
+          final slice = candidates.sublist(i, end);
+          final results = await Future.wait(slice.map((q) async {
+            try {
+              return await WebSearchSeam.instance.search(q);
+            } on WebSearchProviderError catch (e) {
+              failedDiags.add('${e.kind}:${e.message}');
+              return null;
+            }
+          }));
+          for (final r in results) {
+            if (r == null) continue;
+            if (r.diagnostics != null) failedDiags.add(r.diagnostics!);
+            for (final s in r.sources) {
+              final key = normalizeSourceUrl(s.url);
+              if (!seen.add(key)) continue;
+              merged.add(s);
+            }
+          }
+        }
+
+        final truncated = merged.length > kCollectTarget;
+        final result = _formatResult(
+          WebSearchResult(
+            sources: merged.take(kCollectTarget).toList(),
+            truncated: truncated,
+            diagnostics: failedDiags.isEmpty
+                ? null
+                : failedDiags.join('；'),
+          ),
+          now,
         );
-        final result = prepared.length == 1
-            ? _formatResult(results.first, now)
-            : _formatMultiResult(prepared, results, now);
         // 主查询结果入缓存（含时间标签；同回合重复调用直接回读）。
         if (norm.isNotEmpty && !result.isError) {
           session.cache[norm] = result;
@@ -192,49 +236,6 @@ ToolResult _formatResult(WebSearchResult result, DateTime now) {
   }
   if (result.truncated) {
     text = '$text\n[另有更多结果未展示，可换更具体的关键词]';
-  }
-  return ToolResult(content: text);
-}
-
-/// 多关键词并发结果的合并渲染：每个关键词一个小节（标注关键词），
-/// 各小节均分 [kResultMaxChars] 预算，避免前面的查询吃光全部空间。
-ToolResult _formatMultiResult(
-  List<String> queries,
-  List<WebSearchResult> results,
-  DateTime now,
-) {
-  final two = (int v) => v.toString().padLeft(2, '0');
-  final timeTag = '当前时间：'
-      '${now.year}-${two(now.month)}-${two(now.day)} '
-      '${two(now.hour)}:${two(now.minute)}'
-      '（周${'一二三四五六日'[now.weekday - 1]}）';
-  final perQueryCap = kResultMaxChars ~/ queries.length;
-  final buffer = StringBuffer();
-  buffer.writeln(timeTag);
-  for (var i = 0; i < queries.length; i++) {
-    final result = results[i];
-    final section = StringBuffer();
-    section.writeln('\n[搜索：${queries[i]}]');
-    if (result.sources.isEmpty) {
-      final diag = result.diagnostics;
-      if (diag != null) {
-        section.writeln('（无结果：$diag）');
-      } else {
-        section.writeln('（无结果，可换关键词）');
-      }
-    } else {
-      for (final s in result.sources.take(8)) {
-        _appendSource(section, s);
-        if (section.length >= perQueryCap) break;
-      }
-    }
-    buffer.write(_clip(section.toString().trim(), perQueryCap));
-    buffer.write('\n');
-    if (buffer.length >= kResultMaxChars) break;
-  }
-  var text = buffer.toString().trim();
-  if (text.length > kResultMaxChars) {
-    text = '${_clip(text, kResultMaxChars)}\n（结果已截断）';
   }
   return ToolResult(content: text);
 }

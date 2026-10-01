@@ -1120,3 +1120,29 @@ launchApp/isAppInstalled）。双机覆盖安装 Success。
 一次性开启后可做到零粘贴）——待真机评估。
 - **双机 Success**（小米13 一次过；8 Elite 首次 INSTALL_PARSE_FAILED_NOT_APK=
   DERP 中继传输截断，原样重试一次即 Success——140MB 中继安装失败先重试再排查）。
+
+## 2026-10-02 内置技能正文重写（对齐 anthropics/skills 官方规范）+ 技能卡折叠
+
+> 用户批评内置技能"就几句话能解决什么问题"+ 技能列表平铺会把设置页拉成 2 米长。
+> 调研定案（anthropics/skills 45k stars + awesome-claude-skills）：官方优质技能正文
+> **91~485 行**（工作流步骤+代码模板+验收清单），且 body 是 load_skill **按需加载**的，
+> 写厚不增加每回合 prefill——常驻成本只有目录的 name/description/whenToUse 一行短句。
+> 此前"body 砍到 3 条要点"是砍错了对象（该精简的是目录字段，不是正文）。
+
+**改动**：
+- `skill.dart` 17 个技能（16 原有 + 新增 **skill-creator** 元技能绑 save_skill）正文
+  全部重写为真执行手册：`## 目标 / ## 工作流程（编号步骤）/ ## 输出格式（模板）/
+  ## 验收清单` 四段式，20~28 行/个，只绑定真实工具名（web_search/read_file/
+  write_file/edit_file/python_exec/shell_exec/todo_write/export_file/get_weather 等）。
+- `skills_builtin_test.dart`：清单 17 个 + 新增**正文质量下限**断言（非空行 ≥20、
+  含 `## ` 分节、含"验收"）——防止未来再回退成三句话。
+- `settings_screen` 技能卡：17 个 ListTile 平铺改为**默认收起一行汇总**
+  （"技能库（内置 17 · 我的 N）"，点开限高 320px 滚动列表）——技能再多设置页
+  也不再拉长；内置取一次存 `_builtinSkills` 字段。
+
+**回归**：test/agent+services+providers 全绿 **418 项 + 2 skip**；analyze 0 error。
+**2026-10-02 00:0x 重打包（v0.2.8+16 复用）**：app-debug.apk 140268589 B /
+app-release.apk 59886173 B；字符串级验收过（debug kernel UTF-8：验收清单 39/
+避雷 2/skill-creator 2；release libapp.so UTF-16LE：验收清单 19/技能库 1 +
+ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18 直连 +
+8 Elite 100.123.25.54 中继，install -r -t 均 Success）。

@@ -4,7 +4,7 @@ import 'package:tongyi_lite/agent/agent.dart';
 import 'package:tongyi_lite/agent/web_search/web_search_provider.dart';
 import 'package:tongyi_lite/agent/web_search/web_search_seam.dart';
 
-/// 记录查询并返回固定结果的假 provider（并发多关键词用）。
+/// 记录查询并返回固定结果的假 provider。
 class _FakeSearchProvider implements WebSearchProvider {
   final List<String> called = [];
   final Map<String, List<WebSearchSource>> byQuery;
@@ -115,12 +115,101 @@ void main() {
       expect(result.content, contains('query'));
     });
 
-    test('additional_queries：一次调用并发搜索多个关键词并合并返回', () async {
+    test('意图扩展：单个泛关键词内部循环搜索多个时效变体并合并返回', () async {
+      final year = DateTime.now().year.toString();
       final provider = _FakeSearchProvider({
-        '国庆 武汉 活动 2026': [
+        '国庆': [
+          const WebSearchSource(url: 'http://a', title: '百科词条', snippet: '国庆简介'),
+        ],
+        '国庆 新闻': [
+          const WebSearchSource(url: 'http://b', title: '国庆新闻', snippet: '最新动态'),
+        ],
+        '国庆 $year': [
+          const WebSearchSource(url: 'http://c', title: '国庆 2026', snippet: '时效信息'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final result = await createWebSearchTool().execute({'query': '国庆'});
+        // 意图理解后内部循环多搜：原词 + 新闻 + 年份三个时效变体都被搜索。
+        expect(provider.called.length, greaterThanOrEqualTo(3));
+        expect(provider.called, contains('国庆'));
+        expect(provider.called, contains('国庆 新闻'));
+        expect(provider.called, contains('国庆 $year'));
+        // 跨变体合并去重后一并返回，信息量远大于只搜一次。
+        expect(result.isError, isFalse);
+        expect(result.content, contains('百科词条'));
+        expect(result.content, contains('国庆新闻'));
+        expect(result.content, contains('国庆 2026'));
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
+    test('合并去重：跨变体同源 URL 只保留一次', () async {
+      final provider = _FakeSearchProvider({
+        '国庆': [
+          const WebSearchSource(url: 'http://same', title: '标题A', snippet: '摘要A'),
+        ],
+        '国庆 新闻': [
+          const WebSearchSource(url: 'http://same', title: '标题A', snippet: '摘要A'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final result = await createWebSearchTool().execute({'query': '国庆'});
+        // 两个变体返回同一来源 → 合并后只出现一次。
+        expect(result.content.split('标题A').length - 1, 1);
+        expect(result.isError, isFalse);
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
+    test('结果够数提前停：首批收集足够后不再搜剩余变体', () async {
+      final year = DateTime.now().year.toString();
+      final provider = _FakeSearchProvider({
+        '国庆': List.generate(12, (i) => WebSearchSource(
+            url: 'http://s$i', title: '标题$i', snippet: '摘要$i')),
+        '国庆 新闻': [
+          const WebSearchSource(url: 'http://x', title: '不应出现', snippet: '摘要'),
+        ],
+        // 附加关键词的变体不应被搜索（首批已够 12 条）。
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final result = await createWebSearchTool().execute({
+          'query': '国庆',
+          'additional_queries': ['南宁新闻'],
+        });
+        // 首批（国庆 原词/新闻/$year）收集够条数 → 提前停，南宁新闻 变体不搜。
+        expect(provider.called, isNot(contains('南宁新闻')));
+        expect(provider.called, contains('国庆 $year'));
+        expect(result.isError, isFalse);
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
+    test('additional_queries：主查询与附加查询各自扩展、合并返回', () async {
+      final year = DateTime.now().year.toString();
+      final provider = _FakeSearchProvider({
+        '国庆 武汉 活动': [
           const WebSearchSource(url: 'http://a', title: '国庆活动清单', snippet: '武汉国庆活动'),
         ],
-        '武汉 天气 2026': [
+        '国庆 武汉 活动 新闻': [
+          const WebSearchSource(url: 'http://a', title: '国庆活动清单', snippet: '武汉国庆活动'),
+        ],
+        '国庆 武汉 活动 $year': [
+          const WebSearchSource(url: 'http://a', title: '国庆活动清单', snippet: '武汉国庆活动'),
+        ],
+        '武汉 天气': [
+          const WebSearchSource(url: 'http://b', title: '武汉天气', snippet: '晴转多云'),
+        ],
+        '武汉 天气 新闻': [
+          const WebSearchSource(url: 'http://b', title: '武汉天气', snippet: '晴转多云'),
+        ],
+        '武汉 天气 $year': [
           const WebSearchSource(url: 'http://b', title: '武汉天气', snippet: '晴转多云'),
         ],
       });
@@ -130,13 +219,11 @@ void main() {
           'query': '国庆 武汉 活动',
           'additional_queries': ['武汉 天气'],
         });
-        // 两个关键词都被搜索（年份补全后）。
-        expect(provider.called, contains('国庆 武汉 活动 2026'));
-        expect(provider.called, contains('武汉 天气 2026'));
-        // 合并结果带关键词小节归属，两个角度都可见。
+        // 两个关键词的时效变体都被内部搜索。
+        expect(provider.called, contains('国庆 武汉 活动'));
+        expect(provider.called, contains('武汉 天气'));
+        // 合并结果两个角度都可见（同源去重后各保留一条）。
         expect(result.isError, isFalse);
-        expect(result.content, contains('[搜索：国庆 武汉 活动 2026]'));
-        expect(result.content, contains('[搜索：武汉 天气 2026]'));
         expect(result.content, contains('国庆活动清单'));
         expect(result.content, contains('武汉天气'));
       } finally {
@@ -144,7 +231,7 @@ void main() {
       }
     });
 
-    test('additional_queries 截断：最多 4 个关键词，空串忽略', () async {
+    test('候选池截断：扩展关键词过多时截断到内部上限', () async {
       final provider = _FakeSearchProvider({});
       WebSearchSeam.instance.registerProvider(provider);
       try {
@@ -152,10 +239,13 @@ void main() {
           'query': 'q',
           'additional_queries': ['a', 'b', 'c', 'd', 'e', '  '],
         });
-        // query + 最多 3 个附加 = 4 次搜索；空串被过滤。
-        expect(provider.called.length, 4);
+        // 候选池最多 kInternalMaxQueries=6 组；空串被过滤。
+        expect(provider.called.length, lessThanOrEqualTo(6));
+        expect(provider.called, isNotEmpty);
         expect(provider.called, isNot(contains('  ')));
-        expect(result.isError, isFalse);
+        // 全部变体无结果 → 返回"无结果"错误（而非联网失败）。
+        expect(result.isError, isTrue);
+        expect(result.content, contains('未找到相关结果'));
       } finally {
         WebSearchSeam.instance.dispose();
       }
@@ -163,7 +253,7 @@ void main() {
 
     test('重复关键词：同回合再次搜索相同内容 → 直接回缓存结果，不重复联网', () async {
       final provider = _FakeSearchProvider({
-        '华为开发者大会 2026': [
+        '华为开发者大会': [
           const WebSearchSource(url: 'http://a', title: '华为大会', snippet: '开发者大会'),
         ],
       });
@@ -173,9 +263,11 @@ void main() {
         final first = await tool.execute({'query': '华为开发者大会'});
         expect(first.isError, isFalse);
         expect(first.content, contains('华为大会'));
-        // 同回合再次以相同关键词调用：命中缓存，不再触发 provider.search。
+        // 同回合再次以相同关键词调用：命中缓存，不再触发 provider.search
+        //（内部扩展变体数量不再增加）。
+        final countAfterFirst = provider.called.length;
         final second = await tool.execute({'query': '华为开发者大会'});
-        expect(provider.called.length, 1);
+        expect(provider.called.length, countAfterFirst);
         expect(second.isError, isFalse);
         expect(second.content, contains('已搜索过'));
         expect(second.content, contains('华为大会'));
@@ -192,8 +284,9 @@ void main() {
         await tool.execute({'query': 'q1'});
         await tool.execute({'query': 'q2'});
         // 第 3 次：预算耗尽 → 不联网，返回收敛指令（isError=true）。
+        final countAfterTwo = provider.called.length;
         final third = await tool.execute({'query': 'q3'});
-        expect(provider.called.length, 2);
+        expect(provider.called.length, countAfterTwo);
         expect(third.isError, isTrue);
         expect(third.content, contains('已达上限'));
         expect(third.content, contains('不要再调用 web_search'));
@@ -204,7 +297,7 @@ void main() {
 
     test('预算含重复调用：重复也消耗预算，尽快逼模型收敛', () async {
       final provider = _FakeSearchProvider({
-        'q 2026': [
+        'q': [
           const WebSearchSource(url: 'http://a', title: '标题A', snippet: '摘要A'),
         ],
       });
@@ -212,10 +305,11 @@ void main() {
       try {
         final tool = createWebSearchTool(maxSearchesPerTurn: 2);
         await tool.execute({'query': 'q'});
-        await tool.execute({'query': 'q'}); // 去重命中，但仍消耗预算
-        // 预算已满（2/2）→ 新的关键词直接返回收敛指令，不再联网。
+        final countAfterFirst = provider.called.length;
+        await tool.execute({'query': 'q'}); // 去重命中，不联网
+        // 预算已满（2/2）→ 新的关键词直接返回收敛指令，不联网。
         final third = await tool.execute({'query': '新关键词'});
-        expect(provider.called.length, 1);
+        expect(provider.called.length, countAfterFirst);
         expect(third.isError, isTrue);
         expect(third.content, contains('已达上限'));
       } finally {
