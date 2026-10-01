@@ -324,7 +324,7 @@ void main() {
       final keys = SshKeyGen.generate();
       expect(keys, isNotNull);
       expect(keys!.privateKeyPem, startsWith('-----BEGIN OPENSSH PRIVATE KEY-----'));
-      expect(keys.privateKeyPem, endsWith('-----END OPENSSH PRIVATE KEY-----'));
+      expect(keys.privateKeyPem, endsWith('-----END OPENSSH PRIVATE KEY-----\n'));
       expect(keys.publicKey, startsWith('ssh-ed25519 '));
       // 每次生成不同（随机种子）。
       final keys2 = SshKeyGen.generate();
@@ -345,9 +345,11 @@ void main() {
       expect(parts.length, 2);
       expect(parts[0], 'ssh-ed25519');
       final decoded = base64Decode(parts[1]);
-      // uint32 长度前缀（4）+ 类型串 "ssh-ed25519"（11）+ 32 字节公钥。
-      expect(decoded.length, 4 + 11 + 32);
+      // 规范 blob = string(type) + string(pub)：
+      // 4 + 11（"ssh-ed25519"）+ 4 + 32（ed25519 公钥）= 51 字节。
+      expect(decoded.length, 4 + 11 + 4 + 32);
       expect(utf8.decode(decoded.sublist(4, 4 + 11)), 'ssh-ed25519');
+      expect(decoded.buffer.asByteData(15, 4).getUint32(0), 32);
     });
   });
 }
