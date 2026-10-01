@@ -144,55 +144,88 @@ final class AgentUiState {
       );
 }
 
-/// 事件 → 状态归约器。attach 一次订阅一个 [SessionLog]；
-/// detach 只停订阅、保留末态（面板在 turn 结束后仍显示本轮活动）。
-class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
-  AgentUiStateNotifier() : super(const AgentUiState());
+/// 事件 → 状态归约器。状态**按会话（convId）分键**：多会话并发（槽位）
+/// 时每个回合的事件流互不串台，UI 取当前会话自己的快照。
+/// attach(convId, log) 订阅该会话回合事件；detach(convId) 只停订阅、
+/// 保留末态（面板在 turn 结束后仍显示本轮活动）。
+class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
+  AgentUiStateNotifier() : super(const {});
 
-  StreamSubscription<SessionEvent>? _sub;
+  /// 每会话事件订阅（detach 后移除；末态留在 state map 里）。
+  final Map<String, StreamSubscription<SessionEvent>> _subs = {};
 
-  /// 当前思考块的起点（首个非空 thinking 推送时记录；落档后复位）。
-  DateTime? _thinkingStart;
+  /// 每会话归约上下文（当前思考块起点等）。
+  final Map<String, _TurnCtx> _ctx = {};
+
+  bool _has(String convId) => state.containsKey(convId);
+
+  AgentUiState _entry(String convId) =>
+      state[convId] ?? const AgentUiState();
+
+  void _put(String convId, AgentUiState s) {
+    state = {...state, convId: s};
+  }
 
   /// 思考流推送（adapter 全量快照）。节流由调用方（chat_provider）负责，
   /// 这里直接落 state——事件频率低（流 delta 聚合后）。
-  void setThinking(String text) {
-    if (state.thinking == text) return;
-    _thinkingStart ??= (text.isNotEmpty) ? DateTime.now() : null;
-    state = state.copyWith(thinking: text);
+  void setThinking(String convId, String text) {
+    if (!mounted || !_has(convId)) return;
+    final cur = _entry(convId);
+    if (cur.thinking == text) return;
+    final ctx = _ctx.putIfAbsent(convId, _TurnCtx.new);
+    ctx.thinkingStart ??= (text.isNotEmpty) ? DateTime.now() : null;
+    _put(convId, cur.copyWith(thinking: text));
   }
 
   /// 工具调用参数生成进度（WP5）。chars==0 → 清除。
-  void setToolGen({required int chars, String preview = ''}) {
+  void setToolGen(String convId, {required int chars, String preview = ''}) {
+    if (!mounted || !_has(convId)) return;
+    final cur = _entry(convId);
     if (chars <= 0) {
-      if (state.toolGen == null) return;
-      state = state.copyWith(clearToolGen: true);
+      if (cur.toolGen == null) return;
+      _put(convId, cur.copyWith(clearToolGen: true));
       return;
     }
-    state = state.copyWith(toolGen: (chars: chars, preview: preview));
+    _put(convId, cur.copyWith(toolGen: (chars: chars, preview: preview)));
   }
 
-  void attach(SessionLog log) {
-    detach();
-    state = const AgentUiState();
-    _thinkingStart = null;
-    _sub = log.events.listen(onEvent);
+  void attach(String convId, SessionLog log) {
+    detachSub(convId);
+    _ctx[convId] = _TurnCtx();
+    _put(convId, const AgentUiState());
+    _subs[convId] = log.events.listen((e) => onEvent(convId, e));
   }
 
-  void detach() {
-    _sub?.cancel();
-    _sub = null;
+  /// 停订阅并**保留末态**（面板在 turn 结束后仍显示本轮活动）。
+  void detach(String convId) {
+    detachSub(convId);
+    _ctx.remove(convId);
+  }
+
+  /// 仅取消事件订阅（attach 重入时用，不动状态与上下文）。
+  void detachSub(String convId) {
+    _subs.remove(convId)?.cancel();
+  }
+
+  @override
+  void dispose() {
+    for (final sub in _subs.values) {
+      sub.cancel();
+    }
+    _subs.clear();
+    _ctx.clear();
+    super.dispose();
   }
 
   /// 把当前流式思考快照落档（step 边界/turn 结束时调用），清空流式缓冲。
   /// 落档时顺带记录耗时（起点未知 → null），供存档卡显示"持续了X秒"；
   /// 并追加时间线标记（思考存档在**此刻**进入渲染序列，而不是一律排最前）。
-  AgentUiState _finalizeThinking(AgentUiState s) {
+  AgentUiState _finalizeThinking(AgentUiState s, _TurnCtx ctx) {
     if (s.thinking.isEmpty) return s;
     Duration? dur;
-    if (_thinkingStart != null) {
-      dur = DateTime.now().difference(_thinkingStart!);
-      _thinkingStart = null;
+    if (ctx.thinkingStart != null) {
+      dur = DateTime.now().difference(ctx.thinkingStart!);
+      ctx.thinkingStart = null;
     }
     return s.copyWith(
       thinkingHistory: [...s.thinkingHistory, s.thinking],
@@ -202,37 +235,40 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
     );
   }
 
-  /// 事件归约（纯函数式：只产新 state，不改 log）。测试可直接调用。
-  void onEvent(SessionEvent e) {
+  /// 事件归约（按会话键入；只产新 state，不改 log）。测试可直接调用。
+  void onEvent(String convId, SessionEvent e) {
+    if (!mounted) return;
+    final ctx = _ctx.putIfAbsent(convId, _TurnCtx.new);
+    var s = _entry(convId);
     switch (e.type) {
       case kEventTurnStart:
-        state = AgentUiState(
+        s = AgentUiState(
           running: true,
-          turn: (e.data['turn'] as num?)?.toInt() ?? state.turn,
+          turn: (e.data['turn'] as num?)?.toInt() ?? s.turn,
         );
         break;
       case kEventStepStart:
         // step 边界：上一步的思考已结束 → 落档折叠，新 step 另起思考卡。
-        state = _finalizeThinking(state).copyWith(
-          step: (e.data['step'] as num?)?.toInt() ?? state.step);
+        s = _finalizeThinking(s, ctx).copyWith(
+          step: (e.data['step'] as num?)?.toInt() ?? s.step);
         break;
       case kEventToolCall:
-        final tools = [...state.tools, ToolActivityUi(
+        final tools = [...s.tools, ToolActivityUi(
           callId: e.data['callId'] as String? ?? '',
           name: e.data['name'] as String? ?? '',
           arguments: (e.data['arguments'] as Map<String, dynamic>?) ??
               const {},
         )];
-        state = state.copyWith(
+        s = s.copyWith(
           tools: tools,
-          timeline: [...state.timeline, UiTimelineTool(tools.length - 1)],
+          timeline: [...s.timeline, UiTimelineTool(tools.length - 1)],
         );
         break;
       case kEventToolResult:
         final callId = e.data['callId'] as String? ?? '';
         final isError = e.data['isError'] as bool? ?? false;
         final content = e.data['content'] as String? ?? '';
-        final tools = [...state.tools];
+        final tools = [...s.tools];
         for (var i = tools.length - 1; i >= 0; i--) {
           // 从后向前找同 callId 的 executing 卡片（并行调用同名的场合）。
           if (tools[i].callId == callId) {
@@ -243,20 +279,20 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
             break;
           }
         }
-        state = state.copyWith(tools: tools);
+        s = s.copyWith(tools: tools);
         break;
       case kEventLlmRetry:
       case kEventLlmRetryStarted:
-        state = state.copyWith(
+        s = s.copyWith(
             retryAttempt: (e.data['retries'] as num?)?.toInt() ??
-                state.retryAttempt + 1);
+                s.retryAttempt + 1);
         break;
       case kEventCompactionSummary:
-        state = state.copyWith(compacted: true);
+        s = s.copyWith(compacted: true);
         break;
       case kEventTurnEnd:
         final kind = _reasonKind(e.data['reason']);
-        state = _finalizeThinking(state).copyWith(
+        s = _finalizeThinking(s, ctx).copyWith(
           running: false,
           retryAttempt: 0,
           lastError: kind == 'error' ? '本轮执行失败（见推理日志）' : null,
@@ -264,8 +300,9 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
         );
         break;
       default:
-        break;
+        return;
     }
+    _put(convId, s);
   }
 
   /// reason 双形态兼容：主循环写 String（completed/...），崩溃修复写
@@ -277,6 +314,12 @@ class AgentUiStateNotifier extends StateNotifier<AgentUiState> {
   }
 }
 
+/// 单会话归约上下文。
+class _TurnCtx {
+  /// 当前思考块的起点（首个非空 thinking 推送时记录；落档后复位）。
+  DateTime? thinkingStart;
+}
+
 final agentUiStateProvider =
-    StateNotifierProvider<AgentUiStateNotifier, AgentUiState>(
+    StateNotifierProvider<AgentUiStateNotifier, Map<String, AgentUiState>>(
         (ref) => AgentUiStateNotifier());

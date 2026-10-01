@@ -241,6 +241,33 @@ void main() {
       expect(migrated.sshConfigs.length, 1);
       expect(migrated.sshConfigs.first.host, '127.0.0.1');
       expect(migrated.sshConfigs.first.username, 'u0_a1');
+      // 迁移必须补稳定 id（否则删除失效/编辑变追加——2026-10-01 真机定案）。
+      expect(migrated.sshConfigs.first.id, isNotEmpty);
+    });
+
+    test('迁移补 id 幂等：补完持久化后再次加载 id 不变', () {
+      final migrated = InferenceSettings.fromJson({
+        'sshConfig': {
+          'host': 'h', 'port': 22, 'username': 'u', 'authType': 'password',
+          'password': 'p',
+        },
+      });
+      final firstId = migrated.sshConfigs.first.id;
+      expect(firstId, isNotEmpty);
+      // 迁移后的配置已带 id → 持久化后二次加载不再重新分配。
+      final second = InferenceSettings.fromJson(migrated.toJson());
+      expect(second.sshConfigs.single.id, firstId);
+      // 空 id 的旧列表条目同样补齐。
+      final list = InferenceSettings.fromJson({
+        'sshConfigs': [
+          {'host': 'a', 'port': 22, 'username': 'u', 'authType': 'key',
+           'privateKeyPem': 'K'},
+          {'host': 'b', 'port': 8022, 'username': 'u', 'authType': 'key',
+           'privateKeyPem': 'K'},
+        ],
+      });
+      expect(list.sshConfigs.every((c) => c.id.isNotEmpty), isTrue);
+      expect(list.sshConfigs[0].id, isNot(list.sshConfigs[1].id));
     });
 
     test('旧配置无 Dev 键 → 默认关闭（向后兼容）', () {
