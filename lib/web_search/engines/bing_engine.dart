@@ -63,8 +63,14 @@ class BingEngine implements SearchEngine {
       final p = RegExp(r'<p[^>]*>(.*?)</p>', caseSensitive: false, dotAll: true)
           .firstMatch(block);
       final snippet = p == null ? null : _text(p.group(1)!);
+      // 时间标记：p 摘要里常带"2026年9月12日 / 2月5日 / X小时前"。
+      final publishedAt = p == null ? '' : extractDateMarker(p.group(1)!);
       if (url.isEmpty) continue;
-      hits.add(EngineHit(url: url, title: title, snippet: snippet));
+      hits.add(EngineHit(
+          url: url,
+          title: title,
+          snippet: snippet,
+          publishedAt: publishedAt.isEmpty ? null : publishedAt));
     }
     return hits;
   }
