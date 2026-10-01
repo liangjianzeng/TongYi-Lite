@@ -38,11 +38,13 @@ class WebSearchSeam {
     _provider = provider;
   }
 
-  /// provider 的配置签名；非 SearXNG provider 退化为身份比较
+  /// provider 的配置签名；非 SearXNG / 直连 provider 退化为身份比较
   /// （即只有同一对象才算"没变"）。
-  static String _signatureOf(WebSearchProvider p) => p is SearXNGSearchProvider
-      ? p.configSignature
-      : 'identity:${identityHashCode(p)}';
+  static String _signatureOf(WebSearchProvider p) {
+    if (p is SearXNGSearchProvider) return p.configSignature;
+    if (p is DirectSearchProvider) return p.configSignature;
+    return 'identity:${identityHashCode(p)}';
+  }
 
   /// 可用性探测（廉价：仅本地校验，不联网）。
   String? available() => _provider?.available();

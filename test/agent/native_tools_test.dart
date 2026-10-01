@@ -263,6 +263,56 @@ void main() {
     expect(adapter.mapApiError(eTimeout), LlmFailureCode.timeout);
   });
 
+  test('mapApiStatus：4xx 文案命中上下文溢出 → contextWindowExceeded', () {
+    final adapter = _TestAdapter(protocol: PromptJsonProtocol());
+    // OpenAI 官方文案
+    expect(
+      adapter.mapApiStatus(
+        400,
+        message: "This model's maximum context length is 65536 tokens. "
+            'However, you requested 70000 tokens in the messages.',
+      ),
+      LlmFailureCode.contextWindowExceeded,
+    );
+    // DeepSeek 常见措辞 + 响应体前缀（_describeApiError 拼接形态）
+    expect(
+      adapter.mapApiStatus(
+        400,
+        message: '服务端返回异常（HTTP 400）：| 响应体: '
+            'context_length_exceeded: the last request exceeds the '
+            'available context length',
+      ),
+      LlmFailureCode.contextWindowExceeded,
+    );
+    // 中文端点文案
+    expect(
+      adapter.mapApiStatus(400, message: '输入长度超出上下文长度限制'),
+      LlmFailureCode.contextWindowExceeded,
+    );
+    // prompt is too long（Claude 兼容层）
+    expect(
+      adapter.mapApiStatus(
+          400, message: 'Your prompt is too long: 210000 tokens > 200000'),
+      LlmFailureCode.contextWindowExceeded,
+    );
+    // 非溢出 4xx 文案仍是 invalidRequest（宁可窄勿宽）
+    expect(
+      adapter.mapApiStatus(400, message: 'Invalid parameter: max_tokens'),
+      LlmFailureCode.invalidRequest,
+    );
+    expect(
+      adapter.mapApiStatus(401, message: 'Invalid API key'),
+      LlmFailureCode.invalidRequest,
+    );
+    // 溢出码不进 llm-retry（由失败瀑布 compaction 步处理）
+    const overflow = LlmFailure(
+        code: LlmFailureCode.contextWindowExceeded, message: 'context length');
+    expect(
+        LlmRetry(maxRetries: 5, retryEmptyResponse: true)
+            .isRetryable(overflow),
+        isFalse);
+  });
+
   test('LlmRetry：invalidRequest 永不重试；空响应按路线开关', () {
     final local = LlmRetry(maxRetries: 3);
     final api = LlmRetry(maxRetries: 5, retryEmptyResponse: true);

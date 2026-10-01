@@ -108,6 +108,11 @@ class InferenceSettings {
   /// 同一时刻仍只允许一个本地回合（见 chat_provider 门控）。
   final int agentMaxConcurrentTurns;
 
+  /// API 档主动压缩预算（token 估算，默认 32768）：投影历史估算超过该值
+  /// 即触发确定性压缩。local 档预算仍由 agentNctx×3/4 派生，不受此项影响。
+  /// 配置了端点 contextWindow 时取两者较小值（×7/8 留余量，见 chat_provider）。
+  final int agentApiContextBudget;
+
   /// 每轮生成??token 预算。默??512：足够输出一次工具调??JSON 或一段回答??
   final int agentTokensPerRound;
 
@@ -166,6 +171,10 @@ class InferenceSettings {
 
   /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）??
   final bool webSearchEnabled;
+
+  /// 联网搜索模式：'direct' = 手机直连搜索引擎（默认，真实 UA 绕反爬）；
+  /// 'searxng' = 走自建 SearXNG 实例（填 [webSearchSearXngBaseUrl]）。
+  final String webSearchMode;
 
   /// 联网搜索 SearXNG 实例地址（用户在「设????API 接入 ??联网搜索」填写）??
   ///
@@ -226,6 +235,7 @@ class InferenceSettings {
   /// 占用率采样周期（秒）??~30。默??0：仅推理时事件驱动采样（空闲不采样，
   /// 省电）；>0：每??N 秒周期性采样（空闲也更新线条）??
   final int resourceSampleIntervalSec;
+
   /// OOM 内存守卫总开关（设置→推理引擎→内存守卫）。默认开启：加载前预检
   /// 「模型体??+ 预检余量」是否超出可用内存，超出则拒绝加载，防止 UMA 手机
   /// 整机硬死机。关??= 完全跳过守卫拒绝（高级用户排障用，有死机风险）??
@@ -280,6 +290,9 @@ class InferenceSettings {
   // 设置 ??联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己??
   static const String kDefaultSearXngBaseUrl = '';
 
+  // 默认模式 = 手机直连搜索引擎（真实浏览器 UA 绕国内反爬，无需自建实例）。
+  static const String kDefaultWebSearchMode = 'direct';
+
   // 引擎白名单默认留??= 由实例决定。实例上有不可达引擎（如墙内实例挂着
   // google cse / duckduckgo）时，用户自行填写可达引擎可显著提??
   // （实测某实例：全引擎 21s ??指定 2 个可达引??2.5s）??
@@ -316,6 +329,7 @@ class InferenceSettings {
     this.agentMaxRounds = 12,
     this.agentMaxSearchesPerTurn = 5,
     this.agentMaxConcurrentTurns = 1,
+    this.agentApiContextBudget = 32768,
     this.agentTokensPerRound = 1024,
     this.agentToolTimeoutMs = 15000,
     this.agentAllowParallelTools = false,
@@ -333,6 +347,7 @@ class InferenceSettings {
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
     this.webSearchEnabled = false,
+    this.webSearchMode = kDefaultWebSearchMode,
     this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
     this.webSearchSearXngApiKey,
     this.webSearchSearXngMaxResults = 8,
@@ -343,8 +358,9 @@ class InferenceSettings {
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
-    // 长期记忆默认关闭（跨会话记忆可能积累偶发错误，默认不启用）??
-    this.agentMemoryEnabled = false,
+    // 长期记忆默认开启（2026-10-01 P1：系统提示自动注入【用户记忆】段，
+    // 跨会话偏好/事实是"智能感"的核心；设置里仍可关）。
+    this.agentMemoryEnabled = true,
     // ---- 推理引擎 ----
     this.autoLoadMmproj = true,
     this.showResourceMonitor = true,
@@ -391,8 +407,7 @@ class InferenceSettings {
       agentToolsByModel[modelId] ?? const [];
 
   /// 便捷读取：某个模型的 agent 配置覆盖（未配置返回 null）??
-  Map<String, dynamic>? agentConfigFor(String modelId) =>
-      agentByModel[modelId];
+  Map<String, dynamic>? agentConfigFor(String modelId) => agentByModel[modelId];
 
   /// 便捷读取：当前激活的 API 模型配置；未激??不存在返??null??
   /// 便捷读取：当前激活的智能体人格。
@@ -433,70 +448,72 @@ class InferenceSettings {
           maxParallel: agentMaxParallel,
         );
 
-  InferenceSettings copyWith(
-      {bool? enableGpu,
-      int? gpuLayers,
-      int? contextSize,
-      bool? enableThinking,
-      String? gpuBackend,
-      Map<String, bool>? mtpEnabledByModel,
-      bool? enableMtpFeature,
-      Map<String, bool>? dsparkEnabledByModel,
-      bool? enableDsparkFeature,
-      String? defaultModelId,
-      // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
-      // 故增加显式清空标记，供取消默认模型时使用??
-      bool clearDefaultModel = false,
-      List<ApiModelConfig>? apiModels,
-      String? activeApiModelId,
-      // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
-      bool clearActiveApiModel = false,
-      // ---- 智能体（Agent??---
-      bool? agentEnabled,
-      bool? useNewAgentMode,
-      String? agentModelSource,
-      String? agentModelId,
-      // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
-      bool clearAgentModel = false,
-      int? agentNctx,
-      int? agentMaxRounds,
-      int? agentMaxSearchesPerTurn,
-      int? agentMaxConcurrentTurns,
-      int? agentTokensPerRound,
-      int? agentToolTimeoutMs,
-      bool? agentAllowParallelTools,
-      int? agentMaxParallel,
-      double? agentTemperature,
-      int? agentApiMaxRounds,
-      int? agentApiTokensPerRound,
-      double? agentApiTemperature,
-      int? agentApiToolTimeoutMs,
-      bool? agentApiAllowParallelTools,
-      int? agentApiMaxParallel,
-      int? agentThinkingMaxChars,
-      double? chatTextScale,
-      bool? agentSubagentEnabled,
-      bool? agentCompactEnabled,
-      bool? agentSpillEnabled,
-      bool? webSearchEnabled,
-      String? webSearchSearXngBaseUrl,
-      String? webSearchSearXngApiKey,
-      int? webSearchSearXngMaxResults,
-      int? webSearchSearXngTimeoutMs,
-      String? webSearchSearXngLanguage,
-      String? webSearchSearXngCategories,
-      String? webSearchSearXngEngines,
-      bool? agentShellEnabled,
-      bool? agentPythonEnabled,
-      bool? agentFullFileAccess,
-      bool? agentMemoryEnabled,
-      // ---- 推理引擎 ----
-      bool? autoLoadMmproj,
-      bool? showResourceMonitor,
-      int? resourceSampleIntervalSec,
-      bool? oomGuardEnabled,
-      int? oomPreHeadroomMb,
-      int? oomPostHeadroomMb,
+  InferenceSettings copyWith({
+    bool? enableGpu,
+    int? gpuLayers,
+    int? contextSize,
+    bool? enableThinking,
+    String? gpuBackend,
+    Map<String, bool>? mtpEnabledByModel,
+    bool? enableMtpFeature,
+    Map<String, bool>? dsparkEnabledByModel,
+    bool? enableDsparkFeature,
+    String? defaultModelId,
+    // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
+    // 故增加显式清空标记，供取消默认模型时使用??
+    bool clearDefaultModel = false,
+    List<ApiModelConfig>? apiModels,
+    String? activeApiModelId,
+    // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
+    bool clearActiveApiModel = false,
+    // ---- 智能体（Agent??---
+    bool? agentEnabled,
+    bool? useNewAgentMode,
+    String? agentModelSource,
+    String? agentModelId,
+    // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
+    bool clearAgentModel = false,
+    int? agentNctx,
+    int? agentMaxRounds,
+    int? agentMaxSearchesPerTurn,
+    int? agentMaxConcurrentTurns,
+    int? agentApiContextBudget,
+    int? agentTokensPerRound,
+    int? agentToolTimeoutMs,
+    bool? agentAllowParallelTools,
+    int? agentMaxParallel,
+    double? agentTemperature,
+    int? agentApiMaxRounds,
+    int? agentApiTokensPerRound,
+    double? agentApiTemperature,
+    int? agentApiToolTimeoutMs,
+    bool? agentApiAllowParallelTools,
+    int? agentApiMaxParallel,
+    int? agentThinkingMaxChars,
+    double? chatTextScale,
+    bool? agentSubagentEnabled,
+    bool? agentCompactEnabled,
+    bool? agentSpillEnabled,
+    bool? webSearchEnabled,
+    String? webSearchMode,
+    String? webSearchSearXngBaseUrl,
+    String? webSearchSearXngApiKey,
+    int? webSearchSearXngMaxResults,
+    int? webSearchSearXngTimeoutMs,
+    String? webSearchSearXngLanguage,
+    String? webSearchSearXngCategories,
+    String? webSearchSearXngEngines,
+    bool? agentShellEnabled,
+    bool? agentPythonEnabled,
+    bool? agentFullFileAccess,
+    bool? agentMemoryEnabled,
+    // ---- 推理引擎 ----
+    bool? autoLoadMmproj,
+    bool? showResourceMonitor,
+    int? resourceSampleIntervalSec,
+    bool? oomGuardEnabled,
+    int? oomPreHeadroomMb,
+    int? oomPostHeadroomMb,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -516,30 +533,27 @@ class InferenceSettings {
       gpuBackend: gpuBackend ?? this.gpuBackend,
       mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
       enableMtpFeature: enableMtpFeature ?? this.enableMtpFeature,
-      dsparkEnabledByModel:
-          dsparkEnabledByModel ?? this.dsparkEnabledByModel,
+      dsparkEnabledByModel: dsparkEnabledByModel ?? this.dsparkEnabledByModel,
       enableDsparkFeature: enableDsparkFeature ?? this.enableDsparkFeature,
-      defaultModelId: clearDefaultModel
-          ? null
-          : defaultModelId ?? this.defaultModelId,
+      defaultModelId:
+          clearDefaultModel ? null : defaultModelId ?? this.defaultModelId,
       apiModels: apiModels ?? this.apiModels,
       activeApiModelId: clearActiveApiModel
           ? null
           : activeApiModelId ?? this.activeApiModelId,
       agentEnabled: agentEnabled ?? this.agentEnabled,
       useNewAgentMode: useNewAgentMode ?? this.useNewAgentMode,
-      agentModelSource: clearAgentModel
-          ? null
-          : agentModelSource ?? this.agentModelSource,
-      agentModelId: clearAgentModel
-          ? null
-          : agentModelId ?? this.agentModelId,
+      agentModelSource:
+          clearAgentModel ? null : agentModelSource ?? this.agentModelSource,
+      agentModelId: clearAgentModel ? null : agentModelId ?? this.agentModelId,
       agentNctx: agentNctx ?? this.agentNctx,
       agentMaxRounds: agentMaxRounds ?? this.agentMaxRounds,
       agentMaxSearchesPerTurn:
           agentMaxSearchesPerTurn ?? this.agentMaxSearchesPerTurn,
       agentMaxConcurrentTurns:
           agentMaxConcurrentTurns ?? this.agentMaxConcurrentTurns,
+      agentApiContextBudget:
+          agentApiContextBudget ?? this.agentApiContextBudget,
       agentTokensPerRound: agentTokensPerRound ?? this.agentTokensPerRound,
       agentToolTimeoutMs: agentToolTimeoutMs ?? this.agentToolTimeoutMs,
       agentAllowParallelTools:
@@ -562,6 +576,7 @@ class InferenceSettings {
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
+      webSearchMode: webSearchMode ?? this.webSearchMode,
       webSearchSearXngBaseUrl:
           webSearchSearXngBaseUrl ?? this.webSearchSearXngBaseUrl,
       webSearchSearXngApiKey:
@@ -578,8 +593,7 @@ class InferenceSettings {
           webSearchSearXngEngines ?? this.webSearchSearXngEngines,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
-      agentFullFileAccess:
-          agentFullFileAccess ?? this.agentFullFileAccess,
+      agentFullFileAccess: agentFullFileAccess ?? this.agentFullFileAccess,
       agentMemoryEnabled: agentMemoryEnabled ?? this.agentMemoryEnabled,
       autoLoadMmproj: autoLoadMmproj ?? this.autoLoadMmproj,
       showResourceMonitor: showResourceMonitor ?? this.showResourceMonitor,
@@ -622,6 +636,7 @@ class InferenceSettings {
         'agentMaxRounds': agentMaxRounds,
         'agentMaxSearchesPerTurn': agentMaxSearchesPerTurn,
         'agentMaxConcurrentTurns': agentMaxConcurrentTurns,
+        'agentApiContextBudget': agentApiContextBudget,
         'agentTokensPerRound': agentTokensPerRound,
         'agentToolTimeoutMs': agentToolTimeoutMs,
         'agentAllowParallelTools': agentAllowParallelTools,
@@ -639,6 +654,7 @@ class InferenceSettings {
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
         'webSearchEnabled': webSearchEnabled,
+        'webSearchMode': webSearchMode,
         'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
         'webSearchSearXngApiKey': webSearchSearXngApiKey,
         'webSearchSearXngMaxResults': webSearchSearXngMaxResults,
@@ -698,14 +714,17 @@ class InferenceSettings {
       agentModelSource: json['agentModelSource'] as String?,
       agentModelId: json['agentModelId'] as String?,
       agentNctx: (json['agentNctx'] as num?)?.toInt() ?? 8192,
-      agentMaxRounds:
-          _migrateOldDefault((json['agentMaxRounds'] as num?)?.toInt(),
-              oldDefault: 5, newDefault: 12),
+      agentMaxRounds: _migrateOldDefault(
+          (json['agentMaxRounds'] as num?)?.toInt(),
+          oldDefault: 5,
+          newDefault: 12),
       agentMaxSearchesPerTurn:
           (json['agentMaxSearchesPerTurn'] as num?)?.toInt() ?? 5,
       agentMaxConcurrentTurns:
-          ((json['agentMaxConcurrentTurns'] as num?)?.toInt() ?? 1)
-              .clamp(1, 4),
+          ((json['agentMaxConcurrentTurns'] as num?)?.toInt() ?? 1).clamp(1, 4),
+      agentApiContextBudget:
+          ((json['agentApiContextBudget'] as num?)?.toInt() ?? 32768)
+              .clamp(4096, 200000),
       agentTokensPerRound: _migrateOldDefault(
           (json['agentTokensPerRound'] as num?)?.toInt(),
           oldDefault: 512,
@@ -716,8 +735,7 @@ class InferenceSettings {
           json['agentAllowParallelTools'] as bool? ?? false,
       agentMaxParallel: json['agentMaxParallel'] as int? ?? 4,
       agentTemperature: (json['agentTemperature'] as num?)?.toDouble() ?? 0.7,
-      agentApiMaxRounds:
-          (json['agentApiMaxRounds'] as num?)?.toInt() ?? 16,
+      agentApiMaxRounds: (json['agentApiMaxRounds'] as num?)?.toInt() ?? 16,
       agentApiTokensPerRound:
           (json['agentApiTokensPerRound'] as num?)?.toInt() ?? 8192,
       agentApiTemperature:
@@ -726,17 +744,17 @@ class InferenceSettings {
           (json['agentApiToolTimeoutMs'] as num?)?.toInt() ?? 30000,
       agentApiAllowParallelTools:
           json['agentApiAllowParallelTools'] as bool? ?? true,
-      agentApiMaxParallel:
-          (json['agentApiMaxParallel'] as num?)?.toInt() ?? 4,
+      agentApiMaxParallel: (json['agentApiMaxParallel'] as num?)?.toInt() ?? 4,
       agentThinkingMaxChars:
           (json['agentThinkingMaxChars'] as num?)?.toInt() ?? 6000,
       chatTextScale:
-          ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0)
-              .clamp(0.7, 1.3),
+          ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0).clamp(0.7, 1.3),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
+      // 联网搜索模式：旧配置缺字段时回落默认（direct 直连）??
+      webSearchMode: json['webSearchMode'] as String? ?? kDefaultWebSearchMode,
       // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）??
       // 空地址 = 未配置，此时联网搜索工具会给??请先在设置里填地址"的诊断??
       webSearchSearXngBaseUrl:
@@ -748,15 +766,14 @@ class InferenceSettings {
           (json['webSearchSearXngTimeoutMs'] as num?)?.toInt() ??
               kDefaultSearXngTimeoutMs,
       webSearchSearXngLanguage: json['webSearchSearXngLanguage'] as String?,
-      webSearchSearXngCategories:
-          json['webSearchSearXngCategories'] as String?,
+      webSearchSearXngCategories: json['webSearchSearXngCategories'] as String?,
       webSearchSearXngEngines:
           json['webSearchSearXngEngines'] as String? ?? kDefaultSearXngEngines,
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
-      // 长期记忆默认关闭（旧配置缺字段时向后兼容）??
-      agentMemoryEnabled: json['agentMemoryEnabled'] as bool? ?? false,
+      // 记忆默认开；曾显式存过 false 的用户保持 false（fromJson 只兜缺字段）。
+      agentMemoryEnabled: json['agentMemoryEnabled'] as bool? ?? true,
       // 推理引擎扩展：旧配置缺字段时用默认值（投影器默认加载、监控默认开启）??
       autoLoadMmproj: json['autoLoadMmproj'] as bool? ?? true,
       showResourceMonitor: json['showResourceMonitor'] as bool? ?? true,
@@ -831,8 +848,7 @@ class InferenceSettings {
           list.add(persona);
         }
       } else if (e is Map) {
-        final persona =
-            AgentPersona.fromJson(Map<String, dynamic>.from(e));
+        final persona = AgentPersona.fromJson(Map<String, dynamic>.from(e));
         if (persona.id.isNotEmpty && persona.name.isNotEmpty) {
           list.add(persona);
         }

@@ -568,11 +568,12 @@ class OpenAiAdapter extends BaseEngineAdapter {
   }
 
   /// 流错误 → [LlmFailure]：[OpenAiHttpException]（携带状态码）按状态分档，
+  /// message 含响应体详情（溢出文案在此 → contextWindowExceeded 走压缩瀑布）；
   /// dio 异常走 [mapApiError]，其余归 transport。
   LlmFailure _normalizeStreamError(Object error) {
     if (error is OpenAiHttpException) {
       return LlmFailure(
-        code: mapApiStatus(error.statusCode),
+        code: mapApiStatus(error.statusCode, message: error.message),
         message: error.message,
       );
     }

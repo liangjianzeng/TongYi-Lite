@@ -22,8 +22,8 @@ void main() {
       expect(s.agentShellEnabled, isTrue);
       expect(s.agentPythonEnabled, isTrue);
       expect(s.agentFullFileAccess, isFalse);
-      // 长期记忆默认关闭（跨会话记忆可能积累偶发错误）。
-      expect(s.agentMemoryEnabled, isFalse);
+      // 长期记忆默认开启（2026-10-01 P1：自动注入【用户记忆】段）。
+      expect(s.agentMemoryEnabled, isTrue);
       // 推理引擎扩展：投影器默认加载、监控默认开启、采样默认 1 秒（周期性，
       // 打开监控即可看到实时占比）。
       expect(s.autoLoadMmproj, isTrue);
@@ -110,6 +110,27 @@ void main() {
           InferenceSettings.fromJson({'agentMaxConcurrentTurns': 0})
               .agentMaxConcurrentTurns,
           1);
+    });
+
+    test('API 上下文压缩预算：默认 32768，往返一致，解析夹紧 4096~200000', () {
+      const s = InferenceSettings();
+      expect(s.agentApiContextBudget, 32768);
+      final restored = InferenceSettings.fromJson(s.toJson());
+      expect(restored.agentApiContextBudget, 32768);
+
+      final custom = InferenceSettings.fromJson({'agentApiContextBudget': 65536});
+      expect(custom.agentApiContextBudget, 65536);
+      expect(InferenceSettings.fromJson(custom.toJson()).agentApiContextBudget,
+          65536);
+      // 越界值夹紧（手改 JSON 防御）。
+      expect(
+          InferenceSettings.fromJson({'agentApiContextBudget': 999999})
+              .agentApiContextBudget,
+          200000);
+      expect(
+          InferenceSettings.fromJson({'agentApiContextBudget': 1})
+              .agentApiContextBudget,
+          4096);
     });
 
     test('旧配置（无 agent 字段）加载 → 默认值，向后兼容', () {

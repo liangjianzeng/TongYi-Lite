@@ -29,9 +29,17 @@ import '../agent/dev/dev.dart'
         SshStatus,
         WorkspaceBackend,
         sanitizeWorkspaceDirName;
+import '../services/app_bridge.dart' show AppBridge;
 import '../agent/skills/provider.dart'
-    show loadUserSkills, writeUserSkill, deleteUserSkill;
+    show
+        loadUserSkills,
+        writeUserSkill,
+        deleteUserSkill,
+        buildSkillMarkdown,
+        sanitizeSkillDirName;
 import '../agent/skills/skill.dart' show Skill, loadBuiltinSkills;
+import '../agent/builtin_tools/memory_tool.dart'
+    show readGlobalMemorySnapshot, deleteGlobalMemoryEntry, clearGlobalMemory;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
@@ -52,6 +60,9 @@ import 'inference_log_screen.dart';
 /// scan — noisy and slow. Keeping the flag at library scope makes it survive
 /// route disposal while still resetting on process restart.
 bool _appLaunchScanDone = false;
+
+/// Termux sshd 探测结论（`_probeSshd`）。
+enum _SshdProbe { listening, refused, timeout }
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -139,7 +150,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           tabAlignment: TabAlignment.start,
           // 小图标 + 小字号，减少标题栏占用的纵向空间。
           indicatorWeight: 2,
-          labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          labelStyle:
+              const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
           unselectedLabelStyle: const TextStyle(fontSize: 12),
           tabs: const [
             Tab(icon: Icon(Icons.storage, size: 18), text: '模型管理'),
@@ -374,7 +386,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
                     // dspark 开关：仅当全局 dspark 开关开启且该模型声明了草稿头
                     // 时显示，用户可按模型逐个配置。
-                    if (settings.enableDsparkFeature && model.dspark != null) ...[
+                    if (settings.enableDsparkFeature &&
+                        model.dspark != null) ...[
                       const SizedBox(height: 8),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1228,7 +1241,6 @@ class _InferenceEngineTab extends ConsumerWidget {
             ),
           ),
 
-
           const SizedBox(height: 10),
 
           // ---- 引擎状态卡片 ----
@@ -1424,7 +1436,8 @@ class _InferenceEngineTab extends ConsumerWidget {
         children: [
           Row(
             children: [
-              Expanded(child: Text(label, style: const TextStyle(fontSize: 12))),
+              Expanded(
+                  child: Text(label, style: const TextStyle(fontSize: 12))),
               SizedBox(
                 width: 88,
                 child: Text(
@@ -1447,7 +1460,8 @@ class _InferenceEngineTab extends ConsumerWidget {
               onChanged: (v) => onChanged((v / 64).round() * 64),
             ),
           ),
-          Text(hint, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+          Text(hint,
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
         ],
       ),
     );
@@ -1592,6 +1606,16 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   /// 用户自定义 skills（null = 扫描中）。
   List<Skill>? _userSkills;
 
+  /// 内置技能清单（常量，取一次避免每次 build 重建 17 个对象）。
+  final List<Skill> _builtinSkills = loadBuiltinSkills();
+
+  /// 技能列表展开态：技能会越来越多，默认收起成一行汇总，
+  /// 展开后也只在限高滚动区里浏览——技能卡不再把设置页拉成 2 米长。
+  bool _skillsExpanded = false;
+
+  /// 全局记忆条目（null = 加载中；记忆管理卡用）。
+  List<MapEntry<String, String>>? _memoryEntries;
+
   /// 全局 AGENTS.md 路径与字节数（-1 = 不存在）。
   String? _agentsMdPath;
   int _agentsMdLen = -1;
@@ -1605,6 +1629,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     super.initState();
     _rescanSkills();
     _loadAgentsMdInfo();
+    _loadMemoryEntries();
     final listener = () {
       if (mounted) setState(() {});
     };
@@ -1627,6 +1652,118 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     final skills = await loadUserSkills();
     if (!mounted) return;
     setState(() => _userSkills = skills);
+  }
+
+  // ================= 记忆管理（查看/删除，与 memory.json 同存储） =================
+
+  Future<void> _loadMemoryEntries() async {
+    final entries = await readGlobalMemorySnapshot(
+        maxEntries: 100, maxValueChars: 200);
+    if (!mounted) return;
+    setState(() => _memoryEntries = entries);
+  }
+
+  Future<void> _confirmDeleteMemoryEntry(String key) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除记忆：$key'),
+        content: const Text('删除后智能体将不再记得该条内容，无法恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await deleteGlobalMemoryEntry(key);
+    await _loadMemoryEntries();
+  }
+
+  Future<void> _confirmClearMemory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空全部记忆'),
+        content: const Text('将删除全部长期记忆条目，无法恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await clearGlobalMemory();
+    await _loadMemoryEntries();
+  }
+
+  /// 记忆管理列表（嵌在长期记忆开关下方；随开关关闭置灰）。
+  Widget _buildMemoryManager(bool enabled) {
+    final entries = _memoryEntries;
+    if (!enabled) {
+      return const Padding(
+        padding: EdgeInsets.only(left: 16, right: 16, bottom: 8),
+        child: Text('已关闭；开启后自动注入每回合系统提示',
+            style: TextStyle(fontSize: 12, color: Colors.grey)),
+      );
+    }
+    if (entries == null) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: SizedBox(
+            height: 20,
+            width: 20,
+            child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    if (entries.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.only(left: 16, right: 16, bottom: 8),
+        child: Text('暂无记忆。对话里说"记住……"即可写入',
+            style: TextStyle(fontSize: 12, color: Colors.grey)),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final e in entries)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text('${e.key}: ${e.value}',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                  InkWell(
+                    onTap: () => _confirmDeleteMemoryEntry(e.key),
+                    child: const Icon(Icons.close,
+                        size: 16, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: _confirmClearMemory,
+              child: const Text('清空全部', style: TextStyle(fontSize: 12)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadAgentsMdInfo() async {
@@ -1683,8 +1820,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                   active.prompt,
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontSize: 12, color: Colors.grey.shade600),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
               ),
             const SizedBox(height: 8),
@@ -1719,8 +1855,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   }
 
   /// 新增/编辑人格对话框。保存走 [SettingsNotifier.upsertPersona]（trim + 校验）。
-  Future<void> _showPersonaDialog(BuildContext context,
-      SettingsNotifier notifier,
+  Future<void> _showPersonaDialog(
+      BuildContext context, SettingsNotifier notifier,
       {AgentPersona? existing}) async {
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
     final promptCtrl = TextEditingController(text: existing?.prompt ?? '');
@@ -1789,8 +1925,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     ));
   }
 
-  Future<void> _confirmDeletePersona(BuildContext context,
-      SettingsNotifier notifier, String personaId) async {
+  Future<void> _confirmDeletePersona(
+      BuildContext context, SettingsNotifier notifier, String personaId) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1815,18 +1951,171 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 
   // ================= ⑤ 用户技能管理（直接落盘 SKILL.md） =================
 
-  /// 新增/编辑用户技能对话框。保存 = 写标准 SKILL.md 到用户技能目录，
-  /// 随后重新扫描；与手动放文件完全同构。
-  Future<void> _showUserSkillDialog({Skill? existing}) async {
-    final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final descCtrl = TextEditingController(text: existing?.description ?? '');
-    final whenCtrl = TextEditingController(text: existing?.whenToUse ?? '');
-    final bodyCtrl = TextEditingController(text: existing?.body ?? '');
+  /// 查看内置技能内容（只读），可「另存为我的技能」 customized 后覆盖内置。
+  Future<void> _showBuiltinSkillView(Skill s) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('内置技能：${s.name}'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('触发：${s.whenToUse}',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 10),
+                SelectableText(s.body,
+                    style: const TextStyle(fontSize: 13, height: 1.4)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+          TextButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _showUserSkillDialog(prefillText: buildSkillMarkdown(
+                description: s.description,
+                whenToUse: s.whenToUse,
+                invocation: s.invocation,
+                body: s.body,
+              ));
+            },
+            icon: const Icon(Icons.save_as_outlined, size: 16),
+            label: const Text('另存为我的技能'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 新增技能 = **整段粘贴一站式**：一个文本框贴完整 SKILL.md（meta 行 +
+  /// `---` + 正文），技能名自动取 `name:` 行、缺省从描述派生——不再逐字段
+  /// 手填。[prefillText] 用于"从内置技能另存"。编辑已有技能走字段表单。
+  Future<void> _showUserSkillDialog({Skill? existing, String? prefillText}) async {
+    if (existing != null) {
+      return _showEditSkillDialog(existing);
+    }
+    final rawCtrl = TextEditingController(text: prefillText ?? '');
     final formKey = GlobalKey<FormState>();
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(existing == null ? '新增技能' : '编辑技能：${existing.name}'),
+        title: const Text('新增技能（整段粘贴）'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: TextFormField(
+              controller: rawCtrl,
+              autofocus: true,
+              minLines: 8,
+              maxLines: 16,
+              decoration: const InputDecoration(
+                labelText: '粘贴完整技能文本',
+                hintText: 'name: 可选（技能名，缺省从描述取）\n'
+                    'description: 一句话描述\n'
+                    'whenToUse: 何时触发\n'
+                    '---\n'
+                    '正文执行指引（步骤/格式/注意）',
+                border: OutlineInputBorder(),
+                alignLabelWithHint: true,
+              ),
+              validator: (v) =>
+                  (v == null || v.trim().isEmpty) ? '请粘贴技能文本' : null,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final raw = rawCtrl.text;
+    // 技能名：`name:` 行优先；缺省从描述派生（去尾标点取前 12 字再 sanitize）。
+    final nameMatch =
+        RegExp(r'^\s*name\s*:\s*(.+)$', multiLine: true).firstMatch(raw);
+    String? name = nameMatch?.group(1)?.trim();
+    final Skill parsed;
+    try {
+      parsed = Skill.parse(raw, name: name ?? '');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('解析失败（格式见输入框提示）：$e')));
+      return;
+    }
+    if (parsed.description.trim().isEmpty || parsed.whenToUse.trim().isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('缺少 description / whenToUse 行——'
+              '格式：meta 行在前，`---` 分隔正文')));
+      return;
+    }
+    if (name == null || name.isEmpty) {
+      final base = parsed.description.trim().replaceAll(
+          RegExp(r'[。！？!?.、，,；;：:]'), '');
+      final sanitized = sanitizeSkillDirName(base);
+      name = (sanitized == null || sanitized.isEmpty)
+          ? null
+          : (sanitized.length > 12 ? sanitized.substring(0, 12) : sanitized);
+    }
+    if (name == null || name.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('无法确定技能名：请在文本首行加 `name: 技能名`')));
+      return;
+    }
+    try {
+      await writeUserSkill(
+        name: name,
+        description: parsed.description,
+        whenToUse: parsed.whenToUse,
+        invocation: parsed.invocation,
+        body: parsed.body,
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
+      return;
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
+    await _rescanSkills();
+  }
+
+  /// 编辑已有技能（字段表单；技能名锁定）。
+  Future<void> _showEditSkillDialog(Skill existing) async {
+    final descCtrl = TextEditingController(text: existing.description);
+    final whenCtrl = TextEditingController(text: existing.whenToUse);
+    final bodyCtrl = TextEditingController(text: existing.body);
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('编辑技能：${existing.name}'),
         content: Form(
           key: formKey,
           child: SizedBox(
@@ -1836,24 +2125,9 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TextFormField(
-                    controller: nameCtrl,
-                    autofocus: existing == null,
-                    enabled: existing == null,
-                    decoration: const InputDecoration(
-                      labelText: '技能名（唯一标识，保存后不可改）',
-                      hintText: '如：法律文书助手 / 旅行规划 / 周报生成',
-                      border: OutlineInputBorder(),
-                      helperText: '中英文均可，自动去除非法字符',
-                    ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? '请填写技能名' : null,
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
                     controller: descCtrl,
                     decoration: const InputDecoration(
                       labelText: '一句话描述',
-                      hintText: '这个技能做什么（显示在技能目录里）',
                       border: OutlineInputBorder(),
                     ),
                     validator: (v) =>
@@ -1864,8 +2138,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     controller: whenCtrl,
                     decoration: const InputDecoration(
                       labelText: '何时触发（whenToUse）',
-                      hintText: '什么请求应该用这个技能，'
-                          '如：用户要求起草合同、协议类文书',
                       border: OutlineInputBorder(),
                     ),
                     validator: (v) =>
@@ -1878,9 +2150,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     maxLines: 12,
                     decoration: const InputDecoration(
                       labelText: '技能正文（执行指引）',
-                      hintText: '模型命中该技能后按此执行：步骤、格式要求、'
-                          '注意事项。可用工具名（read_file/web_search/'
-                          'python_exec/todo_write/export_file…）',
                       border: OutlineInputBorder(),
                       alignLabelWithHint: true,
                     ),
@@ -1894,9 +2163,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           FilledButton(
             onPressed: () {
               if (formKey.currentState!.validate()) {
@@ -1911,16 +2179,16 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     if (saved != true) return;
     try {
       await writeUserSkill(
-        name: nameCtrl.text,
-        previousName: existing?.name,
+        name: existing.name,
+        previousName: existing.name,
         description: descCtrl.text,
         whenToUse: whenCtrl.text,
         body: bodyCtrl.text,
       );
     } on ArgumentError catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败：${e.message}')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
       return;
     } on Exception catch (e) {
       if (!mounted) return;
@@ -1967,12 +2235,10 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     // ---- 双场景档：API 档读写 agentApi* 专键，local 档读写原平铺键 ----
     final profMaxRounds =
         isApi ? settings.agentApiMaxRounds : settings.agentMaxRounds;
-    final profTokensPerRound = isApi
-        ? settings.agentApiTokensPerRound
-        : settings.agentTokensPerRound;
-    final profToolTimeoutMs = isApi
-        ? settings.agentApiToolTimeoutMs
-        : settings.agentToolTimeoutMs;
+    final profTokensPerRound =
+        isApi ? settings.agentApiTokensPerRound : settings.agentTokensPerRound;
+    final profToolTimeoutMs =
+        isApi ? settings.agentApiToolTimeoutMs : settings.agentToolTimeoutMs;
     final profTemperature =
         isApi ? settings.agentApiTemperature : settings.agentTemperature;
     final profAllowParallel = isApi
@@ -2039,449 +2305,537 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-          // ================= ① 引擎状态（能力总览）=================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 8),
-                  _buildSectionHeader('🤖 驱动模型', context),
-                  const Text(
-                    '指定智能体由哪个模型驱动；能力徽标随选择实时变化',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  // ================= ① 引擎状态（能力总览）=================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 8),
+                          _buildSectionHeader('🤖 驱动模型', context),
+                          const Text(
+                            '指定智能体由哪个模型驱动；能力徽标随选择实时变化',
+                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                          const SizedBox(height: 8),
+                          _buildAgentModelSelector(context, ref, settings),
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              _capChip(isApi ? '场景档：API 档' : '场景档：本地档',
+                                  ok: true),
+                              _capChip(isApi ? '协议：原生工具调用' : '协议：Prompt-JSON',
+                                  ok: true),
+                              _capChip('工具调用：支持', ok: true),
+                              _capChip('并行上限：$capsMaxParallel 路',
+                                  ok: capsMaxParallel > 1),
+                              _capChip(
+                                  isApi
+                                      ? '上下文：由服务端决定'
+                                      : '上下文：${settings.agentNctx} tok',
+                                  ok: true),
+                              _capChip('上下文压缩',
+                                  ok: settings.agentCompactEnabled),
+                              _capChip('输出溢写', ok: settings.agentSpillEnabled),
+                              _capChip('子代理',
+                                  ok: settings.agentSubagentEnabled),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  _buildAgentModelSelector(context, ref, settings),
+
                   const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      _capChip(isApi ? '场景档：API 档' : '场景档：本地档',
-                          ok: true),
-                      _capChip(isApi ? '协议：原生工具调用' : '协议：Prompt-JSON',
-                          ok: true),
-                      _capChip('工具调用：支持', ok: true),
-                      _capChip('并行上限：$capsMaxParallel 路',
-                          ok: capsMaxParallel > 1),
-                      _capChip(
-                          isApi
-                              ? '上下文：由服务端决定'
-                              : '上下文：${settings.agentNctx} tok',
-                          ok: true),
-                      _capChip('上下文压缩', ok: settings.agentCompactEnabled),
-                      _capChip('输出溢写', ok: settings.agentSpillEnabled),
-                      _capChip('子代理', ok: settings.agentSubagentEnabled),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 10),
+                  // ================= ①b 人格（Persona） =================
+                  _buildPersonaCard(context, settings, notifier),
 
-          // ================= ①b 人格（Persona） =================
-          _buildPersonaCard(context, settings, notifier),
+                  const SizedBox(height: 10),
 
-          const SizedBox(height: 10),
-
-          // ================= ② 核心执行参数 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('🔁 执行参数', context),
-                  _buildSliderRow(
-                    label: '单轮最大步数',
-                    value: profMaxRounds,
-                    min: 1,
-                    max: 100,
-                    divisions: 99,
-                    display: '$profMaxRounds 步',
-                    onChanged: (v) => isApi
-                        ? notifier.setAgentApiMaxRounds(v)
-                        : notifier.setAgentMaxRounds(v),
-                    hint: '一次提问内最多几次模型请求（含工具往返）；'
-                        '${isApi ? 'API 档默认 16' : '端侧建议 3–12（默认 12）'}，'
-                        '复杂任务可调到 100',
-                  ),
-                  _buildSliderRow(
-                    label: '并发会话槽位',
-                    value: settings.agentMaxConcurrentTurns,
-                    min: 1,
-                    max: 4,
-                    divisions: 3,
-                    display: '${settings.agentMaxConcurrentTurns} 个',
-                    onChanged: (v) =>
-                        notifier.setAgentMaxConcurrentTurns(v),
-                    hint: '同时允许执行回合的会话数量（默认 1）。'
-                        'API 驱动可真正并行；本地模型受引擎限制，'
-                        '同一时刻仍只能跑一个会话，其余会提示槽位已满',
-                  ),
-                  _buildSliderRow(
-                    label: '每回合搜索上限',
-                    value: settings.agentMaxSearchesPerTurn,
-                    min: 1,
-                    max: 10,
-                    divisions: 9,
-                    display: '${settings.agentMaxSearchesPerTurn} 次',
-                    onChanged: (v) => notifier.setAgentMaxSearchesPerTurn(v),
-                    hint: 'web_search 每回合最多调用次数（DSH max_uses 语义，默认 5）；'
-                        '达到上限拒绝联网、强制基于已有结果回答，杜绝反复搜索',
-                  ),
-                  _buildSliderRow(
-                    label: '每步生成预算',
-                    value: profTokensPerRound,
-                    min: 128,
-                    max: profTokensMax,
-                    divisions: (profTokensMax - 128) ~/ 256,
-                    display: profTokensPerRound >= 1024
-                        ? '${(profTokensPerRound / 1024).toStringAsFixed(0)}k token'
-                        : '$profTokensPerRound token',
-                    onChanged: (v) => isApi
-                        ? notifier.setAgentApiTokensPerRound(v)
-                        : notifier.setAgentTokensPerRound(v),
-                    hint: isApi
-                        ? 'API 档每步生成 token 上限（默认 8192，云端模型吃满思考）'
-                        : '本地档每步生成 token 上限（默认 1024）',
-                  ),
-                  _buildSliderRow(
-                    label: '工具执行超时',
-                    value: profToolTimeoutMs,
-                    min: 1000,
-                    max: 120000,
-                    divisions: 119,
-                    display: _formatTimeout(profToolTimeoutMs),
-                    onChanged: (v) => isApi
-                        ? notifier.setAgentApiToolTimeoutMs(v)
-                        : notifier.setAgentToolTimeoutMs(v),
-                    hint: '单工具超时，防止卡死循环；工具自声明超时优先'
-                        '（${isApi ? 'API 档默认 30 秒' : '本地档默认 15 秒'}）',
-                  ),
-                  _buildDoubleSliderRow(
-                    label: '生成温度',
-                    value: profTemperature,
-                    min: 0.0,
-                    max: 2.0,
-                    divisions: 20,
-                    display: profTemperature.toStringAsFixed(1),
-                    onChanged: (v) => isApi
-                        ? notifier.setAgentApiTemperature(v)
-                        : notifier.setAgentTemperature(v),
-                    hint: '工具决策建议 0.3–0.7；创意直答可到 1.0+（默认 0.7）',
-                  ),
-                  _buildSliderRow(
-                    label: '思考失控守卫阈值',
-                    value: settings.agentThinkingMaxChars,
-                    min: 1000,
-                    max: 65536,
-                    divisions: 129,
-                    display: settings.agentThinkingMaxChars >= 1000
-                        ? '${(settings.agentThinkingMaxChars / 1000).toStringAsFixed(1)}k 字'
-                        : '${settings.agentThinkingMaxChars} 字',
-                    onChanged: (v) => notifier.setAgentThinkingMaxChars(v),
-                    hint: '思考块超长未闭合到该字数即主动止损（默认 6000）；'
-                        '常提示"思考超长未闭合导致任务失败"时调大，'
-                        '或在模型设置里关闭思考模式',
-                  ),
-                  Opacity(
-                    opacity: isApi ? 0.4 : 1.0,
-                    child: IgnorePointer(
-                      ignoring: isApi,
-                      child: _buildSliderRow(
-                        label: '智能体上下文长度',
-                        value: settings.agentNctx,
-                        min: 1024,
-                        max: 65536,
-                        divisions: 63,
-                        display: '${settings.agentNctx} token',
-                        onChanged: (v) => notifier.setAgentNctx(v),
-                        hint: isApi
-                            ? 'API 驱动的上下文长度由服务端决定，此设置仅本地引擎生效'
-                            : '本地引擎 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）。修改后需重载模型生效',
+                  // ================= ② 核心执行参数 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('🔁 执行参数', context),
+                          _buildSliderRow(
+                            label: '单轮最大步数',
+                            value: profMaxRounds,
+                            min: 1,
+                            max: 100,
+                            divisions: 99,
+                            display: '$profMaxRounds 步',
+                            onChanged: (v) => isApi
+                                ? notifier.setAgentApiMaxRounds(v)
+                                : notifier.setAgentMaxRounds(v),
+                            hint: '一次提问内最多几次模型请求（含工具往返）；'
+                                '${isApi ? 'API 档默认 16' : '端侧建议 3–12（默认 12）'}，'
+                                '复杂任务可调到 100',
+                          ),
+                          _buildSliderRow(
+                            label: '并发会话槽位',
+                            value: settings.agentMaxConcurrentTurns,
+                            min: 1,
+                            max: 4,
+                            divisions: 3,
+                            display: '${settings.agentMaxConcurrentTurns} 个',
+                            onChanged: (v) =>
+                                notifier.setAgentMaxConcurrentTurns(v),
+                            hint: '同时允许执行回合的会话数量（默认 1）。'
+                                'API 驱动可真正并行；本地模型受引擎限制，'
+                                '同一时刻仍只能跑一个会话，其余会提示槽位已满',
+                          ),
+                          _buildSliderRow(
+                            label: '每回合搜索上限',
+                            value: settings.agentMaxSearchesPerTurn,
+                            min: 1,
+                            max: 10,
+                            divisions: 9,
+                            display: '${settings.agentMaxSearchesPerTurn} 次',
+                            onChanged: (v) =>
+                                notifier.setAgentMaxSearchesPerTurn(v),
+                            hint: 'web_search 每回合最多调用次数（DSH max_uses 语义，默认 5）；'
+                                '达到上限拒绝联网、强制基于已有结果回答，杜绝反复搜索',
+                          ),
+                          _buildSliderRow(
+                            label: 'API 上下文压缩预算',
+                            value: settings.agentApiContextBudget,
+                            min: 4096,
+                            max: 131072,
+                            divisions: 31,
+                            display:
+                                '${settings.agentApiContextBudget ~/ 1024}k token',
+                            onChanged: (v) =>
+                                notifier.setAgentApiContextBudget(v),
+                            hint: '投影历史超此值即自动压缩（默认 32k）；'
+                                '配置了端点窗口时取较小值',
+                          ),
+                          _buildSliderRow(
+                            label: '每步生成预算',
+                            value: profTokensPerRound,
+                            min: 128,
+                            max: profTokensMax,
+                            divisions: (profTokensMax - 128) ~/ 256,
+                            display: profTokensPerRound >= 1024
+                                ? '${(profTokensPerRound / 1024).toStringAsFixed(0)}k token'
+                                : '$profTokensPerRound token',
+                            onChanged: (v) => isApi
+                                ? notifier.setAgentApiTokensPerRound(v)
+                                : notifier.setAgentTokensPerRound(v),
+                            hint: isApi
+                                ? 'API 档每步生成 token 上限（默认 8192，云端模型吃满思考）'
+                                : '本地档每步生成 token 上限（默认 1024）',
+                          ),
+                          _buildSliderRow(
+                            label: '工具执行超时',
+                            value: profToolTimeoutMs,
+                            min: 1000,
+                            max: 120000,
+                            divisions: 119,
+                            display: _formatTimeout(profToolTimeoutMs),
+                            onChanged: (v) => isApi
+                                ? notifier.setAgentApiToolTimeoutMs(v)
+                                : notifier.setAgentToolTimeoutMs(v),
+                            hint: '单工具超时，防止卡死循环；工具自声明超时优先'
+                                '（${isApi ? 'API 档默认 30 秒' : '本地档默认 15 秒'}）',
+                          ),
+                          _buildDoubleSliderRow(
+                            label: '生成温度',
+                            value: profTemperature,
+                            min: 0.0,
+                            max: 2.0,
+                            divisions: 20,
+                            display: profTemperature.toStringAsFixed(1),
+                            onChanged: (v) => isApi
+                                ? notifier.setAgentApiTemperature(v)
+                                : notifier.setAgentTemperature(v),
+                            hint: '工具决策建议 0.3–0.7；创意直答可到 1.0+（默认 0.7）',
+                          ),
+                          _buildSliderRow(
+                            label: '思考失控守卫阈值',
+                            value: settings.agentThinkingMaxChars,
+                            min: 1000,
+                            max: 65536,
+                            divisions: 129,
+                            display: settings.agentThinkingMaxChars >= 1000
+                                ? '${(settings.agentThinkingMaxChars / 1000).toStringAsFixed(1)}k 字'
+                                : '${settings.agentThinkingMaxChars} 字',
+                            onChanged: (v) =>
+                                notifier.setAgentThinkingMaxChars(v),
+                            hint: '思考块超长未闭合到该字数即主动止损（默认 6000）；'
+                                '常提示"思考超长未闭合导致任务失败"时调大，'
+                                '或在模型设置里关闭思考模式',
+                          ),
+                          Opacity(
+                            opacity: isApi ? 0.4 : 1.0,
+                            child: IgnorePointer(
+                              ignoring: isApi,
+                              child: _buildSliderRow(
+                                label: '智能体上下文长度',
+                                value: settings.agentNctx,
+                                min: 1024,
+                                max: 65536,
+                                divisions: 63,
+                                display: '${settings.agentNctx} token',
+                                onChanged: (v) => notifier.setAgentNctx(v),
+                                hint: isApi
+                                    ? 'API 驱动的上下文长度由服务端决定，此设置仅本地引擎生效'
+                                    : '本地引擎 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）。修改后需重载模型生效',
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 10),
+                  const SizedBox(height: 10),
 
-          // ================= ③ 上下文管理 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('🗜️ 上下文管理', context),
-                  _buildToggleTitle(
-                    '超限自动压缩',
-                    settings.agentCompactEnabled,
-                    notifier.setAgentCompactEnabled,
-                    subtitle: '上下文超限时自动裁剪旧轮工具结果（追加摘要 + 影子遮蔽，'
-                        '日志永不删原文）。关闭 = 超限直接报错终止',
-                  ),
-                  const Divider(height: 24),
-                  _buildToggleTitle(
-                    '超长工具输出溢写',
-                    settings.agentSpillEnabled,
-                    notifier.setAgentSpillEnabled,
-                    subtitle: '单条工具结果超过约 4k token 时落盘，模型侧只留摘要与文件定位，'
-                        '可按需读回；省上下文显著',
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 10),
-
-          // ================= ④ 能力与并行 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('🧩 能力与并行', context),
-                  _buildToggleTitle(
-                    '🛠️ 并行工具调用',
-                    profAllowParallel,
-                    isApi
-                        ? notifier.setAgentApiAllowParallelTools
-                        : notifier.setAgentAllowParallelTools,
-                    subtitle: '模型一次要多个工具时并发执行（$parallelNote）；'
-                        '当前生效并发：$effectiveParallel',
-                  ),
-                  if (profAllowParallel && capsMaxParallel > 2)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: _buildSliderRow(
-                        label: '并发上限',
-                        value: profMaxParallel
-                            .clamp(2, capsMaxParallel)
-                            .toInt(),
-                        min: 2,
-                        max: capsMaxParallel,
-                        divisions: capsMaxParallel - 1,
-                        display: '${profMaxParallel.clamp(2, capsMaxParallel)} 路',
-                        onChanged: (v) => isApi
-                            ? notifier.setAgentApiMaxParallel(v)
-                            : notifier.setAgentMaxParallel(v),
-                        hint: '同时执行的工具数上限（按驱动模型能力封顶 $capsMaxParallel）',
-                      ),
-                    )
-                  else if (settings.agentAllowParallelTools)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(
-                        '本地路线并发固定 2 路（能力上限）；换 API 驱动可调更高',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  // ================= ③ 上下文管理 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('🗜️ 上下文管理', context),
+                          _buildToggleTitle(
+                            '超限自动压缩',
+                            settings.agentCompactEnabled,
+                            notifier.setAgentCompactEnabled,
+                            subtitle: '上下文超限时自动裁剪旧轮工具结果（追加摘要 + 影子遮蔽，'
+                                '日志永不删原文）。关闭 = 超限直接报错终止',
+                          ),
+                          const Divider(height: 24),
+                          _buildToggleTitle(
+                            '超长工具输出溢写',
+                            settings.agentSpillEnabled,
+                            notifier.setAgentSpillEnabled,
+                            subtitle: '单条工具结果超过约 4k token 时落盘，模型侧只留摘要与文件定位，'
+                                '可按需读回；省上下文显著',
+                          ),
+                        ],
                       ),
                     ),
-                  const Divider(height: 24),
-                  _buildToggleTitle(
-                    '🤝 子代理（subagent）',
-                    settings.agentSubagentEnabled,
-                    notifier.setAgentSubagentEnabled,
-                    subtitle: '模型可派生独立子代理执行大任务的子任务（spawn/fork）。'
-                        '固定约束：嵌套 ≤ 2 层、子代理内不可申请沙箱升级、每层独立预算',
                   ),
-                  const Divider(height: 24),
-                  _buildToggleTitle(
-                    '🌐 联网搜索',
-                    settings.webSearchEnabled,
-                    notifier.setWebSearchEnabled,
-                    subtitle: '允许调用 web_search/get_weather（实例地址在「API 接入」页配置）',
-                  ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 10),
+                  const SizedBox(height: 10),
 
-          // ================= ⑤ Skills 与指令文件 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('📚 Skills 与指令文件', context),
-                  for (final s in loadBuiltinSkills())
-                    _kvLine('内置 · ${s.name}', s.description),
-                  const SizedBox(height: 6),
-                  if (_userSkills == null)
-                    const Text('正在扫描用户技能…',
-                        style: TextStyle(fontSize: 12, color: Colors.grey))
-                  else if (_userSkills!.isEmpty)
-                    _kvLine('用户技能', '暂无。点「新增技能」直接创建，'
-                        '无需手动放文件')
-                  else
-                    for (final s in _userSkills!)
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        dense: true,
-                        leading: const Icon(Icons.extension_outlined,
-                            size: 20),
-                        title: Text('用户 · ${s.name}',
-                            style: const TextStyle(fontSize: 14)),
-                        subtitle: Text(s.description,
-                            style: const TextStyle(fontSize: 12)),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 18),
-                          tooltip: '删除技能',
-                          onPressed: () => _confirmDeleteUserSkill(s),
-                        ),
-                        onTap: () => _showUserSkillDialog(existing: s),
+                  // ================= ④ 能力与并行 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('🧩 能力与并行', context),
+                          _buildToggleTitle(
+                            '🛠️ 并行工具调用',
+                            profAllowParallel,
+                            isApi
+                                ? notifier.setAgentApiAllowParallelTools
+                                : notifier.setAgentAllowParallelTools,
+                            subtitle: '模型一次要多个工具时并发执行（$parallelNote）；'
+                                '当前生效并发：$effectiveParallel',
+                          ),
+                          if (profAllowParallel && capsMaxParallel > 2)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: _buildSliderRow(
+                                label: '并发上限',
+                                value: profMaxParallel
+                                    .clamp(2, capsMaxParallel)
+                                    .toInt(),
+                                min: 2,
+                                max: capsMaxParallel,
+                                divisions: capsMaxParallel - 1,
+                                display:
+                                    '${profMaxParallel.clamp(2, capsMaxParallel)} 路',
+                                onChanged: (v) => isApi
+                                    ? notifier.setAgentApiMaxParallel(v)
+                                    : notifier.setAgentMaxParallel(v),
+                                hint: '同时执行的工具数上限（按驱动模型能力封顶 $capsMaxParallel）',
+                              ),
+                            )
+                          else if (settings.agentAllowParallelTools)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                '本地路线并发固定 2 路（能力上限）；换 API 驱动可调更高',
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.grey.shade600),
+                              ),
+                            ),
+                          const Divider(height: 24),
+                          _buildToggleTitle(
+                            '🤝 子代理（subagent）',
+                            settings.agentSubagentEnabled,
+                            notifier.setAgentSubagentEnabled,
+                            subtitle: '模型可派生独立子代理执行大任务的子任务（spawn/fork）。'
+                                '固定约束：嵌套 ≤ 2 层、子代理内不可申请沙箱升级、每层独立预算',
+                          ),
+                          const Divider(height: 24),
+                          _buildToggleTitle(
+                            '🌐 联网搜索',
+                            settings.webSearchEnabled,
+                            notifier.setWebSearchEnabled,
+                            subtitle:
+                                '允许调用 web_search/get_weather（实例地址在「API 接入」页配置）',
+                          ),
+                        ],
                       ),
-                  Row(
-                    children: [
-                      TextButton.icon(
-                        onPressed: _rescanSkills,
-                        icon: const Icon(Icons.refresh, size: 16),
-                        label: const Text('重新扫描'),
-                      ),
-                      const SizedBox(width: 4),
-                      TextButton.icon(
-                        onPressed: () => _showUserSkillDialog(),
-                        icon: const Icon(Icons.add, size: 16),
-                        label: const Text('新增技能'),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    '技能 = 提示词模板：按 whenToUse 自动触发'
-                    '（API 模式可经 load_skill 拉全文）。'
-                    '也可从网上复制现成 SKILL.md 放进'
-                    ' ApplicationSupport/skills/<名称>/ 后点「重新扫描」。',
-                    style: TextStyle(
-                        fontSize: 11, color: Colors.grey.shade500),
-                  ),
-                  const Divider(height: 20),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    leading: const Icon(Icons.description_outlined),
-                    title: Text(
-                      _agentsMdLen < 0
-                          ? 'AGENTS.md 指令文件（未创建）'
-                          : 'AGENTS.md 指令文件（${_agentsMdLen} 字节）',
-                      style: const TextStyle(fontSize: 14),
                     ),
-                    subtitle: const Text('注入系统提示的全局指令（角色、偏好、约束），点按编辑',
-                        style: TextStyle(fontSize: 12)),
-                    trailing: const Icon(Icons.edit_outlined, size: 18),
-                    onTap: _editAgentsMd,
                   ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 10),
+                  const SizedBox(height: 10),
 
-          // ================= ⑥ 工具 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('🧰 工具', context),
-                  Text(
-                    '核心工具恒可用：时间 / 计算 / 待办 / 便签 / 单位换算 / 文件读写检索。'
-                    '以下高级工具按需开启：',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  // ================= ⑤ Skills 与指令文件 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('📚 Skills 与指令文件', context),
+                          // 汇总行：默认收起，点开展开限高滚动列表。
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: const Icon(Icons.extension, size: 20),
+                            title: Text(
+                              '技能库（内置 ${_builtinSkills.length}'
+                              ' · 我的 ${_userSkills?.length ?? '?'}）',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                            subtitle: const Text(
+                              '点开浏览/管理；整段粘贴 SKILL.md 即可新增',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                            trailing: Icon(
+                              _skillsExpanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 20,
+                              color: Colors.grey,
+                            ),
+                            onTap: () =>
+                                setState(() => _skillsExpanded = !_skillsExpanded),
+                          ),
+                          if (_skillsExpanded)
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 320),
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    for (final s in _builtinSkills)
+                                      ListTile(
+                                        contentPadding: EdgeInsets.zero,
+                                        dense: true,
+                                        visualDensity: VisualDensity.compact,
+                                        leading: const Icon(Icons.extension,
+                                            size: 20),
+                                        title: Text('内置 · ${s.name}',
+                                            style: const TextStyle(fontSize: 14)),
+                                        subtitle: Text(s.description,
+                                            style: const TextStyle(fontSize: 12)),
+                                        trailing: const Icon(Icons.chevron_right,
+                                            size: 18, color: Colors.grey),
+                                        onTap: () => _showBuiltinSkillView(s),
+                                      ),
+                                    const SizedBox(height: 6),
+                                    if (_userSkills == null)
+                                      const Text('正在扫描用户技能…',
+                                          style: TextStyle(
+                                              fontSize: 12, color: Colors.grey))
+                                  else if (_userSkills!.isEmpty)
+                                      const Text('暂无用户技能',
+                                          style: TextStyle(
+                                              fontSize: 12, color: Colors.grey))
+                                    else
+                                      for (final s in _userSkills!)
+                                        ListTile(
+                                          contentPadding: EdgeInsets.zero,
+                                          dense: true,
+                                          visualDensity: VisualDensity.compact,
+                                          leading: const Icon(
+                                              Icons.extension_outlined,
+                                              size: 20),
+                                          title: Text('用户 · ${s.name}',
+                                              style:
+                                                  const TextStyle(fontSize: 14)),
+                                          subtitle: Text(s.description,
+                                              style:
+                                                  const TextStyle(fontSize: 12)),
+                                          trailing: IconButton(
+                                            icon: const Icon(Icons.delete_outline,
+                                                size: 18),
+                                            tooltip: '删除技能',
+                                            onPressed: () =>
+                                                _confirmDeleteUserSkill(s),
+                                          ),
+                                          onTap: () => _showUserSkillDialog(
+                                              existing: s),
+                                        ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          Row(
+                            children: [
+                              TextButton.icon(
+                                onPressed: _rescanSkills,
+                                icon: const Icon(Icons.refresh, size: 16),
+                                label: const Text('重新扫描'),
+                              ),
+                              const SizedBox(width: 4),
+                              TextButton.icon(
+                                onPressed: () => _showUserSkillDialog(),
+                                icon: const Icon(Icons.add, size: 16),
+                                label: const Text('新增技能'),
+                              ),
+                            ],
+                          ),
+                          Text(
+                            '整段粘贴 SKILL.md 即可新增；同名覆盖内置。',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.grey.shade500),
+                          ),
+                          const Divider(height: 20),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: const Icon(Icons.description_outlined),
+                            title: Text(
+                              _agentsMdLen < 0
+                                  ? 'AGENTS.md 指令文件（未创建）'
+                                  : 'AGENTS.md 指令文件（${_agentsMdLen} 字节）',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                            subtitle: const Text('注入系统提示的全局指令（角色、偏好、约束），点按编辑',
+                                style: TextStyle(fontSize: 12)),
+                            trailing: const Icon(Icons.edit_outlined, size: 18),
+                            onTap: _editAgentsMd,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 4),
-                  SwitchListTile(
-                    title: const Text('🖥️ Shell 执行（shell_exec）',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('设备 shell 命令执行（app 权限内），逐次弹窗审批',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.agentShellEnabled,
-                    onChanged: notifier.setAgentShellEnabled,
-                  ),
-                  SwitchListTile(
-                    title: const Text('🐍 Python 执行（python_exec）',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('嵌入式 CPython 跑脚本（计算/数据处理/文件/网络）',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.agentPythonEnabled,
-                    onChanged: notifier.setAgentPythonEnabled,
-                  ),
-                  SwitchListTile(
-                    title: const Text('🧠 长期记忆（memory_set / memory_get）',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('跨会话持久记忆；默认关——避免偶发错误被写入积累',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.agentMemoryEnabled,
-                    onChanged: notifier.setAgentMemoryEnabled,
-                  ),
-                  SwitchListTile(
-                    title: const Text('📂 完整文件访问授权',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('允许经逐次批准访问公共目录/完整文件系统'
-                        '（All-Files-Access，默认关）',
-                        style: TextStyle(fontSize: 12)),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    value: settings.agentFullFileAccess,
-                    onChanged: notifier.setAgentFullFileAccess,
-                  ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 10),
+                  const SizedBox(height: 10),
 
-          // ================= ⑦ 高级 / 开发者 =================
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSectionHeader('🧪 高级 / 开发者', context),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    leading: const Icon(Icons.folder_outlined),
-                    title: const Text('智能体数据目录', style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('会话事件日志(JSONL) / 溢写文件 / 技能 / AGENTS.md',
-                        style: TextStyle(fontSize: 12)),
-                    trailing: const Icon(Icons.chevron_right, size: 18),
-                    onTap: _showDataDirs,
+                  // ================= ⑥ 工具 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('🧰 工具', context),
+                          Text(
+                            '核心工具恒可用：时间 / 计算 / 待办 / 便签 / 单位换算 / 文件读写检索。'
+                            '以下高级工具按需开启：',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey.shade600),
+                          ),
+                          const SizedBox(height: 4),
+                          SwitchListTile(
+                            title: const Text('🖥️ Shell 执行（shell_exec）',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: const Text(
+                                '设备 shell 命令执行（app 权限内），逐次弹窗审批',
+                                style: TextStyle(fontSize: 12)),
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            value: settings.agentShellEnabled,
+                            onChanged: notifier.setAgentShellEnabled,
+                          ),
+                          SwitchListTile(
+                            title: const Text('🐍 Python 执行（python_exec）',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: const Text(
+                                '嵌入式 CPython 跑脚本（计算/数据处理/文件/网络）',
+                                style: TextStyle(fontSize: 12)),
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            value: settings.agentPythonEnabled,
+                            onChanged: notifier.setAgentPythonEnabled,
+                          ),
+                          SwitchListTile(
+                            title: const Text(
+                                '🧠 长期记忆（memory_set / memory_get）',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: const Text(
+                                '跨会话持久记忆（默认开）：模型可记住偏好/事实，'
+                                '并自动注入每回合系统提示',
+                                style: TextStyle(fontSize: 12)),
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            value: settings.agentMemoryEnabled,
+                            onChanged: (v) {
+                              notifier.setAgentMemoryEnabled(v);
+                              _loadMemoryEntries();
+                            },
+                          ),
+                          _buildMemoryManager(settings.agentMemoryEnabled),
+                          SwitchListTile(
+                            title: const Text('📂 完整文件访问授权',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: const Text(
+                                '允许经逐次批准访问公共目录/完整文件系统'
+                                '（All-Files-Access，默认关）',
+                                style: TextStyle(fontSize: 12)),
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            value: settings.agentFullFileAccess,
+                            onChanged: notifier.setAgentFullFileAccess,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '扩展接缝（代码级）：agent/pre-step 可否决单步；tools/result 只读审计；'
-                    '流水线 pre/post-execute 可拦截改写。',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                  ),
-                ],
-              ),
-            ),
-          ),
 
-          const SizedBox(height: 24),
+                  const SizedBox(height: 10),
+
+                  // ================= ⑦ 高级 / 开发者 =================
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildSectionHeader('🧪 高级 / 开发者', context),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: const Icon(Icons.folder_outlined),
+                            title: const Text('智能体数据目录',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: const Text(
+                                '会话事件日志(JSONL) / 溢写文件 / 技能 / AGENTS.md',
+                                style: TextStyle(fontSize: 12)),
+                            trailing: const Icon(Icons.chevron_right, size: 18),
+                            onTap: _showDataDirs,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '扩展接缝（代码级）：agent/pre-step 可否决单步；tools/result 只读审计；'
+                            '流水线 pre/post-execute 可拦截改写。',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.grey.shade500),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
                 ],
               ),
             ),
@@ -2550,27 +2904,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             Text(hint,
                 style: const TextStyle(fontSize: 11, color: Colors.grey)),
         ],
-      ),
-    );
-  }
-
-  Widget _kvLine(String k, String v) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: RichText(
-        text: TextSpan(
-          style: const TextStyle(fontSize: 12, height: 1.4),
-          children: [
-            TextSpan(
-              text: '$k　',
-              style: TextStyle(
-                  fontWeight: FontWeight.w600, color: Colors.grey.shade800),
-            ),
-            TextSpan(
-                text: v,
-                style: TextStyle(color: Colors.grey.shade600)),
-          ],
-        ),
       ),
     );
   }
@@ -2748,16 +3081,16 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
               const Divider(height: 24),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 4),
-                child: Text('本地模型',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                child:
+                    Text('本地模型', style: TextStyle(fontWeight: FontWeight.w600)),
               ),
               for (final m in catalog)
                 ListTile(
                   leading: const Icon(Icons.storage),
                   title: Text(cleanModelName(m.name),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(m.id,
-                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle:
+                      Text(m.id, maxLines: 1, overflow: TextOverflow.ellipsis),
                   selected: settings.agentModelSource == 'local' &&
                       settings.agentModelId == m.id,
                   onTap: () {
@@ -2828,8 +3161,8 @@ Widget _buildSliderRow({
               child: Text(label, style: const TextStyle(fontSize: 12)),
             ),
             Text(display,
-                style: const TextStyle(
-                    fontWeight: FontWeight.w500, fontSize: 12)),
+                style:
+                    const TextStyle(fontWeight: FontWeight.w500, fontSize: 12)),
           ],
         ),
         SizedBox(
@@ -2890,8 +3223,7 @@ const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
 /// 通过系统外部浏览器打开 GitHub README 页面。
 Future<void> _openGithub(BuildContext context) async {
   final uri = Uri.parse(_githubUrl);
-  final launched =
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+  final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
   if (!launched && context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('无法打开浏览器，请手动访问：$_githubUrl')),
@@ -3089,8 +3421,8 @@ class _StorageInfoWidget extends ConsumerWidget {
       try {
         dirs.add(await modelStorageService.getModelsRootDir());
       } catch (_) {}
-      dirs.add(Directory(
-          '/data/data/com.dgxspark.tongyilite/app_flutter/models'));
+      dirs.add(
+          Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'));
       try {
         final appDir = await getApplicationDocumentsDirectory();
         dirs.add(Directory(p.join(appDir.path, 'models')));
@@ -3117,11 +3449,8 @@ class _StorageInfoWidget extends ConsumerWidget {
             if (match.isNotEmpty) displayName = match.first.name;
           } catch (_) {}
 
-          cachedModels.add({
-            'name': displayName,
-            'id': fileName,
-            'sizeBytes': sizeBytes
-          });
+          cachedModels.add(
+              {'name': displayName, 'id': fileName, 'sizeBytes': sizeBytes});
         }
       }
     } catch (e) {
@@ -3464,8 +3793,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
             ),
             const SizedBox(height: 6),
             Text(
-              '向导会自动生成 ed25519 密钥、给出"复制即用"的安装命令，'
-              '并自动连接。Termux 无需 root。',
+              '自动生成密钥，一条命令完成，无需 root；'
+              '连接失败会给诊断和修复动作。',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
             ),
             // 配置列表（已保存的连接目标）。
@@ -3486,8 +3815,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         ),
                       ),
                       TextButton(
-                        onPressed: () =>
-                            _showSshConfigDialog(context, notifier, existing: cfg),
+                        onPressed: () => _showSshConfigDialog(context, notifier,
+                            existing: cfg),
                         child: const Text('编辑'),
                       ),
                       TextButton(
@@ -3560,17 +3889,20 @@ class _DevTabState extends ConsumerState<_DevTab> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
             ? '✅ 已连接 ${cfg.name}'
-            : '❌ 连接失败：${ssh.lastError ?? '未知错误（状态 ${ssh.status}）'}')));
+            : '❌ ${_classifySshError(ssh.lastError)}')));
   }
 
   // ---------------- Termux 自动向导 ----------------
 
-  /// Termux 向导：探测 → 自动生成密钥 → 一键命令 → 用户名 → 自动连接。
+  /// Termux 向导（诊断驱动）：
+  /// 打开时探测一次 sshd → 按结果给诊断（未运行 / 被拉黑 / 正常）→
+  /// 万能命令（自带 pkill+sshd 重启，顺带清 PerSourcePenalties 惩罚）→
+  /// 可一键拉起 Termux → 用户名 → 真实连接。
   Future<void> _showTermuxSetupDialog(
       BuildContext context, SettingsNotifier notifier) async {
-    var step = 0; // 0: 探测+密钥准备  1: 显示命令  2: 用户名+连接
+    var step = 0; // 0: 探测  1: 命令执行  2: 用户名+连接
     var probing = true;
-    var reachable = false;
+    var probeResult = _SshdProbe.timeout;
     var generated = false;
     String? publicKey;
     String? privateKeyPem;
@@ -3586,8 +3918,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
         builder: (ctx, setState) {
           Future<void> probeAndGen() async {
             setState(() => probing = true);
-            // 探测 Termux sshd 默认端口。
-            reachable = await _probeTcp('127.0.0.1', 8022);
+            probeResult = await _probeSshd('127.0.0.1', 8022);
             if (!generated) {
               final keys = SshKeyGen.generate();
               if (keys != null) {
@@ -3615,24 +3946,31 @@ class _DevTabState extends ConsumerState<_DevTab> {
             await ssh.connect(cfg);
             connecting = false;
             if (!ctx.mounted) return;
-            Navigator.pop(ctx);
-            if (!ssh.isConnected) {
-              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-                  backgroundColor: Colors.red.shade700,
-                  content: Text(
-                      '❌ 自动连接失败：${ssh.lastError ?? '未知错误'}\n'
-                      '请确认已把安装命令粘贴进 Termux 并回车执行',
-                      style: const TextStyle(fontSize: 12))));
+            if (ssh.isConnected) {
+              Navigator.pop(ctx);
+              return;
             }
+            Navigator.pop(ctx);
+            ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(
+                backgroundColor: Colors.red.shade700,
+                content: Text('❌ ${_classifySshError(ssh.lastError)}',
+                    style: const TextStyle(fontSize: 12))));
           }
 
-          // 首次构建自动启动探测（否则 step 0 永远转圈：探测从未触发）。
           if (!probeStarted) {
             probeStarted = true;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (ctx.mounted) probeAndGen();
             });
           }
+
+          final diagnosis = switch (probeResult) {
+            _SshdProbe.listening => 'sshd 运行中——还差最后一步：安装公钥',
+            _SshdProbe.refused => 'sshd 没在运行（最常见的失败原因）',
+            _SshdProbe.timeout =>
+              '端口无响应——大概率是之前多次连接失败后被 Termux 的 OpenSSH '
+                  '临时拉黑（PerSourcePenalties），越重试越连不上',
+          };
 
           final dialog = AlertDialog(
             title: const Text('📱 Termux 自动连接向导'),
@@ -3652,48 +3990,57 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         SizedBox(width: 12),
                         Text('正在检测 Termux sshd（127.0.0.1:8022）…'),
                       ])
-                    else if (step == 1) ...[
-                      Text(
-                        reachable
-                            ? '✅ 检测到 Termux sshd 正在运行'
-                            : '⚠️ 未检测到 sshd。请在 Termux 里执行：',
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                      if (!reachable) ...[
-                        const SizedBox(height: 6),
-                        _copyableCommand(ctx, 'pkg install -y openssh && sshd'),
-                      ],
-                      const SizedBox(height: 10),
-                      Text('🔑 已自动生成 ed25519 密钥。接下来只需做一件事：',
+                    else ...[
+                      Text('诊断：$diagnosis',
                           style: const TextStyle(fontSize: 13)),
-                      const SizedBox(height: 6),
-                      Text('在 Termux 里粘贴执行下面这条命令（安装公钥 + 写入用户名）：',
+                      const SizedBox(height: 10),
+                      // 万能命令：pkill 重启 sshd（清拉黑）+ 装公钥 + 写用户名，
+                      // 三种诊断状态都靠它修复，一条到底。
+                      Text('在 Termux 里粘贴执行这条命令（自动重启 sshd + 安装公钥）：',
                           style: const TextStyle(fontSize: 12)),
                       const SizedBox(height: 6),
                       _copyableCommand(ctx, command),
                       const SizedBox(height: 10),
-                      Text('执行完成后，点下方「下一步」继续。',
-                          style: const TextStyle(fontSize: 12)),
-                    ] else ...[
-                      Text('输入 Termux 用户名，然后自动连接：',
-                          style: const TextStyle(fontSize: 13)),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: TextEditingController(text: userName),
-                        onChanged: (v) => userName = v,
-                        decoration: const InputDecoration(
-                          labelText: '用户名',
-                          hintText: '通常为 u0_aXXX（命令输出已自动写入，一般无需改）',
-                          border: OutlineInputBorder(),
-                          isDense: true,
+                      Row(children: [
+                        FilledButton.tonalIcon(
+                          onPressed: () async {
+                            final ok = await AppBridge.launchApp(
+                                AppBridge.termuxPackage);
+                            if ((!ok) && ctx.mounted) {
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text('未找到 Termux，请先安装 Termux')));
+                            }
+                          },
+                          icon: const Icon(Icons.open_in_new, size: 16),
+                          label: const Text('拉起 Termux'),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        '命令会在 Termux 里把用户名写入共享文件，这里通常已自动填好。',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade600),
-                      ),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          onPressed:
+                              probing ? null : () => probeAndGen(),
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: Text(probing ? '检测中…' : '重新检测'),
+                        ),
+                      ]),
+                      if (step == 2) ...[
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller:
+                              TextEditingController(text: userName),
+                          onChanged: (v) => userName = v,
+                          decoration: const InputDecoration(
+                            labelText: 'Termux 用户名',
+                            hintText: '通常 u0_aXXX，已自动填好',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 6),
+                        const Text('执行完命令后点「下一步」。',
+                            style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      ],
                     ],
                   ],
                 ),
@@ -3704,19 +4051,14 @@ class _DevTabState extends ConsumerState<_DevTab> {
                 TextButton(
                   onPressed: () {
                     userName = _readSharedUserName() ?? '';
-                    setState(() {});
+                    setState(() => step = 2);
                   },
-                  child: const Text('自动读取用户名'),
+                  child: const Text('下一步'),
                 ),
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: Text(step == 0 ? '取消' : '稍后再说'),
+                child: const Text('取消'),
               ),
-              if (step == 1)
-                FilledButton(
-                  onPressed: () => setState(() => step = 2),
-                  child: const Text('下一步'),
-                ),
               if (step == 2)
                 FilledButton(
                   onPressed: connecting ? null : finishConnect,
@@ -3817,8 +4159,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                       final host = hostCtrl.text.trim();
                       final user = userCtrl.text.trim();
                       if (host.isEmpty || user.isEmpty) {
-                        ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
-                            content: Text('请填写电脑地址与用户名')));
+                        ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text('请填写电脑地址与用户名')));
                         return;
                       }
                       final cfg = SshConfig.remotePcTemplate.copyWith(
@@ -3863,8 +4205,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text: command));
               if (ctx.mounted) {
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                    const SnackBar(content: Text('已复制，去粘贴执行即可')));
+                ScaffoldMessenger.of(ctx)
+                    .showSnackBar(const SnackBar(content: Text('已复制，去粘贴执行即可')));
               }
             },
             icon: const Icon(Icons.copy, size: 16, color: Colors.white),
@@ -3874,16 +4216,47 @@ class _DevTabState extends ConsumerState<_DevTab> {
     );
   }
 
-  /// TCP 探测：目标地址是否可达（不认证，仅看 socket 能否连上）。
-  Future<bool> _probeTcp(String host, int port) async {
+  /// Termux sshd 诊断探测（只在向导打开时做一次）。
+  ///
+  /// ⚠️ 对 Termux 的 OpenSSH 10.x **不能频繁裸探测**：TCP 连上后未认证即断开
+  /// 会被 PerSourcePenalties 记惩罚（源 127.0.0.1 被拉黑后 sshd 接受连接但
+  /// 不发 banner → 表现为 timeout），越探越死。refused = 没监听（不记惩罚）。
+  Future<_SshdProbe> _probeSshd(String host, int port) async {
     try {
-      final socket = await Socket.connect(host, port,
-          timeout: const Duration(seconds: 3));
+      final socket =
+          await Socket.connect(host, port, timeout: const Duration(seconds: 3));
       socket.destroy();
-      return true;
+      return _SshdProbe.listening;
+    } on SocketException catch (e) {
+      final msg = e.message.toLowerCase();
+      if (msg.contains('refused') || e.osError?.errorCode == 111) {
+        return _SshdProbe.refused; // sshd 没在监听
+      }
+      return _SshdProbe.timeout; // 被拉黑 / sshd 卡死
     } catch (_) {
-      return false;
+      return _SshdProbe.timeout;
     }
+  }
+
+  /// SSH 连接失败 → 人话 + 下一步动作（不甩原始异常）。
+  String _classifySshError(String? raw) {
+    final msg = raw ?? '';
+    final lower = msg.toLowerCase();
+    if (lower.contains('refused')) {
+      return '连接失败：Termux 的 sshd 没在运行。'
+          '打开 Termux 重新执行安装命令（会自动重启 sshd），再点连接';
+    }
+    if (lower.contains('timed out') || lower.contains('timeout')) {
+      return '连接失败：端口无响应——多半是多次失败后被 Termux OpenSSH '
+          '临时拉黑。在 Termux 重新执行安装命令（自带重启 sshd 清拉黑），再点连接';
+    }
+    if (lower.contains('auth') ||
+        lower.contains('denied') ||
+        lower.contains('permission')) {
+      return '连接失败：认证不通过——公钥没装上或用户名不对。'
+          '重新执行安装命令，用户名以命令输出 USER= 为准';
+    }
+    return '连接失败：$msg';
   }
 
   /// 读取 Termux 写入共享文件的用户名（/sdcard/tongyilite_ssh_user.txt）。
@@ -3900,7 +4273,10 @@ class _DevTabState extends ConsumerState<_DevTab> {
 
   /// Termux 安装公钥 + 写用户名（一条复制即用；无存储权限不影响公钥安装）。
   String _buildTermuxInstallCommand(String publicKey) {
-    return 'pkg install -y openssh 2>/dev/null; sshd 2>/dev/null; '
+    // v2（2026-10-01）：装 procps 提供 pkill，先杀再启 sshd——
+    // 每次执行命令顺带清掉 OpenSSH PerSourcePenalties 的源拉黑。
+    return 'pkg install -y openssh procps 2>/dev/null; '
+        'pkill sshd 2>/dev/null; sleep 1; sshd 2>/dev/null; '
         'mkdir -p ~/.ssh && echo "$publicKey" > ~/.ssh/authorized_keys && '
         'chmod 600 ~/.ssh/authorized_keys; '
         'echo "USER=\$(whoami)" > /sdcard/tongyilite_ssh_user.txt 2>/dev/null || true; '
@@ -3916,8 +4292,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
   // ---------------- SSH 配置编辑 ----------------
 
   /// 编辑指定配置（existing 为空则新建）。
-  Future<void> _showSshConfigDialog(BuildContext context,
-      SettingsNotifier notifier,
+  Future<void> _showSshConfigDialog(
+      BuildContext context, SettingsNotifier notifier,
       {SshConfig? existing}) async {
     final cfg = existing;
     final nameCtrl = TextEditingController(text: cfg?.name ?? '');
@@ -3994,8 +4370,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         ChoiceChip(
                           label: const Text('密码'),
                           selected: authType == SshAuthType.password,
-                          onSelected: (_) => setState(
-                              () => authType = SshAuthType.password),
+                          onSelected: (_) =>
+                              setState(() => authType = SshAuthType.password),
                         ),
                       ],
                     ),
@@ -4010,9 +4386,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           border: OutlineInputBorder(),
                           alignLabelWithHint: true,
                         ),
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? '请填写私钥'
-                            : null,
+                        validator: (v) =>
+                            (v == null || v.trim().isEmpty) ? '请填写私钥' : null,
                       )
                     else
                       TextFormField(
@@ -4021,16 +4396,15 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           labelText: '密码',
                           border: OutlineInputBorder(),
                         ),
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? '请填写密码'
-                            : null,
+                        validator: (v) =>
+                            (v == null || v.trim().isEmpty) ? '请填写密码' : null,
                       ),
                     const SizedBox(height: 8),
                     Text(
                       '提示：密钥认证更安全。也可点「自动生成」让 app 生成 ed25519 密钥，'
                       '再用向导里的命令把公钥装到对端。',
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey.shade600),
+                      style:
+                          TextStyle(fontSize: 11, color: Colors.grey.shade600),
                     ),
                   ],
                 ),
@@ -4065,10 +4439,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
       port: int.tryParse(portCtrl.text.trim()) ?? 8022,
       username: userCtrl.text.trim(),
       authType: authType,
-      privateKeyPem:
-          authType == SshAuthType.key ? keyCtrl.text.trim() : null,
-      password:
-          authType == SshAuthType.password ? passCtrl.text.trim() : null,
+      privateKeyPem: authType == SshAuthType.key ? keyCtrl.text.trim() : null,
+      password: authType == SshAuthType.password ? passCtrl.text.trim() : null,
     ));
     if (mounted) setState(() {});
   }
@@ -4120,12 +4492,11 @@ class _DevTabState extends ConsumerState<_DevTab> {
   }
 
   /// 新增/编辑工作区对话框。
-  Future<void> _showWorkspaceDialog(BuildContext context,
-      SettingsNotifier notifier,
+  Future<void> _showWorkspaceDialog(
+      BuildContext context, SettingsNotifier notifier,
       {DevWorkspace? existing}) async {
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final pathCtrl =
-        TextEditingController(text: existing?.remotePath ?? '');
+    final pathCtrl = TextEditingController(text: existing?.remotePath ?? '');
     final formKey = GlobalKey<FormState>();
     var backend = existing?.backend ?? WorkspaceBackend.localApp;
     var sshConfigId = existing?.sshConfigId;
@@ -4174,8 +4545,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         child: Text('远程电脑'),
                       ),
                     ],
-                    onChanged: (v) => setState(() =>
-                        backend = v ?? WorkspaceBackend.localApp),
+                    onChanged: (v) => setState(
+                        () => backend = v ?? WorkspaceBackend.localApp),
                   ),
                   if (backend != WorkspaceBackend.localApp) ...[
                     const SizedBox(height: 12),
@@ -4223,10 +4594,10 @@ class _DevTabState extends ConsumerState<_DevTab> {
                                 if (dir != null && ctx.mounted) {
                                   pathCtrl.text = dir;
                                 } else if (ctx.mounted) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
-                                      const SnackBar(content: Text(
-                                          '自动创建失败：请先连接开发环境，'
-                                          '或检查用户名/密钥')));
+                                  ScaffoldMessenger.of(ctx)
+                                      .showSnackBar(const SnackBar(
+                                          content: Text('自动创建失败：请先连接开发环境，'
+                                              '或检查用户名/密钥')));
                                 }
                               } finally {
                                 setState(() => creatingDir = false);
@@ -4264,9 +4635,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
       id: id,
       name: name,
       backend: backend,
-      remotePath: backend == WorkspaceBackend.localApp
-          ? null
-          : pathCtrl.text.trim(),
+      remotePath:
+          backend == WorkspaceBackend.localApp ? null : pathCtrl.text.trim(),
       sshConfigId: backend == WorkspaceBackend.localApp ? null : sshConfigId,
     ));
     if (mounted) setState(() {});
@@ -4293,8 +4663,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
     final safe = sanitizeWorkspaceDirName(name);
     final home =
         (await ssh.run('echo \$HOME', timeout: const Duration(seconds: 30)))
-            ?.trim() ??
-        '';
+                ?.trim() ??
+            '';
     if (home.isEmpty) return null;
     final dir = '$home/projects/$safe';
     final out = await ssh.run('mkdir -p "$dir" && echo OK',
@@ -4305,7 +4675,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
 
   // ---------------- 安全策略 ----------------
 
-  Widget _buildSafetyCard(InferenceSettings settings, SettingsNotifier notifier) {
+  Widget _buildSafetyCard(
+      InferenceSettings settings, SettingsNotifier notifier) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -4318,15 +4689,13 @@ class _DevTabState extends ConsumerState<_DevTab> {
                 ChoiceChip(
                   label: const Text('拒绝'),
                   selected: settings.dangerousCommandPolicy == 'deny',
-                  onSelected: (_) =>
-                      notifier.setDangerousCommandPolicy('deny'),
+                  onSelected: (_) => notifier.setDangerousCommandPolicy('deny'),
                 ),
                 const SizedBox(width: 8),
                 ChoiceChip(
                   label: const Text('每次审批'),
                   selected: settings.dangerousCommandPolicy == 'ask',
-                  onSelected: (_) =>
-                      notifier.setDangerousCommandPolicy('ask'),
+                  onSelected: (_) => notifier.setDangerousCommandPolicy('ask'),
                 ),
               ],
             ),
@@ -4472,7 +4841,8 @@ class _ApiTab extends ConsumerWidget {
             Text('模型：${cfg.model}', style: const TextStyle(fontSize: 12)),
             Text(
               'temp=${cfg.effectiveTemperature.toStringAsFixed(2)} · '
-              'max_tokens=${cfg.effectiveMaxTokens}',
+              'max_tokens=${cfg.effectiveMaxTokens}'
+              '${cfg.contextWindow != null ? ' · 上下文=${cfg.contextWindow}' : ''}',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             const SizedBox(height: 8),
@@ -4573,6 +4943,7 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
   late final TextEditingController _model;
   late final TextEditingController _temp;
   late final TextEditingController _maxTokens;
+  late final TextEditingController _contextWindow;
 
   String? _testResult;
   bool _testing = false;
@@ -4589,6 +4960,8 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
     _temp =
         TextEditingController(text: e?.temperature?.toStringAsFixed(2) ?? '');
     _maxTokens = TextEditingController(text: e?.maxTokens?.toString() ?? '');
+    _contextWindow =
+        TextEditingController(text: e?.contextWindow?.toString() ?? '');
     _visionCapable = e?.visionCapable ?? false;
   }
 
@@ -4600,6 +4973,7 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
     _model.dispose();
     _temp.dispose();
     _maxTokens.dispose();
+    _contextWindow.dispose();
     super.dispose();
   }
 
@@ -4617,6 +4991,7 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
       temperature: double.tryParse(_temp.text.trim()),
       maxTokens: int.tryParse(_maxTokens.text.trim()),
       visionCapable: _visionCapable,
+      contextWindow: int.tryParse(_contextWindow.text.trim()),
     );
   }
 
@@ -4695,6 +5070,14 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
             controller: _maxTokens,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(labelText: 'max_tokens（留空=1024）'),
+          ),
+          TextField(
+            controller: _contextWindow,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: '上下文窗口（留空=自动探测）',
+              hintText: '顶部上下文占用百分比的分母；自动从 /v1/models 读取 n_ctx',
+            ),
           ),
           SwitchListTile(
             title: const Text('支持视觉（图片理解）'),
@@ -4788,7 +5171,8 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
     final n = _liveNotifier!;
     _saveOnBlur(_urlFocus, () => n.setWebSearchSearXngBaseUrl(_url.text));
     _saveOnBlur(_apiKeyFocus, () => n.setWebSearchSearXngApiKey(_apiKey.text));
-    _saveOnBlur(_enginesFocus, () => n.setWebSearchSearXngEngines(_engines.text));
+    _saveOnBlur(
+        _enginesFocus, () => n.setWebSearchSearXngEngines(_engines.text));
     _saveOnBlur(
         _languageFocus, () => n.setWebSearchSearXngLanguage(_language.text));
     _saveOnBlur(_maxResultsFocus, () => _saveMaxResults(_maxResults.text));
@@ -4940,8 +5324,8 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
     _seed(_engines, settings.webSearchSearXngEngines ?? '');
     _seed(_language, settings.webSearchSearXngLanguage ?? '');
     _seed(_maxResults, '${settings.webSearchSearXngMaxResults}');
-    _seed(_timeoutSec,
-        '${(settings.webSearchSearXngTimeoutMs / 1000).round()}');
+    _seed(
+        _timeoutSec, '${(settings.webSearchSearXngTimeoutMs / 1000).round()}');
 
     final url = _url.text.trim();
     final notConfigured = url.isEmpty;
@@ -4950,8 +5334,10 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
     final host = url.isEmpty ? '' : (Uri.tryParse(url)?.host ?? '');
     final isLoopbackHost =
         host == '127.0.0.1' || host == 'localhost' || host == '::1';
-    final insecureKey =
-        !notConfigured && isHttp && !isLoopbackHost && _apiKey.text.trim().isNotEmpty;
+    final insecureKey = !notConfigured &&
+        isHttp &&
+        !isLoopbackHost &&
+        _apiKey.text.trim().isNotEmpty;
 
     return Card(
       child: Padding(
@@ -4959,13 +5345,29 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildSectionHeader('🌐 联网搜索（SearXNG）', context),
+            _buildSectionHeader('🌐 联网搜索', context),
             const SizedBox(height: 4),
             Text(
-              '为智能体提供 web_search 联网搜索。地址需手机能直接访问'
-              '（局域网 IP 或 Tailscale 地址均可）；App 不预置任何搜索实例。',
+              '为智能体提供 web_search 联网搜索。默认「手机直连」模式：用真实'
+              '浏览器 UA 直接请求搜索引擎（bing/百度/360/搜狗），手机 IP 多变'
+              '更易绕开反爬，无需自建实例。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
+            // 搜索模式：手机直连（默认） vs 自建 SearXNG 实例。
+            Row(children: [
+              ChoiceChip(
+                label: const Text('手机直连', style: TextStyle(fontSize: 12)),
+                selected: settings.webSearchMode == 'direct',
+                onSelected: (_) => _notifier.setWebSearchMode('direct'),
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text('SearXNG 实例', style: TextStyle(fontSize: 12)),
+                selected: settings.webSearchMode == 'searxng',
+                onSelected: (_) => _notifier.setWebSearchMode('searxng'),
+              ),
+            ]),
+            const SizedBox(height: 8),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -4976,77 +5378,94 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
               value: settings.webSearchEnabled,
               onChanged: (v) => _notifier.setWebSearchEnabled(v),
             ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _url,
-              keyboardType: TextInputType.url,
-              focusNode: _urlFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: 'SearXNG 地址',
-                hintText: 'http://192.168.1.20:8080',
-                helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
-                helperMaxLines: 2,
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _apiKey,
-              focusNode: _apiKeyFocus,
-              obscureText: !_revealKey,
-              autocorrect: false,
-              decoration: InputDecoration(
-                labelText: 'API Key（可选）',
-                helperText: '仅私有实例需要；以 Bearer 发送',
-                border: const OutlineInputBorder(),
-                isDense: true,
-                suffixIcon: IconButton(
-                  icon: Icon(_revealKey ? Icons.visibility_off : Icons.visibility,
-                      size: 18),
-                  onPressed: () => setState(() => _revealKey = !_revealKey),
+            // ---- 仅 SearXNG 模式显示的实例配置（手机直连模式无需实例）----
+            if (settings.webSearchMode == 'searxng') ...[
+              const SizedBox(height: 8),
+              TextField(
+                controller: _url,
+                keyboardType: TextInputType.url,
+                focusNode: _urlFocus,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: 'SearXNG 地址',
+                  hintText: 'http://192.168.1.20:8080',
+                  helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
+                  helperMaxLines: 2,
+                  border: OutlineInputBorder(),
+                  isDense: true,
                 ),
+                onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
               ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
-            ),
-            if (insecureKey) ...[
-              const SizedBox(height: 6),
-              Text(
-                '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
-                style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _apiKey,
+                focusNode: _apiKeyFocus,
+                obscureText: !_revealKey,
+                autocorrect: false,
+                decoration: InputDecoration(
+                  labelText: 'API Key（可选）',
+                  helperText: '仅私有实例需要；以 Bearer 发送',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _revealKey ? Icons.visibility_off : Icons.visibility,
+                        size: 18),
+                    onPressed: () => setState(() => _revealKey = !_revealKey),
+                  ),
+                ),
+                onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
+              ),
+              if (insecureKey) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
+                  style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+                ),
+              ],
+              const SizedBox(height: 12),
+              TextField(
+                controller: _engines,
+                focusNode: _enginesFocus,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: '引擎白名单（可选）',
+                  hintText: '如 bing,sogou',
+                  helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
+                      '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
+                  helperMaxLines: 3,
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _language,
+                focusNode: _languageFocus,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: '搜索语言（可选）',
+                  hintText: '如 zh-CN，留空 = 不指定',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _testing ? null : _test,
+                      icon: const Icon(Icons.wifi_tethering, size: 16),
+                      label: Text(_testing ? '测试中…' : '测试连接'),
+                    ),
+                  ),
+                ],
               ),
             ],
-            const SizedBox(height: 12),
-            TextField(
-              controller: _engines,
-              focusNode: _enginesFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '引擎白名单（可选）',
-                hintText: '如 bing,sogou',
-                helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
-                    '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
-                helperMaxLines: 3,
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _language,
-              focusNode: _languageFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '搜索语言（可选）',
-                hintText: '如 zh-CN，留空 = 不指定',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
-            ),
+            // ---- 两模式共用的条数 / 超时设置 ----
             const SizedBox(height: 12),
             Row(
               children: [
@@ -5075,18 +5494,6 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                       isDense: true,
                     ),
                     onSubmitted: _saveTimeoutSec,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _testing ? null : _test,
-                    icon: const Icon(Icons.wifi_tethering, size: 16),
-                    label: Text(_testing ? '测试中…' : '测试连接'),
                   ),
                 ),
               ],

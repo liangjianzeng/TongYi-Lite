@@ -28,6 +28,7 @@ class ApiModelConfig {
   final double? temperature;
   final int? maxTokens;
   final bool visionCapable;
+  final int? contextWindow;
 
   const ApiModelConfig({
     required this.id,
@@ -38,6 +39,7 @@ class ApiModelConfig {
     this.temperature,
     this.maxTokens,
     this.visionCapable = false,
+    this.contextWindow,
   });
 
   /// 生效温度：配置值 ?? 0.7。
@@ -54,8 +56,10 @@ class ApiModelConfig {
     double? temperature,
     int? maxTokens,
     bool? visionCapable,
+    int? contextWindow,
     bool clearTemperature = false,
     bool clearMaxTokens = false,
+    bool clearContextWindow = false,
   }) {
     return ApiModelConfig(
       id: id,
@@ -63,10 +67,11 @@ class ApiModelConfig {
       baseUrl: baseUrl ?? this.baseUrl,
       apiKey: apiKey ?? this.apiKey,
       model: model ?? this.model,
-      temperature:
-          clearTemperature ? null : temperature ?? this.temperature,
+      temperature: clearTemperature ? null : temperature ?? this.temperature,
       maxTokens: clearMaxTokens ? null : maxTokens ?? this.maxTokens,
       visionCapable: visionCapable ?? this.visionCapable,
+      contextWindow:
+          clearContextWindow ? null : contextWindow ?? this.contextWindow,
     );
   }
 
@@ -79,6 +84,7 @@ class ApiModelConfig {
         'temperature': temperature,
         'maxTokens': maxTokens,
         'visionCapable': visionCapable,
+        'contextWindow': contextWindow,
       };
 
   factory ApiModelConfig.fromJson(Map<String, dynamic> json) {
@@ -91,6 +97,7 @@ class ApiModelConfig {
       temperature: (json['temperature'] as num?)?.toDouble(),
       maxTokens: (json['maxTokens'] as num?)?.toInt(),
       visionCapable: json['visionCapable'] as bool? ?? false,
+      contextWindow: (json['contextWindow'] as num?)?.toInt(),
     );
   }
 }

@@ -4,15 +4,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:permission_handler/permission_handler.dart' show openAppSettings;
+import 'package:permission_handler/permission_handler.dart'
+    show openAppSettings;
 
-import '../providers/index.dart' show chatNotifierProvider, runningTurnsProvider, messagesProvider, conversationsProvider, currentModelIdProvider, kLocalVisionSupported;
+import '../providers/index.dart'
+    show
+        chatNotifierProvider,
+        runningTurnsProvider,
+        messagesProvider,
+        conversationsProvider,
+        currentModelIdProvider,
+        kLocalVisionSupported;
 import '../providers/model_provider.dart';
 import '../providers/settings_provider.dart' show settingsProvider;
 import '../services/attachment_service.dart'
     show kMaxAttachments, kSupportedExtensions;
 import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
+import '../providers/context_usage_provider.dart'
+    show contextUsageProvider, ContextUsage;
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
@@ -45,6 +55,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   // Image picker state
   final List<String> _selectedImagePaths = [];
+
   /// 智能体附件（≤5 个，WP-A）。
   final List<String> _selectedFilePaths = [];
   final ImagePicker _picker = ImagePicker();
@@ -60,7 +71,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // 会话批量选择状态
   bool _conversationSelectionMode = false;
   final Set<String> _selectedConversations = {};
-
 
   @override
   void initState() {
@@ -255,9 +265,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       type: FileType.custom,
-      allowedExtensions: kSupportedExtensions
-          .map((e) => e.replaceFirst('.', ''))
-          .toList(),
+      allowedExtensions:
+          kSupportedExtensions.map((e) => e.replaceFirst('.', '')).toList(),
     );
     if (result == null || result.files.isEmpty) return;
     setState(() {
@@ -292,8 +301,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       builder: (ctx) => Container(
         decoration: BoxDecoration(
           color: theme.colorScheme.surface,
-          borderRadius:
-              const BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: SafeArea(
           child: Padding(
@@ -539,7 +547,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ..addAll(attachmentPaths);
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: $e', style: const TextStyle(color: Colors.white))),
+        SnackBar(
+            content:
+                Text('发送失败: $e', style: const TextStyle(color: Colors.white))),
       );
       return;
     }
@@ -611,6 +621,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             },
           ),
         ],
+        // 顶部状态栏最下方：叠一条蓝色上下文占用细线（零额外布局空间）。
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(3),
+          child: _buildContextUsageBar(modelState, isGenerating),
+        ),
       ),
       body: Column(
         children: [
@@ -735,7 +750,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     switch (ms.phase) {
       case ModelLifecyclePhase.loading:
         chipIcon = Icons.sync_alt;
-        label = const Text('加载中…', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
+        label = const Text('加载中…',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.loaded:
         chipIcon = isGenerating ? Icons.auto_awesome : Icons.check_circle;
@@ -746,22 +762,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             const SizedBox(width: 4),
             Text(
               ms.modelName ?? (ms.modelId ?? '模型就绪'),
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color),
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w500, color: color),
             ),
           ],
         );
         break;
       case ModelLifecyclePhase.unloading:
         chipIcon = Icons.sync_disabled;
-        label = const Text('卸载中…', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
+        label = const Text('卸载中…',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.error:
         chipIcon = Icons.error_outline;
-        label = const Text('加载失败', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
+        label = const Text('加载失败',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
       case ModelLifecyclePhase.idle:
         chipIcon = Icons.memory_outlined;
-        label = const Text('未加载', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
+        label = const Text('未加载',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500));
         break;
     }
 
@@ -833,7 +853,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         },
         onGoToSettings: () {
           Navigator.pop(ctx);
-          Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+          Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()));
         },
       ),
     );
@@ -844,7 +865,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget _buildInlineProgress(ModelState ms, bool isGenerating) {
     // Only show during loading / unloading / error — idle and loaded states
     // are handled by the AppBar chip (no space wasted on chat area).
-    if (ms.phase == ModelLifecyclePhase.idle || ms.phase == ModelLifecyclePhase.loaded) {
+    if (ms.phase == ModelLifecyclePhase.idle ||
+        ms.phase == ModelLifecyclePhase.loaded) {
       return const SizedBox.shrink();
     }
 
@@ -860,15 +882,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           Row(
             children: [
-              if (ms.phase == ModelLifecyclePhase.loading || ms.phase == ModelLifecyclePhase.unloading)
-                SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: color)),
+              if (ms.phase == ModelLifecyclePhase.loading ||
+                  ms.phase == ModelLifecyclePhase.unloading)
+                SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: color)),
               const SizedBox(width: 4),
               Expanded(
                 child: Text(
                   ms.modelName != null && ms.modelName!.isNotEmpty
                       ? '${ms.modelName!}$generating'
                       : (isGenerating ? '推理中…' : '模型未加载'),
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w500),
                 ),
               ),
             ],
@@ -892,7 +920,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   Expanded(
                     child: Text(
                       ms.errorMessage!,
-                      style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                      style:
+                          TextStyle(fontSize: 11, color: Colors.red.shade700),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -900,7 +929,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   const SizedBox(width: 8),
                   TextButton.icon(
                     onPressed: ms.modelId != null
-                        ? () => ref.read(modelManagerProvider.notifier).loadModel(ms.modelId!)
+                        ? () => ref
+                            .read(modelManagerProvider.notifier)
+                            .loadModel(ms.modelId!)
                         : null,
                     icon: const Icon(Icons.refresh, size: 14),
                     label: const Text('重试', style: TextStyle(fontSize: 11)),
@@ -913,13 +944,56 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  /// 顶部状态栏最下方的 API 接入模型上下文占用细线（叠在 AppBar 底部，
+  /// 不额外占用布局空间）。
+  ///
+  /// 仅当前走 API 接入时显示：一条蓝色细线，宽度 = 占用比例 × 屏幕宽，
+  /// 高度 3px。无数据时仅显示一条极浅的底色线（占满全宽、几乎不可见）。
+  Widget _buildContextUsageBar(ModelState ms, bool isGenerating) {
+    final settings = ref.watch(settingsProvider);
+    final activeApi = settings.activeApiModel();
+    final hasLocalLoaded = ms.isLoaded;
+    final hasDefault = settings.defaultModelId != null;
+    // 当前是否会走 API 接入（细条只对 API 模型显示）：
+    // - 智能体显式 API 驱动（agentModelSource=api）→ 恒走 API；
+    // - 普通聊天：无本地意图（未加载本地模型 且 无默认勾选）且激活了 API → API。
+    final isAgentApi = settings.agentModelSource == 'api' && activeApi != null;
+    final isPlainApi = activeApi != null && !hasLocalLoaded && !hasDefault;
+    if (!isAgentApi && !isPlainApi) return const SizedBox.shrink();
+
+    final usage = ref.watch(contextUsageProvider)[_currentConversationId];
+    final fraction = usage?.fraction ?? 0.0;
+
+    return SizedBox(
+      height: 3,
+      width: MediaQuery.of(context).size.width,
+      child: Stack(
+        children: [
+          // 极浅底色线（全宽）：让用户看到细线槽位存在，占用为 0 时也可见。
+          const Positioned.fill(
+            child: ColoredBox(color: Color(0x14000000)),
+          ),
+          // 蓝色占用细线：宽度 = 占用比例 × 屏幕宽。
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: MediaQuery.of(context).size.width * fraction,
+            child: const ColoredBox(color: Color(0xFF2196F3)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPulsingDot() {
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0.3, end: 1.0),
       duration: const Duration(milliseconds: 800),
       curve: Curves.easeInOut,
       builder: (context, value, _) => Container(
-        width: 12, height: 12,
+        width: 12,
+        height: 12,
         decoration: BoxDecoration(
           color: Colors.orange.shade400.withValues(alpha: value),
           shape: BoxShape.circle,
@@ -930,12 +1004,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Color _colorFor(String name) {
     switch (name) {
-      case 'grey': return Colors.grey;
-      case 'blue': return Colors.blue;
-      case 'green': return Colors.green;
-      case 'orange': return Colors.orange;
-      case 'red': return Colors.red;
-      default: return Colors.grey;
+      case 'grey':
+        return Colors.grey;
+      case 'blue':
+        return Colors.blue;
+      case 'green':
+        return Colors.green;
+      case 'orange':
+        return Colors.orange;
+      case 'red':
+        return Colors.red;
+      default:
+        return Colors.grey;
     }
   }
 
@@ -1012,25 +1092,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   (uiState.running || generating) && index == units.length - 1;
               return switch (unit) {
                 UserUnit(:final message) => ChatBubble(
-                      role: message.role.name,
-                      content: message.content,
-                      timestamp: message.timestamp,
-                      isStreaming:
-                          message.isStreaming && index == units.length - 1,
-                      imagePath: message.imagePath,
-                      imagePaths: message.imagePaths,
-                      attachments: message.attachments,
-                      audioPath: message.audioPath,
-                      inferenceStats: message.inferenceStats,
-                    ),
+                    role: message.role.name,
+                    content: message.content,
+                    timestamp: message.timestamp,
+                    isStreaming:
+                        message.isStreaming && index == units.length - 1,
+                    imagePath: message.imagePath,
+                    imagePaths: message.imagePaths,
+                    attachments: message.attachments,
+                    audioPath: message.audioPath,
+                    inferenceStats: message.inferenceStats,
+                  ),
                 TurnUnit(:final tools, :final answer, :final thinking) =>
                   AgentTurnBlock(
-                      isLive: isLiveTurn,
-                      steps: _stepsFor(uiState, tools, isLiveTurn),
-                      answer: answer,
-                      ui: uiState,
-                      thinking: thinking,
-                    ),
+                    isLive: isLiveTurn,
+                    steps: _stepsFor(uiState, tools, isLiveTurn),
+                    answer: answer,
+                    ui: uiState,
+                    thinking: thinking,
+                  ),
               };
             },
           ),
@@ -1059,51 +1139,56 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)
+            ],
           ),
           child: Row(
-        children: [
-          // 统一附件入口：图片（拍照/相册）+ 文件附件合并为一个「+」按钮，
-          // 徽标显示已选总数（图片 + 文件）。
-          IconButton(
-            icon: Badge(
-              isLabelVisible:
-                  _selectedImagePaths.isNotEmpty || _selectedFilePaths.isNotEmpty,
-              label: Text(
-                  '${_selectedImagePaths.length + _selectedFilePaths.length}'),
-              child: const Icon(Icons.add_circle_outline),
-            ),
-            tooltip: '添加图片 / 文件',
-            onPressed: isGenerating ? null : _showAttachSheet,
-          ),
-          Expanded(
-            child: TextField(
-              controller: _textController,
-              decoration: InputDecoration(
-                hintText: '输入消息...',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
+            children: [
+              // 统一附件入口：图片（拍照/相册）+ 文件附件合并为一个「+」按钮，
+              // 徽标显示已选总数（图片 + 文件）。
+              IconButton(
+                icon: Badge(
+                  isLabelVisible: _selectedImagePaths.isNotEmpty ||
+                      _selectedFilePaths.isNotEmpty,
+                  label: Text(
+                      '${_selectedImagePaths.length + _selectedFilePaths.length}'),
+                  child: const Icon(Icons.add_circle_outline),
                 ),
-                filled: true,
-                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                tooltip: '添加图片 / 文件',
+                onPressed: isGenerating ? null : _showAttachSheet,
               ),
-              onSubmitted: (_) {
-                // Ignore Enter while a reply is streaming — the send button
-                // has switched to "stop" mode during generation.
-                if (isGenerating) return;
-                _sendMessage();
-              },
-              maxLines: null,
-            ),
+              Expanded(
+                child: TextField(
+                  controller: _textController,
+                  decoration: InputDecoration(
+                    hintText: '输入消息...',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor:
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 12),
+                  ),
+                  onSubmitted: (_) {
+                    // Ignore Enter while a reply is streaming — the send button
+                    // has switched to "stop" mode during generation.
+                    if (isGenerating) return;
+                    _sendMessage();
+                  },
+                  maxLines: null,
+                ),
+              ),
+              const SizedBox(width: 8),
+              _buildSendButton(isGenerating),
+            ],
           ),
-          const SizedBox(width: 8),
-          _buildSendButton(isGenerating),
-        ],
-      ),
-      ),
-    ],
+        ),
+      ],
     );
   }
 
@@ -1115,10 +1200,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget _buildSendButton(bool isGenerating) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onLongPressStart:
-          isGenerating ? null : (_) => _startRecording(),
-      onLongPressEnd:
-          isGenerating ? null : (_) => _stopRecording(send: true),
+      onLongPressStart: isGenerating ? null : (_) => _startRecording(),
+      onLongPressEnd: isGenerating ? null : (_) => _stopRecording(send: true),
       onLongPressCancel: () {
         // 按住后滑出按钮/被打断 → 放弃并停止录音（不发送）。
         if (_recordingNotifier.value) _stopRecording(send: false);
@@ -1127,9 +1210,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         valueListenable: _recordingNotifier,
         builder: (_, recording, __) => FloatingActionButton(
           mini: true,
-          tooltip: recording
-              ? '松手发送'
-              : (isGenerating ? '停止回复' : '发送（长按说话）'),
+          tooltip: recording ? '松手发送' : (isGenerating ? '停止回复' : '发送（长按说话）'),
           onPressed: recording
               ? () => _stopRecording(send: true)
               : (isGenerating ? _stopGeneration : _sendMessage),
@@ -1202,17 +1283,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   const Icon(Icons.forum, size: 24),
                   const SizedBox(width: 12),
                   const Expanded(
-                    child: Text('会话', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    child: Text('会话',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
                   ),
                   // 批量选择开关：进入多选模式后，点按会话变为勾选而非切换。
                   IconButton(
-                    icon: Icon(_conversationSelectionMode ? Icons.close : Icons.checklist),
+                    icon: Icon(_conversationSelectionMode
+                        ? Icons.close
+                        : Icons.checklist),
                     tooltip: _conversationSelectionMode ? '退出批量选择' : '批量选择',
-                    color: _conversationSelectionMode ? Theme.of(context).colorScheme.primary : null,
+                    color: _conversationSelectionMode
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
                     onPressed: () {
                       setState(() {
-                        _conversationSelectionMode = !_conversationSelectionMode;
-                        if (!_conversationSelectionMode) _selectedConversations.clear();
+                        _conversationSelectionMode =
+                            !_conversationSelectionMode;
+                        if (!_conversationSelectionMode)
+                          _selectedConversations.clear();
                       });
                     },
                   ),
@@ -1226,13 +1315,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             Expanded(
               child: conversations.isEmpty
-                  ? const Center(child: Text('暂无会话', style: TextStyle(color: Colors.grey)))
+                  ? const Center(
+                      child: Text('暂无会话', style: TextStyle(color: Colors.grey)))
                   : ListView.separated(
                       itemCount: conversations.length,
-                      separatorBuilder: (_i1, _i2) => Divider(height: 1, color: Colors.grey.shade200),
+                      separatorBuilder: (_i1, _i2) =>
+                          Divider(height: 1, color: Colors.grey.shade200),
                       itemBuilder: (ctx, i) {
                         final c = conversations[i];
-                        return _buildConversationTile(c, c.id == _currentConversationId);
+                        return _buildConversationTile(
+                            c, c.id == _currentConversationId);
                       },
                     ),
             ),
@@ -1279,20 +1371,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       leading: selectionMode
           ? Icon(
               selected ? Icons.check_circle : Icons.circle_outlined,
-              color: selected ? Theme.of(context).colorScheme.primary : Colors.grey.shade400,
+              color: selected
+                  ? Theme.of(context).colorScheme.primary
+                  : Colors.grey.shade400,
             )
           : Icon(
               isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
               size: 20,
-              color: isCurrent ? Theme.of(context).colorScheme.primary : Colors.grey,
+              color: isCurrent
+                  ? Theme.of(context).colorScheme.primary
+                  : Colors.grey,
             ),
       title: Text(
         c.title.isEmpty ? '新对话' : c.title,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontWeight: isCurrent && !selectionMode ? FontWeight.w600 : FontWeight.normal),
+        style: TextStyle(
+            fontWeight: isCurrent && !selectionMode
+                ? FontWeight.w600
+                : FontWeight.normal),
       ),
-      subtitle: Text('$updated · ${c.messageCount} 条', style: const TextStyle(fontSize: 12)),
+      subtitle: Text('$updated · ${c.messageCount} 条',
+          style: const TextStyle(fontSize: 12)),
       onTap: selectionMode
           ? () {
               setState(() {
@@ -1346,9 +1446,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除会话'),
-        content: Text('确定删除「${c.title.isEmpty ? '新对话' : c.title}」吗？\n该会话的所有消息将被永久删除。'),
+        content: Text(
+            '确定删除「${c.title.isEmpty ? '新对话' : c.title}」吗？\n该会话的所有消息将被永久删除。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('删除', style: TextStyle(color: Colors.red)),
@@ -1368,7 +1471,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         title: const Text('删除会话'),
         content: Text('确定删除选中的 $n 个会话吗？\n每个会话的所有消息将被永久删除。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('删除', style: TextStyle(color: Colors.red)),
@@ -1556,9 +1661,12 @@ class _ModelStatusSheet extends StatelessWidget {
             children: [
               // Handle bar
               Container(
-                width: 40, height: 4,
+                width: 40,
+                height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(2)),
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade400,
+                    borderRadius: BorderRadius.circular(2)),
               ),
               // Title + icon
               Row(
@@ -1570,13 +1678,18 @@ class _ModelStatusSheet extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          phase == ModelLifecyclePhase.loaded ? '模型已就绪' : _phaseLabelFor(phase),
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                          phase == ModelLifecyclePhase.loaded
+                              ? '模型已就绪'
+                              : _phaseLabelFor(phase),
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold),
                         ),
-                        if (phase == ModelLifecyclePhase.loaded || phase == ModelLifecyclePhase.error)
+                        if (phase == ModelLifecyclePhase.loaded ||
+                            phase == ModelLifecyclePhase.error)
                           Text(
                             modelName,
-                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey.shade600),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1602,7 +1715,8 @@ class _ModelStatusSheet extends StatelessWidget {
                     itemCount: logs.length,
                     itemBuilder: (ctx, i) => Text(
                       logs[i],
-                      style: TextStyle(fontSize: 12, color: Colors.blue.shade800),
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.blue.shade800),
                     ),
                   ),
                 ),
@@ -1616,23 +1730,42 @@ class _ModelStatusSheet extends StatelessWidget {
                     color: Colors.red.shade50,
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Text(errorMessage!, style: TextStyle(fontSize: 12, color: Colors.red.shade800)),
+                  child: Text(errorMessage!,
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.red.shade800)),
                 ),
               if (errorMessage != null) const SizedBox(height: 12),
               // Actions
               if (phase == ModelLifecyclePhase.loaded && !isGenerating) ...[
-                _sheetButton(context, label: '卸载模型', icon: Icons.close, color: Colors.red, onTap: onUnload),
+                _sheetButton(context,
+                    label: '卸载模型',
+                    icon: Icons.close,
+                    color: Colors.red,
+                    onTap: onUnload),
                 const SizedBox(height: 8),
               ],
               if (phase == ModelLifecyclePhase.error) ...[
-                _sheetButton(context, label: '重试加载', icon: Icons.refresh, color: Colors.blue, onTap: onLoad),
+                _sheetButton(context,
+                    label: '重试加载',
+                    icon: Icons.refresh,
+                    color: Colors.blue,
+                    onTap: onLoad),
                 const SizedBox(height: 8),
               ],
               if (phase == ModelLifecyclePhase.idle) ...[
-                _sheetButton(context, label: '去加载模型', icon: Icons.download, color: Colors.green, onTap: onGoToSettings),
+                _sheetButton(context,
+                    label: '去加载模型',
+                    icon: Icons.download,
+                    color: Colors.green,
+                    onTap: onGoToSettings),
                 const SizedBox(height: 8),
               ],
-              _sheetButton(context, label: '关闭', icon: null, color: null, onTap: () => Navigator.pop(context), isDefault: true),
+              _sheetButton(context,
+                  label: '关闭',
+                  icon: null,
+                  color: null,
+                  onTap: () => Navigator.pop(context),
+                  isDefault: true),
             ],
           ),
         ),
@@ -1640,7 +1773,8 @@ class _ModelStatusSheet extends StatelessWidget {
     );
   }
 
-  Widget _sheetButton(BuildContext context, {
+  Widget _sheetButton(
+    BuildContext context, {
     required String label,
     IconData? icon,
     Color? color,
@@ -1652,10 +1786,12 @@ class _ModelStatusSheet extends StatelessWidget {
       child: ElevatedButton.icon(
         onPressed: onTap,
         style: ElevatedButton.styleFrom(
-          backgroundColor: color ?? Theme.of(context).colorScheme.primaryContainer,
+          backgroundColor:
+              color ?? Theme.of(context).colorScheme.primaryContainer,
           foregroundColor: color == null ? null : Colors.white,
           padding: const EdgeInsets.symmetric(vertical: 12),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ),
         icon: icon != null ? Icon(icon, size: 18) : null,
         label: Text(label),
@@ -1665,31 +1801,46 @@ class _ModelStatusSheet extends StatelessWidget {
 
   IconData _sheetIconFor(ModelLifecyclePhase phase) {
     switch (phase) {
-      case ModelLifecyclePhase.idle: return Icons.memory_outlined;
-      case ModelLifecyclePhase.loading: return Icons.sync_alt;
-      case ModelLifecyclePhase.loaded: return Icons.check_circle;
-      case ModelLifecyclePhase.unloading: return Icons.sync_disabled;
-      case ModelLifecyclePhase.error: return Icons.error_outline;
+      case ModelLifecyclePhase.idle:
+        return Icons.memory_outlined;
+      case ModelLifecyclePhase.loading:
+        return Icons.sync_alt;
+      case ModelLifecyclePhase.loaded:
+        return Icons.check_circle;
+      case ModelLifecyclePhase.unloading:
+        return Icons.sync_disabled;
+      case ModelLifecyclePhase.error:
+        return Icons.error_outline;
     }
   }
 
   String _phaseLabelFor(ModelLifecyclePhase phase) {
     switch (phase) {
-      case ModelLifecyclePhase.idle: return '未加载';
-      case ModelLifecyclePhase.loading: return '加载中…';
-      case ModelLifecyclePhase.loaded: return '已加载';
-      case ModelLifecyclePhase.unloading: return '卸载中…';
-      case ModelLifecyclePhase.error: return '加载失败';
+      case ModelLifecyclePhase.idle:
+        return '未加载';
+      case ModelLifecyclePhase.loading:
+        return '加载中…';
+      case ModelLifecyclePhase.loaded:
+        return '已加载';
+      case ModelLifecyclePhase.unloading:
+        return '卸载中…';
+      case ModelLifecyclePhase.error:
+        return '加载失败';
     }
   }
 
   Color _sheetColorFor(ModelLifecyclePhase phase) {
     switch (phase) {
-      case ModelLifecyclePhase.idle: return Colors.grey;
-      case ModelLifecyclePhase.loading: return Colors.blue;
-      case ModelLifecyclePhase.loaded: return Colors.green;
-      case ModelLifecyclePhase.unloading: return Colors.orange;
-      case ModelLifecyclePhase.error: return Colors.red;
+      case ModelLifecyclePhase.idle:
+        return Colors.grey;
+      case ModelLifecyclePhase.loading:
+        return Colors.blue;
+      case ModelLifecyclePhase.loaded:
+        return Colors.green;
+      case ModelLifecyclePhase.unloading:
+        return Colors.orange;
+      case ModelLifecyclePhase.error:
+        return Colors.red;
     }
   }
 
@@ -1699,7 +1850,8 @@ class _ModelStatusSheet extends StatelessWidget {
       duration: const Duration(milliseconds: 800),
       curve: Curves.easeInOut,
       builder: (context, value, _) => Container(
-        width: 14, height: 14,
+        width: 14,
+        height: 14,
         decoration: BoxDecoration(
           color: Colors.orange.shade400.withValues(alpha: value),
           shape: BoxShape.circle,
@@ -1770,7 +1922,8 @@ class _MemoryPanelState extends State<_MemoryPanel> {
         child: Row(
           children: [
             const SizedBox(
-              width: 14, height: 14,
+              width: 14,
+              height: 14,
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
             const SizedBox(width: 10),
@@ -1811,9 +1964,15 @@ class _MemoryPanelState extends State<_MemoryPanel> {
             children: [
               const Icon(Icons.memory, size: 16),
               const SizedBox(width: 6),
-              Text('内存占用', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade800)),
+              Text('内存占用',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade800)),
               const Spacer(),
-              Text('可用 ${_gb(sysAvail)} GB', style: TextStyle(fontSize: 12, color: _pressureColor(sysAvailPct))),
+              Text('可用 ${_gb(sysAvail)} GB',
+                  style: TextStyle(
+                      fontSize: 12, color: _pressureColor(sysAvailPct))),
             ],
           ),
           const SizedBox(height: 10),
@@ -1861,10 +2020,12 @@ class _MemoryPanelState extends State<_MemoryPanel> {
                 'llama.cpp 合计: ${_gb(modelMB + kvCache)} GB',
                 style: TextStyle(
                   fontSize: 12,
-                  color: _pressureColor(sysTotal > 0 ? 1 - (modelMB + kvCache) / sysTotal : 1),
+                  color: _pressureColor(
+                      sysTotal > 0 ? 1 - (modelMB + kvCache) / sysTotal : 1),
                 ),
               ),
-              Text('进程 RSS: ${_gb(procRss)} GB', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+              Text('进程 RSS: ${_gb(procRss)} GB',
+                  style: const TextStyle(fontSize: 12, color: Colors.black87)),
             ],
           ),
         ],
@@ -1883,9 +2044,13 @@ class _MemoryPanelState extends State<_MemoryPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(fontSize: 11, color: color.withValues(alpha: 0.9))),
+          Text(label,
+              style:
+                  TextStyle(fontSize: 11, color: color.withValues(alpha: 0.9))),
           const SizedBox(height: 2),
-          Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color)),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w700, color: color)),
         ],
       ),
     );
@@ -1913,7 +2078,9 @@ class _MemoryPanelState extends State<_MemoryPanel> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(label, style: const TextStyle(fontSize: 12)),
-            Text('${_gb(usedMB)} / ${_gb(totalMB)} GB', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+            Text('${_gb(usedMB)} / ${_gb(totalMB)} GB',
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
           ],
         ),
         const SizedBox(height: 4),
