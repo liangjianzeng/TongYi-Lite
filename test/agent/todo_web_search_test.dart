@@ -166,6 +166,27 @@ void main() {
       }
     });
 
+    test('新闻意图过滤静态页：百科/攻略被剔除，新闻条目保留', () async {
+      final provider = _FakeSearchProvider({
+        '国庆 新闻': [
+          const WebSearchSource(url: 'http://a', title: '国庆_百度百科', snippet: '国庆简介'),
+          const WebSearchSource(url: 'http://b', title: '国庆旅游攻略', snippet: '怎么玩'),
+          const WebSearchSource(url: 'http://c', title: '国庆活动举行', snippet: '各地庆祝'),
+        ],
+      });
+      WebSearchSeam.instance.registerProvider(provider);
+      try {
+        final result = await createWebSearchTool().execute({'query': '国庆 新闻'});
+        // 新闻意图：百科/攻略静态页被过滤，只保留新闻类条目。
+        expect(result.content, contains('国庆活动举行'));
+        expect(result.content, isNot(contains('百度百科')));
+        expect(result.content, isNot(contains('旅游攻略')));
+        expect(result.isError, isFalse);
+      } finally {
+        WebSearchSeam.instance.dispose();
+      }
+    });
+
     test('时效过滤：剔除往年年份旧闻，近期条目优先', () async {
       final prevYear = (DateTime.now().year - 1).toString();
       final provider = _FakeSearchProvider({

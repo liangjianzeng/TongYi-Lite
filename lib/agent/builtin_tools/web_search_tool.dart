@@ -58,6 +58,28 @@ int _recencyScore(WebSearchSource s, int currentYear) {
   return 1;
 }
 
+/// 新闻意图时判定"静态通用页"（百科/攻略/问答/词典/旅游），应过滤掉以免
+/// 模型拿静态页冒充新闻。只对 url/title/snippet 做特征匹配，权威新闻站
+///（news/gov/sohu/toutiao/qq/sina/163 等）不命中。
+bool _isStaleGeneric(WebSearchSource s) {
+  final url = s.url.toLowerCase();
+  final title = (s.title ?? '').toLowerCase();
+  final snip = (s.snippet ?? '').toLowerCase();
+  if (url.contains('baike') ||
+      url.contains('zhihu') ||
+      url.contains('wikipedia') ||
+      url.contains('dict')) {
+    return true;
+  }
+  const staleTitle = <String>[
+    '百科', '词条', '简介', '攻略', '旅游', '怎么去', '景点', '词典', '怎么玩', '必去', '推荐去',
+  ];
+  for (final k in staleTitle) {
+    if (title.contains(k) || snip.contains(k)) return true;
+  }
+  return false;
+}
+
 /// 归一化查询：小写 + 只留中英文/数字，用于同回合重复搜索判定
 ///（"华为大会 " / "华为 大会" / "华为大会。" 视为同一关键词）。
 String _normalizeQuery(String q) {
@@ -206,6 +228,14 @@ ToolDefinition createWebSearchTool({int maxSearchesPerTurn = kMaxSearchesPerTurn
         merged.removeWhere((s) => _recencyScore(s, now.year) == 0);
         merged.sort((a, b) =>
             _recencyScore(b, now.year).compareTo(_recencyScore(a, now.year)));
+
+        // 新闻意图：过滤百科/攻略/问答等静态页，保留新闻/权威内容源——避免
+        // 模型把百科词条/旅游攻略当"新闻"回答。无近期新闻条目时如实说明，
+        // 而不是拿静态页冒充最新。
+        final intent = detectIntent(raw);
+        if (intent == SearchIntent.news || intent == SearchIntent.localNews) {
+          merged.removeWhere(_isStaleGeneric);
+        }
 
         final truncated = merged.length > kCollectTarget;
         final result = _formatResult(
