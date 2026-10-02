@@ -132,3 +132,6 @@ ui.xml
 # 本地验证工作区（2026-09-28）：spike worktree 与 OpenCL/Vulkan 桌面构建链
 wt/
 _build/
+
+# 无线 ADB 缓存（手机 IP，因人/因网而异，不入库）
+scripts/.adb_wifi_*

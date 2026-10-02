@@ -321,6 +321,8 @@ void main() {
         const InferenceSettings().copyWith(
           webSearchSearXngBaseUrl: url,
           webSearchSearXngEngines: engines,
+          // 这组测试专测 SearXNG provider 路径，须关掉直连总开关。
+          webSearchDirectEnabled: false,
         );
 
     test('配置未变时复用同一实例（连接池不作废）', () {

@@ -5348,26 +5348,11 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             _buildSectionHeader('🌐 联网搜索', context),
             const SizedBox(height: 4),
             Text(
-              '为智能体提供 web_search 联网搜索。默认「手机直连」模式：用真实'
-              '浏览器 UA 直接请求搜索引擎（bing/百度/360/搜狗），手机 IP 多变'
-              '更易绕开反爬，无需自建实例。',
+              '为智能体提供 web_search 联网搜索。「端侧直连引擎」开关打开时'
+              '优先级最高（忽略下方 SearXNG 地址）；关闭后用你的 SearXNG 实例'
+              '（需手机能直接访问，局域网 IP 或 Tailscale 地址均可）。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
-            // 搜索模式：手机直连（默认） vs 自建 SearXNG 实例。
-            Row(children: [
-              ChoiceChip(
-                label: const Text('手机直连', style: TextStyle(fontSize: 12)),
-                selected: settings.webSearchMode == 'direct',
-                onSelected: (_) => _notifier.setWebSearchMode('direct'),
-              ),
-              const SizedBox(width: 8),
-              ChoiceChip(
-                label: const Text('SearXNG 实例', style: TextStyle(fontSize: 12)),
-                selected: settings.webSearchMode == 'searxng',
-                onSelected: (_) => _notifier.setWebSearchMode('searxng'),
-              ),
-            ]),
-            const SizedBox(height: 8),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -5378,10 +5363,9 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
               value: settings.webSearchEnabled,
               onChanged: (v) => _notifier.setWebSearchEnabled(v),
             ),
-            // ---- 仅 SearXNG 模式显示的实例配置（手机直连模式无需实例）----
-            if (settings.webSearchMode == 'searxng') ...[
-              const SizedBox(height: 8),
-              TextField(
+            // ---- SearXNG 实例配置（直连引擎开关打开时优先级更高）----
+            const SizedBox(height: 8),
+            TextField(
                 controller: _url,
                 keyboardType: TextInputType.url,
                 focusNode: _urlFocus,
@@ -5464,8 +5448,7 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                   ),
                 ],
               ),
-            ],
-            // ---- 两模式共用的条数 / 超时设置 ----
+            // ---- 条数 / 超时设置 ----
             const SizedBox(height: 12),
             Row(
               children: [
@@ -5501,7 +5484,8 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             if (notConfigured) ...[
               const SizedBox(height: 6),
               Text(
-                '尚未填写地址，联网搜索会返回"未配置"。填好后点「测试连接」验证一下。',
+                '尚未填写地址：联网搜索将使用端侧直连引擎（下方可开关选择）。'
+                '填好地址点「测试连接」可改用 SearXNG 实例。',
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
               ),
             ],
@@ -5515,9 +5499,136 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                 ),
               ),
             ],
+            // ---- 端侧直连引擎（SearXNG 地址为空时生效）----
+            _buildDirectEngineSection(context, notConfigured, settings),
           ],
         ),
       ),
+    );
+  }
+
+  /// 端侧直连引擎配置：引擎开关（按风险分档）+ 每 10 分钟窗口请求预算。
+  /// 「细水长流」管控：高风险引擎（搜狗/百度/夸克，风控激进）默认每窗口
+  /// 只发 2 次；预算耗尽自动跳过，窗口到期恢复；引擎被反爬拦截时熔断冷却
+  /// 并自动换 Cookie/UA 身份重试。
+  Widget _buildDirectEngineSection(
+      BuildContext context, bool notConfigured, InferenceSettings settings) {
+    const engineLabels = {
+      'bing_cn': '必应 CN',
+      'so360': '360 搜索',
+      'chinaso': '中国搜索',
+      'sogou': '搜狗（高风险）',
+      'baidu': '百度（高风险）',
+      'quark': '夸克（高风险）',
+    };
+    final enabled = settings.webSearchDirectEngines;
+    Widget budgetSlider({
+      required String label,
+      required String hint,
+      required int value,
+      required int min,
+      required int max,
+      required ValueChanged<int> onChanged,
+    }) =>
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 12)),
+            SizedBox(
+              height: 34,
+              child: Slider(
+                value: value.toDouble(),
+                min: min.toDouble(),
+                max: max.toDouble(),
+                divisions: max - min,
+                label: '$value 次',
+                onChanged: (v) => onChanged(v.round()),
+              ),
+            ),
+            Text(hint, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+          ],
+        );
+    final directOn = settings.webSearchDirectEnabled;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 14),
+        _buildSectionHeader('⚡ 端侧直连引擎', context),
+        const SizedBox(height: 2),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: const Text('端侧直连引擎（优先级最高）',
+              style: TextStyle(fontSize: 14)),
+          subtitle: Text(
+            directOn
+                ? '已启用：优先用端侧直连，忽略上方 SearXNG 地址'
+                : '已关闭：使用上方配置的 SearXNG 实例',
+            style: const TextStyle(fontSize: 12),
+          ),
+          value: directOn,
+          onChanged: (v) => _notifier.setWebSearchDirectEnabled(v),
+        ),
+        // 总开关关闭时子设置整体置灰不可点（对齐 agentEnabled 的置灰模式）。
+        Opacity(
+          opacity: directOn ? 1.0 : 0.45,
+          child: IgnorePointer(
+            ignoring: !directOn,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  notConfigured
+                      ? '高风险引擎每窗口请求数少、被拦自动冷却换身份，'
+                          '保证长期可用。'
+                      : '当前被 SearXNG 地址覆盖（直连开关打开才生效）。',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+                const SizedBox(height: 4),
+                for (final entry in engineLabels.entries)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            title: Text(entry.value, style: const TextStyle(fontSize: 14)),
+            value: enabled.contains(entry.key),
+            onChanged: (v) => _notifier
+                .setWebSearchDirectEngineEnabled(entry.key, v),
+          ),
+        const SizedBox(height: 4),
+        budgetSlider(
+          label: '低风险引擎每 10 分钟搜索上限'
+              '（必应/360/中国搜索，当前 ${settings.webSearchDirectLowRiskPerWindow} 次）',
+          hint: '容忍度高，可适当放宽；预算用于控制连续任务的请求节奏',
+          value: settings.webSearchDirectLowRiskPerWindow,
+          min: 1,
+          max: 10,
+          onChanged: (v) => _notifier.setWebSearchDirectLowRiskPerWindow(v),
+        ),
+        const SizedBox(height: 4),
+        budgetSlider(
+          label: '高风险引擎每 10 分钟搜索上限'
+              '（搜狗/百度/夸克，当前 ${settings.webSearchDirectHighRiskPerWindow} 次）',
+          hint: '风控激进，默认 2 次"细水长流"——偶尔贡献高质量结果，'
+              '避免连续请求被判定机器行为而封禁',
+          value: settings.webSearchDirectHighRiskPerWindow,
+          min: 1,
+          max: 6,
+          onChanged: (v) => _notifier.setWebSearchDirectHighRiskPerWindow(v),
+        ),
+                if (enabled.isEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '⚠️ 所有直连引擎均已关闭：端侧直连不可用。',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.orange.shade800),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

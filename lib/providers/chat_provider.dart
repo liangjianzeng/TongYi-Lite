@@ -1510,13 +1510,9 @@ class ChatNotifier extends StateNotifier<bool> {
 
     // 联网搜索：把当前搜索 provider 注册到接缝（对齐 DSH ctx.web 的可插拔
     // 搜索能力）。web_search 工具只接接缝、不写死搜索源；替换搜索源无需改工具。
-    // 默认 direct = 手机直连搜索引擎（真实浏览器 UA 绕国内反爬）；用户配置了
-    // SearXNG 实例且选择 searxng 模式时才走实例。
-    if (settings.webSearchMode == 'searxng') {
-      applySearXNGProviderFromSettings(settings);
-    } else {
-      applyDirectSearchProviderFromSettings(settings);
-    }
+    // applySearXNGProviderFromSettings 内部按 webSearchDirectEnabled 切换
+    // 端侧直连引擎 / SearXNG 实例（直连开关打开时优先级最高）。
+    applySearXNGProviderFromSettings(settings);
 
     // 联网类工具（web_search/get_weather）：配置关闭时不可见。
     if (!settings.webSearchEnabled) {
