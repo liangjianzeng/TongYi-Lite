@@ -16,6 +16,9 @@ import 'tool_registry.dart';
 /// [modelId] 按模型渲染可见工具清单；
 /// [personaName]/[personaPrompt] 自定义人格（null = 标准人格，行为不变）：
 /// 身份段改为以人格自称开头，人设提示词作为独立分段插在身份段与工具指引之间。
+///
+/// 环境快照（当前时间）不在这里注入——由 ReactLoopAgent 构造器追加到
+/// 系统提示**最末**（skills/AGENTS.md 之后），保证稳定前缀在前。
 String buildSystemPrompt({
   required String modelName,
   required ToolRegistry registry,

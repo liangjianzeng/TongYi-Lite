@@ -99,3 +99,41 @@ ToolDefinition createMemoryGetTool() {
     },
   );
 }
+
+/// 全局记忆快照（系统提示自动注入用）：最多 [maxEntries] 条，value 截断到
+/// [maxValueChars] 字符。无记忆返回空列表；读文件失败按无记忆处理。
+Future<List<MapEntry<String, String>>> readGlobalMemorySnapshot({
+  int maxEntries = 8,
+  int maxValueChars = 80,
+}) async {
+  final memory = await _readAll(null);
+  if (memory.isEmpty) return const [];
+  final entries = memory.entries.toList()
+    ..sort((a, b) => a.key.compareTo(b.key));
+  return entries
+      .take(maxEntries)
+      .map((e) => MapEntry(
+          e.key,
+          e.value.length > maxValueChars
+              ? '${e.value.substring(0, maxValueChars)}…'
+              : e.value))
+      .toList();
+}
+
+/// 删除一条全局记忆（设置页记忆管理用）。返回是否发生了删除。
+Future<bool> deleteGlobalMemoryEntry(String key) async {
+  final memory = await _readAll(null);
+  if (!memory.containsKey(key)) return false;
+  memory.remove(key);
+  await _writeAll(memory, null);
+  return true;
+}
+
+/// 清空全部全局记忆（设置页记忆管理用）。返回删除的条数。
+Future<int> clearGlobalMemory() async {
+  final memory = await _readAll(null);
+  if (memory.isEmpty) return 0;
+  final n = memory.length;
+  await _writeAll(<String, String>{}, null);
+  return n;
+}

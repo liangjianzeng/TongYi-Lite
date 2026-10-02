@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/agent.dart';
-import 'package:tongyi_lite/agent/web_search/web_search_provider.dart';
 import 'package:tongyi_lite/agent/web_search/web_search_seam.dart';
 
 /// 记录查询并返回固定结果的假 provider（并发多关键词用）。

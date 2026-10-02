@@ -450,6 +450,19 @@ specifier）**，ggml-opencl init abort。NDK 交叉编译能过、桌面 NEO �
 > 多更，旧镜像确实会积累过期性不通；但本例主因仍是无代理（国外引擎）与 302
 > 壳（bing），版本只是加重因素。升级后引擎仍以 keep_only 名单为准。
 
+## 2026-10-01 DGX SearXNG 实例定位（dgxspark 主机）
+
+> **SearXNG 实例所在主机**：`dgxspark` / `Dgx` = **100.81.83.59**（Tailscale 内网地址，
+> 非公网）。这是 TongYi-Lite 智能体联网搜索（`web_search`）背后自建 SearXNG 的宿主机。
+> 手机在设置「API 接入 → 联网搜索」里填的 baseURL 即指向该主机（如
+> `http://100.81.83.59:8080`，需带 `/search` 或 app 自动补）。
+> - 排查 web_search「不行」时，**先确认手机能否访问 100.81.83.59:8080**（Tailscale 是否
+>   在线、端口是否开放），再谈引擎/配置问题。
+> - 实例侧 settings.yml：`keep_only` 白名单 + `cn.bing.com` 覆写（bing 走 302 壳绕国内
+>   访问）；引擎解析器每周更新，旧镜像会积累过期性不通，主因仍是无代理 + 302 壳。
+> - 引擎白名单（`webSearchSearXngEngines`）是设置项：实例上不可达引擎各自等超时，
+>   实测默认全引擎 21s、只指定可达引擎 2.5s → 白名单决定延迟。
+
 ## 2026-09-29 v0.2.8：执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复
 
 > 用户反馈：① 工具调用和思考的位置经常不按执行顺序呈现；② 思考流式输出应自动展开、流式滚动可见、完成才闭合；③ web_search 还是不行。commit `bce9b83`（已推送 main）。
@@ -1047,3 +1060,129 @@ sogou `data-url`；百度/搜狗拦截页都是 HTTP 200 小页（判定串
 `adb install -r -t`。
 **构建坑新增**：Git Bash 的 cd 传不进 .bat 子进程 → release assemble 用
 PowerShell `Set-Location` 执行；release 产物在 `build/flutter-assemble/app.so`。
+
+## 2026-10-01 API 档上下文生命周期三修复 + P1 harness 五件套（对照 DSH 差距分析）
+
+> 定位修正（用户指令）：**本地模型只走简单对话，智能体主力 = API 接入档**。
+> 差距分析全文在 `docs/dsh_gap_analysis_2026-10-01.md`（已对齐项/Tier1-3/P1-P3 分期）。
+
+**Tier 1（bug 级，API 档上下文管理此前基本缺位）**：
+1. **溢出分类修复**：此前 400 一律归 `invalidRequest`（终态失败），且
+   `openai_service._friendlyDioError` 只取 HTTP reason phrase——400 响应体里的
+   "context length exceeded" 详情在源头就被丢弃。修复：`_describeApiError` 异步读
+   badResponse 响应体（ResponseBody 字节流，上限 4KB，提取 error.message）；
+   `mapApiStatus(statusCode, {message})` 命中溢出文案（13 种特征，宁窄勿宽）→
+   `contextWindowExceeded` → 失败瀑布走压缩 → 有界重试。
+2. **API 主动压缩**：新设置 `agentApiContextBudget`（默认 32768 tok，夹 4096~200000，
+   设置页智能体 Tab 滑条）；`_apiContextTokenBudget` = min(设置值, 端点 contextWindow×7/8)。
+3. **工具结果投影剪枝**（DSH tool-result-pruner 语义）：`deriveModelMessages` 对
+   >8192 字符的 tool/result 投影为头 4096 + `[…中间省略 N 字符…]` + 尾 1024；
+   存储原文与 UI 视图不动。
+
+**P1 harness（用户要求"结合人机交互，能优化就优化，必须重构就重构，不自我设限"）**：
+4. **通用重复调用守护**：`ReactLoopAgent` 同一工具本回合第 3/5/8 次 → 结果尾部
+   追加渐进提醒（advisory 不阻断），与签名去重双保险（DSH repeat-tool-reminder）。
+5. **环境段注入（仅 API 档）**：`ReactLoopAgent.environmentNote` 恒追加系统提示
+   **最末**（skills/AGENTS.md 之后）——稳定前缀在前、易变快照在后，API prompt cache
+   友好；local 档不传（系统提示逐字节稳定保 KV）。
+6. **记忆默认开 + 自动注入**：`agentMemoryEnabled` 默认 true（曾显式存 false 的
+   保持 false）；系统提示自动注入【用户记忆】段（前 8 条/条 80 字）；**设置页新增
+   记忆管理卡**（条目列表/逐条删/清空，与 memory.json 同存储）。
+7. **skill 三连**（用户："skill 很扯淡，模型不能自主创建/不能生效"）：
+   - 新工具 **save_skill**（`lib/agent/skills/save_skill_tool.dart`）：对话内模型
+     自主沉淀技能 → writeUserSkill 落盘 + `provider.registerUser` 即时注册
+     （本回合立即可 load_skill）；两档都注册。
+   - **load_skill 去掉 API 门控**：本地档技能目录可见却拿不到正文 = 装饰品；
+     工具 def 的 prefill 成本远小于技能失效（推翻 2026-09-30 定案）。
+   - 设置页技能卡加 **「导入 SKILL.md」**（粘贴社区现成技能一键解析落盘）。
+8. 回归：test/agent+providers+services 全绿 **417 项 + 2 skip**（新增 p1_harness/
+   ctx_lifecycle 等 10 项）；主仓 lib+test analyze 0 error。
+**2026-10-01 23:2x 重打包（工作区未提交，v0.2.8+16 复用版本号）**：
+  app-debug.apk 140246321 B / app-release.apk 59871773 B，字符串级验收过
+  （debug kernel：save_skill 16/用户记忆 4/API 上下文压缩预算 2/environmentNote 8；
+  release libapp.so UTF-16LE：用户记忆/导入 SKILL.md/清空全部记忆/已保存技能/
+  中间省略 均≥1，旧文案"默认关"残留=0）；签名 CN=TongYiLite 核对过。
+- **双机覆盖安装 Success**：小米13（100.70.7.18 直连）+ 8 Elite（100.123.25.54），
+  `install -r -t` 均 Success（versionCode=16 / 0.2.8 复用）。
+
+## 2026-10-01 技能系统交互重构（用户纠偏三连：扩容/精简/整段粘贴）
+
+> 用户批评：① 内置技能不够；② "描述废话太多"（指**设置页 UI 文案**，不是提示词）；
+> ③ 新增技能逐字段手填"不经大脑"——应整段粘贴一站式；④ 内置技能应能点进去看内容。
+
+**落地**：
+1. **内置技能 10 → 16 个**：新增 travel-planner / meeting-notes / resume-polish /
+   social-copy / shopping-compare / tutor（手机助理高频场景，body 全部绑定真实工具）。
+2. **全部文案精简**：description ≤20 字、whenToUse ≤24 字（测试钉死断言），body 砍到
+   3 条要点——技能目录每回合注入，技能文本本身就是 prefill 成本。
+3. **新增技能 = 整段粘贴一站式**（`_showUserSkillDialog` new 模式重写）：
+   一个文本框贴完整 SKILL.md（`name:` 行可选 + description/whenToUse + `---` + 正文），
+   技能名自动取 `name:` 行、缺省从描述派生（去尾标点取前 12 字 + sanitize）——
+   零额外输入。编辑已有技能才走字段表单。原「导入 SKILL.md」按钮删除（已合并）。
+4. **内置技能可点开看全文**（`_showBuiltinSkillView`：触发条件 + 正文可复制），
+   支持「另存为我的技能」（预填整段粘贴框，改名/改内容保存后 rank 200 同名覆盖内置）。
+5. 设置页废话文案同步精简（记忆卡提示/压缩预算滑条 hint/技能卡说明各砍到一行）。
+
+回归：全绿 **417 项 + 2 skip**（技能清单测试更新为 16 + 长度约束断言）；analyze 0 error。
+**2026-10-01 23:4x 重打包（v0.2.8+16 复用）**：app-debug.apk 140246421 B /
+app-release.apk 59872005 B；字符串级验收过（16 技能名/整段粘贴/另存为我的技能/
+内置 · 均命中，旧逐字段表单文案残留=0；注意 travel-planner 等纯 ASCII 技能名在
+libapp.so 按单字节查）。
+- **双机覆盖安装 Success**（小米13 + 8 Elite，install -r -t，23:4x 包）。
+
+## 2026-10-01 Termux SSH 连接可用性重构（用户定案："连接难度跟屎一样，从没成功过"）
+
+> **根因（真机已实锤 + 本次补齐机制层）**：手机本机连接源恒为 127.0.0.1，
+> Termux 的 OpenSSH 10.x `PerSourcePenalties` 对"连接未认证即断开"逐次记惩罚，
+> 被罚期间 **接受 TCP 但不发 banner → 客户端表现 Connection timed out**；
+> 而旧向导的 `_probeTcp`（连上就 destroy）+ 用户反复点重试 + 自动重连**全都在续罚**
+> ——越试越死，重启 sshd 才清零。用户从未成功不是玄学，是我们自己探死的。
+> 加上 Connection refused（sshd 未启动）和 timeout 只甩原始异常，零诊断零动作。
+
+**修复（四件套）**：
+1. **探测三分类 + 只探一次**：`_probeSshd` 返回 listening / refused（=sshd 未监听，
+   不记惩罚）/ timeout（被拉黑或卡死）；向导打开时探一次，不再循环裸探测。
+2. **万能命令 v2**：`pkg install -y openssh procps; pkill sshd; sleep 1; sshd; …`
+   ——三种诊断状态一条命令全修复，且**每次执行顺带重启 sshd 清拉黑**（procps 提供 pkill）。
+3. **一键拉起 Termux**：MainActivity 新增 `com.dgxspark.tongyilite/app` 通道
+   （isAppInstalled / launchApp，launch 用 getLaunchIntentForPackage），
+   Dart 侧 `lib/services/app_bridge.dart` AppBridge。sshd 未运行时用户点按钮直达
+   Termux，不用回桌面找图标。
+4. **失败提示人话分类**：`_classifySshError` 按 refused/timeout/auth 把原始异常翻译成
+   "sshd 没在运行 → 重新执行安装命令" / "被临时拉黑 → 重启 sshd" / "认证不通过 →
+   核对 USER="，向导与「连接」按钮共用。向导内诊断行直接显示三分类结论。
+
+**验收**：全绿 417+2skip；analyze 0 error（顺手删了 _kvLine 死代码）；
+2026-10-01 23:5x 重打包：app-debug.apk 140248864 B / app-release.apk 59872921 B，
+字符串级验收过（诊断/拉起 Termux/临时拉黑/pkill sshd 均命中，dex 含 app 通道 +
+launchApp/isAppInstalled）。双机覆盖安装 Success。
+**遗留**：Termux RUN_COMMAND intent 自动执行命令（需 allow-external-apps，用户侧
+一次性开启后可做到零粘贴）——待真机评估。
+- **双机 Success**（小米13 一次过；8 Elite 首次 INSTALL_PARSE_FAILED_NOT_APK=
+  DERP 中继传输截断，原样重试一次即 Success——140MB 中继安装失败先重试再排查）。
+
+## 2026-10-02 内置技能正文重写（对齐 anthropics/skills 官方规范）+ 技能卡折叠
+
+> 用户批评内置技能"就几句话能解决什么问题"+ 技能列表平铺会把设置页拉成 2 米长。
+> 调研定案（anthropics/skills 45k stars + awesome-claude-skills）：官方优质技能正文
+> **91~485 行**（工作流步骤+代码模板+验收清单），且 body 是 load_skill **按需加载**的，
+> 写厚不增加每回合 prefill——常驻成本只有目录的 name/description/whenToUse 一行短句。
+> 此前"body 砍到 3 条要点"是砍错了对象（该精简的是目录字段，不是正文）。
+
+**改动**：
+- `skill.dart` 17 个技能（16 原有 + 新增 **skill-creator** 元技能绑 save_skill）正文
+  全部重写为真执行手册：`## 目标 / ## 工作流程（编号步骤）/ ## 输出格式（模板）/
+  ## 验收清单` 四段式，20~28 行/个，只绑定真实工具名（web_search/read_file/
+  write_file/edit_file/python_exec/shell_exec/todo_write/export_file/get_weather 等）。
+- `skills_builtin_test.dart`：清单 17 个 + 新增**正文质量下限**断言（非空行 ≥20、
+  含 `## ` 分节、含"验收"）——防止未来再回退成三句话。
+- `settings_screen` 技能卡：17 个 ListTile 平铺改为**默认收起一行汇总**
+  （"技能库（内置 17 · 我的 N）"，点开限高 320px 滚动列表）——技能再多设置页
+  也不再拉长；内置取一次存 `_builtinSkills` 字段。
+
+**回归**：test/agent+services+providers 全绿 **418 项 + 2 skip**；analyze 0 error。
+**2026-10-02 00:0x 重打包（v0.2.8+16 复用）**：app-debug.apk 140268589 B /
+app-release.apk 59886173 B；字符串级验收过（debug kernel UTF-8：验收清单 39/
+避雷 2/skill-creator 2；release libapp.so UTF-16LE：验收清单 19/技能库 1 +
+ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18 直连 +
+8 Elite 100.123.25.54 中继，install -r -t 均 Success）。
