@@ -243,7 +243,10 @@ ToolResult _formatMultiResult(
 void _appendSource(StringBuffer buffer, WebSearchSource s) {
   final title = s.title?.trim();
   final snippet = s.snippet?.trim();
-  if (title != null && title.isNotEmpty) buffer.writeln('标题：$title');
+  final engineTag = _engineLabel(s.engine);
+  if (title != null && title.isNotEmpty) {
+    buffer.writeln('标题：$title${engineTag.isEmpty ? '' : '〔$engineTag〕'}');
+  }
   if (snippet != null && snippet.isNotEmpty) {
     buffer.writeln('摘要：${_clip(snippet, kSnippetMaxChars)}');
   }
@@ -252,6 +255,26 @@ void _appendSource(StringBuffer buffer, WebSearchSource s) {
   }
   if (s.url.isNotEmpty) buffer.writeln('来源：${s.url}');
   buffer.writeln();
+}
+
+/// 引擎 id → 短署名（结果标注来源引擎，便于定位"谁给的烂结果"）。
+String _engineLabel(String? engine) {
+  switch (engine) {
+    case 'bing_cn':
+      return '必应';
+    case 'baidu':
+      return '百度';
+    case 'sogou':
+      return '搜狗';
+    case 'so360':
+      return '360';
+    case 'quark':
+      return '夸克';
+    case 'chinaso':
+      return '国搜';
+    default:
+      return engine ?? '';
+  }
 }
 
 String _clip(String s, int maxChars) =>

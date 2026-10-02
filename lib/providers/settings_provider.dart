@@ -451,6 +451,42 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     _reapplyWebSearchProvider();
   }
 
+  /// 端侧直连引擎总开关（打开时优先级最高，忽略 SearXNG 地址）。
+  Future<void> setWebSearchDirectEnabled(bool value) async {
+    state = state.copyWith(webSearchDirectEnabled: value);
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 直连引擎开关（SearXNG 地址为空时生效）。
+  Future<void> setWebSearchDirectEngineEnabled(String engineId, bool enabled) async {
+    final current = List<String>.of(state.webSearchDirectEngines);
+    if (enabled) {
+      if (!current.contains(engineId)) current.add(engineId);
+    } else {
+      current.remove(engineId);
+    }
+    state = state.copyWith(webSearchDirectEngines: current);
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 低风险引擎每 10 分钟窗口请求预算（1~10）。
+  Future<void> setWebSearchDirectLowRiskPerWindow(int value) async {
+    state = state.copyWith(
+        webSearchDirectLowRiskPerWindow: value.clamp(1, 10));
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
+  /// 高风险引擎每 10 分钟窗口请求预算（1~6）。
+  Future<void> setWebSearchDirectHighRiskPerWindow(int value) async {
+    state = state.copyWith(
+        webSearchDirectHighRiskPerWindow: value.clamp(1, 6));
+    await _persist();
+    _reapplyWebSearchProvider();
+  }
+
   /// 搜索语言（如 `zh-CN`）；??= 不指定??
   Future<void> setWebSearchSearXngLanguage(String value) async {
     state = state.copyWith(

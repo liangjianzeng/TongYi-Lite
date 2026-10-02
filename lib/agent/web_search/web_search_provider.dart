@@ -18,6 +18,7 @@ import 'dart:io' show SocketException;
 import 'package:dio/dio.dart';
 
 import '../../services/settings_service.dart';
+import 'direct_search_provider.dart';
 import 'web_search_seam.dart';
 
 /// 搜索 provider 统一接口（对齐 DSH ctx.web 的可插拔搜索能力）。
@@ -500,20 +501,40 @@ String normalizeSourceUrl(String raw) {
   return normalized.toString();
 }
 
-/// 用持久化设置（重新）构建并注册当前 SearXNG provider 到 [WebSearchSeam]。
+/// 用持久化设置（重新）构建并注册当前搜索 provider 到 [WebSearchSeam]。
 ///
 /// 在设置变更时调用即可热切换搜索源，无需重启应用。
+///
+/// **搜索源选择（优先级）**：
+/// - 端侧直连总开关开（`webSearchDirectEnabled`，默认开）→
+///   [DirectSearchProvider.instance]，**优先级最高**：即使配置了 SearXNG
+///   地址也用端侧直连；
+/// - 总开关关 → SearXNG 模式：地址已配置用 SearXNG，未配置则注册
+///   "未配置"诊断的 SearXNG provider（web_search 给出可行动提示）。
 ///
 /// **配置未变时直接复用现有实例**：每轮对话都 new 一个 provider 会 dispose 掉旧
 /// Dio（连接池作废 → 每次搜索重新 DNS+TCP+TLS，移动网络额外几百 ms 与射频唤醒），
 /// 还会打断上一轮在飞的请求。这里先比签名，不匹配才构造新实例。
 void applySearXNGProviderFromSettings(InferenceSettings settings) {
   final seam = WebSearchSeam.instance;
+  if (settings.webSearchDirectEnabled) {
+    // 直连 provider 是单例（熔断状态/Cookie 会话/预算窗口跨搜索存活），
+    // registerProvider 对 identical 实例直接跳过，重复注册无副作用。
+    // 引擎开关/风险预算经 applySettings 热更新（配置未变则内部直接返回）。
+    DirectSearchProvider.instance.applySettings(settings);
+    if (seam.provider is! DirectSearchProvider) {
+      seam.registerProvider(DirectSearchProvider.instance);
+    }
+    return;
+  }
+  // 端侧直连关闭：SearXNG 模式（地址未配置时保留诊断型 provider，
+  // web_search 返回"请填写地址"而不是莫名的"provider 未配置"）。
   final current = seam.provider;
+  final candidate = SearXNGSearchProvider.fromSettings(settings);
   if (current is SearXNGSearchProvider &&
-      current.configSignature ==
-          SearXNGSearchProvider.signatureFromSettings(settings)) {
+      current.configSignature == candidate.configSignature) {
+    candidate.dispose();
     return; // 配置没变：连 provider 带连接池一起留着。
   }
-  seam.registerProvider(SearXNGSearchProvider.fromSettings(settings));
+  seam.registerProvider(candidate);
 }
