@@ -159,7 +159,8 @@ abstract class BaseEngineAdapter implements LlmAdapter {
 
   /// API 错误归一化（dio 异常）。4xx（除 429）为请求非法——确定性错误，
   /// 归 [LlmFailureCode.invalidRequest] 永久失败档（重试无意义）；
-  /// 429 → 限流，5xx → 服务端错误，均可重试。
+  /// 但 4xx 文案命中上下文溢出 → [LlmFailureCode.contextWindowExceeded]
+  /// （走压缩瀑布，见 [mapApiStatus]）；429 → 限流，5xx → 服务端错误，均可重试。
   LlmFailureCode mapApiError(DioException e) {
     switch (e.type) {
       case DioExceptionType.connectionTimeout:
@@ -167,19 +168,58 @@ abstract class BaseEngineAdapter implements LlmAdapter {
       case DioExceptionType.receiveTimeout:
         return LlmFailureCode.timeout;
       case DioExceptionType.badResponse:
-        return mapApiStatus(e.response?.statusCode);
+        return mapApiStatus(
+          e.response?.statusCode,
+          message: friendlyApiError(e),
+        );
       default:
         return LlmFailureCode.transport;
     }
   }
 
+  /// 上下文溢出文案特征（小写匹配）。各主流 OpenAI 兼容端点措辞不一，
+  /// 宁可窄勿宽——误判会把真正的参数错误送去压缩重试（必失败）。
+  static const List<String> _contextOverflowPatterns = [
+    'context length',
+    'context_length',
+    'context window',
+    'maximum context',
+    'max context length',
+    'prompt is too long',
+    'too many input tokens',
+    'input tokens exceed',
+    'reduce the length',
+    '上下文长度',
+    '上下文窗口',
+    '超出上下文',
+    '超过上下文',
+  ];
+
+  /// message 是否为上下文溢出类错误文案。
+  static bool isContextOverflowMessage(String? message) {
+    if (message == null || message.isEmpty) return false;
+    final lower = message.toLowerCase();
+    for (final p in _contextOverflowPatterns) {
+      if (lower.contains(p)) return true;
+    }
+    return false;
+  }
+
   /// 按 HTTP 状态码分档失败类别（[OpenAiHttpException] 与 dio 共用）。
-  LlmFailureCode mapApiStatus(int? statusCode) {
+  ///
+  /// [message]：错误详情文案（含响应体时）。4xx 且文案命中上下文溢出
+  /// （OpenAI/DeepSeek/Qwen 等的 "maximum context length is N tokens"）→
+  /// 归 [LlmFailureCode.contextWindowExceeded]——失败瀑布第一步触发压缩、
+  /// 压缩成功后有界重试；否则 4xx 归 invalidRequest（终态失败）。
+  LlmFailureCode mapApiStatus(int? statusCode, {String? message}) {
     if (statusCode == 429) return LlmFailureCode.rateLimit;
     if (statusCode != null && statusCode >= 500) {
       return LlmFailureCode.server;
     }
     if (statusCode != null && statusCode >= 400) {
+      if (isContextOverflowMessage(message)) {
+        return LlmFailureCode.contextWindowExceeded;
+      }
       return LlmFailureCode.invalidRequest;
     }
     return LlmFailureCode.transport;

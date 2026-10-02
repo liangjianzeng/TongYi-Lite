@@ -153,6 +153,45 @@ class MainActivity : FlutterActivity() {
                 else             -> result.notImplemented()
             }
         }
+
+        // App 桥：检测/拉起外部应用（Termux SSH 向导用——sshd 未启动时
+        // 一键拉起 Termux，免去用户回桌面找图标）。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/app"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isAppInstalled" -> {
+                    val pkg = call.argument<String>("package") ?: ""
+                    result.success(isAppInstalled(pkg))
+                }
+                "launchApp" -> {
+                    val pkg = call.argument<String>("package") ?: ""
+                    result.success(launchApp(pkg))
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun isAppInstalled(pkg: String): Boolean = try {
+        packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun launchApp(pkg: String): Boolean = try {
+        val intent = packageManager.getLaunchIntentForPackage(pkg)
+        if (intent == null) {
+            false
+        } else {
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            true
+        }
+    } catch (_: Exception) {
+        false
     }
 
     // ------------------------------------------------------------------
