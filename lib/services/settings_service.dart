@@ -14,6 +14,17 @@ import '../models/api_model.dart';
 /// ??Vulkan ??Adreno 825 上实测等效、均无数值崩坏），卸载层数默??100
 /// （全量卸载；llama.cpp 会自??clamp 到模型实际层数）??
 /// 上下文大小默??4096，最??65536??
+/// 端侧直连搜索引擎 id（与 lib/websearch 引擎实现一一对应）。
+const List<String> kDirectEngineIds = [
+  'bing_cn', 'so360', 'chinaso', 'sogou', 'baidu', 'quark',
+];
+
+/// 高风险引擎（风控激进，默认小预算细水长流）。
+const List<String> kHighRiskEngineIds = ['sogou', 'baidu', 'quark'];
+
+/// 直连引擎开关默认值 = 全启用。
+const List<String> kDefaultDirectEngines = kDirectEngineIds;
+
 class InferenceSettings {
   final bool enableGpu;
   final int gpuLayers;
@@ -172,10 +183,6 @@ class InferenceSettings {
   /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）??
   final bool webSearchEnabled;
 
-  /// 联网搜索模式：'direct' = 手机直连搜索引擎（默认，真实 UA 绕反爬）；
-  /// 'searxng' = 走自建 SearXNG 实例（填 [webSearchSearXngBaseUrl]）。
-  final String webSearchMode;
-
   /// 联网搜索 SearXNG 实例地址（用户在「设????API 接入 ??联网搜索」填写）??
   ///
   /// 默认留空 = 未配置。不要预置任何个人实例地址；空地址??provider 会返??
@@ -207,6 +214,25 @@ class InferenceSettings {
   /// 里去掉可把搜索从二十秒级降到秒级。若白名单里有该实例不认识的引擎，SearXNG ??
   /// ??400，provider 会自动去掉该参数重试一次（??SearXNGSearchProvider.search）??
   final String? webSearchSearXngEngines;
+
+  /// 端侧直连搜索引擎开关（SearXNG 地址为空时生效）。
+  ///
+  /// 保存启用的引擎 id（bing_cn/so360/chinaso/sogou/baidu/quark）。
+  /// 空列表 = 直连搜索整体不可用（available() 会给出诊断）。
+  final List<String> webSearchDirectEngines;
+
+  /// 端侧直连引擎总开关（默认开）。打开时**优先级最高**：即使配置了
+  /// SearXNG 地址也优先用端侧直连；关闭后回到 SearXNG 模式
+  /// （未配置地址则 web_search 报"未配置"诊断）。
+  final bool webSearchDirectEnabled;
+
+  /// 低风险引擎（bing_cn/so360/chinaso）每 10 分钟窗口内的请求预算。
+  /// 「细水长流」管控：预算耗尽该引擎跳过本轮（status=budget），窗口到期自动恢复。
+  final int webSearchDirectLowRiskPerWindow;
+
+  /// 高风险引擎（sogou/baidu/quark，风控激进）每 10 分钟窗口内的请求预算。
+  /// 默认 2：偶尔贡献高质量结果，又不至于因连续请求被判定机器行为。
+  final int webSearchDirectHighRiskPerWindow;
 
   /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限??
   /// 用户可在设置中关闭）??
@@ -290,9 +316,6 @@ class InferenceSettings {
   // 设置 ??联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己??
   static const String kDefaultSearXngBaseUrl = '';
 
-  // 默认模式 = 手机直连搜索引擎（真实浏览器 UA 绕国内反爬，无需自建实例）。
-  static const String kDefaultWebSearchMode = 'direct';
-
   // 引擎白名单默认留??= 由实例决定。实例上有不可达引擎（如墙内实例挂着
   // google cse / duckduckgo）时，用户自行填写可达引擎可显著提??
   // （实测某实例：全引擎 21s ??指定 2 个可达引??2.5s）??
@@ -347,7 +370,6 @@ class InferenceSettings {
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
     this.webSearchEnabled = false,
-    this.webSearchMode = kDefaultWebSearchMode,
     this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
     this.webSearchSearXngApiKey,
     this.webSearchSearXngMaxResults = 8,
@@ -355,6 +377,10 @@ class InferenceSettings {
     this.webSearchSearXngLanguage,
     this.webSearchSearXngCategories,
     this.webSearchSearXngEngines = kDefaultSearXngEngines,
+    this.webSearchDirectEngines = kDefaultDirectEngines,
+    this.webSearchDirectEnabled = true,
+    this.webSearchDirectLowRiskPerWindow = 6,
+    this.webSearchDirectHighRiskPerWindow = 2,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -448,72 +474,75 @@ class InferenceSettings {
           maxParallel: agentMaxParallel,
         );
 
-  InferenceSettings copyWith({
-    bool? enableGpu,
-    int? gpuLayers,
-    int? contextSize,
-    bool? enableThinking,
-    String? gpuBackend,
-    Map<String, bool>? mtpEnabledByModel,
-    bool? enableMtpFeature,
-    Map<String, bool>? dsparkEnabledByModel,
-    bool? enableDsparkFeature,
-    String? defaultModelId,
-    // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
-    // 故增加显式清空标记，供取消默认模型时使用??
-    bool clearDefaultModel = false,
-    List<ApiModelConfig>? apiModels,
-    String? activeApiModelId,
-    // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
-    bool clearActiveApiModel = false,
-    // ---- 智能体（Agent??---
-    bool? agentEnabled,
-    bool? useNewAgentMode,
-    String? agentModelSource,
-    String? agentModelId,
-    // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
-    bool clearAgentModel = false,
-    int? agentNctx,
-    int? agentMaxRounds,
-    int? agentMaxSearchesPerTurn,
-    int? agentMaxConcurrentTurns,
-    int? agentApiContextBudget,
-    int? agentTokensPerRound,
-    int? agentToolTimeoutMs,
-    bool? agentAllowParallelTools,
-    int? agentMaxParallel,
-    double? agentTemperature,
-    int? agentApiMaxRounds,
-    int? agentApiTokensPerRound,
-    double? agentApiTemperature,
-    int? agentApiToolTimeoutMs,
-    bool? agentApiAllowParallelTools,
-    int? agentApiMaxParallel,
-    int? agentThinkingMaxChars,
-    double? chatTextScale,
-    bool? agentSubagentEnabled,
-    bool? agentCompactEnabled,
-    bool? agentSpillEnabled,
-    bool? webSearchEnabled,
-    String? webSearchMode,
-    String? webSearchSearXngBaseUrl,
-    String? webSearchSearXngApiKey,
-    int? webSearchSearXngMaxResults,
-    int? webSearchSearXngTimeoutMs,
-    String? webSearchSearXngLanguage,
-    String? webSearchSearXngCategories,
-    String? webSearchSearXngEngines,
-    bool? agentShellEnabled,
-    bool? agentPythonEnabled,
-    bool? agentFullFileAccess,
-    bool? agentMemoryEnabled,
-    // ---- 推理引擎 ----
-    bool? autoLoadMmproj,
-    bool? showResourceMonitor,
-    int? resourceSampleIntervalSec,
-    bool? oomGuardEnabled,
-    int? oomPreHeadroomMb,
-    int? oomPostHeadroomMb,
+  InferenceSettings copyWith(
+      {bool? enableGpu,
+      int? gpuLayers,
+      int? contextSize,
+      bool? enableThinking,
+      String? gpuBackend,
+      Map<String, bool>? mtpEnabledByModel,
+      bool? enableMtpFeature,
+      Map<String, bool>? dsparkEnabledByModel,
+      bool? enableDsparkFeature,
+      String? defaultModelId,
+      // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
+      // 故增加显式清空标记，供取消默认模型时使用??
+      bool clearDefaultModel = false,
+      List<ApiModelConfig>? apiModels,
+      String? activeApiModelId,
+      // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
+      bool clearActiveApiModel = false,
+      // ---- 智能体（Agent??---
+      bool? agentEnabled,
+      bool? useNewAgentMode,
+      String? agentModelSource,
+      String? agentModelId,
+      // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
+      bool clearAgentModel = false,
+      int? agentNctx,
+      int? agentMaxRounds,
+      int? agentMaxSearchesPerTurn,
+      int? agentMaxConcurrentTurns,
+      int? agentApiContextBudget,
+      int? agentTokensPerRound,
+      int? agentToolTimeoutMs,
+      bool? agentAllowParallelTools,
+      int? agentMaxParallel,
+      double? agentTemperature,
+      int? agentApiMaxRounds,
+      int? agentApiTokensPerRound,
+      double? agentApiTemperature,
+      int? agentApiToolTimeoutMs,
+      bool? agentApiAllowParallelTools,
+      int? agentApiMaxParallel,
+      int? agentThinkingMaxChars,
+      double? chatTextScale,
+      bool? agentSubagentEnabled,
+      bool? agentCompactEnabled,
+      bool? agentSpillEnabled,
+      bool? webSearchEnabled,
+      String? webSearchSearXngBaseUrl,
+      String? webSearchSearXngApiKey,
+      int? webSearchSearXngMaxResults,
+      int? webSearchSearXngTimeoutMs,
+      String? webSearchSearXngLanguage,
+      String? webSearchSearXngCategories,
+      String? webSearchSearXngEngines,
+      List<String>? webSearchDirectEngines,
+      bool? webSearchDirectEnabled,
+      int? webSearchDirectLowRiskPerWindow,
+      int? webSearchDirectHighRiskPerWindow,
+      bool? agentShellEnabled,
+      bool? agentPythonEnabled,
+      bool? agentFullFileAccess,
+      bool? agentMemoryEnabled,
+      // ---- 推理引擎 ----
+      bool? autoLoadMmproj,
+      bool? showResourceMonitor,
+      int? resourceSampleIntervalSec,
+      bool? oomGuardEnabled,
+      int? oomPreHeadroomMb,
+      int? oomPostHeadroomMb,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -576,7 +605,6 @@ class InferenceSettings {
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
-      webSearchMode: webSearchMode ?? this.webSearchMode,
       webSearchSearXngBaseUrl:
           webSearchSearXngBaseUrl ?? this.webSearchSearXngBaseUrl,
       webSearchSearXngApiKey:
@@ -591,6 +619,14 @@ class InferenceSettings {
           webSearchSearXngCategories ?? this.webSearchSearXngCategories,
       webSearchSearXngEngines:
           webSearchSearXngEngines ?? this.webSearchSearXngEngines,
+      webSearchDirectEngines:
+          webSearchDirectEngines ?? this.webSearchDirectEngines,
+      webSearchDirectEnabled:
+          webSearchDirectEnabled ?? this.webSearchDirectEnabled,
+      webSearchDirectLowRiskPerWindow:
+          webSearchDirectLowRiskPerWindow ?? this.webSearchDirectLowRiskPerWindow,
+      webSearchDirectHighRiskPerWindow: webSearchDirectHighRiskPerWindow ??
+          this.webSearchDirectHighRiskPerWindow,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess: agentFullFileAccess ?? this.agentFullFileAccess,
@@ -654,7 +690,6 @@ class InferenceSettings {
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
         'webSearchEnabled': webSearchEnabled,
-        'webSearchMode': webSearchMode,
         'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
         'webSearchSearXngApiKey': webSearchSearXngApiKey,
         'webSearchSearXngMaxResults': webSearchSearXngMaxResults,
@@ -662,6 +697,10 @@ class InferenceSettings {
         'webSearchSearXngLanguage': webSearchSearXngLanguage,
         'webSearchSearXngCategories': webSearchSearXngCategories,
         'webSearchSearXngEngines': webSearchSearXngEngines,
+        'webSearchDirectEngines': webSearchDirectEngines,
+        'webSearchDirectEnabled': webSearchDirectEnabled,
+        'webSearchDirectLowRiskPerWindow': webSearchDirectLowRiskPerWindow,
+        'webSearchDirectHighRiskPerWindow': webSearchDirectHighRiskPerWindow,
         'agentShellEnabled': agentShellEnabled,
         // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson??
         // 保存后读回会静默丢配置（默认值兜底）??
@@ -753,8 +792,6 @@ class InferenceSettings {
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
-      // 联网搜索模式：旧配置缺字段时回落默认（direct 直连）??
-      webSearchMode: json['webSearchMode'] as String? ?? kDefaultWebSearchMode,
       // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）??
       // 空地址 = 未配置，此时联网搜索工具会给??请先在设置里填地址"的诊断??
       webSearchSearXngBaseUrl:
@@ -769,6 +806,13 @@ class InferenceSettings {
       webSearchSearXngCategories: json['webSearchSearXngCategories'] as String?,
       webSearchSearXngEngines:
           json['webSearchSearXngEngines'] as String? ?? kDefaultSearXngEngines,
+      webSearchDirectEngines: _parseDirectEngines(json['webSearchDirectEngines']),
+      webSearchDirectEnabled:
+          json['webSearchDirectEnabled'] as bool? ?? true,
+      webSearchDirectLowRiskPerWindow:
+          _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 10, 6),
+      webSearchDirectHighRiskPerWindow:
+          _clampInt(json['webSearchDirectHighRiskPerWindow'], 1, 6, 2),
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
@@ -990,4 +1034,18 @@ class SettingsService {
     await tmp.writeAsString(jsonEncode(settings.toJson()));
     await tmp.rename(path);
   }
+}
+
+/// 解析直连引擎开关列表：丢弃未知 id；缺失 = 默认全启用；空列表 = 用户全关。
+List<String> _parseDirectEngines(dynamic raw) {
+  if (raw == null) return List<String>.of(kDefaultDirectEngines);
+  if (raw is! List) return List<String>.of(kDefaultDirectEngines);
+  return raw.whereType<String>().where(kDirectEngineIds.contains).toList();
+}
+
+/// JSON 数值夹紧（缺省/越界回默认）。
+int _clampInt(dynamic raw, int min, int max, int fallback) {
+  final v = raw is int ? raw : int.tryParse('$raw');
+  if (v == null) return fallback;
+  return v < min ? min : (v > max ? max : v);
 }

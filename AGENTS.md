@@ -1021,6 +1021,46 @@ Termux 冷启动要等 5-6s 再注入；`cat ~/.ssh/...` 在 adb shell 身份下
   双机 versionCode=16 / 0.2.8）。8 Elite 无线 adb 址录：Tailscale peer
   `xiaomi-25053rt47c-1` = 100.123.25.54。
 
+## 2026-10-02 端侧直连国内搜索引擎模块（lib/websearch，6 引擎 + 熔断 + 安全管控）
+
+> 用户需求：摆脱自建 SearXNG 强依赖，端侧直连 ≥3 家国内搜索引擎（可复用独立
+> 模块）；后续追加：引擎开关设置 + 每 10 分钟窗口搜索上限 + 细水长流防封。
+> **过程文档（实测证据/调研/坑速查）= `docs/websearch_direct_2026-10-02.md`，
+> 动搜索模块先读它。**
+
+**模块**（纯 Dart 仅依赖 dio，无 Flutter/agent 依赖）：`lib/websearch/` —
+契约 `SearchEngine`/`SearchHit`/`FetchPage` 注入；引擎 bing_cn（RSS 主+HTML 兜底）、
+baidu（`tn=json` 主+HTML 兜底，302 wappass 判风控）、sogou、so360、quark、
+chinaso（官方 JSON，**必须带随机 uid Cookie**）；`engine_http`（Cookie 会话+
+UA 池）；`multi_engine_search`（加权轮转合并/去重/熔断/窗口预算/诊断）；
+`link_resolver`（baidu·chinaso=302，sogou·360=页内 meta/JS）。
+上层：`lib/agent/web_search/direct_search_provider.dart` 单例 +
+`applySearXNGProviderFromSettings`：SearXNG 地址已配置=SearXNG，**未配置=直连引擎**（零配置可用）。
+
+**安全管控（细水长流）**：每引擎每 10 分钟窗口请求预算（低风险档默认 6、
+高风险档 sogou/baidu/quark 默认 2，设置页可调 1~10/1~6）+ 引擎独立开关
+（`webSearchDirectEngines`）；blocked → 指数熔断 2min×2^n 封顶 15min + 清
+Cookie 会话 + 换池内 UA（**UA 会话级稳定，只在换身份时换**）；budget/cooling
+跳线由其余引擎覆盖。设置 UI 在「API 接入 → 联网搜索」卡下半部。
+
+**实测结论**：必应 RSS 10 连发全成；360/中国搜索稳；搜狗连发 4-5 次封
+（惩罚绑 Cookie，换 IP+新会话首发即过）；百度连发即封且对蜂窝 CGNAT IP 段
+重点照顾（302 wappass）；夸克约 9 次触发 x5sec（罚 15min）。新 IP 实测
+单次搜索 5 引擎同出（bing 8/sogou 8/quark 7/360 5/chinaso 4）。
+解析坑速查：各引擎内嵌真实 URL 字段 = baidu `mu=` / so360 `data-mdurl` /
+sogou `data-url`；百度/搜狗拦截页都是 HTTP 200 小页（判定串
+`百度安全验证`/`antispider`），百度 tn=json 风控是 302→wappass（Dio 必须
+`followRedirects:false`）；属性值先 unescape 再解析。
+
+**回归**：test/websearch **54 项**（fixture 解析 25 + json 8 + quark 6 + 聚合器
+12 + provider 5 + live 2 门控）；全量 test/agent+providers+services+websearch
+**458 项 + 4 skip 全绿**，analyze 0 新增。
+**APK**（v0.2.8+16 复用）：app-debug.apk 106628214 B / app-release.apk
+59897266 B（10:48/10:55），字符串级验收过；设备未连未装，重连后
+`adb install -r -t`。
+**构建坑新增**：Git Bash 的 cd 传不进 .bat 子进程 → release assemble 用
+PowerShell `Set-Location` 执行；release 产物在 `build/flutter-assemble/app.so`。
+
 ## 2026-10-01 API 档上下文生命周期三修复 + P1 harness 五件套（对照 DSH 差距分析）
 
 > 定位修正（用户指令）：**本地模型只走简单对话，智能体主力 = API 接入档**。
