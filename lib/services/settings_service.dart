@@ -14,6 +14,17 @@ import '../models/api_model.dart';
 /// ??Vulkan ??Adreno 825 上实测等效、均无数值崩坏），卸载层数默??100
 /// （全量卸载；llama.cpp 会自??clamp 到模型实际层数）??
 /// 上下文大小默??4096，最??65536??
+/// 端侧直连搜索引擎 id（与 lib/websearch 引擎实现一一对应）。
+const List<String> kDirectEngineIds = [
+  'bing_cn', 'so360', 'chinaso', 'sogou', 'baidu', 'quark',
+];
+
+/// 高风险引擎（风控激进，默认小预算细水长流）。
+const List<String> kHighRiskEngineIds = ['sogou', 'baidu', 'quark'];
+
+/// 直连引擎开关默认值 = 全启用。
+const List<String> kDefaultDirectEngines = kDirectEngineIds;
+
 class InferenceSettings {
   final bool enableGpu;
   final int gpuLayers;
@@ -199,6 +210,25 @@ class InferenceSettings {
   /// ??400，provider 会自动去掉该参数重试一次（??SearXNGSearchProvider.search）??
   final String? webSearchSearXngEngines;
 
+  /// 端侧直连搜索引擎开关（SearXNG 地址为空时生效）。
+  ///
+  /// 保存启用的引擎 id（bing_cn/so360/chinaso/sogou/baidu/quark）。
+  /// 空列表 = 直连搜索整体不可用（available() 会给出诊断）。
+  final List<String> webSearchDirectEngines;
+
+  /// 端侧直连引擎总开关（默认开）。打开时**优先级最高**：即使配置了
+  /// SearXNG 地址也优先用端侧直连；关闭后回到 SearXNG 模式
+  /// （未配置地址则 web_search 报"未配置"诊断）。
+  final bool webSearchDirectEnabled;
+
+  /// 低风险引擎（bing_cn/so360/chinaso）每 10 分钟窗口内的请求预算。
+  /// 「细水长流」管控：预算耗尽该引擎跳过本轮（status=budget），窗口到期自动恢复。
+  final int webSearchDirectLowRiskPerWindow;
+
+  /// 高风险引擎（sogou/baidu/quark，风控激进）每 10 分钟窗口内的请求预算。
+  /// 默认 2：偶尔贡献高质量结果，又不至于因连续请求被判定机器行为。
+  final int webSearchDirectHighRiskPerWindow;
+
   /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限??
   /// 用户可在设置中关闭）??
   final bool agentShellEnabled;
@@ -340,6 +370,10 @@ class InferenceSettings {
     this.webSearchSearXngLanguage,
     this.webSearchSearXngCategories,
     this.webSearchSearXngEngines = kDefaultSearXngEngines,
+    this.webSearchDirectEngines = kDefaultDirectEngines,
+    this.webSearchDirectEnabled = true,
+    this.webSearchDirectLowRiskPerWindow = 6,
+    this.webSearchDirectHighRiskPerWindow = 2,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -486,6 +520,10 @@ class InferenceSettings {
       String? webSearchSearXngLanguage,
       String? webSearchSearXngCategories,
       String? webSearchSearXngEngines,
+      List<String>? webSearchDirectEngines,
+      bool? webSearchDirectEnabled,
+      int? webSearchDirectLowRiskPerWindow,
+      int? webSearchDirectHighRiskPerWindow,
       bool? agentShellEnabled,
       bool? agentPythonEnabled,
       bool? agentFullFileAccess,
@@ -576,6 +614,14 @@ class InferenceSettings {
           webSearchSearXngCategories ?? this.webSearchSearXngCategories,
       webSearchSearXngEngines:
           webSearchSearXngEngines ?? this.webSearchSearXngEngines,
+      webSearchDirectEngines:
+          webSearchDirectEngines ?? this.webSearchDirectEngines,
+      webSearchDirectEnabled:
+          webSearchDirectEnabled ?? this.webSearchDirectEnabled,
+      webSearchDirectLowRiskPerWindow:
+          webSearchDirectLowRiskPerWindow ?? this.webSearchDirectLowRiskPerWindow,
+      webSearchDirectHighRiskPerWindow: webSearchDirectHighRiskPerWindow ??
+          this.webSearchDirectHighRiskPerWindow,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess:
@@ -646,6 +692,10 @@ class InferenceSettings {
         'webSearchSearXngLanguage': webSearchSearXngLanguage,
         'webSearchSearXngCategories': webSearchSearXngCategories,
         'webSearchSearXngEngines': webSearchSearXngEngines,
+        'webSearchDirectEngines': webSearchDirectEngines,
+        'webSearchDirectEnabled': webSearchDirectEnabled,
+        'webSearchDirectLowRiskPerWindow': webSearchDirectLowRiskPerWindow,
+        'webSearchDirectHighRiskPerWindow': webSearchDirectHighRiskPerWindow,
         'agentShellEnabled': agentShellEnabled,
         // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson??
         // 保存后读回会静默丢配置（默认值兜底）??
@@ -752,6 +802,13 @@ class InferenceSettings {
           json['webSearchSearXngCategories'] as String?,
       webSearchSearXngEngines:
           json['webSearchSearXngEngines'] as String? ?? kDefaultSearXngEngines,
+      webSearchDirectEngines: _parseDirectEngines(json['webSearchDirectEngines']),
+      webSearchDirectEnabled:
+          json['webSearchDirectEnabled'] as bool? ?? true,
+      webSearchDirectLowRiskPerWindow:
+          _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 10, 6),
+      webSearchDirectHighRiskPerWindow:
+          _clampInt(json['webSearchDirectHighRiskPerWindow'], 1, 6, 2),
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
@@ -974,4 +1031,18 @@ class SettingsService {
     await tmp.writeAsString(jsonEncode(settings.toJson()));
     await tmp.rename(path);
   }
+}
+
+/// 解析直连引擎开关列表：丢弃未知 id；缺失 = 默认全启用；空列表 = 用户全关。
+List<String> _parseDirectEngines(dynamic raw) {
+  if (raw == null) return List<String>.of(kDefaultDirectEngines);
+  if (raw is! List) return List<String>.of(kDefaultDirectEngines);
+  return raw.whereType<String>().where(kDirectEngineIds.contains).toList();
+}
+
+/// JSON 数值夹紧（缺省/越界回默认）。
+int _clampInt(dynamic raw, int min, int max, int fallback) {
+  final v = raw is int ? raw : int.tryParse('$raw');
+  if (v == null) return fallback;
+  return v < min ? min : (v > max ? max : v);
 }
