@@ -5509,8 +5509,8 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
 
   /// 端侧直连引擎配置：引擎开关（按风险分档）+ 每 10 分钟窗口请求预算。
   /// 「细水长流」管控：高风险引擎（搜狗/百度/夸克，风控激进）默认每窗口
-  /// 只发 2 次；预算耗尽自动跳过，窗口到期恢复；引擎被反爬拦截时熔断冷却
-  /// 并自动换 Cookie/UA 身份重试。
+  /// 发 4 次；预算耗尽自动跳过，窗口到期恢复；引擎被反爬拦截时熔断冷却
+  /// 并自动换 Cookie/UA 身份重试（2026-10-02 放宽：次数 2→4、冷却缩短）。
   Widget _buildDirectEngineSection(
       BuildContext context, bool notConfigured, InferenceSettings settings) {
     const engineLabels = {
@@ -5602,14 +5602,14 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
           hint: '容忍度高，可适当放宽；预算用于控制连续任务的请求节奏',
           value: settings.webSearchDirectLowRiskPerWindow,
           min: 1,
-          max: 10,
+          max: 20,
           onChanged: (v) => _notifier.setWebSearchDirectLowRiskPerWindow(v),
         ),
         const SizedBox(height: 4),
         budgetSlider(
           label: '高风险引擎每 10 分钟搜索上限'
               '（搜狗/百度/夸克，当前 ${settings.webSearchDirectHighRiskPerWindow} 次）',
-          hint: '风控激进，默认 2 次"细水长流"——偶尔贡献高质量结果，'
+          hint: '风控激进，默认 4 次"细水长流"——偶尔贡献高质量结果，'
               '避免连续请求被判定机器行为而封禁',
           value: settings.webSearchDirectHighRiskPerWindow,
           min: 1,
