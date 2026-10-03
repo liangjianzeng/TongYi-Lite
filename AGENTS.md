@@ -1258,3 +1258,39 @@ debug+release，.so 内 kv_used/kv_ctx 均 =1），双机覆盖安装 Success。
 构建后必须字符串级验证 APK 内 `libtongyilite_jni.so` 含新增日志串/字段名——
 gradle 的 up-to-date 判定信任 mtime，git 操作不保证 mtime 前进。此前「Dart 幽灵」
 教训是 kernel/libapp，这是同一坑的 NDK 版。
+
+## 2026-10-03 KV/上下文占比细条「一直不行」定案（两层根因，全链路实锤打通）
+
+> 用户三报顶部状态栏上下文/KV 占比条从不更新。**两层根因叠加**，分别断在本地档与
+> API 档的数据源上：
+
+**根因 1（本地档，.so 陈旧）**：合并 f00cf65 带来 JNI `nativeGetLastStats` 的
+kv_used/kv_ctx 输出，但 gradle CMake 任务 up-to-date 跳过（git merge 保留旧 mtime）
+→ APK 里 `libtongyilite_jni.so` 还是旧版 → Dart 拿到的 stats JSON 缺这两个键 →
+细条恒 0。修复 = touch cpp 强制重编（详见上节）。
+
+**根因 2（API 档，usage 从未到达，本次新定位）**：用户实机配置 = API 档
+（Bonsai2），细条走 `prompt_tokens/contextWindow` 分支。两层断点：
+1. **请求体没带 `stream_options:{"include_usage":true}`** → 端点流式默认不回
+   usage（Bonsai2 curl 实锤：不带=NO，带=YES prompt_tokens=57，带 tools 同样 OK）
+   → `OpenAiService.lastUsage` 恒 null；
+2. **`chatCompletionEvents` 对 usage 末块（choices:[] 的独立 chunk）直接
+   continue**，从不 yield → assembler.usage 恒 null → LlmResult.usage null →
+   会话日志 assistant 事件无 usage 键 → agent 档的占用更新永不触发。
+   （assembler 的 `case 'usage'` 处理器早就写好了，只是事件源从来没喂过它。）
+
+**修复（openai_service.dart + chat_provider.dart）**：
+- `_sseDataPayloads` 请求体加 `stream_options:{"include_usage":true}`；严格端点
+  400/404/422 且报错含 stream_options → 自动去掉重试一次（牺牲 usage 换可用）；
+- SSE 行层抓到 usage 打 `[SSE] usage captured`（assert-only，release 不打）；
+- `chatCompletionEvents` choices 空时若带 usage → yield `{'type':'usage',...}`；
+- agent 档 usage 读取加 lastUsage 兜底（事件链缺失时用 service 层捕获值）。
+
+**真机验证（小米13 USB，14:03）**：`[SSE] usage captured: prompt_tokens=12502` →
+`[ChatNotifier] API usage: prompt=12502 window=180000` 全链路日志齐 → 细条显示
+≈7%。回归 429+2 全绿，analyze 0 error。14:00/14:01 重打包
+（debug 106724401 B / release 59955886 B），双机覆盖安装 Success。
+
+**排障沉淀**：adb 驱动发送消息用「点输入框 → input text → keyevent 66（Enter）」
+——发送 FAB 会随键盘弹起移位，硬编码坐标点不中；锁屏（secure keyguard）adb 解不开，
+`wm dismiss-keyguard` 只对无凭据锁有效，需用户手动解锁。

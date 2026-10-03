@@ -144,7 +144,15 @@ class OpenAiService {
         continue; // 心跳/注释/不完整 JSON
       }
       final choices = json['choices'] as List?;
-      if (choices == null || choices.isEmpty) continue;
+      // usage 末块（include_usage 开启后服务端在流末发 choices:[] + usage）：
+      // 下游（assembler/上下文占用条）要消费它，choices 空时也要 yield 出去。
+      if (choices == null || choices.isEmpty) {
+        final usage = json['usage'];
+        if (usage is Map<String, dynamic>) {
+          yield {'type': 'usage', 'usage': usage};
+        }
+        continue;
+      }
       final first = choices.first;
       if (first is! Map<String, dynamic>) continue;
       final delta = first['delta'];
@@ -206,12 +214,17 @@ class OpenAiService {
       'model': config.model,
       'messages': messages,
       'stream': true,
+      // OpenAI 兼容标准：要求末块回 usage（prompt_tokens 等）。vLLM/SGLang 等
+      // 端点流式默认**不回 usage**，不带上它 lastUsage（顶部上下文占用条数据源）
+      // 永远为 null（2026-10-03 Bonsai2 端点实测实锤）。严格端点不认识该字段
+      // 时的 400/422 兜底重试见下方 catch。
+      'stream_options': const {'include_usage': true},
       'temperature': temperature ?? config.effectiveTemperature,
       'max_tokens': maxTokens ?? config.effectiveMaxTokens,
       if (tools != null && tools.isNotEmpty) 'tools': tools,
     };
 
-    final Response<ResponseBody> response;
+    Response<ResponseBody> response;
     try {
       response = await _dio.post<ResponseBody>(
         url,
@@ -223,10 +236,39 @@ class OpenAiService {
         cancelToken: _cancelToken,
       );
     } on DioException catch (e) {
-      throw OpenAiHttpException(
-        statusCode: e.response?.statusCode,
-        message: await _describeApiError(e),
-      );
+      final status = e.response?.statusCode;
+      if (body.containsKey('stream_options') &&
+          (status == 400 || status == 404 || status == 422)) {
+        // 端点不认 stream_options → 去掉该字段重试一次（牺牲 usage 换可用）。
+        final detail = await _describeApiError(e);
+        if (detail.contains('stream_options') || detail.contains('include_usage')) {
+          final retryBody = Map<String, dynamic>.from(body)
+            ..remove('stream_options');
+          try {
+            response = await _dio.post<ResponseBody>(
+              url,
+              data: retryBody,
+              options: Options(
+                responseType: ResponseType.stream,
+                headers: _headers(config.apiKey),
+              ),
+              cancelToken: _cancelToken,
+            );
+          } on DioException catch (e2) {
+            throw OpenAiHttpException(
+              statusCode: e2.response?.statusCode,
+              message: await _describeApiError(e2),
+            );
+          }
+        } else {
+          throw OpenAiHttpException(statusCode: status, message: detail);
+        }
+      } else {
+        throw OpenAiHttpException(
+          statusCode: e.response?.statusCode,
+          message: await _describeApiError(e),
+        );
+      }
     }
 
     if (response.statusCode != 200) {
@@ -252,7 +294,15 @@ class OpenAiService {
         try {
           final parsed = jsonDecode(payload) as Map<String, dynamic>;
           final usage = parsed['usage'];
-          if (usage is Map<String, dynamic>) lastUsage = usage;
+          if (usage is Map<String, dynamic>) {
+            lastUsage = usage;
+            assert(() {
+              // ignore: avoid_print
+              print('[SSE] usage captured: prompt_tokens='
+                  '${usage['prompt_tokens']}');
+              return true;
+            }());
+          }
         } catch (_) {
           // 非 JSON 载荷（心跳/注释）忽略。
         }

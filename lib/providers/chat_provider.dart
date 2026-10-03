@@ -1437,12 +1437,17 @@ class ChatNotifier extends StateNotifier<bool> {
           usage = u;
         }
       }
+      // 兜底：SSE 末块 usage 已被 service 层统一捕获（lastUsage），
+      // 事件链缺失（如流被提前取消）时用它——两条链同一数据源。
+      usage ??= _ref.read(openAiServiceProvider).lastUsage;
       if (usage != null) {
         logManager.appendInferenceLog(
           'API 用量 | prompt=${usage['prompt_tokens'] ?? '?'} '
           'completion=${usage['completion_tokens'] ?? '?'}'
           '${usage['prompt_cache_hit_tokens'] != null ? ' 缓存命中=${usage['prompt_cache_hit_tokens']}' : ''}',
         );
+        debugPrint('[ChatNotifier] API usage: prompt='
+            '${usage['prompt_tokens'] ?? '?'} window=${activeApi?.contextWindow}');
         // API 接入：回合结束更新上下文占用（prompt_tokens = 当前上下文已占用）。
         final prompt = usage['prompt_tokens'] as num?;
         if (prompt != null) {
