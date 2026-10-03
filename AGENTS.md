@@ -1239,3 +1239,22 @@ final 变量 await 后 catch 再赋值会报 "might already be assigned"（改�
   100.123.25.54；8 Elite 首次空报错失败、原样重试一次 Success，与此前
   DERP 中继传输截断行为一致）。九件套真机验收点：长任务撞步数上限自动收尾、
   生成中输入框插话、提问卡片、后台子代理通知、run_code（需 Chaquopy）。
+
+## 2026-10-03 KV 占比细条「一直不行」根因：合并后 NDK up-to-date 跳过 → .so 陈旧
+
+> **现象**：顶部状态栏本地模型上下文/KV 占比条自 f00cf65 合并进来后从不更新（恒 0）。
+
+**根因链**：合并带来三层改动——JNI `nativeGetLastStats` 输出增加 `kv_used/kv_ctx`
+→ Kotlin `getLastStats()` 透传 → Dart `_updateLocalContextUsage` 消费。Dart/JNI 源码
+都在树里，但**重打包时 CMake/Ninja 判定目标 up-to-date（git checkout/merge 保留旧
+mtime，早于上次构建产物）跳过 NDK 重编** → APK 里 `libtongyilite_jni.so` 还是旧版
+（实测 zip 内 .so 搜 `kv_used` = 0）→ Dart 每次拿到的 stats JSON 缺这两个键 →
+`_updateLocalContextUsage` 每次提前 return → 细条恒 0。
+
+**修复**：`touch android/app/src/main/cpp/tongyilite_jni.cpp` 强制重编（12:32 重打
+debug+release，.so 内 kv_used/kv_ctx 均 =1），双机覆盖安装 Success。
+
+**教训（打包验收新增一道门）**：凡合并/checkout 带来 **native（cpp/CMake）改动**，
+构建后必须字符串级验证 APK 内 `libtongyilite_jni.so` 含新增日志串/字段名——
+gradle 的 up-to-date 判定信任 mtime，git 操作不保证 mtime 前进。此前「Dart 幽灵」
+教训是 kernel/libapp，这是同一坑的 NDK 版。
