@@ -1186,3 +1186,45 @@ app-release.apk 59886173 B；字符串级验收过（debug kernel UTF-8：验收
 避雷 2/skill-creator 2；release libapp.so UTF-16LE：验收清单 19/技能库 1 +
 ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18 直连 +
 8 Elite 100.123.25.54 中继，install -r -t 均 Success）。
+
+## 2026-10-03 智能体执行质量九件套（对照 DSH 二次差距分析，commit 5fa142f）
+
+> 用户反馈"智能体还是笨笨的做不好任务"。重挖 DSH 全仓后定案：差距不在循环骨架
+> （已对齐），在执行纪律层——收尾机制/验证纪律/todo 纪律/提示词教学段。
+> DSH 哲学 = 薄系统提示 + 厚工具描述 + 结构化护栏（纪律靠执行期强制不靠自觉）。
+
+**九件套（P2-A×4 + P2-B×2 + P3×3，全部落地）**：
+1. **maxSteps 收敛注入 + 自动续跑**（头号修复）：剩 2 步注入收敛警告 user 事件；
+   撞上限不死停——合成收尾提示追加预算（`maxWrapups×wrapupSteps` 默认 2×2），
+   老语义用 `maxWrapups:0` 钉死。引导消息只活在本回合（trace 信封不编码 user 事件，
+   跨回合自然消失）。
+2. **【任务执行纪律】系统提示段**（仅 API 档，`taskDiscipline: useApi`）：
+   规划/推进/验证（完成必用工具结果佐证）/诚实 grounding（DSH wrapup 反幻觉句）/停止。
+3. **todo_write 执行期强制**：>1 个 in_progress（doing/inprogress/current/active 均为
+   别名）→ 直接拒绝 + 修正指引，原清单不污染；结果回显计数。存储保留原词不归一化
+   （老测试 `[done]` 兼容）。
+4. **read/write/edit_file 描述加厚**：先读后改、写后读回核对、oldString 带上下文。
+5. **steer 回合中转向**：ReactLoopAgent 新增收件箱 `steer()`/`injectNotice()`，step
+   边界 drain 为 `[用户插话]`/`[系统通知]` user 事件（通知在前插话在后）；
+   `ChatNotifier.steerTurn`（无运行回合回退 sendMessage）；home_screen 生成中输入框
+   有文字 = 插话发送按钮 + Enter 插话，空 = 停止（heroTag 区分双 FAB）。
+6. **ask_user_question**：`agentPendingQuestionProvider`（convId→提问+Completer）；
+   UI 提问卡片（选项 chip/自由回答/跳过）；stopGeneration 兜底 complete(null)
+   防挂死；等待上限 10 分钟；不假设无法继续才问，描述里写明。
+7. **run_code（PTC 最小实现，仅 API 档）**：脚本内 `agent_tool(name, **args)` 编排
+   子工具调用；Chaquopy 一次性 runScript 期间 Dart 轮询桥目录（`<uuid>.req/.resp`
+   文件交换）；嵌套 run_code 禁止、30 次子调用上限、总超时 120s、桥目录用后即删。
+   ⚠️ 桥接预置代码按 `TOOL_BRIDGE_DIR` 字面量注入脚本头。
+8. **子代理专用 API 模型**（按步路由最小形态）：`agentSubagentApiModelId` 设置 +
+   智能体 tab 子代理卡下拉；非空且 ≠ 主模型才单独建 OpenAiAdapter。
+9. **子代理后台化 + send_message 续轮**：`run_in_background` 立即返回 id，完成通知
+   经 `injectNotice` 投父回合 + 🔔 消息落库（不入模型上下文）；可续轮表 FIFO 8 个
+   （`kContinuableCapacity`），`send_message{id,message}` 续跑；subagent 描述对齐
+   DSH（完整独立任务书/独立委派一条消息并发起/stopReason 非 completed 附注部分输出）。
+
+**回归**：test/agent+providers+services+websearch 全绿 **487 项 + 4 skip**（新增
+loop 6/todo 3/persona 3）；analyze 0 error。**未出包**——真机验收待下次构建。
+
+**坑**：Future 没有 isComplete（用 `whenComplete` 置 flag 轮询）；try/catch 内
+final 变量 await 后 catch 再赋值会报 "might already be assigned"（改非 final）；
+测试桩太快时回合内插话要用工具执行体入队（不能靠 10ms 延时）。
