@@ -385,8 +385,8 @@ class InferenceSettings {
     this.webSearchSearXngEngines = kDefaultSearXngEngines,
     this.webSearchDirectEngines = kDefaultDirectEngines,
     this.webSearchDirectEnabled = true,
-    this.webSearchDirectLowRiskPerWindow = 6,
-    this.webSearchDirectHighRiskPerWindow = 2,
+    this.webSearchDirectLowRiskPerWindow = 10,
+    this.webSearchDirectHighRiskPerWindow = 4,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -822,9 +822,9 @@ class InferenceSettings {
       webSearchDirectEnabled:
           json['webSearchDirectEnabled'] as bool? ?? true,
       webSearchDirectLowRiskPerWindow:
-          _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 10, 6),
+          _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 20, 10),
       webSearchDirectHighRiskPerWindow:
-          _clampInt(json['webSearchDirectHighRiskPerWindow'], 1, 6, 2),
+          _clampInt(json['webSearchDirectHighRiskPerWindow'], 1, 6, 4),
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
