@@ -476,10 +476,10 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     _reapplyWebSearchProvider();
   }
 
-  /// 低风险引擎每 10 分钟窗口请求预算（1~10）。
+  /// 低风险引擎每 10 分钟窗口请求预算（1~20）。
   Future<void> setWebSearchDirectLowRiskPerWindow(int value) async {
     state = state.copyWith(
-        webSearchDirectLowRiskPerWindow: value.clamp(1, 10));
+        webSearchDirectLowRiskPerWindow: value.clamp(1, 20));
     await _persist();
     _reapplyWebSearchProvider();
   }
