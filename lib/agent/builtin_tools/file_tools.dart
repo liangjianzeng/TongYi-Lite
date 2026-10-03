@@ -72,7 +72,9 @@ ToolDefinition createReadFileTool() {
     name: 'read_file',
     description:
         '读取工作区内文本文件内容。path 为相对 workspace 的路径（如 "notes/draft.txt"）；'
-        '需要读取公共目录（/sdcard 等）时带 sandbox_permissions 请求完整访问。',
+        '需要读取公共目录（/sdcard 等）时带 sandbox_permissions 请求完整访问。'
+        '分析/修改文件前必须先 read_file 完整阅读，绝不在未读的情况下凭空作答或编辑；'
+        '写入或编辑之后，用 read_file 读回核对结果再声称完成。',
     parameters: _withEscalation({
       'type': 'object',
       'properties': {
@@ -111,7 +113,8 @@ ToolDefinition createWriteFileTool() {
     name: 'write_file',
     description:
         '覆盖写入文本到工作区文件（目录自动创建）；需要写公共目录（/sdcard 等）时'
-        '带 sandbox_permissions 请求完整访问。',
+        '带 sandbox_permissions 请求完整访问。content 必须是完整最终内容'
+        '（整文件替换）；只改局部用 edit_file 更省。',
     parameters: _withEscalation({
       'type': 'object',
       'properties': {
@@ -147,7 +150,9 @@ ToolDefinition createEditFileTool() {
     name: 'edit_file',
     description:
         '替换工作区文件中的文本（oldString 必须唯一，出现多次会报错）；'
-        '编辑公共目录文件时带 sandbox_permissions 请求完整访问。',
+        '编辑公共目录文件时带 sandbox_permissions 请求完整访问。'
+        'oldString 要带足够上下文（含缩进的连续原文），先 read_file 确认原文'
+        '再编辑；报「出现 N 次」就扩长 oldString，不要盲改。',
     parameters: _withEscalation({
       'type': 'object',
       'properties': {

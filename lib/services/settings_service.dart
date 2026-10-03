@@ -174,6 +174,11 @@ class InferenceSettings {
   /// 不变量固定（深度 ??2 / 子代理审批恒 never / 每层独立预算）??
   final bool agentSubagentEnabled;
 
+  /// 子代理专用 API 模型（P3-2 按步路由最小形态）：非空且存在于 apiModels
+  /// 时，子代理用这个（通常更便宜/更快）的 API 配置驱动，父回合仍用主模型。
+  /// 空串 = 跟随父模型（默认，行为与旧版一致）。仅 API 档生效。
+  final String agentSubagentApiModelId;
+
   /// 上下文超限自动压缩（默认开；关闭后超限直接报错终止）??
   final bool agentCompactEnabled;
 
@@ -367,6 +372,7 @@ class InferenceSettings {
     this.agentThinkingMaxChars = 6000,
     this.chatTextScale = 1.0,
     this.agentSubagentEnabled = true,
+    this.agentSubagentApiModelId = '',
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
     this.webSearchEnabled = false,
@@ -518,6 +524,7 @@ class InferenceSettings {
       int? agentThinkingMaxChars,
       double? chatTextScale,
       bool? agentSubagentEnabled,
+      String? agentSubagentApiModelId,
       bool? agentCompactEnabled,
       bool? agentSpillEnabled,
       bool? webSearchEnabled,
@@ -602,6 +609,8 @@ class InferenceSettings {
           agentThinkingMaxChars ?? this.agentThinkingMaxChars,
       chatTextScale: chatTextScale ?? this.chatTextScale,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
+      agentSubagentApiModelId:
+          agentSubagentApiModelId ?? this.agentSubagentApiModelId,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
@@ -687,6 +696,7 @@ class InferenceSettings {
         'agentThinkingMaxChars': agentThinkingMaxChars,
         'chatTextScale': chatTextScale,
         'agentSubagentEnabled': agentSubagentEnabled,
+        'agentSubagentApiModelId': agentSubagentApiModelId,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
         'webSearchEnabled': webSearchEnabled,
@@ -789,6 +799,8 @@ class InferenceSettings {
       chatTextScale:
           ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0).clamp(0.7, 1.3),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
+      agentSubagentApiModelId:
+          json['agentSubagentApiModelId'] as String? ?? '',
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,

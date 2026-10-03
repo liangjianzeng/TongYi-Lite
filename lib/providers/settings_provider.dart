@@ -409,6 +409,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 子代理专用 API 模型（'' = 跟随主模型；仅 API 档生效）??
+  Future<void> setAgentSubagentApiModelId(String value) async {
+    state = state.copyWith(agentSubagentApiModelId: value);
+    await _persist();
+  }
+
   /// 上下文超限自动压缩开关??
   Future<void> setAgentCompactEnabled(bool value) async {
     state = state.copyWith(agentCompactEnabled: value);

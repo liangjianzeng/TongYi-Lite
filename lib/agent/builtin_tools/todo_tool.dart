@@ -71,13 +71,22 @@ String _render(List<Map<String, String>> items) {
 }
 
 /// 全量替换待办清单。参数：`todos: [{content, status}]`。
-/// 调用后返回当前完整清单，模型可据此继续规划。
+/// 调用后返回当前完整清单与状态计数（待办/进行中/已完成）。
+///
+/// 执行期强制（DSH todo 纪律，不靠提示词自觉）：
+/// - **单活跃**：同一时刻最多一个 `in_progress`（含 doing 等别名），
+///   违反直接拒绝执行并返回修正指引（`toTodoList` throw 同语义）；
+/// - 状态词归一化判定：done/completed/finished → 已完成；
+///   in_progress/inprogress/doing/current → 进行中；其余 → 待办。
+///   存储保留调用方原词（展示/测试兼容），仅判定时归一化。
 ToolDefinition createTodoWriteTool() {
   return ToolDefinition(
     name: 'todo_write',
     description:
         '全量替换待办任务清单。todos 为任务数组，每项含 content（任务内容）'
-        '与 status（状态，如 todo/done）。调用后返回当前完整清单。',
+        '与 status（状态：todo/in_progress/done）。发送完整清单（整表替换，'
+        '无部分更新）；同一时刻最多一项 in_progress，完成一项立刻标记 done，'
+        '不要批量补记。调用后返回当前完整清单与计数。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -129,13 +138,51 @@ ToolDefinition createTodoWriteTool() {
       if (items.isEmpty) {
         return ToolResult.error('todos 数组为空');
       }
+      // 单活跃强制：>1 个进行中 → 拒绝执行（原清单保持不变），返回修正指引。
+      final active = items.where((e) => _isInProgress(e['status'])).length;
+      if (active > 1) {
+        return ToolResult.error(
+            '待办清单被拒绝：同时有 $active 项处于 in_progress。'
+            '同一时刻只能有一项进行中——请把其余进行中项改回 todo'
+            '（或已完成项标 done），重新发送完整清单。');
+      }
       final store = await _store()
         ..clear()
         ..addAll(items);
       _persist();
-      return ToolResult(content: '待办清单已更新：\n${_render(store)}');
+      return ToolResult(
+          content: '待办清单已更新（${_countText(store)}）：\n${_render(store)}');
     },
   );
+}
+
+/// 状态归一化判定：是否「进行中」。
+bool _isInProgress(String? status) {
+  final s = (status ?? '').trim().toLowerCase();
+  return s == 'in_progress' || s == 'inprogress' || s == 'doing' ||
+      s == 'current' || s == 'active';
+}
+
+/// 状态归一化判定：是否「已完成」。
+bool _isDone(String? status) {
+  final s = (status ?? '').trim().toLowerCase();
+  return s == 'done' || s == 'completed' || s == 'finished' || s == 'ok';
+}
+
+/// 状态计数一行（DSH `Updated todo list: X pending, Y in progress, Z
+/// completed.` 同语义）。
+String _countText(List<Map<String, String>> items) {
+  var pending = 0, active = 0, done = 0;
+  for (final e in items) {
+    if (_isInProgress(e['status'])) {
+      active++;
+    } else if (_isDone(e['status'])) {
+      done++;
+    } else {
+      pending++;
+    }
+  }
+  return '待办 $pending · 进行中 $active · 已完成 $done';
 }
 
 /// 读取当前待办清单（只读，不修改）。
