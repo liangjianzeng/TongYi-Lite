@@ -2279,6 +2279,16 @@ struct InferenceEngine {
     // "kv_cache_total_bytes" API in this vendored build, so compute it from
     // the context/model dimensions. This matches the actual pre-allocated KV
     // buffer (default f16) and is non-zero as soon as the context is created.
+    // Current KV-cache usage: positions actually filled by the active
+    // conversation (kv_position cursor). 0 = no model / fresh conversation.
+    // Exposed to Dart so the top context-usage bar can show a real percentage
+    // for LOCAL models (window = llama_n_ctx, used = kv_position).
+    int64_t get_kv_used_positions() const { return (int64_t)kv_position; }
+
+    // KV-cache allocation size (bytes). llama.cpp does not expose a direct
+    // "kv_cache_total_bytes" API in this vendored build, so compute it from
+    // the context/model dimensions. This matches the actual pre-allocated KV
+    // buffer (default f16) and is non-zero as soon as the context is created.
     int64_t get_kv_cache_bytes() const {
         if (!model || !context) return 0;
         const int n_embd    = llama_model_n_embd(model);
@@ -3008,10 +3018,13 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetAudioSampleRate(JNIEnv *en
 JNIEXPORT jstring JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, jobject) {
     char buf[256];
+    // kv_used = KV 缓存已占用位置数（当前会话），kv_ctx = 上下文窗口 n_ctx，
+    // 供本地模型顶部状态栏「上下文/KV 占比」细条使用（0 = 无模型/新会话）。
     snprintf(buf, sizeof(buf),
-             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f}",
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f,\"kv_used\":%lld,\"kv_ctx\":%d}",
              g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms,
-             g_last_stats.t_vision_ms, g_last_stats.t_audio_ms);
+             g_last_stats.t_vision_ms, g_last_stats.t_audio_ms,
+             (long long)g_engine.get_kv_used_positions(), (int)g_engine.n_ctx.load());
     return utf8_to_jstring(env, buf);
 }
 

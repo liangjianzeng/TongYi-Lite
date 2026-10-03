@@ -752,8 +752,9 @@ class ChatNotifier extends StateNotifier<bool> {
         double genMs = 0.0;
         int visionMs = 0;
         int audioMs = 0;
+        // 本地路线：原生 getInferenceStats 附带 KV 缓存占比（kv_used/kv_ctx）。
+        Map<String, dynamic> genStats = {};
         if (!useApi) {
-          Map<String, dynamic> genStats = {};
           try {
             genStats = await _inference.getInferenceStats();
           } catch (_) {}
@@ -789,8 +790,8 @@ class ChatNotifier extends StateNotifier<bool> {
         // 回复落地后再刷新一次消息条数（流式占位消息已收尾）。
         await _refreshConversationMeta(conversationId);
 
-        // API 接入：回合结束更新上下文占用（普通聊天路径的 usage 由
-        // OpenAiService.lastUsage 透传）。本地路线不显示，跳过。
+        // 上下文占用：API 接入（usage.prompt_tokens）走 _updateContextUsage；
+        // 本地路线走原生 KV 缓存占比（kv_used/kv_ctx）。
         if (useApi) {
           final usage = _ref.read(openAiServiceProvider).lastUsage;
           final prompt = usage?['prompt_tokens'] as num?;
@@ -801,6 +802,8 @@ class ChatNotifier extends StateNotifier<bool> {
               api: activeApi,
             );
           }
+        } else {
+          _updateLocalContextUsage(conversationId, genStats);
         }
 
         return fullResponse;
@@ -1407,8 +1410,10 @@ class ChatNotifier extends StateNotifier<bool> {
     // 与普通聊天同一口径（tok/s 与推理日志一致）；API 路线无原生 stats，
     // 保持不显示。首 Tok 对多步回合无单步语义，置 0 → 界面省略首Tok。
     InferenceStats? answerStats;
+    // 本地路线：原生 getInferenceStats 同时携带 KV 缓存占比字段
+    // （kv_used / kv_ctx），供顶部状态栏细条展示本地上下文占用。
+    Map<String, dynamic> genStats = {};
     if (!useApi) {
-      Map<String, dynamic> genStats = {};
       try {
         genStats = await _inference.getInferenceStats();
       } catch (_) {}
@@ -1448,6 +1453,9 @@ class ChatNotifier extends StateNotifier<bool> {
           );
         }
       }
+    } else {
+      // 本地路线：KV 缓存占比（已占用位置 kv_used / 上下文窗口 kv_ctx）。
+      _updateLocalContextUsage(conversationId, genStats);
     }
     // 思考存档落库（💭 前缀，仅 UI 展示不入模型上下文）：turn 事件流结束时
     // 各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程痕迹消息
@@ -1556,6 +1564,26 @@ class ChatNotifier extends StateNotifier<bool> {
           usedTokens: usedTokens,
           windowTokens: window,
           windowSource: source,
+        );
+  }
+
+  /// 本地路线：更新某会话 KV 缓存占比（顶部状态栏细条数据源）。
+  ///
+  /// used = 原生 KV 缓存已占用位置数（kv_used，当前会话已解码进缓存的 token），
+  /// window = 原生实际上下文窗口（kv_ctx = llama_n_ctx，含 oom-guard 裁剪后值）。
+  /// 任一缺失 → 无数据，UI 不显示（fraction 为 null）。
+  void _updateLocalContextUsage(
+    String conversationId,
+    Map<String, dynamic> genStats,
+  ) {
+    final used = genStats['kv_used'] as num?;
+    final ctx = genStats['kv_ctx'] as num?;
+    if (used == null || ctx == null || ctx <= 0) return;
+    _ref.read(contextUsageProvider.notifier).update(
+          conversationId,
+          usedTokens: used.toInt(),
+          windowTokens: ctx.toInt(),
+          windowSource: '原生',
         );
   }
 
