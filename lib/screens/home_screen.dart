@@ -23,7 +23,7 @@ import '../services/attachment_service.dart'
 import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
 import '../providers/context_usage_provider.dart'
-    show contextUsageProvider, ContextUsage;
+    show contextUsageProvider;
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
@@ -949,22 +949,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 顶部状态栏最下方的 API 接入模型上下文占用细线（叠在 AppBar 底部，
-  /// 不额外占用布局空间）。
+  /// 顶部状态栏最下方的上下文占用细线（叠在 AppBar 底部，不额外占用布局
+  /// 空间）。
   ///
-  /// 仅当前走 API 接入时显示：一条蓝色细线，宽度 = 占用比例 × 屏幕宽，
-  /// 高度 3px。无数据时仅显示一条极浅的底色线（占满全宽、几乎不可见）。
+  /// API 接入：宽度 = prompt_tokens / n_ctx（usage + /v1/models 实测槽位）。
+  /// 本地模型：宽度 = KV 缓存已占用位置（kv_used）/ 上下文窗口（kv_ctx）。
+  /// 一条蓝色细线，高度 3px；无数据时仅显示一条极浅的底色线（几乎不可见）。
   Widget _buildContextUsageBar(ModelState ms, bool isGenerating) {
     final settings = ref.watch(settingsProvider);
     final activeApi = settings.activeApiModel();
     final hasLocalLoaded = ms.isLoaded;
     final hasDefault = settings.defaultModelId != null;
-    // 当前是否会走 API 接入（细条只对 API 模型显示）：
+    // 细条显示条件（本地或 API 任一可用即显示）：
     // - 智能体显式 API 驱动（agentModelSource=api）→ 恒走 API；
-    // - 普通聊天：无本地意图（未加载本地模型 且 无默认勾选）且激活了 API → API。
+    // - 普通聊天：无本地意图（未加载本地模型 且 无默认勾选）且激活了 API → API；
+    // - 本地模型（已加载 或 勾选默认）→ 显示 KV 缓存占比。
     final isAgentApi = settings.agentModelSource == 'api' && activeApi != null;
     final isPlainApi = activeApi != null && !hasLocalLoaded && !hasDefault;
-    if (!isAgentApi && !isPlainApi) return const SizedBox.shrink();
+    final isLocal = hasLocalLoaded || hasDefault;
+    if (!isAgentApi && !isPlainApi && !isLocal) return const SizedBox.shrink();
 
     final usage = ref.watch(contextUsageProvider)[_currentConversationId];
     final fraction = usage?.fraction ?? 0.0;
