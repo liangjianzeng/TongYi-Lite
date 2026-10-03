@@ -11,6 +11,7 @@ import '../providers/index.dart'
     show
         chatNotifierProvider,
         runningTurnsProvider,
+        agentPendingQuestionProvider,
         messagesProvider,
         conversationsProvider,
         currentModelIdProvider,
@@ -47,6 +48,9 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _scrollController = ScrollController();
   final _textController = TextEditingController();
+
+  /// ask_user_question 自由回答输入框（随提问卡片创建/销毁复用）。
+  final _questionController = TextEditingController();
   String _currentConversationId = '';
   bool _initiallyLoaded = false;
   // When true, the view auto-scrolls to the newest message (bottom of the
@@ -86,6 +90,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _textController.dispose();
+    _questionController.dispose();
     _recordingTimer?.cancel();
     _recordingTimer = null;
     _recordingNotifier.dispose();
@@ -1135,6 +1140,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       children: [
         // 录音中：波形动画 + 计时 + 「松手发送」提示（独立 widget，不重建手势区）。
         _buildRecordingBanner(),
+        // ask_user_question 待回答卡片（P2-B2）：智能体提问挂起等待时显示。
+        _buildPendingQuestionCard(),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           decoration: BoxDecoration(
@@ -1175,9 +1182,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         horizontal: 20, vertical: 12),
                   ),
                   onSubmitted: (_) {
-                    // Ignore Enter while a reply is streaming — the send button
-                    // has switched to "stop" mode during generation.
-                    if (isGenerating) return;
+                    // 生成中：Enter = 插话转向（steer，不打断执行）。
+                    if (isGenerating) {
+                      _steerMessage();
+                      return;
+                    }
                     _sendMessage();
                   },
                   maxLines: null,
@@ -1192,16 +1201,145 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  /// ask_user_question 待回答卡片：问题 + 候选项 + 自由回答 + 跳过。
+  /// 回答经 [ChatNotifier.answerPendingQuestion] 完成挂起的工具调用。
+  Widget _buildPendingQuestionCard() {
+    final pending =
+        ref.watch(agentPendingQuestionProvider)[_currentConversationId];
+    if (pending == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.help_outline,
+                  size: 16, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 6),
+              Text('智能体提问 · 回合等待中',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.primary)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(pending.question, style: const TextStyle(fontSize: 14)),
+          if (pending.options.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                for (final option in pending.options)
+                  ActionChip(
+                    label: Text(option, style: const TextStyle(fontSize: 12)),
+                    onPressed: () => ref
+                        .read(chatNotifierProvider.notifier)
+                        .answerPendingQuestion(_currentConversationId, option),
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _questionController,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: const InputDecoration(
+                    hintText: '输入你的回答…',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onSubmitted: (value) {
+                    if (value.trim().isEmpty) return;
+                    ref
+                        .read(chatNotifierProvider.notifier)
+                        .answerPendingQuestion(_currentConversationId, value);
+                    _questionController.clear();
+                  },
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, size: 20),
+                tooltip: '回答',
+                onPressed: () {
+                  final value = _questionController.text.trim();
+                  if (value.isEmpty) return;
+                  ref
+                      .read(chatNotifierProvider.notifier)
+                      .answerPendingQuestion(_currentConversationId, value);
+                  _questionController.clear();
+                },
+              ),
+              TextButton(
+                onPressed: () => ref
+                    .read(chatNotifierProvider.notifier)
+                    .answerPendingQuestion(_currentConversationId, null),
+                child: const Text('跳过', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 发送/停止/录音三合一按钮（发送区收窄定案）：
-  /// - **短按**：发送消息；生成中 → 停止回复；
+  /// - **短按**：发送消息；生成中且输入框有文字 → 插话转向（steer）；
+  ///   生成中且输入框为空 → 停止回复；
   /// - **长按**：按住说话（麦克风），松手自动发送语音。
   /// 手势区在 FAB 外层；录音态用 ValueNotifier 驱动图标（不 setState），
   /// 避免录音中重建 GestureDetector 导致「松手」事件丢失。
   Widget _buildSendButton(bool isGenerating) {
+    if (isGenerating) {
+      // 生成中（P2-B1 steer）：有文字 = 插话发送 + 停止并排；无文字 = 停止。
+      return ValueListenableBuilder<TextEditingValue>(
+        valueListenable: _textController,
+        builder: (_, value, __) {
+          final hasText = value.text.trim().isNotEmpty;
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasText) ...[
+                FloatingActionButton(
+                  mini: true,
+                  heroTag: 'steer_send',
+                  tooltip: '插话发送（不打断执行）',
+                  onPressed: _steerMessage,
+                  child: const Icon(Icons.forward_to_inbox, size: 22),
+                ),
+                const SizedBox(width: 6),
+              ],
+              FloatingActionButton(
+                mini: true,
+                heroTag: 'stop_gen',
+                tooltip: '停止回复',
+                onPressed: _stopGeneration,
+                child: const Icon(Icons.stop, size: 24),
+              ),
+            ],
+          );
+        },
+      );
+    }
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onLongPressStart: isGenerating ? null : (_) => _startRecording(),
-      onLongPressEnd: isGenerating ? null : (_) => _stopRecording(send: true),
+      onLongPressStart: (_) => _startRecording(),
+      onLongPressEnd: (_) => _stopRecording(send: true),
       onLongPressCancel: () {
         // 按住后滑出按钮/被打断 → 放弃并停止录音（不发送）。
         if (_recordingNotifier.value) _stopRecording(send: false);
@@ -1210,18 +1348,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         valueListenable: _recordingNotifier,
         builder: (_, recording, __) => FloatingActionButton(
           mini: true,
-          tooltip: recording ? '松手发送' : (isGenerating ? '停止回复' : '发送（长按说话）'),
+          tooltip: recording ? '松手发送' : '发送（长按说话）',
           onPressed: recording
               ? () => _stopRecording(send: true)
-              : (isGenerating ? _stopGeneration : _sendMessage),
+              : _sendMessage,
           child: recording
               ? const Icon(Icons.mic, color: Colors.red)
-              : (isGenerating
-                  ? const Icon(Icons.stop, size: 24)
-                  : const Icon(Icons.send)),
+              : const Icon(Icons.send),
         ),
       ),
     );
+  }
+
+  /// 回合中插话（steer）：不打断执行，文字注入运行中回合的下一个 step。
+  Future<void> _steerMessage() async {
+    final text = _textController.text.trim();
+    if (text.isEmpty) return;
+    _textController.clear();
+    FocusScope.of(context).unfocus();
+    _followStream = true;
+    try {
+      await ref
+          .read(chatNotifierProvider.notifier)
+          .steerTurn(_currentConversationId, text);
+    } catch (e) {
+      _textController.text = text;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text('插话失败: $e', style: const TextStyle(color: Colors.white))),
+      );
+    }
   }
 
   /// 录音中的横幅：波形动画 + 计时 + 「松手发送」提示。

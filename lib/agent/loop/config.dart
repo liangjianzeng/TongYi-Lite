@@ -44,6 +44,14 @@ final class AgentConfig {
   /// 该预算只对"上一步有工具结果"的步生效（WP3 消费）。
   final int? maxTokensFinalRound;
 
+  /// 撞 [maxStepsPerTurn] 后自动续跑的收尾轮数（DSH goal-round-driver 语义：
+  /// 撞上限不死停，合成收尾提示追加步数预算逼模型收敛作答）。
+  /// 每轮追加 [wrapupSteps] 步；总步数硬上限 = maxSteps + maxWrapups×wrapupSteps。
+  final int maxWrapups;
+
+  /// 每个收尾轮追加的步数。
+  final int wrapupSteps;
+
   const AgentConfig({
     this.maxStepsPerTurn = 12,
     this.maxTokensPerRound = 512,
@@ -54,9 +62,15 @@ final class AgentConfig {
     this.persistTrajectory = false,
     this.contextTokenBudget,
     this.maxTokensFinalRound,
+    this.maxWrapups = 2,
+    this.wrapupSteps = 2,
   }) :
     assert(maxStepsPerTurn >= 1 && maxStepsPerTurn <= 100,
         'maxStepsPerTurn must be in [1, 100]'),
+    assert(maxWrapups >= 0 && maxWrapups <= 4,
+        'maxWrapups must be in [0, 4]'),
+    assert(wrapupSteps >= 1 && wrapupSteps <= 8,
+        'wrapupSteps must be in [1, 8]'),
     assert(temperature >= 0.0 && temperature <= 2.0,
         'temperature must be in [0, 2]');
 
