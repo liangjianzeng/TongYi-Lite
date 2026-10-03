@@ -99,6 +99,10 @@ abstract class SubagentProvider {
 
   /// 启动一次子代理；返回 [SubagentRun]。
   Future<SubagentRun> start(SubagentStartRequest request);
+
+  /// 向已结束的子代理续轮（DSH `send_message`）：对 [id] 对应的子代理
+  /// 会话追加一条用户消息并再跑一个 turn。子代理不存在/已回收时抛错。
+  Future<SubagentResult> sendMessage(String id, String message);
 }
 
 /// 子代理启动时的最大委派深度（DSH Part 11.10 固定 2）。

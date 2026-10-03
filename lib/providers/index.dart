@@ -12,6 +12,8 @@ export 'chat_provider.dart' show
     messagesProvider,
     isGeneratingProvider,
     runningTurnsProvider,
+    agentPendingQuestionProvider,
+    AgentPendingQuestion,
     chatNotifierProvider,
     kLocalVisionSupported;
 

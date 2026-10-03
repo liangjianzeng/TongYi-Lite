@@ -27,11 +27,14 @@ import '../agent/protocol/protocol_selector.dart' show selectProtocol;
 import '../agent/protocol/prompt_json_protocol.dart' show PromptJsonProtocol;
 import '../agent/protocol/native_tool_protocol.dart' show NativeToolProtocol;
 import '../agent/subagents/in_process.dart' show InProcessSubagentProvider;
-import '../agent/subagents/subagent_tool.dart' show createSubagentTool;
+import '../agent/subagents/subagent_tool.dart'
+    show createSubagentTool, createSubagentSendMessageTool;
 import '../agent/hooks/hooks.dart' show AgentHooks;
 import '../agent/skills/load_skill_tool.dart' show createLoadSkillTool;
 import '../agent/skills/save_skill_tool.dart' show createSaveSkillTool;
 import '../agent/builtin_tools/memory_tool.dart' show readGlobalMemorySnapshot;
+import '../agent/builtin_tools/ask_user_tool.dart' show createAskUserTool;
+import '../agent/builtin_tools/run_code_tool.dart' show createRunCodeTool;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
 import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
@@ -223,6 +226,26 @@ final isGeneratingProvider = StateProvider<bool>((ref) => false);
 final runningTurnsProvider =
     StateProvider<Map<String, bool>>((ref) => const {});
 
+/// 一条待用户回答的提问（ask_user_question 工具发起，回合挂起等待）。
+class AgentPendingQuestion {
+  final String question;
+  final List<String> options;
+
+  /// 回答通道：UI 点选项/提交文本后 complete(答案)；跳过/取消 complete(null)。
+  final Completer<String?> completer;
+
+  const AgentPendingQuestion({
+    required this.question,
+    required this.options,
+    required this.completer,
+  });
+}
+
+/// 各会话待回答提问（convId → 提问）。UI 在输入区上方渲染卡片；
+/// 回合取消/停止时由 stopGeneration 以 null 兜底完成，防工具挂死。
+final agentPendingQuestionProvider =
+    StateProvider<Map<String, AgentPendingQuestion>>((ref) => const {});
+
 /// 槽位门控纯函数（可测）：能否在现有活跃回合之上再开一个回合。
 /// 返回 null = 允许；否则为拒绝文案（直接作为 sendMessage 返回值）。
 ///
@@ -351,6 +374,43 @@ class ChatNotifier extends StateNotifier<bool> {
     return await manager.loadModel(modelId);
   }
 
+  /// 回合中转向（P2-B1，DSH `steer` 语义）：当前会话有运行中的智能体回合时，
+  /// 把 [text] 作为用户插话注入该回合的下一个 step（模型下一条请求即看到，
+  /// 不打断执行）；没有运行中的回合则回退为正常 sendMessage（新开回合）。
+  Future<String> steerTurn(String conversationId, String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return '';
+    final agent = _activeTurns[conversationId]?.agent;
+    if (agent == null || !agent.isRunning) {
+      return sendMessage(conversationId, text);
+    }
+    // 插话对用户可见（普通 user 气泡落库）；模型侧由 loop 在 step 边界
+    // 以「[用户插话] …」user 事件投喂，跨回合不入历史（同 trace 口径）。
+    await _storage.saveMessage(ChatMessage(
+      id: 'steer_${DateTime.now().millisecondsSinceEpoch}',
+      conversationId: conversationId,
+      role: MessageRole.user,
+      content: trimmed,
+    ));
+    await _refreshConversationMeta(conversationId);
+    agent.steer(trimmed);
+    return '（已作为插话转入执行中的回合）';
+  }
+
+  /// 回答 ask_user_question 的挂起提问（UI 卡片提交/点选项/跳过时调用）。
+  /// [answer] 为 null = 用户跳过；提问不存在时静默忽略。
+  void answerPendingQuestion(String conversationId, String? answer) {
+    final notifier = _ref.read(agentPendingQuestionProvider.notifier);
+    final pending = notifier.state[conversationId];
+    if (pending == null) return;
+    notifier.state = {
+      ...notifier.state,
+    }..remove(conversationId);
+    if (!pending.completer.isCompleted) {
+      pending.completer.complete(answer);
+    }
+  }
+
   /// Send a message to the currently loaded model.
   /// Automatically ensures the correct model is loaded first via ModelManager.
   ///
@@ -363,8 +423,7 @@ class ChatNotifier extends StateNotifier<bool> {
     List<String>? imagePaths,
     List<String>? attachmentPaths,
     String? audioPath,
-  }) async {
-    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
+  }) async {    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
     // 路由未定时先按纯槽位计数预检；路由确定后再补「本地互斥」校验。
     final settings = _ref.read(settingsProvider);
     final admission = checkTurnAdmission(
@@ -969,6 +1028,42 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.register(createSaveSkillTool(skillProvider));
     }
 
+    // ask_user_question（P2-B2，DSH tool-ask-user）：缺信息/需确认时向用户
+    // 提问，回合挂起等待；回答通道挂 agentPendingQuestionProvider → UI 卡片。
+    registry.register(createAskUserTool(ask: (question, options) {
+      final notifier = _ref.read(agentPendingQuestionProvider.notifier);
+      final completer = Completer<String?>();
+      notifier.state = {
+        ...notifier.state,
+        conversationId: AgentPendingQuestion(
+          question: question,
+          options: options,
+          completer: completer,
+        ),
+      };
+      return completer.future;
+    }));
+
+    // run_code（P3-1，DSH PTC 语义）：仅 API 档注册——编排型编程子调用
+    // 超出端侧小模型能力且耗 prefill；API 模型写编排程序是净收益。
+    if (useApi) {
+      registry.register(createRunCodeTool(callTool: (name, args) async {
+        final matches = registry
+            .visibleFor(agentModelKey)
+            .where((t) => t.name == name)
+            .toList();
+        if (matches.isEmpty) {
+          return ToolResult.error(
+              '未知工具：$name（run_code 只能调用本回合已注册的其他工具）');
+        }
+        try {
+          return await matches.first.execute(args);
+        } catch (e) {
+          return ToolResult.error('工具 "$name" 执行异常: $e');
+        }
+      }));
+    }
+
     // 能力快照（Phase 3）：API 声明原生工具调用 → selectProtocol 选出
     // NativeToolProtocol（tools 进请求体）；本地走 prompt-json 文本协议。
     final caps = _engineCapabilitiesFor(agentModelKey, activeApi);
@@ -983,6 +1078,9 @@ class ChatNotifier extends StateNotifier<bool> {
       modelId: agentModelKey,
       personaName: persona?.name,
       personaPrompt: persona?.prompt,
+      // 任务执行纪律段（P2-A2）：仅 API 档——local 档系统提示必须逐字节
+      // 稳定保 KV 前缀复用（与环境快照同一取舍）。
+      taskDiscipline: useApi,
     );
     // ---- Dev Agent：开发模式注入 DevContext（工作区/计划/记忆/开发循环）----
     // 注入失败静默跳过（不阻断回合）；关闭 = 零注入零回归。
@@ -1077,11 +1175,33 @@ class ChatNotifier extends StateNotifier<bool> {
     _ref.read(agentUiStateProvider.notifier).attach(conversationId, sessionLog);
 
     // ---- 子代理接缝（Phase 4）：in-process spawn/fork（设置可关）----
-    // 复用当前 registry/adapter/模型/系统提示（同模型、同工具集，§10.6）。
+    // 复用当前 registry/系统提示；adapter 可指定专用（更便宜）API 配置
+    // （P3-2 按步路由最小形态：重活/子任务走低价模型，主回答走主模型）。
     // 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
     if (settings.agentSubagentEnabled) {
+      // 专用子代理模型：设置指定 + 存在 + 与主模型不同才单独建 adapter。
+      LlmAdapter subagentEngine = engine;
+      final subApiId = settings.agentSubagentApiModelId;
+      if (useApi && subApiId.isNotEmpty && subApiId != activeApi?.id) {
+        ApiModelConfig? subApi;
+        for (final m in settings.apiModels) {
+          if (m.id == subApiId) {
+            subApi = m;
+            break;
+          }
+        }
+        if (subApi != null) {
+          subagentEngine = OpenAiAdapter(
+            protocol: protocol,
+            capabilities: caps,
+            openAi: _ref.read(openAiServiceProvider),
+            apiModel: subApi,
+            maxThinkingChars: settings.agentThinkingMaxChars,
+          );
+        }
+      }
       final subagentProvider = InProcessSubagentProvider(
-        adapter: engine,
+        adapter: subagentEngine,
         registry: registry,
         modelId: agentModelKey,
         providerKind: useApi ? ProviderKind.api : ProviderKind.local,
@@ -1089,7 +1209,23 @@ class ChatNotifier extends StateNotifier<bool> {
         parentSession: sessionLog,
       );
       // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
-      registry.register(createSubagentTool(subagentProvider));
+      // 后台子代理完成 → 通知转投父回合 step 收件箱（下一 step 模型可见）
+      // + 落一条 🔔 可见消息（不入模型上下文，上下文走收件箱）。
+      registry.register(createSubagentTool(
+        subagentProvider,
+        onBackgroundDone: (notice) {
+          turn.agent?.injectNotice(notice);
+          unawaited(_storage.saveMessage(ChatMessage(
+            id: 'bgsub_${DateTime.now().millisecondsSinceEpoch}',
+            conversationId: conversationId,
+            role: MessageRole.assistant,
+            content: '🔔 $notice',
+          )));
+        },
+      ));
+      // send_message 续轮（DSH tool-subagent-control）：向可续轮子代理
+      // 追加指令再跑一回合。
+      registry.register(createSubagentSendMessageTool(subagentProvider));
     }
 
     // 保存用户消息（UI 立即可见）。附件/多图落库供历史回看（ attachments 存
@@ -1619,6 +1755,9 @@ class ChatNotifier extends StateNotifier<bool> {
       // 标记为用户主动停止：API 侧取消会抛 [request cancelled]，
       // 由 [_suppressUserCancelled] 静默丢弃，避免误报「发送失败」。
       turn.userCancelled = true;
+      // 挂起的提问以"用户未回答"兜底完成——否则 ask_user 工具会把回合
+      // 挂死到超时，停止按钮看起来没反应。
+      answerPendingQuestion(id, null);
       // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
       final agent = turn.agent;
       if (agent != null && agent.isRunning) {

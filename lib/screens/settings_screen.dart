@@ -2580,6 +2580,33 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             subtitle: '模型可派生独立子代理执行大任务的子任务（spawn/fork）。'
                                 '固定约束：嵌套 ≤ 2 层、子代理内不可申请沙箱升级、每层独立预算',
                           ),
+                          // 子代理专用模型（P3-2）：重活/子任务可走更便宜的
+                          // API 配置，主回答仍走主模型（仅 API 档生效）。
+                          if (settings.agentSubagentEnabled &&
+                              settings.apiModels.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(
+                                  left: 4, right: 4, top: 8),
+                              child: DropdownButtonFormField<String>(
+                                value: settings.agentSubagentApiModelId,
+                                isDense: true,
+                                decoration: const InputDecoration(
+                                  labelText: '子代理专用模型（API 档）',
+                                  hintText: '跟随主模型',
+                                  isDense: true,
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: [
+                                  const DropdownMenuItem(
+                                      value: '', child: Text('跟随主模型')),
+                                  for (final cfg in settings.apiModels)
+                                    DropdownMenuItem(
+                                        value: cfg.id, child: Text(cfg.name)),
+                                ],
+                                onChanged: (v) => notifier
+                                    .setAgentSubagentApiModelId(v ?? ''),
+                              ),
+                            ),
                           const Divider(height: 24),
                           _buildToggleTitle(
                             '🌐 联网搜索',
