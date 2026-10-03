@@ -266,14 +266,157 @@ void main() {
             ToolCall(id: 'c1', name: 'get_weather',
                 arguments: {'city': 'Beijing'})
           ]),
-      // 第三次不应被调用（达到 maxSteps=2 上限）
+      // 第三次不应被调用（达到 maxSteps=2 上限；maxWrapups=0 关闭续跑）
       LlmResult(text: 'never', toolCalls: const []),
     ]);
-    final agent = _agent(fake, config: const AgentConfig(maxStepsPerTurn: 2));
+    final agent = _agent(fake,
+        config: const AgentConfig(maxStepsPerTurn: 2, maxWrapups: 0));
     final reason = await agent.kick('北京天气？');
     expect(reason.kind, TurnEndReasonKind.maxSteps);
     expect(fake.calls, 2); // 只到上限，不超
     expect(_findData(agent.session, kEventTurnEnd)?['reason'], 'maxSteps');
+  });
+
+  test('maxSteps 续跑（P2-A1）：撞上限自动合成收尾提示追加预算，不死停', () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(
+          text: '',
+          toolCalls: [
+            ToolCall(id: 'c0', name: 'get_weather',
+                arguments: {'city': 'Beijing'})
+          ]),
+      LlmResult(
+          text: '',
+          toolCalls: [
+            ToolCall(id: 'c1', name: 'get_weather',
+                arguments: {'city': 'Beijing'})
+          ]),
+      // 续跑轮（撞 maxSteps=2 后追加 2 步）：模型收尾作答
+      LlmResult(text: '根据查询结果，北京晴', toolCalls: const []),
+    ]);
+    final agent = _agent(fake,
+        config: const AgentConfig(maxStepsPerTurn: 2, maxWrapups: 1,
+            wrapupSteps: 2));
+    final reason = await agent.kick('北京天气？');
+    expect(reason.kind, TurnEndReasonKind.completed);
+    expect(fake.calls, 3); // 2 步预算 + 续跑 1 步
+    // 收尾提示以 user 事件入 log（模型可见）
+    final events = agent.session.rawEvents;
+    final guidance = events
+        .where((e) => e.type == kEventUserMessage)
+        .where((e) => '${e.data['content']}'.contains('收尾阶段'))
+        .toList();
+    expect(guidance, isNotEmpty);
+    expect(_findData(agent.session, kEventTurnEnd)?['reason'], 'completed');
+  });
+
+  test('maxSteps 续跑耗尽：总预算封顶后仍 maxSteps 终止', () async {
+    LlmResult alwaysTool() => LlmResult(
+        text: '',
+        toolCalls: [
+          ToolCall(id: 'c${DateTime.now().microsecondsSinceEpoch}',
+              name: 'get_weather', arguments: {'city': 'Beijing'})
+        ]);
+    final fake = FakeLlmAdapter(List.generate(10, (_) => alwaysTool()));
+    final agent = _agent(fake,
+        config: const AgentConfig(maxStepsPerTurn: 2, maxWrapups: 1,
+            wrapupSteps: 2));
+    final reason = await agent.kick('北京天气？');
+    expect(reason.kind, TurnEndReasonKind.maxSteps);
+    expect(fake.calls, 4); // 2 + 2（一轮收尾）= 封顶
+  });
+
+  test('收敛警告（P2-A1）：剩余步数 ≤2 时注入一次引导消息', () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(
+          text: '',
+          toolCalls: [
+            ToolCall(id: 'c0', name: 'get_weather',
+                arguments: {'city': 'Beijing'})
+          ]),
+      LlmResult(text: '北京晴', toolCalls: const []),
+    ]);
+    // maxSteps=2：第一步后剩 1 步 → 应注入警告
+    final agent = _agent(fake,
+        config: const AgentConfig(maxStepsPerTurn: 2, maxWrapups: 0));
+    await agent.kick('北京天气？');
+    final events = agent.session.rawEvents;
+    final warnings = events
+        .where((e) => e.type == kEventUserMessage)
+        .where((e) => '${e.data['content']}'.contains('剩余步数不多'))
+        .toList();
+    expect(warnings.length, 1);
+  });
+
+  test('steer（P2-B1）：回合中插话在下一个 step 前落为 user 消息', () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(
+          text: '',
+          toolCalls: [
+            ToolCall(id: 'c0', name: 'get_weather',
+                arguments: {'city': 'Beijing'})
+          ]),
+      LlmResult(text: '北京晴', toolCalls: const []),
+    ]);
+    // 工具执行体内排队插话：保证入队时机在 step1 drain 之后、step2 drain 之前。
+    late final ReactLoopAgent agent;
+    agent = _agent(fake, tools: [
+      ToolDefinition(
+        name: 'get_weather',
+        description: '查询天气',
+        parameters: {
+          'type': 'object',
+          'properties': {'city': {'type': 'string'}},
+          'required': ['city'],
+        },
+        execute: (args) async {
+          agent.steer('顺便问下上海呢');
+          return ToolResult(content: 'Beijing: sunny 25C');
+        },
+      ),
+    ]);
+    await agent.kick('北京天气？');
+    final events = agent.session.rawEvents;
+    final steerMsgs = events
+        .where((e) => e.type == kEventUserMessage)
+        .where((e) => '${e.data['content']}'.contains('[用户插话] 顺便问下上海呢'))
+        .toList();
+    expect(steerMsgs.length, 1);
+  });
+
+  test('injectNotice（P3-3）：系统通知在 step 边界入模型上下文', () async {
+    final fake = FakeLlmAdapter([
+      LlmResult(
+          text: '',
+          toolCalls: [
+            ToolCall(id: 'c0', name: 'get_weather',
+                arguments: {'city': 'Beijing'})
+          ]),
+      LlmResult(text: '北京晴', toolCalls: const []),
+    ]);
+    late final ReactLoopAgent agent;
+    agent = _agent(fake, tools: [
+      ToolDefinition(
+        name: 'get_weather',
+        description: '查询天气',
+        parameters: {
+          'type': 'object',
+          'properties': {'city': {'type': 'string'}},
+          'required': ['city'],
+        },
+        execute: (args) async {
+          agent.injectNotice('后台子代理已完成（id=sub-1）');
+          return ToolResult(content: 'Beijing: sunny 25C');
+        },
+      ),
+    ]);
+    await agent.kick('北京天气？');
+    final events = agent.session.rawEvents;
+    final notices = events
+        .where((e) => e.type == kEventUserMessage)
+        .where((e) => '${e.data['content']}'.contains('[系统通知] 后台子代理已完成'))
+        .toList();
+    expect(notices.length, 1);
   });
 
   test('未知工具：模型调未注册工具 → 工具返回可读错误，不崩溃', () async {

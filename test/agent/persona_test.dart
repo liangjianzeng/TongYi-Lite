@@ -143,4 +143,47 @@ void main() {
       );
     });
   });
+
+  group('buildSystemPrompt 任务执行纪律段（P2-A2）', () {
+    test('taskDiscipline=false（默认）不注入纪律段', () {
+      final prompt = buildSystemPrompt(
+        modelName: 'm',
+        registry: registry(),
+        protocol: PromptJsonProtocol(),
+        modelId: 'm',
+      );
+      expect(prompt, isNot(contains('【任务执行纪律】')));
+    });
+
+    test('taskDiscipline=true 注入五条纪律（规划/推进/验证/诚实/停止）', () {
+      final prompt = buildSystemPrompt(
+        modelName: 'm',
+        registry: registry(),
+        protocol: PromptJsonProtocol(),
+        modelId: 'm',
+        taskDiscipline: true,
+      );
+      expect(prompt, contains('【任务执行纪律】'));
+      expect(prompt, contains('最多一个步骤「进行中」'));
+      expect(prompt, contains('必须用工具结果佐证'));
+      // DSH wrapup grounding 同语义：没证据直说没拿到，不编造。
+      expect(prompt, contains('绝不编造'));
+      expect(prompt, contains('立即收尾作答'));
+      // 纪律段插在工具规则之后、工具清单之前（段序稳定）。
+      final disciplineIdx = prompt.indexOf('【任务执行纪律】');
+      final rulesIdx = prompt.indexOf('【工具调用规则】');
+      expect(disciplineIdx, greaterThan(rulesIdx));
+    });
+
+    test('设置字段 agentSubagentApiModelId：默认空 + 往返一致（P3-2）', () {
+      const base = InferenceSettings();
+      expect(base.agentSubagentApiModelId, '');
+      final updated =
+          base.copyWith(agentSubagentApiModelId: 'api-cheap');
+      expect(updated.agentSubagentApiModelId, 'api-cheap');
+      final restored =
+          InferenceSettings.fromJson(updated.toJson());
+      expect(restored.agentSubagentApiModelId, 'api-cheap');
+    });
+  });
 }

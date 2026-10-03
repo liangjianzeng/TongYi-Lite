@@ -45,6 +45,51 @@ void main() {
       expect(result.content, contains('2. [todo] 验证推理'));
     });
 
+    test('单活跃强制（P2-A3）：两项 in_progress 被拒绝且原清单不变', () async {
+      // 预置一条旧清单，验证拒绝后不被污染。
+      await createTodoWriteTool().execute({
+        'todos': [
+          {'content': '旧任务', 'status': 'todo'},
+        ],
+      });
+      final result = await createTodoWriteTool().execute({
+        'todos': [
+          {'content': '任务A', 'status': 'in_progress'},
+          {'content': '任务B', 'status': 'in_progress'},
+        ],
+      });
+      expect(result.isError, isTrue);
+      expect(result.content, contains('in_progress'));
+      expect(result.content, contains('只能有一项进行中'));
+      // 原清单保持不变
+      final list = await createTodoListTool().execute(const {});
+      expect(list.content, contains('旧任务'));
+      expect(list.content, isNot(contains('任务A')));
+    });
+
+    test('单活跃强制：doing 是 in_progress 别名，同样计入', () async {
+      final result = await createTodoWriteTool().execute({
+        'todos': [
+          {'content': '任务A', 'status': 'in_progress'},
+          {'content': '任务B', 'status': 'doing'},
+        ],
+      });
+      expect(result.isError, isTrue);
+    });
+
+    test('计数回显（P2-A3）：更新结果带待办/进行中/已完成计数', () async {
+      final result = await createTodoWriteTool().execute({
+        'todos': [
+          {'content': '已完成的事', 'status': 'done'},
+          {'content': '正在做的事', 'status': 'in_progress'},
+          {'content': '还没做的事'},
+        ],
+      });
+      expect(result.isError, isFalse);
+      expect(result.content, contains('待办 1 · 进行中 1 · 已完成 1'));
+      expect(result.content, contains('待办清单已更新'));
+    });
+
     test('todo_list 可读取当前清单', () async {
       await createTodoWriteTool().execute({
         'todos': [

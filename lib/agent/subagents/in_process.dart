@@ -45,6 +45,17 @@ final SubagentDepthCounter kSubagentDepth = SubagentDepthCounter();
 /// 生成子代理 id 用的随机数源。
 final Random _kRandom = Random();
 
+/// 可续轮子代理保留容量（FIFO）。
+const int kContinuableCapacity = 8;
+
+/// 一个可续轮子代理（会话 + agent + 运行标记）。
+final class _Continuable {
+  final ReactLoopAgent agent;
+  final SessionLog session;
+  bool running = false;
+  _Continuable(this.agent, this.session);
+}
+
 /// 子代理审批 `never`：恒拒绝沙箱升级（子代理不可升 `danger-full-access`）。
 /// 传入即 fail-closed：审批通道不"询问用户"，直接否决升级。
 final AgentSandboxApprover neverApprover = (escalation, toolName) =>
@@ -61,6 +72,11 @@ final class InProcessSubagentProvider extends SubagentProvider {
 
   // 子代理受限配置（§10.6 成本控制）。
   final AgentConfig _subConfig;
+
+  /// 可续轮子代理表（DSH continuable subagent）：id → 会话+agent。
+  /// 容量 [kContinuableCapacity] FIFO（超出回收最旧——父代理拿到的 id
+  /// 太旧时 sendMessage 报"已回收"，重新委派即可）。
+  final Map<String, _Continuable> _continuable = {};
 
   InProcessSubagentProvider({
     required LlmAdapter adapter,
@@ -109,13 +125,74 @@ final class InProcessSubagentProvider extends SubagentProvider {
     final id =
         'sub-${DateTime.now().millisecondsSinceEpoch}-${_kRandom.nextInt(10000)}';
     final session = _createSession(request);
+    final agent = _buildAgent(session);
+    _rememberContinuable(id, agent, session);
+    final entry = _continuable[id]!;
+    entry.running = true;
     final completer = Completer<SubagentResult>();
-    unawaited(_runTurn(session, request.task)
+    unawaited(_runTurnWith(agent, request.task)
         .then((r) => completer.complete(r))
         .catchError((Object e, StackTrace st) =>
             completer.complete(SubagentResult.fromError(e.toString())))
-        .then((_) => kSubagentDepth.pop()));
+        .then((_) {
+      kSubagentDepth.pop();
+      entry.running = false;
+    }));
     return SubagentRun(id, session, completer.future);
+  }
+
+  @override
+  Future<SubagentResult> sendMessage(String id, String message) async {
+    final entry = _continuable[id];
+    if (entry == null) {
+      return SubagentResult(
+        output: '子代理 $id 不存在或已被回收（可续轮子代理最多保留 '
+            '$kContinuableCapacity 个）。请重新用 subagent 委派。',
+        isError: true,
+        stopReason: 'error',
+      );
+    }
+    final msg = message.trim();
+    if (msg.isEmpty) {
+      return SubagentResult.fromError('send_message 的 message 不能为空');
+    }
+    if (entry.running) {
+      return SubagentResult(
+        output: '子代理 $id 仍在执行中，本次消息未送达。'
+            '请等它完成后再 send_message。',
+        isError: true,
+        stopReason: 'error',
+      );
+    }
+    kSubagentDepth.push();
+    try {
+      entry.running = true;
+      return await _runTurnWith(entry.agent, msg);
+    } finally {
+      entry.running = false;
+      kSubagentDepth.pop();
+    }
+  }
+
+  void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s) {
+    while (_continuable.length >= kContinuableCapacity) {
+      _continuable.remove(_continuable.keys.first);
+    }
+    _continuable[id] = _Continuable(agent, s);
+  }
+
+  ReactLoopAgent _buildAgent(SessionLog session) {
+    return ReactLoopAgent(
+      session: session,
+      adapter: _adapter,
+      registry: _registry,
+      config: _subConfig,
+      modelId: _modelId,
+      providerKind: _providerKind,
+      systemPrompt: _systemPrompt,
+      sandboxApprover: neverApprover,
+      // 子代理不更新 UI（用户关注父输出）；工具活动归父 session。
+    );
   }
 
   SessionLog _createSession(SubagentStartRequest request) {
@@ -156,18 +233,7 @@ final class InProcessSubagentProvider extends SubagentProvider {
     return s.length;
   }
 
-  Future<SubagentResult> _runTurn(SessionLog session, String task) async {
-    final agent = ReactLoopAgent(
-      session: session,
-      adapter: _adapter,
-      registry: _registry,
-      config: _subConfig,
-      modelId: _modelId,
-      providerKind: _providerKind,
-      systemPrompt: _systemPrompt,
-      sandboxApprover: neverApprover,
-      // 子代理不更新 UI（用户关注父输出）；工具活动归父 session。
-    );
+  Future<SubagentResult> _runTurnWith(ReactLoopAgent agent, String task) async {
     final turnReason = await agent.kick(task);
     // 映射 turn 结束原因 → SubagentResult（§10.5）。
     bool isError;

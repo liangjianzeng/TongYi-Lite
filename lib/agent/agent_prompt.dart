@@ -16,6 +16,9 @@ import 'tool_registry.dart';
 /// [modelId] 按模型渲染可见工具清单；
 /// [personaName]/[personaPrompt] 自定义人格（null = 标准人格，行为不变）：
 /// 身份段改为以人格自称开头，人设提示词作为独立分段插在身份段与工具指引之间。
+/// [taskDiscipline] 任务执行纪律段（P2-A2，对照 DSH goal/wrapup grounding）：
+/// 规划→推进→验证→诚实汇报→停止 五条纪律。仅 API 档开启——local 档
+/// 系统提示必须逐字节稳定（KV 前缀复用）。
 ///
 /// 环境快照（当前时间）不在这里注入——由 ReactLoopAgent 构造器追加到
 /// 系统提示**最末**（skills/AGENTS.md 之后），保证稳定前缀在前。
@@ -26,6 +29,7 @@ String buildSystemPrompt({
   String modelId = '',
   String? personaName,
   String? personaPrompt,
+  bool taskDiscipline = false,
 }) {
   final toolSection = protocol.buildToolSection(registry, modelId: modelId);
   final hasPersona = personaName != null && personaName.trim().isNotEmpty;
@@ -79,6 +83,23 @@ String buildSystemPrompt({
     '指向 workspace/_uploads/ 的附件必须先用 read_file 完整阅读，'
     '再按用户要求分析/总结，绝不在未读文件的情况下凭空作答。\n'
     '11. 不需要工具时直接回答用户。',
+    // 任务执行纪律段（仅 API 档）：把"把任务做完"的元纪律独立成段——
+    // 规划/推进/验证/诚实/停止。grounding 句对照 DSH goal wrapup 反幻觉原文。
+    if (taskDiscipline)
+      '【任务执行纪律】\n'
+      '1. 规划：接手多步任务，先用 todo_write 列出全部步骤再动手；'
+      '执行中任意时刻最多一个步骤「进行中」，完成一项立刻标记完成，'
+      '绝不批量补记。\n'
+      '2. 推进：每个动作都要产生真实进展（工具结果、写入的文件、拿到'
+      '的数据）。原地打转（重复调用、空泛思考）时换方法或直接收尾。\n'
+      '3. 验证：声明「完成/成功」之前，必须用工具结果佐证——写完的文件'
+      '读回确认、执行的命令查看输出、算出的数据核对量级。无法验证的结论'
+      '要明说「未验证」，绝不假装已确认。\n'
+      '4. 诚实汇报：只汇报本回合工具结果真正证实的事情；某个信息不在'
+      '工具结果里，就直说没有拿到，绝不编造细节填补空白。任务做不完时，'
+      '如实说明已完成的部分、卡在哪一步、需要什么才能继续。\n'
+      '5. 停止：已有信息足以回答用户问题时立即收尾作答；不要为了'
+      '「更保险」而反复调用工具，也不要输出与任务无关的补充。',
     if (toolSection.isNotEmpty) toolSection,
   ];
   return sections.join('\n\n');

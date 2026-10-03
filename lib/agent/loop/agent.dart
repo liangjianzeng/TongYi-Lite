@@ -284,6 +284,7 @@ class ReactLoopAgent {
     // 重发同一调用不收敛。签名 → 首次结果缓存，回合开始时清空。
     _turnToolCallCache.clear();
     _turnToolCallCounts.clear();
+    _clearInbox();
     // imagePath 入事件（store.dart importFromMessages 同款键名）：API 路线
     // 无状态，每个 step 重放历史时都要把图片重发；不入 log 则后续 step 丢图。
     final userSeq = _session.append(
@@ -305,17 +306,49 @@ class ReactLoopAgent {
     var step = 0;
     var reason = TurnEndReasonKind.completed;
     bool turnDone = false;
+    // 步数预算（P2-A1，DSH goal-round-driver 语义）：撞 [maxStepsPerTurn]
+    // 不死停——合成收尾提示追加预算再给 [maxWrapups] 轮收敛机会；
+    // 剩余步数 ≤2 时先注入收敛警告，逼模型提前收尾。
+    var stepBudget = _config.maxStepsPerTurn;
+    var wrapupsUsed = 0;
+    var warnedBudget = -1;
     try {
-      while (step < _config.maxStepsPerTurn && !turnDone) {
+      while (!turnDone) {
         // 用户取消可能在工具执行中途触发 —— 在 step 边界检查，尽快收 turn。
         if (_cancelCompleted) {
           reason = TurnEndReasonKind.interrupted;
           turnDone = true;
           break;
         }
+        if (step >= stepBudget) {
+          if (wrapupsUsed < _config.maxWrapups) {
+            wrapupsUsed++;
+            stepBudget += _config.wrapupSteps;
+            _appendTurnGuidance(
+                '[系统] 工具循环步数已达上限，本回合进入收尾阶段'
+                '（追加 ${_config.wrapupSteps} 步预算）：请基于已完成的工具'
+                '结果与进展，立即汇总并给出最终回答；未完成的部分明确说明'
+                '（已完成什么、还差什么、建议下一步）。不要再发起新的'
+                '大规模工具调用。');
+            continue;
+          }
+          reason = TurnEndReasonKind.maxSteps;
+          break;
+        }
+        final remaining = stepBudget - step;
+        if (remaining <= 2 && warnedBudget != stepBudget) {
+          warnedBudget = stepBudget;
+          _appendTurnGuidance(
+              '[系统] 工具循环剩余步数不多（约 $remaining 步）：'
+              '若已有足够信息，请立即给出最终回答；若必须继续调用工具，'
+              '只做完成任务必需的关键调用。');
+        }
         step++;
         // 新 step：重置本步重试预算（同一 step 内最多 maxRetries 次重试）。
         _retry.reset();
+        // steer/通知收件箱（DSH next-step inbox 语义）：排队的插话与
+        // 系统通知在本 step 请求前落为 user 消息，模型下一条请求即看到。
+        _drainInbox();
         _session.append(kEventStepStart, {'turn': turn, 'step': step});
         // WP3a：主动压缩前置——估算投影 token，超预算先裁剪，
         // 不等撞 nctx/服务端硬墙（被动压缩只救得了 CONTEXT_WINDOW_EXCEEDED）。
@@ -386,9 +419,6 @@ class ReactLoopAgent {
           }
         }
         _session.append(kEventStepEnd, {'turn': turn, 'step': step});
-      }
-      if (!turnDone && step >= _config.maxStepsPerTurn) {
-        reason = TurnEndReasonKind.maxSteps;
       }
     } finally {
       _session.append(kEventTurnEnd, {'turn': turn, 'reason': reason.name});
@@ -603,6 +633,65 @@ class ReactLoopAgent {
 
   /// 本回合各工具调用计数（重复守护用），kick 时清空。
   final Map<String, int> _turnToolCallCounts = {};
+
+  // ---- steer / 通知收件箱（DSH next-step inbox 语义）----
+  // [steer] 用户回合中插话（下一条模型请求即看到，不新开回合）；
+  // [injectNotice] 系统产生的通知（如后台子代理完成），同样搭下一 step。
+  // 队列在 step 边界统一 drain 为 user 消息事件（模型可见、log 溯源）；
+  // kick 时清空（跨回合残留的插话没有意义——回合已结束，用户重发即可）。
+  final List<String> _steerQueue = [];
+  final List<String> _noticeQueue = [];
+
+  /// 回合中转向：用户插话进入**当前回合**的下一个 step（DSH `steer`）。
+  /// 不唤醒、不新开回合——仅当回合仍在跑时生效；agent idle 时调用方
+  /// 应直接走正常 sendMessage。
+  void steer(String text) {
+    final t = text.trim();
+    if (t.isNotEmpty) _steerQueue.add(t);
+  }
+
+  /// 系统通知注入（DSH `inject`）：后台任务结果等运行时事件搭下一 step
+  /// 进入模型上下文，不带用户语义。
+  void injectNotice(String text) {
+    final t = text.trim();
+    if (t.isNotEmpty) _noticeQueue.add(t);
+  }
+
+  /// step 边界统一 drain：系统通知在前（任务事实），用户插话在后（最新
+  /// 指令最靠近请求），模型按时间序读到。
+  void _drainInbox() {
+    while (_noticeQueue.isNotEmpty) {
+      _session.append(
+        kEventUserMessage,
+        {'content': '[系统通知] ${_noticeQueue.removeAt(0)}'},
+        source: const {'kind': 'notice'},
+      );
+    }
+    while (_steerQueue.isNotEmpty) {
+      _session.append(
+        kEventUserMessage,
+        {'content': '[用户插话] ${_steerQueue.removeAt(0)}'},
+        source: const {'kind': 'steer'},
+      );
+    }
+  }
+
+  /// kick 时清空收件箱（上回合残留的插话/通知不再投喂）。
+  void _clearInbox() {
+    _steerQueue.clear();
+    _noticeQueue.clear();
+  }
+
+  /// 回合引导消息（收尾/收敛警告）：以 user 事件入 log，仅本回合内可见
+  /// —— trace 信封只编码 assistant(toolCalls)/tool/result，下回合导入
+  /// 自然消失，不污染跨回合历史。
+  void _appendTurnGuidance(String content) {
+    _session.append(
+      kEventUserMessage,
+      {'content': content},
+      source: const {'kind': 'system-guidance'},
+    );
+  }
 
   /// 单次工具调用安全包装（流水线异常不逃逸，转 ToolResult）。
   Future<ToolResult> _safeExecute(ToolCall call) async {
