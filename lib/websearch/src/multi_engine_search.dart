@@ -1,8 +1,8 @@
 /// 多引擎聚合器：并行查多引擎 → 引擎级熔断冷却 → 跨引擎去重合并 → 链接还原。
 ///
 /// 设计要点（调研+实测沉淀，详见 docs/websearch_direct_2026-10-02.md）：
-/// - **熔断按引擎维度**：blocked（反爬）冷却指数退避（2min 起，×2，封顶 15min），
-///   parse（页面改版）5min，network 45s，empty 不冷却（是查询相关现象）。
+/// - **熔断按引擎维度**：blocked（反爬）冷却指数退避（1min 起，×2，封顶 10min），
+///   parse（页面改版）3min，network 20s，empty 不冷却（是查询相关现象）。
 ///   手机 IP 频繁漂移（蜂窝/WiFi 切换），分钟级冷却天然适配——冷却到期自动
 ///   重试，不需要用户干预。
 /// - **合并按引擎优先级轮转**（bing → 360 → chinaso → 搜狗 → 百度）：
@@ -27,10 +27,13 @@ import 'engines/so360_engine.dart';
 import 'engines/sogou_engine.dart';
 
 /// 各失败类型的冷却时长（指数退避基于此）。
-const Duration _cooldownBlockedBase = Duration(minutes: 2);
-const Duration _cooldownBlockedCap = Duration(minutes: 15);
-const Duration _cooldownParse = Duration(minutes: 5);
-const Duration _cooldownNetwork = Duration(seconds: 45);
+/// 2026-10-02 放宽（端侧直连门控太严）：blocked 2min→1min 起步、封顶 15→10min；
+/// parse 5→3min；network 45s→20s。手机 IP 频繁漂移，分钟级冷却已足够防反爬，
+/// 过长的冷却反而让整回合搜索体验"卡死"。
+const Duration _cooldownBlockedBase = Duration(minutes: 1);
+const Duration _cooldownBlockedCap = Duration(minutes: 10);
+const Duration _cooldownParse = Duration(minutes: 3);
+const Duration _cooldownNetwork = Duration(seconds: 20);
 
 class _EngineState {
   int blockedStreak = 0;

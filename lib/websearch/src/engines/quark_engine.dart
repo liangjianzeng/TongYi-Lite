@@ -9,7 +9,8 @@
 ///   sourceProps.dest_url；title 类：title/titleProps.content 等），对类型
 ///   变化鲁棒；
 /// - 阿里 x5sec 风控：短时约 9 次请求触发，`"action": "captcha"` JSON 片段
-///   出现即判 blocked，封约 15 分钟——熔断冷却参数恰好匹配。
+///   出现即判 blocked——熔断冷却会指数退避兜底（2026-10-02 已放宽至 1min 起、
+///   封顶 10min，冷却到期换身份重试）。
 library;
 
 import 'dart:convert';

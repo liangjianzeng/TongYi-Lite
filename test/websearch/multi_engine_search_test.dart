@@ -177,26 +177,26 @@ void main() {
       expect(bad.calls, 1); // 冷却期内未再调用
       expect(out2.hits, hasLength(1)); // 好引擎照常出结果
 
-      // 冷却到期（默认 blocked 首次 2min）自动重试。
-      ticker.advance(const Duration(minutes: 2, seconds: 1));
+      // 冷却到期（默认 blocked 首次 1min）自动重试。
+      ticker.advance(const Duration(minutes: 1, seconds: 1));
       await m.search('q');
       expect(bad.calls, 2);
     });
 
-    test('blocked 指数退避：连续封锁冷却时长翻倍（2min→4min）', () async {
+    test('blocked 指数退避：连续封锁冷却时长翻倍（1min→2min）', () async {
       final ticker = _Ticker();
       final bad = FakeEngine('bad', 'B', (q, l) async {
         throw const SearchEngineException('bad', 'blocked', '验证码');
       });
       final m = MultiEngineSearch(engines: [bad], now: ticker.fn);
-      await m.search('q'); // 第1次：2min
+      await m.search('q'); // 第1次：1min
       expect(m.isCooling('bad'), isTrue);
-      ticker.advance(const Duration(minutes: 2, seconds: 1));
-      await m.search('q'); // 第2次：4min
-      ticker.advance(const Duration(minutes: 3));
-      expect(m.isCooling('bad'), isTrue); // 4min 未到
       ticker.advance(const Duration(minutes: 1, seconds: 1));
-      expect(m.isCooling('bad'), isFalse); // 4min+1s 到期
+      await m.search('q'); // 第2次：2min
+      ticker.advance(const Duration(minutes: 1));
+      expect(m.isCooling('bad'), isTrue); // 2min 未到
+      ticker.advance(const Duration(minutes: 1, seconds: 1));
+      expect(m.isCooling('bad'), isFalse); // 2min+1s 到期
     });
 
     test('成功重置封锁连击；empty 不冷却', () async {
@@ -210,27 +210,27 @@ void main() {
         return [hit('e', 'https://e.com/1')];
       });
       final m = MultiEngineSearch(engines: [e], now: ticker.fn);
-      await m.search('q'); // blocked #1 → 冷却 2min
+      await m.search('q'); // blocked #1 → 冷却 1min
       fail = false;
-      ticker.advance(const Duration(minutes: 2, seconds: 1));
+      ticker.advance(const Duration(minutes: 1, seconds: 1));
       await m.search('ok'); // 成功 → streak 清零
       await m.search('empty'); // empty → 不冷却
       expect(m.isCooling('e'), isFalse);
-      // 下次 blocked 因为 streak 已重置，冷却回到 2min 而不是 8min。
+      // 下次 blocked 因为 streak 已重置，冷却回到 1min 而不是 4min。
       fail = true;
       await m.search('q');
-      ticker.advance(const Duration(minutes: 2, seconds: 1));
+      ticker.advance(const Duration(minutes: 1, seconds: 1));
       expect(m.isCooling('e'), isFalse);
     });
 
-    test('parse 冷却 5min；network 冷却 45s', () async {
+    test('parse 冷却 3min；network 冷却 20s', () async {
       final ticker = _Ticker();
       final e = FakeEngine('e', 'E', (q, l) async {
         throw const SearchEngineException('e', 'parse', '结构不认识');
       });
       final m = MultiEngineSearch(engines: [e], now: ticker.fn);
       await m.search('q');
-      ticker.advance(const Duration(minutes: 4));
+      ticker.advance(const Duration(minutes: 2));
       expect(m.isCooling('e'), isTrue);
       ticker.advance(const Duration(minutes: 1, seconds: 1));
       expect(m.isCooling('e'), isFalse);
