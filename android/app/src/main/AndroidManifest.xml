@@ -29,6 +29,12 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!-- Dev Agent L2：Termux RUN_COMMAND 免 SSH 通道（normal 级权限）。
+         Termux 侧还需 ~/.termux/termux.properties 里 allow-external-apps=true。 -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <!-- Dev Agent L2：Termux 伴侣 APK 自动下载后拉起安装器（用户逐次确认）。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:name="${applicationName}"
         android:label="TongYi-Lite"
