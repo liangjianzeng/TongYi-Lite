@@ -18,6 +18,14 @@ import 'task.dart';
 final class DevStore {
   DevStore({this.baseDirOverride});
 
+  /// 测试注入的全局默认实例（工具层无显式注入点时使用；生产恒 null）。
+  /// 仅测试可写：setUp 里设为 override 实例，tearDown 还原 null。
+  static DevStore? testDefault;
+
+  /// 工具层取 store 的统一入口（显式 store 优先，其次测试默认，最后新建）。
+  static DevStore resolve([DevStore? explicit]) =>
+      explicit ?? testDefault ?? DevStore();
+
   /// 测试注入：绕过 path_provider 直接指定根目录（null = 真实 ApplicationSupport）。
   final String? baseDirOverride;
 
@@ -76,9 +84,20 @@ final class DevStore {
   }
 
   /// 工作区本地镜像目录：`documents/workspace/projects/<safe-id>/`。
+  /// 测试（baseDirOverride）下 = `<override>/projects/<safe-id>`（不触 path_provider）。
   Future<String> workspaceLocalMirror(String id) async {
+    if (baseDirOverride != null) {
+      return p.join(baseDirOverride!, 'projects', _safe(id));
+    }
     final docs = await getApplicationDocumentsDirectory();
     return p.join(docs.path, 'workspace', 'projects', _safe(id));
+  }
+
+  /// 默认工作区根目录（documents/workspace；测试 override 下 = <override>/workspace）。
+  Future<String> defaultWorkspaceDir() async {
+    if (baseDirOverride != null) return p.join(baseDirOverride!, 'workspace');
+    final docs = await getApplicationDocumentsDirectory();
+    return p.join(docs.path, 'workspace');
   }
 
   // ---------------------------------------------------------------------------

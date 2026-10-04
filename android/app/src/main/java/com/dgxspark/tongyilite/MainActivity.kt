@@ -172,6 +172,155 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // 开发环境桥（Dev Agent L1/L2）：native 信息 + Termux RUN_COMMAND
+        // 免 SSH 通道 + Termux 伴侣 APK 下载/安装。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/devenv"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "nativeInfo" -> result.success(mapOf(
+                    "nativeLibraryDir" to applicationInfo.nativeLibraryDir,
+                    "filesDir" to filesDir.absolutePath,
+                ))
+                "runTermux" -> handleRunTermux(call, result)
+                "canRequestInstall" -> result.success(canRequestInstall())
+                "installApk" -> handleInstallApk(call, result)
+                "downloadTermuxApk" -> handleDownloadTermuxApk(call, result)
+                else -> result.notImplemented()
+            }
+        }
+
+        // 本地 git 桥（Dev Agent L1）：JGit 进程内执行（零 exec，W^X 安全）。
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.dgxspark.tongyilite/devgit"
+        ).setMethodCallHandler { call, result ->
+            devGitExecutor.submit {
+                val reply = try {
+                    when (call.method) {
+                        "status" -> DevGitPlugin.status(
+                            call.argument<String>("root") ?: "")
+                        "diff" -> DevGitPlugin.diff(
+                            call.argument<String>("root") ?: "",
+                            call.argument<Boolean>("staged") == true,
+                            call.argument<String>("file"))
+                        "log" -> DevGitPlugin.log(
+                            call.argument<String>("root") ?: "",
+                            call.argument<Number>("n")?.toInt() ?: 10)
+                        "commit" -> DevGitPlugin.commit(
+                            call.argument<String>("root") ?: "",
+                            call.argument<List<String>>("files") ?: emptyList(),
+                            call.argument<String>("message") ?: "")
+                        "push" -> DevGitPlugin.push(
+                            call.argument<String>("root") ?: "",
+                            call.argument<String>("remote") ?: "origin",
+                            call.argument<String>("branch"),
+                            call.argument<String>("username"),
+                            call.argument<String>("password"))
+                        "clone" -> DevGitPlugin.clone(
+                            call.argument<String>("url") ?: "",
+                            call.argument<String>("target") ?: "",
+                            call.argument<String>("username"),
+                            call.argument<String>("password"),
+                            call.argument<String>("branch"))
+                        else -> null
+                    }
+                } catch (e: Exception) {
+                    logE("devgit", "${call.method} failed: ${e.message}", e)
+                    mapOf("ok" to false, "output" to "git 操作异常：${e.message}")
+                }
+                runOnMain {
+                    if (reply == null) result.notImplemented()
+                    else result.success(reply)
+                }
+            }
+        }
+    }
+
+    /** Termux RUN_COMMAND intent 发送（免 SSH 通道）。返回错误信息或 null。 */
+    private fun handleRunTermux(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("path").orEmpty()
+        val args = call.argument<List<String>>("args") ?: emptyList()
+        val workDir = call.argument<String>("workDir")
+        if (path.isEmpty() || args.isEmpty()) {
+            result.error("BAD_ARGS", "path/args 不能为空", null)
+            return
+        }
+        try {
+            val intent = Intent().apply {
+                setClassName("com.termux", "com.termux.app.RunCommandService")
+                action = "com.termux.RUN_COMMAND"
+                putExtra("com.termux.RUN_COMMAND_PATH", path)
+                putExtra("com.termux.RUN_COMMAND_ARGUMENTS", args.toTypedArray())
+                if (!workDir.isNullOrEmpty()) {
+                    putExtra("com.termux.RUN_COMMAND_WORKDIR", workDir)
+                }
+                putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+            }
+            startService(intent)
+            logI("handleRunTermux", "RUN_COMMAND sent: $path ${args.joinToString(" ").take(80)}")
+            result.success(null)
+        } catch (e: Exception) {
+            logW("handleRunTermux", "send failed: ${e.message}", e)
+            result.success("发送失败：${e.message}（Termux 未安装或未允许外部应用执行）")
+        }
+    }
+
+    private fun canRequestInstall(): Boolean = try {
+        packageManager.canRequestPackageInstalls()
+    } catch (_: Exception) {
+        false
+    }
+
+    /** FileProvider 拉起 APK 安装器（Termux 伴侣应用）。返回错误信息或 null。 */
+    private fun handleInstallApk(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("path").orEmpty()
+        val f = File(path)
+        if (path.isEmpty() || !f.isFile) {
+            result.error("NOT_FOUND", "APK 不存在：$path", null)
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            logI("handleInstallApk", "installer opened for $path")
+            result.success(null)
+        } catch (e: Exception) {
+            logW("handleInstallApk", "install failed: ${e.message}", e)
+            result.success("安装器拉起失败：${e.message}")
+        }
+    }
+
+    /** 系统 DownloadManager 下载 Termux APK 到 Download/TongYi-Lite/。 */
+    private fun handleDownloadTermuxApk(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url").orEmpty()
+        if (url.isEmpty()) {
+            result.error("BAD_ARGS", "url 不能为空", null)
+            return
+        }
+        try {
+            val req = android.app.DownloadManager.Request(Uri.parse(url)).apply {
+                setTitle("Termux.apk")
+                setDescription("TongYi-Lite 开发环境（Termux 伴侣应用）")
+                setDestinationInExternalPublicDir(
+                    android.os.Environment.DIRECTORY_DOWNLOADS, "TongYi-Lite/termux.apk")
+                setNotificationVisibility(
+                    android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            }
+            val dm = getSystemService(android.app.DownloadManager::class.java)
+            dm.enqueue(req)
+            logI("handleDownloadTermuxApk", "enqueued $url")
+            result.success(null)
+        } catch (e: Exception) {
+            logW("handleDownloadTermuxApk", "download failed: ${e.message}", e)
+            result.success("下载失败：${e.message}")
+        }
     }
 
     private fun isAppInstalled(pkg: String): Boolean = try {
@@ -369,6 +518,9 @@ class MainActivity : FlutterActivity() {
 
     // python_exec：单线程池执行脚本（串行防 GIL 争用），超时由 Future.get 兜底。
     private val pythonExecutor = Executors.newSingleThreadExecutor()
+
+    // devgit：JGit 操作单线程池（串行防仓库句柄争用）。
+    private val devGitExecutor = Executors.newSingleThreadExecutor()
 
     // pdf：PDF 抽取（TomRoush/PdfBox-Android）。
     // 单线程池执行 load+getText（原生/阻塞），主线程只收回调；init 惰性且只一次。
@@ -953,6 +1105,11 @@ class MainActivity : FlutterActivity() {
             pythonExecutor.shutdown()
         } catch (e: Exception) {
             logW("onDestroy", "pythonExecutor shutdown failed", e)
+        }
+        try {
+            devGitExecutor.shutdown()
+        } catch (e: Exception) {
+            logW("onDestroy", "devGitExecutor shutdown failed", e)
         }
         if (this::engine.isInitialized) {
             engine.destroy()
