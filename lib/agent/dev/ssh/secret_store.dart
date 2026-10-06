@@ -9,6 +9,7 @@
 ///   兼容未迁移数据）。
 library;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'ssh_credentials.dart';
@@ -101,8 +102,19 @@ Future<List<SshConfig>?> migrateSshSecrets(List<SshConfig> configs,
       out.add(c);
       continue;
     }
+    final secrets = _extractSecrets(c);
     try {
-      await st.write(c.id, _extractSecrets(c));
+      await st.write(c.id, secrets);
+      // 回读校验（真机实锤：EncryptedSharedPreferences decryptKey 失败时
+      // 写入"成功"但读不回——直接剥明文 = 密钥丢失、认证必败）。只有
+      // 回读逐字段一致才允许剥离明文；否则 fail-open 保留明文。
+      final readBack = await st.read(c.id);
+      final verified =
+          secrets.entries.every((e) => readBack[e.key] == e.value);
+      if (!verified) {
+        out.add(c);
+        continue;
+      }
     } on Exception {
       // 安全存储不可用（极少见）：保留明文，连接仍可用（fail-open）。
       out.add(c);
@@ -134,10 +146,16 @@ Future<SshConfig> resolveSshSecrets(SshConfig config,
   final Map<String, String> secrets;
   try {
     secrets = await (store ?? sshSecretStore).read(config.id);
-  } on Exception {
+  } on Exception catch (e) {
+    debugPrint('[SecretStore] read failed for ${config.id}: $e '
+        '(安全存储不可用，回退配置自带密钥)');
     return config;
   }
-  if (secrets.isEmpty) return config;
+  if (secrets.isEmpty) {
+    debugPrint('[SecretStore] no secrets stored for ${config.id} '
+        '(迁移未发生或安全存储为空)');
+    return config;
+  }
   return SshConfig(
     id: config.id,
     name: config.name,
