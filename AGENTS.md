@@ -1788,3 +1788,37 @@ intent → Termux sh 执行 `echo ok` → 交换文件出现 `ok / __TYL_EXIT__=
 **装机包（23:2x final）**：app-release.apk 6378xxxx B（含 mkdir 修复 + 交换目录
 /sdcard/TongYiLite + 上次测试常驻行 + 向导 v3），双机 `install -r -t` Success；
 小米13 额外执行了 pm grant + appops allow 两步授权。
+
+
+## 2026-10-06 SSH 三连故障定案（设备取证）：向导用户名整行入库 + 安全存储迁移吞密钥 + 远程电脑密码丢失
+
+> 用户报：远程电脑密钥/密码都连不上、Termux 自动执行报错。debug 包临时装机
+> run-as 取证（release 不可 run-as；装 debug 取证后恢复 release，数据保留），
+> 设备 inference_settings.json 实锤三个问题。
+
+**① Termux 认证必败：用户名存了整行 `USER=u0_a333`**——向导自动读
+`/sdcard/tongyilite_ssh_user.txt` 时没解析 KEY=VALUE，前缀进了 username。
+修复：`_readSharedUserName` 解析 `USER=` 取值 + 兜底清洗（单行/取 = 后段/
+剔除裸 'user'）。**设备数据已直接修复**（run-as 改 JSON：u0_a333）。
+
+**② 远程电脑密码丢失：安全存储迁移吞密钥**——`migrateSshSecrets` 写入
+EncryptedSharedPreferences 后立即剥明文，但设备上 FlutterSecureStorage
+`decryptKey` 失败（E/FlutterSecureStorage 实锤，疑 KeyStore 失效）——写"成功"
+读不回，密钥两边皆失。修复：迁移加**回读校验**（write→read 逐字段一致才剥
+明文；否则 fail-open 保留明文）；resolveSshSecrets 读失败打诊断日志。
+**存量损失不可恢复**：远程电脑密码需用户在向导重输一次（修复后不会再丢）。
+
+**③ Termux sshd 未运行**（nc 127.0.0.1:8022 refused）——自动执行（RUN_COMMAND）
+需 Termux 侧 allow-external-apps=true，而写该开关的引导命令本身没跑过
+（鸡生蛋）。**已代跑**：从设备配置导出私钥 → ssh-keygen 导出公钥 → 生成
+v3 引导脚本 → adb push 到手机 `/sdcard/tl_bootstrap.sh`——用户在 Termux
+执行一行 `sh /sdcard/tl_bootstrap.sh` 即完成全部初始化（装 openssh/procps、
+起 sshd、装公钥、开 allow-external-apps、写用户名文件）。
+⚠️ 教训：远程 input 注入前必须确认前台（本次注入时用户正在用相机）。
+
+**④ 热词陈旧 id**：设备 asrHotwordCategories 存的全是改版前旧 id——已由
+loadHotwords 交集兜底处理（空交集按全部启用），无需用户操作。
+
+**遗留**：8 Elite 07:46+ 语音修复包未装（设备离线），上线后
+`adb install -r -t`；小米13 已装 07:46 release（取证 debug 已覆盖恢复，
+username 修复保留在数据中）。

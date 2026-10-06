@@ -4799,12 +4799,23 @@ class _DevTabState extends ConsumerState<_DevTab> {
   }
 
   /// 读取 Termux 写入共享文件的用户名（/sdcard/tongyilite_ssh_user.txt）。
+  /// 实锤修复：文件内容是 `USER=u0_a333` 整行，此前直接存进配置导致
+  /// 用户名带 `USER=` 前缀 → 认证必败。这里剥前缀 + 兜底清洗。
   String? _readSharedUserName() {
     try {
       final f = File('/storage/emulated/0/tongyilite_ssh_user.txt');
       if (!f.existsSync()) return null;
-      final v = f.readAsStringSync().trim();
-      return v.isEmpty ? null : v;
+      var v = f.readAsStringSync().trim();
+      // 取第一行；兼容 KEY=VALUE / 纯用户名两种形态。
+      final first = v.split('\n').first.trim();
+      if (first.contains('=')) {
+        v = first.split('=').last.trim();
+      } else {
+        v = first;
+      }
+      // 手机用户名形如 u0_aXXX；防止残留关键字前缀/空白。
+      if (v.isEmpty || v.toLowerCase() == 'user') return null;
+      return v;
     } catch (_) {
       return null;
     }
