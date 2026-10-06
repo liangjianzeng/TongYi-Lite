@@ -4,7 +4,7 @@ description: 端侧离线 AI 智能体
 # 此处同步保持一致，About 页版本号运行时从安装包读取（package_info_plus）。
 # 注意：About 页版本号是 Dart 常量（settings_screen.dart），与 gradle 同步；
 # 离线沙箱无法下载 package_info_plus 的 AGP 依赖，故不引插件读取。
-version: 0.2.8+16
+version: 0.2.9+17
 publish_to: 'none'
 
 environment:
@@ -43,6 +43,12 @@ dependencies:
   record: 6.2.1
   background_downloader: 8.9.5
   lpinyin: 2.0.3
+  # Edge 在线 TTS（免费 neural 语音，Sec-MS-GEC 本地 token，纯 Dart WebSocket）
+  edge_tts: ^0.1.5
+  # TTS/语音消息播放（本地 mp3 文件）
+  audioplayers: ^6.4.0
+  # TTS 缓存 key（sha256，与 vendored edge_tts 同版本约束）
+  crypto: ^3.0.0
 
 
 dependency_overrides:
@@ -50,6 +56,10 @@ dependency_overrides:
   # （含 zlib 压缩/批处理解密优化，源自 DSH-Phone 真机验证的 fork）。
   dartssh2:
     path: third_party/dartssh2
+  # Edge 在线 TTS：vendored edge_tts 0.1.5（上游要求 Dart ≥3.10.8，
+  # 本机 Flutter 3.27/Dart 3.6.0 装不上；代码本身无超纲 API，放宽 SDK 约束）。
+  edge_tts:
+    path: third_party/edge_tts
 
 
 dev_dependencies:

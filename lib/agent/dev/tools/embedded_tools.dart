@@ -130,11 +130,15 @@ ToolDefinition createDevShellTool({
 }) {
   return ToolDefinition(
     name: 'dev_shell',
+    // 副作用工具：可写任意工作区文件（P2-A 独占执行 / 计划模式禁用）。
+    // 此前漏标（默认按只读安全）导致 /plan 只读门控被 shell 绕过——
+    // 计划回合里模型用 dev_shell 下载/改文件，"只读规划"形同虚设（真机实锤）。
+    isConcurrencySafe: (_) => false,
     description:
         '在当前开发工作区内执行 shell 命令（本地沙箱，cwd=工作区根）。'
         '系统自带 mksh + toybox（ls/cp/grep/sed/awk/find/tar/diff 等齐全），'
         '并带内嵌工具（存在时）：busybox/ripgrep(rg)/jq。'
-        '没有 git/包管理器——git 用 git_status/git_diff/git_commit/git_push 工具，'
+        '没有 git/包管理器——git 用 git_status/git_diff/git_commit/git_push/git_clone 工具，'
         '装软件请切 Termux 工作区用 pkg。'
         '输出截断到 ${kShellOutputLimit} 字符，超时 ${kDevShellTimeout.inSeconds}s。'
         '危险命令（rm -rf /、dd 直写设备、git push --force 等）会被拒绝；'

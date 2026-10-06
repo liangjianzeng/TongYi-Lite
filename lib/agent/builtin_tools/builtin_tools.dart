@@ -23,7 +23,14 @@ export 'memory_tool.dart' show createMemoryGetTool, createMemorySetTool;
 export 'note_tool.dart' show createNoteListTool, createNoteTakeTool, resetNoteStore;
 export 'python_tool.dart' show createPythonExecTool;
 export 'shell_tool.dart' show createShellExecTool;
-export 'todo_tool.dart' show createTodoListTool, createTodoWriteTool, resetTodoStore;
+export 'todo_tool.dart'
+    show
+        createTodoListTool,
+        createTodoWriteTool,
+        resetTodoStore,
+        debugSeedLegacyTodoFile,
+        readTodoStore,
+        renderTodoCardText;
 export 'unit_converter_tool.dart' show createUnitConverterTool;
 export 'weather_tool.dart' show createGetWeatherTool;
 export 'web_search_tool.dart' show createWebSearchTool;
@@ -127,14 +134,21 @@ const List<String> kDevToolNames = [
 /// 语义，默认 5），接入层按设置传入。
 /// [includeDevTools]：Dev Agent 工具组（开发模式开启时 true）。
 /// [devSshConfigs]：SSH 连接配置快照（回合级），Dev 工具据此自动连接。
+/// [onTodosChanged]：todo_write 成功后的 UI 通知（对话内任务清单活卡 upsert）。
+/// [conversationId]：todo 清单按会话隔离的存储键（todo_v3；null 回退
+/// 'default' 键，现网唯一调用方 chat_provider 恒传真实会话 id）。
 List<ToolDefinition> createBuiltinTools({
     int webSearchMaxSearchesPerTurn = 5,
     bool includeDevTools = false,
-    List<SshConfig> devSshConfigs = const []}) => [
+    List<SshConfig> devSshConfigs = const [],
+    String? conversationId,
+    void Function(List<Map<String, String>> items)? onTodosChanged}) => [
       createGetTimeTool(),
       createCalculatorTool(),
-      createTodoWriteTool(),
-      createTodoListTool(),
+      createTodoWriteTool(
+          conversationId: conversationId ?? 'default',
+          onTodosChanged: onTodosChanged),
+      createTodoListTool(conversationId: conversationId ?? 'default'),
       createNoteTakeTool(),
       createNoteListTool(),
       createUnitConverterTool(),

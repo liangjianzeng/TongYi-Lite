@@ -147,6 +147,7 @@ object DevGitPlugin {
         username: String?,
         password: String?,
         branch: String?,
+        depth: Int?,
     ): Map<String, Any> {
         if (url.startsWith("git@") || url.startsWith("ssh://")) {
             return fail("本地工作区仅支持 https 克隆（当前 url 为 ssh）。"
@@ -157,6 +158,9 @@ object DevGitPlugin {
                 .setURI(url)
                 .setDirectory(File(target))
             if (!branch.isNullOrEmpty()) cmd.setBranch(branch)
+            // 浅克隆（JGit 6.10 CloneCommand.setDepth）：大仓库只拉最近 N 层
+            // 提交。浅克隆历史不完整——读代码/分析够用，不能 push。
+            if (depth != null && depth > 0) cmd.setDepth(depth)
             creds(username, password)?.let { cmd.setCredentialsProvider(it) }
             val git = cmd.call()
             git.use { g -> ok("克隆完成：${g.repository.branch}") }

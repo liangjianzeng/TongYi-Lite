@@ -94,15 +94,17 @@ class LocalGit {
     });
   }
 
-  /// clone（https + 用户名/token）到 [target]。
+  /// clone（https + 用户名/token）到 [target]；[depth] 非空时浅克隆
+  /// （只拉最近 N 层提交，JGit setDepth——读代码/分析用，浅克隆不能 push）。
   static Future<LocalGitResult> clone(String url, String target,
-      {String? username, String? password, String? branch}) {
+      {String? username, String? password, String? branch, int? depth}) {
     return _invoke('clone', {
       'url': url,
       'target': target,
       if (username != null && username.isNotEmpty) 'username': username,
       if (password != null && password.isNotEmpty) 'password': password,
       if (branch != null && branch.isNotEmpty) 'branch': branch,
+      if (depth != null && depth > 0) 'depth': depth,
     });
   }
 }

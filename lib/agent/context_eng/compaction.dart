@@ -16,6 +16,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../session/event.dart';
 import '../session/session.dart';
 import '../loop/failure.dart';
+import 'token_estimate.dart';
 
 /// 两阶段压缩插件（替代 [NoCompactionPlugin] 的占位）。
 ///
@@ -153,6 +154,9 @@ final class DeterministicCompaction implements CompactionPlugin {
     }
 
     // ---- 遮蔽 [first..last] 为一条摘要 ----
+    // 压缩前基线：估算当前投影 token（与预算/呈现同一口径）。
+    final beforeTokens =
+        estimateContextTokens(log.deriveModelMessages());
     final advance = log.replace(
       startSeq: first,
       endSeq: last,
@@ -161,10 +165,18 @@ final class DeterministicCompaction implements CompactionPlugin {
       summaryModel: summaryModel,
     );
     if (advance > 0) {
-      debugPrint(
-          '[Compaction] 裁剪（$summaryProvider）：mask [${first}..${last}]，'
-          'summary=${finalSummary.length}chars，advance=$advance');
-      return const CompactionResult(CompactionResultKind.success);
+      final afterTokens = estimateContextTokens(log.deriveModelMessages());
+      final stats = CompactionStats(
+        maskedEvents: last - first + 1,
+        beforeTokens: beforeTokens,
+        afterTokens: afterTokens,
+        provider: summaryProvider,
+        summaryChars: finalSummary.length,
+      );
+      debugPrint('[Compaction] 裁剪（$summaryProvider）：mask [${first}..${last}]，'
+          '${stats.beforeTokens}→${stats.afterTokens} tok'
+          '（省 ${stats.savedTokens}），summary=${finalSummary.length}chars');
+      return CompactionResult(CompactionResultKind.success, stats);
     }
     return const CompactionResult(CompactionResultKind.failure);
   }

@@ -1,7 +1,7 @@
 # TongYi-Lite 端侧离线 AI 智能体
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![v0.2.8](https://img.shields.io/badge/v0.2.8-8B5CF6)]
+[![v0.2.9](https://img.shields.io/badge/v0.2.9-8B5CF6)]
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)](https://flutter.dev)
 [![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)](https://developer.android.com)
 [![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)](https://github.com/ggerganov/llama.cpp)
@@ -37,7 +37,7 @@
 ## 功能概览
 
 TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模型权重完全本地推理，网络请求仅用于
-下载模型与可选的联网搜索/天气，**对话数据不出设备**。
+下载模型与可选的联网搜索/天气/语音播报（Edge TTS），**对话数据不出设备**。
 
 | 能力 | 说明 |
 |------|------|
@@ -47,6 +47,8 @@ TongYi-Lite 是一个**纯端侧、可离线运行**的 Android AI 应用：模�
 | **投机解码** | **MTP**（多 token 预测）+ **dspark**（整块投机），部分模型支持，设置页按模型单独开启 |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描 |
 | **多模态（视觉 + 语音）** | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；Gemma 4 E2B 自带原生语音编码器，支持**按住说话** |
+| **🔊 语音播报（Edge TTS）** | 回答气泡 🔊 按钮点按播报 / 回复后自动播报；微软 Edge 免费 neural 音色（免 key），音色/语速/音调/音量设置页可配 + 试听；markdown 清洗成可朗读文本、长回复按句分段逐段播放；失败静默降级不打断聊天 |
+| **上下文占用圈 + 手动压缩** | 输入框圆形占用环（API `prompt_tokens/n_ctx` 实测 · 本地 KV `kv_used/kv_ctx`），阈值变色；点开详情面板（占用数字 / 会话快照 / 压缩记录），支持**存储级手动压缩**（清理旧工具结果存摘要，聊天记录不受影响） |
 | **远程 API 接入** | OpenAI 兼容 `{baseUrl}/chat/completions`（云端大模型或自建 llama.cpp 服务），本地优先、API 后备；智能体可指定 API 驱动（双场景档） |
 | **联网搜索（自建实例）** | `web_search` / `get_weather` 走**用户自己部署的 SearXNG**，全配置化 + 一键测试连接；支持**并发多关键词一次调用**、每回合搜索上限（DSH `max_uses` 语义）；App **不预置任何搜索服务** |
 | **智能体可配置** | 驱动模型（本地 / API / 跟随默认）、总开关、轮次 / 每步预算 / 工具超时 / 并行 / 上下文压缩 / 溢写 / 搜索上限 / 思考守卫，全部持久化；支持原生工具调用能力探测（`nativeToolCall`） |
@@ -480,7 +482,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| **v0.2.8**（当前） | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（DSH `max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
+| **v0.2.9**（当前） | 2026-10-06 | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17 |
+| **v0.2.8** | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（DSH `max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
 | **v0.2.7** | 2026-09-29 | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向 |
 | **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（`mul_mm_ptq1_0_f32_l4_lm`，raw 块布局 + staged 三进制解码；桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控 + `GGML_VK_FWHT_SUBGROUP` A/B 开关——真机实锤 Turnip shuffle 错编（8/27）原厂无罪（27/27），门控恰好兜住；③ **Turnip e2e 乱码根因定案**：GEMM 大 n（≥48）编译器错编（f16+MMQ 双中招，ERR≈1.0；原厂 16/16 全绿）——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界（`-ub 16` e2e 连贯闭环）；④ tbo 增补 hadamard 4096/8192、PTQ1_0 二分/大 batch、f16 大 n 用例防回归；⑤ 双驱动真机全矩阵验证（原厂 0800.71 / fork Turnip × 三药）记录于 [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) |
 | **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复（三元表达式替代数组索引）；真机 174/174 通过 |
@@ -503,7 +506,34 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 > ⚠️ 2026-09-05 重新发布：修正为 `CN=TongYiLite` 官方签名证书（原 `652245B5…` 非官方证书）。
 > 后续版本发布流程：构建产物拷入 `releases/` 并在此更新链接与 SHA-256。
 
-**v0.2.8 详细变更**（2026-09-29，当前版本，versionCode 16）：
+**v0.2.9 详细变更**（2026-10-06，当前版本，versionCode 17）：
+
+- **① 🔊 Edge 在线 TTS 语音播报**：微软 Edge 免费 neural 语音（`speech.platform.bing.com`，
+  免 API key，`Sec-MS-GEC` 本地 token 鉴权，纯 Dart vendored 包 `third_party/edge_tts`）；
+  回答气泡 🔊 按钮点按播报 / 回复后自动播报（设置可关）；音色（在线拉取 300+，zh 系置顶）、
+  语速（-50%~+100%）、音调（±50Hz）、音量（±50%）设置页可配 + 试听；markdown 清洗成
+  可朗读文本（代码块/URL/表格符号剔除）、长回复按句分段（≤600 字）逐段合成逐段播放；
+  mp3 按 SHA-256 落缓存复用（audioplayers 播放）；合成/播放失败静默降级不打断聊天。
+- **② 输入框圆形上下文占用圈**：环 = 占用比例（蓝 <60% / 橙 ≥60% / 红 ≥85% 阈值配色），
+  环心 = 百分比；数据源 API `usage.prompt_tokens / n_ctx`（实测优先、配置回退）、
+  本地 `kv_used / kv_ctx` 原生实测；启动/切会话按本地历史估算回填（直读持久层设置
+  规避 provider 异步加载竞态），回合结束后被实测值覆盖；AppBar 底部 3px 细条保留。
+- **③ 详情面板 + 存储级手动压缩**：点开占用圈 → 占用数字/来源、其它会话快照、最近
+  压缩记录（推理日志）、「手动压缩」按钮——把较早轮次的 🔧TRACE 工具结果信封从
+  SQLite 清出（保留最近一条=最近一轮工具上下文），最早一条原位改写为摘要信封
+  （下一轮导入投影为 user 摘要，模型仍记得做过什么），可见对话文本不动、聊天记录
+  显示不受影响；与回合内内存压缩（每次重建即失效）互补，此后每轮导入都看到瘦身后
+  历史；压缩后占用快照即时回落。
+- **④ 任务清单按会话隔离（todo v3）**：`todo_write` 清单从全局单文件改为按会话落盘
+  `agent_todo_<convId>.json`——计划面板/`todo_list` 只看当前会话的清单；旧全局
+  `agent_todo.json` 首次被某会话读取时一次性迁移（迁移即删）。
+- **⑤ 其它**：SSE 停摆看门狗（`stream_options.include_usage` + 120s 无数据超时 →
+  可重试失败档）；git_clone 浅克隆 + 目标目录语义 + 陈旧目录自动备份；用户消息
+  复制按钮；任务清单卡片可视化（✓/▶/○ 状态徽标）；计划文案精简 + 面板统一渲染；
+  KV/压缩观测（中文加权 token 估算器、CompactionStats、细条阈值变色）；
+  回归 594 项 + 4 skip 全绿。
+
+**v0.2.8 详细变更**（2026-09-29，versionCode 16）：
 
 - **① 执行顺序渲染（timeline markers）**：思考 / 🔧 工具卡 / 答案按事件到达顺序**交错渲染**，
   不再"思考一律在前、工具一律在后"（`UiTimelineThinking` / `UiTimelineTool` 依序交错）。

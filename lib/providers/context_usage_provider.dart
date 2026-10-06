@@ -53,6 +53,27 @@ class ContextUsageNotifier extends StateNotifier<Map<String, ContextUsage>> {
     state = next;
   }
 
+  /// 清空全部快照（本地 resetContext 后：KV 归零，旧快照全部失效）。
+  void clear() {
+    if (state.isNotEmpty) state = const {};
+  }
+
+  /// 清除除 [keepConversationId] 外的全部占用快照。
+  ///
+  /// 本地引擎 KV 是**单实例**：切会话/切模式 resetContext 后，其它会话的
+  /// 快照已成陈旧值（KV 里装的是当前会话的 token），细条继续显示会误导。
+  void clearExcept(String? keepConversationId) {
+    if (keepConversationId == null) {
+      if (state.isNotEmpty) state = const {};
+      return;
+    }
+    final next = <String, ContextUsage>{
+      for (final e in state.entries)
+        if (e.key == keepConversationId) e.key: e.value,
+    };
+    if (next.length != state.length) state = next;
+  }
+
   /// 读取某会话的占用快照（无记录返回 null）。
   ContextUsage? usageFor(String? conversationId) =>
       conversationId == null ? null : state[conversationId];

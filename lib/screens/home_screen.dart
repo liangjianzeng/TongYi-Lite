@@ -29,6 +29,9 @@ import '../providers/context_usage_provider.dart'
 import '../models/agent_persona.dart' show kStandardPersonaId;
 import '../agent/goal/goal_store.dart'
     show GoalStore, GoalState, GoalStatus, PlanStepStatus;
+import '../agent/builtin_tools/todo_tool.dart'
+    show readTodoStore, renderTodoCardText;
+import '../widgets/todo_card.dart';
 import '../models/conversation.dart';
 import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
@@ -142,6 +145,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _currentConversationId = conversations.first.id;
       _initiallyLoaded = true;
     });
+    // 占用快照是内存态（重启即丢）：启动时按本地历史估算回填，圈圈立即可见。
+    unawaited(ref
+        .read(chatNotifierProvider.notifier)
+        .refreshUsageEstimate(_currentConversationId));
   }
 
   /// 启动自动加载「默认模型」：用户已在模型管理页勾选某个已缓存模型为默认，
@@ -886,11 +893,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 顶部状态栏最下方的上下文占用细线（叠在 AppBar 底部，不额外占用布局
-  /// 空间）。
+  /// 空间）。纯展示：查询/手动压缩入口在输入框左侧的圆形占用圈。
   ///
   /// API 接入：宽度 = prompt_tokens / n_ctx（usage + /v1/models 实测槽位）。
   /// 本地模型：宽度 = KV 缓存已占用位置（kv_used）/ 上下文窗口（kv_ctx）。
-  /// 一条蓝色细线，高度 3px；无数据时仅显示一条极浅的底色线（几乎不可见）。
   Widget _buildContextUsageBar(ModelState ms, bool isGenerating) {
     final settings = ref.watch(settingsProvider);
     final activeApi = settings.activeApiModel();
@@ -907,6 +913,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     final usage = ref.watch(contextUsageProvider)[_currentConversationId];
     final fraction = usage?.fraction ?? 0.0;
+    // 阈值语义：≥85% 红（撞墙在即，应压缩/换会话）、≥60% 橙（留意）、蓝（健康）。
+    final barColor = fraction >= 0.85
+        ? const Color(0xFFE53935)
+        : fraction >= 0.60
+            ? const Color(0xFFFB8C00)
+            : const Color(0xFF2196F3);
 
     return SizedBox(
       height: 3,
@@ -917,17 +929,254 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           const Positioned.fill(
             child: ColoredBox(color: Color(0x14000000)),
           ),
-          // 蓝色占用细线：宽度 = 占用比例 × 屏幕宽。
+          // 占用细线：宽度 = 占用比例 × 屏幕宽，颜色按阈值分档。
           Positioned(
             left: 0,
             top: 0,
             bottom: 0,
             width: MediaQuery.of(context).size.width * fraction,
-            child: const ColoredBox(color: Color(0xFF2196F3)),
+            child: ColoredBox(color: barColor),
           ),
         ],
       ),
     );
+  }
+
+  /// 手动压缩确认 + 执行：回合执行中拒绝（与活动回合的会话日志竞争）；
+  /// 完成后 SnackBar 反馈（清理条数 0 = 没有可压缩的旧工具记录）。
+  Future<void> _confirmManualCompact() async {
+    final running =
+        ref.read(runningTurnsProvider)[_currentConversationId] ?? false;
+    if (running) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('回合执行中，结束后再压缩')),
+      );
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('手动压缩上下文'),
+        content: const Text(
+          '把较早轮次的工具结果从会话上下文中清出（保留最近一轮的工具记录'
+          '与全部对话文本，'
+          '存一条摘要供模型回看）。聊天记录显示不受影响。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('压缩'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final (envelopes, chars) = await ref
+        .read(chatNotifierProvider.notifier)
+        .manualCompact(_currentConversationId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(envelopes == 0
+            ? '没有可压缩的旧工具记录'
+            : '已压缩：清理 $envelopes 条工具记录，摘要 $chars 字'),
+      ),
+    );
+  }
+
+  /// 上下文 / KV 占用详情面板（输入框占用圈点开）：当前会话占用数字与来源、全部
+  /// 会话快照、最近压缩记录（来自推理日志）、阈值图例。
+  void _showContextUsageSheet() {
+    final usageMap = ref.read(contextUsageProvider);
+    final modelState = ref.read(modelManagerProvider);
+    final settings = ref.read(settingsProvider);
+    final activeApi = settings.activeApiModel();
+    final engineName = modelState.isLoaded
+        ? (modelState.modelName ?? modelState.modelId ?? '本地模型')
+        : (activeApi != null ? activeApi.name : null);
+
+    // 压缩记录：推理日志里带「上下文压缩」前缀的行（chat_provider 落档），
+    // 最近 8 条倒序。
+    final compactionLines = modelState.loadingLogs
+        .where((l) => l.contains('上下文压缩'))
+        .toList()
+        .reversed
+        .take(8)
+        .toList();
+
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        final current = usageMap[_currentConversationId];
+        final fraction = current?.fraction ?? 0.0;
+        final barColor = fraction >= 0.85
+            ? const Color(0xFFE53935)
+            : fraction >= 0.60
+                ? const Color(0xFFFB8C00)
+                : const Color(0xFF2196F3);
+        final others = usageMap.entries
+            .where((e) => e.key != _currentConversationId && e.value.hasData)
+            .toList();
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('上下文占用', style: theme.textTheme.titleMedium),
+                const SizedBox(height: 4),
+                Text(
+                  engineName == null ? '当前无激活引擎' : '引擎：$engineName',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                if (current == null || !current.hasData)
+                  Text(
+                    '当前会话暂无占用数据——发一条消息（或跑一轮智能体）后，'
+                    '占用会在每轮响应后更新。',
+                    style: theme.textTheme.bodyMedium,
+                  )
+                else ...[
+                  // 大号占用数字 + 进度条。
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text(
+                        '${(fraction * 100).toStringAsFixed(1)}%',
+                        style: theme.textTheme.headlineMedium?.copyWith(
+                          color: barColor,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${_fmtTokens(current.usedTokens)} / '
+                          '${_fmtTokens(current.windowTokens)} tokens'
+                          '（${current.windowSource}）',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: SizedBox(
+                      height: 8,
+                      child: LinearProgressIndicator(
+                        value: fraction,
+                        backgroundColor:
+                            barColor.withValues(alpha: 0.15),
+                        valueColor: AlwaysStoppedAnimation(barColor),
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Text(
+                  '颜色阈值：蓝 <60% · 橙 ≥60%（留意）· 红 ≥85%（建议压缩或换会话）',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // 手动压缩：存储级清理旧工具轮信封（持久，区别于回合内压缩）。
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.compress, size: 18),
+                    label: const Text('手动压缩上下文'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _confirmManualCompact();
+                    },
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '清理较早轮次的工具结果（保留最近一轮的工具记录与全部对话文本），'
+                  '存一条摘要供模型回看——下一轮请求立即瘦身。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (others.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text('其它会话快照',
+                      style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 4),
+                  for (final e in others)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text(
+                        '· ${_fmtTokens(e.value.usedTokens)} / '
+                        '${_fmtTokens(e.value.windowTokens)}'
+                        '（${(e.value.fraction! * 100).toStringAsFixed(0)}%）',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                ],
+                if (compactionLines.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text('最近压缩记录', style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 4),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest
+                          .withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final line in compactionLines)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 1),
+                            child: Text(
+                              line,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                fontFamily: 'monospace',
+                                fontSize: 11,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// token 数格式化：1234 → 1.2k，1234567 → 1.23M，其余原样。
+  static String _fmtTokens(int? tokens) {
+    if (tokens == null) return '?';
+    if (tokens >= 1000000) {
+      return '${(tokens / 1000000).toStringAsFixed(2)}M';
+    }
+    if (tokens >= 1000) {
+      return '${(tokens / 1000).toStringAsFixed(1)}k';
+    }
+    return '$tokens';
   }
 
   Widget _buildPulsingDot() {
@@ -1173,6 +1422,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
+                          _buildContextUsageRing(),
                           _buildAgentToggleChip(settings),
                           _buildPersonaChip(settings),
                           _buildPlanModeChip(),
@@ -1192,9 +1442,61 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  /// 输入框左侧的圆形上下文占用圈（传统进度环形态）：
+  /// 环 = 占用比例（阈值配色与顶部细条一致），环心 = 百分比数字；
+  /// 无数据时灰环显示「—」。点按 → 上下文详情面板（数字/来源/压缩记录/
+  /// 手动压缩）。智能体回合执行中禁用点按（防误触打断注意力）。
+  Widget _buildContextUsageRing() {
+    final usage = ref.watch(contextUsageProvider)[_currentConversationId];
+    final fraction = usage?.fraction;
+    final hasData = fraction != null;
+    final color = !hasData
+        ? Colors.grey.shade400
+        : fraction >= 0.85
+            ? const Color(0xFFE53935)
+            : fraction >= 0.60
+                ? const Color(0xFFFB8C00)
+                : const Color(0xFF2196F3);
+    return Tooltip(
+      message: '上下文占用详情 / 手动压缩',
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: _showContextUsageSheet,
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              SizedBox(
+                width: 26,
+                height: 26,
+                child: CircularProgressIndicator(
+                  value: hasData ? fraction.clamp(0.02, 1.0) : 0.0,
+                  strokeWidth: 2.6,
+                  strokeCap: StrokeCap.round,
+                  color: color,
+                  backgroundColor: color.withValues(alpha: 0.18),
+                ),
+              ),
+              Text(
+                hasData ? '${(fraction * 100).toStringAsFixed(0)}%' : '—',
+                style: TextStyle(
+                  fontSize: 9,
+                  height: 1.0,
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 输入 hint 随状态：计划模式 / 生成中插话 / 普通输入。
-  String _inputHintFor(bool isGenerating, String text) {
-    if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
+  String _inputHintFor(bool isGenerating, String text) {    if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
     if (isGenerating) return '插话给执行中的智能体…（不打断）';
     return '输入消息…';
   }
@@ -1478,7 +1780,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 计划面板（bottom sheet）：无计划 = 说明 + 一键生成入口；
-  /// 有计划 = 目标 + 步骤状态列表（点步骤循环置状态）+ 放弃/重新规划。
+  /// 有计划 = 目标 + 步骤状态列表（点按改状态）+ 放弃/重新规划。
   Future<void> _showPlanPanel() async {
     final store = await _planStore();
     if (!mounted) return;
@@ -2106,6 +2408,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         _selectedFilePaths.clear();
       });
       _restoreDraft();
+      // 切会话：该会话无快照（如重启后首次切入）→ 估算回填。
+      unawaited(ref
+          .read(chatNotifierProvider.notifier)
+          .refreshUsageEstimate(id));
     }
     Navigator.of(context).pop();
   }
@@ -2788,6 +3094,7 @@ class _PlanPanelSheet extends StatefulWidget {
 
 class _PlanPanelSheetState extends State<_PlanPanelSheet> {
   GoalState? _plan;
+  List<Map<String, String>> _todos = const [];
   bool _loaded = false;
 
   @override
@@ -2798,9 +3105,16 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
 
   Future<void> _reload() async {
     final plan = await widget.store.load(widget.conversationId);
+    // 任务清单（todo_write 按会话落盘）：只看**当前会话**的清单（todo v3
+    // 按会话隔离——旧全局单文件会在任何会话显示同一份清单，已废弃）。
+    List<Map<String, String>> todos = const [];
+    try {
+      todos = await readTodoStore(widget.conversationId);
+    } catch (_) {}
     if (!mounted) return;
     setState(() {
       _plan = plan;
+      _todos = todos;
       _loaded = true;
     });
   }
@@ -2855,6 +3169,15 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
     );
   }
 
+  /// 任务清单区（todo_write 的全局清单；空则不显示）。与对话内活卡同组件。
+  Widget _buildTodosSection(BuildContext context) {
+    if (_todos.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: TodoChecklistCard(content: renderTodoCardText(_todos)),
+    );
+  }
+
   Widget _buildEmpty(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2864,11 +3187,10 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
         const SizedBox(height: 8),
         const Text(
-            '当前会话没有活跃计划。计划 = 目标 + 可验证的步骤清单：\n'
-            '· 发送「/plan <任务>」→ 智能体只读调研后提交计划，你批准后自动执行；\n'
-            '· 执行中智能体逐步更新状态，这里可随时查看进度、手动纠正；\n'
-            '· 长任务会自动续跑（轮数上限见设置）。',
+            '当前会话没有活跃计划。发送「/plan <任务>」，智能体调研后提交计划，'
+            '你批准后自动执行，进度在这里回看。',
             style: TextStyle(fontSize: 13, height: 1.5)),
+        _buildTodosSection(context),
         const SizedBox(height: 16),
         SizedBox(
           width: double.infinity,
@@ -2942,9 +3264,10 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
               ],
             ),
           ),
-          Text('已完成 ${plan.doneCount}/${plan.steps.length} · 点步骤循环置状态，长按菜单指定',
+          Text('已完成 ${plan.doneCount}/${plan.steps.length} · 点按改状态',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
         ],
+        _buildTodosSection(context),
         const SizedBox(height: 12),
         Row(children: [
           Expanded(

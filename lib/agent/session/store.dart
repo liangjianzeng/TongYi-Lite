@@ -198,6 +198,114 @@ String _safe(String s) =>
 /// - UI parseToolActivity 解析失败返回 null → 历史回看静默跳过。
 const String kAgentTraceMessagePrefix = '🔧TRACE';
 
+// ---------------------------------------------------------------------------
+// 手动压缩（存储级确定性裁剪；provider 层 manualCompact 的纯函数核心）
+// ---------------------------------------------------------------------------
+
+/// 手动压缩计划：把较早轮次的 🔧TRACE 工具轮信封从存储清出。
+final class StorageCompactionPlan {
+  /// 最早一条旧信封的消息 id——**原位改写**为 [summaryEnvelope]
+  ///（保持 id/时间戳 → 消息排序不变）。
+  final String firstId;
+
+  /// 摘要信封内容（kAgentTraceMessagePrefix + 单条 user/message 事件，
+  /// 下一轮导入时投影为 user 摘要——与回合内压缩投影语义一致）。
+  final String summaryEnvelope;
+
+  /// 其余待删除的旧信封消息 id。
+  final List<String> deleteIds;
+
+  /// 旧信封里触达过的工具名（供日志与测试断言）。
+  final List<String> toolNames;
+
+  /// 摘要字符数。
+  int get summaryChars => summaryEnvelope.length;
+
+  const StorageCompactionPlan({
+    required this.firstId,
+    required this.summaryEnvelope,
+    required this.deleteIds,
+    required this.toolNames,
+  });
+}
+
+/// 计算手动压缩计划（纯函数，无 I/O）。
+///
+/// 保留**最近一条** 🔧TRACE 信封（最近一轮的工具上下文，模型最需要），
+/// 其余信封全部压缩——工具结果是上下文 token 大户。可见消息（user/
+/// assistant 文本）一律不动。单条工具结果摘录 [excerptLen] 字、最多
+/// [maxExcerpts] 条。信封不足 2 条（无"较早"内容可压）返回 null。
+///
+/// 注意：不能用「尾部保留 N 个用户轮」做门槛——短对话（≤N 轮）会把全部
+/// 信封都当"最近"保护起来，手动压缩永远没东西可压（真机实测教训）。
+StorageCompactionPlan? planStorageCompaction(
+  List<ChatMessage> messages, {
+  int maxExcerpts = 12,
+  int excerptLen = 300,
+}) {
+  final oldEnvelopes = <ChatMessage>[
+    for (final m in messages)
+      if (m.content.startsWith(kAgentTraceMessagePrefix)) m,
+  ];
+  // 最后一条信封保留；不足 2 条 → 无可压缩。
+  if (oldEnvelopes.length < 2) return null;
+  oldEnvelopes.removeLast();
+
+  // 摘要：从旧信封还原事件，收集工具名 + 结果摘录。
+  final toolNames = <String>{};
+  final excerpts = <String>[];
+  for (final m in oldEnvelopes) {
+    final events = decodeAgentTraceMessage(m.content);
+    if (events == null) continue;
+    for (final e in events) {
+      if (e['type'] != kEventToolResult) continue;
+      final data = e['data'];
+      if (data is! Map<String, dynamic>) continue;
+      final name = data['name'];
+      if (name is String && name.isNotEmpty) toolNames.add(name);
+      if (excerpts.length >= maxExcerpts) continue;
+      var content = data['content'] as String? ?? '';
+      if (content.isEmpty) continue;
+      if (content.length > excerptLen) {
+        content = '${content.substring(0, excerptLen)}…';
+      }
+      excerpts.add('[${name ?? 'tool'}] $content');
+    }
+  }
+  final summaryBuf = StringBuffer(
+      '（手动压缩）较早轮次的工具结果已省略以释放上下文；'
+      '此前已调用过工具：${toolNames.isEmpty ? '无' : toolNames.join('、')}。');
+  if (excerpts.isNotEmpty) {
+    summaryBuf.write('\n${excerpts.join('\n')}');
+    if (excerpts.length >= maxExcerpts) {
+      summaryBuf.write('\n（其余工具结果已省略）');
+    }
+  }
+  final summary = summaryBuf.toString();
+
+  // 摘要以 user/message 事件编码进 TRACE 信封（同前缀保证导入放行 +
+  // UI 不渲染；decode 还原为 user/message 事件 → 投影为 user 摘要）。
+  final summaryEnvelope = kAgentTraceMessagePrefix +
+      jsonEncode(<String, dynamic>{
+        'v': 1,
+        'events': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'type': kEventUserMessage,
+            'data': <String, dynamic>{'content': summary},
+          },
+        ],
+      });
+
+  return StorageCompactionPlan(
+    firstId: oldEnvelopes.first.id,
+    summaryEnvelope: summaryEnvelope,
+    deleteIds: [
+      for (var i = 1; i < oldEnvelopes.length; i++) oldEnvelopes[i].id,
+    ],
+    toolNames: toolNames.toList(),
+  );
+}
+
 /// 单个字符串值的截断上限（防长工具结果把 SQLite 消息撑爆；
 /// 超限结果本应已被 spill 换成定位符，这里只是兜底）。
 const int _kTraceValueCapChars = 8000;

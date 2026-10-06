@@ -265,6 +265,17 @@ class StorageService {
     await db.delete('messages', where: 'conversationId = ?', whereArgs: [conversationId]);
   }
 
+  /// 按 id 批量删除消息（手动压缩清理旧工具轮轨迹信封用；可见消息不受影响）。
+  Future<void> deleteMessages(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final db = await database;
+    await db.delete(
+      'messages',
+      where: 'id IN (${List.filled(ids.length, '?').join(',')})',
+      whereArgs: ids,
+    );
+  }
+
   // ----- Storage stats -----
 
   Future<Map<String, int>> getStorageStats() async {

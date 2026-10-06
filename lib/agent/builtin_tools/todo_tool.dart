@@ -1,9 +1,12 @@
-/// 待办清单工具（持久化，v2）。
+/// 待办清单工具（持久化，v3：**按会话隔离**）。
 ///
 /// 语义照抄 DSH 的 todo 工具：`todo_write` 全量替换任务清单；
-/// `todo_list` 只读当前清单（供模型规划下一步）。清单落盘
-/// `ApplicationSupport/agent_todo.json`——跨 turn、跨重启保留；
-/// 配合系统提示"多步任务先 todo_write"的规划约束（WP2d）。
+/// `todo_list` 只读当前清单（供模型规划下一步）。清单按会话落盘
+/// `ApplicationSupport/agent_todo_<convId>.json`——跨 turn、跨重启保留，
+/// 且不同会话互不可见（v2 是全局单文件，计划面板在任何会话都显示同一份
+/// 清单，用户反馈"计划状态应该跟着会话任务走"）。
+/// 旧全局 `agent_todo.json` 首次被某会话读取时一次性迁移（迁移即删除，
+/// 只归第一个打开的会话，避免继续全局可见）。
 library;
 
 import 'dart:convert';
@@ -15,48 +18,100 @@ import 'package:path_provider/path_provider.dart';
 
 import '../tool_definition.dart';
 
-/// 进程级待办清单（惰性从磁盘加载；写入即落盘）。
-List<Map<String, String>>? _todoStore;
-bool _todoLoaded = false;
-String? _todoFilePath;
+/// 各会话的进程级清单缓存（key = conversationId；写入即落盘）。
+final Map<String, List<Map<String, String>>> _todoStores = {};
+String? _todoBaseDir;
 
-Future<List<Map<String, String>>> _store() async {
-  if (_todoLoaded) return _todoStore ??= <Map<String, String>>[];
-  _todoLoaded = true;
+/// 会话 id → 文件名安全段。
+String _safeConv(String conversationId) =>
+    conversationId.replaceAll(RegExp(r'[^\w-]'), '_');
+
+Future<String> _baseDir() async {
+  _todoBaseDir ??= (await getApplicationSupportDirectory()).path;
+  return _todoBaseDir!;
+}
+
+Future<File> _fileOf(String conversationId) async {
+  final base = await _baseDir();
+  return File(p.join(base, 'agent_todo_${_safeConv(conversationId)}.json'));
+}
+
+/// 旧全局文件路径（v2 遗留；迁移后删除）。
+Future<File> _legacyFile() async {
+  final base = await _baseDir();
+  return File(p.join(base, 'agent_todo.json'));
+}
+
+Future<List<Map<String, String>>> _store(String conversationId) async {
+  final cached = _todoStores[conversationId];
+  if (cached != null) return cached;
   try {
-    final dir = await getApplicationSupportDirectory();
-    _todoFilePath ??= p.join(dir.path, 'agent_todo.json');
-    final file = File(_todoFilePath!);
+    final file = await _fileOf(conversationId);
     if (file.existsSync()) {
       final decoded = jsonDecode(file.readAsStringSync());
       if (decoded is List) {
-        _todoStore = [
+        return _todoStores[conversationId] = [
           for (final e in decoded)
             if (e is Map<String, dynamic>) _cleanItem(e),
         ];
       }
     }
+    // v2 → v3 迁移：旧全局文件内容归入**第一个读取的会话**并删除全局文件
+    //（不删会让后续每个会话都继承同一份清单——正是要修的跨会话可见）。
+    final legacy = await _legacyFile();
+    if (legacy.existsSync()) {
+      final decoded = jsonDecode(legacy.readAsStringSync());
+      final items = <Map<String, String>>[
+        if (decoded is List)
+          for (final e in decoded)
+            if (e is Map<String, dynamic>) _cleanItem(e),
+      ];
+      _todoStores[conversationId] = items;
+      final f = await _fileOf(conversationId);
+      f.writeAsStringSync(jsonEncode(items));
+      legacy.deleteSync();
+      return items;
+    }
   } catch (_) {
     // 坏文件/测试环境无插件 → 空清单，不影响工具可用性。
   }
-  return _todoStore ??= <Map<String, String>>[];
+  return _todoStores[conversationId] = <Map<String, String>>[];
 }
 
 /// 写入即落盘（best-effort：失败不阻断，内存清单仍有效）。
-void _persist() {
-  final path = _todoFilePath;
-  final store = _todoStore;
-  if (path == null || store == null) return;
+Future<void> _persist(String conversationId) async {
+  final store = _todoStores[conversationId];
+  if (store == null) return;
   try {
-    File(path).writeAsStringSync(jsonEncode(store));
+    final file = await _fileOf(conversationId);
+    await file.writeAsString(jsonEncode(store));
   } catch (_) {}
 }
 
-/// 测试专用：清空待办清单（回到空态；不再读盘，保证测试隔离）。
+/// 测试专用：清空全部会话的待办清单缓存 + 删除测试期间落盘的会话文件
+///（不删的话下一个用例会从磁盘读到旧清单——v3 每次都读盘）。
 @visibleForTesting
 void resetTodoStore() {
-  _todoStore = null;
-  _todoLoaded = true;
+  _todoStores.clear();
+  final base = _todoBaseDir;
+  if (base == null) return;
+  final dir = Directory(base);
+  if (!dir.existsSync()) return;
+  for (final f in dir.listSync()) {
+    if (f is File &&
+        p.basename(f.path).startsWith('agent_todo_')) {
+      try {
+        f.deleteSync();
+      } catch (_) {}
+    }
+  }
+}
+
+/// 测试专用：注入旧全局遗留文件（v2 迁移路径测试用）。
+@visibleForTesting
+void debugSeedLegacyTodoFile(String json) {
+  _todoBaseDir = Directory.systemTemp.createTempSync('todo_test').path;
+  File(p.join(_todoBaseDir!, 'agent_todo.json')).writeAsStringSync(json);
 }
 
 /// 生成待办清单文本。
@@ -79,7 +134,9 @@ String _render(List<Map<String, String>> items) {
 /// - 状态词归一化判定：done/completed/finished → 已完成；
 ///   in_progress/inprogress/doing/current → 进行中；其余 → 待办。
 ///   存储保留调用方原词（展示/测试兼容），仅判定时归一化。
-ToolDefinition createTodoWriteTool() {
+ToolDefinition createTodoWriteTool(
+    {required String conversationId,
+    void Function(List<Map<String, String>> items)? onTodosChanged}) {
   return ToolDefinition(
     isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'todo_write',
@@ -147,10 +204,12 @@ ToolDefinition createTodoWriteTool() {
             '同一时刻只能有一项进行中——请把其余进行中项改回 todo'
             '（或已完成项标 done），重新发送完整清单。');
       }
-      final store = await _store()
+      final store = await _store(conversationId)
         ..clear()
         ..addAll(items);
-      _persist();
+      await _persist(conversationId);
+      // UI 通知：对话内"任务清单"活卡 upsert（chat_provider 接线）。
+      onTodosChanged?.call(List.unmodifiable(items));
       return ToolResult(
           content: '待办清单已更新（${_countText(store)}）：\n${_render(store)}');
     },
@@ -186,14 +245,35 @@ String _countText(List<Map<String, String>> items) {
   return '待办 $pending · 进行中 $active · 已完成 $done';
 }
 
-/// 读取当前待办清单（只读，不修改）。
-ToolDefinition createTodoListTool() {
+/// UI 读取某会话当前待办清单（对话内任务清单活卡 / 计划面板用）。
+/// 按会话隔离：不同会话各看各的清单（v2 全局单文件已废弃）。
+Future<List<Map<String, String>>> readTodoStore(String conversationId) =>
+    _store(conversationId);
+
+/// 渲染对话内「任务清单」活卡文本（todo_write 成功后由接入层 upsert 固定
+/// id 消息；徽标：✓ 已完成 / ▶ 进行中 / ○ 待办）。
+String renderTodoCardText(List<Map<String, String>> items) {
+  final buf = StringBuffer('☑ 任务清单（${_countText(items)}）');
+  for (var i = 0; i < items.length; i++) {
+    final e = items[i];
+    final badge = _isDone(e['status'])
+        ? '✓'
+        : _isInProgress(e['status'])
+            ? '▶'
+            : '○';
+    buf.write('\n$badge ${i + 1}. ${e['content'] ?? ''}');
+  }
+  return buf.toString();
+}
+
+/// 读取当前会话待办清单（只读，不修改）。
+ToolDefinition createTodoListTool({required String conversationId}) {
   return ToolDefinition(
     name: 'todo_list',
     description: '读取当前待办任务清单（只读，不修改）。',
     parameters: const {'type': 'object'},
     execute: (args) async {
-      return ToolResult(content: _render(await _store()));
+      return ToolResult(content: _render(await _store(conversationId)));
     },
   );
 }

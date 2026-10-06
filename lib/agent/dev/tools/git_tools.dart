@@ -14,7 +14,6 @@ import 'dart:io';
 
 import '../../sandbox.dart' show withEscalationFields;
 import '../../tool_definition.dart';
-import '../safety.dart';
 import '../ssh/ssh_credentials.dart' show SshConfig;
 import '../workspace.dart';
 import '../workspace_store.dart';
@@ -50,6 +49,10 @@ Future<({bool remote, String root, DevWorkspace? ws})> _resolveGitRoot(
 }
 
 /// 统一错误包装（StateError → ToolResult.error）。
+///
+/// 支持可选 `path` 参数（工作区内相对子目录）：git_clone 克隆出的仓库在
+/// `<工作区>/<name>/`，status/diff/log 等 git 工具靠它指向子目录仓库——
+/// 此前只能作用于工作区根，子目录仓库一律 RepositoryNotFound（真机实锤）。
 Future<ToolResult> _gitTool(
   Map<String, dynamic> args,
   Future<ToolResult> Function(bool remote, String root) body,
@@ -63,6 +66,14 @@ Future<ToolResult> _gitTool(
   } on StateError catch (e) {
     return ToolResult.error(e.message);
   }
+  final path = (args['path'] as String?)?.trim() ?? '';
+  if (path.isNotEmpty) {
+    final rel = path.replaceAll('\\', '/');
+    if (rel.startsWith('/') || rel.split('/').contains('..') || rel.isEmpty) {
+      return ToolResult.error('path 必须是工作区内的相对子目录（不允许 .. 与绝对路径）');
+    }
+    root = root.endsWith('/') ? '$root$rel' : '$root/$rel';
+  }
   return body(remote, root);
 }
 
@@ -74,9 +85,19 @@ ToolDefinition createGitStatusTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_status',
     description:
-        '查看当前工作区 git 仓库状态：当前分支、改动文件、未跟踪文件。'
-        '开发任务开始时先调用确认基线。',
-    parameters: const {'type': 'object'},
+        '查看 git 仓库状态：当前分支、改动文件、未跟踪文件。'
+        '开发任务开始时先调用确认基线。'
+        'path 可选：仓库在当前工作区下的相对子目录（如 git_clone 克隆出的 '
+        'TongYi-Lite/）；缺省 = 工作区根。',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'path': {
+          'type': 'string',
+          'description': '可选：仓库相对工作区的子目录（默认工作区根）',
+        },
+      },
+    },
     timeout: const Duration(seconds: 15),
     execute: (args) => _gitTool(args, (remote, root) async {
       if (remote) {
@@ -101,14 +122,19 @@ ToolDefinition createGitDiffTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_diff',
     description:
-        '查看当前工作区改动：文件统计 + 具体 diff。'
+        '查看 git 仓库改动：文件统计 + 具体 diff。'
         '可选 file 只看单个文件；staged=true 看已暂存改动。'
+        'path 可选：仓库在当前工作区下的相对子目录（缺省 = 工作区根）。'
         '输出按 4000 字符截断，大改动先看统计再按文件细看。',
     parameters: {
       'type': 'object',
       'properties': {
         'file': {'type': 'string', 'description': '可选：只看某个文件'},
         'staged': {'type': 'boolean', 'description': '是否看已暂存改动（默认 false）'},
+        'path': {
+          'type': 'string',
+          'description': '可选：仓库相对工作区的子目录（默认工作区根）',
+        },
       },
     },
     timeout: const Duration(seconds: 15),
@@ -140,12 +166,16 @@ ToolDefinition createGitLogTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_log',
     description:
-        '查看最近提交历史（默认最近 10 条，一行摘要）。'
-        '可选 n 指定条数。',
+        '查看 git 仓库最近提交历史（默认最近 10 条，一行摘要）。'
+        '可选 n 指定条数；path 可选：仓库相对工作区的子目录（缺省 = 工作区根）。',
     parameters: {
       'type': 'object',
       'properties': {
         'n': {'type': 'number', 'description': '条数（默认 10）'},
+        'path': {
+          'type': 'string',
+          'description': '可选：仓库相对工作区的子目录（默认工作区根）',
+        },
       },
     },
     timeout: const Duration(seconds: 15),
@@ -175,18 +205,23 @@ ToolDefinition createGitCommitTool({List<SshConfig> sshConfigs = const []}) {
     isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'git_commit',
     description:
-        '提交当前工作区改动：files 为要提交的文件（相对工作区，可用 "." 提交全部），'
+        '提交 git 仓库改动：files 为要提交的文件（相对仓库根，可用 "." 提交全部），'
         'message 为提交说明。提交前建议先 git_diff 自查。'
+        'path 可选：仓库相对工作区的子目录（缺省 = 工作区根）。'
         '这是本地操作，不需要批准。',
     parameters: {
       'type': 'object',
       'properties': {
         'files': {
           'type': 'array',
-          'description': '要提交的文件（相对工作区；"." 提交全部改动）',
+          'description': '要提交的文件（相对仓库根；"." 提交全部改动）',
           'items': {'type': 'string'},
         },
         'message': {'type': 'string', 'description': '提交说明'},
+        'path': {
+          'type': 'string',
+          'description': '可选：仓库相对工作区的子目录（默认工作区根）',
+        },
       },
       'required': ['files', 'message'],
     },
@@ -271,8 +306,12 @@ ToolDefinition createGitPushTool({List<SshConfig> sshConfigs = const []}) {
 ToolDefinition createGitCloneTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
     name: 'git_clone',
+    isConcurrencySafe: (_) => false, // 副作用工具：写工作区（P2-A / 计划模式禁用）
     description:
-        '克隆仓库到当前本地工作区（url 为 https 地址；name 可选，默认取仓库名）。'
+        '克隆仓库到本地工作区下的新子目录 <工作区>/<name>（url 为 https 地址；'
+        'name 缺省取 URL 仓库名，目标目录已存在非空会报错）。'
+        '大仓库务必带 depth（浅克隆，如 depth=1 只拉最近一层提交）——'
+        '只读代码/分析时推荐 depth=1，可大幅省流量与时间；浅克隆不能 push。'
         '需要凭据时带 username + token。'
         '远端工作区（Termux/远程电脑）不支持本工具，请用 ssh_exec 执行 git clone。',
     parameters: withEscalationFields({
@@ -283,16 +322,22 @@ ToolDefinition createGitCloneTool({List<SshConfig> sshConfigs = const []}) {
         'username': {'type': 'string', 'description': '可选：https 用户名'},
         'token': {'type': 'string', 'description': '可选：https 访问令牌'},
         'branch': {'type': 'string', 'description': '可选：分支（默认远端 HEAD）'},
+        'depth': {
+          'type': 'integer',
+          'description': '可选：浅克隆深度（提交层数）。大仓库建议 1；'
+              '不传 = 完整克隆（历史全量，大仓库很慢）',
+        },
       },
       'required': ['url'],
     }),
-    timeout: const Duration(seconds: 120),
+    timeout: const Duration(seconds: 300),
     execute: (args) {
       final url = (args['url'] as String?)?.trim() ?? '';
       final name = (args['name'] as String?)?.trim() ?? '';
       final username = (args['username'] as String?)?.trim() ?? '';
       final token = (args['token'] as String?)?.trim() ?? '';
       final branch = (args['branch'] as String?)?.trim() ?? '';
+      final depth = args['depth'] is num ? (args['depth'] as num).toInt() : null;
       if (url.isEmpty) return Future.value(ToolResult.error('缺少 url 参数'));
       if (url.startsWith('git@') || url.contains('ssh://')) {
         return Future.value(ToolResult.error(
@@ -304,14 +349,52 @@ ToolDefinition createGitCloneTool({List<SshConfig> sshConfigs = const []}) {
           return ToolResult.error('git_clone 仅支持本地工作区；'
               '远端请用 ssh_exec 执行 git clone');
         }
-        await Directory(root).create(recursive: true);
-        final res = await LocalGit.clone(url, root,
+        // 克隆目标必须是工作区下的**新子目录**（JGit 要求目标为空目录）。
+        // 此前直接克隆进工作区根——根目录永不为空，恒报
+        // "Destination path already exists and is not an empty directory"。
+        final repoName = name.isNotEmpty
+            ? name
+            : url
+                .replaceAll(RegExp(r'/+$'), '')
+                .split('/')
+                .last
+                .replaceAll(RegExp(r'\.git$'), '');
+        if (repoName.isEmpty) {
+          return ToolResult.error('无法从 url 推断仓库名，请带 name 参数');
+        }
+        final target = root.endsWith('/')
+            ? '$root$repoName'
+            : '$root/$repoName';
+        final targetDir = Directory(target);
+        String? backupPath;
+        if (targetDir.existsSync() &&
+            targetDir.listSync(followLinks: false).isNotEmpty) {
+          final hasGit = File('$target/.git').existsSync() ||
+              Directory('$target/.git').existsSync();
+          if (hasGit) {
+            return ToolResult.error('目标目录已是一个 git 仓库：$target。'
+                '更新代码请用 git_pull；确要重克隆请换一个 name 参数');
+          }
+          // 非仓库残留（如旧会话 HTTP 拉取的裸文件）→ 自动改名备份后重新克隆，
+          // 不删任何数据（真机实锤：残留目录把 git_clone 永久堵死）。
+          backupPath =
+              '$target.bak-${DateTime.now().millisecondsSinceEpoch}';
+          targetDir.renameSync(backupPath);
+        }
+        await targetDir.create(recursive: true);
+        final res = await LocalGit.clone(url, target,
             username: username.isEmpty ? null : username,
             password: token.isEmpty ? null : token,
-            branch: branch.isEmpty ? null : branch);
-        if (!res.ok) return ToolResult.error('git_clone 失败：${res.output}');
-        return ToolResult(
-            content: '已克隆到 $root${name.isEmpty ? '' : '（$name）'}');
+            branch: branch.isEmpty ? null : branch,
+            depth: depth);
+        if (!res.ok) {
+          // 克隆失败把备份挪回来，不丢用户文件。
+          if (backupPath != null) Directory(backupPath).renameSync(target);
+          return ToolResult.error('git_clone 失败：${res.output}');
+        }
+        final tag = depth != null && depth > 0 ? '（浅克隆 depth=$depth）' : '';
+        final bak = backupPath == null ? '' : '（旧目录已备份为 $backupPath）';
+        return ToolResult(content: '已克隆到 $target$tag$bak');
       });
     },
   );

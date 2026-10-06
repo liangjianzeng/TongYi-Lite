@@ -233,7 +233,8 @@ class MainActivity : FlutterActivity() {
                             call.argument<String>("target") ?: "",
                             call.argument<String>("username"),
                             call.argument<String>("password"),
-                            call.argument<String>("branch"))
+                            call.argument<String>("branch"),
+                            call.argument<Number>("depth")?.toInt())
                         else -> null
                     }
                 } catch (e: Exception) {

@@ -189,10 +189,10 @@ class GoalState {
       buf.write('\n目标：$goal');
     } else {
       buf.write('\n目标：${goal.length > 120 ? '${goal.substring(0, 120)}…' : goal}');
+      // 卡内只留标题与状态徽标——detail/verify 属面板详情，进卡只会啰嗦
+      // 且每回合白耗 prefill token。
       for (var i = 0; i < steps.length; i++) {
-        final s = steps[i];
-        buf.write('\n${s.statusBadge} ${i + 1}. ${s.title}');
-        if (s.detail.isNotEmpty) buf.write(' —— ${s.detail}');
+        buf.write('\n${steps[i].statusBadge} ${i + 1}. ${steps[i].title}');
       }
     }
     return buf.toString();

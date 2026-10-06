@@ -20,11 +20,14 @@ library;
 import 'dart:async';
 import 'dart:convert' show jsonEncode;
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../llm/adapter.dart';
 import '../session/session.dart';
 import 'config.dart';
 import 'failure.dart';
 import '../context_eng/spill.dart';
+import '../context_eng/token_estimate.dart';
 import '../sandbox.dart';
 import '../tool_definition.dart';
 import '../tool_registry.dart';
@@ -285,6 +288,8 @@ class ReactLoopAgent {
     if (_phase.phase != AgentPhase.idle) {
       throw StateError('agent is running; cancel() first');
     }
+    // 回合计时（结束日志用）：真机排障需要"回合跑了多久、几步"的基线。
+    final turnWatch = Stopwatch()..start();
     _cancelCompleter = Completer<void>();
     _cancelCompleted = false;
     _turnAnswer = '';
@@ -388,6 +393,8 @@ class ReactLoopAgent {
             final options =
                 _buildRequest(turn, step, imagePath, audioPath,
                     onStatus: onStatus, imagePaths: imagePaths);
+            debugPrint('[AgentStep] t$turn s$step request '
+                '(events=${_session.eventsCount})');
             final result = await _adapter.generate(
                 options,
                 onToken: onToken,
@@ -396,11 +403,15 @@ class ReactLoopAgent {
             );
             _appendAssistant(turn, step, result);
             if (!result.hasToolCalls) {
+              debugPrint('[AgentStep] t$turn s$step answer '
+                  '${result.text.length} chars');
               _turnAnswer = result.text; // 本轮最终回答（无工具那步）
               turnDone = true;
               break; // 无工具调用 → turn 完成（最终回答）
             }
             // 有工具 → 逐工具执行；成功后进入下一个 step。
+            debugPrint('[AgentStep] t$turn s$step tools='
+                '${result.toolCalls.map((c) => c.name).toList()}');
             await _executeToolCalls(turn, step, result.toolCalls);
             _lastStepHadToolResults = true;
             if (_cancelCompleted) {
@@ -411,6 +422,8 @@ class ReactLoopAgent {
             break;
           } on LlmFailure catch (f) {
             // 失败 → 落 assistant/attempt（log-only，模型不可见）→ 跑瀑布。
+            debugPrint('[AgentStep] t$turn s$step failure '
+                '${f.code.name}: ${f.message}');
             _appendAttempt(turn, step, f);
             _turnError = f.message;
             final decision = await _handleFailure(turn, step, f);
@@ -434,6 +447,8 @@ class ReactLoopAgent {
       }
     } finally {
       _session.append(kEventTurnEnd, {'turn': turn, 'reason': reason.name});
+      debugPrint('[AgentStep] t$turn end reason=${reason.name} steps=$step '
+          'elapsed=${(turnWatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s');
       _phase = AgentPhaseState(AgentPhase.idle, turn, step);
       final c = _cancelCompleter;
       if (c != null && !_cancelCompleted) {
@@ -552,14 +567,9 @@ class ReactLoopAgent {
   Future<void> _maybeCompactProactively(int turn, int step) async {
     final budget = _config.contextTokenBudget!;
     final messages = _session.deriveModelMessages();
-    var chars = 0;
-    for (final m in messages) {
-      final c = m['content'];
-      if (c is String) chars += c.length;
-      final tc = m['tool_calls'];
-      if (tc is List) chars += tc.length * 40;
-    }
-    final estTokens = chars ~/ 4;
+    // 中文加权估算（context_eng/token_estimate）：旧 chars/4 口径对中文
+    // 低估 ~3 倍，主动压缩迟迟不触发直到撞服务端硬墙。
+    final estTokens = estimateContextTokens(messages);
     if (estTokens <= budget) return;
     final result = await _compaction.decide(
       ref: SessionRef(_session),
@@ -567,13 +577,11 @@ class ReactLoopAgent {
       step: step,
       reason: 'proactive: 估算约 $estTokens tok 超预算 $budget（主动前置压缩）',
     );
-    assert(() {
-      if (result.kind == CompactionResultKind.success) {
-        // ignore: avoid_print
-        print('[ReactLoopAgent] proactive compaction: ~$estTokens tok > $budget');
-      }
-      return true;
-    }());
+    final stats = result.stats;
+    if (result.kind == CompactionResultKind.success) {
+      debugPrint('[AgentStep] t$turn s$step proactive compaction: '
+          '~$estTokens > $budget；压缩后 ~${stats?.afterTokens ?? '?'} tok');
+    }
   }
 
   /// 失败 → 落 assistant/attempt（log-only，模型不可见）。
@@ -632,6 +640,8 @@ class ReactLoopAgent {
         return const FailureDecision(FailureDecisionKind.giveUp,
             detail: 'llm-retry exhausted');
       }
+      debugPrint('[AgentStep] t$turn s$step retry ${_retry.retries}/'
+          '${_retry.maxRetries} in ${delay.inMilliseconds}ms');
       return const FailureDecision(FailureDecisionKind.retry);
     }
     // 3. 默认 → 终态失败。

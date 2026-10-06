@@ -38,7 +38,38 @@ enum CompactionResultKind {
 
 final class CompactionResult {
   final CompactionResultKind kind;
-  const CompactionResult(this.kind);
+
+  /// 压缩统计（success 时由插件填写；failure 为 null）。
+  /// 查询/呈现压缩状态的数据源：推理日志、可观测面板据此回答
+  /// "压没压、从多少压到多少、谁压的"。
+  final CompactionStats? stats;
+  const CompactionResult(this.kind, [this.stats]);
+}
+
+/// 一次压缩的量化结果。
+final class CompactionStats {
+  /// 被遮蔽的事件数（影子区宽度）。
+  final int maskedEvents;
+
+  /// 压缩前/后上下文估算 token（estimateContextTokens 口径）。
+  final int beforeTokens;
+  final int afterTokens;
+
+  /// 摘要来源：deterministic-prune / llm。
+  final String provider;
+
+  /// 摘要文本长度（字符）。
+  final int summaryChars;
+  const CompactionStats({
+    required this.maskedEvents,
+    required this.beforeTokens,
+    required this.afterTokens,
+    required this.provider,
+    required this.summaryChars,
+  });
+
+  /// 净省下的估算 token（可为负——旧区本就小时摘要可能不省）。
+  int get savedTokens => beforeTokens - afterTokens;
 }
 
 abstract class CompactionPlugin {

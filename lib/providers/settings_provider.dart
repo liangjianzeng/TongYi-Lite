@@ -503,6 +503,44 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  // ---- 语音播报（Edge TTS）----
+
+  /// Edge TTS 总开关。
+  Future<void> setEdgeTtsEnabled(bool value) async {
+    state = state.copyWith(edgeTtsEnabled: value);
+    await _persist();
+  }
+
+  /// 自动播报开关。
+  Future<void> setEdgeTtsAutoSpeak(bool value) async {
+    state = state.copyWith(edgeTtsAutoSpeak: value);
+    await _persist();
+  }
+
+  /// 音色（ShortName）。
+  Future<void> setEdgeTtsVoice(String value) async {
+    state = state.copyWith(edgeTtsVoice: value);
+    await _persist();
+  }
+
+  /// 语速（-50 ~ +100）。
+  Future<void> setEdgeTtsRate(int value) async {
+    state = state.copyWith(edgeTtsRate: value.clamp(-50, 100));
+    await _persist();
+  }
+
+  /// 音调（-50 ~ +50 Hz）。
+  Future<void> setEdgeTtsPitch(int value) async {
+    state = state.copyWith(edgeTtsPitch: value.clamp(-50, 50));
+    await _persist();
+  }
+
+  /// 音量（-50 ~ +50）。
+  Future<void> setEdgeTtsVolume(int value) async {
+    state = state.copyWith(edgeTtsVolume: value.clamp(-50, 50));
+    await _persist();
+  }
+
   /// 回合轨迹自动落盘开关（P0 轨迹导出）。
   Future<void> setAgentTraceExportEnabled(bool value) async {
     state = state.copyWith(agentTraceExportEnabled: value);

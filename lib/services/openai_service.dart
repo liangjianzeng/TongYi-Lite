@@ -32,11 +32,41 @@ class OpenAiHttpException implements Exception {
   String toString() => message;
 }
 
+/// SSE 流停摆异常：连接建立后连续 [idle] 未收到任何数据（含心跳）。
+///
+/// 典型成因是中转/网关把请求挂住不回包（真机实测：端点 13 分钟零字节，
+/// 回合表面"思考中"实为无限等待）。抛出后由 adapter 归一化为
+/// [LlmFailureCode.timeout]（可重试档），UI 出现重试横幅而非无限转圈。
+class OpenAiStallException implements Exception {
+  final Duration idle;
+  const OpenAiStallException(this.idle);
+
+  @override
+  String toString() =>
+      '端点停摆：${idle.inSeconds}s 未收到任何响应数据（连接可能已被网关挂起）';
+}
+
 /// OpenAI 兼容远程推理服务。密钥明文由配置持有，此处仅用于请求头。
 class OpenAiService {
-  OpenAiService({Dio? dio}) : _dio = dio ?? Dio();
+  OpenAiService({Dio? dio, Duration? stallIdle})
+      : _dio = dio ??
+            Dio(BaseOptions(
+              // 连接/发送必须有界：DNS/握手挂起不能拖死整个智能体回合。
+              // 接收侧不设全局 receiveTimeout（长生成合法），流式空闲由
+              // [_sseStallIdle] 看门狗单独守护（见 _sseDataPayloads）。
+              connectTimeout: const Duration(seconds: 20),
+              sendTimeout: const Duration(seconds: 30),
+            )),
+        _stallIdle = stallIdle ?? _sseStallIdle;
 
   final Dio _dio;
+
+  /// 流式空闲看门狗阈值：连续这么久没收到任何 SSE 数据（含心跳/注释行）
+  /// 判定端点停摆。慢流合法（每个 chunk 重置计时），只拦"彻底没数据"。
+  static const Duration _sseStallIdle = Duration(seconds: 120);
+
+  /// 实际生效的看门狗阈值（可注入缩短，供回归测试）。
+  final Duration _stallIdle;
 
   /// 当前流式请求的取消令牌，用于「停止生成」。
   CancelToken? _cancelToken;
@@ -282,8 +312,16 @@ class OpenAiService {
     // dio 流式响应：response.data 是 ResponseBody，其 .stream 为字节流。
     final byteStream = response.data?.stream ?? const Stream<Uint8List>.empty();
     final lines = utf8.decoder.bind(byteStream).transform(const LineSplitter());
+    // 停摆看门狗：`Stream.timeout` 监听**两个事件之间**的静默时长，超限
+    // 即向流注入 [OpenAiStallException]（await for 处抛出、上游订阅随之
+    // 取消）。慢流合法——每个 chunk 到达都会重置计时；只拦"彻底没数据"。
+    final guarded = lines.timeout(
+      _stallIdle,
+      onTimeout: (sink) => sink.addError(OpenAiStallException(_stallIdle)),
+    );
 
-    await for (final rawLine in lines) {
+    try {
+      await for (final rawLine in guarded) {
       final line = rawLine.trim();
       if (!line.startsWith('data:')) continue;
       final payload = line.substring(5).trim();
@@ -308,6 +346,13 @@ class OpenAiService {
         }
       }
       yield payload;
+      }
+    } on OpenAiStallException {
+      // 主动掐断挂死的连接（上游订阅已随 await for 抛错取消，CancelToken
+      // 兜底确保底层 socket 关闭），异常原样上抛 → adapter 归一化为
+      // timeout 档 → 失败瀑布有界重试。
+      _cancelToken?.cancel('sse stall');
+      rethrow;
     }
   }
 
