@@ -28,7 +28,7 @@ Future<DevWorkspace?> _loadWorkspace(String? workspaceId,
   if (workspaceId == null || workspaceId == DevWorkspace.kDefaultId) {
     return DevWorkspace.defaultWorkspace;
   }
-  final s = store ?? DevStore();
+  final s = DevStore.resolve(store);
   final workspaces = await s.loadWorkspaces();
   return workspaces.where((w) => w.id == workspaceId).firstOrNull;
 }
@@ -40,6 +40,7 @@ Future<String> buildWorkspaceContextSection(
   if (ws == null) return '';
   final backendName = switch (ws.backend) {
     WorkspaceBackend.localApp => '本地沙盒',
+    WorkspaceBackend.embedded => '内嵌工具沙箱（本地执行）',
     WorkspaceBackend.termux => 'Termux（手机 Linux）',
     WorkspaceBackend.remotePc => '远程电脑',
   };
@@ -55,7 +56,7 @@ Future<String> buildWorkspaceContextSection(
   // 当前任务一句话。
   if (taskId != null && taskId.isNotEmpty) {
     try {
-      final tasks = await (store ?? DevStore()).loadTasks();
+      final tasks = await (DevStore.resolve(store)).loadTasks();
       final task = tasks.where((t) => t.id == taskId).firstOrNull;
       if (task != null) {
         buf.write('当前任务：「${task.title}」（${task.status.name}）');
@@ -65,8 +66,17 @@ Future<String> buildWorkspaceContextSection(
       debugPrint('[Dev] task load failed: $e');
     }
   }
-  buf.write('文件/命令类工具作用域为当前工作区；远端工作区用 ssh_exec / '
-      'ssh_read_file / ssh_write_file 操作。\n</workspace:context>');
+  buf.write('文件/命令类工具作用域为当前工作区。');
+  buf.write(switch (ws.backend) {
+    WorkspaceBackend.termux || WorkspaceBackend.remotePc =>
+      '远端工作区用 ssh_exec / ssh_read_file / ssh_write_file 操作'
+          '（Termux 优先走 RUN_COMMAND 免 SSH 通道，自动回落 SSH）。',
+    WorkspaceBackend.embedded =>
+      '本地执行用 dev_shell / run_tests；git 用 git_* 工具（进程内，无需 git 命令）。',
+    WorkspaceBackend.localApp =>
+      '本地执行用 dev_shell / run_tests；git 用 git_* 工具（进程内）。',
+  });
+  buf.write('\n</workspace:context>');
   final text = buf.toString();
   return text.length <= kDevWorkspaceChars * 2 ? text : text;
 }
@@ -75,7 +85,7 @@ Future<String> buildWorkspaceContextSection(
 Future<String> buildPlanSection(String? taskId, {DevStore? store}) async {
   if (taskId == null || taskId.isEmpty) return '';
   try {
-    final tasks = await (store ?? DevStore()).loadTasks();
+    final tasks = await (DevStore.resolve(store)).loadTasks();
     final task = tasks.where((t) => t.id == taskId).firstOrNull;
     final plan = task?.plan;
     if (plan == null || plan.steps.isEmpty) return '';
@@ -103,7 +113,7 @@ Future<String> buildWorkspaceMemorySection(String? workspaceId,
     {DevStore? store}) async {
   if (workspaceId == null || workspaceId == DevWorkspace.kDefaultId) return '';
   try {
-    final s = store ?? DevStore();
+    final s = DevStore.resolve(store);
     // 读取 workspace 记忆文件（独立文件：workspace/projects/<id>/memory.json）。
     final docs = await s.workspaceLocalMirror(workspaceId);
     final file = File(p.join(docs, 'memory.json'));

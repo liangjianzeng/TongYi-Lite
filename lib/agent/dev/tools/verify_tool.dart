@@ -1,11 +1,17 @@
-/// 验证循环工具（Dev Agent Phase C）—— 在远端工作区运行测试/构建。
+/// 验证循环工具（Dev Agent Phase C）—— 在工作区运行测试/构建。
 ///
-/// 复用 ssh 共享执行器；默认 60s 超时（构建类任务）；输出截断 4000。
+/// 分派（L1 扩展）：远端后端（termux/remotePc）走 ssh 共享执行器（原路径）；
+/// 本地后端（localApp/embedded/默认工作区）走内嵌沙箱执行器（dev_shell 同款，
+/// PATH 前插 nativeLibraryDir）。默认 60s 超时（构建类任务）；输出截断 4000。
 /// 失败 → 模型迭代修复 → 再跑；成功 → 接入层 tools/result hook 可推进计划。
 library;
 
 import '../../tool_definition.dart';
+import '../safety.dart';
 import '../ssh/ssh_credentials.dart' show SshConfig;
+import '../workspace.dart';
+import '../workspace_store.dart';
+import 'embedded_tools.dart' show devShellRoot, executeDevShell;
 import 'ssh_tools.dart' show sshRunInWorkspace;
 
 /// run_tests：执行测试/构建命令。
@@ -35,11 +41,35 @@ ToolDefinition createRunTestsTool({List<SshConfig> sshConfigs = const []}) {
             'Flutter 项目 "flutter test"。请补全命令后重试');
       }
       final cwd = (args['cwd'] as String?)?.trim() ?? '';
+      final full = cwd.isEmpty ? command : '$cwd && $command';
+      // 本地工作区：内嵌沙箱执行（危险命令黑名单同通道）。
+      final wsId = effectiveWorkspaceOf(args);
+      final remote = wsId != null && wsId != DevWorkspace.kDefaultId
+          ? await _isRemoteWorkspace(wsId)
+          : false;
+      if (!remote) {
+        final danger = checkDangerousCommand(full);
+        if (danger != null) {
+          return ToolResult.error('危险命令被拒绝：$danger');
+        }
+        final root = await devShellRoot(wsId);
+        return executeDevShell(full,
+            root: root, timeout: const Duration(seconds: 60));
+      }
       return sshRunInWorkspace(args, (root) {
-        return cwd.isEmpty
-            ? 'cd $root && $command'
-            : 'cd $root/$cwd && $command';
+        return cwd.isEmpty ? 'cd $root && $command' : 'cd $root/$cwd && $command';
       }, timeout: const Duration(seconds: 60), sshConfigs: sshConfigs);
     },
   );
+}
+
+/// 工作区是否存在且为远端后端（本地/默认/不存在 = 非远端）。
+Future<bool> _isRemoteWorkspace(String workspaceId) async {
+  try {
+    final workspaces = await DevStore.resolve().loadWorkspaces();
+    final ws = workspaces.where((w) => w.id == workspaceId).firstOrNull;
+    return ws?.isRemote ?? false;
+  } catch (_) {
+    return false;
+  }
 }

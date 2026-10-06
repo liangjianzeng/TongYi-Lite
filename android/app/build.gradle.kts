@@ -129,6 +129,9 @@ dependencies {
     // PDF 文本抽取：TomRoush/PdfBox-Android（Apache PDFBox 2.0.27 移植，类包名 com.tom_roush.pdfbox）。
     // 替代原手搓纯 Dart 解析器（2026-09-30 已删）；纯 JVM 依赖，不碰 NDK。
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    // Dev Agent L1：本地 git = JGit 进程内执行（EDL 许可，零 exec —— targetSdk 34
+    // W^X 限制下 app 数据目录不可 exec，没有 git 可执行文件可用）。
+    implementation("org.eclipse.jgit:org.eclipse.jgit:6.10.0.202406032230-r")
     // PdfExtracter 的 JVM 单测（fixture PDF 在 src/test/resources）。
     testImplementation("junit:junit:4.13.2")
 }
