@@ -2,8 +2,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/chat_message.dart';
+import '../providers/settings_provider.dart' show settingsProvider;
 import '../services/share_service.dart';
+import '../tts/edge_tts_service.dart' show EdgeTtsService;
+import 'todo_card.dart';
 
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
@@ -35,6 +39,63 @@ class ChatBubble extends StatelessWidget {
 
   /// 工具活动消息（🔧 前缀，智能体模式工具轮）。
   bool get _isToolActivity => !_isUser && content.startsWith('🔧');
+
+  /// 可播报：assistant 普通文本回答（排除工具活动/思考存档/待办卡/计划卡）。
+  bool get _canSpeak =>
+      !_isUser &&
+      !isStreaming &&
+      content.length > 1 &&
+      !content.startsWith('🔧') &&
+      !content.startsWith('💭') &&
+      !content.startsWith('☑') &&
+      !content.startsWith('📋') &&
+      !content.startsWith('🔔');
+
+  /// TTS 播报按钮：Consumer 自取设置（开关/音色/语速…）与播放状态。
+  /// 播报中（playingKey == 本条）图标变停止样式，点按即停（speak 内部处理）。
+  Widget _buildSpeakButton(BuildContext context, ThemeData theme) {
+    // 无 ProviderScope（部分纯渲染测试直接 pump ChatBubble）→ 不渲染，
+    // 避免抛 "No ProviderScope found"；真机恒有 scope，不受影响。
+    try {
+      ProviderScope.containerOf(context);
+    } catch (_) {
+      return const SizedBox.shrink();
+    }
+    return Consumer(
+      builder: (context, ref, _) {
+        final settings = ref.watch(settingsProvider);
+        final tts = EdgeTtsService.instance;
+        return ValueListenableBuilder<String?>(
+          valueListenable: tts.playingKey,
+          builder: (context, playing, _) {
+            final isThis = playing == content.hashCode.toString();
+            return InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () {
+                tts.speak(
+                  content,
+                  key: content.hashCode.toString(),
+                  voice: settings.edgeTtsVoice,
+                  rate: settings.edgeTtsRate,
+                  pitch: settings.edgeTtsPitch,
+                  volume: settings.edgeTtsVolume,
+                );
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  isThis ? Icons.stop_circle : Icons.volume_up,
+                  size: 15,
+                  color:
+                      isThis ? theme.colorScheme.primary : Colors.grey.shade400,
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
 
   /// 思考中占位（内容为空 + 流式中 → 显示「思考中…」指示器）。
   bool get _isThinkingPlaceholder => !_isUser && isStreaming && content.isEmpty;
@@ -219,6 +280,10 @@ class ChatBubble extends StatelessWidget {
                                 height: 1.5,
                               ),
                             )
+                          else if (content.startsWith('☑ 任务清单'))
+                            // 任务清单活卡（todo_write upsert）：结构化清单
+                            // 视图（状态图标/完成删除线/进行中高亮），不走 MD。
+                            TodoChecklistCard(content: content)
                           else
                             // 智能体回答 markdown 美化渲染（WP-B）：标题/列表/
                             // 代码块/表格/加粗等结构化排版。流式期间部分 MD
@@ -297,6 +362,32 @@ class ChatBubble extends StatelessWidget {
                         ),
                       ),
                     ],
+                    // 用户消息同样可复制：长文/提示词常需复用，与回复复制同款式。
+                    if (_isUser && content.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () async {
+                          await Clipboard.setData(ClipboardData(text: content));
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('已复制消息内容'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(
+                            Icons.content_copy,
+                            size: 15,
+                            color: Colors.grey.shade400,
+                          ),
+                        ),
+                      ),
+                    ],
                     if (!_isUser && content.isNotEmpty) ...[
                       const SizedBox(width: 6),
                       InkWell(
@@ -346,6 +437,12 @@ class ChatBubble extends StatelessWidget {
                           ),
                         ),
                       ),
+                      // TTS 播报：普通回答才有（工具活动/思考存档/卡片不显示）。
+                      // 按钮自取设置与播放状态；播报中变停止键（点按即停）。
+                      if (_canSpeak) ...[
+                        const SizedBox(width: 6),
+                        _buildSpeakButton(context, theme),
+                      ],
                     ],
                   ],
                 ),

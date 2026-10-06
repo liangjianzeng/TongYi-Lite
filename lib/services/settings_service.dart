@@ -210,6 +210,26 @@ class InferenceSettings {
   /// 超长工具输出溢写落盘（默认开；模型侧只留摘要与文件定位）??
   final bool agentSpillEnabled;
 
+  // ---- 语音播报（Edge 在线 TTS）----
+
+  /// Edge TTS 总开关（默认关）：开 = 回答气泡出现 🔊 按钮、允许自动播报。
+  final bool edgeTtsEnabled;
+
+  /// 回复完成后自动播报（默认关；需 edgeTtsEnabled 同时开启）。
+  final bool edgeTtsAutoSpeak;
+
+  /// 音色 ShortName（默认 zh-CN-XiaoxiaoNeural 晓晓，公认最优中文女声）。
+  final String edgeTtsVoice;
+
+  /// 语速（-50 ~ +100 → SSML "+N%"）。
+  final int edgeTtsRate;
+
+  /// 音调（-50 ~ +50 Hz → SSML "+NHz"）。
+  final int edgeTtsPitch;
+
+  /// 音量（-50 ~ +50 → SSML "+N%"）。
+  final int edgeTtsVolume;
+
   /// 回合轨迹自动落盘（P0 轨迹导出，默认关）：每回合结束把 SessionLog
   /// 整份事件流写 `ApplicationSupport/traces/*.jsonl`（回放/评估/排障用）。
   final bool agentTraceExportEnabled;
@@ -417,6 +437,12 @@ class InferenceSettings {
     this.agentCompressionApiModelId = '',
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
+    this.edgeTtsEnabled = false,
+    this.edgeTtsAutoSpeak = false,
+    this.edgeTtsVoice = 'zh-CN-XiaoxiaoNeural',
+    this.edgeTtsRate = 0,
+    this.edgeTtsPitch = 0,
+    this.edgeTtsVolume = 0,
     this.agentTraceExportEnabled = false,
     this.webSearchEnabled = false,
     this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
@@ -578,6 +604,12 @@ class InferenceSettings {
       String? agentCompressionApiModelId,
       bool? agentCompactEnabled,
       bool? agentSpillEnabled,
+      bool? edgeTtsEnabled,
+      bool? edgeTtsAutoSpeak,
+      String? edgeTtsVoice,
+      int? edgeTtsRate,
+      int? edgeTtsPitch,
+      int? edgeTtsVolume,
       bool? agentTraceExportEnabled,
       bool? webSearchEnabled,
       String? webSearchSearXngBaseUrl,
@@ -676,6 +708,12 @@ class InferenceSettings {
           agentCompressionApiModelId ?? this.agentCompressionApiModelId,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
+      edgeTtsEnabled: edgeTtsEnabled ?? this.edgeTtsEnabled,
+      edgeTtsAutoSpeak: edgeTtsAutoSpeak ?? this.edgeTtsAutoSpeak,
+      edgeTtsVoice: edgeTtsVoice ?? this.edgeTtsVoice,
+      edgeTtsRate: edgeTtsRate ?? this.edgeTtsRate,
+      edgeTtsPitch: edgeTtsPitch ?? this.edgeTtsPitch,
+      edgeTtsVolume: edgeTtsVolume ?? this.edgeTtsVolume,
       agentTraceExportEnabled:
           agentTraceExportEnabled ?? this.agentTraceExportEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
@@ -772,6 +810,12 @@ class InferenceSettings {
         'agentCompressionApiModelId': agentCompressionApiModelId,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
+        'edgeTtsEnabled': edgeTtsEnabled,
+        'edgeTtsAutoSpeak': edgeTtsAutoSpeak,
+        'edgeTtsVoice': edgeTtsVoice,
+        'edgeTtsRate': edgeTtsRate,
+        'edgeTtsPitch': edgeTtsPitch,
+        'edgeTtsVolume': edgeTtsVolume,
         'agentTraceExportEnabled': agentTraceExportEnabled,
         'webSearchEnabled': webSearchEnabled,
         'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
@@ -900,6 +944,12 @@ class InferenceSettings {
           json['agentCompressionApiModelId'] as String? ?? '',
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
+      edgeTtsEnabled: json['edgeTtsEnabled'] as bool? ?? false,
+      edgeTtsAutoSpeak: json['edgeTtsAutoSpeak'] as bool? ?? false,
+      edgeTtsVoice: json['edgeTtsVoice'] as String? ?? 'zh-CN-XiaoxiaoNeural',
+      edgeTtsRate: ((json['edgeTtsRate'] as num?) ?? 0).clamp(-50, 100).toInt(),
+      edgeTtsPitch: ((json['edgeTtsPitch'] as num?) ?? 0).clamp(-50, 50).toInt(),
+      edgeTtsVolume: ((json['edgeTtsVolume'] as num?) ?? 0).clamp(-50, 50).toInt(),
       agentTraceExportEnabled:
           json['agentTraceExportEnabled'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,

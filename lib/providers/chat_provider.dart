@@ -17,6 +17,8 @@ import '../agent/dev/tools/ssh_tools.dart' show readRemoteAgentsMd;
 import '../agent/dev/workspace.dart' show DevWorkspace;
 import '../agent/web_search/web_search_provider.dart';
 import '../agent/context_eng/compaction.dart' show DeterministicCompaction;
+import '../agent/context_eng/token_estimate.dart' show estimateContextTokens;
+import '../tts/edge_tts_service.dart' show EdgeTtsService;
 import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
@@ -53,8 +55,14 @@ import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
 import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
 import '../agent/session/store.dart'
-    show JsonlSessionStore, kAgentTraceMessagePrefix, encodeAgentTraceMessage;
-import '../agent/session/event.dart' show kEventAssistantMessage;
+    show
+        JsonlSessionStore,
+        kAgentTraceMessagePrefix,
+        encodeAgentTraceMessage,
+        decodeAgentTraceMessage,
+        planStorageCompaction;
+import '../agent/session/event.dart'
+    show kEventAssistantMessage, kEventCompactionSummary;
 import '../agent/metrics/turn_metrics.dart'
     show TurnMetrics, TurnMetricsStore;
 import '../agent/session/trace_export.dart' as trace_export;
@@ -456,8 +464,22 @@ class ChatNotifier extends StateNotifier<bool> {
   ///
   /// [imagePaths] 多图（≤10，首张即 [imagePath]）；[attachmentPaths] 智能体
   /// 附件（≤5，仅智能体模式消费——普通聊天引擎无文件阅读能力，忽略并提示）。
-  Future<String> sendMessage(
-    String conversationId,
+  /// 自动播报（Edge TTS，设置开启时）：回复落库后朗读；失败静默不打断聊天。
+  void _maybeAutoSpeak(String conversationId, String text) {
+    final settings = _ref.read(settingsProvider);
+    if (!settings.edgeTtsEnabled || !settings.edgeTtsAutoSpeak) return;
+    if (text.trim().isEmpty) return;
+    unawaited(EdgeTtsService.instance.speak(
+      text,
+      key: 'auto-$conversationId',
+      voice: settings.edgeTtsVoice,
+      rate: settings.edgeTtsRate,
+      pitch: settings.edgeTtsPitch,
+      volume: settings.edgeTtsVolume,
+    ));
+  }
+
+  Future<String> sendMessage(    String conversationId,
     String prompt, {
     String? imagePath,
     List<String>? imagePaths,
@@ -466,6 +488,8 @@ class ChatNotifier extends StateNotifier<bool> {
   }) async {    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
     // 路由未定时先按纯槽位计数预检；路由确定后再补「本地互斥」校验。
     final settings = _ref.read(settingsProvider);
+    // 新消息发出 → 停掉正在进行的播报（避免旧回答声音与新提问交叠）。
+    unawaited(EdgeTtsService.instance.stop());
     final admission = checkTurnAdmission(
       activeCount: _activeTurns.length,
       activeHasLocal: false,
@@ -614,17 +638,22 @@ class ChatNotifier extends StateNotifier<bool> {
     // KV 归属本地引擎：仅本地路线管理（API 回合不动 KV 状态，避免把
     // 并行运行中的本地回合上下文重置掉）。
     if (!useApi) {
+      var kvReset = false;
       if (_currentKvConvId != conversationId) {
         debugPrint(
             '[ChatNotifier] Conversation changed ($_currentKvConvId -> $conversationId): resetContext()');
         await _inference.resetContext();
         _currentKvConvId = conversationId;
+        kvReset = true;
       } else if (_currentKvWasAgentMode) {
         // 智能体 → 普通聊天（模式切换）：KV 里是系统提示词 + 工具轮，必须重置，
         // 本轮以最小 prefill 重放纯对话历史。
         debugPrint('[ChatNotifier] Agent→plain mode switch: resetContext()');
         await _inference.resetContext();
+        kvReset = true;
       }
+      // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
+      if (kvReset) _ref.read(contextUsageProvider.notifier).clear();
       _currentKvWasAgentMode = false;
       _currentKvPersonaId = null;
     }
@@ -887,6 +916,7 @@ class ChatNotifier extends StateNotifier<bool> {
         await _storage.saveMessage(assistantMsg);
         // 回复落地后再刷新一次消息条数（流式占位消息已收尾）。
         await _refreshConversationMeta(conversationId);
+        _maybeAutoSpeak(conversationId, fullResponse);
 
         // 上下文占用：API 接入（usage.prompt_tokens）走 _updateContextUsage；
         // 本地路线走原生 KV 缓存占比（kv_used/kv_ctx）。
@@ -1095,22 +1125,28 @@ class ChatNotifier extends StateNotifier<bool> {
     // 并行运行中的本地回合上下文重置掉）。
     final personaId = settings.activePersonaId;
     if (!useApi) {
+      var kvReset = false;
       if (_currentKvConvId != conversationId) {
         debugPrint(
             '[ChatNotifier] new-agent conversation changed: resetContext()');
         await _inference.resetContext();
         _currentKvConvId = conversationId;
+        kvReset = true;
       } else if (!_currentKvWasAgentMode) {
         // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
         // 由主循环带系统提示词/工具协议重建。
         debugPrint('[ChatNotifier] plain→agent mode switch: resetContext()');
         await _inference.resetContext();
+        kvReset = true;
       } else if (_currentKvPersonaId != personaId) {
         // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
         debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
             '$personaId): resetContext()');
         await _inference.resetContext();
+        kvReset = true;
       }
+      // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
+      if (kvReset) _ref.read(contextUsageProvider.notifier).clear();
       _currentKvWasAgentMode = true;
       _currentKvPersonaId = personaId;
     }
@@ -1146,7 +1182,8 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     }
 
-    final registry = _buildAgentRegistry(settings, agentModelKey);
+    final registry = _buildAgentRegistry(settings, agentModelKey,
+        conversationId: conversationId);
     // P2-B MCP：远程 server 工具注册（仅 API 档；enabled 逐个拉取，
     // 失败 server 静默跳过不阻断回合）。注册在计划模式收窄之前，
     // 只读 MCP 工具可进计划模式白名单。
@@ -1634,6 +1671,23 @@ class ChatNotifier extends StateNotifier<bool> {
       _lastTurnEndReason[conversationId] = reason.kind.name;
       debugPrint('[ChatNotifier] new-agent done: reason=${reason.kind.name}, '
           'answer len=${answer.length}');
+      // 压缩可观测：本回合 compaction/summary 事件 → 推理日志（此前压缩
+      // 只有一条 debugPrint，release 里用户/开发者都查不到"压没压"）。
+      try {
+        final compactions = [
+          for (final e in sessionLog.rawEvents)
+            if (e.type == kEventCompactionSummary) e,
+        ];
+        if (compactions.isNotEmpty) {
+          final last = compactions.last;
+          final summaryLen =
+              ((last.data['content'] as String?) ?? '').length;
+          logManager.appendInferenceLog(
+            '上下文压缩 | 本回合 ${compactions.length} 次 | '
+            '来源=${last.data['provider'] ?? '?'} | 摘要 $summaryLen 字',
+          );
+        }
+      } catch (_) {}
       // P0 遥测：回合指标从日志纯派生（循环零侵入），JSONL 落盘。
       try {
         final metrics =
@@ -1794,6 +1848,7 @@ class ChatNotifier extends StateNotifier<bool> {
     );
     await _storage.saveMessage(assistantMsg);
     await _refreshConversationMeta(conversationId);
+    _maybeAutoSpeak(conversationId, answer);
     return answer;
   }
 
@@ -1875,12 +1930,143 @@ class ChatNotifier extends StateNotifier<bool> {
     final used = genStats['kv_used'] as num?;
     final ctx = genStats['kv_ctx'] as num?;
     if (used == null || ctx == null || ctx <= 0) return;
+    // 本地 KV 单实例：当前快照只对刚测量完的会话有效，清掉其它会话的
+    // 陈旧值（切会话后旧细条仍显示是误导）。
+    _ref.read(contextUsageProvider.notifier).clearExcept(conversationId);
     _ref.read(contextUsageProvider.notifier).update(
           conversationId,
           usedTokens: used.toInt(),
           windowTokens: ctx.toInt(),
           windowSource: '原生',
         );
+  }
+
+  /// 启动/切会话时回填占用快照（估算口径）。
+  ///
+  /// 占用快照只在回合结束时更新（内存态），app 重启后圈圈会一直显示「—」；
+  /// 这里按本地历史重估 used。窗口按首页细条同款路由规则：智能体 API 驱动 /
+  /// 纯 API → API 槽位（fetchContextWindow 实测优先，回退配置 contextWindow），
+  /// 本地 → contextSize 设置。
+  /// ⚠️ 必须直读持久层 [SettingsService.load] 而非 settingsProvider：启动时
+  /// provider 的异步 _load 未完成，读到默认设置会误判路由（真机踩坑：用户
+  /// API 模型 256k 被显示成本地 contextSize 4096 的「估算」）。
+  /// 已有快照的会话跳过（不覆盖回合实测值）；任何失败静默。
+  Future<void> refreshUsageEstimate(String conversationId) async {
+    try {
+      if (conversationId.isEmpty) return;
+      if (_ref.read(contextUsageProvider.notifier).hasUsage(conversationId)) {
+        return;
+      }
+      final settings = await SettingsService().load();
+      final activeApi = settings.activeApiModel();
+      final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
+      final hasDefault = settings.defaultModelId != null;
+      final isAgentApi =
+          settings.agentModelSource == 'api' && activeApi != null;
+      final isPlainApi = activeApi != null && !hasLocalLoaded && !hasDefault;
+
+      final all = await _storage.getMessages(conversationId, limit: 200);
+      if (all.isEmpty) return;
+      final history = all
+          .where((m) =>
+              m.content.isNotEmpty &&
+              (!_isToolActivityMessage(m) ||
+                  m.content.startsWith(kAgentTraceMessagePrefix)))
+          .toList();
+      final log = _sessionStore.importFromMessages(conversationId, history);
+      final est = estimateContextTokens(log.deriveModelMessages());
+      if (est <= 0) return;
+
+      int? window;
+      var source = '';
+      if (isAgentApi || isPlainApi) {
+        final fetched = await _ref
+            .read(openAiServiceProvider)
+            .fetchContextWindow(activeApi!);
+        if (fetched != null && fetched > 0) {
+          window = fetched;
+          source = '实测';
+        } else if ((activeApi.contextWindow ?? 0) > 0) {
+          window = activeApi.contextWindow;
+          source = '配置';
+        }
+      } else if (settings.contextSize > 0) {
+        window = settings.contextSize;
+        source = '配置';
+      }
+      if (window == null) return;
+      _ref.read(contextUsageProvider.notifier).update(
+            conversationId,
+            usedTokens: est,
+            windowTokens: window,
+            windowSource: source,
+          );
+    } catch (e) {
+      debugPrint('[ChatNotifier] refreshUsageEstimate failed: $e');
+    }
+  }
+
+  /// 手动压缩（输入框占用圈 → 详情面板入口）。
+  ///
+  /// 把较早轮次的 🔧TRACE 工具轮轨迹信封从存储中清出（保留最近一条信封，
+  /// 即最近一轮的工具上下文）——工具结果是上下文的 token 大户。最早一条
+  /// 信封**原位改写**为「摘要信封」（同 TRACE 前缀 + 单条 user/message
+  /// 事件，下一轮导入时投影为 user 摘要，模型仍记得做过什么），其余信封
+  /// 删除；可见消息（user/assistant 文本）一律不动，UI 历史回看不受影响
+  /// （🔧TRACE 消息本就不渲染）。
+  ///
+  /// 与回合内 DeterministicCompaction 的区别：那是一次性内存投影（下回合
+  /// 重建即失效），本方法**存储级持久**——之后每一轮导入都看到瘦身后历史。
+  ///
+  /// 返回 (清理信封数, 摘要字符数)；无可压缩内容返回 (0, 0)。
+  Future<(int, int)> manualCompact(String conversationId) async {
+    final all = await _storage.getMessages(conversationId, limit: 200);
+    final plan = planStorageCompaction(all);
+    if (plan == null) return (0, 0);
+
+    // 最早一条信封原位改写为摘要信封（保持 id/timestamp → 排序不变），
+    // 其余删除。
+    final first =
+        all.firstWhere((m) => m.id == plan.firstId);
+    await _storage.saveMessage(ChatMessage(
+      id: first.id,
+      conversationId: first.conversationId,
+      role: first.role,
+      content: plan.summaryEnvelope,
+      timestamp: first.timestamp,
+    ));
+    if (plan.deleteIds.isNotEmpty) {
+      await _storage.deleteMessages(plan.deleteIds);
+    }
+
+    // 日志 + 占用快照即时回落（按瘦身后历史重估，窗口沿用原快照）。
+    final manager = _ref.read(modelManagerProvider.notifier);
+    manager.appendInferenceLog(
+      '手动压缩 | 清理工具轮信封 ${plan.deleteIds.length + 1} 条 | '
+      '摘要 ${plan.summaryChars} 字',
+    );
+    final updated = await _storage.getMessages(conversationId, limit: 200);
+    final history = updated
+        .where((m) =>
+            m.content.isNotEmpty &&
+            (!_isToolActivityMessage(m) ||
+                m.content.startsWith(kAgentTraceMessagePrefix)))
+        .toList();
+    final log = _sessionStore.importFromMessages(conversationId, history);
+    final est = estimateContextTokens(log.deriveModelMessages());
+    final prev = _ref.read(contextUsageProvider.notifier).usageFor(conversationId);
+    if (prev?.windowTokens != null) {
+      _ref.read(contextUsageProvider.notifier).update(
+            conversationId,
+            usedTokens: est,
+            windowTokens: prev!.windowTokens,
+            windowSource: '压缩后估算',
+          );
+    }
+    debugPrint('[ManualCompact] conv=$conversationId envelopes='
+        '${plan.deleteIds.length + 1} summary=${plan.summaryChars}chars '
+        'est=$est tok');
+    return (plan.deleteIds.length + 1, plan.summaryChars);
   }
 
   /// 溢写存储：超长工具输出落盘 `ApplicationSupport/agent_spill/`，
@@ -1925,14 +2111,27 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// 默认全启用；联网类（web_search/get_weather）由 [settings.webSearchEnabled]
   /// 控制；shell_exec 默认启用（端侧能力向强扩展，不做自我设限）。
-  ToolRegistry _buildAgentRegistry(InferenceSettings settings, String modelId) {
+  ToolRegistry _buildAgentRegistry(InferenceSettings settings, String modelId,
+      {String? conversationId}) {
     final registry = ToolRegistry();
     // web_search 每回合调用上限来自设置（DSH max_uses 语义，默认 5）。
     // Dev Agent 工具组（git/plan/ssh/run_tests）：仅开发模式注册。
     for (final tool in createBuiltinTools(
         webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn,
         includeDevTools: settings.devModeEnabled,
-        devSshConfigs: settings.sshConfigs)) {
+        devSshConfigs: settings.sshConfigs,
+        conversationId: conversationId,
+        // todo_write 成功 → 对话内固定 id 的「☑ 任务清单」活卡 upsert
+        //（用户有地方看进度；固定 id 反复重写不刷屏，模型历史可见）。
+        // 清单本体也按会话隔离存储（v3）：不同会话各看各的清单。
+        onTodosChanged: conversationId == null
+            ? null
+            : (items) => unawaited(_storage.saveMessage(ChatMessage(
+                  id: 'todo_$conversationId',
+                  conversationId: conversationId,
+                  role: MessageRole.assistant,
+                  content: renderTodoCardText(items),
+                ))))) {
       registry.register(tool);
     }
     // 开发模式关闭兜底：不暴露任何 Dev 工具（零回归）。
@@ -1943,7 +2142,14 @@ class ChatNotifier extends StateNotifier<bool> {
     } else {
       // P2-D1 Dev 工具逐组开关：git/ssh/plan/task/verify 五组独立开关。
       const groups = <String, List<String>>{
-        'git': ['git_status', 'git_diff', 'git_log', 'git_commit', 'git_push'],
+        'git': [
+          'git_status',
+          'git_diff',
+          'git_log',
+          'git_commit',
+          'git_push',
+          'git_clone', // L1 本地克隆（JGit）；漏列会导致关 git 组后它仍可见
+        ],
         'ssh': ['ssh_exec', 'ssh_read_file', 'ssh_write_file'],
         'sync': ['workspace_sync'],
         'plan': ['plan_create', 'plan_update', 'plan_list'],
@@ -2059,6 +2265,8 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 多会话并发：[conversationId] 非空只停该会话的回合（聊天页停止按钮）；
   /// 为空停**全部**活跃回合（模型卸载前调用，避免引擎被并行回合占用）。
   Future<void> stopGeneration({String? conversationId}) async {
+    // 停止生成的同时停掉播报（用户明确喊停，不应继续出声）。
+    unawaited(EdgeTtsService.instance.stop());
     final ids = conversationId != null
         ? (_activeTurns.containsKey(conversationId)
             ? [conversationId]

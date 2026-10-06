@@ -17,6 +17,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../tts/edge_tts_service.dart' show EdgeTtsService, TtsVoiceInfo, kFallbackVoices;
+
 import '../agent/dev/dev.dart'
     show
         DevNativeEnv,
@@ -1636,12 +1638,16 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   /// 必须监听 ChangeNotifier 才能实时刷新（否则"测试连接成功但页面显示未连接"）。
   VoidCallback? _devStateListener;
 
+  /// Edge TTS 音色列表（null = 拉取中；失败回退内置常用清单）。
+  List<TtsVoiceInfo>? _ttsVoices;
+
   @override
   void initState() {
     super.initState();
     _rescanSkills();
     _loadAgentsMdInfo();
     _loadMemoryEntries();
+    _loadTtsVoices();
     final listener = () {
       if (mounted) setState(() {});
     };
@@ -1665,6 +1671,165 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     if (!mounted) return;
     setState(() => _userSkills = skills);
   }
+
+  Future<void> _loadTtsVoices() async {
+    final voices = await EdgeTtsService.instance.listVoices();
+    if (!mounted) return;
+    setState(() => _ttsVoices = voices);
+  }
+
+  // ================= 语音播报（Edge TTS）设置卡 =================
+
+  Widget _buildTtsCard(InferenceSettings settings, SettingsNotifier notifier) {
+    final voices = _ttsVoices;
+    final tts = EdgeTtsService.instance;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildToggleTitle(
+              '🔊 语音播报（Edge TTS）',
+              settings.edgeTtsEnabled,
+              notifier.setEdgeTtsEnabled,
+              subtitle: '开 = 回答气泡出现 🔊 播报按钮；需联网（免费在线接口，'
+                  '微软侧随时可能调整，失败会静默降级不打断聊天）',
+            ),
+            const SizedBox(height: 8),
+            // 子设置：总开关关闭时置灰。
+            Opacity(
+              opacity: settings.edgeTtsEnabled ? 1.0 : 0.45,
+              child: IgnorePointer(
+                ignoring: !settings.edgeTtsEnabled,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildToggleTitle(
+                      '回复后自动播报',
+                      settings.edgeTtsAutoSpeak,
+                      notifier.setEdgeTtsAutoSpeak,
+                    ),
+                    const SizedBox(height: 8),
+                    // 音色下拉（拉取失败回退内置清单）。
+                    DropdownButtonFormField<String>(
+                      value: _ttsVoiceInList(
+                          voices, settings.edgeTtsVoice),
+                      decoration: InputDecoration(
+                        labelText: '音色',
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        suffixIcon: voices == null
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: Padding(
+                                  padding: EdgeInsets.all(8),
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                ),
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.refresh, size: 18),
+                                onPressed: () {
+                                  setState(() => _ttsVoices = null);
+                                  _loadTtsVoices();
+                                },
+                              ),
+                      ),
+                      items: [
+                        for (final v in (voices ?? kFallbackVoices))
+                          DropdownMenuItem(
+                            value: v.shortName,
+                            child: Text('${v.localName} · ${v.shortName}',
+                                style: const TextStyle(fontSize: 13)),
+                          ),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) notifier.setEdgeTtsVoice(v);
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    _buildSliderRow(
+                      label: '语速',
+                      value: settings.edgeTtsRate,
+                      min: -50,
+                      max: 100,
+                      divisions: 30,
+                      display: _signedPct(settings.edgeTtsRate),
+                      onChanged: notifier.setEdgeTtsRate,
+                    ),
+                    _buildSliderRow(
+                      label: '音调',
+                      value: settings.edgeTtsPitch,
+                      min: -50,
+                      max: 50,
+                      divisions: 20,
+                      display: _signedHz(settings.edgeTtsPitch),
+                      onChanged: notifier.setEdgeTtsPitch,
+                    ),
+                    _buildSliderRow(
+                      label: '音量',
+                      value: settings.edgeTtsVolume,
+                      min: -50,
+                      max: 50,
+                      divisions: 20,
+                      display: _signedPct(settings.edgeTtsVolume),
+                      onChanged: notifier.setEdgeTtsVolume,
+                    ),
+                    const SizedBox(height: 4),
+                    // 试听：播报中显示停止。
+                    ValueListenableBuilder<String?>(
+                      valueListenable: tts.playingKey,
+                      builder: (context, playing, _) {
+                        final isPreview = playing == 'preview';
+                        return OutlinedButton.icon(
+                          icon: Icon(
+                            isPreview ? Icons.stop : Icons.volume_up,
+                            size: 18,
+                          ),
+                          label: Text(isPreview ? '停止' : '试听'),
+                          onPressed: () {
+                            if (isPreview) {
+                              tts.stop();
+                              return;
+                            }
+                            tts.speak(
+                              '你好，这是 TongYi-Lite 的语音播报效果。'
+                              '当前语速${_signedPct(settings.edgeTtsRate)}，'
+                              '音色${settings.edgeTtsVoice}。',
+                              key: 'preview',
+                              voice: settings.edgeTtsVoice,
+                              rate: settings.edgeTtsRate,
+                              pitch: settings.edgeTtsPitch,
+                              volume: settings.edgeTtsVolume,
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 音色列表里不存在当前设置值（拉取失败/下架）→ 返回 null 让下拉显示空，
+  /// 但保存值不动，列表恢复后自动回显。
+  String? _ttsVoiceInList(List<TtsVoiceInfo>? voices, String current) {
+    if (voices == null) return current;
+    for (final v in voices) {
+      if (v.shortName == current) return current;
+    }
+    return null;
+  }
+
+  static String _signedPct(int v) => '${v >= 0 ? '+' : ''}$v%';
+  static String _signedHz(int v) => '${v >= 0 ? '+' : ''}$v Hz';
 
   // ================= 记忆管理（查看/删除，与 memory.json 同存储） =================
 
@@ -3196,6 +3361,11 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     ),
                   ),
 
+                  const SizedBox(height: 10),
+
+                  // ================= ⑧ 语音播报（Edge TTS） =================
+                  _buildTtsCard(settings, notifier),
+
                   const SizedBox(height: 24),
                 ],
               ),
@@ -3576,7 +3746,7 @@ class _buildAboutTab extends StatelessWidget {
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
 // versionName（0.2.1）保持同步。离线沙箱无法下载 package_info_plus 的
 // AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.2.8';
+const _appVersion = '0.2.9';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';

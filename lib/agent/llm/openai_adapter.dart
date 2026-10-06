@@ -569,13 +569,19 @@ class OpenAiAdapter extends BaseEngineAdapter {
 
   /// 流错误 → [LlmFailure]：[OpenAiHttpException]（携带状态码）按状态分档，
   /// message 含响应体详情（溢出文案在此 → contextWindowExceeded 走压缩瀑布）；
-  /// dio 异常走 [mapApiError]，其余归 transport。
+  /// SSE 停摆归 timeout 档；dio 异常走 [mapApiError]，其余归 transport。
   LlmFailure _normalizeStreamError(Object error) {
     if (error is OpenAiHttpException) {
       return LlmFailure(
         code: mapApiStatus(error.statusCode, message: error.message),
         message: error.message,
       );
+    }
+    // 端点停摆（连接后长时间零数据，网关挂起）→ timeout：可重试档，
+    // 失败瀑布有限重试 + UI 重试横幅，不再表现为无限"思考中"。
+    if (error is OpenAiStallException) {
+      return LlmFailure(
+          code: LlmFailureCode.timeout, message: error.toString());
     }
     if (error is DioException) {
       return LlmFailure(

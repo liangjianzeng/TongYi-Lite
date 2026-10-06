@@ -1822,3 +1822,359 @@ loadHotwords 交集兜底处理（空交集按全部启用），无需用户操�
 **遗留**：8 Elite 07:46+ 语音修复包未装（设备离线），上线后
 `adb install -r -t`；小米13 已装 07:46 release（取证 debug 已覆盖恢复，
 username 修复保留在数据中）。
+
+## 2026-10-06 智能体回合「无过程输出/疑似卡死」定案：SSE 无限静默等待（Dio 零超时）
+
+> 用户反馈：智能体模式"分析没有过程有效输出，像重复循环一轮过"。真机取证
+> （后台 logcat，463MB）：11:21:09 `[ChatNotifier] new-agent route=API(Qwen3.8Flash)`
+> 之后 **13 分 24 秒零日志零输出**，11:34:33 才 `done`（answer 3251 字、
+> prompt=25049）。UI 全程只有"思考中"，无思考流/工具卡/重试横幅——
+> **根因：`OpenAiService` 的 `Dio()` 裸实例，无 connectTimeout/receiveTimeout、
+> 无流式空闲看门狗**；中转端点建立连接后长时间不回数据（网关挂起/排队）时，
+> SSE `await for` 无限等待，失败瀑布/重试机制全部够不着。
+
+**修复（三层）**：
+1. **停摆看门狗**（openai_service.dart `_sseDataPayloads`）：行流
+   `Stream.timeout(_stallIdle)`——**两个 chunk 之间**静默超阈值（默认 120s，
+   可注入缩短供测试）即向流注入 `OpenAiStallException` → CancelToken 兜底掐断
+   挂死连接 → rethrow。慢流合法：每个 chunk 到达都重置计时，只拦"彻底没数据"。
+2. **失败分档**（openai_adapter.dart `_normalizeStreamError`）：
+   `OpenAiStallException → LlmFailureCode.timeout`（可重试档）→ 失败瀑布有界
+   重试 + **UI 出重试横幅**——用户看得见"在重试"，不再是无限转圈。
+3. **Dio BaseOptions**：connectTimeout 20s / sendTimeout 30s（接收侧不设全局
+   receiveTimeout，长生成合法，由看门狗单独守护）。
+
+**可观测性（本次教训：回合内零日志 = 排障全靠瞎猜）**：`loop/agent.dart` 加
+`[AgentStep]` 最小日志——每 step 一行 request/answer/tools、failure+retry
+（N/maxRetries+退避 ms）、turn end（reason+steps+elapsed 秒）。此前 AGENTS.md
+"AGDBG print 全删"删的是逐 token 噪音；step 级 1-3 行/步是排障刚需，保留。
+
+**回归**：`test/agent/sse_stall_test.dart` 新增 2 项（假传输层"首发 1 chunk 后
+永久挂起"→ 抛 OpenAiStallException；"20ms/chunk 慢流"→ 正常读完不误杀）；
+全量 test/agent **444 + 2 skip 全绿**，test/providers+services 65 项全绿。
+**2026-10-06 11:53/11:56 重打包（v0.2.8+16 复用，SSE 看门狗+[AgentStep] 日志）**：
+app-debug.apk 146537648 B / app-release.apk 85260710 B，字符串级验收过
+（debug kernel UTF-8 `[AgentStep]`7/`OpenAiStallException`7/`端点停摆`4；
+release libapp.so UTF-16LE `端点停摆`1 + ASCII `AgentStep`1）。**双机覆盖
+安装 Success**（小米13 100.70.7.18 直连 + 8 Elite 100.123.25.54 中继）。
+
+## 2026-10-06 「沙箱无 git」说辞定案 + git 组开关漏 git_clone 修复
+
+> 用户问：为什么智能体说"沙箱无 git，改用 GitHub API + raw 定向拉取"。
+
+**定案：模型没说错，是环境事实。** git 可用性分三层：
+1. **本地沙箱永远没有 git**：`shell_exec` 跑 `sh -c`（app 权限），Android
+   /system/bin 无 git 二进制，app 也无法打包/exec 任意用户态二进制（W^X）；
+   python_exec（Chaquopy）同样没有 git。所以非 Dev 回合里"拉代码"唯一出路
+   = HTTP（GitHub API + raw），模型自行降级是**正确行为**（"只要代码"场景
+   本就不需要 git 历史）。
+2. **真 git 在 Dev 工具组**：git_clone（JGit 进程内）/git_status/diff/log/
+   commit/push（本地工作区）+ ssh_exec（Termux/远程 PC 系统 git）——
+   **仅 设置→开发者→开发模式开启 时注册**（`_buildAgentRegistry`
+   includeDevTools/devModeEnabled 门控）。想用真 git 就开 Dev 模式。
+3. **修复**：git 组开关清单漏了 `git_clone`（关 git 组后它仍可见）——
+   已补入 `kDevToolNames` git 组（chat_provider.dart）；test/providers 36 项
+   全绿，analyze 无新增。
+**2026-10-06 12:07/12:08 重打包（v0.2.8+16 复用）**：app-debug.apk
+146534499 B / app-release.apk 85260718 B；**双机覆盖安装 Success**。
+
+## 2026-10-06 续：「都集成进来了」——/plan 门控 + dev_shell 漏标副作用定案（真机 DB 取证）
+
+> 用户纠错："沙箱不可用 git？都集成进来了"。debug 包可 run-as，直接拉设备
+> inference_settings.json + 对话库取证，**推翻上一节"Dev 模式没开"的猜测**：
+> devModeEnabled=true、工具组全默认开——git 工具**在册**。真凶另有其人。
+
+**回合还原（/plan 拉取 github.com/liangjianzeng/TongYi-Lite 仅要代码并分析）**：
+1. 用户用了 **`/plan` 前缀 → 计划模式**：注册表收窄为"只读 + exit_plan"
+   （isConcurrencySafe==true 才放行）。git_clone/git_commit 等副作用工具被禁——
+   **设计如此**（批准前不动修改类操作）。💭 落库实锤："I'm in plan mode,
+   read-only... cloning is needed to analyze"——模型试过 git_clone，调不到。
+2. **dev_shell 描述写死"没有 git/包管理器"**（指 mksh+toybox 沙箱无 git 二进制，
+   git 走专用工具）→ 模型据此说出"沙箱无 git"，转 GitHub API（tree + raw）
+   拉 262 个文件（3.5MB）。对"仅要代码"（289MB 仓库）其实是最优解。
+3. git_status 也被调了（NOT_A_GIT_REPO——工作区非 git 仓库），集成没白做。
+
+**真漏洞（本次挖出）**：`dev_shell` 与 `git_clone` **漏标 isConcurrencySafe:false**
+（P2-A 默认翻转后遗漏）→ 两个后果：
+- **计划模式"只读"被 shell 绕过**：dev_shell 默认按只读安全放行进 /plan 白名单，
+  模型在计划回合用它下载/写文件（本回合就是这么干的）——"只读规划"形同虚设；
+- 并行批次里可与其他工具并发执行副作用命令。
+**修复**：两工具补 `isConcurrencySafe: (_) => false`（dev_shell 描述同步补
+git_clone 指引）；`git_clone` 加 **depth 浅克隆参数**（JGit 6.10
+CloneCommand.setDepth，Kotlin+Dart 全链路，timeout 120s→300s；大仓库
+depth=1 省流量，浅克隆不能 push 已写进描述）。
+
+**回归**：test/agent+providers+services 全绿 **509 + 2 skip**；analyze 无新增
+（顺手清 git_tools 既有 unused_import）。
+**2026-10-06 12:23/12:24 重打包（v0.2.8+16 复用）**：app-debug.apk
+146537364 B / app-release.apk 85261410 B；字符串级验收过（kernel UTF-8
+`浅克隆`10；dex `setDepth`2）。小米13 覆盖安装 Success；**8 Elite 离线
+（10060 连接超时），上线后补装**。
+
+## 2026-10-06 用户消息气泡加复制按钮
+
+> 用户需求："给发送消息增加个复制按钮"。此前仅 assistant 气泡的元信息行有
+> 复制/分享，user 气泡只有时间。
+
+**改动**（chat_bubble.dart，一处）：user 气泡元信息行 `content.isNotEmpty` 时
+追加复制按钮（Icons.content_copy 15px 灰，同 assistant 款式），SnackBar
+"已复制消息内容"。analyze 0 新增；providers 36 项全绿（无 test/widgets 目录，
+chat_bubble 无既有 UI 测试）。
+**2026-10-06 12:55/12:56 重打包（v0.2.8+16 复用）**：app-debug.apk
+146536268 B / app-release.apk 85261674 B；字符串级验收过（debug kernel
+UTF-8 `已复制消息内容`2；release libapp.so UTF-16LE 1）。小米13 覆盖安装
+Success；8 Elite 仍离线（10060），上线后补装。
+
+## 2026-10-06 续2：git_clone 目标路径 bug（用户截图报错）修复
+
+> 用户发截图："还是报错"——git_clone {"url":…TongYi-Lite, "depth":1} 报
+> `JGitInternalException: Destination path "workspace" already exists and is
+> not an empty directory`。好消息：**depth 参数已被模型正确使用**（新描述
+> 生效）；坏消息：克隆目标直接指向工作区根目录——工作区永不为空，恒失败，
+> `name` 参数此前只进展示文案不进路径（真 bug）。
+
+**修复**（git_tools.dart）：克隆目标 = `<工作区>/<name>` 子目录；name 缺省从
+URL 推断仓库名（去尾斜杠/取末段/去 .git）；目标已存在且非空 → 可读报错
+"换 name 或先清理"；描述同步改为"克隆到本地工作区下的新子目录"。
+回归：test/agent 444+2 全绿；analyze 0。
+**2026-10-06 13:50/13:51 重打包（v0.2.8+16 复用）**：app-debug.apk
+146537283 B / app-release.apk 85262534 B；字符串级验收过（kernel UTF-8
+`目标目录已存在且非空`2/`新子目录`3；release libapp.so UTF-16LE 1）。
+小米13 覆盖安装 Success。
+
+## 2026-10-06 终轮：git_clone 残留目录自动备份 + git 工具 path 参数 + todo 清单可视化
+
+> 用户两连报："还是不行"（git_clone 报目标目录已存在且非空）+
+> "todo计划还是没地方看"（todo_write 写了清单 UI 无处显示）。
+
+**① git_clone 残留堵死（截图 + 设备取证）**：workspace/TongYi-Lite 是旧会话
+HTTP 拉的裸文件（无 .git），git_clone 报"目标目录已存在且非空"后模型无路可走
+（dev_shell 无 git 二进制，git_log 只作用于工作区根报 RepositoryNotFound）。
+修复：目标已存在但**非 git 仓库** → 自动改名备份 `<name>.bak-<ms>` 后重新克隆
+（失败把备份挪回来，不丢数据）；**已是 git 仓库** → 报错引导 git_pull/换 name。
+
+**② git 工具加 path 参数**：git_status/diff/log/commit 增加可选 `path`
+（工作区内相对子目录，禁 `..`/绝对路径，_gitTool 统一解析拼接）——git_clone
+克隆出的 `<工作区>/<name>/` 子仓库此前对所有 git 工具不可见（真机实锤
+RepositoryNotFoundException）。
+
+**③ todo 清单可视化**（"todo计划还是没地方看"）：todo_write 此前只落
+agent_todo.json，UI 零读取。修复两处：
+- **对话内活卡**：todo_write 成功 → upsert 固定 id `todo_<convId>` 消息
+  （renderTodoCardText：☑ 标题+计数，逐项 ✓/▶/○ 徽标；链路
+  createTodoWriteTool(onTodosChanged:) → createBuiltinTools 透传 →
+  chat_provider 接线，与 📋 计划卡同模式）。
+- **计划/上下文面板**：_PlanPanelSheet 加「☑ 任务清单」区（readTodoStore
+  读取，空则隐藏；无 /plan 也能看）。
+
+**回归**：test/agent+providers+services 全绿 **509 + 2 skip**；analyze 无新增
+（home_screen/chat_provider 剩余 warning 均为旧代码既有）。
+**2026-10-06 14:02/14:03 重打包（v0.2.8+16 复用）**：app-debug.apk
+146542682 B / app-release.apk 85266066 B；字符串级验收过（kernel UTF-8
+`任务清单`16/`旧目录已备份为`2/`相对子目录`7/`目标目录已是一个 git 仓库`2）。
+小米13 覆盖安装 Success；8 Elite 仍离线。
+
+## 2026-10-06 计划/任务清单展示精简优化
+
+> 用户反馈："计划里描述太啰嗦，精简后优化好任务列表展示"。
+
+**文案精简**：
+- 计划面板空态提示 4 行 → 1 句（"发送「/plan <任务>」，智能体调研后提交计划，
+  你批准后自动执行，进度在这里回看"）；
+- 步骤区脚注 "点步骤循环置状态，长按菜单指定" → "点按改状态"；
+- **planCardText 去掉每步 `—— detail` 拼接**（卡内只留 徽标+序号+标题；
+  detail/verify 属面板详情，进卡啰嗦且每回合白耗 prefill token）。
+
+**任务列表展示升级（新组件 lib/widgets/todo_card.dart TodoChecklistCard）**：
+解析 renderTodoCardText 固定格式文本 → 结构化清单：✓ 绿勾+灰化删除线 /
+▶ 橙色+高亮底色 / ○ 灰空心圈；**对话内气泡**（chat_bubble 对 `☑ 任务清单`
+前缀消息不走 Markdown，走卡片）与**计划面板**共用同一组件，两处展示一致。
+
+回归：test/agent+providers+services 全绿 **509+2skip**；analyze 0。
+**2026-10-06 14:32/14:33 重打包（v0.2.8+16 复用）**：app-debug.apk
+146544662 B / app-release.apk 85272890 B；字符串级验收过（kernel
+`TodoChecklistCard`5 + 新短文案命中、旧长文案仅余注释不可见；release
+libapp.so ASCII `TodoChecklistCard`1）。小米13 覆盖安装 Success。
+
+## 2026-10-06 KV 管理 / 压缩重构（查询·呈现·压缩三链路）
+
+> 用户需求："kv管理和压缩认真分析现状问题，重构好查询呈现压缩"。
+
+**现状问题（代码级定案）**：
+1. **预算估算对中文低估 ~3 倍**：主动压缩判断用 `chars ~/ 4`（英文经验值），
+   中文 qwen/deepseek 系每字 0.6~1 token——主动压缩迟迟不触发，直到撞服务端
+   硬墙才被动压缩。
+2. **压缩全黑盒**：只有一条 debugPrint + assert print（release 全瞎）；推理
+   日志页查不到"压没压、压了多少"；CompactionResult 只有 success/failure。
+3. **本地 KV 快照陈旧**：KV 单实例但占用按会话存，切会话/重置后旧会话细条
+   仍显示（KV 里装的已是别的会话的 token）。
+4. **细条无阈值语义**：恒蓝，>85% 快撞墙也看不出。
+
+**重构**：
+- **查询口径统一**：新 `context_eng/token_estimate.dart estimateContextTokens()`
+  —— ASCII≈4 字/tok + 非 ASCII 0.75 tok/字（宁略高不略低）+ 40 tok/tool_call
+  （经验值不参与除 4）。主动压缩预算判断与压缩统计共用同一口径。
+- **压缩可观测**：`CompactionResult` 增 `CompactionStats`（maskedEvents/
+  beforeTokens/afterTokens/savedTokens/provider/summaryChars），
+  DeterministicCompaction.decide 填写（压缩前基线 = deriveModelMessages 估算，
+  压缩后重投影重估）；loop 主动压缩成功打 `[AgentStep]` 统计行；
+  chat_provider 回合结束扫 compaction/summary 事件 → 推理日志
+  「上下文压缩 | 本回合 N 次 | 来源 | 摘要字数」。
+- **呈现**：细条阈值变色（≥85% 红 / ≥60% 橙 / 蓝）；本地 resetContext 后
+  全清占用快照（plain/agent 两路径 KV reset 处 + _updateLocalContextUsage
+  clearExcept——陈旧值清零，宁可无数据不显示误导值）。
+- （压缩后细条回落天然可见：压缩发生在回合内，回合末 usage/重投影即回落。）
+
+**回归**：新增 test/agent/kv_compaction_test.dart（估算器 4 项 + 统计 2 项）、
+test/providers/context_usage_test.dart（快照 4 项）；全量 **519+2skip 全绿**，
+analyze 0 error。
+**2026-10-06 14:48/14:49 重打包（v0.2.8+16 复用）**：app-debug.apk
+146552236 B / app-release.apk 85275878 B；字符串级验收过（debug kernel
+`上下文压缩`10/`estimateContextTokens`6；release libapp.so ASCII 1/UTF-16LE 4）。
+小米13 覆盖安装 Success；8 Elite 仍离线。
+
+## 2026-10-06 KV 占用圈 + 手动压缩（输入框入口，用户定案「传统圈圈呈现总量占用」）
+
+> 用户反馈：细条「没看到形态和入口」→ 定案改为**输入框左侧圆形进度圈**（环=占用比例
+> 阈值配色，环心=百分比），点开底部详情面板；面板内支持**手动压缩**。
+
+**呈现**（home_screen `_buildContextUsageRing` + `_showContextUsageSheet`）：
+- 占用圈挂在输入区 chips 行最左（36px 环，26px 进度环 + 9% 字号百分比；无数据灰环「—」）；
+  点开详情面板：占用 %/used/window tokens/来源（实测/配置/原生）、其它会话快照、
+  最近压缩记录（推理日志过滤「上下文压缩」）、阈值图例、手动压缩按钮。
+- AppBar 底部 3px 细条保留为纯展示（曾试过徽标+点按方案，用户嫌小，已还原）。
+
+**手动压缩（存储级持久，区别于回合内内存压缩）**：
+- 纯函数核心 `planStorageCompaction`（session/store.dart）：尾部保留最近 5 个用户轮
+  （`manualCompactKeepRounds`），其前 🔧TRACE 信封全部视为旧——最早一条**原位改写**为
+  摘要信封（同 TRACE 前缀 + 单条 user/message 事件，下一轮导入投影为 user 摘要，与
+  回合内压缩语义一致），其余删除；可见消息（user/assistant 文本）不动，UI 历史不受影响。
+- ⚠️ 关键认知：压缩此前只活在回合内存（每回合从 SQLite 重建日志，遮蔽不持久）——
+  手动压缩必须动存储才有效。摘要 = 工具名集合 + 每条结果 300 字摘录 ≤12 条。
+- chat_provider.manualCompact：执行后 appendInferenceLog 记录 + 按瘦身后历史重估 token
+  更新占用快照（窗口沿用原值，来源「压缩后估算」）→ 圈圈立即回落。
+- StorageService 新增 deleteMessages(List<String> ids)。
+- 回归：test/agent/manual_compact_test.dart 5 项（无信封/边界保留/原位改写+删除清单/
+  摘要信封→importFromMessages→投影 roundtrip/损坏信封容错）。
+
+## 2026-10-06 Edge 在线 TTS 集成（消息播报，免费无 key）
+
+> 用户需求：微软 Edge 在线 TTS 端侧直连，消息输出后可播报；音色/语速等在设置可配。
+> 调研结论（本机实测）：`speech.platform.bing.com` 免费、免 key、国内直连 200；
+> Sec-MS-GEC token 本地可算（SHA256(5min 窗口 ticks + token)，时钟偏差自动校正）；
+> ⚠️ 情感风格（mstts:express-as）免费端点**不支持**，可配 = 音色/语速/音调/音量。
+
+**依赖**：`edge_tts` 0.1.5 **vendored** 到 `third_party/edge_tts`（上游要求 Dart ≥3.10.8，
+本机 Flutter 3.27/Dart 3.6 装不上，代码无超纲 API → dependency_overrides path +
+放宽 SDK 约束 ≥3.6.0 + dev 依赖 flutter_lints 降到 ^5.0.0）；`audioplayers` 6.6.0
+（播放本地 mp3；6.x 无 onPlayerFailure，错误从 play() 抛出）；`crypto`（缓存 key）。
+
+**模块 `lib/tts/`**：
+- `tts_text.dart`（纯函数）：cleanTextForTts（代码块剔除留「（代码略）」/链接保留文字/
+  图片与裸 URL 剔除/标题引用表格符号剥离/表情清理）+ segmentForTts（句子边界分段
+  ≤600 字，超长单句硬切；输出 trimRight 防补位 \n 外泄）。test/tts 9 项。
+- `edge_tts_service.dart` 单例：synthesize（mp3 落 `tts_cache/<sha256>.mp3`）+ speak
+  （清洗→分段→逐段合成逐段播放，代次计数 `_seq` 防旧任务回写）+ stop + playingKey
+  ValueNotifier（key=消息 hash 或 'preview' 或 'auto-<convId>'）+ listVoices（30min 缓存，
+  失败回退 kFallbackVoices 8 个常用 zh 音色，zh 系置顶）。
+
+**设置链路**：InferenceSettings 六字段（edgeTtsEnabled 默认关/edgeTtsAutoSpeak 默认关/
+edgeTtsVoice 默认 zh-CN-XiaoxiaoNeural/edgeTtsRate -50~100/edgeTtsPitch -50~50 Hz/
+edgeTtsVolume -50~50，fromJson 夹紧）+ settings_provider 六 setter；设置页智能体 Tab
+⑧「🔊 语音播报（Edge TTS）」卡（总开关→子设置置灰：自动播报/音色下拉可刷新/三滑条/
+试听按钮播报中变停止）。
+
+**接入点**：
+- 回答气泡 🔊 按钮（chat_bubble `_buildSpeakButton`）：Consumer 自取设置+播放状态，
+  播报中变停止图标；`_canSpeak` 排除 🔧/💭/☑/📋/🔔 与流式中；**无 ProviderScope 时
+  不渲染**（phase6 纯渲染测试直接 pump ChatBubble 会抛 No ProviderScope——
+  用 ProviderScope.containerOf(context) try/catch 探测，真机恒有 scope 不受影响）。
+- 自动播报：chat_provider `_maybeAutoSpeak` 挂两处成功落库点（普通聊天 + agent 回合）；
+  sendMessage 顶部与 stopGeneration 均 stop() 播报（新消息/喊停不与旧声音交叠）。
+- 失败静默降级：合成/播报任何异常只 debugPrint，绝不打断聊天。
+
+**回归**：test/tts+agent+providers+services+websearch 全量 **592 项 + 4 skip 全绿**；
+analyze lib+test 0 error（44 项均为旧代码既有 info/warning）。
+
+**2026-10-06 16:27/16:29 重打包（v0.2.8+16 复用，含占用圈+手动压缩+Edge TTS 三轮改动）**：
+`E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` — app-debug.apk 146734304 B /
+app-release.apk 85411938 B。字符串级验收过：debug kernel UTF-8 `语音播报`8/`自动播报`6/
+`试听`4/`手动压缩`19/`EdgeTtsService`14/`edgeTtsVoice`17/`上下文占用详情`2；release
+libapp.so UTF-16LE `语音播报`2/`自动播报`1/`试听`1/`手动压缩`4 + ASCII
+`edgeTtsVoice`1/`EdgeTtsService`2/`planStorageCompaction`1。
+**8 Elite（100.123.25.54 直连）覆盖安装 Success；小米13（100.70.7.18）Tailscale 离线
+（last seen 53m），上线后需补装 `adb install -r -t`。**
+
+## 2026-10-06 占用圈/手动压缩「看不到效果」两根因修复（真机 DB 取证实锤）
+
+> 用户反馈：占用圈 + 手动压缩"没完成、看不到效果"。拉 8 Elite DB 分析最新会话
+> 「你好啊」（21 条消息、2 条 TRACE 信封、恰好 5 个用户轮）实锤两根因：
+
+**根因 1（主因）：压缩门槛把短对话全保护**。旧规则"尾部保留 5 个用户轮，之前的
+信封才算旧"——该会话恰好 5 轮 → cutoff=0 → 全部信封被保护 → 压缩恒返回
+(0,0)「没有可压缩的旧工具记录」。**修复**：`planStorageCompaction` 改为**保留最近
+一条信封**（最近一轮的工具上下文，模型最需要），其余全部压缩；信封不足 2 条才
+返回 null。`manualCompactKeepRounds` 常量删除（index.dart/home_screen 同步清理），
+文案改"保留最近一轮的工具记录"。
+
+**根因 2：占用快照不持久，重启后圈圈恒灰「—」**。快照只在回合结束时更新（内存态）。
+**修复**：`ChatNotifier.refreshUsageEstimate(conversationId)`——按本地历史重估
+（importFromMessages + estimateContextTokens），窗口 API=实测(fetchContextWindow
+30min 缓存)→配置 contextWindow、本地=contextSize 设置；已有快照跳过（不覆盖实测）；
+任何失败静默。home_screen 在 `_initConversation`（启动）与 `_switchConversation`
+（切会话）调用。
+
+回归：manual_compact_test 5 项重写（短对话压缩/最后一条保留/roundtrip 校验保留信封
+仍投 tool 消息），全量 592+4 全绿，analyze 0 error。
+**2026-10-06 17:04/17:06 重打包（v0.2.8+16 复用）**：app-debug.apk 146730780 B /
+app-release.apk 85412974 B；字符串级验收（debug kernel `refreshUsageEstimate`6/
+`保留最近一轮的工具记录`4/旧门槛文案与常量=0；release libapp.so 同步重打）。
+**双机覆盖安装 Success（8 Elite 100.123.25.54 + 小米13 100.70.7.18）。**
+**验收注意：圈圈要显示数据须满足①当前会话发过消息（或重启后首次进入自动估算回填）
+②引擎窗口可取（API 实测/配置，本地用 contextSize）。手动压缩需会话有 ≥2 条工具轮
+信封（≥2 轮带工具调用的智能体回合）——纯直答对话没有可压内容是预期行为。**
+
+## 2026-10-06 「KV 总是估算？模型 API 是 256k」——启动竞态误判路由（第三轮修复）
+
+> 用户指出占用圈来源恒为「估算」、窗口小得不对（其 API 模型 256k）。
+
+**根因**：`refreshUsageEstimate` 读 `settingsProvider`，而 `SettingsNotifier` 构造时
+异步 `_load()`——启动时 `_initConversation` 先于加载完成执行，读到**默认设置**
+（activeApiModel()=null）→ 误走本地分支 → 窗口 = contextSize 默认 4096、来源「估算」。
+与 `_initAutoLoadDefaultModel` 直读 `SettingsService().load()` 是同一坑的另一形态。
+
+**修复**：refreshUsageEstimate 改为 `await SettingsService().load()` 直读持久层 +
+镜像首页细条的路由判定（isAgentApi/isPlainApi → API 槽位：fetchContextWindow 实测
+优先、回退配置 contextWindow；本地 → contextSize，来源统一标「配置」——「估算」
+标签不再出现；used 的实测/估算差异由回合结束后覆盖机制兜底）。
+
+回归 592+4 全绿；**17:13/17:14 重打包**（debug 146731017 B / release 85412950 B），
+双机覆盖安装 Success。验收：重启 app → 点圈圈 → 窗口应显示 API 配置值（如 256k）、
+来源「配置」（端点暴露 n_ctx 时为「实测」）；发消息后回合实测值覆盖。
+
+## 2026-10-06 v0.2.9+17 发版：任务清单按会话隔离 + README/CHANGELOG + git push
+
+> 用户指令：升版本 0.2.9、更新 README、git push。
+
+**任务清单按会话隔离（todo v3，用户反馈"计划状态应该跟着会话任务走"）**：
+- 根因：`todo_write` 清单是**进程级全局单文件** `agent_todo.json`，计划面板在任何
+  会话都显示同一份（计划本体 GoalStore 本就按会话隔离，泄漏的只是清单）。
+- 修复：todo_tool 存储层改按会话落盘 `agent_todo_<convId>.json`（每会话独立缓存 +
+  独立文件），`createTodoWriteTool/createTodoListTool/readTodoStore` 全部加
+  conversationId 参数（createBuiltinTools 透传）；旧全局文件首次被某会话读取时
+  **一次性迁移（迁移即删）**——只归第一个打开的会话，不删会继续全局可见。
+- 测试坑：v3 每次都读盘，`resetTodoStore` 只清内存会让上个用例落盘的文件漏进
+  下个用例——补 `agent_todo_*` 文件删除；新增跨会话隔离 + 迁移即删 2 用例。
+
+**版本**：0.2.9+17（pubspec / build.gradle.kts / settings_screen `_appVersion` 三处）。
+README：徽标、功能表加 🔊 TTS 行 + 占用圈/手动压缩行、版本表加 v0.2.9 行 +
+详细变更段；CHANGELOG.md 补 [0.2.9] 全条目。
+
+**2026-10-06 18:10/18:11 发版打包**：`E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`
+— app-debug.apk **128,939,864 B** / app-release.apk 85,413,958 B。debug 包较前几轮
+（146.7MB）**缩小 18MB**：内容级验尸过（lib/ 26 项 arm64 全在、kernel_blob 65.9MB
+全标记命中、chaquopy/pdf 资产齐全）——非缺件，为 gradle 重压缩差异，无需追查。
+字符串级验收：debug kernel `语音播报`8/`手动压缩`19/`refreshUsageEstimate`6；
+release libapp.so ASCII `0.2.9`1/`edgeTtsVoice`1/`refreshUsageEstimate`2 +
+UTF-16LE `语音播报`2/`自动播报`1/`试听`1/`手动压缩`4。**双机覆盖安装 Success**
+（8 Elite + 小米13，dumpsys 核实 versionCode=17 / versionName=0.2.9）。

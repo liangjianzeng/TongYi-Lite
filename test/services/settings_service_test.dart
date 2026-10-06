@@ -133,6 +133,44 @@ void main() {
           4096);
     });
 
+    test('Edge TTS：默认关/晓晓/0 偏移，往返一致，数值夹紧', () {
+      const s = InferenceSettings();
+      expect(s.edgeTtsEnabled, isFalse);
+      expect(s.edgeTtsAutoSpeak, isFalse);
+      expect(s.edgeTtsVoice, 'zh-CN-XiaoxiaoNeural');
+      expect(s.edgeTtsRate, 0);
+      expect(s.edgeTtsPitch, 0);
+      expect(s.edgeTtsVolume, 0);
+
+      final restored = InferenceSettings.fromJson(s.toJson());
+      expect(restored.edgeTtsVoice, 'zh-CN-XiaoxiaoNeural');
+
+      final custom = InferenceSettings.fromJson({
+        'edgeTtsEnabled': true,
+        'edgeTtsAutoSpeak': true,
+        'edgeTtsVoice': 'zh-CN-YunxiNeural',
+        'edgeTtsRate': 30,
+        'edgeTtsPitch': -10,
+        'edgeTtsVolume': 20,
+      });
+      final back = InferenceSettings.fromJson(custom.toJson());
+      expect(back.edgeTtsEnabled, isTrue);
+      expect(back.edgeTtsAutoSpeak, isTrue);
+      expect(back.edgeTtsVoice, 'zh-CN-YunxiNeural');
+      expect(back.edgeTtsRate, 30);
+      expect(back.edgeTtsPitch, -10);
+      expect(back.edgeTtsVolume, 20);
+      // 越界值夹紧（手改 JSON 防御）。
+      final clamped = InferenceSettings.fromJson({
+        'edgeTtsRate': 999,
+        'edgeTtsPitch': -999,
+        'edgeTtsVolume': 999,
+      });
+      expect(clamped.edgeTtsRate, 100);
+      expect(clamped.edgeTtsPitch, -50);
+      expect(clamped.edgeTtsVolume, 50);
+    });
+
     test('旧配置（无 agent 字段）加载 → 默认值，向后兼容', () {
       final old = InferenceSettings.fromJson({
         'enableGpu': true,

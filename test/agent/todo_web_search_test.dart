@@ -30,9 +30,36 @@ void main() {
     resetTodoStore();
   });
 
+  group('todo 清单按会话隔离（todo v3）', () {
+    test('不同会话清单互不可见', () async {
+      await createTodoWriteTool(conversationId: 'convA').execute({
+        'todos': [
+          {'content': 'A会话任务'},
+        ],
+      });
+      // 会话 B 读不到 A 的清单。
+      final b = await createTodoListTool(conversationId: 'convB').execute(const {});
+      expect(b.content, contains('没有待办'));
+      expect(b.content, isNot(contains('A会话任务')));
+      // A 自己可见。
+      final a = await createTodoListTool(conversationId: 'convA').execute(const {});
+      expect(a.content, contains('A会话任务'));
+    });
+
+    test('v2 全局文件一次性迁移到首个读取的会话（迁移即删，不再全局可见）', () async {
+      debugSeedLegacyTodoFile('[{"content": "遗留任务", "status": "todo"}]');
+      final first = await readTodoStore('convX');
+      expect(first, hasLength(1));
+      expect(first.first['content'], '遗留任务');
+      // 全局文件已被删除：另一个会话读不到遗留内容。
+      final other = await readTodoStore('convY');
+      expect(other, isEmpty);
+    });
+  });
+
   group('todo_write 工具', () {
     test('写入清单并返回完整清单', () async {
-      final tool = createTodoWriteTool();
+      final tool = createTodoWriteTool(conversationId: 'c1');
       final result = await tool.execute({
         'todos': [
           {'content': '下载模型', 'status': 'done'},
@@ -47,12 +74,12 @@ void main() {
 
     test('单活跃强制（P2-A3）：两项 in_progress 被拒绝且原清单不变', () async {
       // 预置一条旧清单，验证拒绝后不被污染。
-      await createTodoWriteTool().execute({
+      await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '旧任务', 'status': 'todo'},
         ],
       });
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '任务A', 'status': 'in_progress'},
           {'content': '任务B', 'status': 'in_progress'},
@@ -62,13 +89,13 @@ void main() {
       expect(result.content, contains('in_progress'));
       expect(result.content, contains('只能有一项进行中'));
       // 原清单保持不变
-      final list = await createTodoListTool().execute(const {});
+      final list = await createTodoListTool(conversationId: 'c1').execute(const {});
       expect(list.content, contains('旧任务'));
       expect(list.content, isNot(contains('任务A')));
     });
 
     test('单活跃强制：doing 是 in_progress 别名，同样计入', () async {
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '任务A', 'status': 'in_progress'},
           {'content': '任务B', 'status': 'doing'},
@@ -78,7 +105,7 @@ void main() {
     });
 
     test('计数回显（P2-A3）：更新结果带待办/进行中/已完成计数', () async {
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '已完成的事', 'status': 'done'},
           {'content': '正在做的事', 'status': 'in_progress'},
@@ -91,36 +118,36 @@ void main() {
     });
 
     test('todo_list 可读取当前清单', () async {
-      await createTodoWriteTool().execute({
+      await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '写代码'},
         ],
       });
-      final result = await createTodoListTool().execute(const {});
+      final result = await createTodoListTool(conversationId: 'c1').execute(const {});
       expect(result.isError, isFalse);
       expect(result.content, contains('1. [todo] 写代码'));
     });
 
     test('空清单 todo_list 提示无任务', () async {
-      final result = await createTodoListTool().execute(const {});
+      final result = await createTodoListTool(conversationId: 'c1').execute(const {});
       expect(result.isError, isFalse);
       expect(result.content, contains('没有待办'));
     });
 
     test('缺少 todos 参数 → 错误', () async {
-      final result = await createTodoWriteTool().execute(const {});
+      final result = await createTodoWriteTool(conversationId: 'c1').execute(const {});
       expect(result.isError, isTrue);
       expect(result.content, contains('todos'));
     });
 
     test('空数组 → 错误', () async {
-      final result = await createTodoWriteTool().execute({'todos': []});
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({'todos': []});
       expect(result.isError, isTrue);
       expect(result.content, contains('为空'));
     });
 
     test('空任务内容 → 错误', () async {
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': [
           {'content': '  '},
         ],
@@ -130,7 +157,7 @@ void main() {
     });
 
     test('todos 为 JSON 字符串（XML 协议形态）→ 同样可写入', () async {
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': '[{"content": "明天开会", "status": "todo"}]',
       });
       expect(result.isError, isFalse);
@@ -138,7 +165,7 @@ void main() {
     });
 
     test('todos 为非法 JSON 字符串 → 错误', () async {
-      final result = await createTodoWriteTool().execute({
+      final result = await createTodoWriteTool(conversationId: 'c1').execute({
         'todos': '不是合法数组',
       });
       expect(result.isError, isTrue);
