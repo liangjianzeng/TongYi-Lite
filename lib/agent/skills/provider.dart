@@ -31,6 +31,12 @@ String _basename(String path) {
 final class SkillProvider {
   final List<Skill> _skills;
 
+  /// 目录冻结文本（P1-D prompt-cache）：非空时 [availableSkillsText] 恒
+  /// 返回该文本（按会话冻结），技能集变化延迟到会话切换才进目录——
+  /// 系统提示逐字节稳定，API prompt cache / 本地 KV 前缀不因增删技能破掉。
+  /// load_skill 注册表仍用实时技能集，新增技能照常可拉取。
+  String? frozenDirectoryText;
+
   SkillProvider({List<Skill>? skills})
       : _skills = _dedupeByRank(
             (skills ?? loadBuiltinSkills()).sortedByRank());
@@ -84,6 +90,8 @@ final class SkillProvider {
   /// [saveSkillAvailable] = save_skill 工具是否已注册（模型自主沉淀技能）。
   String availableSkillsText(
       {bool loadSkillAvailable = false, bool saveSkillAvailable = false}) {
+    final frozen = frozenDirectoryText;
+    if (frozen != null && frozen.isNotEmpty) return frozen;
     if (_skills.isEmpty) return '';
     final sb = StringBuffer();
     sb.writeln('<available_skills>');

@@ -32,6 +32,7 @@ const MethodChannel kPythonChannel =
 ///   （对照 DSH 升级通道；Python 以 app 权限运行，公共目录需 All-Files-Access）。
 ToolDefinition createPythonExecTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'python_exec',
     description:
         '在设备上执行 Python 脚本（嵌入式 CPython，app 权限内）。'

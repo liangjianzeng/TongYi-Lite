@@ -169,6 +169,15 @@ class MainActivity : FlutterActivity() {
                     val pkg = call.argument<String>("package") ?: ""
                     result.success(launchApp(pkg))
                 }
+                // Termux 零粘贴（RUN_COMMAND intent）：向导安装命令自动执行。
+                // 前置：本 app 声明 com.termux.permission.RUN_COMMAND（manifest）
+                // + 用户在 Termux ~/.termux/termux.properties 开
+                // allow-external-apps=true（一次性）。
+                "runInTermux" -> {
+                    val command = call.argument<String>("command") ?: ""
+                    val background = call.argument<Boolean>("background") ?: false
+                    result.success(runInTermux(command, background))
+                }
                 else -> result.notImplemented()
             }
         }
@@ -176,6 +185,29 @@ class MainActivity : FlutterActivity() {
 
     private fun isAppInstalled(pkg: String): Boolean = try {
         packageManager.getPackageInfo(pkg, 0)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    /// 通过 Termux RUN_COMMAND 服务执行命令。返回是否已派发 intent
+    /// （Termux 未装/未开 allow-external-apps 时 Termux 侧会静默忽略或抛异常）。
+    private fun runInTermux(command: String, background: Boolean): Boolean = try {
+        val intent = Intent("com.termux.RUN_COMMAND").apply {
+            setClassName("com.termux", "com.termux.app.RunCommandService")
+            putExtra("com.termux.RUN_COMMAND_PATH",
+                "/data/data/com.termux/files/usr/bin/sh")
+            putExtra("com.termux.RUN_COMMAND_ARGUMENTS",
+                arrayOf("-c", command))
+            putExtra("com.termux.RUN_COMMAND_WORKDIR",
+                "/data/data/com.termux/files/home")
+            putExtra("com.termux.RUN_COMMAND_BACKGROUND", background)
+        }
+        if (!background && android.os.Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
         true
     } catch (_: Exception) {
         false

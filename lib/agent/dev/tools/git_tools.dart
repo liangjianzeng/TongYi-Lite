@@ -88,6 +88,7 @@ ToolDefinition createGitLogTool({List<SshConfig> sshConfigs = const []}) {
 /// git_commit：暂存并提交（本地操作，默认允许）。
 ToolDefinition createGitCommitTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'git_commit',
     description:
         '提交当前工作区改动：files 为要提交的文件（相对工作区，可用 "." 提交全部），'
@@ -127,6 +128,7 @@ ToolDefinition createGitCommitTool({List<SshConfig> sshConfigs = const []}) {
 /// git_push：推送远端（影响远端 → 需用户批准，走沙箱升级通道）。
 ToolDefinition createGitPushTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'git_push',
     description:
         '推送当前分支到远端仓库。会改动远端代码，需要用户批准：'

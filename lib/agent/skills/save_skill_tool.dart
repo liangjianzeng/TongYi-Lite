@@ -17,6 +17,7 @@ import 'skill.dart';
 ToolDefinition createSaveSkillTool(SkillProvider provider,
     {String? skillsDirOverride}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'save_skill',
     description: '把可复用的任务流程/方法论固化为长期技能（跨会话生效）。'
         '两种时机调用：① 用户要求"记住这套做法/存成技能"；'

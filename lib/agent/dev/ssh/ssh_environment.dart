@@ -19,6 +19,7 @@ import 'package:flutter/foundation.dart' show ChangeNotifier, debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'secret_store.dart' show resolveSshSecrets;
 import 'ssh_credentials.dart';
 
 /// 连接状态。
@@ -63,13 +64,18 @@ final class SshEnvironmentService extends ChangeNotifier {
 
   /// 建立连接（幂等：已连接且配置相同则跳过）。
   Future<void> connect(SshConfig config) async {
-    if (!config.isComplete) {
+    // P2-D3：密钥从安全存储回填（JSON 只留空槽位；内存配置自带密钥则直通）。
+    SshConfig cfg = config;
+    try {
+      cfg = await resolveSshSecrets(config);
+    } on Exception catch (_) {}
+    if (!cfg.isComplete) {
       _fail('SSH 配置不完整（host/port/username/认证）');
       return;
     }
     if (isConnected && _activeConfig != null) {
       // 配置未变：直接复用现有连接。
-      if (_sameConfig(_activeConfig!, config)) return;
+      if (_sameConfig(_activeConfig!, cfg)) return;
       await disconnect();
     }
     _status = SshStatus.connecting;
@@ -79,16 +85,16 @@ final class SshEnvironmentService extends ChangeNotifier {
     notifyListeners();
     SSHClient? client;
     try {
-      final socket = await SSHSocket.connect(config.host, config.port,
+      final socket = await SSHSocket.connect(cfg.host, cfg.port,
           timeout: kSshConnectTimeout);
 
       final List<SSHKeyPair>? identities;
-      if (config.authType == SshAuthType.key) {
+      if (cfg.authType == SshAuthType.key) {
         try {
-          identities = SSHKeyPair.fromPem(config.privateKeyPem ?? '',
-              (config.keyPassphrase ?? '').isEmpty
+          identities = SSHKeyPair.fromPem(cfg.privateKeyPem ?? '',
+              (cfg.keyPassphrase ?? '').isEmpty
                   ? null
-                  : config.keyPassphrase);
+                  : cfg.keyPassphrase);
         } catch (_) {
           // 旧版向导曾生成 checkint/公钥格式错误的密钥，永远无法认证。
           throw const FormatException(
@@ -100,14 +106,14 @@ final class SshEnvironmentService extends ChangeNotifier {
 
       client = SSHClient(
         socket,
-        username: config.username,
+        username: cfg.username,
         identities: identities,
-        onPasswordRequest: config.authType == SshAuthType.key
+        onPasswordRequest: cfg.authType == SshAuthType.key
             ? null
-            : () async => config.password,
+            : () async => cfg.password,
         keepAliveInterval: const Duration(seconds: 10),
         onVerifyHostKey: (hostkeyType, fingerprint) =>
-            _verifyHostKey(config, hostkeyType, fingerprint),
+            _verifyHostKey(cfg, hostkeyType, fingerprint),
         // 注：fork 回调签名 = (typeName: String, fingerprint: Uint8List)。
       );
 
@@ -127,7 +133,7 @@ final class SshEnvironmentService extends ChangeNotifier {
         throw const SocketException('SSH 连接已被替换，放弃本次');
       }
       _client = client;
-      _activeConfig = config;
+      _activeConfig = cfg;
       _status = SshStatus.connected;
       notifyListeners();
       debugPrint('[SSH] connected ${config.username}@${config.host}:${config.port}');
@@ -188,6 +194,13 @@ final class SshEnvironmentService extends ChangeNotifier {
       throw const SocketException(
           'SSH 命令执行超时，连接已断开（可重新连接后重试）');
     }
+  }
+
+  /// P2-D4：打开 SFTP 会话（workspace_sync 递归同步用）；未连接抛异常。
+  Future<SftpClient> openSftp() async {
+    final client = _client;
+    if (client == null) throw const SocketException('SSH 未连接');
+    return client.sftp();
   }
 
   /// 远程读取文件（SFTP），上限 [kSshMaxReadBytes]；失败抛异常。

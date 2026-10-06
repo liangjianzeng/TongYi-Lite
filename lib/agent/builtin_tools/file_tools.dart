@@ -110,6 +110,7 @@ ToolDefinition createReadFileTool() {
 /// 写文件：覆盖写入（目录自动创建）。
 ToolDefinition createWriteFileTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'write_file',
     description:
         '覆盖写入文本到工作区文件（目录自动创建）；需要写公共目录（/sdcard 等）时'
@@ -147,6 +148,7 @@ ToolDefinition createWriteFileTool() {
 /// 编辑文件：替换 oldString → newString（oldString 必须唯一）。
 ToolDefinition createEditFileTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'edit_file',
     description:
         '替换工作区文件中的文本（oldString 必须唯一，出现多次会报错）；'

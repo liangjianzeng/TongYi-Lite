@@ -24,6 +24,20 @@ class AppBridge {
     }
   }
 
+  /// Termux 零粘贴：经 RUN_COMMAND intent 让 Termux 执行 [command]。
+  /// 返回是否成功派发 intent；Termux 未装 / 未开 allow-external-apps 时
+  /// 返回 false 或 Termux 侧静默忽略（调用方需引导用户检查开关）。
+  static Future<bool> runInTermux(String command,
+      {bool background = false}) async {
+    try {
+      return await _ch.invokeMethod<bool>('runInTermux',
+              <String, dynamic>{'command': command, 'background': background}) ==
+          true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 拉起应用主界面。失败（未安装/被禁）返回 false。
   static Future<bool> launchApp(String package) async {
     try {

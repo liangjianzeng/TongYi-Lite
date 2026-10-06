@@ -246,6 +246,20 @@ class StorageService {
     return rows.map(_mapMessageRow).toList();
   }
 
+  /// 各会话最后一条消息内容（P2 抽屉摘要行；一次 SQL 批量取，免 N 次查询）。
+  Future<Map<String, String>> lastMessageSnippets() async {
+    final db = await database;
+    final rows = await db.rawQuery(
+        'SELECT m.conversationId AS cid, m.content AS content FROM messages m '
+        "JOIN (SELECT conversationId, MAX(createdAt) AS mc FROM messages "
+        'GROUP BY conversationId) t '
+        'ON m.conversationId = t.conversationId AND m.createdAt = t.mc');
+    return {
+      for (final r in rows)
+        r['cid'] as String: ((r['content'] as String?) ?? '').trim(),
+    };
+  }
+
   Future<void> clearConversation(String conversationId) async {
     final db = await database;
     await db.delete('messages', where: 'conversationId = ?', whereArgs: [conversationId]);

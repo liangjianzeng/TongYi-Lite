@@ -19,6 +19,7 @@ const int kShellOutputLimit = 4000;
 
 ToolDefinition createShellExecTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'shell_exec',
     description:
         '在设备上执行 shell 命令（sh -c，app 权限内）。'

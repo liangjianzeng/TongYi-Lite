@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/dev/task.dart';
 import 'package:tongyi_lite/agent/dev/tools/plan_tools.dart';
+import 'package:tongyi_lite/agent/dev/workspace.dart';
 import 'package:tongyi_lite/agent/dev/workspace_store.dart';
 
 void main() {
@@ -66,16 +67,157 @@ void main() {
       expect(result.content, contains('steps 为空'));
     });
 
-    test('任务不存在报错', () async {
+    test('任务不存在 → 自动创建（title 缺省取第一步标题）', () async {
       final tool = createPlanCreateTool(store: store);
       final result = await tool.execute({
-        'task_id': 'nope',
+        'task_id': 'fix-login',
         'steps': [
-          {'title': 'x'},
+          {'title': 'A'},
+        ],
+      });
+      expect(result.isError, isFalse);
+      expect(result.content, contains('已自动创建'));
+      final task = (await store.loadTasks()).first;
+      expect(task.id, 'fix-login');
+      expect(task.title, 'A');
+      expect(task.workspaceId, isNull); // 无注入工作区 → 无主
+    });
+
+    test('任务不存在 + title → 用 title 建任务', () async {
+      final tool = createPlanCreateTool(store: store);
+      final result = await tool.execute({
+        'task_id': 'fix-login',
+        'title': '修复登录页',
+        'steps': [
+          {'title': 'A'},
+        ],
+      });
+      expect(result.isError, isFalse);
+      final task = (await store.loadTasks()).first;
+      expect(task.title, '修复登录页');
+    });
+
+    test('plan_create 自动建任务绑定注入的工作区（_workspaceId）', () async {
+      await store.saveWorkspace(const DevWorkspace(
+          id: 'ws_1', name: '项目一', backend: WorkspaceBackend.localApp));
+      final tool = createPlanCreateTool(store: store);
+      final result = await tool.execute({
+        '_workspaceId': 'ws_1',
+        'task_id': 't9',
+        'steps': [
+          {'title': 'A'},
+        ],
+      });
+      expect(result.isError, isFalse);
+      final task = (await store.loadTasks()).first;
+      expect(task.workspaceId, 'ws_1');
+    });
+
+    test('plan_create 指定不存在的工作区报错', () async {
+      final tool = createPlanCreateTool(store: store);
+      final result = await tool.execute({
+        'task_id': 't9',
+        'workspace_id': 'nope',
+        'steps': [
+          {'title': 'A'},
         ],
       });
       expect(result.isError, isTrue);
-      expect(result.content, contains('任务不存在'));
+      expect(result.content, contains('工作区不存在'));
+    });
+  });
+
+  group('task_create / task_list', () {
+    test('创建任务绑定省略时用注入工作区；带 steps 一步建计划', () async {
+      await store.saveWorkspace(const DevWorkspace(
+          id: 'ws_2', name: '项目二', backend: WorkspaceBackend.termux));
+      final tool = createTaskCreateTool(store: store);
+      final result = await tool.execute({
+        '_workspaceId': 'ws_2',
+        'title': '重构存储层',
+        'steps': [
+          {'title': 'S1', 'verify': '编译过'},
+          {'title': 'S2'},
+        ],
+      });
+      expect(result.isError, isFalse);
+      expect(result.content, contains('工作区 ws_2'));
+      expect(result.content, contains('计划 2 步'));
+      final task = (await store.loadTasks()).first;
+      expect(task.workspaceId, 'ws_2');
+      expect(task.status, DevTaskStatus.implementing);
+      expect(task.plan!.steps.length, 2);
+    });
+
+    test('不带 steps → planning 状态无计划', () async {
+      final tool = createTaskCreateTool(store: store);
+      final result = await tool.execute({'title': '只建任务'});
+      expect(result.isError, isFalse);
+      expect(result.content, contains('plan_create'));
+      final task = (await store.loadTasks()).first;
+      expect(task.status, DevTaskStatus.planning);
+      expect(task.plan, isNull);
+    });
+
+    test('显式 workspace_id 不存在报错', () async {
+      final tool = createTaskCreateTool(store: store);
+      final result = await tool.execute(
+          {'title': 'x', 'workspace_id': 'ghost'});
+      expect(result.isError, isTrue);
+      expect(result.content, contains('工作区不存在'));
+    });
+
+    test('task_list 按当前工作区过滤（默认收编无主任务）', () async {
+      Future<void> seed(String id, String? wsId) async {
+        await store.saveTask(DevTask(
+          id: id,
+          title: '任务$id',
+          workspaceId: wsId,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ));
+      }
+
+      await seed('a', null);
+      await seed('b', 'ws_1');
+      // 注入默认工作区 → 只见无主任务。
+      final r1 = await createTaskListTool(store: store)
+          .execute({'_workspaceId': 'default'});
+      expect(r1.content, contains('任务a'));
+      expect(r1.content, isNot(contains('任务b')));
+      // 注入 ws_1 → 只见 ws_1 任务。
+      final r2 = await createTaskListTool(store: store)
+          .execute({'_workspaceId': 'ws_1'});
+      expect(r2.content, contains('任务b'));
+      expect(r2.content, isNot(contains('任务a')));
+      // 无注入 → 全量（旧行为兼容）。
+      final r3 = await createTaskListTool(store: store).execute({});
+      expect(r3.content, contains('任务a'));
+      expect(r3.content, contains('任务b'));
+      // 空列表提示。
+      final store2 = DevStore(
+          baseDirOverride:
+              '${tmp.path}/empty-${DateTime.now().microsecondsSinceEpoch}');
+      final r4 = await createTaskListTool(store: store2).execute({});
+      expect(r4.content, contains('还没有任务'));
+    });
+
+    test('task_list 显示状态与进度', () async {
+      await store.saveTask(DevTask(
+        id: 't1',
+        title: '实现 SSH 工具',
+        status: DevTaskStatus.implementing,
+        plan: DevPlan(steps: [
+          const DevPlanStep(id: 's1', title: 'A', done: true),
+          const DevPlanStep(id: 's2', title: 'B'),
+        ], currentStep: 1),
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ));
+      final result =
+          await createTaskListTool(store: store).execute({});
+      expect(result.content, contains('实施中'));
+      expect(result.content, contains('进度 1/2'));
     });
   });
 

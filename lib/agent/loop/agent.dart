@@ -19,7 +19,6 @@ library;
 
 import 'dart:async';
 import 'dart:convert' show jsonEncode;
-import 'dart:math' as math;
 
 import '../llm/adapter.dart';
 import '../session/session.dart';
@@ -89,6 +88,14 @@ class ReactLoopAgent {
   /// 环境快照（当前时间等），注入系统提示最末（cache 友好；null = 不注入）。
   final String? _environmentNote;
 
+  /// 环境快照提供者（P1-C prompt-cache 友好形态）：每个 step 边界取一次，
+  /// 内容变化才以**尾部 user 消息**注入（追加不破坏前缀）。
+  /// 与 [environmentNote]（系统提示内嵌，构造期一次性）二选一：
+  /// provider 形态下系统提示逐字节稳定，API prompt cache 整段命中；
+  /// 环境变化（时间桶滚动）只在上下文末尾追加一小段。
+  final String Function()? _environmentNoteProvider;
+  String? _lastEnvNote;
+
   /// 通用重复调用守护（DSH repeat-tool-reminder 语义）：同一工具本回合
   /// 调用次数命中 [kRepeatReminderSteps] 时，在结果尾部追加渐进提醒，
   /// 逼模型收敛（配合签名去重的"回缓存"双保险）。
@@ -151,6 +158,8 @@ class ReactLoopAgent {
     // 之后）——稳定前缀在前、易变快照在后，API 端 prompt cache 友好
     // （DSH section ordering）；local 档不传，系统提示逐字节稳定保 KV。
     String? environmentNote,
+    // ---- P1-C：环境快照提供者（每 step 尾部注入，保前缀稳定）----
+    String Function()? environmentNoteProvider,
   })  : _session = session,
         _adapter = adapter,
         _registry = registry,
@@ -165,6 +174,7 @@ class ReactLoopAgent {
         _skills = skills,
         _agentsMd = agentsMd,
         _environmentNote = environmentNote,
+        _environmentNoteProvider = environmentNoteProvider,
         _executor = ToolExecutor(
           registry: registry,
           modelId: modelId,
@@ -349,6 +359,8 @@ class ReactLoopAgent {
         // steer/通知收件箱（DSH next-step inbox 语义）：排队的插话与
         // 系统通知在本 step 请求前落为 user 消息，模型下一条请求即看到。
         _drainInbox();
+        // P1-C：环境快照尾部注入（内容变化才追加，见方法注释）。
+        _maybeInjectEnvironmentNote();
         _session.append(kEventStepStart, {'turn': turn, 'step': step});
         // WP3a：主动压缩前置——估算投影 token，超预算先裁剪，
         // 不等撞 nctx/服务端硬墙（被动压缩只救得了 CONTEXT_WINDOW_EXCEEDED）。
@@ -682,6 +694,30 @@ class ReactLoopAgent {
     _noticeQueue.clear();
   }
 
+  /// P1-C 环境快照尾部注入：每个 step 边界取一次 provider，内容与上次
+  /// 相同（时间桶未滚动）不重复注入；变化才以尾部 user 消息追加——
+  /// 追加不破坏既有前缀，系统提示保持逐字节稳定（API prompt cache
+  /// 全段命中；旧 environmentNote 系统提示内嵌形态每个回合都破缓存，
+  /// 此形态把它从 100% 破缓存降到每 10 分钟一次小追加）。
+  void _maybeInjectEnvironmentNote() {
+    final provider = _environmentNoteProvider;
+    if (provider == null) return;
+    String note;
+    try {
+      note = provider();
+    } on Exception {
+      return; // 提供者异常静默跳过（环境快照非关键路径）
+    }
+    final t = note.trim();
+    if (t.isEmpty || t == _lastEnvNote) return;
+    _lastEnvNote = t;
+    _session.append(
+      kEventUserMessage,
+      {'content': '【环境】$t'},
+      source: const {'kind': 'env-note'},
+    );
+  }
+
   /// 回合引导消息（收尾/收敛警告）：以 user 事件入 log，仅本回合内可见
   /// —— trace 信封只编码 assistant(toolCalls)/tool/result，下回合导入
   /// 自然消失，不污染跨回合历史。
@@ -803,28 +839,90 @@ class ReactLoopAgent {
   /// 执行一批工具调用：`allowParallelTools` 则按 [AgentConfig.maxParallel]
   /// 分批并发（batch 内并发、batch 间串行，并发上限 = maxParallel），
   /// 否则串行。返回按 [calls] 顺序排列的 [ToolResult] 列表。
+  ///
+  /// P2-A 并发安全语义（DSH isConcurrencySafe 消费）：
+  /// - 声明非并行安全（`concurrencySafeFor(args)==false`，默认）的调用
+  ///   **独占一批**执行——写文件/发请求等有副作用的操作不与兄弟调用并发；
+  /// - 回合被用户中断时，未完成的调用以**合成占位结果**回填（结果未知、
+  ///   提示模型先核实再重试），与崩溃修复 closeOpenTurns 的合成回执同语义，
+  ///   保证每个 tool/call 都有配对 tool/result（G 不变量）。
   Future<List<ToolResult>> _runCalls(
     int turn,
     int step,
     List<ToolCall> calls,
   ) async {
     final maxParallel = _config.allowParallelTools ? _config.maxParallel : 1;
-    final results = <ToolResult>[];
     if (maxParallel <= 1 || calls.length <= 1) {
-      // 串行。
-      for (final call in calls) {
-        results.add(await _safeExecute(call));
-      }
-      return results;
+      return _runSerial(calls);
     }
-    // 并行：每批 maxParallel 个并发，批间串行（并发上限 = maxParallel）。
-    for (var i = 0; i < calls.length; i += maxParallel) {
-      final end = math.min(i + maxParallel, calls.length);
-      final batch = calls.sublist(i, end);
-      final batchResults =
-          await Future.wait(batch.map((call) => _safeExecute(call)));
-      results.addAll(batchResults);
+    // 分批：非并行安全的调用独占一批；安全调用按 maxParallel 凑批。
+    final batches = <List<ToolCall>>[];
+    var safeBatch = <ToolCall>[];
+    void flushSafe() {
+      if (safeBatch.isEmpty) return;
+      batches.add(safeBatch);
+      safeBatch = <ToolCall>[];
+    }
+
+    for (final call in calls) {
+      final def = _registry.lookup(call.name, modelId: _modelId);
+      final safe = def?.concurrencySafeFor(call.arguments ?? const {}) ?? false;
+      if (safe) {
+        safeBatch.add(call);
+        if (safeBatch.length >= maxParallel) flushSafe();
+      } else {
+        flushSafe();
+        batches.add([call]);
+      }
+    }
+    flushSafe();
+
+    final results = <ToolResult>[];
+    for (final batch in batches) {
+      if (_cancelCompleted) {
+        // 已中断：剩余批次全部合成占位（不再发起新执行）。
+        results.addAll(batch.map(_interruptedPlaceholder));
+        continue;
+      }
+      if (batch.length == 1) {
+        results.add(await _safeExecute(batch.first));
+        continue;
+      }
+      // 并发启动，按序收口；中断时未收口的以占位回填（后台 future 由
+      // _safeExecute 自行捕获异常，不会被丢弃成 unhandled error）。
+      final futures = batch.map(_safeExecute).toList();
+      var completed = true;
+      for (var i = 0; i < futures.length; i++) {
+        if (_cancelCompleted && i > 0) {
+          completed = false;
+          break;
+        }
+        results.add(await futures[i]);
+      }
+      if (!completed) {
+        for (var j = results.length; j < batch.length; j++) {
+          results.add(_interruptedPlaceholder(batch[j]));
+        }
+      }
     }
     return results;
   }
+
+  /// 串行路径：逐个执行；中断后剩余调用合成占位。
+  Future<List<ToolResult>> _runSerial(List<ToolCall> calls) async {
+    final results = <ToolResult>[];
+    for (final call in calls) {
+      if (_cancelCompleted) {
+        results.add(_interruptedPlaceholder(call));
+        continue;
+      }
+      results.add(await _safeExecute(call));
+    }
+    return results;
+  }
+
+  /// 中断占位结果：与 closeOpenTurns 合成回执同语义（结果未知、先核实）。
+  static ToolResult _interruptedPlaceholder(ToolCall call) => ToolResult.error(
+      '该调用（${call.name}）因回合被用户中断而未完成，执行结果未知；'
+      '工具可能已部分生效，重试前请先核实状态');
 }

@@ -25,7 +25,7 @@ pluginManagement {
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "8.7.0" apply false
-    id("org.jetbrains.kotlin.android") version "1.8.22" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
     // Chaquopy 插件（Android 嵌入式 CPython + pip）——17.x 支持 AGP 7.3~9.2 / minSdk 24+
     id("com.chaquo.python") version "17.0.0" apply false
 }

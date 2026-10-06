@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
+import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../models/agent_persona.dart';
 import '../models/api_model.dart';
 
@@ -114,6 +115,26 @@ class InferenceSettings {
   /// ???壺?ﵽ???޺? web_search ?ܾ???????????????ָ??ž???????????
   final int agentMaxSearchesPerTurn;
 
+  /// goal 无人值守续跑轮数上限（1~20，默认 8）：目标未完成时驱动器自动
+  /// 续跑的最大回合数（P1-A goal-round-driver）。
+  final int agentGoalMaxRounds;
+
+  /// 远程 MCP server 列表（P2-B）：enabled 的在 API 档回合注册为
+  /// `mcp_<server>_<tool>` 工具；失败 server 静默跳过不阻断回合。
+  final List<McpServerConfig> mcpServers;
+
+  /// 置顶会话 id 列表（P2 抽屉重构；存 settings 免 DB 迁移）。
+  final List<String> pinnedConversationIds;
+
+  /// 端侧 ASR 增强档（true = beam search + blankPenalty，识别更准、首字略慢）。
+  final bool asrEnhancedMode;
+
+  /// 启用的热词分类 id（空 = 全部启用）。
+  final List<String> asrHotwordCategories;
+
+  /// 自定义热词（每行一个，词表外同音后校正）。
+  final String asrHotwordCustom;
+
   /// 并发会话槽位（1~4，默认 1）：同时允许执行回合的会话数量。
   /// 智能体/API 会话可真正并行；本地模型路线受引擎单实例约束，
   /// 同一时刻仍只允许一个本地回合（见 chat_provider 门控）。
@@ -179,11 +200,19 @@ class InferenceSettings {
   /// 空串 = 跟随父模型（默认，行为与旧版一致）。仅 API 档生效。
   final String agentSubagentApiModelId;
 
+  /// 压缩摘要专用 API 模型 id（P1-B 按步模型路由的压缩分支）：非空时上下文
+  /// 压缩的旧区摘要交给该（更便宜的）模型；空 = 回退子代理模型，再回退主模型。
+  final String agentCompressionApiModelId;
+
   /// 上下文超限自动压缩（默认开；关闭后超限直接报错终止）??
   final bool agentCompactEnabled;
 
   /// 超长工具输出溢写落盘（默认开；模型侧只留摘要与文件定位）??
   final bool agentSpillEnabled;
+
+  /// 回合轨迹自动落盘（P0 轨迹导出，默认关）：每回合结束把 SessionLog
+  /// 整份事件流写 `ApplicationSupport/traces/*.jsonl`（回放/评估/排障用）。
+  final bool agentTraceExportEnabled;
 
   /// 联网搜索工具总开关（默认关闭：web_search 默认不注册，需手动开启）??
   final bool webSearchEnabled;
@@ -316,6 +345,12 @@ class InferenceSettings {
   /// 危险命令策略：'deny'（默认，黑名单直接拒绝）/ 'ask'（转用户审批）。
   final String dangerousCommandPolicy;
 
+  /// Dev 工具逐组开关（P2-D1）：组名 git/ssh/plan/task/verify；
+  /// 缺省键 = 开（与旧行为一致）。
+  final Map<String, bool> devToolToggles;
+
+  bool devToolGroupEnabled(String group) => devToolToggles[group] ?? true;
+
   // ---- 联网搜索默认值（保持中性：不预置任何个人实例）----
   // 地址默认留空 = 未配置。真机上没有可用实例时，provider 会给??请先??
   // 设置 ??联网搜索填写地址"的明确诊断，而不是拿 127.0.0.1 去连手机自己??
@@ -356,6 +391,12 @@ class InferenceSettings {
     // fromJson 一次性迁移到新默认。
     this.agentMaxRounds = 12,
     this.agentMaxSearchesPerTurn = 5,
+    this.agentGoalMaxRounds = 8,
+    this.mcpServers = const [],
+    this.pinnedConversationIds = const [],
+    this.asrEnhancedMode = false,
+    this.asrHotwordCategories = const [],
+    this.asrHotwordCustom = '',
     this.agentMaxConcurrentTurns = 1,
     this.agentApiContextBudget = 32768,
     this.agentTokensPerRound = 1024,
@@ -373,8 +414,10 @@ class InferenceSettings {
     this.chatTextScale = 1.0,
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
+    this.agentCompressionApiModelId = '',
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
+    this.agentTraceExportEnabled = false,
     this.webSearchEnabled = false,
     this.webSearchSearXngBaseUrl = kDefaultSearXngBaseUrl,
     this.webSearchSearXngApiKey,
@@ -410,6 +453,7 @@ class InferenceSettings {
     this.devWorkspaceId = 'default',
     List<SshConfig>? sshConfigs,
     this.dangerousCommandPolicy = 'deny',
+    this.devToolToggles = const {},
   })  : sshConfigs = sshConfigs ?? const [],
         mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
@@ -508,6 +552,12 @@ class InferenceSettings {
       int? agentNctx,
       int? agentMaxRounds,
       int? agentMaxSearchesPerTurn,
+      int? agentGoalMaxRounds,
+      List<McpServerConfig>? mcpServers,
+      List<String>? pinnedConversationIds,
+      bool? asrEnhancedMode,
+      List<String>? asrHotwordCategories,
+      String? asrHotwordCustom,
       int? agentMaxConcurrentTurns,
       int? agentApiContextBudget,
       int? agentTokensPerRound,
@@ -525,8 +575,10 @@ class InferenceSettings {
       double? chatTextScale,
       bool? agentSubagentEnabled,
       String? agentSubagentApiModelId,
+      String? agentCompressionApiModelId,
       bool? agentCompactEnabled,
       bool? agentSpillEnabled,
+      bool? agentTraceExportEnabled,
       bool? webSearchEnabled,
       String? webSearchSearXngBaseUrl,
       String? webSearchSearXngApiKey,
@@ -558,7 +610,8 @@ class InferenceSettings {
     bool? devModeEnabled,
     String? devWorkspaceId,
     List<SshConfig>? sshConfigs,
-    String? dangerousCommandPolicy,
+      String? dangerousCommandPolicy,
+      Map<String, bool>? devToolToggles,
     bool clearSshConfig = false,
   }) {
     return InferenceSettings(
@@ -586,6 +639,14 @@ class InferenceSettings {
       agentMaxRounds: agentMaxRounds ?? this.agentMaxRounds,
       agentMaxSearchesPerTurn:
           agentMaxSearchesPerTurn ?? this.agentMaxSearchesPerTurn,
+      agentGoalMaxRounds: agentGoalMaxRounds ?? this.agentGoalMaxRounds,
+      mcpServers: mcpServers ?? this.mcpServers,
+      pinnedConversationIds:
+          pinnedConversationIds ?? this.pinnedConversationIds,
+      asrEnhancedMode: asrEnhancedMode ?? this.asrEnhancedMode,
+      asrHotwordCategories:
+          asrHotwordCategories ?? this.asrHotwordCategories,
+      asrHotwordCustom: asrHotwordCustom ?? this.asrHotwordCustom,
       agentMaxConcurrentTurns:
           agentMaxConcurrentTurns ?? this.agentMaxConcurrentTurns,
       agentApiContextBudget:
@@ -611,8 +672,12 @@ class InferenceSettings {
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentSubagentApiModelId:
           agentSubagentApiModelId ?? this.agentSubagentApiModelId,
+      agentCompressionApiModelId:
+          agentCompressionApiModelId ?? this.agentCompressionApiModelId,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
+      agentTraceExportEnabled:
+          agentTraceExportEnabled ?? this.agentTraceExportEnabled,
       webSearchEnabled: webSearchEnabled ?? this.webSearchEnabled,
       webSearchSearXngBaseUrl:
           webSearchSearXngBaseUrl ?? this.webSearchSearXngBaseUrl,
@@ -656,6 +721,7 @@ class InferenceSettings {
       sshConfigs: clearSshConfig ? const [] : (sshConfigs ?? this.sshConfigs),
       dangerousCommandPolicy:
           dangerousCommandPolicy ?? this.dangerousCommandPolicy,
+      devToolToggles: devToolToggles ?? this.devToolToggles,
     );
   }
 
@@ -680,6 +746,12 @@ class InferenceSettings {
         'agentNctx': agentNctx,
         'agentMaxRounds': agentMaxRounds,
         'agentMaxSearchesPerTurn': agentMaxSearchesPerTurn,
+        'agentGoalMaxRounds': agentGoalMaxRounds,
+        'mcpServers': mcpServers.map((s) => s.toJson()).toList(),
+        'pinnedConversationIds': pinnedConversationIds,
+        'asrEnhancedMode': asrEnhancedMode,
+        'asrHotwordCategories': asrHotwordCategories,
+        'asrHotwordCustom': asrHotwordCustom,
         'agentMaxConcurrentTurns': agentMaxConcurrentTurns,
         'agentApiContextBudget': agentApiContextBudget,
         'agentTokensPerRound': agentTokensPerRound,
@@ -697,8 +769,10 @@ class InferenceSettings {
         'chatTextScale': chatTextScale,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
+        'agentCompressionApiModelId': agentCompressionApiModelId,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
+        'agentTraceExportEnabled': agentTraceExportEnabled,
         'webSearchEnabled': webSearchEnabled,
         'webSearchSearXngBaseUrl': webSearchSearXngBaseUrl,
         'webSearchSearXngApiKey': webSearchSearXngApiKey,
@@ -733,6 +807,7 @@ class InferenceSettings {
         'devWorkspaceId': devWorkspaceId,
         'sshConfigs': [for (final c in sshConfigs) c.toJson()],
         'dangerousCommandPolicy': dangerousCommandPolicy,
+        'devToolToggles': devToolToggles,
       };
 
   factory InferenceSettings.fromJson(Map<String, dynamic> json) {
@@ -769,6 +844,26 @@ class InferenceSettings {
           newDefault: 12),
       agentMaxSearchesPerTurn:
           (json['agentMaxSearchesPerTurn'] as num?)?.toInt() ?? 5,
+      agentGoalMaxRounds:
+          (json['agentGoalMaxRounds'] as num?)?.toInt() ?? 8,
+      mcpServers: (json['mcpServers'] as List<dynamic>?)
+              ?.map((e) =>
+                  McpServerConfig.fromJson((e as Map).cast<String, dynamic>()))
+              .where((c) => c.id.isNotEmpty && c.url.isNotEmpty)
+              .toList() ??
+          const [],
+      pinnedConversationIds:
+          (json['pinnedConversationIds'] as List<dynamic>?)
+                  ?.map((e) => '$e')
+                  .toList() ??
+              const [],
+      asrEnhancedMode: json['asrEnhancedMode'] as bool? ?? false,
+      asrHotwordCategories:
+          (json['asrHotwordCategories'] as List<dynamic>?)
+                  ?.map((e) => '$e')
+                  .toList() ??
+              const [],
+      asrHotwordCustom: json['asrHotwordCustom'] as String? ?? '',
       agentMaxConcurrentTurns:
           ((json['agentMaxConcurrentTurns'] as num?)?.toInt() ?? 1).clamp(1, 4),
       agentApiContextBudget:
@@ -801,8 +896,12 @@ class InferenceSettings {
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentSubagentApiModelId:
           json['agentSubagentApiModelId'] as String? ?? '',
+      agentCompressionApiModelId:
+          json['agentCompressionApiModelId'] as String? ?? '',
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
+      agentTraceExportEnabled:
+          json['agentTraceExportEnabled'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       // 联网搜索 SearXNG 配置：旧配置缺字段时用默认值（向后兼容）??
       // 空地址 = 未配置，此时联网搜索工具会给??请先在设置里填地址"的诊断??
@@ -850,6 +949,10 @@ class InferenceSettings {
       sshConfigs: _parseSshConfigs(json['sshConfigs'], json['sshConfig']),
       dangerousCommandPolicy:
           json['dangerousCommandPolicy'] as String? ?? 'deny',
+      devToolToggles:
+          (json['devToolToggles'] as Map<String, dynamic>?)
+                  ?.map((k, v) => MapEntry(k, v as bool? ?? true)) ??
+              const {},
     );
   }
 
