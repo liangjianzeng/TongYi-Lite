@@ -29,6 +29,7 @@ String _render(Map<String, String> notes) {
 /// 新增/覆盖便签。参数：`title`（键）、`content`（内容）。
 ToolDefinition createNoteTakeTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'note_take',
     description: '新增或覆盖一条便签。title 为便签标题（键），content 为内容。',
     parameters: {

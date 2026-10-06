@@ -81,6 +81,7 @@ String _render(List<Map<String, String>> items) {
 ///   存储保留调用方原词（展示/测试兼容），仅判定时归一化。
 ToolDefinition createTodoWriteTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'todo_write',
     description:
         '全量替换待办任务清单。todos 为任务数组，每项含 content（任务内容）'

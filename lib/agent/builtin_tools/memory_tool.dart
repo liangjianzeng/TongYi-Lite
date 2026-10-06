@@ -50,6 +50,7 @@ Future<void> _writeAll(Map<String, String> memory, String? workspaceId) async {
 /// 写入一条记忆。参数：`key`、`value`、可选 `workspace`（工作区作用域）。
 ToolDefinition createMemorySetTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'memory_set',
     description:
         '写入一条长期记忆（跨会话保留，如用户偏好/重要事实）。'

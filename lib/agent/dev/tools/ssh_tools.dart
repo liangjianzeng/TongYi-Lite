@@ -30,7 +30,7 @@ const int kSshWriteFileLimit = 65536;
 /// - workspaceId 缺失/默认 → 错误（默认工作区是本地，无远端路径）；
 /// - 工作区不存在 → 错误；backend 非远端 → 错误；remotePath 空 → 错误。
 /// 返回 `(root, workspace)`。
-Future<({String root, DevWorkspace workspace})> _resolveRemoteRoot(
+Future<({String root, DevWorkspace workspace})> resolveRemoteRoot(
     String? workspaceId) async {
   if (workspaceId == null || workspaceId == DevWorkspace.kDefaultId) {
     throw StateError('当前工作区是本地默认工作区，没有远端路径。'
@@ -53,7 +53,7 @@ Future<({String root, DevWorkspace workspace})> _resolveRemoteRoot(
 }
 
 /// 相对路径 → 远端绝对路径（相对基于工作区远端根目录）。
-String _toRemotePath(String root, String rawPath) {
+String toRemotePath(String root, String rawPath) {
   final trimmed = rawPath.trim();
   if (trimmed.isEmpty) return root;
   if (trimmed.startsWith('/')) return trimmed; // 已是绝对路径
@@ -63,7 +63,7 @@ String _toRemotePath(String root, String rawPath) {
 /// 确保 SSH 连接（按工作区绑定的配置自动连接/切换）。
 ///
 /// 返回错误信息（null = 已连接可用）。
-Future<String?> _ensureSshConnection(
+Future<String?> ensureSshConnectionFor(
     SshEnvironmentService ssh, DevWorkspace ws, List<SshConfig> sshConfigs) async {
   // 已连接且配置匹配（都未绑定或绑定相同）：直接复用。
   if (ssh.isConnected) {
@@ -103,6 +103,27 @@ Future<String?> _ensureSshConnection(
   return null;
 }
 
+/// P2-D2：读取远端工作区根目录的 AGENTS.md（SFTP，≤64KB）。
+/// 任何失败（无远端工作区/未配置/连接失败/文件不存在）返回 null，
+/// 调用方静默降级为只注入本地 AGENTS.md。
+Future<String?> readRemoteAgentsMd(
+    String? workspaceId, List<SshConfig> sshConfigs) async {
+  try {
+    final remote = await resolveRemoteRoot(workspaceId);
+    final sshErr = await ensureSshConnectionFor(
+        SshEnvironmentService.instance, remote.workspace, sshConfigs);
+    if (sshErr != null) return null;
+    final path = toRemotePath(remote.root, 'AGENTS.md');
+    final bytes = await SshEnvironmentService.instance
+        .readFileBytes(path, maxBytes: 65536);
+    return utf8.decode(bytes, allowMalformed: true);
+  } on Exception {
+    return null;
+  } on StateError {
+    return null;
+  }
+}
+
 /// 共享：在远端工作区执行命令（git/verify/ssh 工具共用）。
 ///
 /// [buildCommand]：接收远端根目录，返回要执行的完整命令。
@@ -118,7 +139,7 @@ Future<ToolResult> sshRunInWorkspace(
   DevWorkspace ws;
   try {
     final wsId = effectiveWorkspaceOf(args);
-    final remote = await _resolveRemoteRoot(wsId);
+    final remote = await resolveRemoteRoot(wsId);
     ws = remote.workspace;
     fullCommand = buildCommand(remote.root);
   } on StateError catch (e) {
@@ -129,7 +150,7 @@ Future<ToolResult> sshRunInWorkspace(
     return ToolResult.error('危险命令被拒绝：$danger');
   }
   final ssh = SshEnvironmentService.instance;
-  final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+  final connError = await ensureSshConnectionFor(ssh, ws, sshConfigs);
   if (connError != null) {
     return ToolResult.error('[SSH] $connError');
   }
@@ -145,7 +166,7 @@ Future<ToolResult> sshRunInWorkspace(
     } catch (e) {
       if (!ssh.isConnected && attempt == 0) {
         // 连接断了：自动重连一次再试。
-        final retry = await _ensureSshConnection(ssh, ws, sshConfigs);
+        final retry = await ensureSshConnectionFor(ssh, ws, sshConfigs);
         if (retry == null) continue;
       }
       return ToolResult.error('[SSH] 命令执行失败：$e');
@@ -157,6 +178,7 @@ Future<ToolResult> sshRunInWorkspace(
 /// ssh_exec：在远端执行命令（cwd 相对工作区）。
 ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'ssh_exec',
     description:
         '在 SSH 开发环境（Termux/远程电脑）执行 shell 命令。'
@@ -181,13 +203,13 @@ ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
       String fullCommand;
       try {
         final wsId = effectiveWorkspaceOf(args);
-        final remote = await _resolveRemoteRoot(wsId);
+        final remote = await resolveRemoteRoot(wsId);
         fullCommand = cwd.isEmpty
             ? 'cd ${remote.root} && $command'
-            : 'cd ${_toRemotePath(remote.root, cwd)} && $command';
+            : 'cd ${toRemotePath(remote.root, cwd)} && $command';
         final ssh = SshEnvironmentService.instance;
         final connError =
-            await _ensureSshConnection(ssh, remote.workspace, sshConfigs);
+            await ensureSshConnectionFor(ssh, remote.workspace, sshConfigs);
         if (connError != null) {
           return ToolResult.error('[SSH] $connError');
         }
@@ -210,7 +232,7 @@ ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
           } catch (e) {
             if (!ssh.isConnected && attempt == 0) {
               final retry =
-                  await _ensureSshConnection(ssh, remote.workspace, sshConfigs);
+                  await ensureSshConnectionFor(ssh, remote.workspace, sshConfigs);
               if (retry == null) continue;
             }
             return ToolResult.error('[SSH] 命令执行失败：$e');
@@ -246,14 +268,14 @@ ToolDefinition createSshReadFileTool({List<SshConfig> sshConfigs = const []}) {
       DevWorkspace ws;
       try {
         final wsId = effectiveWorkspaceOf(args);
-        final remote = await _resolveRemoteRoot(wsId);
+        final remote = await resolveRemoteRoot(wsId);
         ws = remote.workspace;
-        remotePath = _toRemotePath(remote.root, rawPath);
+        remotePath = toRemotePath(remote.root, rawPath);
       } on StateError catch (e) {
         return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
       }
       final ssh = SshEnvironmentService.instance;
-      final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+      final connError = await ensureSshConnectionFor(ssh, ws, sshConfigs);
       if (connError != null) {
         return ToolResult.error('[SSH] $connError');
       }
@@ -275,6 +297,7 @@ ToolDefinition createSshReadFileTool({List<SshConfig> sshConfigs = const []}) {
 /// ssh_write_file：远端写文件（SFTP，覆盖截断）。
 ToolDefinition createSshWriteFileTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'ssh_write_file',
     description:
         '写入文本到 SSH 开发环境中当前工作区文件（覆盖，目录自动创建）。'
@@ -300,14 +323,14 @@ ToolDefinition createSshWriteFileTool({List<SshConfig> sshConfigs = const []}) {
       DevWorkspace ws;
       try {
         final wsId = effectiveWorkspaceOf(args);
-        final remote = await _resolveRemoteRoot(wsId);
+        final remote = await resolveRemoteRoot(wsId);
         ws = remote.workspace;
-        remotePath = _toRemotePath(remote.root, rawPath);
+        remotePath = toRemotePath(remote.root, rawPath);
       } on StateError catch (e) {
         return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
       }
       final ssh = SshEnvironmentService.instance;
-      final connError = await _ensureSshConnection(ssh, ws, sshConfigs);
+      final connError = await ensureSshConnectionFor(ssh, ws, sshConfigs);
       if (connError != null) {
         return ToolResult.error('[SSH] $connError');
       }

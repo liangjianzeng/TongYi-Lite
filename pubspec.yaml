@@ -38,6 +38,11 @@ dependencies:
   flutter_markdown: ^0.7.4+3
   # Dev Agent：自动生成 ed25519 SSH 密钥对（TweetNaCl 移植，无外部依赖）
   pinenacl: ^0.6.0
+  flutter_secure_storage: ^10.3.4
+  sherpa_onnx: 1.13.8
+  record: 6.2.1
+  background_downloader: 8.9.5
+  lpinyin: 2.0.3
 
 
 dependency_overrides:

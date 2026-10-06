@@ -12,6 +12,7 @@ import 'providers/settings_provider.dart' show settingsProvider;
 import 'screens/home_screen.dart';
 import 'services/inference_service.dart';
 import 'services/model_manager.dart';
+import 'asr/sherpa_streaming_asr.dart';
 
 /// 全局导航 key：沙箱升级审批确认框经此弹出（ProviderScope 在 MaterialApp 之前，
 /// 无法直接使用 BuildContext）。
@@ -33,6 +34,10 @@ Future<void> main() async {
   // 从未请求——前台推理进度通知对用户不可见）。fire-and-forget：拒绝不阻塞
   // 启动，推理保活通知只是不可见，功能不受影响。
   unawaited(_requestNotificationPermission());
+
+  // 端侧 ASR 预热（sherpa-onnx，DSH-Phone 方案）：后台 isolate 预读模型文件
+  // 到页缓存，首次按住说话时加载更快；模型未下载时静默跳过。fire-and-forget。
+  unawaited(SherpaStreamingAsr.warmup());
 
   // 立即渲染启动画面（LOGO + APP 描述），避免初始化期间出现空白加载页。
   // 模型目录 / 原生引擎的初始化改在启动画面内异步进行（见 AppStartupGate）。

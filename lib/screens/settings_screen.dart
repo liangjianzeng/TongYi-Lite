@@ -21,6 +21,8 @@ import '../agent/dev/dev.dart'
     show
         DevSessionController,
         DevStore,
+        DevTask,
+        DevTaskStatus,
         DevWorkspace,
         SshAuthType,
         SshConfig,
@@ -28,8 +30,15 @@ import '../agent/dev/dev.dart'
         SshKeyGen,
         SshStatus,
         WorkspaceBackend,
-        sanitizeWorkspaceDirName;
+        newDevTaskId,
+        sanitizeWorkspaceDirName,
+        taskBelongsToWorkspace;
 import '../services/app_bridge.dart' show AppBridge;
+import '../agent/mcp/mcp_client.dart' show McpServerConfig;
+import '../asr/asr_model_manager.dart' show AsrModelManager;
+import '../asr/hold_to_talk.dart' show AsrModelGate;
+import '../asr/default_hotwords.dart' show hotwordCategories;
+
 import '../agent/skills/provider.dart'
     show
         loadUserSkills,
@@ -1612,6 +1621,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   /// 技能列表展开态：技能会越来越多，默认收起成一行汇总，
   /// 展开后也只在限高滚动区里浏览——技能卡不再把设置页拉成 2 米长。
   bool _skillsExpanded = false;
+  Future<bool>? _asrModelReady;
 
   /// 全局记忆条目（null = 加载中；记忆管理卡用）。
   List<MapEntry<String, String>>? _memoryEntries;
@@ -1994,6 +2004,86 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
         ],
       ),
     );
+  }
+
+  /// 编辑自定义热词（多行文本，每行一个；随设置持久化）。
+  Future<void> _editAsrHotwords(SettingsNotifier notifier) async {
+    final ctrl = TextEditingController(text: settings0HotwordCustom(notifier));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义热词'),
+        content: TextField(
+          controller: ctrl,
+          maxLines: 8,
+          minLines: 4,
+          decoration: const InputDecoration(
+            hintText: '每行一个词，例如：\n彤 Yi\nTongYi-Lite\nsherpa',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await notifier.setAsrHotwordCustom(ctrl.text);
+      if (mounted) setState(() {});
+    }
+  }
+
+  String settings0HotwordCustom(SettingsNotifier notifier) =>
+      notifier.state.asrHotwordCustom;
+
+  /// P2-B：添加 MCP server（名称 + 端点 URL）。
+  Future<void> _showAddMcpServerDialog(SettingsNotifier notifier) async {
+    final nameCtrl = TextEditingController();
+    final urlCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('添加 MCP server'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(
+                  labelText: '名称（工具前缀 mcp_<名称>_）'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: urlCtrl,
+              decoration: const InputDecoration(
+                  labelText: '端点 URL（如 http://主机:3000/mcp）'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final name = nameCtrl.text.trim();
+    final url = urlCtrl.text.trim();
+    if (name.isEmpty || url.isEmpty) return;
+    await notifier.upsertMcpServer(McpServerConfig(
+      id: 'mcp_${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      url: url,
+    ));
   }
 
   /// 新增技能 = **整段粘贴一站式**：一个文本框贴完整 SKILL.md（meta 行 +
@@ -2404,6 +2494,17 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 '达到上限拒绝联网、强制基于已有结果回答，杜绝反复搜索',
                           ),
                           _buildSliderRow(
+                            label: '目标无人值守轮数',
+                            value: settings.agentGoalMaxRounds,
+                            min: 1,
+                            max: 20,
+                            divisions: 19,
+                            display: '${settings.agentGoalMaxRounds} 轮',
+                            onChanged: (v) => notifier.setAgentGoalMaxRounds(v),
+                            hint: 'goal 未完成时自动续跑的最大回合数（goal_set/exit_plan '
+                                '生效，默认 8）；仅 API 档',
+                          ),
+                          _buildSliderRow(
                             label: 'API 上下文压缩预算',
                             value: settings.agentApiContextBudget,
                             min: 4096,
@@ -2520,6 +2621,14 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             subtitle: '单条工具结果超过约 4k token 时落盘，模型侧只留摘要与文件定位，'
                                 '可按需读回；省上下文显著',
                           ),
+                          const Divider(height: 24),
+                          _buildToggleTitle(
+                            '回合轨迹落盘（排障/评估）',
+                            settings.agentTraceExportEnabled,
+                            notifier.setAgentTraceExportEnabled,
+                            subtitle: '每回合把完整事件流写 ApplicationSupport/traces/*.jsonl，'
+                                '供离线回放与质量评估；默认关',
+                          ),
                         ],
                       ),
                     ),
@@ -2605,6 +2714,33 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 ],
                                 onChanged: (v) => notifier
                                     .setAgentSubagentApiModelId(v ?? ''),
+                              ),
+                            ),
+                          // 压缩摘要专用模型（P1-B 按步模型路由）：上下文
+                          // 压缩的旧区摘要交给更便宜的模型（仅 API 档生效）。
+                          if (settings.agentCompactEnabled &&
+                              settings.apiModels.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(
+                                  left: 4, right: 4, top: 8),
+                              child: DropdownButtonFormField<String>(
+                                value: settings.agentCompressionApiModelId,
+                                isDense: true,
+                                decoration: const InputDecoration(
+                                  labelText: '压缩摘要专用模型（API 档）',
+                                  hintText: '跟随子代理模型',
+                                  isDense: true,
+                                  border: OutlineInputBorder(),
+                                ),
+                                items: [
+                                  const DropdownMenuItem(
+                                      value: '', child: Text('跟随子代理模型')),
+                                  for (final cfg in settings.apiModels)
+                                    DropdownMenuItem(
+                                        value: cfg.id, child: Text(cfg.name)),
+                                ],
+                                onChanged: (v) => notifier
+                                    .setAgentCompressionApiModelId(v ?? ''),
                               ),
                             ),
                           const Divider(height: 24),
@@ -2735,6 +2871,202 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 fontSize: 11, color: Colors.grey.shade500),
                           ),
                           const Divider(height: 20),
+
+                          // ---- P2-B MCP 远程工具 ----
+                          _buildSectionHeader('🔌 MCP 远程工具', context),
+                          if (settings.mcpServers.isEmpty)
+                            Text('暂未配置。可接入任意 MCP server（Streamable HTTP）'
+                                '扩展工具生态。',
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.grey.shade600))
+                          else
+                            for (final s in settings.mcpServers)
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                visualDensity: VisualDensity.compact,
+                                leading: Icon(s.enabled
+                                    ? Icons.lan
+                                    : Icons.lan_outlined),
+                                title: Text(s.name,
+                                    style: const TextStyle(fontSize: 14)),
+                                subtitle: Text(s.url,
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Colors.grey)),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Switch(
+                                      value: s.enabled,
+                                      onChanged: (v) => notifier
+                                          .upsertMcpServer(s.copyWith(enabled: v)),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 18),
+                                      onPressed: () =>
+                                          notifier.removeMcpServer(s.id),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          TextButton.icon(
+                            onPressed: () => _showAddMcpServerDialog(notifier),
+                            icon: const Icon(Icons.add, size: 16),
+                            label: const Text('添加 MCP server'),
+                          ),
+
+                          Text(
+                            '填远程 MCP 端点（如 http://主机:3000/mcp）；'
+                            '工具以 mcp_<服务>_<名> 注册，仅 API 档生效，'
+                            '失败自动跳过。',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.grey.shade500),
+                          ),
+
+                          const Divider(height: 20),
+
+                          // ---- 端侧语音输入（sherpa-onnx ASR）设置 ----
+                          _buildSectionHeader('🎙️ 语音输入（端侧识别）', context),
+                          _buildToggleTitle(
+                            '增强识别模式',
+                            settings.asrEnhancedMode,
+                            notifier.setAsrEnhancedMode,
+                            subtitle: 'beam search + 热词偏置：识别更准，首字延迟略增'
+                                '（默认标准档 = greedy 流式）',
+                          ),
+                          const SizedBox(height: 4),
+                          Text('热词分类（未选 = 全部启用；提升术语识别准确率）',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600)),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 2,
+                            children: [
+                              for (final cat in hotwordCategories)
+                                FilterChip(
+                                  label: Text(cat.name,
+                                      style: const TextStyle(fontSize: 11)),
+                                  selected:
+                                      settings.asrHotwordCategories.isEmpty ||
+                                          settings.asrHotwordCategories
+                                              .contains(cat.id),
+                                  onSelected: (sel) {
+                                    final current =
+                                        settings.asrHotwordCategories;
+                                    // 空 = 全部启用语义：首次取消某个分类时，
+                                    // 先把其他全部分类写进启用集。
+                                    List<String> next;
+                                    if (current.isEmpty) {
+                                      next = sel
+                                          ? current
+                                          : [
+                                              for (final c in hotwordCategories)
+                                                if (c.id != cat.id) c.id
+                                            ];
+                                    } else {
+                                      next = sel
+                                          ? [...current, cat.id]
+                                          : current
+                                              .where((e) => e != cat.id)
+                                              .toList();
+                                    }
+                                    notifier.setAsrHotwordCategories(next);
+                                  },
+                                ),
+                            ],
+                          ),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: const Icon(Icons.edit_note, size: 20),
+                            title: const Text('自定义热词',
+                                style: TextStyle(fontSize: 14)),
+                            subtitle: Text(
+                                settings.asrHotwordCustom.trim().isEmpty
+                                    ? '每行一个词（人名/产品名等，同音自动校正）'
+                                    : settings.asrHotwordCustom
+                                            .trim()
+                                            .split('\n')
+                                            .length
+                                            .toString() +
+                                        ' 个词',
+                                style: const TextStyle(fontSize: 12)),
+                            trailing: const Icon(Icons.edit_outlined, size: 18),
+                            onTap: () => _editAsrHotwords(notifier),
+                          ),
+                          // 模型管理：状态 + 下载/删除
+                          FutureBuilder<bool>(
+                            future: _asrModelReady ??= AsrModelManager.isReady(),
+                            builder: (ctx, snap) {
+                              final ready = snap.data ?? false;
+                              return ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                leading: Icon(
+                                  ready
+                                      ? Icons.check_circle
+                                      : Icons.download_outlined,
+                                  size: 20,
+                                  color: ready ? Colors.green : Colors.orange,
+                                ),
+                                title: Text(
+                                    ready ? '识别模型：已就绪' : '识别模型：未下载',
+                                    style: const TextStyle(fontSize: 14)),
+                                subtitle: const Text(
+                                    'sherpa-onnx 流式中文模型（约 160MB，'
+                                    '首次语音时自动下载，支持断点续传）',
+                                    style: TextStyle(fontSize: 12)),
+                                trailing: TextButton(
+                                  onPressed: () async {
+                                    if (ready) {
+                                      final ok = await showDialog<bool>(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          title: const Text('删除识别模型？'),
+                                          content: const Text(
+                                              '删除后语音输入不可用，'
+                                              '再次长按说话会重新下载。'),
+                                          actions: [
+                                            TextButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(ctx, false),
+                                                child: const Text('取消')),
+                                            FilledButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(ctx, true),
+                                                child: const Text('删除')),
+                                          ],
+                                        ),
+                                      );
+                                      if (ok == true) {
+                                        await AsrModelManager.deleteModel();
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(const SnackBar(
+                                                  content:
+                                                      Text('识别模型已删除')));
+                                        }
+                                      }
+                                    } else {
+                                      await AsrModelGate.ensureModelReady(
+                                          context);
+                                    }
+                                    if (context.mounted) {
+                                      setState(() => _asrModelReady = null);
+                                    }
+                                  },
+                                  child: Text(ready ? '删除' : '下载',
+                                      style: const TextStyle(fontSize: 12)),
+                                ),
+                              );
+                            },
+                          ),
+
+                          const Divider(height: 20),
+
                           ListTile(
                             contentPadding: EdgeInsets.zero,
                             dense: true,
@@ -3674,15 +4006,24 @@ class _DevTabState extends ConsumerState<_DevTab> {
   /// SSH 连接/工作区激活是异步后台变化，监听 ChangeNotifier 实时刷新。
   VoidCallback? _devStateListener;
 
+  /// 当前激活工作区下的任务（懒加载；新建/删除后刷新）。
+  List<DevTask> _devTasks = const [];
+  bool _devTasksLoaded = false;
+
   @override
   void initState() {
     super.initState();
     final listener = () {
-      if (mounted) setState(() {});
+      if (mounted) {
+        // 工作区切换会改变任务过滤范围，一并重载。
+        _reloadDevTasks();
+        setState(() {});
+      }
     };
     _devStateListener = listener;
     SshEnvironmentService.instance.addListener(listener);
     DevSessionController.instance.addListener(listener);
+    _reloadDevTasks();
   }
 
   @override
@@ -3709,6 +4050,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
           _buildConnectionsCard(settings, notifier),
           const SizedBox(height: 10),
           _buildWorkspacesCard(settings, notifier),
+          const SizedBox(height: 10),
+          _buildDevTasksCard(settings, notifier),
           const SizedBox(height: 10),
           _buildSafetyCard(settings, notifier),
         ],
@@ -3742,6 +4085,29 @@ class _DevTabState extends ConsumerState<_DevTab> {
               '执行 git 提交、跑测试。连接与密钥由下方向导自动完成。',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
             ),
+            // P2-D1：Dev 工具逐组开关（默认全开 = 旧行为）。
+            if (settings.devModeEnabled) ...[
+              const Divider(height: 20),
+              Text('工具组开关（默认全开）',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600)),
+              for (final g in const [
+                ('git', 'Git（状态/diff/log/提交/推送）'),
+                ('ssh', 'SSH（执行/读写远端文件）'),
+                ('sync', '工作区同步（workspace_sync）'),
+                ('plan', '计划（plan_create/update/list）'),
+                ('task', '任务（task_create/list）'),
+                ('verify', '测试验证（run_tests）'),
+              ])
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(g.$2, style: const TextStyle(fontSize: 13)),
+                  value: settings.devToolGroupEnabled(g.$1),
+                  onChanged: (v) =>
+                      notifier.setDevToolGroupEnabled(g.$1, v),
+                ),
+            ],
           ],
         ),
       ),
@@ -4029,6 +4395,30 @@ class _DevTabState extends ConsumerState<_DevTab> {
                       _copyableCommand(ctx, command),
                       const SizedBox(height: 10),
                       Row(children: [
+                        FilledButton.icon(
+                          onPressed: () async {
+                            // 零粘贴：RUN_COMMAND 让 Termux 自己执行安装命令。
+                            final ok =
+                                await AppBridge.runInTermux(command);
+                            if (!ctx.mounted) return;
+                            if (ok) {
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          '已发送到 Termux 执行；若执行完未出现 '
+                                          'ALL_DONE，检查 Termux 是否开启 '
+                                          'allow-external-apps')));
+                            } else {
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text('发送失败：Termux 未安装或'
+                                          '未授权 RUN_COMMAND，请粘贴执行')));
+                            }
+                          },
+                          icon: const Icon(Icons.bolt, size: 16),
+                          label: const Text('自动执行'),
+                        ),
+                        const SizedBox(width: 8),
                         FilledButton.tonalIcon(
                           onPressed: () async {
                             final ok = await AppBridge.launchApp(
@@ -4050,6 +4440,11 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           label: Text(probing ? '检测中…' : '重新检测'),
                         ),
                       ]),
+                      const SizedBox(height: 6),
+                      const Text('自动执行需 Termux 一次性开启：'
+                          '~/.termux/termux.properties 写 allow-external-apps=true 后重启 Termux；'
+                          '未开启请用复制粘贴。',
+                          style: TextStyle(fontSize: 10, color: Colors.grey)),
                       if (step == 2) ...[
                         const SizedBox(height: 12),
                         TextField(
@@ -4698,6 +5093,241 @@ class _DevTabState extends ConsumerState<_DevTab> {
         timeout: const Duration(seconds: 30));
     if ((out?.trim() ?? '') != 'OK') return null;
     return dir;
+  }
+
+  // ---------------- 任务与规划 ----------------
+
+  /// 任务按激活工作区过滤（默认工作区收编无主任务），新更新的在前。
+  Future<void> _reloadDevTasks() async {
+    try {
+      final dev = DevSessionController.instance;
+      await dev.init();
+      final all = await DevStore().loadTasks();
+      final wsId = dev.activeWorkspaceId;
+      all.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      if (!mounted) return;
+      setState(() {
+        _devTasks = [
+          for (final t in all)
+            if (taskBelongsToWorkspace(t, wsId)) t,
+        ];
+        _devTasksLoaded = true;
+      });
+    } catch (_) {
+      if (mounted) _devTasksLoaded = true;
+    }
+  }
+
+  static const _devTaskStatusLabels = {
+    DevTaskStatus.planning: '规划中',
+    DevTaskStatus.implementing: '实施中',
+    DevTaskStatus.verifying: '验证中',
+    DevTaskStatus.done: '已完成',
+    DevTaskStatus.blocked: '受阻',
+  };
+
+  Widget _buildDevTasksCard(
+      InferenceSettings settings, SettingsNotifier notifier) {
+    final dev = DevSessionController.instance;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSectionHeader('📋 任务与规划', context),
+            Text(
+              '规划归属于工作区；点任务行设为当前任务（智能体上下文会注入其计划）。'
+              '也可以直接在对话里让智能体 task_create。',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 8),
+            if (!_devTasksLoaded)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('加载中…', style: TextStyle(fontSize: 12)),
+              )
+            else if (_devTasks.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text(
+                  '当前工作区还没有任务',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                ),
+              )
+            else
+              for (final t in _devTasks)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          t.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      if (dev.activeTaskId == t.id) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .primaryContainer,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text('当前',
+                              style: TextStyle(fontSize: 10)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  subtitle: Text(
+                    '${_devTaskStatusLabels[t.status] ?? t.status.name}'
+                    '${t.plan != null && t.plan!.steps.isNotEmpty
+                        ? ' · 进度 ${t.plan!.steps.where((s) => s.done).length}/${t.plan!.steps.length}'
+                        : ''}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    tooltip: '删除任务',
+                    onPressed: () => _confirmDeleteDevTask(t),
+                  ),
+                  onTap: () async {
+                    await DevSessionController.instance.setActiveTask(t.id);
+                    if (mounted) {
+                      setState(() {});
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text('已设为当前任务：${t.title}')));
+                    }
+                  },
+                ),
+            const SizedBox(height: 4),
+            FilledButton.icon(
+              onPressed: () => _showNewDevTaskDialog(context),
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('新建规划'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 新建规划：标题 + 工作区选择（默认当前激活工作区）。
+  Future<void> _showNewDevTaskDialog(BuildContext context) async {
+    final dev = DevSessionController.instance;
+    final titleCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    var workspaceId = dev.activeWorkspaceId;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建规划'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextFormField(
+                  controller: titleCtrl,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: '任务标题',
+                    hintText: '如：给搜索结果加缓存',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? '请填写标题' : null,
+                ),
+                const SizedBox(height: 12),
+                const Text('所属工作区',
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final ws in dev.workspaces)
+                      ChoiceChip(
+                        label: Text(ws.name),
+                        selected: workspaceId == ws.id,
+                        onSelected: (_) => workspaceId = ws.id,
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (!formKey.currentState!.validate()) return;
+              Navigator.pop(ctx, true);
+            },
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final title = titleCtrl.text.trim();
+    if (title.isEmpty) return;
+    final task = DevTask(
+      id: newDevTaskId(),
+      title: title,
+      workspaceId: workspaceId == DevWorkspace.kDefaultId ? null : workspaceId,
+      status: DevTaskStatus.planning,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    await DevStore().saveTask(task);
+    await dev.setActiveTask(task.id);
+    await _reloadDevTasks();
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('已创建「$title」并设为当前任务，'
+              '对话里可让智能体 plan_create 填步骤')));
+    }
+  }
+
+  Future<void> _confirmDeleteDevTask(DevTask t) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除任务'),
+        content: Text('确定删除「${t.title}」？其计划将一并删除。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await DevStore().deleteTask(t.id);
+    if (DevSessionController.instance.activeTaskId == t.id) {
+      await DevSessionController.instance.setActiveTask(null);
+    }
+    await _reloadDevTasks();
   }
 
   // ---------------- 安全策略 ----------------

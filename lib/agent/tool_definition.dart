@@ -87,8 +87,10 @@ class ToolDefinition {
   /// 执行函数：入参为模型解析后的参数，返回回填结果。
   final Future<ToolResult> Function(Map<String, dynamic> args) execute;
 
-  /// 并行安全声明（预留：DSH `isConcurrencySafe`）。
-  /// 返回 true 表示可与兄弟调用并行；默认 false（独占/串行）。
+  /// 并行安全声明（P2-A，DSH `isConcurrencySafe`）。
+  /// 返回 true 表示可与兄弟调用并行；**默认 true（只读安全）**——并行调用
+  /// 主流语义：无副作用的读/查工具天然可并发，有副作用的写/执行类工具
+  /// 必须显式声明 false 独占执行。
   final bool Function(Map<String, dynamic> args)? isConcurrencySafe;
 
   /// 合作式超时预算（预留：DSH `timeoutMs`）。执行体应能响应取消。
@@ -103,7 +105,8 @@ class ToolDefinition {
     this.timeout,
   });
 
-  /// 是否声明为并行安全（未声明视为独占）。
+  /// 是否声明为并行安全（未声明视为安全——只读默认可并发；
+  /// 有副作用的工具必须显式 `isConcurrencySafe: (_) => false`）。
   bool concurrencySafeFor(Map<String, dynamic> args) =>
-      isConcurrencySafe?.call(args) ?? false;
+      isConcurrencySafe?.call(args) ?? true;
 }

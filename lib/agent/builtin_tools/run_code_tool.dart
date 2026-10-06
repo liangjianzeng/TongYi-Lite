@@ -72,6 +72,7 @@ ToolDefinition createRunCodeTool({
   Directory? bridgeRoot,
 }) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'run_code',
     description:
         '把多步数据加工/批量工具编排写成一段 Python 程序，一次调用内完成'

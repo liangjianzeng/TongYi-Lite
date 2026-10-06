@@ -129,7 +129,8 @@ const String kDevInstruction = '''
 [开发工作循环]
 你在进行开发任务时按以下顺序工作：
 1. 先 git_status 确认当前仓库状态与分支；
-2. 有任务计划时按 plan_list 看当前步骤，先完成当前步骤；
+2. 还没有任务/计划时，先 task_create 创建任务（可带 steps 一步建计划）；
+   已有任务时用 task_list 找回 task_id，按 plan_list 看当前步骤，先完成当前步骤；
 3. 改代码：read_file/ssh_read_file 看代码 → edit_file/write_file 或 ssh 写改；
 4. 自查：git_diff 看改动是否合理；
 5. 验证：run_tests 跑测试，失败就修再跑，直到通过；

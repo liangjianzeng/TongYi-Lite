@@ -30,6 +30,7 @@ const List<String> kArtifactExtensions = [
 
 ToolDefinition createExportFileTool() {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'export_file',
     description: '把工作区里已生成的文件导出到系统下载目录（Download/TongYi-Lite/），'
         '用户即可在文件管理器查看。生成报告/网页/图表/数据文件后必须调用本工具交付。'

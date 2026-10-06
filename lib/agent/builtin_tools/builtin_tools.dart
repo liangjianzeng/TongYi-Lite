@@ -36,18 +36,25 @@ export '../dev/tools/git_tools.dart'
         createGitPushTool,
         createGitStatusTool;
 export '../dev/tools/plan_tools.dart'
-    show createPlanCreateTool, createPlanListTool, createPlanUpdateTool;
+    show
+        createPlanCreateTool,
+        createPlanListTool,
+        createPlanUpdateTool,
+        createTaskCreateTool,
+        createTaskListTool;
 export '../dev/tools/ssh_tools.dart'
     show
         createSshExecTool,
         createSshReadFileTool,
         createSshWriteFileTool;
+export '../dev/tools/sync_tools.dart' show createWorkspaceSyncTool;
 export '../dev/tools/verify_tool.dart' show createRunTestsTool;
 
 import '../dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../dev/tools/git_tools.dart';
 import '../dev/tools/plan_tools.dart';
 import '../dev/tools/ssh_tools.dart';
+import '../dev/tools/sync_tools.dart';
 import '../dev/tools/verify_tool.dart';
 import '../tool_definition.dart';
 import 'calculator.dart';
@@ -97,12 +104,15 @@ const List<String> kDevToolNames = [
   'git_log',
   'git_commit',
   'git_push',
+  'task_create',
+  'task_list',
   'plan_create',
   'plan_update',
   'plan_list',
   'ssh_exec',
   'ssh_read_file',
   'ssh_write_file',
+  'workspace_sync',
   'run_tests',
 ];
 
@@ -143,6 +153,8 @@ List<ToolDefinition> createBuiltinTools({
         createGitLogTool(sshConfigs: devSshConfigs),
         createGitCommitTool(sshConfigs: devSshConfigs),
         createGitPushTool(sshConfigs: devSshConfigs),
+        createTaskCreateTool(),
+        createTaskListTool(),
         createPlanCreateTool(),
         createPlanUpdateTool(),
         createPlanListTool(),
@@ -150,5 +162,6 @@ List<ToolDefinition> createBuiltinTools({
         createSshReadFileTool(sshConfigs: devSshConfigs),
         createSshWriteFileTool(sshConfigs: devSshConfigs),
         createRunTestsTool(sshConfigs: devSshConfigs),
+        createWorkspaceSyncTool(sshConfigs: devSshConfigs),
       ],
     ];

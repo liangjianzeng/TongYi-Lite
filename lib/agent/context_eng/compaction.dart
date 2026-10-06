@@ -9,15 +9,20 @@
 ///   - [replaceGeneration]++ 作前进性证明 → 允许 overflow retry。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../session/event.dart';
+import '../session/session.dart';
 import '../loop/failure.dart';
 
 /// 两阶段压缩插件（替代 [NoCompactionPlugin] 的占位）。
 ///
 /// 端侧：`useSummary=false`（默认）→ 只跑确定性裁剪；
-/// `useSummary=true` → 裁剪后仍超预算则模型摘要（当前实现为占位：端侧默认关）。
+/// P1-B：传入 [llmSummarizer] 时旧区摘要交给**便宜模型**生成（按步模型
+/// 路由的压缩分支）——模型失败/超时/空回复一律回退确定性 digest，
+/// 压缩永不因摘要模型而失败。
 final class DeterministicCompaction implements CompactionPlugin {
   /// 尾部保留的 user 轮数（默认 5）。
   final int keepRounds;
@@ -25,7 +30,21 @@ final class DeterministicCompaction implements CompactionPlugin {
   /// 是否启用模型摘要（端侧默认关）。
   final bool useSummary;
 
-  DeterministicCompaction({this.keepRounds = 5, this.useSummary = false});
+  /// LLM 摘要器：入参为摘要提示词（含旧区摘录），返回摘要文本；
+  /// 失败返回 null。null = 不用模型（纯确定性裁剪）。
+  final Future<String?> Function(String summaryPrompt)? llmSummarizer;
+
+  /// 摘要提示词里的单条工具结果摘录上限（字符）。
+  static const int _excerptLen = 400;
+
+  /// 摘要提示词总长上限（字符），超限截尾。
+  static const int _promptCap = 12000;
+
+  DeterministicCompaction({
+    this.keepRounds = 5,
+    this.useSummary = false,
+    this.llmSummarizer,
+  });
 
   /// 判断当前会话是否超预算，并尝试压缩。
   /// [reason] 触发原因（`contextWindowExceeded` 时强制裁剪；其余情况也做主动裁剪）。
@@ -103,20 +122,89 @@ final class DeterministicCompaction implements CompactionPlugin {
             '${toolNames.isEmpty ? "无" : toolNames.join("、")}）：\n'
             '${digestParts.join('\n')}';
 
+    // ---- P1-B：LLM 摘要（便宜模型）——失败回退确定性 digest ----
+    var finalSummary = summary;
+    var summaryProvider = 'deterministic-prune';
+    var summaryModel = 'none';
+    final summarizer = llmSummarizer;
+    if (summarizer != null && digestParts.isNotEmpty) {
+      try {
+        final prompt = _buildSummaryPrompt(
+          digestParts: digestParts,
+          toolNames: toolNames,
+          events: events,
+          first: first,
+          last: last,
+          log: log,
+        );
+        final modelSummary = await summarizer(prompt)
+            .timeout(const Duration(seconds: 20));
+        final t = modelSummary?.trim() ?? '';
+        if (t.isNotEmpty) {
+          finalSummary = '较早轮次摘要（由模型生成）：\n$t';
+          summaryProvider = 'llm';
+          summaryModel = 'compression';
+        }
+      } on Exception {
+        // 摘要模型失败 → 确定性 digest 兜底（压缩本身不能失败）。
+      } on TimeoutException {
+        // 超时同上。
+      }
+    }
+
     // ---- 遮蔽 [first..last] 为一条摘要 ----
     final advance = log.replace(
       startSeq: first,
       endSeq: last,
-      newContent: summary,
-      summaryProvider: 'deterministic-prune',
-      summaryModel: 'none',
+      newContent: finalSummary,
+      summaryProvider: summaryProvider,
+      summaryModel: summaryModel,
     );
     if (advance > 0) {
       debugPrint(
-          '[Compaction] 确定性裁剪：mask [${first}..${last}]，'
-          'summary=${summary.length}chars，advance=$advance');
+          '[Compaction] 裁剪（$summaryProvider）：mask [${first}..${last}]，'
+          'summary=${finalSummary.length}chars，advance=$advance');
       return const CompactionResult(CompactionResultKind.success);
     }
     return const CompactionResult(CompactionResultKind.failure);
+  }
+
+  /// 构造 LLM 摘要提示词：任务诉求摘录 + 触达工具 + 旧工具结果摘录
+  ///（头 [_excerptLen] 字符），总长截到 [_promptCap]。
+  String _buildSummaryPrompt({
+    required List<String> digestParts,
+    required Set<String> toolNames,
+    required List<SessionEvent> events,
+    required int first,
+    required int last,
+    required SessionLog log,
+  }) {
+    final buf = StringBuffer();
+    buf.writeln('以下是智能体较早轮次的执行记录。请生成一份紧凑摘要（≤300 字），'
+        '保留：用户的任务目标、已完成的关键步骤与结论、重要数据/文件路径、'
+        '未完成的部分。不要逐条罗列，不要评论。');
+    buf.writeln();
+    for (final p in digestParts) {
+      buf.writeln(p);
+    }
+    if (toolNames.isNotEmpty) {
+      buf.writeln('调用过的工具：${toolNames.join('、')}');
+    }
+    for (final e in events) {
+      if (e.seq < first || e.seq > last) continue;
+      if (e.type != kEventToolResult) continue;
+      if (log.isShadowed(e.seq)) continue;
+      final name = e.data['name'] as String? ?? 'tool';
+      var content = e.data['content'] as String? ?? '';
+      if (content.length > _excerptLen) {
+        content = '${content.substring(0, _excerptLen)}…';
+      }
+      buf.writeln('[$name] $content');
+      if (buf.length > _promptCap) {
+        buf.writeln('（记录过长，已截断）');
+        break;
+      }
+    }
+    return buf.toString();
   }
 }

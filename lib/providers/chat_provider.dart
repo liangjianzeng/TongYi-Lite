@@ -13,6 +13,7 @@ import '../models/conversation.dart';
 import '../agent/agent.dart';
 import '../agent/dev/dev.dart'
     show DevSessionController, buildDevContext, sanitizeWorkspaceDirName;
+import '../agent/dev/tools/ssh_tools.dart' show readRemoteAgentsMd;
 import '../agent/dev/workspace.dart' show DevWorkspace;
 import '../agent/web_search/web_search_provider.dart';
 import '../agent/context_eng/compaction.dart' show DeterministicCompaction;
@@ -20,7 +21,8 @@ import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/capability.dart';
-import '../agent/llm/adapter.dart' show LlmAdapter, ProviderKind;
+import '../agent/llm/adapter.dart'
+    show LlmAdapter, ProviderKind, GenerateOptions;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
 import '../agent/protocol/protocol_selector.dart' show selectProtocol;
@@ -34,6 +36,18 @@ import '../agent/skills/load_skill_tool.dart' show createLoadSkillTool;
 import '../agent/skills/save_skill_tool.dart' show createSaveSkillTool;
 import '../agent/builtin_tools/memory_tool.dart' show readGlobalMemorySnapshot;
 import '../agent/builtin_tools/ask_user_tool.dart' show createAskUserTool;
+import '../agent/builtin_tools/goal_tools.dart'
+    show createGoalTools, createExitPlanTool, createPlanStepUpdateTool;
+import '../agent/mcp/mcp_client.dart' show fetchMcpTools;
+import '../agent/goal/goal_store.dart'
+    show
+        GoalStore,
+        GoalState,
+        GoalStatus,
+        GoalAction,
+        PlanStep,
+        PlanStepStatus,
+        decideGoalAction;
 import '../agent/builtin_tools/run_code_tool.dart' show createRunCodeTool;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
@@ -41,6 +55,9 @@ import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
 import '../agent/session/store.dart'
     show JsonlSessionStore, kAgentTraceMessagePrefix, encodeAgentTraceMessage;
 import '../agent/session/event.dart' show kEventAssistantMessage;
+import '../agent/metrics/turn_metrics.dart'
+    show TurnMetrics, TurnMetricsStore;
+import '../agent/session/trace_export.dart' as trace_export;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
 import '../services/attachment_service.dart'
@@ -317,6 +334,29 @@ class ChatNotifier extends StateNotifier<bool> {
   /// sendMessage 顶部同步注册占位（防双开竞态），finally 注销。
   final Map<String, _ActiveTurn> _activeTurns = {};
 
+  /// P0 遥测：回合指标落盘（ApplicationSupport/metrics/turn_metrics.jsonl）。
+  /// 循环零侵入——指标在回合结束后从 SessionLog 纯派生。
+  TurnMetricsStore? _metricsStore;
+
+  /// P0 轨迹：每回合自动落盘的目录缓存（ApplicationSupport/traces）。
+  String? _traceDir;
+
+  /// P1-D 技能目录冻结缓存：convId → 目录文本。同一会话内技能目录文本
+  /// 不变（系统提示稳定保 API prompt cache / 本地 KV 前缀），技能集变化
+  /// 延迟到会话切换生效；FIFO 容量 32 防泄漏。
+  final Map<String, String> _skillDirectoryCache = {};
+
+  /// P1-A goal 存储（ApplicationSupport/goals/）与上一回合终止原因。
+  GoalStore? _goalStoreCache;
+  final Map<String, String> _lastTurnEndReason = {};
+
+  Future<GoalStore> _goalStore() async {
+    _goalStoreCache ??= GoalStore(
+        baseDir:
+            '${(await getApplicationSupportDirectory()).path}/goals');
+    return _goalStoreCache!;
+  }
+
   void _registerTurn(String conversationId, _ActiveTurn turn) {
     _activeTurns[conversationId] = turn;
     _syncRunningState();
@@ -435,14 +475,72 @@ class ChatNotifier extends StateNotifier<bool> {
     if (admission != null) return _rejectTurn(conversationId, admission);
     final turn = _ActiveTurn();
     _registerTurn(conversationId, turn);
+    String response;
     try {
-      return await _dispatchMessage(conversationId, prompt, turn,
+      response = await _dispatchMessage(conversationId, prompt, turn,
           imagePath: imagePath,
           imagePaths: imagePaths,
           attachmentPaths: attachmentPaths,
           audioPath: audioPath);
     } finally {
       _unregisterTurn(conversationId);
+    }
+    // P1-A goal 无人值守续跑驱动器：回合正常结束后检查持久目标——
+    // 未完成则自动开续跑回合（递归经 sendMessage 展开，深度 = 剩余轮数）。
+    // 在注销后调用：续跑回合重新走注册/门控（本地互斥同样生效）。
+    await _driveGoalIfNeeded(conversationId, settings);
+    return response;
+  }
+
+  /// P1-A goal 驱动器：目标活跃 + 上回合 completed → 续跑；
+  /// 轮数耗尽 → 落一条可见提示并终结。失败/中断/等提问不自动续。
+  Future<void> _driveGoalIfNeeded(
+      String conversationId, InferenceSettings settings) async {
+    try {
+      final goal = await (await _goalStore()).load(conversationId);
+      if (goal == null || !goal.isActive) return;
+      // 用户有未回答的提问（ask_user/exit_plan 挂起）→ 不抢跑。
+      if (_ref.read(agentPendingQuestionProvider)[conversationId] != null) {
+        return;
+      }
+      // 只在上一回合正常完成后续跑（失败/中断交给用户处理）。
+      if (_lastTurnEndReason[conversationId] != 'completed') return;
+      final action = decideGoalAction(goal, turnCompleted: true);
+      switch (action) {
+        case GoalAction.none:
+        case GoalAction.settle:
+          return;
+        case GoalAction.expire:
+          final finished =
+              await (await _goalStore()).finish(conversationId, GoalStatus.expired);
+          await _storage.saveMessage(ChatMessage(
+            id: 'goalfin_${DateTime.now().millisecondsSinceEpoch}',
+            conversationId: conversationId,
+            role: MessageRole.assistant,
+            content: 'ℹ️ 目标续跑已达上限（${finished?.maxRounds ?? goal.maxRounds} 轮），'
+                '自动停止。目标：${finished?.goal ?? goal.goal}\n'
+                '如需继续，请发送「/plan <任务>」或直接下达下一步指示。',
+          ));
+          return;
+        case GoalAction.continueTurn:
+          final bumped = await (await _goalStore()).bumpRound(conversationId);
+          final notice =
+              '[目标续跑 ${bumped.rounds}/${bumped.maxRounds}] '
+              '${bumped.progressText()}\n'
+              '请继续推进（全部工具可用）：完成当前步骤立即 plan_step_update，'
+              '再进入下一步；全部步骤完成后调用 goal_complete 总结收尾；'
+              '某步确认失败用 plan_step_update 置 failed 并如实说明。';
+          await _storage.saveMessage(ChatMessage(
+            id: 'goalrun_${DateTime.now().millisecondsSinceEpoch}',
+            conversationId: conversationId,
+            role: MessageRole.user,
+            content: notice,
+          ));
+          await sendMessage(conversationId, notice);
+          return;
+      }
+    } catch (e) {
+      debugPrint('[ChatNotifier] goal driver failed: $e');
     }
   }
 
@@ -975,6 +1073,19 @@ class ChatNotifier extends StateNotifier<bool> {
     debugPrint('[ChatNotifier] new-agent route='
         '${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
 
+    // ---- P1-A 计划模式：'/plan ' 前缀（仅 API 档）----
+    // 本回合 = 只读规划：注册表收窄为只读工具 + exit_plan 审批工具；
+    // 批准后计划落为持久目标，goal 驱动器自动接管执行。
+    var planMode = false;
+    if (useApi && effectivePrompt.startsWith('/plan')) {
+      planMode = true;
+      effectivePrompt = effectivePrompt.substring('/plan'.length).trim();
+      if (effectivePrompt.isEmpty) {
+        return '[计划模式用法：/plan <任务描述>，'
+            '例如「/plan 重构登录模块并补齐测试」]';
+      }
+    }
+
     turn.started = true;
     _syncRunningState();
 
@@ -1017,8 +1128,52 @@ class ChatNotifier extends StateNotifier<bool> {
     final skillProvider = userSkills.isEmpty
         ? SkillProvider()
         : SkillProvider(skills: [...loadBuiltinSkills(), ...userSkills]);
+    // P1-D 技能目录冻结：同一会话沿用首次生成的目录文本（系统提示逐字节
+    // 稳定，prompt cache/KV 前缀不因增删技能破掉）；load_skill 注册表用
+    // 实时技能集，新增技能本会话内仍可按名拉取，只是目录不刷新。
+    if (skillProvider.count > 0) {
+      if (_skillDirectoryCache.containsKey(conversationId)) {
+        skillProvider.frozenDirectoryText =
+            _skillDirectoryCache[conversationId];
+      } else {
+        if (_skillDirectoryCache.length >= 32) {
+          _skillDirectoryCache
+              .remove(_skillDirectoryCache.keys.first);
+        }
+        _skillDirectoryCache[conversationId] =
+            skillProvider.availableSkillsText(
+                loadSkillAvailable: true, saveSkillAvailable: true);
+      }
+    }
 
     final registry = _buildAgentRegistry(settings, agentModelKey);
+    // P2-B MCP：远程 server 工具注册（仅 API 档；enabled 逐个拉取，
+    // 失败 server 静默跳过不阻断回合）。注册在计划模式收窄之前，
+    // 只读 MCP 工具可进计划模式白名单。
+    if (useApi) {
+      for (final server in settings.mcpServers) {
+        if (!server.enabled) continue;
+        try {
+          final tools = await fetchMcpTools(server);
+          final existing = registry.all.map((t) => t.name).toSet();
+          for (final t in tools) {
+            if (!existing.contains(t.name)) registry.register(t);
+          }
+        } catch (e) {
+          debugPrint('[MCP] server "${server.name}" 拉取失败，跳过: $e');
+        }
+      }
+    }
+    // P1-A 计划模式：注册表收窄为「只读 + exit_plan」——复用并行安全声明
+    //（副作用工具恒声明不安全），计划回合模型想执行修改类操作也调不到。
+    if (planMode) {
+      final readOnly = registry
+          .visibleFor(agentModelKey)
+          .where((t) => t.isConcurrencySafe?.call(const {}) ?? true)
+          .map((t) => t.name)
+          .toSet();
+      registry.restrictUser(allow: {...readOnly, 'exit_plan'});
+    }
     // 技能双工具（两条路线都注册，2026-10-01 P1-4）：
     // - load_skill：本地档此前"省 prefill 不开"导致技能目录可见却拿不到
     //   正文（技能=装饰品）；工具定义 prefill 成本远小于技能失效。
@@ -1030,7 +1185,8 @@ class ChatNotifier extends StateNotifier<bool> {
 
     // ask_user_question（P2-B2，DSH tool-ask-user）：缺信息/需确认时向用户
     // 提问，回合挂起等待；回答通道挂 agentPendingQuestionProvider → UI 卡片。
-    registry.register(createAskUserTool(ask: (question, options) {
+    // P1-A：exit_plan 审批走同一提问通道。
+    Future<String?> askUser(String question, List<String> options) {
       final notifier = _ref.read(agentPendingQuestionProvider.notifier);
       final completer = Completer<String?>();
       notifier.state = {
@@ -1042,7 +1198,49 @@ class ChatNotifier extends StateNotifier<bool> {
         ),
       };
       return completer.future;
-    }));
+    }
+
+    registry.register(createAskUserTool(ask: askUser));
+
+    // P1-A goal 工具（无人值守续跑）+ 计划模式 exit_plan：仅 API 档注册
+    // （本地小模型自驱多回合收敛性差，goal 驱动只给 API 档）。
+    if (useApi) {
+      final goalStore = await _goalStore();
+      final goalMaxRounds = settings.agentGoalMaxRounds.clamp(1, 20);
+      // 计划实体化：计划变化 → 重写对话内固定 id 的「📋 计划」活卡
+      // （saveMessage upsert 同 id；内容含步骤状态，模型历史可见，UI 可回看）。
+      void onPlanChanged(String cardText) {
+        unawaited(_storage.saveMessage(ChatMessage(
+          id: 'plan_$conversationId',
+          conversationId: conversationId,
+          role: MessageRole.assistant,
+          content: cardText,
+        )));
+      }
+
+      for (final t in createGoalTools(
+        store: goalStore,
+        conversationId: conversationId,
+        maxRounds: goalMaxRounds,
+        onPlanChanged: onPlanChanged,
+      )) {
+        registry.register(t);
+      }
+      registry.register(createPlanStepUpdateTool(
+        store: goalStore,
+        conversationId: conversationId,
+        onPlanChanged: onPlanChanged,
+      ));
+      if (planMode) {
+        registry.register(createExitPlanTool(
+          store: goalStore,
+          conversationId: conversationId,
+          maxRounds: goalMaxRounds,
+          ask: askUser,
+          onPlanChanged: onPlanChanged,
+        ));
+      }
+    }
 
     // run_code（P3-1，DSH PTC 语义）：仅 API 档注册——编排型编程子调用
     // 超出端侧小模型能力且耗 prefill；API 模型写编排程序是净收益。
@@ -1082,6 +1280,17 @@ class ChatNotifier extends StateNotifier<bool> {
       // 稳定保 KV 前缀复用（与环境快照同一取舍）。
       taskDiscipline: useApi,
     );
+    // P1-A 计划模式系统段：只读规划纪律（exit_plan 前不动任何修改类操作）。
+    if (planMode) {
+      systemPrompt = '$systemPrompt\n\n'
+          '【计划模式】本回合是只读规划回合，纪律如下：\n'
+          '1. 可用工具仅限只读/查询类，修改与执行类工具已被禁用；\n'
+          '2. 先充分调研（读文件/搜索/查状态），再产出完整执行计划；\n'
+          '3. 计划完成后调用 exit_plan 提交用户审批（plan 参数 = 结构化'
+          '计划：目标 / 步骤清单 / 每步验证方式 / 风险）；\n'
+          '4. 被拒绝时按用户意见修订后可再次提交；批准前不做任何修改尝试；\n'
+          '5. 用户批准后系统会自动开启执行回合，你只需一两句话确认开始。';
+    }
     // ---- Dev Agent：开发模式注入 DevContext（工作区/计划/记忆/开发循环）----
     // 注入失败静默跳过（不阻断回合）；关闭 = 零注入零回归。
     if (settings.devModeEnabled) {
@@ -1174,11 +1383,13 @@ class ChatNotifier extends StateNotifier<bool> {
     // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
     _ref.read(agentUiStateProvider.notifier).attach(conversationId, sessionLog);
 
-    // ---- 子代理接缝（Phase 4）：in-process spawn/fork（设置可关）----
+    // ---- 子代理接缝（Phase 4）：in-process spawn/fork/fan-out ----
     // 复用当前 registry/系统提示；adapter 可指定专用（更便宜）API 配置
-    // （P3-2 按步路由最小形态：重活/子任务走低价模型，主回答走主模型）。
+    // （P3-2 按步路由：重活/子任务走低价模型，主回答走主模型）。
     // 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
-    if (settings.agentSubagentEnabled) {
+    // 本地档精简（2026-10-05）：仅 API 档注册——端侧小模型自驱多回合
+    // 收敛性差，子代理定义的 prefill 成本是净损失。
+    if (settings.agentSubagentEnabled && useApi) {
       // 专用子代理模型：设置指定 + 存在 + 与主模型不同才单独建 adapter。
       LlmAdapter subagentEngine = engine;
       final subApiId = settings.agentSubagentApiModelId;
@@ -1313,9 +1524,59 @@ class ChatNotifier extends StateNotifier<bool> {
       }
       final agentsMd = await loadAgentsMd(workspacePath: workspacePath);
       agentsMdText = agentsMd.content;
+      // P2-D2：远端工作区叠加远端 AGENTS.md（SFTP 读取；失败静默降级）。
+      final remoteMd = await readRemoteAgentsMd(
+          DevSessionController.instance.activeWorkspaceId,
+          settings.sshConfigs);
+      if (remoteMd != null && remoteMd.trim().isNotEmpty) {
+        agentsMdText = agentsMdText.trim().isEmpty
+            ? remoteMd
+            : '$agentsMdText\n\n$remoteMd';
+      }
     } on Exception catch (_) {}
     // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
     final hooks = AgentHooks();
+    // ---- P1-B：压缩摘要走便宜模型（按步模型路由的压缩分支）----
+    // 仅 API 档：模型链 = 专用压缩模型 > 子代理模型 > 主模型；摘要失败/
+    // 超时由压缩插件内部回退确定性 digest（压缩永不因摘要模型失败）。
+    Future<String?> Function(String)? llmSummarizer;
+    if (useApi && settings.agentCompactEnabled) {
+      var compApiId = settings.agentCompressionApiModelId;
+      if (compApiId.isEmpty) compApiId = settings.agentSubagentApiModelId;
+      ApiModelConfig? compApi;
+      if (compApiId.isNotEmpty && compApiId != activeApi?.id) {
+        for (final m in settings.apiModels) {
+          if (m.id == compApiId) {
+            compApi = m;
+            break;
+          }
+        }
+      }
+      final compEngine = compApi != null
+          ? OpenAiAdapter(
+              protocol: protocol,
+              capabilities: caps,
+              openAi: _ref.read(openAiServiceProvider),
+              apiModel: compApi,
+              maxThinkingChars: settings.agentThinkingMaxChars,
+            )
+          : engine;
+      final compModelName = compApi?.model ?? agentModelKey;
+      llmSummarizer = (prompt) async {
+        final r = await compEngine.generate(GenerateOptions(
+          provider: ProviderKind.api,
+          messages: [
+            {'role': 'system', 'content': '你是上下文压缩摘要器，只输出摘要本身。'},
+            {'role': 'user', 'content': prompt},
+          ],
+          tools: const [],
+          temperature: 0.2,
+          maxTokens: 1024,
+          modelId: compModelName,
+        ));
+        return r.text;
+      };
+    }
     // ---- 主循环 ----
     final agent = ReactLoopAgent(
       session: sessionLog,
@@ -1336,12 +1597,16 @@ class ChatNotifier extends StateNotifier<bool> {
       hooks: hooks,
       skills: skillProvider,
       agentsMd: agentsMdText,
-      // 环境快照（当前时间）：仅 API 档——local 档系统提示必须逐字节稳定，
-      // 否则 KV 前缀每回合失效整段重 prefill（DSH time-context 的端侧取舍）。
-      environmentNote: useApi ? _formatEnvironmentNote() : null,
-      // 上下文压缩（确定性裁剪）：设置可关；关 = 超限直接走失败终止。
-      compaction:
-          settings.agentCompactEnabled ? DeterministicCompaction() : null,
+      // 环境快照（当前时间）：仅 API 档。P1-C 改为**尾部注入**形态——
+      // provider 每 step 取一次，内容变化才以尾部 user 消息追加；系统提示
+      // 逐字节稳定，API prompt cache 不再因时间快照每回合全段破缓存。
+      environmentNoteProvider:
+          useApi ? () => _formatEnvironmentNote() : null,
+      // 上下文压缩（确定性裁剪 + P1-B LLM 摘要）：设置可关；关 = 超限直接
+      // 走失败终止。摘要模型失败时插件内部回退确定性摘要。
+      compaction: settings.agentCompactEnabled
+          ? DeterministicCompaction(llmSummarizer: llmSummarizer)
+          : null,
       // 超长工具输出溢写：写 ApplicationSupport/agent_spill/，模型侧留摘要。
       spillStore: settings.agentSpillEnabled ? _writeSpillFile : null,
     );
@@ -1366,8 +1631,34 @@ class ChatNotifier extends StateNotifier<bool> {
       );
       // 只取**本轮**产出的答案；失败时为空——绝不回退历史旧回复冒充本回复。
       answer = agent.lastTurnAnswer;
+      _lastTurnEndReason[conversationId] = reason.kind.name;
       debugPrint('[ChatNotifier] new-agent done: reason=${reason.kind.name}, '
           'answer len=${answer.length}');
+      // P0 遥测：回合指标从日志纯派生（循环零侵入），JSONL 落盘。
+      try {
+        final metrics =
+            TurnMetrics.fromLog(sessionLog, agent.phaseState.turn);
+        if (metrics != null) {
+          _metricsStore ??= TurnMetricsStore(
+              baseDir:
+                  '${(await getApplicationSupportDirectory()).path}/metrics');
+          await _metricsStore!.record(metrics);
+        }
+      } catch (e) {
+        debugPrint('[ChatNotifier] metrics record failed: $e');
+      }
+      // P0 轨迹：设置开启时整份会话轨迹落 JSONL（回放/评估/排障用）。
+      if (settings.agentTraceExportEnabled) {
+        try {
+          _traceDir ??=
+              '${(await getApplicationSupportDirectory()).path}/traces';
+          final f = await trace_export.writeTraceFile(sessionLog,
+              baseDir: _traceDir!, conversationId: conversationId);
+          logManager.appendInferenceLog('轨迹已落盘 | ${f.path}');
+        } catch (e) {
+          debugPrint('[ChatNotifier] trace export failed: $e');
+        }
+      }
     } catch (e, s) {
       answer = agent.lastTurnAnswer;
       debugPrint('[ChatNotifier] new-agent error: $e\n$s');
@@ -1604,14 +1895,16 @@ class ChatNotifier extends StateNotifier<bool> {
     return file.path;
   }
 
-  /// 环境快照文案（API 档系统提示【环境】段）：当前日期时间 + 星期。
+  /// 环境快照文案（API 档环境注入）：当前日期时间 + 星期。
+  /// P1-C：分钟按 10 分钟桶化——同一桶内文案不变，主循环据此跳过重复
+  /// 注入（时间快照的变化频率从每回合降到每 ≤10 分钟，尾部小追加）。
   static String _formatEnvironmentNote() {
     const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
     final now = DateTime.now();
     final mm = now.month.toString().padLeft(2, '0');
     final dd = now.day.toString().padLeft(2, '0');
     final hh = now.hour.toString().padLeft(2, '0');
-    final mi = now.minute.toString().padLeft(2, '0');
+    final mi = (now.minute ~/ 10 * 10).toString().padLeft(2, '0');
     return '当前时间：${now.year}-$mm-$dd $hh:$mi（星期${weekdays[now.weekday - 1]}）';
   }
 
@@ -1646,6 +1939,23 @@ class ChatNotifier extends StateNotifier<bool> {
     if (!settings.devModeEnabled) {
       for (final name in kDevToolNames) {
         registry.unregister(name);
+      }
+    } else {
+      // P2-D1 Dev 工具逐组开关：git/ssh/plan/task/verify 五组独立开关。
+      const groups = <String, List<String>>{
+        'git': ['git_status', 'git_diff', 'git_log', 'git_commit', 'git_push'],
+        'ssh': ['ssh_exec', 'ssh_read_file', 'ssh_write_file'],
+        'sync': ['workspace_sync'],
+        'plan': ['plan_create', 'plan_update', 'plan_list'],
+        'task': ['task_create', 'task_list'],
+        'verify': ['run_tests'],
+      };
+      for (final entry in groups.entries) {
+        if (!settings.devToolGroupEnabled(entry.key)) {
+          for (final name in entry.value) {
+            registry.unregister(name);
+          }
+        }
       }
     }
 

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../agent/mcp/mcp_client.dart' show McpServerConfig;
+import '../agent/dev/ssh/secret_store.dart' show migrateSshSecrets;
 
 import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/web_search/web_search_provider.dart';
@@ -17,7 +19,16 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   Future<void> _load() async {
     final loaded = await _service.load();
-    if (mounted) state = loaded;
+    // P2-D3：SSH 密钥迁移安全存储——settings JSON 里的明文密钥一次性搬走
+    // （幂等；安全存储不可用时保留明文，连接不中断）。
+    var finalSettings = loaded;
+    try {
+      final migrated = await migrateSshSecrets(loaded.sshConfigs);
+      if (migrated != null) {
+        finalSettings = loaded.copyWith(sshConfigs: migrated);
+      }
+    } on Exception catch (_) {}
+    if (mounted) state = finalSettings;
   }
 
   Future<void> setEnableGpu(bool value) async {
@@ -415,6 +426,71 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 压缩摘要专用 API 模型（'' = 跟随子代理模型；P1-B 按步模型路由）。
+  Future<void> setAgentCompressionApiModelId(String value) async {
+    state = state.copyWith(agentCompressionApiModelId: value);
+    await _persist();
+  }
+
+  /// goal 无人值守续跑轮数上限（1~20）。
+  Future<void> setAgentGoalMaxRounds(int value) async {
+    state = state.copyWith(agentGoalMaxRounds: value.clamp(1, 20));
+    await _persist();
+  }
+
+  /// 新增/更新 MCP server（按 id 覆盖；P2-B）。
+  Future<void> upsertMcpServer(McpServerConfig server) async {
+    final list = [...state.mcpServers];
+    final idx = list.indexWhere((s) => s.id == server.id);
+    if (idx >= 0) {
+      list[idx] = server;
+    } else {
+      list.add(server);
+    }
+    state = state.copyWith(mcpServers: list);
+    await _persist();
+  }
+
+  /// 删除 MCP server。
+  Future<void> removeMcpServer(String id) async {
+    final list =
+        state.mcpServers.where((s) => s.id != id).toList();
+    if (list.length == state.mcpServers.length) return;
+    state = state.copyWith(mcpServers: list);
+    await _persist();
+  }
+
+  /// 端侧 ASR：增强档 / 热词分类 / 自定义热词（语音设置卡）。
+  Future<void> setAsrEnhancedMode(bool value) async {
+    state = state.copyWith(asrEnhancedMode: value);
+    await _persist();
+  }
+
+  Future<void> setAsrHotwordCategories(List<String> ids) async {
+    state = state.copyWith(asrHotwordCategories: ids);
+    await _persist();
+  }
+
+  Future<void> setAsrHotwordCustom(String words) async {
+    state = state.copyWith(asrHotwordCustom: words);
+    await _persist();
+  }
+
+  /// 置顶/取消置顶会话（P2 抽屉重构）。
+  Future<void> togglePinnedConversation(String id) async {
+    final list = [...state.pinnedConversationIds];
+    if (!list.remove(id)) list.add(id);
+    state = state.copyWith(pinnedConversationIds: list);
+    await _persist();
+  }
+
+  /// Dev 工具逐组开关（P2-D1）。
+  Future<void> setDevToolGroupEnabled(String group, bool value) async {
+    state = state.copyWith(
+        devToolToggles: {...state.devToolToggles, group: value});
+    await _persist();
+  }
+
   /// 上下文超限自动压缩开关??
   Future<void> setAgentCompactEnabled(bool value) async {
     state = state.copyWith(agentCompactEnabled: value);
@@ -424,6 +500,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   /// 超长工具输出溢写开关??
   Future<void> setAgentSpillEnabled(bool value) async {
     state = state.copyWith(agentSpillEnabled: value);
+    await _persist();
+  }
+
+  /// 回合轨迹自动落盘开关（P0 轨迹导出）。
+  Future<void> setAgentTraceExportEnabled(bool value) async {
+    state = state.copyWith(agentTraceExportEnabled: value);
     await _persist();
   }
 

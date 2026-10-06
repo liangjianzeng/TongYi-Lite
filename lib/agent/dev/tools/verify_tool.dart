@@ -11,6 +11,7 @@ import 'ssh_tools.dart' show sshRunInWorkspace;
 /// run_tests：执行测试/构建命令。
 ToolDefinition createRunTestsTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'run_tests',
     description:
         '在当前工作区运行测试/构建命令，验证改动是否正确。'

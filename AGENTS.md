@@ -1294,3 +1294,385 @@ kv_used/kv_ctx 输出，但 gradle CMake 任务 up-to-date 跳过（git merge �
 **排障沉淀**：adb 驱动发送消息用「点输入框 → input text → keyevent 66（Enter）」
 ——发送 FAB 会随键盘弹起移位，硬编码坐标点不中；锁屏（secure keyguard）adb 解不开，
 `wm dismiss-keyguard` 只对无凭据锁有效，需用户手动解锁。
+
+## 2026-10-05 规划系统补全：task_create/task_list 工具 + 开发者 Tab「任务与规划」卡（工作区可选）
+
+> 用户反馈："创建新规划的时候没法选择工作区"。定位发现三层缺口：① `plan_create` 要求
+> task_id 已存在，但**全工程没有任何创建 DevTask 的途径**（无工具无 UI，只有测试手动造）
+> → 真机建规划恒报「任务不存在」；② `DevTask.workspaceId` 从未被赋值，规划与工作区脱钩；
+> ③ `DevSessionController.activeTaskId` 被 chat_provider 读去注入 DevContext 但没人写过（恒 null）。
+
+**落地（全部未提交，待真机验收）**：
+- **`task_create` 工具**（plan_tools.dart）：title 必填 + workspace_id 可选（省略=
+  ToolExecutor 注入的 `_workspaceId` 当前激活工作区；显式指定会校验存在）+ steps 可选
+  （一步建计划，状态直接 implementing），id=`task_<ms>`。`task_list`：列当前工作区任务
+  （id/标题/状态/进度），默认工作区收编无主任务（workspaceId null/'default'）。
+- **plan_create 自动建任务**：task_id 不存在时不再报错——自动创建（title 可选，缺省取
+  第一步标题；workspace_id 可选，缺省=当前工作区），返回内容注明"已自动创建"。
+- **kDevInstruction** 更新：第 2 步改为"没有任务先 task_create（可带 steps），已有用
+  task_list 找回 task_id"。
+- **开发者 Tab 新卡「📋 任务与规划」**（工作区卡与安全策略卡之间）：任务列表按激活
+  工作区过滤（新更新的在前）、状态中文化（规划中/实施中/验证中/已完成/受阻）+ 步骤进度、
+  「当前」徽标 = activeTaskId；点行设为当前任务（DevContext 注入其计划）；尾随删除带确认；
+  **「新建规划」对话框 = 标题 + 工作区 ChoiceChip（默认当前激活工作区）**——用户要的
+  "创建规划选工作区"就在这里；创建后自动设为当前任务。
+- `_DevTabState` 监听器现在同时 `_reloadDevTasks()`（工作区切换会改过滤范围）；
+  `dev.dart` 新导出 `newDevTaskId`/`taskBelongsToWorkspace`（UI 复用，单一真相）。
+- **坑**：测试里 `'$tmp/empty-...'` 插值 Directory 对象会调 toString()（带
+  `Directory: '...'` 前缀）→ 路径非法 errno 123，必须插 `tmp.path`。
+
+**回归**：test/agent+services+providers+websearch 全绿 **495 项 + 4 skip**（plan_tools_test
+新增 9 项：task_create 绑定注入工作区/无 steps planning/工作区校验、task_list 过滤三态+
+进度、plan_create 自动建任务 title 缺省/绑定工作区/坏工作区报错）；analyze 0 error。
+**2026-10-05 14:55 构建（工作区未提交，v0.2.8+16 复用）**：
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` —
+  app-debug.apk 140376769 B（14:53）/ app-release.apk 59949345 B（14:55）。
+  字符串级验收过：debug kernel UTF-8 `新建规划`4/`任务与规划`3/`task_create`11；
+  release libapp.so UTF-16LE `新建规划`1/`所属工作区`2 + ASCII `task_create`1/
+  `taskBelongsToWorkspace`1；签名 CN=TongYiLite 核对过。设备未连未装，重连后
+  `adb install -r -t`。
+
+
+## 2026-10-05 智能体执行质量全面提升（对照主流差距分析 P0/P1/P2 全量施工，工作区未提交）
+
+> 全面评估定案：循环骨架已对齐 DSH，真实差距在四层——质量度量（无 eval/遥测）、
+> 长任务编排（无计划模式/goal 续跑）、上下文工程深水区（LLM 压缩/暖前缀）、
+> 生态扩展（无 MCP）。本次全部落地。
+
+**P0 质量度量（最被低估的差距）**：
+- `lib/agent/metrics/turn_metrics.dart`：回合指标**纯派生自 SessionLog**（循环零侵入）
+  ——steps/工具调用/同签名重复/渐进提醒/llm 重试/失败码/压缩次数/终止原因；
+  `TurnMetricsStore` JSONL 追加落盘 `ApplicationSupport/metrics/turn_metrics.jsonl`
+  + 内存 ring 聚合（aggregate）。chat_provider 每回合结束自动记录。
+- `lib/agent/session/trace_export.dart`：SessionLog → JSONL（header+全事件），
+  `writeTraceFile` 落 `ApplicationSupport/traces/trace_<conv>_<ts>.jsonl`；
+  设置项 `agentTraceExportEnabled`（默认关，智能体 tab 上下文管理卡）开启后每回合落盘。
+- `eval/` 基线评估：`eval/tasks.json` 12 个代表性任务（问答/搜索/todo/文件/计划模式/
+  goal/技能/子代理…）+ `eval/scoring.dart` 纯 Dart 评分库（期望工具/禁用工具/
+  终止原因/步数/重复上限/回答断言六维）+ `dart run eval/score_traces.dart <traces目录>`
+  离线评分（轨迹匹配 = 首条 user 消息含任务 prompt 前 40 字）。
+
+**P1-A 计划模式 + goal 无人值守续跑**：
+- `/plan <任务>` 前缀（仅 API 档）= 只读规划回合：注册表收窄为「并行安全（只读）
+  工具 + exit_plan」——复用 P2-A 的 isConcurrencySafe 声明做白名单；
+  系统提示注入【计划模式】纪律段。
+- `exit_plan` 工具：计划提交用户审批（走 ask_user 提问通道），**批准即落持久目标**
+  （origin=plan）；批准判定精确匹配「批准执行」且排除「不批准」（踩坑：contains('批准')
+  会误吞拒绝）。
+- `lib/agent/goal/goal_store.dart`：GoalState 按会话持久化（`ApplicationSupport/
+  goals/<conv>.json`，已终结读出即清）+ 纯决策函数 `decideGoalAction`；
+  goal_set/goal_complete/goal_cancel 工具组（仅 API 档注册——端侧小模型自驱多回合
+  收敛性差）。
+- 驱动器：sendMessage 顶层**回合注销后** `_driveGoalIfNeeded`——上回合 completed
+  且目标活跃 → bumpRound + 合成续跑 user 消息（可见落库）+ 递归 sendMessage
+  （深度 = 剩余轮数）；失败/中断/等提问不续；轮耗尽 → 落 ℹ️ 提示终结。
+  设置 `agentGoalMaxRounds`（1~20 默认 8，智能体 tab 滑条）。
+
+**P1-B LLM 摘要压缩 + 按步模型路由**：
+- `DeterministicCompaction` 新增 `llmSummarizer` 回调：旧区摘要交给便宜模型
+  （≤300 字，提示词含任务诉求+触达工具+旧工具结果摘录头 400 字，总长 12k 截断，
+  20s 超时）；**失败/超时/空回退确定性 digest，压缩永不因摘要模型失败**。
+- 模型链（仅 API 档）：专用压缩模型 > 子代理模型 > 主模型；设置
+  `agentCompressionApiModelId`（智能体 tab 下拉「压缩摘要专用模型」）。
+
+**P1-C/D prompt-cache 双修**：
+- **环境快照移出系统提示**：`environmentNoteProvider` 每 step 边界取一次，
+  内容变化才以**尾部 user 消息**【环境】注入（追加不破前缀）；分钟按 10 分钟桶化
+  ——时间快照从"每回合全段破缓存"降为"每 ≤10 分钟一次小追加"；local 档恒不注入
+  （系统提示逐字节稳定保 KV）。旧 `environmentNote` 构造参数保留兼容（测试用）。
+- **技能目录冻结**：SkillProvider.frozenDirectoryText——同一会话目录文本恒定
+  （chat_provider 按 convId 缓存 FIFO 32），增删技能延迟到会话切换才进目录；
+  load_skill 注册表仍实时（新增技能可按名拉取）。
+
+**P2-A 并行工具安全（isConcurrencySafe 消费 + abort 占位）**：
+- **语义翻转**：ToolDefinition 默认并行安全（只读可并发），副作用工具显式
+  `isConcurrencySafe: (_) => false`——此前默认不安全导致并行功能名存实亡。
+  20 个副作用工具已声明：export_file/write_file/edit_file/note_take/memory_set/
+  todo_write/python_exec/run_code/shell_exec/git_commit/git_push/task_create/
+  plan_create/plan_update/ssh_exec/ssh_write_file/run_tests/save_skill/subagent/
+  ask_user_question。
+- `_runCalls` 重写：非安全调用**独占一批**；回合中断时未完成调用合成占位结果
+  （「结果未知，先核实」，与 closeOpenTurns 同语义），保证每个 tool/call 有配对
+  tool/result。
+
+**P2-C 子代理 fan-out**：`subagent` 工具新增 `tasks` 数组（2~4 个独立任务书，
+一次全部后台并行启动，逐个完成通知）；task/tasks 二选一（schema required 移除，
+执行体自行校验）。
+
+**P2-B MCP 客户端**：`lib/agent/mcp/mcp_client.dart`——Streamable HTTP JSON-RPC 2.0
+（initialize/session-id/tools/list/tools/call；响应 JSON 与 SSE 帧双形态解析）；
+工具映射 `mcp_<server>_<名>`（非法字符净化防撞名）；仅 API 档注册，失败 server
+静默跳过。设置 `mcpServers` + 智能体 tab「🔌 MCP 远程工具」卡（增删/开关）。
+
+**P2-D Dev Agent 遗留四件**：
+1. **工具逐组开关**：`devToolToggles`（git/ssh/sync/plan/task/verify 六组，缺省=开），
+   _buildAgentRegistry 按 group unregister；开发者 tab 开发模式卡内开关组。
+2. **远端 AGENTS.md**：`readRemoteAgentsMd`（SFTP 读工作区根 ≤64KB，失败静默
+   降级）叠加本地 AGENTS.md 注入。ssh_tools 助手公有化（resolveRemoteRoot/
+   ensureSshConnectionFor/toRemotePath）供复用。
+3. **SSH 密钥安全存储**：`secret_store.dart`——SshSecretStore 抽象（生产
+   flutter_secure_storage/测试 InMemory 可注入）+ `migrateSshSecrets`（settings
+   加载时明文一次性搬走、幂等、存储不可用 fail-open 保留明文）+
+   `resolveSshSecrets`（connect 前回填，配置自带密钥直通）。pubspec 新增
+   flutter_secure_storage。
+4. **workspace_sync 工具**（Phase D MVP）：本地镜像 ↔ 远端双向同步（SFTP
+   listdir/stat/mkdir 全 SFTP 实现，不依赖 find -printf）；mtime 判新旧，冲突
+   默认只报告（overwrite=true 强制覆盖），.git 恒跳过，单次 500 文件/64KB 上限；
+   `SshEnvironmentService.openSftp` 新增。
+
+**本地档精简**：subagent 门控到 API 档（`agentSubagentEnabled && useApi`）——
+端侧小模型自驱多回合收敛性差，子代理 prefill 是净损失。
+
+**回归**：test/agent+providers+services+websearch 全绿 **545 项 + 4 skip**
+（新增 quality_infra 17 / goal 12 / fanout 3 / mcp_client 5 / dev_quality 7 /
+eval_scoring 4）；analyze 0 error。**未出包**——真机验收点：指标 JSONL 落盘、
+/plan→exit_plan→自动续跑、goal 续跑/轮耗尽提示、MCP 卡、Dev 工具开关、
+workspace_sync 真机 SFTP 闭环。
+
+**坑**：① Dart 字符串插值内嵌同类引号（`'${x.join('、')}'`）在部分解析路径报错，
+统一预计算变量；② GoalState.fromJson 结尾写成 `});`（factory => 赋值）编译错；
+③ evaluate 里 `answer.contains('批准')` 会把「不批准（…）」判成批准——审批类
+匹配必须精确且先排除否定词；④ HttpServer 写 SSE 中文必须 ContentType charset
+utf-8（默认 latin1 write 抛 invalid characters）。
+
+- **2026-10-05 20:47 最新构建（工作区未提交，v0.2.8+16 复用：执行质量全面提升包）**：
+  `E:\DTXY\TongYi-Liteuildpp\outputslutter-apk\` —
+  app-debug.apk 140506631 B（20:43）/ app-release.apk 62854409 B（20:47，含
+  flutter_secure_storage 依赖变大）。字符串级验收过：debug kernel UTF-8
+  `workspace_sync`8/`agentGoalMaxRounds`15/`MCP 远程工具`3/`目标续跑`4/
+  `回合轨迹落盘`2/`压缩摘要专用模型`3；release libapp.so UTF-16LE `目标续跑`2/
+  `工作区同步`1/`MCP 远程工具`1 + ASCII `fetchMcpTools`/`mcpServers`/`turn_metrics`
+  命中；dex 含 FlutterSecureStoragePlugin；签名 CN=TongYiLite 核对过。
+  **release 已覆盖安装双机：小米13（100.70.7.18，Success，20:50:31）+ 8 Elite（100.123.25.54，Success，22:10:52）**。
+  打包坑新增：Git Bash 的 cd 会跨调用保留——assemble/gradlew 前必须显式回项目根
+  （上次 `cd android` 后跑 assemble 报 "lib/main.dart 找不到路径"）。
+
+
+## 2026-10-05 消息输入区重构（标准智能体 composer 形态，P1+P2+P3 全量，工作区未提交）
+
+> 用户反馈"消息输入框区域不太行，按标准智能体重构"。对照 ChatGPT/Claude/Gemini
+> 移动端 composer 形态，home_screen 输入区整体重写。
+
+**布局（自上而下）**：
+1. **生成中状态细条** `_buildTurnStatusStrip`：「● 执行中 · N 个工具 · 当前工具名」
+   （agentUiStateProvider 实时数据；普通聊天显示「生成中…」）+ 右侧「停止」文字按钮
+   ——停止永远两处可达（主键位 + 细条）。
+2. **composer 卡片**（圆角 24，surfaceContainerHigh）：附件 chips 行（图片 44px 缩略图 /
+   文件名 chip，右上角 × 单个删除，替代原 108px 大缩略图行）→ TextField（无框，
+   min 1 / max 6 行，hint 随状态）→ 底部动作行 [+] [模式 chips…] [主键]。
+3. **主键位置语义复用**（单键四态，删掉双 FAB 并排）`_buildComposerKey` +
+   `_roundKey`（40px 圆形实心，非 FAB）：
+   空闲空=🎤（长按说话手势保留）/ 空闲有字=➤ 发送 / 生成中空=⏹ 停止 /
+   生成中有字=➤ 插话。
+4. **模式 chips 行**（11px 轻量 pill，`_composerChip`）：🤖智能体开关（点按
+   setAgentEnabled）/ 🎭人格（点按底部弹层快速切换 setActivePersona）/ 📋计划
+   （点按在输入框加/去 `/plan ` 前缀，激活高亮）/ 模型名（点按开模型状态弹层）。
+5. **hint 状态化**：计划模式「计划模式：先规划后执行…」/ 生成中「插话给执行中的
+   智能体…（不打断）」/ 空闲「输入消息…」。
+6. **会话草稿**：`_drafts` Map，切换/新建/删除回落时 `_saveDraft/_restoreDraft`，
+   发送成功即删——切会话回来打字还在。
+7. **插话附件语义**：steer 只发文字；已选附件保留并 snackbar 提示"将随下一条
+   消息发送"。附件选择不再因生成中禁用（可选好等下一条）。
+
+**回归**：test/agent+providers 458+2 全绿；analyze 0 error。
+**2026-10-05 23:56 重打包（v0.2.8+16 复用）**：app-debug.apk 140513668 B（23:55）/
+app-release.apk 62853949 B（23:56）；字符串级验收过（debug kernel
+`插话给执行中的智能体`/`切换人格`/`_buildComposerKey`/`_restoreDraft`/
+`_buildTurnStatusStrip`；release libapp.so 对应 UTF-16LE/ASCII 命中）。
+**release 双机覆盖安装 Success**（小米13 + 8 Elite）。
+
+
+## 2026-10-06 输入区模式键图标化 + Termux 零粘贴自动执行（RUN_COMMAND，遗留清零）
+
+> 用户反馈"模式 chips 图标+文字拥挤堆叠，用图标就行"——四枚模式键全部改纯图标
+>（`_composerChip` 重写：32×30 圆角方，17px 图标，active 高亮 + Tooltip 承载语义）：
+> 🤖智能体开关 / 🎭人格（自定义人格激活时图标高亮紫色）/ 📋计划 / 🧠模型。
+
+**Termux 零粘贴（AGENTS.md 长期遗留项，本次清零）**：
+- MainActivity app 通道新增 `runInTermux`：RUN_COMMAND intent
+  （className=com.termux/.app.RunCommandService，PATH=termux sh，
+  ARGUMENTS=["-c", command]，WORKDIR=$HOME，BACKGROUND=false →
+  API≥26 用 startForegroundService）。
+- AndroidManifest 新增 `<uses-permission android:name=
+  "com.termux.permission.RUN_COMMAND" />`（二进制 manifest 已验证编入）。
+- AppBridge.runInTermux(command, {background})；Termux 向导命令展示区新增
+  **「自动执行」主按钮**（复制粘贴降级为兜底），下方小字说明一次性前置：
+  `~/.termux/termux.properties` 写 `allow-external-apps=true` 后重启 Termux。
+- 开启后向导全流程零粘贴：装 Termux → 点「自动执行」→ 读共享文件自动填用户名
+  → 自动连接。
+
+**回归**：test/agent+providers+services+websearch 全绿 **545 项 + 4 skip**；
+analyze 0 error。
+**2026-10-06 00:10 重打包（v0.2.8+16 复用）**：app-debug.apk 140515377 B /
+app-release.apk 62855125 B；字符串级验收过（debug kernel `runInTermux`4/
+`allow-external-apps`5；release libapp.so `runInTermux` ASCII + `已发送到
+Termux` UTF-16LE 命中；manifest 含 RUN_COMMAND 权限 UTF-16LE 池命中）。
+**release 双机覆盖安装 Success**（小米13 + 8 Elite，00:1x）。
+
+
+## 2026-10-06 计划一等实体化 + 会话抽屉重构（用户纠偏：计划"生成后是什么、在哪看、怎么更新状态"全缺）
+
+> 用户批评成立：计划 chip 此前只是 /plan 前缀插入器——批准后的计划存哪、
+> 长什么样、步骤状态如何更新、用户在哪看，全部缺失（goal 只有一段文本）。
+
+**P1 计划实体化（goal 升级为结构化计划，三处呈现）**：
+- **数据模型**（goal_store.dart）：GoalState 新增 id/title/steps
+  （PlanStep{title,detail,verify,status: pending/running/done/failed}），
+  progressText()（续跑消息增量进度）与 planCardText()（对话内活卡文本）；
+  GoalStore.updateStep（步骤状态推进，1-based）；旧 JSON（无新字段）兼容。
+- **工具链**：exit_plan 新增 title + steps 数组参数（批准即生成结构化计划，
+  无 steps 退化为纯文本目标）；新工具 **plan_step_update**（步骤状态推进，
+  命名避开 Dev 档 plan_update——两者在"开发模式+API 档"注册表共存）；
+  goal_set/complete/cancel 均触发计划卡重写。
+- **驱动器进度消息**：续跑 user 消息从"目标全文重发"改为 progressText()
+  增量进度（✓/◐/○/✗ + ← 本轮先做这步 + 验证方式），要求模型完成当前步
+  立即 plan_step_update。
+- **对话内活计划卡**：固定 id `plan_<convId>` 的 assistant 消息，saveMessage
+  upsert 同 id——每次计划变化重写，对话流里永远一张最新计划卡（模型历史
+  可见、UI 可回看，不刷屏）。
+- **计划面板**（home_screen `_PlanPanelSheet`，计划 chip 点按弹出）：
+  无计划 = 说明 + 「生成计划」（填 /plan 回输入框）；有计划 = 标题+状态徽标+
+  目标+步骤列表（点步骤循环置状态 / 菜单指定 / 当前步高亮 / 完成划线）+
+  已完成 N/M + 放弃计划 / 重新规划。chip 激活 = 输入带 /plan 前缀或存在
+  活跃计划（`_hasActivePlan`，切会话刷新）。
+
+**P2 会话抽屉重构**：
+- 头部：**新建主按钮**（FilledButton）+ 批量选择；下方常驻**搜索框**（标题过滤）。
+- **分组节**：置顶 / 今天 / 昨天 / 7 天内 / 更早（updatedAt 分桶）。
+- **会话行**：最后一条消息**摘要行**（`StorageService.lastMessageSnippets()`
+  一次批量 SQL，打开抽屉失效重取）替代"N 条"；**● 执行中**徽标
+  （runningTurnsProvider，多会话并发可见化）；置顶 📌 / 当前会话活跃计划 📋。
+- **行内 ⋯ 菜单**：置顶（settings.pinnedConversationIds，免 DB 迁移）/
+  重命名（对话框 → updateConversation）/ 删除；长按进多选（原批量能力保留）。
+
+**回归**：test/agent+providers+services+websearch 全绿 **547 项 + 4 skip**
+（goal_test 新增：批准+steps 结构化落库、plan_step_update 推进/越界/坏状态/
+无计划报错/全完成收尾、旧 JSON 兼容）；analyze 0 error。
+**2026-10-06 00:41 重打包（v0.2.8+16 复用）**：app-debug.apk 140547742 B /
+app-release.apk 62893461 B；字符串级验收过（debug kernel `plan_step_update`11/
+`_PlanPanelSheet`9/`置为执行中`/`放弃计划`/`pinnedConversationIds`14；
+release libapp.so 对应 ASCII/UTF-16LE 命中）。**release 双机覆盖安装 Success**
+（小米13 + 8 Elite，00:4x）。
+
+**坑**：Python 脚本经 JSON 传参时 `
+` 会被解码成真实换行——改写含转义序列的
+Dart 字符串必须用 chr(92)+'n' 构造或 Write 工具落片段文件再拼接（Dart 三引号
+''' 还会与 Python 三引号冲突）。
+
+
+## 2026-10-06 语音接入重做：sherpa-onnx 端侧流式 ASR（自 DSH-Phone 搬迁），放弃 LLM 音频方案
+
+> 用户指令：参考 DSH-Phone 实现语音接入，放弃「录音文件喂大模型」的 LLM 语音方案
+> （旧方案要求 Gemma 4 E2B 带 mmproj 音频编码器的模型，覆盖面窄且慢）。
+
+**方案（对照 DSH-Phone `lib/asr/`，整体搬迁解耦）**：
+- 引擎 = sherpa-onnx 流式 Zipformer 中文 int8（`sherpa-onnx-streaming-zipformer-*
+  zh-int8-2025-06-30`，~160MB），FFI 进程内推理，**完全离线零网络依赖**。
+- 交互 = 微信式按住说话：长按 🎤 → 浮层「准备中」→ 引擎就绪实时回显 partial →
+  上滑取消（>70px）→ 松手终稿**直接发送**（附加输入框已有文字）。
+- 模型不入 APK：首次长按触发 `AsrModelGate.ensureModelReady` 下载对话框
+  （hf-mirror 主源 + huggingface 兜底，background_downloader 断点续传），
+  落 `<documents>/models/asr/<modelId>/` 四文件。`main.dart` 启动 warmup 预读页缓存。
+- 热词：MVP 固定全部内置分类（200+ AI 术语，ContextGraph 偏置 + lpinyin 同音
+  后校正）；档位固定 standard。`lib/asr/asr_settings.dart` 替代 DSH 的 SSHConfig
+  配置面（后续可调时换 SharedPreferences 存取即可）。
+
+**改动**：`lib/asr/` 七文件（6 个 DSH 原文件 + asr_settings.dart 解耦层）；
+pubspec 加 sherpa_onnx/record/background_downloader 8.9.5/lpinyin；main.dart 预热；
+home_screen 长按说话接 HoldToTalkSession + **删除旧录音路线全部代码**
+（_startRecording/_stopRecording/_recordingNotifier/波形动画横幅/
+_sendMessage audioPath 参数；旧语音消息渲染保留供历史回看）。
+
+**打包坑（重要）**：background_downloader 是源码模块，其
+`kotlin-serialization` 插件跟随**项目 Kotlin 版本**解析 compiler plugin——
+项目钉 1.8.22 时请求 `kotlin-serialization-compiler-plugin-embeddable:1.8.22`，
+该构件在 Maven Central **不存在**（1.8.22 serialization 插件未发布，404 实锤），
+构建报 Could not find。修复 = Kotlin 1.8.22 → **1.9.22**（settings.gradle.kts，
+对齐 DSH-Phone 同款插件集的已验证版本），Kotlin 全量重编 2m41s 过。
+gradle daemon 偶发"产物 up-to-date 但内容陈旧"——删 APK 产物强制重跑。
+
+**回归**：test/agent+providers+services+websearch 全绿 **547 项 + 4 skip**；
+analyze 0 error。
+**2026-10-06 01:13 重打包（v0.2.8+16 复用）**：app-debug.apk 124220922 B /
+app-release.apk 81389944 B（release +18MB = sherpa/onnxruntime 原生库）；
+字符串级验收过（debug kernel `HoldToTalkSession`7/`AsrModelGate`5/
+`按住说话（端侧语音识别`2；release libapp.so 对应命中；APK 内
+libsherpa-onnx-{c,cxx}-api.so + libonnxruntime.so 在）。**release 双机覆盖
+安装 Success**（小米13 + 8 Elite，01:1x）。
+真机验收点：首次长按说话弹模型下载（160MB 断点续传）→ 识别实时回显 →
+松手直接发出文字消息；飞行模式下识别可用（纯端侧证明）。
+
+
+## 2026-10-06 语音两连修：①Tooltip 抢长按手势（"按了没效果"根因）②语音设置卡补齐
+
+**① "长按没效果"根因（adb 远程复现实锤）**：composer 主键 `_roundKey` 外包的
+**Tooltip 默认带长按手势识别器**（显示气泡用），在手势竞技场里赢过外层
+GestureDetector 的长按——长按 🎤 只弹 tooltip 气泡，语音处理从不触发。
+修复 = `_roundKey` tooltip 传 null 时**条件包裹**（不建 Tooltip 实例）；
+麦克风键提示改由单击 SnackBar 承担（同时作为新包自证：单击弹
+「按住 🎤 说话，松手即发送」= 新代码生效）。诊断过程沉淀：uiautomator dump
+抓 Flutter 语义树定位 composer 键坐标（mic ≈ (976,2263)），单击后 dump 内可见
+SnackBar 文本；logcat 无 [Voice] 日志 = 长按未进处理器。
+
+**② 语音设置卡（用户要求：热词等配置进设置页）**——智能体 tab 新卡
+「🎙️ 语音输入（端侧识别）」：
+- 增强识别模式 toggle（asrEnhancedMode：beam search + blankPenalty，默认标准档）；
+- 热词分类 FilterChips（`asrHotwordCategories`，空 = 全部启用；首次取消某分类
+  时自动把其余分类写入启用集）；
+- 自定义热词（`asrHotwordCustom` 多行编辑，每行一个词，词表外同音后校正）；
+- 模型管理行：就绪状态（FutureBuilder）+ 下载（AsrModelGate 复用向导对话框）/
+  删除（AsrModelManager.deleteModel，释放 160MB）。
+- `asr_settings.dart` 从固定值改为读 InferenceSettings（每次长按读本地 JSON，
+  毫秒级）；新字段全链路（service/provider/卡片）。
+
+**回归**：547 项 + 4 skip 全绿；analyze 0 error。
+**2026-10-06 07:24 重打包（v0.2.8+16 复用）**：app-debug.apk 146484511 B /
+app-release.apk 81393088 B；字符串级验收过（语音卡文案双包命中）；
+**release 双机覆盖安装 Success**。真机验收点：①单击 🎤 出提示（新版自证）；
+②长按弹下载/浮层回显（Tooltip 修复生效）；③设置页语音卡改热词/档位后
+下次长按生效。
+
+
+## 2026-10-06 语音"说话无转写"根因：识别器每会话双载 ~9.5s（final=0 实锤）
+
+> 现象：模型已下载、长按弹监听浮层、但松手 final=0 字。后台 logcat 全程
+> 捕获实锤：`recognizer loaded (greedy) 4.8s` → `recognizer loaded (hotwords)
+> 4.8s` → `session start` → 用户在「准备中」等 9.5s 后松手 → held 仅
+> 186ms~1.7s → `session stop, final=0 chars`。
+
+**根因**：`create()` 按签名 'greedy' 预载（入参不含热词信息），`start()` 又因
+热词签名 'hotwords' 不一致**重载一遍**——每个会话双载 ~9.5s，且热词默认启用
+使该问题每会话必现（DSH 原实现无此症状，因其档位/热词多走 greedy）。
+
+**修复**：`create()` 不再加载（注释写明双载根因），加载统一收口到 `start()`
+按最终形态（enhanced+热词）做一次，签名幂等 → 后续会话瞬时启动；新增诊断
+日志：`first pcm chunk: N bytes @Tms`（确认麦克风真在出数据）与
+`session stop, final=N chars, held=Tms`（区分「没说话」vs「没音频」）。
+
+**2026-10-06 07:34 重打包双机 Success**。真机验收点：第一次长按「准备中」
+~5s（单载）→ 说话 3 秒+ 松手应出文字；第二次长按应瞬时开始（无准备中）。
+若 first pcm chunk 日志出现但 final=0 且 held>3s → 麦克风数据为静音，
+查 MIUI 麦克风权限/占用；连 first chunk 都没有 → record 流没起来。
+
+
+## 2026-10-06 热词分类改版：Agent 智能体开发 + 端侧智能助手（用户指令）
+
+> 用户指令：热词改为 agent 智能体开发、端侧智能助手相关分类。原 DSH 搬来的
+> 10 类通用 AI 术语（机器学习/CV/NLP 等）与本项目场景不匹配，整体重写。
+
+**新分类（5 类，全部中文词）**：
+- `agent` 智能体/Agent 开发（38 词）：子代理/工具调用/计划模式/无人值守/
+  上下文压缩/智能体提问/失败重试/扇出/目标续跑…
+- `edge` 端侧推理/本地模型（40 词）：端侧推理/键值缓存/预填充/量化/层数卸载/
+  实时转写/静音断句/离线识别…
+- `app` 本项目/常用产品名（24 词）：彤 Yi/搜索聚合/并发搜索/覆盖安装/会话列表…
+- `dev` 开发调试/打包验收（28 词）：真机调试/全量回归/字符串验收/热重载…
+- `daily` 日常交互指令（30 词）：帮我/继续/重新规划/放弃计划…
+
+**陈旧 id 兜底**：分类表改版后旧配置存的 id 可能全部失效（交集为空 → 热词
+整体静默失效）——loadHotwords 过滤有效 id，交集为空但配置非空时按"全部启用"
+处理。
+
+**回归**：460+2 全绿（agent+providers）；analyze 0 error。
+**2026-10-06 07:46 重打包双机 Success**（debug 146480488 B / release
+81394644 B）。

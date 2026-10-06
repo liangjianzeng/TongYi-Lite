@@ -21,6 +21,7 @@ ToolDefinition createAskUserTool({
   required Future<String?> Function(String question, List<String> options) ask,
 }) {
   return ToolDefinition(
+    isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
     name: 'ask_user_question',
     description:
         '向用户提问以获取缺失信息或确认关键选择（回合会暂停等待用户回答）。'
