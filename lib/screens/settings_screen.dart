@@ -19,6 +19,7 @@ import 'package:uuid/uuid.dart';
 
 import '../agent/dev/dev.dart'
     show
+        DevNativeEnv,
         DevSessionController,
         DevStore,
         DevTask,
@@ -29,6 +30,7 @@ import '../agent/dev/dev.dart'
         SshEnvironmentService,
         SshKeyGen,
         SshStatus,
+        TermuxIntentService,
         WorkspaceBackend,
         newDevTaskId,
         sanitizeWorkspaceDirName,
@@ -4006,6 +4008,13 @@ class _DevTabState extends ConsumerState<_DevTab> {
   /// SSH 连接/工作区激活是异步后台变化，监听 ChangeNotifier 实时刷新。
   VoidCallback? _devStateListener;
 
+  /// 免 SSH 通道测试 / Termux APK 下载 进行中标记。
+  bool _testingIntent = false;
+  bool _downloadingTermux = false;
+
+  /// 免 SSH 通道测试结果（持久显示，SnackBar 真机上抓不到）。
+  String? _intentTestResult;
+
   /// 当前激活工作区下的任务（懒加载；新建/删除后刷新）。
   List<DevTask> _devTasks = const [];
   bool _devTasksLoaded = false;
@@ -4190,6 +4199,114 @@ class _DevTabState extends ConsumerState<_DevTab> {
               '连接失败会给诊断和修复动作。',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
             ),
+            // 免 SSH 通道（RUN_COMMAND intent，L2）：工具执行优先走这里，
+            // 不可用才回落 SSH。状态探测 + 一键拉起 Termux + 下载安装。
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: _testingIntent
+                      ? null
+                      : () async {
+                          setState(() {
+                            _testingIntent = true;
+                            _intentTestResult = null;
+                          });
+                          String msg;
+                          try {
+                            final installed =
+                                await AppBridge.isAppInstalled(AppBridge.termuxPackage);
+                            if (!installed) {
+                              msg = 'Termux 未安装：可用下方按钮自动下载';
+                            } else {
+                              final res = await TermuxIntentService.instance
+                                  .run('echo ok', timeout: const Duration(seconds: 10));
+                              msg = res.output.trim() == 'ok'
+                                  ? '免 SSH 通道可用（RUN_COMMAND，echo ok 往返成功）'
+                                  : '通道返回异常（exit=${res.exit}，输出：${res.output.trim()}）：'
+                                      '检查 allow-external-apps 是否已开启';
+                            }
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(msg)));
+                            }
+                          } catch (e) {
+                            msg = '免 SSH 通道不可用：'
+                                '${e.toString().replaceAll('StateError: ', '')}';
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(msg)));
+                            }
+                          }
+                          // 结果持久显示（SnackBar 4s 即逝，真机验收读不到）。
+                          if (mounted) {
+                            setState(() {
+                              _intentTestResult = msg;
+                              _testingIntent = false;
+                            });
+                          }
+                        },
+                  icon: Icon(_testingIntent ? Icons.hourglass_top : Icons.bolt,
+                      size: 16),
+                  label: Text(_testingIntent ? '测试中…' : '免 SSH 通道测试'),
+                ),
+                TextButton.icon(
+                  onPressed: _downloadingTermux ? null : () async {
+                    setState(() => _downloadingTermux = true);
+                    try {
+                      const apkUrl =
+                          'https://github.com/termux/termux-app/releases/download/v0.118.1/termux-app_0.118.1+github-debug_arm64-v8a.apk';
+                      final err = await DevNativeEnv.downloadTermuxApk(apkUrl);
+                      if (!mounted) return;
+                      if (err != null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('下载失败：$err')));
+                        return;
+                      }
+                      // 下载入队后轮询目标文件出现，再拉安装器。
+                      const apkPath =
+                          '/storage/emulated/0/Download/TongYi-Lite/termux.apk';
+                      for (var i = 0; i < 240; i++) {
+                        await Future<void>.delayed(const Duration(seconds: 5));
+                        final f = File(apkPath);
+                        if (await f.exists() && await f.length() > 1024 * 1024) {
+                          final installErr = await DevNativeEnv.installApk(apkPath);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text(installErr == null
+                                    ? '下载完成，已拉起安装器（需允许安装未知应用）'
+                                    : '安装器拉起失败：$installErr')));
+                          }
+                          return;
+                        }
+                      }
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                            content: Text('下载超时：请到系统通知查看进度，'
+                                '完成后在 Download/TongYi-Lite/ 找到 APK')));
+                      }
+                    } finally {
+                      if (mounted) setState(() => _downloadingTermux = false);
+                    }
+                  },
+                  icon: Icon(_downloadingTermux ? Icons.hourglass_top : Icons.download,
+                      size: 16),
+                  label: Text(_downloadingTermux ? '下载中…' : '下载 Termux'),
+                ),
+              ],
+            ),
+            if (_intentTestResult != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '上次测试：$_intentTestResult',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: _intentTestResult!.contains('可用')
+                          ? Colors.green.shade700
+                          : Colors.red.shade700),
+                ),
+              ),
             // 配置列表（已保存的连接目标）。
             if (configs.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -4695,14 +4812,18 @@ class _DevTabState extends ConsumerState<_DevTab> {
 
   /// Termux 安装公钥 + 写用户名（一条复制即用；无存储权限不影响公钥安装）。
   String _buildTermuxInstallCommand(String publicKey) {
-    // v2（2026-10-01）：装 procps 提供 pkill，先杀再启 sshd——
-    // 每次执行命令顺带清掉 OpenSSH PerSourcePenalties 的源拉黑。
+    // v3（2026-10-04）：追加 allow-external-apps（RUN_COMMAND 免 SSH 通道的
+    // 唯一前置）+ termux-setup-storage（交换目录 /sdcard/TongYiLite 需要
+    // Termux 侧存储权限）；SSH 部分保留作回退通道。
     return 'pkg install -y openssh procps 2>/dev/null; '
         'pkill sshd 2>/dev/null; sleep 1; sshd 2>/dev/null; '
         'mkdir -p ~/.ssh && echo "$publicKey" > ~/.ssh/authorized_keys && '
         'chmod 600 ~/.ssh/authorized_keys; '
+        'mkdir -p ~/.termux && grep -q allow-external-apps ~/.termux/termux.properties 2>/dev/null '
+        '|| echo "allow-external-apps=true" >> ~/.termux/termux.properties; '
+        'termux-reload-settings 2>/dev/null; '
         'echo "USER=\$(whoami)" > /sdcard/tongyilite_ssh_user.txt 2>/dev/null || true; '
-        'echo ALL_DONE';
+        'echo ALL_DONE（免 SSH 通道已配置；如需读写共享存储请在 Termux 里跑一次 termux-setup-storage）';
   }
 
   /// 远程电脑添加公钥命令（追加，不覆盖已有公钥）。
@@ -4959,6 +5080,10 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         child: Text('本地沙盒（app 内目录）'),
                       ),
                       DropdownMenuItem(
+                        value: WorkspaceBackend.embedded,
+                        child: Text('内嵌工具沙箱（本地执行，免配置）'),
+                      ),
+                      DropdownMenuItem(
                         value: WorkspaceBackend.termux,
                         child: Text('Termux（手机 Linux）'),
                       ),
@@ -4970,7 +5095,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                     onChanged: (v) => setState(
                         () => backend = v ?? WorkspaceBackend.localApp),
                   ),
-                  if (backend != WorkspaceBackend.localApp) ...[
+                  if (backend == WorkspaceBackend.termux ||
+                      backend == WorkspaceBackend.remotePc) ...[
                     const SizedBox(height: 12),
                     // 绑定连接配置。
                     DropdownButtonFormField<String?>(
@@ -5057,9 +5183,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
       id: id,
       name: name,
       backend: backend,
-      remotePath:
-          backend == WorkspaceBackend.localApp ? null : pathCtrl.text.trim(),
-      sshConfigId: backend == WorkspaceBackend.localApp ? null : sshConfigId,
+      remotePath: backend.isRemoteBackend ? pathCtrl.text.trim() : null,
+      sshConfigId: backend.isRemoteBackend ? sshConfigId : null,
     ));
     if (mounted) setState(() {});
   }

@@ -11,11 +11,19 @@ enum WorkspaceBackend {
   /// app 沙盒内（documents/workspace 及 projects/<id> 本地镜像）。
   localApp,
 
+  /// 内嵌工具沙箱（app 私有 dev 目录 + 系统 toybox/mksh + jniLibs 工具 +
+  /// JGit 进程内 git）。本地执行、无 SSH；文件即本地镜像目录。
+  embedded,
+
   /// 手机上的 Termux Linux 用户态（127.0.0.1:8022）。
   termux,
 
   /// 远程电脑（OpenSSH/WSL），同一连接层、host 指 PC。
-  remotePc,
+  remotePc;
+
+  /// 是否远端后端（需要 SSH 配置与远端路径）。
+  bool get isRemoteBackend =>
+      this == WorkspaceBackend.termux || this == WorkspaceBackend.remotePc;
 }
 
 /// 工作区内部参数键：ToolExecutor 执行前注入当前激活工作区 id

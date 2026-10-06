@@ -30,11 +30,13 @@ export 'web_search_tool.dart' show createWebSearchTool;
 // Dev Agent 工具组（开发模式开启后注册）。
 export '../dev/tools/git_tools.dart'
     show
+        createGitCloneTool,
         createGitCommitTool,
         createGitDiffTool,
         createGitLogTool,
         createGitPushTool,
         createGitStatusTool;
+export '../dev/tools/embedded_tools.dart' show createDevShellTool;
 export '../dev/tools/plan_tools.dart'
     show
         createPlanCreateTool,
@@ -51,6 +53,7 @@ export '../dev/tools/sync_tools.dart' show createWorkspaceSyncTool;
 export '../dev/tools/verify_tool.dart' show createRunTestsTool;
 
 import '../dev/ssh/ssh_credentials.dart' show SshConfig;
+import '../dev/tools/embedded_tools.dart';
 import '../dev/tools/git_tools.dart';
 import '../dev/tools/plan_tools.dart';
 import '../dev/tools/ssh_tools.dart';
@@ -99,6 +102,7 @@ const List<String> kOptionalToolNames = [
 
 /// Dev 开发工具名（开发模式开启后可见；默认关闭）。
 const List<String> kDevToolNames = [
+  'dev_shell',
   'git_status',
   'git_diff',
   'git_log',
@@ -106,6 +110,7 @@ const List<String> kDevToolNames = [
   'git_push',
   'task_create',
   'task_list',
+  'git_clone',
   'plan_create',
   'plan_update',
   'plan_list',
@@ -148,6 +153,7 @@ List<ToolDefinition> createBuiltinTools({
       createPythonExecTool(),
       // Dev Agent 工具组（开发模式开启后由接入层过滤启用）。
       if (includeDevTools) ...[
+        createDevShellTool(),
         createGitStatusTool(sshConfigs: devSshConfigs),
         createGitDiffTool(sshConfigs: devSshConfigs),
         createGitLogTool(sshConfigs: devSshConfigs),
@@ -155,6 +161,7 @@ List<ToolDefinition> createBuiltinTools({
         createGitPushTool(sshConfigs: devSshConfigs),
         createTaskCreateTool(),
         createTaskListTool(),
+        createGitCloneTool(sshConfigs: devSshConfigs),
         createPlanCreateTool(),
         createPlanUpdateTool(),
         createPlanListTool(),

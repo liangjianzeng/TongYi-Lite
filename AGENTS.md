@@ -1676,3 +1676,115 @@ app-release.apk 81393088 B；字符串级验收过（语音卡文案双包命中
 **回归**：460+2 全绿（agent+providers）；analyze 0 error。
 **2026-10-06 07:46 重打包双机 Success**（debug 146480488 B / release
 81394644 B）。
+
+## 2026-10-04 Dev Agent 执行环境三级升级（内嵌沙箱 L0/L1 + Termux 免 SSH L2，工作区未提交）
+
+> 用户需求："一步到位，施工"——按 `docs/termux_integration_plan_2026-10-04.md` 全量落地。
+> 核心结论：targetSdk 34 W^X 限制下**不能整包内嵌 Termux bootstrap**（app 数据目录不可 exec），
+> 走三级：L0 系统工具链用满 → L1 内嵌沙箱（jniLibs + JGit 进程内 git，零 exec）→
+> L2 Termux 伴侣应用（RUN_COMMAND intent 免 SSH，PerSourcePenalties 死穴整体退役）。
+
+**L1 内嵌沙箱（embedded 后端）**：
+- `WorkspaceBackend` 新增 `embedded`（本地执行、无 SSH、文件即本地镜像目录）+
+  `isRemoteBackend` getter（枚举成员**必须在常量列表后加分号**，否则 analyzer 把 getter 当 static）。
+- 新工具 **dev_shell**（`lib/agent/dev/tools/embedded_tools.dart`）：cwd 锚定工作区根
+  （`devShellRoot`：default → documents/workspace，其他 → projects/<id>），
+  **PATH 前插 nativeLibraryDir**（jniLibs 的 lib*.so 是 targetSdk 34 下唯一可 exec 白名单位置）；
+  dangerFullAccess 批准后跳过黑名单。`executeDevShell` 为 dev_shell/run_tests 共享执行核心。
+- **git 全走 JGit**（`lib/agent/dev/tools/embedded_git.dart` ↔ Kotlin `DevGitPlugin.kt`，
+  通道 `com.dgxspark.tongyilite/devgit`）：status/diff/log/commit/push/clone 进程内完成，
+  ssh:// 远端明确报错引导切 Termux/远程。git_tools 按后端分派：本地 → LocalGit，
+  远端（termux/remotePc）→ SSH 原路径。新增 git_clone 工具（仅本地，https+token）。
+- gradle 依赖 `org.eclipse.jgit:6.10.0.202406032230-r`（**版本号别再写错**：202406032230，
+  aliyun 镜像无 JGit，走 repo.maven.apache.org）。
+
+**L2 Termux 免 SSH 通道（RUN_COMMAND intent）**：
+- 通道 `com.dgxspark.tongyilite/devenv`（`native_env.dart` + MainActivity）：
+  nativeInfo / runTermux / canRequestInstall / installApk / downloadTermuxApk（DownloadManager）。
+- `termux_intent.dart`：命令包装 `{ cmd ; } > 交换文件 2>&1; echo EXIT; echo DONE`，
+  交换文件 = Termux 自己的外部目录 `/sdcard/Android/data/com.termux/files/tongyilite_out/<id>.out`
+  （Termux 无需存储权限可写自家目录；本 app MANAGE_EXTERNAL_STORAGE 可直读），Dart 300ms 轮询
+  `__TYL_DONE__` 标记；读文件走 base64 免换行截断，写文件 base64 塞命令行（单次 ≤64KB）。
+- **ssh_tools 全工具 intent 优先**：termux 后端先走 `TermuxIntentService`，只有
+  "Termux 通道不可用"（未装/未开 allow-external-apps）才回落 SSH；**命令超时不回落**
+  （命令可能已执行，重复执行有副作用）。git_tools/run_tests 同样分派。
+- manifest 新增 `com.termux.permission.RUN_COMMAND` + `REQUEST_INSTALL_PACKAGES`；
+  Termux 侧仍需一次性配置 `allow-external-apps=true`（向导命令已带）。
+- 设置页 DevTab：免 SSH 通道测试按钮 + 「下载 Termux」（DownloadManager →
+  Download/TongYi-Lite/termux.apk → 轮询到位后 FileProvider 拉安装器）。
+
+**L0 / 全通道**：
+- kDevToolNames 新增 dev_shell/git_clone（开发模式即注册）；run_tests 本地分派到内嵌沙箱；
+  safety 黑名单覆盖 dev_shell 与本地 run_tests（shell_exec 主线未动）。
+- `DevStore.testDefault`（测试注入收口）：工具层无注入点的 `DevStore()` 一律改
+  `DevStore.resolve()`，workspaceLocalMirror/defaultWorkspaceDir 在 override 下不触 path_provider。
+
+**回归**：`test/agent/dev_embedded_test.dart` 新增 18 项（枚举序列化/wrapper/解析/intent 注入桩/
+dev_shell 黑名单+PATH+cwd/git 分派/远端不触 JGit/DevContext）；全量 test/agent+services+
+providers **447+2 skip**、test/websearch **58+2 skip** 全绿；analyze 0 error。
+
+**APK（v0.2.8+16 复用版本号，2026-10-04 21:1x）**：app-debug.apk 118071859 B /
+app-release.apk 62585127 B（JGit 使包体 +~3MB release）。验收：debug kernel UTF-8
+dev_shell 15/git_clone 8/内嵌工具沙箱 5；release libapp.so UTF-16LE 内嵌工具沙箱 2 +
+ASCII dev_shell/git_clone/TermuxIntentService；dex 含 DevGitPlugin（release 5 处）+
+org.eclipse.jgit 类引用 2196；manifest（AXML UTF-16LE 串池）RUN_COMMAND/REQUEST_INSTALL
+各 1；apksigner 签名 CN=TongYiLite SHA-256 与备忘指纹一致。**设备未连未装**，重连后
+`adb install -r -t`。
+
+**遗留（真机验收点）**：① Termux RUN_COMMAND 全链路（echo → 文件交换 → 工具结果）；
+② JGit clone/commit/push GitHub https+token；③ embedded 工作区 dev_shell 智能体整回合；
+④ 下载 Termux → 安装 → 配置 → intent 通道可用 的全自动流；⑤ 预编译 aarch64 工具
+（busybox/rg/jq）无可靠静态源，**待 NDK 自编**后放 jniLibs/lib*.so 即点亮（PATH 探测已在）。
+
+**busybox 32 位问题已解决（2026-10-04 21:5x，同日追加）**：busybox.net 预编译只有
+armv8l（32 位），但 **DGX 服务器（ssh 别名 sync-DgxSpark，主机 gx10-85f3）本身是
+ARM 机器**（aarch64-linux-gnu-gcc 已装好）——`~/busybox-build/bb` 里
+`make defconfig` + `CONFIG_STATIC=y` + 关 `CONFIG_TC`（新内核头删了 CBQ，tc applet
+必炸）+ `FEATURE_UTMP/WTMP` 关，`make -j16 CROSS_COMPILE=aarch64-linux-gnu-` 产出
+**aarch64 全静态 2.15MB**，且服务器原生试跑 `echo hi` 通过。已改名
+`libbusybox.so` 放 `android/app/src/main/jniLibs/arm64-v8a/`（非 PIE 静态 e_type=2，
+Android 无动态链接器依赖），双 APK 重打验收：debug 118071932 B / release
+63782732 B，APK 内 libbusybox.so ELF64-ARM64 + BusyBox v1.36.1 串命中，签名
+CN=TongYiLite 不变。**dev_shell 的 PATH 已前插 nativeLibraryDir，装机即点亮
+busybox 全量 applet**（ripgrep/jq 如需，同样路子服务器上编译）。
+
+## 2026-10-04 免 SSH 通道真机全链路打通（四坑定案，两机验收过）
+
+> 晚间真机验收把 RUN_COMMAND 免 SSH 通道跑通（小米13 USB + 8 Elite Tailscale），
+> 途中抓到三个设计 bug + 一个权限坑，全部修复并重打包装机。**用户确认"提示成功"**。
+
+**坑 1：wrapper 没建输出目录**。buildTermuxWrapper 最初 `> 文件` 但从不 mkdir
+→ 首跑必失败且无任何报错痕迹。修复：wrapper 开头 `mkdir -p '<outDir>';`（自愈）。
+
+**坑 2（架构级）：交换目录不能放 `/sdcard/Android/data/com.termux`**。那是 Termux
+的私有外部目录——Termux 能写，但本 app 读不到：**MANAGE_EXTERNAL_STORAGE 不覆盖
+其他应用的 Android/data**（Android 11+ 硬规则，All-Files-Access 也不行）。症状 =
+intent 发了、Termux 执行了、文件也在（shell 可见），app 却永远超时。修复：交换目录
+改 `/sdcard/TongYiLite/termux_out`（app 有 All-Files-Access 可读；Termux 需存储权限，
+向导 v3 已引导 termux-setup-storage）。
+
+**坑 3：RUN_COMMAND 在 Termux 0.118.3+ 是 dangerous 权限**（不再是 normal）——
+manifest 声明不够，必须运行时 `pm grant com.dgxspark.tongyilite
+com.termux.permission.RUN_COMMAND`。真机日志铁证：`Permission Denial: ... requires
+com.termux.permission.RUN_COMMAND`。App 内暂无自动请求 UI，装机后需 adb 授一次或
+后续加运行时请求。
+
+**坑 4：全新安装的 app 缺 All-Files-Access**。小米13 全新装后 MANAGE_EXTERNAL_STORAGE
+appops=default → 读 /sdcard/TongYiLite 被拒（MediaProvider SecurityException）。
+`appops set <pkg> MANAGE_EXTERNAL_STORAGE allow` 授予后立通。
+
+**免 SSH 通道真机验收（两机全过）**：App 内点「免 SSH 通道测试」→ RUN_COMMAND
+intent → Termux sh 执行 `echo ok` → 交换文件出现 `ok / __TYL_EXIT__=0 / __TYL_DONE__`
+→ App 读回显示「免 SSH 通道可用」。为让结果可持久查看，测试结果改为页面内
+「上次测试：…」常驻显示（SnackBar 4s 即逝，真机 uiautomator 抓不到）。
+
+**Termux 侧配置（已自动化验证的路径）**：向导一键命令升级 v3——追加写
+`allow-external-apps=true` + `termux-reload-settings`；本机实测用 adb 往 Termux
+终端 `input text`（空格用 %s）注入命令链即可全自动 provision，无需手打。
+
+**注意**：uiautomator dump 会返回陈旧缓存（同字节数反复出现），据此判断"点击没生效"
+不可靠——以 logcat（TongYiLite [handleRunTermux]）和文件系统证据为准。
+
+**装机包（23:2x final）**：app-release.apk 6378xxxx B（含 mkdir 修复 + 交换目录
+/sdcard/TongYiLite + 上次测试常驻行 + 向导 v3），双机 `install -r -t` Success；
+小米13 额外执行了 pm grant + appops allow 两步授权。

@@ -221,7 +221,7 @@ ToolDefinition createPlanCreateTool({DevStore? store}) {
       if (taskId.isEmpty) return ToolResult.error('缺少 task_id 参数');
       final steps = _parseSteps(rawSteps);
       if (steps.isEmpty) return ToolResult.error('steps 为空或格式非法');
-      final s = store ?? DevStore();
+      final s = DevStore.resolve(store);
       var task = await _findTask(s, taskId);
       var createdNote = '';
       if (task == null) {
@@ -303,7 +303,7 @@ ToolDefinition createPlanUpdateTool({DevStore? store}) {
       final taskId = (args['task_id'] as String?)?.trim() ?? '';
       final action = (args['action'] as String?)?.trim() ?? '';
       if (taskId.isEmpty) return ToolResult.error('缺少 task_id 参数');
-      final s = store ?? DevStore();
+      final s = DevStore.resolve(store);
       final task = await _findTask(s, taskId);
       if (task == null) return ToolResult.error('任务不存在：$taskId');
       final plan = task.plan;
@@ -385,7 +385,7 @@ ToolDefinition createPlanListTool({DevStore? store}) {
     execute: (args) async {
       final taskId = (args['task_id'] as String?)?.trim() ?? '';
       if (taskId.isEmpty) return ToolResult.error('缺少 task_id 参数');
-      final s = store ?? DevStore();
+      final s = DevStore.resolve(store);
       final task = await _findTask(s, taskId);
       if (task == null) return ToolResult.error('任务不存在：$taskId');
       final plan = task.plan;
