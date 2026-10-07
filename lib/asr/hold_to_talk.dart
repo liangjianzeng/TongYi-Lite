@@ -116,6 +116,11 @@ class HoldToTalkSession {
   }
 }
 
+/// 测试钩子：直接构建回显浮层（绕过引擎加载，供 widget 测试验证键盘场景）。
+@visibleForTesting
+Widget buildHoldTalkOverlayForTest(HoldToTalkSession session) =>
+    _HoldOverlay(session: session);
+
 class _HoldOverlay extends StatelessWidget {
   const _HoldOverlay({required this.session});
 
@@ -123,6 +128,10 @@ class _HoldOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 键盘打开时回显浮层必须抬到键盘上方：root overlay 不随 Scaffold 的
+    // resizeToAvoidBottomInset 缩放，固定 margin 的底部卡片会被键盘整个
+    // 盖住。依赖 MediaQuery.viewInsets（键盘弹起/收起自动重建本浮层）。
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     return Positioned.fill(
       // 浮层只做展示：手指仍按在语音按钮上，事件路由不能被打断
       child: IgnorePointer(
@@ -132,7 +141,8 @@ class _HoldOverlay extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
               Container(
-                margin: const EdgeInsets.all(32),
+                key: const ValueKey('hold-overlay-card'),
+                margin: EdgeInsets.fromLTRB(32, 32, 32, 32 + keyboard),
                 padding:
                     const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                 constraints: const BoxConstraints(maxWidth: 360),
@@ -143,36 +153,69 @@ class _HoldOverlay extends StatelessWidget {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // 就绪前不显示声浪（声浪 = 真正在监听的信号），改为
+                    // 加载指示 +「引擎加载中，请稍后…」；就绪后切回声浪 +
+                    // 松开手势提示。上滑取消提示优先级最高。
                     ValueListenableBuilder<bool>(
-                      valueListenable: session.cancelMode,
-                      builder: (_, cancelling, __) => Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          _ListeningIndicator(red: cancelling),
-                          const SizedBox(width: 10),
-                          Text(
-                            cancelling ? '松开取消' : '松开发送',
-                            style: TextStyle(
-                              color: cancelling
-                                  ? Colors.redAccent
-                                  : Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
+                      valueListenable: session.ready,
+                      builder: (_, isReady, __) =>
+                          ValueListenableBuilder<bool>(
+                        valueListenable: session.cancelMode,
+                        builder: (_, cancelling, ___) {
+                          final loading = !isReady && !cancelling;
+                          final color = cancelling
+                              ? Colors.redAccent
+                              : Colors.white;
+                          return Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (loading) ...[
+                                const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2, color: Colors.white70),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text('引擎加载中，请稍后…',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                          color: Colors.white70,
+                                          fontWeight: FontWeight.w600)),
+                                ),
+                              ] else ...[
+                                _ListeningIndicator(red: cancelling),
+                                const SizedBox(width: 10),
+                                Text(cancelling ? '松开取消' : '松开发送',
+                                    style: TextStyle(
+                                        color: color,
+                                        fontWeight: FontWeight.w600)),
+                              ],
+                            ],
+                          );
+                        },
                       ),
                     ),
                     const SizedBox(height: 10),
-                    ValueListenableBuilder<String>(
-                      valueListenable: session.partial,
-                      builder: (_, text, __) => ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 48),
-                        child: Align(
-                          alignment: Alignment.topLeft,
-                          child: Text(
-                            text.isEmpty ? '请说话…' : text,
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 15, height: 1.4),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: session.ready,
+                      builder: (_, isReady, __) =>
+                          ValueListenableBuilder<String>(
+                        valueListenable: session.partial,
+                        builder: (_, text, ___) => ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: 48),
+                          child: Align(
+                            alignment: Alignment.topLeft,
+                            child: Text(
+                              !isReady
+                                  ? '首次使用需加载识别模型，稍等片刻…'
+                                  : (text.isEmpty ? '请说话…' : text),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  height: 1.4),
+                            ),
                           ),
                         ),
                       ),

@@ -39,6 +39,57 @@ class TtsVoiceInfo {
   String get displayLabel => '$localName（${locale}）';
 }
 
+/// 音色保留地区（大陆/港/台/美/英），[order] 决定下拉分区顺序。
+class TtsVoiceRegion {
+  final int order;
+  final String label;
+  const TtsVoiceRegion(this.order, this.label);
+
+  /// locale → 保留地区；null = 不保留（其余语言/地区全部过滤）。
+  /// zh-CN 含方言变体（liaoning/shaanxi），同属大陆。
+  static TtsVoiceRegion? of(String locale) {
+    if (locale.startsWith('zh-CN')) return const TtsVoiceRegion(0, '中国大陆');
+    if (locale.startsWith('zh-HK')) return const TtsVoiceRegion(1, '中国香港');
+    if (locale.startsWith('zh-TW')) return const TtsVoiceRegion(2, '中国台湾');
+    if (locale.startsWith('en-US')) return const TtsVoiceRegion(3, '英语（美国）');
+    if (locale.startsWith('en-GB')) return const TtsVoiceRegion(4, '英语（英国）');
+    return null;
+  }
+}
+
+/// 下拉分组条目：地区 · 性别 标题 + 该组音色（组内按 shortName 排序）。
+class TtsVoiceGroup {
+  final String title;
+  final List<TtsVoiceInfo> voices;
+  const TtsVoiceGroup(this.title, this.voices);
+}
+
+/// 只保留 大陆/港/台/美/英 音色，按地区顺序分区、区内男先女后。
+List<TtsVoiceGroup> groupTtsVoices(List<TtsVoiceInfo> all) {
+  int genderOrder(String g) => g == 'Male' ? 0 : 1;
+  final kept = [...all]..removeWhere((v) => TtsVoiceRegion.of(v.locale) == null);
+  kept.sort((a, b) {
+    final ra = TtsVoiceRegion.of(a.locale)!;
+    final rb = TtsVoiceRegion.of(b.locale)!;
+    if (ra.order != rb.order) return ra.order - rb.order;
+    final ga = genderOrder(a.gender);
+    final gb = genderOrder(b.gender);
+    if (ga != gb) return ga - gb;
+    return a.shortName.compareTo(b.shortName);
+  });
+  final groups = <TtsVoiceGroup>[];
+  for (final v in kept) {
+    final region = TtsVoiceRegion.of(v.locale)!;
+    final title = '${region.label} · ${v.gender == 'Male' ? '男' : '女'}';
+    if (groups.isEmpty || groups.last.title != title) {
+      groups.add(TtsVoiceGroup(title, [v]));
+    } else {
+      groups.last.voices.add(v);
+    }
+  }
+  return groups;
+}
+
 /// 网络不可达时音色下拉的兜底清单（常用 zh 系；拉取成功后会被覆盖）。
 const List<TtsVoiceInfo> kFallbackVoices = [
   TtsVoiceInfo(
@@ -118,11 +169,16 @@ class EdgeTtsService {
                 gender: v.gender,
               ))
           .toList();
-      // zh 系置顶、按 locale 排序，其余排后（下拉列表不淹没中文用户）。
+      // 只留 大陆/港/台/美/英，按地区顺序 + 性别分区（其余语言全部过滤）。
+      all.removeWhere((v) => TtsVoiceRegion.of(v.locale) == null);
       all.sort((a, b) {
-        final az = a.locale.startsWith('zh'), bz = b.locale.startsWith('zh');
-        if (az != bz) return az ? -1 : 1;
-        return a.locale.compareTo(b.locale);
+        final ra = TtsVoiceRegion.of(a.locale)!;
+        final rb = TtsVoiceRegion.of(b.locale)!;
+        if (ra.order != rb.order) return ra.order - rb.order;
+        final ga = a.gender == 'Male' ? 0 : 1;
+        final gb = b.gender == 'Male' ? 0 : 1;
+        if (ga != gb) return ga - gb;
+        return a.shortName.compareTo(b.shortName);
       });
       _voicesCache = all;
       _voicesAt = now;

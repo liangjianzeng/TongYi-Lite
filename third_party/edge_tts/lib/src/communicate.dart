@@ -98,6 +98,10 @@ class Communicate {
   /// Whether to emit [SentenceBoundaryEvent]s during synthesis.
   final bool sentenceBoundary;
 
+  /// Optional dialect locale（如 'zh-CN-sichuan'）：文本外包一层 SSML
+  /// `<lang>` 元素，供方言能力音色选择口音（XiaoxiaoDialectsNeural）。
+  final String? dialectLocale;
+
   /// Creates a [Communicate] instance for synthesizing [text] to speech.
   ///
   /// All prosody parameters ([rate], [pitch], [volume]) are validated on
@@ -110,6 +114,7 @@ class Communicate {
     this.volume = '+0%',
     this.wordBoundary = false,
     this.sentenceBoundary = false,
+    this.dialectLocale,
   }) {
     _validateParam(rate, RegExp(r'^[+-]\d+%$'), 'rate');
     _validateParam(pitch, RegExp(r'^[+-]\d+Hz$'), 'pitch');
@@ -224,7 +229,8 @@ class Communicate {
     ws.add(configMsg);
 
     // -- Send SSML --
-    final ssml = _buildSsml(chunk, voice, rate, pitch, volume);
+    final ssml = _buildSsml(chunk, voice, rate, pitch, volume,
+        dialectLocale: dialectLocale);
     final ssmlMsg = 'X-RequestId:$requestId\r\n'
         'Content-Type:application/ssml+xml\r\n'
         'X-Timestamp:${timestamp}Z\r\n'
@@ -410,25 +416,33 @@ class Communicate {
     String voice,
     String rate,
     String pitch,
-    String volume,
-  ) {
+    String volume, {
+    String? dialectLocale,
+  }) {
     final longName = _voiceShortToLong(voice);
     final escaped = _xmlEscape(text);
+    // 方言音色：文本包 <lang> 元素选择口音（Azure XiaoxiaoDialectsNeural）。
+    final body = dialectLocale == null || dialectLocale.isEmpty
+        ? escaped
+        : "<lang xml:lang='$dialectLocale'>$escaped</lang>";
     return "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
         "xml:lang='en-US'>"
         "<voice name='$longName'>"
         "<prosody pitch='$pitch' rate='$rate' volume='$volume'>"
-        '$escaped'
+        '$body'
         '</prosody></voice></speak>';
   }
 
   static String _voiceShortToLong(String shortName) {
-    final match =
-        RegExp(r'^([a-z]{2,})-([A-Z]{2,})-(.+Neural)$').firstMatch(shortName);
-    if (match != null) {
-      final locale = '${match.group(1)}-${match.group(2)}';
-      final name = match.group(3);
-      return 'Microsoft Server Speech Text to Speech Voice ($locale, $name)';
+    // 区域变体音色（zh-CN-liaoning-XiaobeiNeural 等）的 locale 是多段的，
+    // 不能按前两段切分——否则服务端不认 voice 名、返回空音频。规范：
+    // 末段 = voice 名，其余整体 = locale。
+    if (shortName.endsWith('Neural')) {
+      final idx = shortName.lastIndexOf('-');
+      if (idx > 0) {
+        return 'Microsoft Server Speech Text to Speech Voice '
+            '(${shortName.substring(0, idx)}, ${shortName.substring(idx + 1)})';
+      }
     }
     return shortName;
   }

@@ -135,6 +135,12 @@ class InferenceSettings {
   /// 自定义热词（每行一个，词表外同音后校正）。
   final String asrHotwordCustom;
 
+  /// 热词分类差量覆盖：用户在分类默认词表上新增的词（catId → 词表）。
+  final Map<String, List<String>> asrHotwordAdded;
+
+  /// 热词分类差量覆盖：用户从分类默认词表删除的词（catId → 词表）。
+  final Map<String, List<String>> asrHotwordRemoved;
+
   /// 并发会话槽位（1~4，默认 1）：同时允许执行回合的会话数量。
   /// 智能体/API 会话可真正并行；本地模型路线受引擎单实例约束，
   /// 同一时刻仍只允许一个本地回合（见 chat_provider 门控）。
@@ -329,6 +335,22 @@ class InferenceSettings {
   /// 内存预算 = MemAvailable - 该余量；调小可给 KV 更大空间，调大更保守??
   final int oomPostHeadroomMb;
 
+  /// GPU 推理时限制刷新率（防闪纹，2026-10-07 小米13 定案）：模型加载/
+  /// prefill 的瞬时显存带宽会挤占显示供帧（Adreno UMA），期间临时锁 60Hz、
+  /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
+  final bool inferenceLimitRefreshRate;
+
+  /// GPU prefill 宽度 n_ubatch（2026-10-07 小米13 GPU fault 缓解）：0 = 自动
+  /// （GPU 档 512 / CPU 档 16，默认行为）；32~512 = 拆小单次 dispatch 计算
+  /// burst，缓解 Adreno 持续满血计算触发的 GPU 挂死（代价：prefill 变慢）。
+  /// 仅 GPU 后端生效（JNI 侧 CPU 档恒 16 不受影响）。
+  final int gpuNUbatch;
+
+  /// Vulkan 禁用 subgroup 扩展（GGML_VK_NO_SUBGROUP）：turnip 在部分芯片
+  /// （Adreno 740 等）的 GPU 挂死嫌疑源之一。默认关；切换后需重启 app
+  /// 生效（vulkan 设备初始化每进程仅一次）。
+  final bool vkNoSubgroup;
+
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模??
   /// 目录声明的默认工具集（agentDefaults.enabledTools）??
   final Map<String, List<String>> agentToolsByModel;
@@ -417,6 +439,8 @@ class InferenceSettings {
     this.asrEnhancedMode = false,
     this.asrHotwordCategories = const [],
     this.asrHotwordCustom = '',
+    this.asrHotwordAdded = const {},
+    this.asrHotwordRemoved = const {},
     this.agentMaxConcurrentTurns = 1,
     this.agentApiContextBudget = 32768,
     this.agentTokensPerRound = 1024,
@@ -468,6 +492,9 @@ class InferenceSettings {
     this.resourceSampleIntervalSec = 1,
     // OOM 内存守卫默认开启，余量默认与原生层常量一致（768 / 1536 MB）??
     this.oomGuardEnabled = true,
+    this.inferenceLimitRefreshRate = true,
+    this.gpuNUbatch = 0,
+    this.vkNoSubgroup = false,
     this.oomPreHeadroomMb = 768,
     this.oomPostHeadroomMb = 1536,
     Map<String, List<String>>? agentToolsByModel,
@@ -584,6 +611,8 @@ class InferenceSettings {
       bool? asrEnhancedMode,
       List<String>? asrHotwordCategories,
       String? asrHotwordCustom,
+      Map<String, List<String>>? asrHotwordAdded,
+      Map<String, List<String>>? asrHotwordRemoved,
       int? agentMaxConcurrentTurns,
       int? agentApiContextBudget,
       int? agentTokensPerRound,
@@ -632,8 +661,11 @@ class InferenceSettings {
       bool? showResourceMonitor,
       int? resourceSampleIntervalSec,
       bool? oomGuardEnabled,
+      bool? inferenceLimitRefreshRate,
       int? oomPreHeadroomMb,
       int? oomPostHeadroomMb,
+    int? gpuNUbatch,
+    bool? vkNoSubgroup,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -679,6 +711,8 @@ class InferenceSettings {
       asrHotwordCategories:
           asrHotwordCategories ?? this.asrHotwordCategories,
       asrHotwordCustom: asrHotwordCustom ?? this.asrHotwordCustom,
+      asrHotwordAdded: asrHotwordAdded ?? this.asrHotwordAdded,
+      asrHotwordRemoved: asrHotwordRemoved ?? this.asrHotwordRemoved,
       agentMaxConcurrentTurns:
           agentMaxConcurrentTurns ?? this.agentMaxConcurrentTurns,
       agentApiContextBudget:
@@ -748,6 +782,9 @@ class InferenceSettings {
       resourceSampleIntervalSec:
           resourceSampleIntervalSec ?? this.resourceSampleIntervalSec,
       oomGuardEnabled: oomGuardEnabled ?? this.oomGuardEnabled,
+      inferenceLimitRefreshRate: inferenceLimitRefreshRate ?? this.inferenceLimitRefreshRate,
+      gpuNUbatch: gpuNUbatch ?? this.gpuNUbatch,
+      vkNoSubgroup: vkNoSubgroup ?? this.vkNoSubgroup,
       oomPreHeadroomMb: oomPreHeadroomMb ?? this.oomPreHeadroomMb,
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
@@ -790,6 +827,8 @@ class InferenceSettings {
         'asrEnhancedMode': asrEnhancedMode,
         'asrHotwordCategories': asrHotwordCategories,
         'asrHotwordCustom': asrHotwordCustom,
+        'asrHotwordAdded': asrHotwordAdded,
+        'asrHotwordRemoved': asrHotwordRemoved,
         'agentMaxConcurrentTurns': agentMaxConcurrentTurns,
         'agentApiContextBudget': agentApiContextBudget,
         'agentTokensPerRound': agentTokensPerRound,
@@ -840,6 +879,9 @@ class InferenceSettings {
         'showResourceMonitor': showResourceMonitor,
         'resourceSampleIntervalSec': resourceSampleIntervalSec,
         'oomGuardEnabled': oomGuardEnabled,
+        'inferenceLimitRefreshRate': inferenceLimitRefreshRate,
+        'gpuNUbatch': gpuNUbatch,
+        'vkNoSubgroup': vkNoSubgroup,
         'oomPreHeadroomMb': oomPreHeadroomMb,
         'oomPostHeadroomMb': oomPostHeadroomMb,
         'agentToolsByModel': agentToolsByModel,
@@ -908,6 +950,8 @@ class InferenceSettings {
                   .toList() ??
               const [],
       asrHotwordCustom: json['asrHotwordCustom'] as String? ?? '',
+      asrHotwordAdded: _parseStringListMap(json['asrHotwordAdded']),
+      asrHotwordRemoved: _parseStringListMap(json['asrHotwordRemoved']),
       agentMaxConcurrentTurns:
           ((json['agentMaxConcurrentTurns'] as num?)?.toInt() ?? 1).clamp(1, 4),
       agentApiContextBudget:
@@ -986,6 +1030,9 @@ class InferenceSettings {
           (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 1,
       // OOM 内存守卫：旧配置缺字段时默认开??+ 原生层默认余量（向后兼容）??
       oomGuardEnabled: json['oomGuardEnabled'] as bool? ?? true,
+      inferenceLimitRefreshRate: json['inferenceLimitRefreshRate'] as bool? ?? true,
+      gpuNUbatch: (json['gpuNUbatch'] as num?)?.toInt() ?? 0,
+      vkNoSubgroup: json['vkNoSubgroup'] as bool? ?? false,
       oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
@@ -1137,6 +1184,17 @@ class InferenceSettings {
     // 仅有旧版全局 enableMtp 时保持默认全关：无法定位具体模型（不迁移为开??
     // ??AGENTS.md 约定），由用户在模型列表重新逐个开启??
     return const {};
+  }
+
+  /// Map<String, List<String>> 容错解析（热词差量覆盖等字段共用）。
+  static Map<String, List<String>> _parseStringListMap(Object? raw) {
+    if (raw is! Map) return const {};
+    final out = <String, List<String>>{};
+    raw.forEach((k, v) {
+      out['$k'] =
+          v is List<dynamic> ? v.map((e) => '$e').toList() : <String>[];
+    });
+    return out;
   }
 }
 

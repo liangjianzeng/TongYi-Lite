@@ -83,6 +83,7 @@ import 'agent_state_provider.dart' show agentUiStateProvider;
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
+import '../services/app_bridge.dart' show AppBridge;
 import 'context_usage_provider.dart' show contextUsageProvider;
 
 // Re-export for other files that need these types.
@@ -247,7 +248,11 @@ final messagesProvider = StreamProvider.autoDispose
 final isGeneratingProvider = StateProvider<bool>((ref) => false);
 
 /// 各会话正在执行回合（convId → 是否本地路线）。多会话并发的唯一真相：
-/// UI 判「当前会话生成中」、槽位门控计数、模型卸载前停全部都以它为准。
+/// 槽位门控计数、模型卸载前停全部都以它为准。
+/// ⚠️ UI 判「当前会话生成中」必须用 **containsKey(convId)**——map 的值是
+/// 「是否本地路线」（true=本地/false=API），不是生成标志；用 `map[id] ?? false`
+/// 会把 API 档执行中的回合误判成空闲（composer 停止键消失、只剩麦克风，
+/// 真机实锤 bug，2026-10-07）。
 final runningTurnsProvider =
     StateProvider<Map<String, bool>>((ref) => const {});
 
@@ -398,7 +403,42 @@ class ChatNotifier extends StateNotifier<bool> {
     _ref.read(runningTurnsProvider.notifier).state = map;
     _ref.read(isGeneratingProvider.notifier).state = map.isNotEmpty;
     state = map.isNotEmpty;
+    _updateInferenceRefreshRate();
   }
+
+  /// GPU 推理防闪纹（2026-10-07 小米13 定案）：本地回合的模型加载 + prefill
+  /// 瞬时显存带宽会挤占显示供帧（Adreno UMA 闪条纹）。回合存在期间锁
+  /// 60Hz（DPU 供帧带宽减半），回合结束恢复跟随系统。API 回合不占 GPU
+  /// 引擎、CPU 后端无此现象，均不介入。
+  void _updateInferenceRefreshRate() {
+    try {
+      final s = _ref.read(settingsProvider);
+      if (!s.inferenceLimitRefreshRate) return;
+      final gpuTurnActive = _activeTurns.values
+          .any((t) => !t.started || t.local); // 未定路由的占位按 GPU 预判
+      if (s.gpuBackend == 'cpu') {
+        if (_rateLimitEngaged) {
+          _rateLimitEngaged = false;
+          AppBridge.setPreferredRefreshRate(0);
+        }
+        return;
+      }
+      if (gpuTurnActive && !_rateLimitEngaged) {
+        _rateLimitEngaged = true;
+        AppBridge.setPreferredRefreshRate(60).then((ok) => debugPrint(
+            '[ChatNotifier] [refresh-rate] engage 60Hz ok=$ok '
+            'backend=${s.gpuBackend}'));
+      } else if (!gpuTurnActive && _rateLimitEngaged) {
+        _rateLimitEngaged = false;
+        AppBridge.setPreferredRefreshRate(0).then((ok) =>
+            debugPrint('[ChatNotifier] [refresh-rate] restore ok=$ok'));
+      }
+    } catch (e) {
+      debugPrint('[ChatNotifier] refresh-rate limit failed: $e');
+    }
+  }
+
+  bool _rateLimitEngaged = false;
 
   ChatNotifier(this._ref, this._inference, this._storage) : super(false);
 
@@ -1756,7 +1796,7 @@ class ChatNotifier extends StateNotifier<bool> {
     // 保持不显示。首 Tok 对多步回合无单步语义，置 0 → 界面省略首Tok。
     InferenceStats? answerStats;
     // 本地路线：原生 getInferenceStats 同时携带 KV 缓存占比字段
-    // （kv_used / kv_ctx），供顶部状态栏细条展示本地上下文占用。
+    // （kv_used / kv_ctx），供输入框上下文占用圈展示本地上下文占用。
     Map<String, dynamic> genStats = {};
     if (!useApi) {
       try {
@@ -1885,7 +1925,7 @@ class ChatNotifier extends StateNotifier<bool> {
     );
   }
 
-  /// 更新某会话 API 接入模型的上下文占用（顶部状态栏细条数据源）。
+  /// 更新某会话 API 接入模型的上下文占用（上下文占用圈数据源）。
   ///
   /// [usedTokens] = 当前发送给模型的上下文 token 数（usage.prompt_tokens）。
   /// 槽位优先 API `/v1/models` 拉取的 `n_ctx`（30min 缓存），拉不到时回退
@@ -1918,7 +1958,7 @@ class ChatNotifier extends StateNotifier<bool> {
         );
   }
 
-  /// 本地路线：更新某会话 KV 缓存占比（顶部状态栏细条数据源）。
+  /// 本地路线：更新某会话 KV 缓存占比（上下文占用圈数据源）。
   ///
   /// used = 原生 KV 缓存已占用位置数（kv_used，当前会话已解码进缓存的 token），
   /// window = 原生实际上下文窗口（kv_ctx = llama_n_ctx，含 oom-guard 裁剪后值）。
@@ -1931,7 +1971,7 @@ class ChatNotifier extends StateNotifier<bool> {
     final ctx = genStats['kv_ctx'] as num?;
     if (used == null || ctx == null || ctx <= 0) return;
     // 本地 KV 单实例：当前快照只对刚测量完的会话有效，清掉其它会话的
-    // 陈旧值（切会话后旧细条仍显示是误导）。
+    // 陈旧值（切会话后旧占用圈仍显示是误导）。
     _ref.read(contextUsageProvider.notifier).clearExcept(conversationId);
     _ref.read(contextUsageProvider.notifier).update(
           conversationId,
@@ -1944,7 +1984,7 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 启动/切会话时回填占用快照（估算口径）。
   ///
   /// 占用快照只在回合结束时更新（内存态），app 重启后圈圈会一直显示「—」；
-  /// 这里按本地历史重估 used。窗口按首页细条同款路由规则：智能体 API 驱动 /
+  /// 这里按本地历史重估 used。窗口按首页占用圈同款路由规则：智能体 API 驱动 /
   /// 纯 API → API 槽位（fetchContextWindow 实测优先，回退配置 contextWindow），
   /// 本地 → contextSize 设置。
   /// ⚠️ 必须直读持久层 [SettingsService.load] 而非 settingsProvider：启动时

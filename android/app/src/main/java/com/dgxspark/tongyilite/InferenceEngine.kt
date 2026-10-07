@@ -72,7 +72,7 @@ class InferenceEngine(private val context: Context) {
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
-    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean, mmprojPath: String?, draftPath: String?): Boolean
+    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean, mmprojPath: String?, draftPath: String?, nUbatch: Int, vkNoSubgroup: Boolean): Boolean
     private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
@@ -143,6 +143,8 @@ class InferenceEngine(private val context: Context) {
         enableMtp: Boolean = false,
         mmprojPath: String? = null,
         draftPath: String? = null,
+        nUbatch: Int = 0,
+        vkNoSubgroup: Boolean = false,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
         checkNotDestroyed()
@@ -161,7 +163,7 @@ class InferenceEngine(private val context: Context) {
         }
 
         Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath)")
-        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath)
+        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup)
         Log.i(TAG, "loadModel result: $ok")
 
         if (ok) {

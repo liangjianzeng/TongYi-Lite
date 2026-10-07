@@ -135,3 +135,8 @@ _build/
 
 # 无线 ADB 缓存（手机 IP，因人/因网而异，不入库）
 scripts/.adb_wifi_*
+
+.tmp-mdtool/
+README.html
+TongYi-Lite-ProductSpec.html
+spec-images/

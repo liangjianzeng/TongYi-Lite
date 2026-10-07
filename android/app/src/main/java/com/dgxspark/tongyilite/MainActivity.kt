@@ -178,6 +178,13 @@ class MainActivity : FlutterActivity() {
                     val background = call.argument<Boolean>("background") ?: false
                     result.success(runInTermux(command, background))
                 }
+                // GPU 推理防闪纹（2026-10-07 小米13 定案）：prefill/加载的瞬
+                // 时显存带宽挤占显示供帧 → 锁 60Hz 给 DPU 留带宽。fps<=0 =
+                // 恢复跟随系统（清除 preferredDisplayModeId）。
+                "setPreferredRefreshRate" -> {
+                    val fps = (call.argument<Number>("fps") ?: 0).toFloat()
+                    result.success(setPreferredRefreshRate(fps))
+                }
                 else -> result.notImplemented()
             }
         }
@@ -373,6 +380,71 @@ class MainActivity : FlutterActivity() {
             true
         }
     } catch (_: Exception) {
+        false
+    }
+
+    /// 递归找 Flutter 渲染面（FlutterSurfaceView extends SurfaceView）。
+    private fun findSurfaceView(v: android.view.View): android.view.SurfaceView? {
+        if (v is android.view.SurfaceView) return v
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) {
+                findSurfaceView(v.getChildAt(i))?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /// GPU 推理防闪纹：fps > 0 = 请求窗口锁定该刷新率（60 → DPU 供帧带宽
+    /// 减半，prefill/加载不再挤占显示）；fps <= 0 = 恢复跟随系统。
+    /// 双层投票：preferredDisplayModeId/Rate（窗口级）+ Surface 级
+    /// setFrameRate——MIUI"智能刷新"会无视窗口级偏好，Surface 级投票直达
+    /// SF 帧率控制器，实测可生效路径。返回是否成功。
+    private fun setPreferredRefreshRate(fps: Float): Boolean = try {
+        val lp = window.attributes
+        if (fps <= 0f) {
+            lp.preferredDisplayModeId = 0
+            lp.preferredRefreshRate = 0f
+        } else {
+            val display = (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY)
+            val mode = display?.supportedModes
+                ?.minByOrNull { kotlin.math.abs(it.refreshRate - fps) }
+            if (mode != null) lp.preferredDisplayModeId = mode.modeId
+            lp.preferredRefreshRate = fps
+        }
+        window.attributes = lp
+        // Surface 级帧率投票：MIUI"智能刷新"无视窗口级 mode-id/Rate 偏好
+        //（实测 renderFrameRate 恒 120）。Flutter 渲染面是 SurfaceView，
+        // SurfaceView.getSurfaceControl()（API 31+ 公开 API）+ Transaction
+        // setFrameRate = 视频类 app 锁帧同款通道，MIUI 尊重它。
+        try {
+            val sv = findSurfaceView(window.decorView)
+            val sc = sv?.surfaceControl
+            if (sc != null && sc.isValid) {
+                val t = android.view.SurfaceControl.Transaction()
+                if (fps <= 0f) {
+                    t.setFrameRate(sc, 0f,
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                } else {
+                    t.setFrameRate(sc, fps,
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                }
+                t.apply()
+                android.util.Log.i("TongYiLite",
+                    "[refresh-rate] surface vote applied (fps=$fps)")
+            } else {
+                android.util.Log.w("TongYiLite",
+                    "[refresh-rate] surface view/control unavailable")
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("TongYiLite", "[refresh-rate] surface vote failed: $t")
+        }
+        android.util.Log.i("TongYiLite",
+            "[refresh-rate] set fps=$fps modeId=${lp.preferredDisplayModeId} " +
+                "rate=${lp.preferredRefreshRate}")
+        true
+    } catch (e: Exception) {
+        android.util.Log.w("TongYiLite", "[refresh-rate] set failed: $e")
         false
     }
 
@@ -704,12 +776,14 @@ class MainActivity : FlutterActivity() {
         val enableMtp = call.argument<Boolean>("enableMtp") ?: false
         val mmprojPath = call.argument<String>("mmprojPath")
         val draftPath = call.argument<String>("draftPath")
+        val nUbatch = call.argument<Int>("nUbatch") ?: 0
+        val vkNoSubgroup = call.argument<Boolean>("vkNoSubgroup") ?: false
 
-        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath")
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {

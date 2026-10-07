@@ -58,6 +58,34 @@ const List<HotwordCategory> hotwordCategories = [
     '保存', '删除', '新建', '打开', '关闭', '下载', '上传', '查看',
     '编辑', '刷新', '清空', '重启', '重新规划', '放弃计划',
   ]),
+  // 常用应用名（口播高频；仅纯中文词——混合英文的词在词表分流时会被丢弃）。
+  HotwordCategory('apps', '常用应用 / 服务', [
+    '微信', '支付宝', '抖音', '快手', '小红书', '哔哩哔哩', '知乎', '微博',
+    '淘宝', '京东', '拼多多', '天猫', '美团', '饿了么', '高德地图',
+    '百度地图', '携程', '飞猪', '网易云音乐', '喜马拉雅', '腾讯视频',
+    '爱奇艺', '优酷', '钉钉', '飞书', '企业微信', '脉脉', '豆瓣',
+  ]),
+  // 手机系统操作指令（设置/开关/应用直达）。
+  HotwordCategory('phoneops', '手机操作', [
+    '截屏', '截图', '录屏', '手电筒', '飞行模式', '无线网', '蓝牙', '热点',
+    '音量', '亮度', '静音', '震动', '勿扰模式', '省电模式', '通讯录',
+    '短信', '日历', '闹钟', '天气', '定位', '导航', '相机', '计算器',
+    '便签', '备忘录', '文件管理', '应用商店', '系统设置', '清理后台',
+  ]),
+  // 生活服务高频词（出行/购物/餐饮/健康）。
+  HotwordCategory('life', '生活服务', [
+    '外卖', '打车', '快递', '取件码', '缴费', '充值', '购物车', '订单',
+    '退款', '优惠券', '会员', '积分', '门票', '酒店', '民宿', '火车票',
+    '机票', '值机', '登机牌', '加油站', '停车场', '共享单车', '公交',
+    '地铁', '医院', '挂号', '药店', '超市', '外卖红包', '报销',
+  ]),
+  // 办公 / 学习文档高频词。
+  HotwordCategory('office', '办公学习', [
+    '会议', '纪要', '周报', '日报', '月报', '汇报', '幻灯片', '文档',
+    '表格', '思维导图', '待办', '日程', '提醒', '邮件', '抄送', '附件',
+    '合同', '发票', '简历', '面试', '论文', '开题', '文献', '参考文献',
+    '考试', '复习', '笔记', '错题', '课程表', '成绩单',
+  ]),
 ];
 
 /// 用户自定义分类的稳定 id（不在 [hotwordCategories] 内，词表由用户自填）。
@@ -70,3 +98,29 @@ List<String> defaultHotwordCategoryIds() =>
 /// 某分类的默认词表。
 List<String> defaultCategoryWords(String id) =>
     hotwordCategories.firstWhere((c) => c.id == id).words;
+
+/// 分类生效词表 = 默认词 + 用户增词 − 用户删词（差量覆盖，不随默认表改版
+/// 丢失用户编辑）。
+List<String> effectiveCategoryWords(
+  String id,
+  Map<String, List<String>> added,
+  Map<String, List<String>> removed,
+) {
+  final set = <String>{...defaultCategoryWords(id), ...?added[id]};
+  final rm = removed[id];
+  if (rm != null && rm.isNotEmpty) set.removeAll(rm);
+  return set.toList();
+}
+
+/// 用户编辑整个分类词表后计算差量：增词 = 新表 − 默认表；删词 = 默认表 − 新表。
+({List<String> added, List<String> removed}) diffCategoryWords(
+  String id,
+  Iterable<String> newWords,
+) {
+  final defaults = defaultCategoryWords(id).toSet();
+  final nw = newWords.map((w) => w.trim()).where((w) => w.isNotEmpty).toSet();
+  return (
+    added: nw.where((w) => !defaults.contains(w)).toList()..sort(),
+    removed: defaults.where((w) => !nw.contains(w)).toList()..sort(),
+  );
+}

@@ -90,6 +90,35 @@ void main() {
           {'maxRounds': 4, 'nctx': 32768});
     });
 
+    test('GPU 推理防闪纹开关：默认开，往返一致（缺键兼容旧配置）', () {
+      const s = InferenceSettings();
+      expect(s.inferenceLimitRefreshRate, isTrue);
+      final off = InferenceSettings.fromJson(
+          {'inferenceLimitRefreshRate': false});
+      expect(off.inferenceLimitRefreshRate, isFalse);
+      expect(InferenceSettings.fromJson(off.toJson()).inferenceLimitRefreshRate,
+          isFalse);
+      // 旧配置无此键 → 默认开（行为与本次改动前一致）。
+      expect(InferenceSettings.fromJson({}).inferenceLimitRefreshRate, isTrue);
+    });
+
+    test('GPU 稳定性调优：n_ubatch 默认 0（自动）/往返一致，vkNoSubgroup 默认关', () {
+      const s = InferenceSettings();
+      expect(s.gpuNUbatch, 0);
+      expect(s.vkNoSubgroup, isFalse);
+      final custom = InferenceSettings.fromJson(
+          {'gpuNUbatch': 64, 'vkNoSubgroup': true});
+      expect(custom.gpuNUbatch, 64);
+      expect(custom.vkNoSubgroup, isTrue);
+      final restored = InferenceSettings.fromJson(custom.toJson());
+      expect(restored.gpuNUbatch, 64);
+      expect(restored.vkNoSubgroup, isTrue);
+      // 旧配置无此键 → 默认值（0=自动 / 关），行为与改动前一致。
+      final legacy = InferenceSettings.fromJson({});
+      expect(legacy.gpuNUbatch, 0);
+      expect(legacy.vkNoSubgroup, isFalse);
+    });
+
     test('并发会话槽位：默认 1，往返一致，解析夹紧 1~4', () {
       const s = InferenceSettings();
       expect(s.agentMaxConcurrentTurns, 1);
@@ -133,8 +162,31 @@ void main() {
           4096);
     });
 
-    test('Edge TTS：默认关/晓晓/0 偏移，往返一致，数值夹紧', () {
-      const s = InferenceSettings();
+    test('ASR 热词差量覆盖：JSON 往返一致 + 非法输入不崩', () {
+      const s = InferenceSettings(
+        asrHotwordAdded: {
+          'daily': ['新词甲'],
+          'apps': ['高德地图'],
+        },
+        asrHotwordRemoved: {
+          'daily': ['确认'],
+        },
+      );
+      final back = InferenceSettings.fromJson(s.toJson());
+      expect(back.asrHotwordAdded['daily'], ['新词甲']);
+      expect(back.asrHotwordAdded['apps'], ['高德地图']);
+      expect(back.asrHotwordRemoved['daily'], ['确认']);
+      // 非法/缺失输入 → 空表（向后兼容，不崩）。
+      expect(InferenceSettings.fromJson({}).asrHotwordAdded, isEmpty);
+      final bad = InferenceSettings.fromJson({
+        'asrHotwordAdded': 'not-a-map',
+        'asrHotwordRemoved': {'x': 'not-a-list'},
+      });
+      expect(bad.asrHotwordAdded, isEmpty);
+      expect(bad.asrHotwordRemoved['x'], isEmpty);
+    });
+
+    test('Edge TTS：默认关/晓晓/0 偏移，往返一致，数值夹紧', () {      const s = InferenceSettings();
       expect(s.edgeTtsEnabled, isFalse);
       expect(s.edgeTtsAutoSpeak, isFalse);
       expect(s.edgeTtsVoice, 'zh-CN-XiaoxiaoNeural');
