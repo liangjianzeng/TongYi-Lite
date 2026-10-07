@@ -17,7 +17,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
-import '../tts/edge_tts_service.dart' show EdgeTtsService, TtsVoiceInfo, kFallbackVoices;
+import '../tts/edge_tts_service.dart'
+    show EdgeTtsService, TtsVoiceInfo, groupTtsVoices, kFallbackVoices;
 
 import '../agent/dev/dev.dart'
     show
@@ -41,7 +42,8 @@ import '../services/app_bridge.dart' show AppBridge;
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../asr/asr_model_manager.dart' show AsrModelManager;
 import '../asr/hold_to_talk.dart' show AsrModelGate;
-import '../asr/default_hotwords.dart' show hotwordCategories;
+import '../asr/default_hotwords.dart'
+    show HotwordCategory, hotwordCategories, effectiveCategoryWords, diffCategoryWords, defaultCategoryWords;
 
 import '../agent/skills/provider.dart'
     show
@@ -96,7 +98,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    // 6 个 Tab（模型管理/API 接入/推理引擎/智能体/开发者/关于）——
+    // length 必须与 TabBar/TabBarView 数量一致。
+    _tabController = TabController(length: 6, vsync: this);
     _catalogFuture = loadModelCatalog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
@@ -1158,7 +1162,9 @@ class _InferenceEngineTab extends ConsumerWidget {
                           min: 1024,
                           max: 65536,
                           divisions: 63,
-                          label: '${gpuSettings.contextSize}',
+                          // k 级显示（1k 步进恒整 k），不再显示裸数值。
+                          label:
+                              '${gpuSettings.contextSize ~/ 1024}k',
                           onChanged: (v) =>
                               gpuNotifier.setContextSize(v.round()),
                         ),
@@ -1167,7 +1173,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                       SizedBox(
                         width: 78,
                         child: Text(
-                          '${gpuSettings.contextSize} 字',
+                          '${gpuSettings.contextSize ~/ 1024}k token',
                           textAlign: TextAlign.center,
                           style: const TextStyle(fontWeight: FontWeight.w500),
                         ),
@@ -1195,6 +1201,71 @@ class _InferenceEngineTab extends ConsumerWidget {
                     gpuSettings.autoLoadMmproj,
                     gpuNotifier.setAutoLoadMmproj,
                     subtitle: '针对有投影器（mmproj）的视觉模型；关闭后仅文本推理',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          // ---- GPU 推理防闪纹卡片（2026-10-07 小米13 定案）----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildToggleTitle(
+                    '🖥️ GPU 推理时限制刷新率（防闪纹）',
+                    gpuSettings.inferenceLimitRefreshRate,
+                    gpuNotifier.setInferenceLimitRefreshRate,
+                    subtitle: '模型加载/prefill 的瞬时显存带宽会挤占显示供帧'
+                        '（Adreno 闪条纹），期间自动锁 60Hz、回合结束恢复 120Hz。'
+                        'CPU 后端无此现象不受影响',
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          // ---- GPU 稳定性调优（2026-10-07 小米13 GPU fault 定案）----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('⚙️ GPU 稳定性调优（防 GPU fault）',
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Adreno 持续满血计算可能触发 GPU 挂死'
+                    '（屏幕随机彩色乱码，Vulkan 档可升级为闪退）。',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                  ),
+                  const Divider(height: 20),
+                  _buildSliderRow(
+                    label: 'GPU prefill 宽度（n_ubatch）',
+                    value: gpuSettings.gpuNUbatch,
+                    min: 0,
+                    max: 512,
+                    divisions: 16,
+                    display: gpuSettings.gpuNUbatch == 0
+                        ? '自动'
+                        : '${gpuSettings.gpuNUbatch}',
+                    onChanged: gpuNotifier.setGpuNUbatch,
+                    hint: '0=自动（GPU 512/CPU 16）；调小拆单次计算 burst 缓解 GPU '
+                        '挂死，prefill 变慢。32 的倍数步进，改后重新加载模型生效',
+                  ),
+                  _buildToggleTitle(
+                    'Vulkan 禁用 subgroup',
+                    gpuSettings.vkNoSubgroup,
+                    gpuNotifier.setVkNoSubgroup,
+                    subtitle: 'turnip GPU 挂死嫌疑源之一，开启可能更稳但略降速；'
+                        '重启 app 后生效',
                   ),
                 ],
               ),
@@ -1682,6 +1753,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 
   Widget _buildTtsCard(InferenceSettings settings, SettingsNotifier notifier) {
     final voices = _ttsVoices;
+    final groups = groupTtsVoices(voices ?? kFallbackVoices);
     final tts = EdgeTtsService.instance;
     return Card(
       child: Padding(
@@ -1712,9 +1784,14 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     ),
                     const SizedBox(height: 8),
                     // 音色下拉（拉取失败回退内置清单）。
+                    // isExpanded=true：选中项占满行宽——方言音色全名很长
+                    // （zh-CN-shaanxi-XiaoniNeural），不放开会把 suffixIcon
+                    // 挤出界 → RenderFlex RIGHT OVERFLOWED 溢出条遮挡 UI
+                    //（真机实锤 87px）。
                     DropdownButtonFormField<String>(
                       value: _ttsVoiceInList(
                           voices, settings.edgeTtsVoice),
+                      isExpanded: true,
                       decoration: InputDecoration(
                         labelText: '音色',
                         border: const OutlineInputBorder(),
@@ -1738,12 +1815,31 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                               ),
                       ),
                       items: [
-                        for (final v in (voices ?? kFallbackVoices))
-                          DropdownMenuItem(
-                            value: v.shortName,
-                            child: Text('${v.localName} · ${v.shortName}',
-                                style: const TextStyle(fontSize: 13)),
+                        // 分组头（不可点，value 用哨兵防与真实音色冲突）。
+                        for (var i = 0; i < groups.length; i++) ...[
+                          DropdownMenuItem<String>(
+                            enabled: false,
+                            value: '◆group$i',
+                            child: Text(
+                              '── ${groups[i].title} ──',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
                           ),
+                          for (final v in groups[i].voices)
+                            DropdownMenuItem(
+                              value: v.shortName,
+                              child: Text('${v.localName} · ${v.shortName}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13)),
+                            ),
+                        ],
                       ],
                       onChanged: (v) {
                         if (v != null) notifier.setEdgeTtsVoice(v);
@@ -1795,9 +1891,14 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                               return;
                             }
                             tts.speak(
-                              '你好，这是 TongYi-Lite 的语音播报效果。'
-                              '当前语速${_signedPct(settings.edgeTtsRate)}，'
-                              '音色${settings.edgeTtsVoice}。',
+                              // 英文音色读不出中文（服务端返回空音频），
+                              // 试听文本按音色语言选择。
+                              settings.edgeTtsVoice.startsWith('en-')
+                                  ? 'Hello, this is the TongYi-Lite voice '
+                                      'preview. Rate ${_signedPct(settings.edgeTtsRate)}.'
+                                  : '你好，这是 TongYi-Lite 的语音播报效果。'
+                                      '当前语速${_signedPct(settings.edgeTtsRate)}，'
+                                      '音色${settings.edgeTtsVoice}。',
                               key: 'preview',
                               voice: settings.edgeTtsVoice,
                               rate: settings.edgeTtsRate,
@@ -2207,6 +2308,61 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
 
   String settings0HotwordCustom(SettingsNotifier notifier) =>
       notifier.state.asrHotwordCustom;
+
+  /// 编辑某个热词分类的词表：预填生效词（默认 + 增 − 删），保存时算差量
+  /// （增词 = 新表 − 默认表；删词 = 默认表 − 新表）持久化；「恢复默认」
+  /// 清空该分类差量。
+  Future<void> _editAsrCategoryWords(
+      HotwordCategory cat, SettingsNotifier notifier) async {
+    final defaults = defaultCategoryWords(cat.id);
+    final effective = effectiveCategoryWords(
+        cat.id, notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
+    final ctrl = TextEditingController(text: effective.join('\n'));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('热词：${cat.name}'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('内置 ${defaults.length} 个词，当前生效 '
+                  '${effective.length} 个。一行一个词：新增行 = 加词，'
+                  '删掉行 = 从该分类移除。',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctrl,
+                maxLines: 12,
+                minLines: 8,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => ctrl.text = defaults.join('\n'),
+            child: const Text('恢复默认'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final d = diffCategoryWords(cat.id, ctrl.text.split('\n'));
+    await notifier.setAsrHotwordCategoryEdit(cat.id, d.added, d.removed);
+    if (mounted) setState(() {});
+  }
 
   /// P2-B：添加 MCP server（名称 + 端点 URL）。
   Future<void> _showAddMcpServerDialog(SettingsNotifier notifier) async {
@@ -2661,38 +2817,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 '达到上限拒绝联网、强制基于已有结果回答，杜绝反复搜索',
                           ),
                           _buildSliderRow(
-                            label: '目标无人值守轮数',
-                            value: settings.agentGoalMaxRounds,
-                            min: 1,
-                            max: 20,
-                            divisions: 19,
-                            display: '${settings.agentGoalMaxRounds} 轮',
-                            onChanged: (v) => notifier.setAgentGoalMaxRounds(v),
-                            hint: 'goal 未完成时自动续跑的最大回合数（goal_set/exit_plan '
-                                '生效，默认 8）；仅 API 档',
-                          ),
-                          _buildSliderRow(
-                            label: 'API 上下文压缩预算',
-                            value: settings.agentApiContextBudget,
-                            min: 4096,
-                            max: 131072,
-                            divisions: 31,
-                            display:
-                                '${settings.agentApiContextBudget ~/ 1024}k token',
-                            onChanged: (v) =>
-                                notifier.setAgentApiContextBudget(v),
-                            hint: '投影历史超此值即自动压缩（默认 32k）；'
-                                '配置了端点窗口时取较小值',
-                          ),
-                          _buildSliderRow(
                             label: '每步生成预算',
                             value: profTokensPerRound,
                             min: 128,
                             max: profTokensMax,
                             divisions: (profTokensMax - 128) ~/ 256,
-                            display: profTokensPerRound >= 1024
-                                ? '${(profTokensPerRound / 1024).toStringAsFixed(0)}k token'
-                                : '$profTokensPerRound token',
+                            display: _formatKValue(profTokensPerRound, 'token'),
                             onChanged: (v) => isApi
                                 ? notifier.setAgentApiTokensPerRound(v)
                                 : notifier.setAgentTokensPerRound(v),
@@ -2740,28 +2870,209 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 '常提示"思考超长未闭合导致任务失败"时调大，'
                                 '或在模型设置里关闭思考模式',
                           ),
-                          Opacity(
-                            opacity: isApi ? 0.4 : 1.0,
-                            child: IgnorePointer(
-                              ignoring: isApi,
-                              child: _buildSliderRow(
-                                label: '智能体上下文长度',
-                                value: settings.agentNctx,
-                                min: 1024,
-                                max: 65536,
-                                divisions: 63,
-                                display: '${settings.agentNctx} token',
-                                onChanged: (v) => notifier.setAgentNctx(v),
-                                hint: isApi
-                                    ? 'API 驱动的上下文长度由服务端决定，此设置仅本地引擎生效'
-                                    : '本地引擎 n_ctx，独立于普通聊天；工具历史越多所需越大（默认 8192）。修改后需重载模型生效',
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
                   ),
+
+                  const SizedBox(height: 10),
+
+                  // ================= ②b API 档专属参数（仅 API 驱动可见）=================
+                  // 这些参数只对云端 API 驱动有意义；本地短 KV 模型驱动时整卡
+                  // 隐藏，不再让不生效的配置淹没本地用户。
+                  if (isApi) ...[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildSectionHeader('☁️ API 档专属', context),
+                            Text(
+                              '仅 API 接入驱动智能体时生效；切回本地模型驱动时'
+                              '本卡自动隐藏',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                            _buildSliderRow(
+                              label: '目标无人值守轮数',
+                              value: settings.agentGoalMaxRounds,
+                              min: 1,
+                              max: 20,
+                              divisions: 19,
+                              display: '${settings.agentGoalMaxRounds} 轮',
+                              onChanged: (v) =>
+                                  notifier.setAgentGoalMaxRounds(v),
+                              hint: 'goal 未完成时自动续跑的最大回合数'
+                                  '（goal_set/exit_plan 生效，默认 8）',
+                            ),
+                            _buildSliderRow(
+                              label: 'API 上下文压缩预算',
+                              value: settings.agentApiContextBudget,
+                              min: 4096,
+                              max: 131072,
+                              divisions: 31,
+                              display: _formatKValue(
+                                  settings.agentApiContextBudget, 'token'),
+                              onChanged: (v) =>
+                                  notifier.setAgentApiContextBudget(v),
+                              hint: '投影历史超此值即自动压缩（默认 32k）；'
+                                  '配置了端点窗口时取较小值',
+                            ),
+                            // 子代理专用模型（P3-2）：重活/子任务可走更便宜的
+                            // API 配置，主回答仍走主模型。
+                            if (settings.agentSubagentEnabled &&
+                                settings.apiModels.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    left: 4, right: 4, top: 8),
+                                child: DropdownButtonFormField<String>(
+                                  value: settings.agentSubagentApiModelId,
+                                  isDense: true,
+                                  isExpanded: true,
+                                  decoration: const InputDecoration(
+                                    labelText: '子代理专用模型',
+                                    hintText: '跟随主模型',
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: [
+                                    const DropdownMenuItem(
+                                        value: '', child: Text('跟随主模型')),
+                                    for (final cfg in settings.apiModels)
+                                      DropdownMenuItem(
+                                          value: cfg.id,
+                                          child: Text(cfg.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis)),
+                                  ],
+                                  onChanged: (v) => notifier
+                                      .setAgentSubagentApiModelId(v ?? ''),
+                                ),
+                              ),
+                            // 压缩摘要专用模型（P1-B 按步模型路由）：上下文
+                            // 压缩的旧区摘要交给更便宜的模型。
+                            if (settings.agentCompactEnabled &&
+                                settings.apiModels.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    left: 4, right: 4, top: 8),
+                                child: DropdownButtonFormField<String>(
+                                  value: settings.agentCompressionApiModelId,
+                                  isDense: true,
+                                  isExpanded: true,
+                                  decoration: const InputDecoration(
+                                    labelText: '压缩摘要专用模型',
+                                    hintText: '跟随子代理模型',
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: [
+                                    const DropdownMenuItem(
+                                        value: '', child: Text('跟随子代理模型')),
+                                    for (final cfg in settings.apiModels)
+                                      DropdownMenuItem(
+                                          value: cfg.id,
+                                          child: Text(cfg.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis)),
+                                  ],
+                                  onChanged: (v) => notifier
+                                      .setAgentCompressionApiModelId(v ?? ''),
+                                ),
+                              ),
+                            const Divider(height: 20),
+                            _buildSectionHeader('🔌 MCP 远程工具', context),
+                            if (settings.mcpServers.isEmpty)
+                              Text('暂未配置。可接入任意 MCP server（Streamable HTTP）'
+                                      '扩展工具生态。',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey.shade600))
+                            else
+                              for (final s in settings.mcpServers)
+                                ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  dense: true,
+                                  visualDensity: VisualDensity.compact,
+                                  leading: Icon(s.enabled
+                                      ? Icons.lan
+                                      : Icons.lan_outlined),
+                                  title: Text(s.name,
+                                      style: const TextStyle(fontSize: 14)),
+                                  subtitle: Text(s.url,
+                                      style: const TextStyle(
+                                          fontSize: 11, color: Colors.grey)),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Switch(
+                                        value: s.enabled,
+                                        onChanged: (v) => notifier
+                                            .upsertMcpServer(
+                                                s.copyWith(enabled: v)),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline,
+                                            size: 18),
+                                        onPressed: () =>
+                                            notifier.removeMcpServer(s.id),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                            TextButton.icon(
+                              onPressed: () =>
+                                  _showAddMcpServerDialog(notifier),
+                              icon: const Icon(Icons.add, size: 16),
+                              label: const Text('添加 MCP server'),
+                            ),
+                            Text(
+                              '填远程 MCP 端点（如 http://主机:3000/mcp）；'
+                              '工具以 mcp_<服务>_<名> 注册，失败自动跳过。',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey.shade500),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+
+                  // ================= ②c 本地档专属参数（仅本地模型驱动可见）=================
+                  if (!isApi) ...[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildSectionHeader('📱 本地档专属', context),
+                            Text(
+                              '仅本地模型驱动智能体时生效；这些参数面向端侧短 KV '
+                              '上下文，切到 API 驱动时本卡自动隐藏',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                            _buildSliderRow(
+                              label: '智能体上下文长度',
+                              value: settings.agentNctx,
+                              min: 1024,
+                              max: 65536,
+                              divisions: 63,
+                              display: _formatKValue(
+                                  settings.agentNctx, 'token'),
+                              onChanged: (v) => notifier.setAgentNctx(v),
+                              hint: '本地引擎 n_ctx，独立于普通聊天；工具历史越多'
+                                  '所需越大（默认 8192）。修改后需重载模型生效',
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
 
                   const SizedBox(height: 10),
 
@@ -2856,60 +3167,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             subtitle: '模型可派生独立子代理执行大任务的子任务（spawn/fork）。'
                                 '固定约束：嵌套 ≤ 2 层、子代理内不可申请沙箱升级、每层独立预算',
                           ),
-                          // 子代理专用模型（P3-2）：重活/子任务可走更便宜的
-                          // API 配置，主回答仍走主模型（仅 API 档生效）。
-                          if (settings.agentSubagentEnabled &&
-                              settings.apiModels.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                  left: 4, right: 4, top: 8),
-                              child: DropdownButtonFormField<String>(
-                                value: settings.agentSubagentApiModelId,
-                                isDense: true,
-                                decoration: const InputDecoration(
-                                  labelText: '子代理专用模型（API 档）',
-                                  hintText: '跟随主模型',
-                                  isDense: true,
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: [
-                                  const DropdownMenuItem(
-                                      value: '', child: Text('跟随主模型')),
-                                  for (final cfg in settings.apiModels)
-                                    DropdownMenuItem(
-                                        value: cfg.id, child: Text(cfg.name)),
-                                ],
-                                onChanged: (v) => notifier
-                                    .setAgentSubagentApiModelId(v ?? ''),
-                              ),
-                            ),
-                          // 压缩摘要专用模型（P1-B 按步模型路由）：上下文
-                          // 压缩的旧区摘要交给更便宜的模型（仅 API 档生效）。
-                          if (settings.agentCompactEnabled &&
-                              settings.apiModels.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                  left: 4, right: 4, top: 8),
-                              child: DropdownButtonFormField<String>(
-                                value: settings.agentCompressionApiModelId,
-                                isDense: true,
-                                decoration: const InputDecoration(
-                                  labelText: '压缩摘要专用模型（API 档）',
-                                  hintText: '跟随子代理模型',
-                                  isDense: true,
-                                  border: OutlineInputBorder(),
-                                ),
-                                items: [
-                                  const DropdownMenuItem(
-                                      value: '', child: Text('跟随子代理模型')),
-                                  for (final cfg in settings.apiModels)
-                                    DropdownMenuItem(
-                                        value: cfg.id, child: Text(cfg.name)),
-                                ],
-                                onChanged: (v) => notifier
-                                    .setAgentCompressionApiModelId(v ?? ''),
-                              ),
-                            ),
+                          // 子代理/压缩摘要专用模型（API 档专属）已移入
+                          // 「☁️ API 档专属」卡。
                           const Divider(height: 24),
                           _buildToggleTitle(
                             '🌐 联网搜索',
@@ -3037,59 +3296,6 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             style: TextStyle(
                                 fontSize: 11, color: Colors.grey.shade500),
                           ),
-                          const Divider(height: 20),
-
-                          // ---- P2-B MCP 远程工具 ----
-                          _buildSectionHeader('🔌 MCP 远程工具', context),
-                          if (settings.mcpServers.isEmpty)
-                            Text('暂未配置。可接入任意 MCP server（Streamable HTTP）'
-                                '扩展工具生态。',
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.grey.shade600))
-                          else
-                            for (final s in settings.mcpServers)
-                              ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                dense: true,
-                                visualDensity: VisualDensity.compact,
-                                leading: Icon(s.enabled
-                                    ? Icons.lan
-                                    : Icons.lan_outlined),
-                                title: Text(s.name,
-                                    style: const TextStyle(fontSize: 14)),
-                                subtitle: Text(s.url,
-                                    style: const TextStyle(
-                                        fontSize: 11, color: Colors.grey)),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Switch(
-                                      value: s.enabled,
-                                      onChanged: (v) => notifier
-                                          .upsertMcpServer(s.copyWith(enabled: v)),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete_outline,
-                                          size: 18),
-                                      onPressed: () =>
-                                          notifier.removeMcpServer(s.id),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                          TextButton.icon(
-                            onPressed: () => _showAddMcpServerDialog(notifier),
-                            icon: const Icon(Icons.add, size: 16),
-                            label: const Text('添加 MCP server'),
-                          ),
-
-                          Text(
-                            '填远程 MCP 端点（如 http://主机:3000/mcp）；'
-                            '工具以 mcp_<服务>_<名> 注册，仅 API 档生效，'
-                            '失败自动跳过。',
-                            style: TextStyle(
-                                fontSize: 11, color: Colors.grey.shade500),
-                          ),
 
                           const Divider(height: 20),
 
@@ -3142,6 +3348,35 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                     }
                                     notifier.setAsrHotwordCategories(next);
                                   },
+                                ),
+                            ],
+                          ),
+                          // 词表查看/编辑：逐分类展开看实际热词内容，
+                          // 点进编辑框可增删词（差量持久化）。
+                          ExpansionTile(
+                            tilePadding: EdgeInsets.zero,
+                            childrenPadding: const EdgeInsets.only(bottom: 4),
+                            title: Text('热词词表（查看 / 编辑）',
+                                style: const TextStyle(fontSize: 14)),
+                            subtitle: Text(
+                                '${hotwordCategories.length} 个分类，共 '
+                                '${hotwordCategories.fold<int>(0, (n, c) => n + effectiveCategoryWords(c.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length)} 个生效词；点分类可增删词',
+                                style: const TextStyle(fontSize: 12)),
+                            children: [
+                              for (final cat in hotwordCategories)
+                                ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  title: Text(cat.name,
+                                      style: const TextStyle(fontSize: 13)),
+                                  subtitle: Text(
+                                      '${effectiveCategoryWords(cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length} 个词',
+                                      style:
+                                          const TextStyle(fontSize: 11)),
+                                  trailing: const Icon(Icons.edit_outlined,
+                                      size: 16),
+                                  onTap: () =>
+                                      _editAsrCategoryWords(cat, notifier),
                                 ),
                             ],
                           ),
@@ -3703,7 +3938,8 @@ Widget _buildSliderRow({
             min: min.toDouble(),
             max: max.toDouble(),
             divisions: divisions,
-            label: '$value',
+            // 拖动气泡与行尾一致采用格式化值（k 级），不再裸露原始数值。
+            label: display,
             onChanged: (v) => onChanged(v.round()),
           ),
         ),
@@ -3712,6 +3948,14 @@ Widget _buildSliderRow({
       ],
     ),
   );
+}
+
+/// token 类大数值的 k 级显示：1024→"1k"、1536→"1.5k"、960→"960"。
+/// [unit] 如 'token'；注意按 1024 进位（token/字节语义），不用 1000。
+String _formatKValue(int v, String unit) {
+  if (v >= 1024 && v % 1024 == 0) return '${v ~/ 1024}k $unit';
+  if (v > 1024) return '${(v / 1024).toStringAsFixed(1)}k $unit';
+  return '$v $unit';
 }
 
 /// 毫秒 → 可读时长（如 15000 → "15 秒"）。

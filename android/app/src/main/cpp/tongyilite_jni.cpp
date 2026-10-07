@@ -276,6 +276,94 @@ static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
     return (int64_t)mb << 20;
 }
 
+// --- Safe token sampling (2026-10-07 voice-input crash fix) ---
+// llama_sampler_sample() contains two unrecoverable GGML_ASSERT aborts
+// (logits == nullptr / selected out of range) that SIGABRT the whole app in
+// release builds — tombstone from the field: ggml_abort inside
+// llama_sampler_sample called straight from InferenceEngine::completion.
+// This helper replicates llama_sampler_sample() minus the fatal asserts:
+//   * null logits -> one recovery re-decode of the token already sitting at
+//     recover_pos (restores the outputs buffer, e.g. after a turn where the
+//     prefill loop was skipped by incremental KV reuse), then graceful -1;
+//   * degenerate chain output (selected out of range) -> first candidate.
+// Behavior is otherwise byte-identical (same chain, same apply/accept order).
+// The candidate buffer is thread_local and reused across tokens/turns, so the
+// per-token O(vocab) allocation stays a one-time cost.
+static llama_token sample_token_safe(
+        llama_context * ctx,
+        struct llama_sampler * chain,
+        llama_token recover_token,   // token already decoded at recover_pos (-1 = unknown)
+        llama_pos    recover_pos,    // KV position of recover_token (-1 = no recovery)
+        const char * tag) {
+    static thread_local std::vector<llama_token_data> cur;
+    const int n_vocab =
+        llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+    const float * logits = llama_get_logits_ith(ctx, -1);
+    if (logits == nullptr && recover_token >= 0 && recover_pos >= 0) {
+        LOGW("[%s] logits unavailable -> recovery re-decode of token %d at pos %d",
+             tag, (int)recover_token, (int)recover_pos);
+        llama_batch rb = llama_batch_init(1, 0, 1);
+        rb.n_tokens = 1;
+        rb.token[0] = recover_token;
+        rb.pos[0]   = recover_pos;
+        rb.n_seq_id[0] = 1;
+        rb.seq_id[0][0] = 0;
+        rb.logits[0] = 1;
+        const int ret = llama_decode(ctx, rb);
+        llama_batch_free(rb);
+        if (ret == 0) logits = llama_get_logits_ith(ctx, -1);
+    }
+    if (logits == nullptr) {
+        LOGE("[%s] logits unavailable after recovery -> stop generation gracefully "
+             "(no SIGABRT)", tag);
+        return -1;
+    }
+    if ((int)cur.size() != n_vocab) cur.resize(n_vocab);
+    for (llama_token t = 0; t < n_vocab; t++) {
+        cur[t] = llama_token_data{t, logits[t], 0.0f};
+    }
+    llama_token_data_array cur_p = {
+        /* .data    = */ cur.data(),
+        /* .size    = */ cur.size(),
+        /* .selected= */ -1,
+        /* .sorted  = */ false,
+    };
+    llama_sampler_apply(chain, &cur_p);
+    llama_token out = (cur_p.selected >= 0 && cur_p.selected < (int32_t)cur_p.size)
+        ? cur_p.data[cur_p.selected].id
+        : cur_p.data[0].id;
+    llama_sampler_accept(chain, out);
+    return out;
+}
+
+// --- Chat template rendering with growth (2026-10-07 local-agent empty-reply fix) ---
+// llama_chat_apply_template() ALWAYS returns the full rendered length and only
+// strncpy()s min(needed, buf_len) bytes. The old fixed 16KB stack buffer made
+// agent-mode prompts (system prompt + tool defs ≈ 19KB on-device) overflow:
+// the caller saw n > buf_len, misread it as failure and fell back to the raw
+// prompt — empty in the agent path → 0-token prompt → "模型返回空响应".
+// Render into a heap buffer sized by the first call's returned requirement.
+static std::string apply_chat_template_grown(
+        const std::vector<llama_chat_message> & chat,
+        bool add_ass,
+        const char * tag,
+        const char * tmpl = "chatml") {
+    std::vector<char> buf(16384);
+    int32_t n = llama_chat_apply_template(
+        tmpl, chat.data(), chat.size(), add_ass, buf.data(), (int32_t)buf.size());
+    if (n > (int32_t)buf.size()) {
+        LOGI("[%s] chat template needs %d bytes > default buffer, regrowing", tag, n);
+        buf.resize((size_t)n + 4096);
+        n = llama_chat_apply_template(
+            tmpl, chat.data(), chat.size(), add_ass, buf.data(), (int32_t)buf.size());
+    }
+    if (n <= 0 || n >= (int32_t)buf.size()) {
+        LOGW("[%s] chat template render failed (n=%d)", tag, n);
+        return std::string();
+    }
+    return std::string(buf.data(), (size_t)n);
+}
+
 struct InferenceEngine {
     llama_model *model   = nullptr;
     const struct llama_vocab *vocab = nullptr; // extracted from model for new API
@@ -1186,12 +1274,10 @@ struct InferenceEngine {
             chat_vec.back().content = last_with_marker.c_str();
         }
 
-        char buf[16384];
-        int32_t n = llama_chat_apply_template(
-            "chatml", chat_vec.data(), chat_vec.size(), true, buf, sizeof(buf));
-        std::string formatted_prompt;
-        if (n > 0 && n < (int32_t)sizeof(buf)) {
-            formatted_prompt.assign(buf, n);
+        // 动态扩容渲染（同 plain 路径：16KB 栈缓冲会被大系统提示撑爆）。
+        std::string formatted_prompt =
+            apply_chat_template_grown(chat_vec, true, "vision");
+        if (!formatted_prompt.empty()) {
             // Qwen3 thinking suppression (same rule as the text path).
             const char *mtmpl = llama_model_chat_template(model, nullptr);
             const bool supports_think =
@@ -1204,7 +1290,7 @@ struct InferenceEngine {
                 formatted_prompt += " thinking\n\n response\n\n";
             }
         } else {
-            LOGW("vision: chatml template failed (n=%d) -> abort", n);
+            LOGW("vision: chatml template failed -> abort");
             return "[ERROR: 模板生成失败]";
         }
         LOGI("vision formatted_prompt (%zu chars): %.*s",
@@ -1336,8 +1422,12 @@ struct InferenceEngine {
         llama_sampler_chain_add(smpl_chain, llama_sampler_init_dist((uint32_t)llama_time_us()));
 
         while (n_gen < max_tokens && !should_stop) {
-            llama_token new_token = llama_sampler_sample(smpl_chain, context, -1);
-            llama_sampler_accept(smpl_chain, new_token);
+            // Safe sampling (see sample_token_safe): vision path has no known
+            // recovery token (chunks may end in a media embedding) -> graceful
+            // stop on missing logits.
+            llama_token new_token = sample_token_safe(context, smpl_chain,
+                                                      -1, -1, "vision");
+            if (new_token < 0) { LOGE("vision: no token sampled, graceful stop"); break; }
             if (new_token == eos) { LOGI("vision: EOS at gen=%d", n_gen); break; }
             if (!emit_token(new_token)) { gen_stopped = true; break; }
             const int32_t decode_pos = kv_position + n_gen;
@@ -1503,16 +1593,12 @@ struct InferenceEngine {
                 // Use the history vector as-is (its last entry is the live prompt).
                 std::vector<llama_chat_message> chat_vec = *history;
 
-                char buf[16384];
-                int32_t n = llama_chat_apply_template(
-                    "chatml",   // Qwen3 / Gemma-3 both use chatml format
-                    chat_vec.data(),
-                    (size_t)chat_vec.size(),
-                    true,       // add_ass → appends "assistant\n" at the end
-                    buf,
-                    sizeof(buf));
+                // 动态扩容渲染（旧 16KB 栈缓冲被智能体系统提示撑爆 →
+                // "returned 18880, falling back" → 空 prompt → 空响应）。
+                formatted_prompt =
+                    apply_chat_template_grown(chat_vec, true, "gen");
 
-                if (n > 0 && n < (int32_t)sizeof(buf)) {
+                if (!formatted_prompt.empty()) {
                     // The built-in chatml template with add_ass=true already
                     // appends "<|im_start|>assistant\n", which is the correct
                     // generation trigger for Qwen2.5 / Qwen3. Do NOT inject an
@@ -1520,7 +1606,6 @@ struct InferenceEngine {
                     // prompt (an empty assistant turn followed by a second
                     // assistant marker) that drives the model into a degenerate
                     // loop emitting a single special token (151935) forever.
-                    formatted_prompt = std::string(buf, n);
                     // Qwen3 "thinking" models emit a long <think>...</think> chain
                     // before the real answer; at on-device speeds that makes the UI
                     // spin for a very long time. When the user has NOT enabled
@@ -1550,9 +1635,10 @@ struct InferenceEngine {
                     } else if (enable_thinking.load()) {
                         LOGI("thinking enabled (user toggle) -> model will reason before answering");
                     }
-                    LOGI("chatml template applied: %d chars, %zu history msgs", n, history->size());
+                    LOGI("chatml template applied: %d chars, %zu history msgs",
+                         (int)formatted_prompt.size(), history->size());
                 } else {
-                    LOGW("llama_chat_apply_template returned %d, falling back to raw prompt", n);
+                    LOGW("chat template render failed -> falling back to raw prompt");
                     formatted_prompt = prompt;
                 }
             } else {
@@ -2086,21 +2172,33 @@ struct InferenceEngine {
             // successive generations differ.
             llama_sampler_chain_add(smpl_chain, llama_sampler_init_dist((uint32_t)llama_time_us()));
 
+            // Token most recently decoded (for the safe sampler's logits
+            // recovery re-decode): last prompt token before the first
+            // generated token, then the previous generated token.
+            llama_token prev_gen_token = 0;
             while (n_gen < max_tokens && !should_stop) {
                 llama_token new_token = 0;
 
-                // Use the built-in llama.cpp sampler for efficient top-k /
-                // top-p / temperature sampling. This avoids the per-token
-                // O(vocab) allocation and partial_sort of the previous
-                // manual implementation.
-                new_token = llama_sampler_sample(smpl_chain, context, -1);
-                // CRITICAL: feed the sampled token back into the sampler chain.
-                // Without llama_sampler_accept, stateful samplers (penalties /
-                // top_k / dist RNG) never update their internal history, so the
-                // repeat penalty NEVER fires → degenerate repetition loops
-                // (e.g. tokens 9841/57699 repeating forever on turn 2, no EOS).
-                // Matches llama.android ai_chat.cpp: common_sampler_accept().
-                llama_sampler_accept(smpl_chain, new_token);
+                // Safe sampling (2026-10-07): llama_sampler_sample() can
+                // SIGABRT the whole app on null logits / degenerate chain
+                // output (field tombstone). Recovery token/pos = the token
+                // most recently decoded (last prompt token on the first
+                // iteration, the previous generated token afterwards).
+                const llama_token prev_tok = (n_gen == 0)
+                    ? (prompt_tokens.empty() ? (llama_token)-1 : prompt_tokens.back())
+                    : prev_gen_token;
+                const llama_pos  prev_pos = kv_position + n_gen - 1;
+                new_token = sample_token_safe(context, smpl_chain,
+                                              prev_tok, prev_pos, "gen");
+                if (new_token < 0) {
+                    LOGE("generation stopped: sampler returned no token "
+                         "(logits unavailable), graceful stop");
+                    break;
+                }
+                prev_gen_token = new_token;
+                // NOTE: sample_token_safe() already fed the token back via
+                // llama_sampler_accept() — accepting again would double-count
+                // every token in the repeat-penalty history.
 
                 if (n_gen == 0) {
                     LOGI("[DIAG] chosen new_token=%d (sampler chain, n_vocab=%d)",
@@ -2528,7 +2626,7 @@ JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
     jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path,
-    jstring j_draft_path
+    jstring j_draft_path, jint j_n_ubatch, jboolean j_vk_no_subgroup
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
@@ -2537,6 +2635,27 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
 
     // Fresh failure-reason slate per attempt (see g_last_loading_msg above).
     g_last_loading_msg[0] = '\0';
+
+    // GPU fault mitigation (2026-10-07 小米13 Adreno 740 条纹/闪退案)：持续
+    // 满血 prefill burst 触发 GPU 挂死（Adreno-GSL snapshot + device lost）。
+    // 缓解 = 拆小计算块（TONGYI_UBATCH，load() 每次 getenv）+ 可选禁用
+    // subgroup（GGML_VK_NO_SUBGROUP，turnip 在 a740 的挂死经典嫌疑源；
+    // 注意该 env 在 vulkan 设备首次初始化时读取，中途切换需重启 app 生效）。
+    // CPU 档必须保持 ubatch=16（GEMM 垃圾 logits 老 bug），env 覆盖仅 GPU 档。
+    if (j_enable_gpu == JNI_TRUE && j_n_ubatch >= 32) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", (int)j_n_ubatch);
+        setenv("TONGYI_UBATCH", buf, 1);
+        LOGI("gpu tuning: TONGYI_UBATCH=%d", (int)j_n_ubatch);
+    } else {
+        unsetenv("TONGYI_UBATCH");
+    }
+    if (j_vk_no_subgroup == JNI_TRUE) {
+        setenv("GGML_VK_NO_SUBGROUP", "1", 1);
+        LOGI("gpu tuning: GGML_VK_NO_SUBGROUP=1");
+    } else {
+        unsetenv("GGML_VK_NO_SUBGROUP");
+    }
 
     // Mali（天玑/麒麟等 ARM GPU）驱动的 Vulkan 后端对部分 compute 特性
     // dispatch 有缺陷（社区已知：llama.cpp #16881、Gio #274、ppsspp #17426）：

@@ -81,10 +81,17 @@ class InferenceService {
     /// 可选的 dspark 投机解码草稿模型路径（如 Bonsai-27B-dspark-Q4_1.gguf）。
     /// 原生侧加载后启用 DFlash/DSpark 投机加速；null 表示不启用。
     String? draftPath,
+
+    /// GPU prefill 宽度 n_ubatch（0 = 自动：GPU 512 / CPU 16）。
+    /// 小值拆小 dispatch burst，缓解 Adreno GPU fault（小米13 定案）。
+    int nUbatch = 0,
+
+    /// Vulkan 禁用 subgroup（GGML_VK_NO_SUBGROUP，turnip GPU 挂死缓解）。
+    bool vkNoSubgroup = false,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
         '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
-        ', mmproj=$mmprojPath, draft=$draftPath)');
+        ', mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
@@ -95,6 +102,8 @@ class InferenceService {
         'enableMtp': enableMtp,
         'mmprojPath': mmprojPath,
         'draftPath': draftPath,
+        'nUbatch': nUbatch,
+        'vkNoSubgroup': vkNoSubgroup,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;

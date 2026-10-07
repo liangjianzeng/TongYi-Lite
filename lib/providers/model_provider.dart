@@ -377,6 +377,8 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         enableMtp: mtp,
         mmprojPath: mmprojPath, // null = 单文件自包含 VL；两文件形态由原生 mtmd_init 加载
         draftPath: draftPath,
+        nUbatch: gpu.gpuNUbatch, // 0=自动；>0 拆小 GPU prefill burst（GPU fault 缓解）
+        vkNoSubgroup: gpu.vkNoSubgroup,
       );
 
       if (ok) {

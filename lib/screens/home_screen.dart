@@ -114,7 +114,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // if we let those intermediate positions flip _followStream off, the
     // following stops and the incoming assistant message piles up off-screen.
     // So during generation we pin _followStream = true and ignore position.
-    if (ref.read(runningTurnsProvider)[_currentConversationId] ?? false) {
+    if (ref.read(runningTurnsProvider).containsKey(_currentConversationId)) {
       if (!_followStream) setState(() => _followStream = true);
       return;
     }
@@ -479,7 +479,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _voiceSession = null;
     _voiceLongPressPos = null;
     final cancelled = session.cancelMode.value;
-    final text = await session.end(cancelled: cancelled);
+    // end() 触及引擎收尾（引擎往返/录音停止），任何异常都不允许外抛——
+    // release 下未捕获异常会直接杀死 App（语音链路崩溃兜底）。
+    String text = '';
+    try {
+      text = await session.end(cancelled: cancelled);
+    } catch (e) {
+      debugPrint('[Voice] session end error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(this.context).showSnackBar(
+            SnackBar(content: Text('语音收尾异常：$e')));
+      }
+      return;
+    }
     if (!mounted) return;
     if (text.isEmpty) {
       if (!cancelled) {
@@ -493,7 +505,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _textController.text = existing.isEmpty ? text : '$existing $text';
     _textController.selection = TextSelection.fromPosition(
         TextPosition(offset: _textController.text.length));
-    await _sendMessage();
+    try {
+      await _sendMessage();
+    } catch (e) {
+      debugPrint('[Voice] send error: $e');
+    }
   }
 
   /// 麦克风权限被拒：引导去系统设置授权（无需重装 APK）。
@@ -614,7 +630,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // 生成态按「当前会话」判定：多会话并发时，别的会话在跑不影响本会话
     // 的发送按钮（本会话自己在跑才显示停止键）。
     final isGenerating =
-        ref.watch(runningTurnsProvider)[_currentConversationId] ?? false;
+        ref.watch(runningTurnsProvider).containsKey(_currentConversationId);
     final modelState = ref.watch(modelManagerProvider);
 
     return Scaffold(
@@ -650,11 +666,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             },
           ),
         ],
-        // 顶部状态栏最下方：叠一条蓝色上下文占用细线（零额外布局空间）。
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(3),
-          child: _buildContextUsageBar(modelState, isGenerating),
-        ),
       ),
       body: Column(
         children: [
@@ -892,61 +903,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 顶部状态栏最下方的上下文占用细线（叠在 AppBar 底部，不额外占用布局
-  /// 空间）。纯展示：查询/手动压缩入口在输入框左侧的圆形占用圈。
-  ///
-  /// API 接入：宽度 = prompt_tokens / n_ctx（usage + /v1/models 实测槽位）。
-  /// 本地模型：宽度 = KV 缓存已占用位置（kv_used）/ 上下文窗口（kv_ctx）。
-  Widget _buildContextUsageBar(ModelState ms, bool isGenerating) {
-    final settings = ref.watch(settingsProvider);
-    final activeApi = settings.activeApiModel();
-    final hasLocalLoaded = ms.isLoaded;
-    final hasDefault = settings.defaultModelId != null;
-    // 细条显示条件（本地或 API 任一可用即显示）：
-    // - 智能体显式 API 驱动（agentModelSource=api）→ 恒走 API；
-    // - 普通聊天：无本地意图（未加载本地模型 且 无默认勾选）且激活了 API → API；
-    // - 本地模型（已加载 或 勾选默认）→ 显示 KV 缓存占比。
-    final isAgentApi = settings.agentModelSource == 'api' && activeApi != null;
-    final isPlainApi = activeApi != null && !hasLocalLoaded && !hasDefault;
-    final isLocal = hasLocalLoaded || hasDefault;
-    if (!isAgentApi && !isPlainApi && !isLocal) return const SizedBox.shrink();
-
-    final usage = ref.watch(contextUsageProvider)[_currentConversationId];
-    final fraction = usage?.fraction ?? 0.0;
-    // 阈值语义：≥85% 红（撞墙在即，应压缩/换会话）、≥60% 橙（留意）、蓝（健康）。
-    final barColor = fraction >= 0.85
-        ? const Color(0xFFE53935)
-        : fraction >= 0.60
-            ? const Color(0xFFFB8C00)
-            : const Color(0xFF2196F3);
-
-    return SizedBox(
-      height: 3,
-      width: MediaQuery.of(context).size.width,
-      child: Stack(
-        children: [
-          // 极浅底色线（全宽）：让用户看到细线槽位存在，占用为 0 时也可见。
-          const Positioned.fill(
-            child: ColoredBox(color: Color(0x14000000)),
-          ),
-          // 占用细线：宽度 = 占用比例 × 屏幕宽，颜色按阈值分档。
-          Positioned(
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: MediaQuery.of(context).size.width * fraction,
-            child: ColoredBox(color: barColor),
-          ),
-        ],
-      ),
-    );
-  }
-
   /// 手动压缩确认 + 执行：回合执行中拒绝（与活动回合的会话日志竞争）；
   /// 完成后 SnackBar 反馈（清理条数 0 = 没有可压缩的旧工具记录）。
   Future<void> _confirmManualCompact() async {
     final running =
-        ref.read(runningTurnsProvider)[_currentConversationId] ?? false;
+        ref.read(runningTurnsProvider).containsKey(_currentConversationId);
     if (running) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('回合执行中，结束后再压缩')),
@@ -1223,7 +1184,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // 普通聊天（非智能体回合）也要让最后一组进入 live 态：
     // 空答案气泡才会显示唯一的「思考中…」占位、流式光标才会出现。
     final generating =
-        ref.watch(runningTurnsProvider)[_currentConversationId] ?? false;
+        ref.watch(runningTurnsProvider).containsKey(_currentConversationId);
     final messagesAsync = ref.watch(messagesProvider(_currentConversationId));
 
     return messagesAsync.when(
@@ -1443,7 +1404,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 输入框左侧的圆形上下文占用圈（传统进度环形态）：
-  /// 环 = 占用比例（阈值配色与顶部细条一致），环心 = 百分比数字；
+  /// 环 = 占用比例（蓝 <60% / 橙 ≥60% / 红 ≥85% 阈值配色），环心 = 百分比数字；
   /// 无数据时灰环显示「—」。点按 → 上下文详情面板（数字/来源/压缩记录/
   /// 手动压缩）。智能体回合执行中禁用点按（防误触打断注意力）。
   Widget _buildContextUsageRing() {
@@ -2221,7 +2182,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // 批量选择模式下：勾选框 + 点按切换选中；隐藏单个操作菜单。
     final selectionMode = _conversationSelectionMode;
     final selected = _selectedConversations.contains(c.id);
-    final running = ref.watch(runningTurnsProvider)[c.id] ?? false;
+    final running = ref.watch(runningTurnsProvider).containsKey(c.id);
     return ListTile(
       dense: true,
       selected: isCurrent && !selectionMode,

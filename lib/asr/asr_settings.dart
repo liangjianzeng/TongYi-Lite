@@ -34,7 +34,8 @@ class AsrSettings {
   }
 
   /// 热词表（每行一个词；sherpa 按换行切分，逗号连写会失效）。
-  /// = 启用分类的内置词 + 自定义词（去重、去空行）。
+  /// = 启用分类的生效词（默认词 + 用户增词 − 用户删词）+ 自定义词
+  /// （去重、去空行）。
   static Future<String> loadHotwords() async {
     try {
       final s = await _settings();
@@ -47,7 +48,8 @@ class AsrSettings {
       for (final cat in hotwordCategories) {
         // 未配置分类 = 全部启用；配置后只取启用的。
         if (enabled.isNotEmpty && !enabled.contains(cat.id)) continue;
-        words.addAll(cat.words);
+        words.addAll(effectiveCategoryWords(
+            cat.id, s.asrHotwordAdded, s.asrHotwordRemoved));
       }
       for (final line in s.asrHotwordCustom.split('\n')) {
         final w = line.trim();

@@ -476,6 +476,27 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 保存某个热词分类的用户差量编辑（增词/删词；空表 = 清除该分类覆盖，
+  /// 恢复内置词表）。
+  Future<void> setAsrHotwordCategoryEdit(
+      String catId, List<String> added, List<String> removed) async {
+    final nextAdded = {...state.asrHotwordAdded};
+    final nextRemoved = {...state.asrHotwordRemoved};
+    if (added.isEmpty) {
+      nextAdded.remove(catId);
+    } else {
+      nextAdded[catId] = added;
+    }
+    if (removed.isEmpty) {
+      nextRemoved.remove(catId);
+    } else {
+      nextRemoved[catId] = removed;
+    }
+    state = state.copyWith(
+        asrHotwordAdded: nextAdded, asrHotwordRemoved: nextRemoved);
+    await _persist();
+  }
+
   /// 置顶/取消置顶会话（P2 抽屉重构）。
   Future<void> togglePinnedConversation(String id) async {
     final list = [...state.pinnedConversationIds];
@@ -688,9 +709,28 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// OOM 内存守卫总开关。关??= 加载前不再拒绝超大模型（有整机死机风险）??
+  /// OOM 内存守卫总开关。关闭 = 加载前不再拒绝超大模型（有整机死机风险）。
   Future<void> setOomGuardEnabled(bool value) async {
     state = state.copyWith(oomGuardEnabled: value);
+    await _persist();
+  }
+
+  /// GPU 推理时限制刷新率（防闪纹）。关 = 推理期间不干预屏幕刷新率。
+  Future<void> setInferenceLimitRefreshRate(bool value) async {
+    state = state.copyWith(inferenceLimitRefreshRate: value);
+    await _persist();
+  }
+
+  /// GPU prefill 宽度 n_ubatch。0 = 自动（GPU 512 / CPU 16）；改后重新加载
+  /// 模型生效。仅 GPU 后端读取（CPU 档原生恒 16）。
+  Future<void> setGpuNUbatch(int value) async {
+    state = state.copyWith(gpuNUbatch: value < 32 ? 0 : value.clamp(32, 512));
+    await _persist();
+  }
+
+  /// Vulkan 禁用 subgroup（GGML_VK_NO_SUBGROUP）。重启 app 后生效。
+  Future<void> setVkNoSubgroup(bool value) async {
+    state = state.copyWith(vkNoSubgroup: value);
     await _persist();
   }
 

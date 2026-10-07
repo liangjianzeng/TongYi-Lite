@@ -2178,3 +2178,346 @@ README：徽标、功能表加 🔊 TTS 行 + 占用圈/手动压缩行、版本
 release libapp.so ASCII `0.2.9`1/`edgeTtsVoice`1/`refreshUsageEstimate`2 +
 UTF-16LE `语音播报`2/`自动播报`1/`试听`1/`手动压缩`4。**双机覆盖安装 Success**
 （8 Elite + 小米13，dumpsys 核实 versionCode=17 / versionName=0.2.9）。
+
+## 2026-10-06 TTS"有些音色无法播放试听"定案（两根因，探针实锤）+ 语音浮层键盘遮挡修复
+
+> **排障工具**：`tool/tts_voice_probe.dart`（纯 Dart，`dart run` 直跑）——用 vendored
+> edge_tts 对五地区 36 个音色逐个合成中文/英文文本，报告 OK/EMPTY/ERR。
+> TTS"某音色不出声"先跑它，别猜。**根因是服务端静默返回空音频**（turn.end 无
+> audio → toBytes 空 → app 侧 `bytes.isEmpty` 静默失败，无异常无日志）。
+
+**根因 1：英文音色读不出中文（服务端行为）**——所有非 Multilingual 的
+en-US/en-GB 音色对中文文本一律返回 EMPTY（英文文本正常）；少数例外
+（AndrewNeural/EmmaNeural 等能读中文）。Multilingual 变体中英文都行。
+修复 = 试听文本按音色语言选择（`settings.edgeTtsVoice.startsWith('en-')`
+→ 英文试听句）。**注意：中文回复配英文音色自动播报仍会无声**（固有限制，
+混合内容建议选 Multilingual 变体）。
+
+**根因 2：方言音色 SSML 长名错拆（vendored 包 bug）**——
+`communicate.dart _voiceShortToLong` 正则按前两段切 locale，
+`zh-CN-liaoning-XiaobeiNeural` 被拼成 `(zh-CN, liaoning-XiaobeiNeural)`，
+服务端不认 → 空音频。修复 = 末段是 voice 名、其余整体是 locale
+（lastIndexOf('-') 切分）。修后探针复测 liaoning/shaanxi 均 OK(25KB/23KB)。
+
+**语音浮层键盘遮挡（真机 bug）**：按住说话回显浮层 `_HoldOverlay` 插在
+root overlay（rootOverlay: true），`Positioned.fill` + 底部对齐 margin 32
+——root overlay **不随 Scaffold resizeToAvoidBottomInset 收缩**，键盘开着
+时长按麦克风，浮层整个沉在键盘后面。修复 = margin 底部加
+`MediaQuery.viewInsetsOf(context).bottom`（依赖继承自动随键盘弹起/收起
+重建）。测试坑：`tester.view.viewInsets = FakeViewPadding(...)` 是
+**物理像素**（ViewPadding 语义），要 ×devicePixelRatio 才等于逻辑键盘高度。
+回归：test/asr/hold_overlay_test.dart 2 项（键盘上方 + 弹起/收起自动跟随）。
+
+**构建坑补充**：`cd android && ./gradlew.bat` 后 **shell 停在 android/**，
+后续相对路径（build/...）全查错位置——release assemble"看似失败"实为检查
+路径错了。构建命令一律用 `cmd //c "cd /d E:\DTXY\TongYi-Lite && ..."`
++ 绝对路径检查产物。flutter assemble 成功时**本来就无 stdout**（勿当失败）。
+
+**2026-10-06 21:12/21:13 重打包（v0.2.9+17 复用）**：
+app-debug.apk 151,453,443 B / app-release.apk 85,416,758 B；字符串级验收过
+（debug kernel/release libapp.so：`hold-overlay-card` + 英文试听句均命中）。
+双机覆盖安装 Success（小米13 100.70.7.18 + 8 Elite 100.123.25.54）。
+
+## 2026-10-06 Edge 免费接口方言上限定案（实测）：大陆方言只有 2 个，Azure 方言蹭不到
+
+> 用户想加更多大陆方言。**实测定案：Edge 免费接口的中文音色共 14 个**
+> （zh-CN 8 / zh-HK 3 / zh-TW 3），**大陆方言仅 liaoning-Xiaobei（女）+
+> shaanxi-Xiaoni（女）两个**——/voices/list 全量 dump 实锤，且无 wuu-CN/nan-CN/
+> yue-CN 等其他中文方言 locale（142 个 locale 里中文相关仅这 5 个）。
+
+- **Azure 独有方言蹭不到**：Azure 目录有 `zh-CN-XiaoxiaoDialectsNeural`
+  （单音色，SSML `<lang xml:lang="zh-CN-sichuan">` 选口音，覆盖河南/四川/
+  山西/安徽/湖南/甘肃等约 11 种）+ 陕西男声 `zh-CN-shaanxi-YuntaNeural`，
+  但 **Edge 免费接口校验音色名单，这些名字全部 EMPTY**（方言矩阵探针
+  tool/tts_dialect_probe.dart 17 项全 EMPTY 实测）。
+- **vendored 包已加 `dialectLocale` 参数**（Communicate 可选参，SSML 包
+  `<lang>` 元素）——Edge 路径暂无用武之地，为将来接 Azure Speech 预留，
+  null 时行为与旧版逐字节一致。
+- 若未来要方言全家桶：需接 Azure Speech（F0 免费档 50 万字符/月，用户
+  注册拿 region+key），合成走 Azure 端点 + XiaoxiaoDialectsNeural。
+- 排障工具留存：tool/tts_voice_probe.dart（全音色矩阵）、
+  tool/tts_dialect_probe.dart（方言矩阵）、tool/tts_locale_dump.dart
+  （locale dump）。
+
+## 2026-10-06 热词词表扩容 + 分类词表查看/编辑（差量覆盖存储）
+
+> 用户反馈：热词覆盖不够 + 设置页看不到分类里到底是什么词、没法增删。
+
+- **默认词表 5 类 → 9 类**（约 180 → 约 290 词）：新增 apps（常用应用/服务）、
+  phoneops（手机操作）、life（生活服务）、office（办公学习）。
+  **铁律：新增热词必须纯中文**——混合英文的词在 HotwordCorrector.configure
+  分流时两路全丢（解码器要求逐字在模型词表内；同音校正要求纯汉字）。
+  实锤例：'QQ音乐' 已换成 '喜马拉雅'；存量 '彤 Yi' 实际是惰性词（待另修）。
+  test/asr/hotwords_test.dart 有纯中文断言钉死新分类。
+- **分类词表可查看/编辑**：设置页「热词词表（查看/编辑）」ExpansionTile 逐
+  分类列词数，点进多行编辑框（预填生效词；删行 = 从分类移除；「恢复默认」
+  清差量）。存储用**差量覆盖**：`asrHotwordAdded`/`asrHotwordRemoved`
+  （Map<catId, 词表>）——增词 = 新表−默认表、删词 = 默认表−新表，默认词表
+  改版不顶掉用户编辑；与启用分类开关、自定义热词（asrHotwordCustom）正交，
+  loadHotwords 统一合并。纯函数 effectiveCategoryWords/diffCategoryWords
+  在 default_hotwords.dart，7 项回归钉死。
+- **2026-10-06 21:38/21:39 重打包（v0.2.9+17 复用）**：
+  app-debug.apk 151,455,507 B / app-release.apk 85,436,854 B；字符串级验收
+  （热词词表/喜马拉雅/asrHotwordAdded 均命中）。双机覆盖安装 Success。
+
+## 2026-10-07 顶部占用细条废弃（用户定案）
+
+> 用户：底部输入框已有占用圈管理，AppBar 底部 3px 上下文占用细条应废弃。
+> 移除 `_buildContextUsageBar` 与 AppBar `bottom: PreferredSize`（home_screen.dart）；
+> `contextUsageProvider` 数据层保留（占用圈/详情面板唯一入口）。注释措辞同步
+> 「细条→占用圈」。test/providers 40 项全绿；analyze 无新增告警。
+
+## 2026-10-07 语音输入"直接崩溃"定案（llama_sampler_sample SIGABRT）+ ASR worker isolate + 智能体设置拆档
+
+> 用户报"刚语音输入搞(狗)直接崩溃了"。**崩溃不在语音链路，在本地模型推理**：
+> 语音转写的短消息发送后，plain 路径采样 `llama_sampler_sample` 内 GGML_ASSERT
+> 失败 → `ggml_abort` → SIGABRT 整个 App（dropbox tombstone 实锤，8 Elite，
+> v0.2.9+17）。release 下无断言文本，且 logcat tag `llama` **没有**
+> "invalid logits id" 错误 → 可判 abort 点在 `llama-sampler.cpp:956`
+> `GGML_ASSERT(cur_p.selected >= 0 && < size)`（940 的 logits 断言失败会先打
+> ERROR 日志）。触发条件未复现（疑与 KV 复用后 outputs 状态退化有关），
+> 修复走"消除崩溃类"而非"修触发条件"。
+
+**JNI 安全采样（tongyilite_jni.cpp）**：
+- 新增 `sample_token_safe()`：复刻 `llama_sampler_sample` 语义（同链同序
+  apply+accept）但**绕开两处致命断言**——① logits 为 null → 用"上一次解码的
+  token 在其 KV 位置重解码一次"恢复 outputs（一次机会），仍失败 → 返回 -1
+  优雅终止生成；② chain 输出 selected 越界 → 回退首候选。候选缓冲
+  thread_local 复用，O(vocab) 分配一次性。
+- plain 路径与 vision 路径两处调用点全部替换。**注意：helper 内部已
+  accept，调用点不得再 accept（重复计入 repeat-penalty 历史）**。
+- 排障提示：tombstone 无 "Abort message" 行 + logcat 无 llama ERROR 日志
+  = abort 在 sampler 自身断言；下次升级 llama.cpp 先盯这类。
+
+**ASR 引擎迁入 worker isolate（首次使用卡顿根治，lib/asr/sherpa_streaming_asr.dart）**：
+- 根因：识别器加载（~160MB ONNX）+ 解码 + 热词校正在主 isolate → 首次按住
+  说话 UI 整体冻结数秒（warmup 预读页缓存救不了 FFI 加载阻塞）。
+- 现在：sherpa 全部工作在**常驻 worker isolate**（进程级单例，识别器跨会话
+  复用）；主 isolate 只跑 record 录音（平台通道不能进后台 isolate），PCM 块
+  经 SendPort + TransferableTypedData 零拷贝转发；worker 内异常就地捕获回传
+  error 事件，**语音引擎层失败不再能杀 App**。
+- `warmup()` 升级：预读页缓存后直接在 worker **预加载识别器**——首次长按
+  秒开（代价：App 启动即持有识别器内存；原设计首次使用后本来也常驻）。
+- 协议：load（档位对齐+热词配置）/ session（建流）/ audio / stop / discard；
+  热词在主 isolate 读设置（prefs 平台通道），词表传 worker。
+- HoldToTalkSession 接口不变；`stop()` 在 worker 未建时防御返回 ''。
+
+**语音浮层状态语义（用户要求）**：声浪 = 真正监听开始；此前加载期就显示
+"请说话…"是误导。现在 `!ready` → 转圈 + "引擎加载中，请稍后…"（无声浪无
+麦克风图标），就绪后切声浪 + "松开发送"/"请说话…"。hold_overlay_test 新增
+2 项钉死。home_screen `_onVoiceLongPressEnd` 全程 try/catch（release 下
+未捕获异常 = 直接杀 App）。
+
+**智能体设置拆档（API 档 vs 本地档，用户："很多参数面向 API，不适用短 KV
+本地模型，tab 太长"）**：
+- 执行参数卡只留**两档共用**项（步数/并发槽位/搜索上限/每步预算/超时/温度/
+  思考守卫——这些本就按 isApi 切换存取值）。
+- 新增「☁️ API 档专属」卡（**仅 isApi 时渲染**）：目标无人值守轮数、API
+  上下文压缩预算、子代理专用模型、压缩摘要专用模型（后两个从"能力与并行"
+  卡迁入）、MCP 远程工具（从 Skills 卡迁入）。
+- 新增「📱 本地档专属」卡（**仅 !isApi 时渲染**）：智能体上下文长度 n_ctx
+  （原在执行参数卡内 isApi 置灰，现本地档才出现）。
+- 本地用户看到的智能体 Tab 显著变短，且不再出现任何"当前档不生效"的配置。
+
+**顺手修真 bug**：`settings_screen initState` 的 `TabController(length: 5)`
+而 TabBar/TabBarView 是 **6 个**（开发者 tab 加入时漏改）——debug 断言必崩
+（用户桌面 release 无断言才没炸出来），改 length: 6。
+
+**回归**：test/asr 11 + test/agent+providers+services+tts+websearch 596 项
++4 skip 全绿；analyze lib+test/asr 0 error（44 条告警均为旧代码既有）。
+- **2026-10-07 08:15/08:16 重打包（v0.2.9+17 复用）**：
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\` —
+  app-debug.apk 151,461,790 B / app-release.apk 85,443,626 B。
+  字符串级验收过：debug kernel UTF-8（引擎加载中，请稍后…/API 档专属/
+  本地档专属/sherpa-asr-worker）+ libtongyilite_jni.so（logits unavailable/
+  recovery re-decode = 新采样器实锤编入）；release libapp.so UTF-16LE 同验。
+  8 Elite（100.123.25.54 中继）覆盖安装 Success。小米13 未装，重连后
+  `adb install -r -t`。
+
+## 2026-10-07 TTS 卡"异常遮挡"定案：方言音色长名撑爆下拉 → RenderFlex 溢出条
+
+> 用户截图实锤：TTS 卡右上压着黄黑条纹 "RIGHT OVERFLOWED BY 87 PIXELS" 溢出
+> 指示条，盖住「回复后自动播报」开关和音色下拉右侧。
+> **根因**：方言音色全名 `Xiaoni · zh-CN-shaanxi-XiaoniNeural` 太长（方言
+> 变体 10-06 上新后出现），音色 DropdownButtonFormField 没有 `isExpanded`，
+> 选中行文本把 suffixIcon（刷新按钮）挤出界 → 溢出指示条遮挡 UI。
+> **修复**：下拉加 `isExpanded: true` + 条目 Text `maxLines:1 + ellipsis`
+>（TTS 音色 + 子代理专用模型 + 压缩专用模型三处同防）。
+> **经验**：DropdownButtonFormField 只要带 suffixIcon/可能长名，必须
+> isExpanded+ellipsis，否则长配置名一出现就是溢出条遮挡。
+> 08:32 重打 debug（151,459,857 B）覆盖安装 8 Elite Success。
+
+## 2026-10-07 规则：自动打包可以，推送必须等用户安排 + API 档执行中停止键消失定案
+
+> **用户指令（长期有效）**：构建/打包可以自动做；**推送（覆盖安装到真机/
+> git push 远端）必须等用户明确安排**，不要自动执行。下文的"重打包后覆盖
+> 安装 Success"流程自本条起废止——打包完只报路径和验收结果。
+
+**执行中停止键消失（API 档必现，真机实锤）**：`runningTurnsProvider` 的
+map 值 = **是否本地路线**（true=本地/false=API），不是生成标志。home_screen
+五处用 `map[convId] ?? false` 当"生成中"读 → **API 档回合值 false 被当成
+空闲**：composer 停止键/插话键不出现（只剩 🎤）、live 回合占位、滚动跟随、
+手动压缩门控、会话列表执行中标记全部失效。本地档（值 true）侥幸正常，
+所以此前测试没炸出来。
+- **修复**：五处全部改 `containsKey(convId)`；provider 注释加 ⚠️ 钉死语义
+  （`?? false` 禁止）。composer 四态不变：生成中+空输入=⏹停止、生成中+
+  有文字=➤插话、空闲+有文字=发送、空闲+空输入=🎤长按说话。
+- 排障教训：Map<String,bool> 语义的 provider，消费端"?? 默认值"是典型的
+  语义坍缩——false 值和"不存在"被合并。这类判断一律 containsKey/非空判定。
+- 回归：test/providers+test/agent 497+2 skip 全绿；analyze 0 error。
+
+## 2026-10-07 设置滑块 k 级显示统一（用户："全部滑块 k 级，有些还是字节数"）
+
+- `_buildSliderRow` 拖动气泡原恒显 `label: '$value'` 裸数值 → 改用行尾同款
+  `display` 串。
+- 新增顶层助手 `_formatKValue(v, unit)`：1024 进位，1024→"1k token"、
+  1536→"1.5k token"、960→"960 token"（顺带修掉旧显示 1536→"2k" 的
+  toStringAsFixed(0) 四舍五入 bug）。
+- 替换四处裸数值：智能体上下文长度（8192 token→8k token）、每步生成预算、
+  API 上下文压缩预算、推理引擎「上下文大小」（8192 字→8k token，原单位
+  "字"也是错的）。步进本就是 1k/4k 整数 k，无精度损失。
+- 层数（gpuLayers）/MB（OOM 余量）/%（文字缩放）/次数（搜索/槽位）类滑块
+  语义清晰，保持原样。08:45 重打 debug（151,460,855 B），**未推送**。
+
+## 2026-10-07 本地模型智能体"空响应"定案：16KB 栈缓冲撑爆 chat 模板渲染（真机 logcat 实锤）
+
+> 小米13 / Spark-X2.5 4B / 智能体模式连续"本轮执行失败：模型返回空响应"。
+> logcat 铁证链：`llama_chat_apply_template returned 18880, falling back to
+> raw prompt` → `tokenize(): '' -> 0 tokens` → 0 token prompt → 无 prefill →
+> 无 logits →（新安全采样器按设计优雅终止，没崩）→ 空响应。
+> **与 2026-10-07 采样器/ASR 改动无关**，是被智能体系统提示词撑爆的老雷。
+
+**根因**：JNI 用固定 `char buf[16384]` 渲染 chat 模板。b11267 的
+`llama_chat_apply_template` **恒返回渲染全长**（缓冲不足时 strncpy 截断、
+返回值仍是需要的大小）——智能体系统提示+工具定义 ≈19KB > 16KB，调用方
+`n < sizeof(buf)` 判定失败 → 回退 `formatted_prompt = prompt`，而智能体
+路径 prompt 形参为空（内容在 messages 里）→ 空 prompt。普通聊天 prompt
+小，从未触发，故长期潜伏。
+
+**修复**：新增 `apply_chat_template_grown()`——先按 16KB 试渲染，返回值
+大于缓冲则按需扩容（+4KB 余量）重渲染；两处调用点（plain + vision）全部
+替换。修复后超长 prompt 走既有预算保护（丢最旧 token 保尾部）。
+**验证铁律**：APK 内 libtongyilite_jni.so 搜 `chat template needs`（注意
+"regrowing" 不含子串 "regrowth"，验收串别写错）。
+**用户侧配套**：小米13 agentNctx=4096，智能体系统提示 ≈19KB（≈5k+ token）
+会触发截断——建议智能体上下文长度调到 ≥8192（本地档专属卡，改后重载模型）。
+**08:51 重打 debug（151,460,855 B），未推送（等用户安排）。**
+
+## 2026-10-07 推送策略定案（用户指令，更新当日"推送等安排"规则）
+
+> **小米13（100.70.7.18，Tailscale 直连）= 主开发调测机，流量充足：
+> 每次打包完成后默认推送（`adb install -r -t`），无需逐次请示。**
+> **另一台 8 Elite（100.123.25.54，DERP 中继）必须等用户明确下达推送指令**，
+> 不要默认推。
+> 即：打包 → 自动推小米13 → 报告路径与安装结果；8 Elite 只在用户点名时推。
+
+## 2026-10-07 小米13 OpenCL 推理时屏幕闪条纹（排查中，待后端对照定案）
+
+> 现象：小米13（Adreno 740）本地模型 GPU 加速（OpenCL 全量 offload：2.42GB
+> 权重 + 432MB KV + 182MB 计算全在 GPU）推理时屏幕闪现奇怪条纹/显示。
+> **用户初判实验结果：玩游戏（其他重 GPU 负载）不闪 + 回答内容正常**。
+> → 排除设备级带宽问题（嫌疑一降权）；回答正常 = 权重/KV 未被污染，
+> 若是内核越界写则只踩显示/中间缓冲（嫌疑二部分成立但不能解释数据完好）。
+
+**剩余假设**：① OpenCL 内核越界写显示缓冲（需要后端对照锁死）；
+② Adreno 计算内核 vs 显示渲染抢占的调度现象（长时 CL dispatch 挤掉
+显示帧）。**区分实验**：Vulkan/CPU 后端对照（两后端都闪=调度层，仅
+OpenCL 闪=内核审计 q4_K GEMM）；GPU 层数 100→40 看条纹是否负载敏感；
+条纹形态/出现时序（prefill 期 vs 全程）待用户补充。
+**铁律**：真机视觉类问题本模型不能看图，全部走用户口述/文本通道取证。
+
+> **定案补充（用户时序取证）**：条纹只出现在**模型加载 + prefill**阶段，
+> 流式输出开始后消失。加载期无任何内核执行（纯权重 DMA）→ **排除内核
+> 越界写**；回答始终正常 → 数据未污染。定案 = **prefill/加载的瞬时显存
+> 带宽挤占显示供帧**（Adreno UMA 计算负载 vs 显示调度，设备级现象，
+> 无数据风险）。游戏不触发 = 帧步调受 vsync 节制非持续满血突发。
+> **缓解方案（待用户点头）**：推理期自动锁 60Hz（preferredDisplayModeId，
+> 回合结束恢复 120Hz），做成 GPU 后端默认开的开关；减 GPU 层数不划算。
+
+## 2026-10-07 GPU 推理防闪纹落地：推理期自动锁 60Hz（小米13 默认已推）
+
+> 定案（见上节）后落地缓解。**新设置 `inferenceLimitRefreshRate`（默认开）**
+>：设置 → 推理引擎 →「🖥️ GPU 推理时限制刷新率（防闪纹）」。
+- **Android**：MainActivity app 通道新增 `setPreferredRefreshRate(fps)`——
+  按 `supportedModes` 找最接近 fps 的模式锁 `preferredDisplayModeId`；
+  fps<=0 = 清锁恢复跟随系统。
+- **Dart**：AppBridge.setPreferredRefreshRate 封装（静默失败）；
+  chat_provider `_syncRunningState` 挂钩 `_updateInferenceRefreshRate()`：
+  存在活跃回合（含未定路由占位）且 `gpuBackend != 'cpu'` → 锁 60，
+  回合清空 → 恢复。API 回合不占 GPU 引擎不介入；设置关闭时不干预。
+- **注意**：_syncRunningState 是回合注册/注销的唯一汇聚点，联动挂在它
+  上面天然覆盖加载+prefill+生成全程与多会话并发。
+- **回归**：settings_service_test 新增开关默认开/往返/旧配置缺键兼容 3 断言
+  （全量 25 项绿）；analyze 0 error。验收：kernel `防闪纹` 命中、
+  dex `setPreferredRefreshRate` 命中（classes18.dex）。
+- **09:38 重打（151,465,231 B）小米13 默认推送 Success**（按 2026-10-07
+  推送策略）。
+
+> **防闪纹 MIUI 适配定案（09:57 真机实证）**：preferredDisplayModeId/
+> preferredRefreshRate 窗口级偏好被 MIUI"智能刷新+触摸加速"**无视**
+>（回合期间实测恒 120）；Android 16 上 ViewRootImpl.mSurfaceControl 字段
+> 已消失（反射路线死）。**生效通道 = SurfaceView.getSurfaceControl()
+>（API 31+ 公开 API）+ Transaction.setFrameRate(FIXED_SOURCE)**——Flutter
+> 渲染面就是 FlutterSurfaceView，MainActivity 递归找到它投票，实测回合期
+> renderFrameRate 恒 60。恢复路径 setFrameRate(0, DEFAULT)。
+> 待用户目测：60Hz 下条纹是否消失（不消失 → 回到内核审计线）。
+
+> **60Hz 判决（用户目测）：仍闪屏** —— surface 级 60Hz 锁已实证生效
+>（renderFrameRate 恒 60）条纹依旧 → **纯 120Hz 扫描带宽挤占理论被否**：
+> 60Hz 下 DPU 每帧时间预算翻倍、带宽需求减半，若是带宽不足应显著缓解。
+> 剩余假设重排：① **面板供电/PWM 闪**（加载+prefill = 持续满血电流突发，
+> 游戏受 vsync 步调约束占空比低；60Hz 无关电学，完美吻合全部证据；
+> 小米13 低亮度 PWM 调光敏感）——判别：高亮度/MIUI 防闪烁(DC调光)下
+> 是否消失 + 条纹形态（规则横纹/亮度闪烁=电学，随机彩色乱码=内存）；
+> ② **分配重叠**（推理写落进 DPU 扫描缓冲；负载量级吻合：加载 2.4GB 写
+> > prefill 大中间量 > decode 每 token 微量 → 恰好"加载/prefill 闪、流式停"）
+> ——判别：CPU 后端对照（CPU 同样打满内存总线，闪=设备级电学/带宽，
+> 不闪=OpenCL 专属走内核/分配审计）；③ 内核越界写已排除（加载期无内核）。
+
+> **终局定案（2026-10-07 12:05 崩溃实锤，推翻"分配踩踏"假说）**：
+> **条纹 = Adreno GPU 挂死/复位（GPU fault）的显示侧症状**。崩溃瞬间监控
+> 抓到完整链条（lfm2.5-2.6b / vulkan / load 期）：
+> 1. `W/Adreno-GSL: log_gpu_snapshot — not generating user snapshot`
+>    （Adreno 驱动取 GPU 快照 = GPU fault/hang 恢复动作）；
+> 2. `E/flutter: command_queue_vk.cc Failed to submit queue: ErrorDeviceLost`
+>    （设备被驱动复位丢失，Impeller 无法提交 → app 闪退）；
+> 3. `E/SurfaceFlinger: SF-BufferCheck: Buffer processing hung for over
+>    4711ms due to backpressure`（显示合成器停摆 4.7s = GPU 复位窗口，
+>    乱码/条纹出现在此窗口）。
+> 证据自洽：随机彩色乱码=复位窗口扫描半写缓冲；CPU 后端干净=无 GPU
+> fault；60Hz 无效=与带宽无关；简单对话正常=短 prompt 微 burst 不足以
+> 触发；智能体（大 prefill）/模型加载（全量权重上传）= 持续满血 GPU 计算
+> burst 才触发；游戏不闪 = 商业游戏负载是驱动成熟验证过的（我们的 llama
+> GEMM compute 不是）。OpenCL（高通闭源驱动）与 Vulkan（turnip）共同底层
+> = 同一颗 Adreno + kgsl 内核驱动。小米13（a740）故障，8 Elite（a825）
+> 同代码稳定 → 机型/驱动特定。
+> **app 侧无可指责点（标准 CL/VK API）**；缓解杠杆：GPU n_ubatch 512→
+> 64/128（降单次 dispatch burst，标准 Adreno 稳定性旋钮，待实验）；
+> 保底 = 该机用 CPU 后端（已证干净）。OpenCL 档此前数周只闪不崩
+> （fault 可恢复），Vulkan/turnip-on-a740 会升级到 device-lost 闪退。
+
+**缓解落地（GPU 稳定性调优，2026-10-07 12:35 包已推小米13）**：
+- **JNI**：`nativeLoadModel` 签名加 `nUbatch/vkNoSubgroup` 两参——nUbatch≥32
+  且 GPU 档才 setenv `TONGYI_UBATCH`（CPU 档恒 16，env 覆盖若不挡会复活
+  CPU GEMM 垃圾 logits 老 bug，**必须挡**）；vkNoSubgroup → setenv
+  `GGML_VK_NO_SUBGROUP`（该 env 在 vulkan 设备首次 init 时读，**中途切换
+  需重启 app 生效**）。
+- **Dart**：InferenceSettings 加 `gpuNUbatch`（默认 0=自动，provider 夹紧
+  <32→0）/`vkNoSubgroup`（默认关）；inference_service.loadModel 与
+  model_provider 全透传；设置→推理引擎新卡「⚙️ GPU 稳定性调优（防 GPU
+  fault）」：n_ubatch 滑条（0~512，32 倍数步进，divisions=16）+ subgroup
+  开关。
+- **验收**：settings 测试 26 项绿；analyze 0 error；APK 字符串级（debug
+  kernel `GPU 稳定性调优`3/`nUbatch`8；release libapp UTF-16LE 命中 +
+  ASCII nUbatch 2；双包 libtongyilite_jni.so `gpu tuning:`2、dex
+  vkNoSubgroup 3/2）。
+- **APK**：app-debug.apk 151468784 B / app-release.apk 85445670 B
+  （12:33/12:35，v0.2.9+17），小米13 `install -r -t` Success。
+- **2026-10-07 14:43 release 推 8 Elite Success**（用户指令，100.123.25.54
+  DERP 中继，app-release.apk 85445670 B，覆盖安装 versionCode=17/0.2.9，
+  lastUpdateTime 14:43:09）。该机同样获得 n_ubatch/subgroup 旋钮但**无需
+  动设置**（同代码一直稳定）。
+- **小米13 推荐实验序**：① OpenCL + n_ubatch=64 看条纹是否消失（此前
+  OpenCL 只闪不崩，最安全）；② Vulkan + n_ubatch=64 + 禁 subgroup（若
+  ①无效）；③ 仍闪 = 该机 GPU 档放弃，用 CPU。8 Elite 不受影响（同代码
+  一直稳定，无需动设置）。

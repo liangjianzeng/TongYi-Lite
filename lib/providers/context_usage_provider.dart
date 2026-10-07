@@ -28,7 +28,7 @@ class ContextUsage {
   bool get hasData => fraction != null;
 }
 
-/// 按会话 id 跟踪 API 接入模型的上下文占用，供顶部状态栏细条展示。
+/// 按会话 id 跟踪 API 接入模型的上下文占用，供输入框上下文占用圈展示。
 ///
 /// 仅记录 API 接入模型的占用；本地模型不更新（UI 侧也不显示）。
 class ContextUsageNotifier extends StateNotifier<Map<String, ContextUsage>> {

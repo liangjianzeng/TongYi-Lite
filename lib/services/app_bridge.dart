@@ -48,4 +48,17 @@ class AppBridge {
       return false;
     }
   }
+
+  /// GPU 推理防闪纹：把窗口刷新率锁到最接近 [fps] 的支持模式（60 = DPU
+  /// 供帧带宽减半，prefill/加载不再挤占显示）。[fps] <= 0 = 恢复跟随系统。
+  /// 静默失败（老设备不支持 preferredDisplayModeId 时）返回 false。
+  static Future<bool> setPreferredRefreshRate(double fps) async {
+    try {
+      return await _ch.invokeMethod<bool>('setPreferredRefreshRate',
+              <String, dynamic>{'fps': fps}) ==
+          true;
+    } catch (_) {
+      return false;
+    }
+  }
 }
