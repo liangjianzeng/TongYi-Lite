@@ -662,13 +662,14 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 > LLM 压缩/并行安全/fan-out）、composer 输入区重构、sherpa-onnx 端侧语音、KV 占用圈/手动压缩、
 > Edge TTS——以上均已合入 main 并双真机（小米 13 / 8 Elite）验证。
 
-**下载**（release 签名 `CN=TongYiLite`）：
+**下载**（release 签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
-> [⬇️ 下载 `TongYi-Lite-v0.2.0.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.0.apk)
-> `SHA-256: FB:BE:1B:6C:F8:79:AB:94:1A:65:CD:D7:A7:A8:DD:6F:5A:6B:B6:40:41:2D:E3:8C:43:CB:89:4F:08:88:69:92`
+> [⬇️ 下载 `TongYi-Lite-v0.2.9.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.9.apk)
+> v0.2.9+17 · 71,169,325 B（2026-10-08，含长截图切块与包体瘦身 -14.3MB）
+> `SHA-256: e32ac17f949c0e8ceb67cc34e795a06f29417e4dce774a1532dd262415894b83`
 
-> ⚠️ 2026-09-05 重新发布：修正为 `CN=TongYiLite` 官方签名证书（原 `652245B5…` 非官方证书）。
-> 后续版本发布流程：构建产物拷入 `releases/` 并在此更新链接与 SHA-256。
+> ⚠️ 覆盖安装请用同一签名证书（`CN=TongYiLite`），并保持 versionCode ≥ 已装版本；`adb install -r`
+> 可保留已下载模型缓存，切勿先卸载。后续版本发布流程：构建产物拷入 `releases/` 并在此更新链接与 SHA-256。
 
 ---
 
