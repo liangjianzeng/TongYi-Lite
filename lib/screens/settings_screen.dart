@@ -65,7 +65,8 @@ import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
 import '../services/settings_service.dart';
 import '../services/model_manager.dart';
-import '../services/model_storage_service.dart' show modelStorageService;
+import '../services/model_storage_service.dart'
+    show ModelStorageService, modelStorageService;
 import 'inference_log_screen.dart';
 
 /// App-lifetime guard: the local .gguf scan runs **once per app launch**.
@@ -4189,32 +4190,38 @@ class _StorageInfoWidget extends ConsumerWidget {
     int totalBytes = 0;
 
     try {
-      // 模型实际存储位置与 ModelStorageService 的候选目录一致：
-      // 外部主目录（/storage/emulated/0/TongYiLite/models 等）+ 内部
-      // app_flutter/models + app docs 回退。此前只扫 app docs → 恒 0MB。
-      final dirs = <Directory>[];
-      try {
-        dirs.add(await modelStorageService.getModelsRootDir());
-      } catch (_) {}
-      dirs.add(
-          Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'));
-      try {
-        final appDir = await getApplicationDocumentsDirectory();
-        dirs.add(Directory(p.join(appDir.path, 'models')));
-      } catch (_) {}
+      // 目录列表统一由 ModelStorageService 提供（内含 Android 路径别名去重）。
+      //
+      // 曾经这里自行拼三份目录：主目录 + 硬编码 `/data/data/<pkg>/app_flutter/models`
+      // + `getApplicationDocumentsDirectory()/models`。而后者返回的是
+      // `/data/user/0/<pkg>/app_flutter/models` —— 与前者是**同一个物理目录**
+      // （同一 inode，bind mount 别名），字符串却不同，于是同一个目录被扫两遍：
+      // **每个模型列出两遍、总占用翻倍**。去重已在 candidateModelDirs() 内完成。
+      final dirs = await modelStorageService.candidateModelDirs();
 
-      final seenPaths = <String>{};
+      final seenFiles = <String>{};
       for (final dir in dirs) {
-        if (!seenPaths.add(dir.path)) continue;
         if (!await dir.exists()) continue;
         await for (final entity in dir.list(recursive: true)) {
           if (entity is! File) continue;
           final isGguf = entity.path.endsWith('.gguf');
           final isMmproj = entity.path.endsWith('.mmproj');
+          // 投机草稿头落盘形如 `<模型id>.dspark.gguf`：它是模型的附属文件，
+          // 不是独立模型。此前只按扩展名过滤，草稿头会多出一行（看起来像"双份模型"）。
+          final isDspark = entity.path.endsWith('.dspark.gguf');
           if (!isGguf && !isMmproj) continue;
+          // 兜底：同一物理文件的不同路径写法（别名/软链）只计一次。
+          var realPath = entity.path;
+          try {
+            realPath = await entity.resolveSymbolicLinks();
+          } catch (_) {}
+          if (!seenFiles.add(ModelStorageService.pathDedupeKey(realPath))) {
+            continue;
+          }
           final sizeBytes = await entity.length();
           totalBytes += sizeBytes;
-          if (!isGguf) continue; // 投影器/草稿头只计入总量，不单列模型行
+          // 投影器 / 草稿头只计入总量，不单列模型行。
+          if (!isGguf || isDspark) continue;
           final fileName = p.basenameWithoutExtension(entity.path);
 
           String displayName = fileName;

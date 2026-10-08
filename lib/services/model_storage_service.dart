@@ -23,6 +23,70 @@ class ModelStorageService {
   // 持久化存储文件夹名（重装 APK 后仍保留，因为不在 app-private 目录下）
   static const String _appFolder = 'TongYiLite';
 
+  /// 本应用包名。app 私有目录在不同调用路径下会有多种字符串写法
+  /// （`/data/data/<pkg>` vs `/data/user/0/<pkg>`），统一以此折叠去重。
+  static const String _packageName = 'com.dgxspark.tongyilite';
+
+  /// 去重键：把「同一个 app 私有目录的不同路径写法」折叠成同一个键。
+  ///
+  /// Android 上 `/data/data/<pkg>`、`/data/user/0/<pkg>`、
+  /// `/data/mirror/data_ce/null/0/<pkg>` 指向**同一个物理目录**（设备别名 bind mount，
+  /// 且 `getApplicationDocumentsDirectory()` 在 Android 上返回的正是
+  /// `/data/user/0/<pkg>/app_flutter` 形态），但字符串不同。
+  ///
+  /// 只按字符串去重 = 同一个模型目录被扫两遍 → 「模型管理 → 存储空间」里
+  /// **每个模型列两遍、总占用翻倍**（真机实测 bug 的根因）。
+  ///
+  /// 做法：把包名之前的前缀（`/data/data/`、`/data/user/0/` …）统一折叠为
+  /// `<appdata>`，包名之后的相对路径原样保留。
+  static String pathDedupeKey(String path) {
+    final idx = path.indexOf('/$_packageName/');
+    if (idx >= 0) {
+      return '<appdata>${path.substring(idx + _packageName.length + 1)}';
+    }
+    return path;
+  }
+
+  /// 单条路径的去重键：先尽量解析软链（`/sdcard` → `/storage/emulated/0`
+  /// 这类真软链只有 realpath 才能折叠），再折叠 app 私有目录别名。
+  Future<String> _dedupeKeyFor(String path) async {
+    var effective = path;
+    try {
+      effective = await File(path).resolveSymbolicLinks();
+    } catch (_) {}
+    return pathDedupeKey(effective);
+  }
+
+  /// 按去重键过滤目录，保持入参顺序（首见者保留）。
+  Future<List<Directory>> _dedupeDirs(List<String> paths) async {
+    final seen = <String>{};
+    final out = <Directory>[];
+    for (final path in paths) {
+      if (!seen.add(await _dedupeKeyFor(path))) continue;
+      out.add(Directory(path));
+    }
+    return out;
+  }
+
+  /// 「已缓存模型 / 占用空间」统计所用的目录列表（主目录 + 内部 app_flutter +
+  /// app docs 回退），**已去重**。
+  ///
+  /// 注意：外部存储被 scoped storage 拒绝后主目录会回退到内部
+  /// `app_flutter/models`，而 app docs 目标也是 `app_flutter/models` ——
+  /// 三者常是同一个物理目录，去重后通常只剩 1 个。这是正确结果，不是漏扫。
+  Future<List<Directory>> candidateModelDirs() async {
+    final paths = <String>[];
+    try {
+      paths.add((await getModelsRootDir()).path);
+    } catch (_) {}
+    paths.add('/data/data/$_packageName/app_flutter/models');
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      paths.add(p.join(appDir.path, 'models'));
+    } catch (_) {}
+    return _dedupeDirs(paths);
+  }
+
   /// 解析外部存储卷根下的模型目录。优先用 getExternalStorageDirectory() 推导的真实
   /// 卷根（如 /storage/emulated/0），回退到传统的 /sdcard 软链，避免硬编码路径在
   /// 部分机型/Android 版本上失效。
@@ -82,7 +146,7 @@ class ModelStorageService {
   /// 回退方案：使用内部存储（Flutter app_flutter 目录）
   Future<Directory> _getFallbackDir() async {
     // Flutter 的 app_flutter/models 路径
-    final dir = Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models');
+    final dir = Directory('/data/data/$_packageName/app_flutter/models');
     
     // 尝试创建目录
     try {
@@ -266,26 +330,30 @@ class ModelStorageService {
 
   /// 返回所有可能的模型存储目录（主目录 + 内部 + Download + DCIM + app docs），
   /// 与 [scanExistingModels] 的扫描范围保持一致，避免"主目录 vs 多位置"矛盾。
+  ///
+  /// 已按 [pathDedupeKey] 去重：`/data/data/<pkg>` 与 `/data/user/0/<pkg>` 是同一
+  /// 物理目录，不去重会让"存在性检查/递归查找"对同一目录重复遍历两遍。
   Future<List<Directory>> _allCandidateDirs() async {
-    final dirs = <Directory>[];
+    final paths = <String>[];
 
-    final externalPath = await _resolveExternalModelsDir();
-    dirs.add(Directory(externalPath));
+    paths.add(await _resolveExternalModelsDir());
 
     // 内部存储（app_flutter/models）
-    dirs.add(Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'));
+    paths.add('/data/data/$_packageName/app_flutter/models');
 
     // 系统广目录（用户手动放入模型文件）
-    dirs.add(Directory('/sdcard/Download'));
-    dirs.add(Directory('/sdcard/DCIM'));
+    paths.add('/sdcard/Download');
+    paths.add('/sdcard/DCIM');
 
     // 回退目录（applicationDocumentsDirectory/models）
     try {
       final appDir = await getApplicationDocumentsDirectory();
-      dirs.add(Directory(p.join(appDir.path, 'models')));
+      paths.add(p.join(appDir.path, 'models'));
     } catch (_) {}
 
-    return dirs;
+    // 注意：去重后仍保留原始字符串形态，`_findFile` 对 Download/DCIM
+    // 的字符串判断依赖这一点。
+    return _dedupeDirs(paths);
   }
 
   /// Get local file size if cached
@@ -320,31 +388,32 @@ class ModelStorageService {
   }
 
   /// Scan for existing models on device（多位置扫描）
+  ///
+  /// 目录级去重：`/data/data/<pkg>` 与 `/data/user/0/<pkg>` 是同一物理目录，
+  /// 重复扫描只是白耗 IO（且会把同一个模型 id 反复 add）。
   Future<List<String>> scanExistingModels() async {
     final cachedIds = <String>{};
+    final seenDirs = <String>{};
+
+    Future<void> scanAt(String path, {bool recursive = true}) async {
+      if (!seenDirs.add(await _dedupeKeyFor(path))) return;
+      await _scanDirectory(Directory(path), cachedIds, recursive: recursive);
+    }
 
     // 1. 扫描外部存储主目录（递归，模型通常直接放这里）
-    final externalPath = await _resolveExternalModelsDir();
-    await _scanDirectory(Directory(externalPath), cachedIds, recursive: true);
+    await scanAt(await _resolveExternalModelsDir());
 
     // 2. 扫描内部存储（app_flutter/models）- Flutter 默认存储位置
-    await _scanDirectory(
-      Directory('/data/data/com.dgxspark.tongyilite/app_flutter/models'),
-      cachedIds,
-      recursive: true,
-    );
+    await scanAt('/data/data/$_packageName/app_flutter/models');
 
     // 3. 扫描 Download / DCIM 目录（仅顶层，避免递归扫全盘导致极慢/权限异常）
-    await _scanDirectory(Directory('/sdcard/Download'), cachedIds, recursive: false);
-    await _scanDirectory(Directory('/sdcard/DCIM'), cachedIds, recursive: false);
+    await scanAt('/sdcard/Download', recursive: false);
+    await scanAt('/sdcard/DCIM', recursive: false);
 
     // 4. 回退到 applicationDocumentsDirectory
     try {
       final appDir = await getApplicationDocumentsDirectory();
-      final internalModels = Directory(p.join(appDir.path, 'models'));
-      if (await internalModels.exists()) {
-        await _scanDirectory(internalModels, cachedIds, recursive: true);
-      }
+      await scanAt(p.join(appDir.path, 'models'));
     } catch (_) {}
 
     debugPrint('[ModelStorage] Found ${cachedIds.length} cached models: $cachedIds');
