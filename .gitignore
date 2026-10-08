@@ -142,3 +142,11 @@ TongYi-Lite-ProductSpec.html
 spec-images/
 
 .zcode-uploads/
+
+# === 本地调试残留（不入库）===
+# 真机抓取的 logcat 快照
+.device_logcat.txt
+# 模型内核/ptq 调试日志目录
+vkptq_logs/
+# vendored llama.cpp 的本地回滚备份（同 .b10176 口径，约 200MB）
+third_party/llama.cpp.bak-*/
