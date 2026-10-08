@@ -128,7 +128,14 @@ extensions.configure<ChaquopyExtension>("chaquopy") {
 dependencies {
     // PDF 文本抽取：TomRoush/PdfBox-Android（Apache PDFBox 2.0.27 移植，类包名 com.tom_roush.pdfbox）。
     // 替代原手搓纯 Dart 解析器（2026-09-30 已删）；纯 JVM 依赖，不碰 NDK。
-    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    // 瘦身（2026-10-08）：排除传递依赖 BouncyCastle（bcprov/bcpkix/bcutil）——
+    // 仅 PDF 签名验证与加密算法（含 AES-256/PQC）需要它；文本抽取路径零引用。
+    // bcprov 自带的 PQC 查表（picnic/sike .properties）压缩后就有 4.2MB。
+    // 极端场景（需 BC 的加密 PDF）会抛 NoClassDefFoundError，已由
+    // MainActivity.handleExtractPdfText 的 Throwable 兜底转成用户可读错误。
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0") {
+        exclude(group = "org.bouncycastle")
+    }
     // Dev Agent L1：本地 git = JGit 进程内执行（EDL 许可，零 exec —— targetSdk 34
     // W^X 限制下 app 数据目录不可 exec，没有 git 可执行文件可用）。
     implementation("org.eclipse.jgit:org.eclipse.jgit:6.10.0.202406032230-r")
