@@ -7,6 +7,7 @@ import '../models/chat_message.dart';
 import '../providers/settings_provider.dart' show settingsProvider;
 import '../services/share_service.dart';
 import '../tts/edge_tts_service.dart' show EdgeTtsService;
+import 'image_preview.dart';
 import 'todo_card.dart';
 
 class ChatBubble extends StatelessWidget {
@@ -165,14 +166,24 @@ class ChatBubble extends StatelessWidget {
                         const SizedBox(height: 6),
                       ],
                       // Show image if present (user messages only)；多图 ≤10 依次展示。
+                      // 点任意缩略图 → 全屏预览（可缩放/翻页）。
                       if (imagePath != null && imagePath!.isNotEmpty) ...[
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 300, maxHeight: 300),
-                            child: Image.file(
-                              File(imagePath!),
-                              fit: BoxFit.cover,
+                        GestureDetector(
+                          onTap: () => showImagePreview(
+                            context,
+                            imagePaths: imagePaths != null && imagePaths!.isNotEmpty
+                                ? imagePaths!
+                                : [imagePath!],
+                            initialIndex: 0,
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 300, maxHeight: 300),
+                              child: Image.file(
+                                File(imagePath!),
+                                fit: BoxFit.cover,
+                              ),
                             ),
                           ),
                         ),
@@ -184,16 +195,23 @@ class ChatBubble extends StatelessWidget {
                           child: ListView(
                             scrollDirection: Axis.horizontal,
                             children: [
-                              for (final path in imagePaths!.skip(1))
+                              for (var i = 1; i < imagePaths!.length; i++)
                                 Padding(
                                   padding: const EdgeInsets.only(right: 8),
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: Image.file(
-                                      File(path),
-                                      height: 100,
-                                      width: 100,
-                                      fit: BoxFit.cover,
+                                  child: GestureDetector(
+                                    onTap: () => showImagePreview(
+                                      context,
+                                      imagePaths: imagePaths!,
+                                      initialIndex: i,
+                                    ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Image.file(
+                                        File(imagePaths![i]),
+                                        height: 100,
+                                        width: 100,
+                                        fit: BoxFit.cover,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -299,6 +317,25 @@ class ChatBubble extends StatelessWidget {
                                   color: theme.colorScheme.onSurfaceVariant,
                                   fontSize: 15,
                                   height: 1.5,
+                                ),
+                                // 引用块（> …）：flutter_markdown 默认底色写死
+                                // Colors.blue.shade100，深色模式下浅色文字+浅蓝底
+                                // 几乎不可读——改为跟随主题的中性底 + onSurface 文字。
+                                blockquote: TextStyle(
+                                  color: theme.colorScheme.onSurface,
+                                  fontSize: 15,
+                                  height: 1.5,
+                                ),
+                                blockquoteDecoration: BoxDecoration(
+                                  color: theme.colorScheme.onSurfaceVariant
+                                      .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border(
+                                    left: BorderSide(
+                                      width: 3,
+                                      color: theme.colorScheme.primary,
+                                    ),
+                                  ),
                                 ),
                                 h1: theme.textTheme.titleLarge
                                     ?.copyWith(fontWeight: FontWeight.w700),

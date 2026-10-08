@@ -37,6 +37,7 @@ import '../services/settings_service.dart';
 import '../services/storage_permission_service.dart';
 import '../widgets/agent_workflow.dart';
 import '../widgets/chat_bubble.dart';
+import '../widgets/image_preview.dart';
 import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
 import '../models/chat_message.dart' show ChatMessage;
@@ -1511,13 +1512,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           for (var i = 0; i < _selectedImagePaths.length; i++)
             _removableChip(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.file(
-                  File(_selectedImagePaths[i]),
-                  width: 44,
-                  height: 44,
-                  fit: BoxFit.cover,
+              child: GestureDetector(
+                // 点击缩略图 → 全屏预览原图（× 删除键独立不受影响）。
+                onTap: () => showImagePreview(
+                  context,
+                  imagePaths: _selectedImagePaths,
+                  initialIndex: i,
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(
+                    File(_selectedImagePaths[i]),
+                    width: 44,
+                    height: 44,
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ),
               onRemove: () => setState(() => _selectedImagePaths.removeAt(i)),
