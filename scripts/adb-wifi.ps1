@@ -48,9 +48,16 @@ function Get-UsbSerial {
     return $null
 }
 
+# set when USB is attached but the phone LAN IP could not be read (wifi off / no lease).
+# In that case the cached LAN IP is very likely from an expired subnet - reusing it only
+# produces a noisy "cannot connect (10061)" and a dead target, so skip it entirely.
+$script:lanUnknown = $false
+
 function Get-WirelessTargets {
     # fill only what is still empty - never clobber an explicitly passed / freshly read value
-    if (-not $script:Ip    -and (Test-Path $ipCache))    { $script:Ip    = (Get-Content $ipCache    -Raw).Trim() }
+    if (-not $script:Ip -and -not $script:lanUnknown -and (Test-Path $ipCache)) {
+        $script:Ip = (Get-Content $ipCache -Raw).Trim()
+    }
     if (-not $script:VpnIp -and (Test-Path $vpnIpCache)) { $script:VpnIp = (Get-Content $vpnIpCache -Raw).Trim() }
 }
 
@@ -97,13 +104,31 @@ if ($usb) {
     $m = [regex]::Match($rawWlan, 'inet (\d+\.\d+\.\d+\.\d+)')
     if ($m.Success) { $lanFromUsb = $m.Groups[1].Value }
 
+    # wifi off == LAN wireless adb is impossible, no matter what adb does.
+    # Turn it on ourselves and wait for the saved AP to reconnect, instead of giving up.
+    if (-not $lanFromUsb) {
+        Write-Host "[2/5] no wlan0 IPv4 - enabling phone wifi and waiting up to 36s..."
+        & $adb -s $usb shell "svc wifi enable" 2>$null | Out-Null
+        for ($i = 1; $i -le 12; $i++) {
+            Start-Sleep -Seconds 3
+            $rawWlan = (& $adb -s $usb shell "ip -4 addr show wlan0" 2>$null) -join "`n"
+            $m = [regex]::Match($rawWlan, 'inet (\d+\.\d+\.\d+\.\d+)')
+            if ($m.Success) {
+                $lanFromUsb = $m.Groups[1].Value
+                Write-Host "      wifi up after $($i * 3)s"
+                break
+            }
+        }
+    }
+
     $rawAll = (& $adb -s $usb shell "ip -4 addr show" 2>$null) -join "`n"
     $addrs = [regex]::Matches($rawAll, 'inet (\d+\.\d+\.\d+\.\d+)') | ForEach-Object { $_.Groups[1].Value }
     # Tailscale lives in the CGNAT range 100.64.0.0/10
     $vpnFromUsb = $addrs | Where-Object { $_ -match '^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\.' } | Select-Object -First 1
 
     if ($lanFromUsb) { Write-Host "[2/5] phone LAN IP: $lanFromUsb" } else {
-        Write-Host "[2/5] WARN: no wlan0 IPv4 - is the phone on wifi?"
+        Write-Host "[2/5] WARN: still no wlan0 IPv4 - LAN channel will be skipped"
+        $script:lanUnknown = $true
     }
     if ($vpnFromUsb) { Write-Host "      phone VPN IP: $vpnFromUsb" } else {
         Write-Host "      WARN: no 100.64/10 address - is the Tailscale app running on the phone?"
