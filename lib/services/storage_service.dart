@@ -21,7 +21,7 @@ class StorageService {
     final path = join(await getDatabasesPath(), 'tongyilite.db');
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -65,6 +65,14 @@ class StorageService {
         );
       }
     }
+    // 模型视图列（长图切块序列，JSON 数组）：与版本无关的列级检查——
+    // 任何历史版本升级上来缺这列都补上。展示仍用 imagePaths，
+    // visionPaths 仅供模型侧重发历史时使用。
+    if (!names.contains('visionPaths')) {
+      await db.execute(
+        "ALTER TABLE messages ADD COLUMN visionPaths TEXT",
+      );
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -87,6 +95,7 @@ class StorageService {
         content TEXT NOT NULL,
         imagePath TEXT,
         imagePaths TEXT,
+        visionPaths TEXT,
         attachments TEXT,
         audioPath TEXT,
         createdAt INTEGER NOT NULL,
@@ -179,6 +188,7 @@ class StorageService {
       content: r['content'] as String,
       imagePath: r['imagePath'] as String?,
       imagePaths: _decodeList(r['imagePaths']),
+      visionPaths: _decodeList(r['visionPaths']),
       attachments: _decodeList(r['attachments']),
       audioPath: r['audioPath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(r['createdAt'] as int),
@@ -224,6 +234,8 @@ class StorageService {
       'imagePath': msg.imagePath,
       'imagePaths':
           msg.imagePaths == null ? null : jsonEncode(msg.imagePaths),
+      'visionPaths':
+          msg.visionPaths == null ? null : jsonEncode(msg.visionPaths),
       'attachments':
           msg.attachments == null ? null : jsonEncode(msg.attachments),
       'audioPath': msg.audioPath,

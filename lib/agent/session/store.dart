@@ -143,11 +143,19 @@ final class JsonlSessionStore {
         continue;
       }
       final isUser = m.role == MessageRole.user;
+      // 模型视图（visionPaths 优先的长图切块序列）：重放历史时模型看到的
+      // 与首发一致；切片已被清理时（7 天保留）消费侧按缺文件跳过/回退。
+      final modelImages = m.modelImagePaths;
       log.append(
         isUser ? kEventUserMessage : kEventAssistantMessage,
         <String, dynamic>{
           'content': m.content,
-          if (m.imagePath != null) 'imagePath': m.imagePath,
+          if (modelImages != null && modelImages.isNotEmpty)
+            'imagePath': modelImages.first
+          else if (m.imagePath != null)
+            'imagePath': m.imagePath,
+          if (modelImages != null && modelImages.length > 1)
+            'imagePaths': modelImages,
           if (m.audioPath != null) 'audioPath': m.audioPath,
           if (m.inferenceStats != null) 'stats': m.inferenceStats!.toMap(),
         },

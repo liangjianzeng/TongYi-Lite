@@ -80,6 +80,8 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         prompt: '',
         messagesJson: messagesJson,
         imagePath: options.imagePath,
+        // 多图全量送原生（长图切块序列）：mtmd 按序逐张编码。
+        imagePaths: options.imagePaths,
         audioPath: options.audioPath,
         maxTokens: options.maxTokens ?? 512,
         temperature: options.temperature,

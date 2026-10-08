@@ -67,8 +67,9 @@ void main() {
       final parts = wire[1]['content'] as List;
       expect(parts[0], {'type': 'text', 'text': '这是什么'});
       expect(parts[1]['type'], 'image_url');
+      // MIME 按扩展名（.png 文件必须标 image/png——硬标 jpeg 会被严格端拒收）。
       expect((parts[1]['image_url'] as Map)['url'],
-          startsWith('data:image/jpeg;base64,'));
+          startsWith('data:image/png;base64,'));
       expect(wire[2]['content'], '无图追问'); // 无图不转
     });
 

@@ -419,17 +419,44 @@ class OpenAiService {
       }
 
       // 仅当 API 支持视觉时，才尝试把图片 base64 编码为 image_url part。
-      final imageB64 = visionCapable && msg.imagePath != null
-          ? await encodeImageFile(msg.imagePath!)
-          : null;
+      // 模型视图优先：visionPaths（长图切块序列）> imagePaths（原图）。
+      // 切片是临时产物（7 天保留），历史消息重发时若切片文件已被清理，
+      // 回退原图（服务端自有压缩，好过丢图）。
+      final paths = <String>[];
+      if (visionCapable) {
+        final vision = msg.visionPaths;
+        if (vision != null && vision.isNotEmpty) {
+          paths.addAll(vision.where((p) => File(p).existsSync()));
+          if (paths.isEmpty && msg.imagePaths != null) {
+            paths.addAll(msg.imagePaths!);
+          }
+        } else if (msg.imagePaths != null) {
+          paths.addAll(msg.imagePaths!);
+        }
+        // imagePath 仅在两个列表都为空的历史行里兜底补入（模型视图有值时
+        // 绝不把原图再塞回去——imagePath 属用户视图）。
+        if (msg.imagePath != null &&
+            msg.imagePath!.isNotEmpty &&
+            paths.isEmpty &&
+            (msg.imagePaths == null || msg.imagePaths!.isEmpty) &&
+            (msg.visionPaths == null || msg.visionPaths!.isEmpty)) {
+          paths.insert(0, msg.imagePath!);
+        }
+      }
 
-      if (imageB64 != null) {
-        final parts = <Map<String, dynamic>>[
-          {
-            'type': 'image_url',
-            'image_url': {'url': 'data:image/jpeg;base64,$imageB64'},
+      final parts = <Map<String, dynamic>>[];
+      for (final p in paths) {
+        final b64 = await encodeImageFile(p);
+        if (b64 == null) continue;
+        parts.add({
+          'type': 'image_url',
+          'image_url': {
+            'url': 'data:${mimeForPath(p)};base64,$b64',
           },
-        ];
+        });
+      }
+
+      if (parts.isNotEmpty) {
         if (msg.content.isNotEmpty) {
           parts.insert(0, {'type': 'text', 'text': msg.content});
         }
@@ -443,6 +470,16 @@ class OpenAiService {
       }
     }
     return messages;
+  }
+
+  /// 按扩展名给出图片 MIME（长图切块产物为 PNG，误标 jpeg 会被严格服务端拒收）。
+  static String mimeForPath(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.bmp')) return 'image/bmp';
+    return 'image/jpeg';
   }
 
   /// 图片 base64 编码（带缓存：agent 每个 step 重放历史会重复编码同一图）。

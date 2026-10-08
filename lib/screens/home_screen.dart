@@ -229,29 +229,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
 
     try {
-      // 端侧视觉：把用户选图先「下采样」再喂模型，而不是原图直喂。
-      // 真机实测：1920px 大图进视觉塔 → 单张图产出 ~2717 个 image token，
-      // 视觉编码内存飙到 2.6GB+，推理卡死（消息一直转圈无输出）后被系统杀掉。
-      // 压到 768px 后 token 数骤减（~300+），编码内存/耗时都大幅下降。
+      // 选图 = 用户视角：存**原图**路径（imageQuality 只压体积不改构图，
+      // 1280 宽长截图仍是完整一张）。长图切块是发给模型时后端做的
+      // （chat_provider._prepareVisionPaths），用户全程只见原图。
+      // 注：不要恢复旧的 maxWidth/maxHeight=768——那会把长截图挤成糊图，
+      // 模型反馈「分辨率太低无法识别」。
       if (source == ImageSource.gallery) {
-        final images = await _picker.pickMultiImage(
-          maxWidth: 768,
-          maxHeight: 768,
-          imageQuality: 85,
-        );
+        final images = await _picker.pickMultiImage(imageQuality: 90);
         if (images.isEmpty) return;
         setState(() {
-          for (final image in images) {
+          for (final img in images) {
             if (_selectedImagePaths.length >= 10) break;
-            _selectedImagePaths.add(image.path);
+            _selectedImagePaths.add(img.path);
           }
         });
       } else {
         final XFile? image = await _picker.pickImage(
           source: source,
-          maxWidth: 768,
-          maxHeight: 768,
-          imageQuality: 85,
+          imageQuality: 90,
         );
         if (image != null) {
           setState(() {

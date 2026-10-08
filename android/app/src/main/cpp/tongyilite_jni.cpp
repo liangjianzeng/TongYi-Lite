@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <sys/stat.h>
 
 // llama.cpp headers
@@ -1246,31 +1247,63 @@ struct InferenceEngine {
 
     // ------------------------------------------------------------------
     // Vision completion — self-contained mtmd flow.
-    // 1. Format chatml template, injecting the mmproj media marker into the
-    //    LAST (current) user message so mtmd_tokenize can attach the image.
-    // 2. Decode the image file to an RGB bitmap (mtmd_helper).
+    // 1. Decode all media files to bitmaps (mtmd_helper; one entry per
+    //    image/audio path). Long screenshots are sliced upstream into
+    //    several images, so media_paths may carry MANY images per turn.
+    // 2. Format chatml template, injecting ONE media marker per decoded
+    //    bitmap into the LAST (current) user message (mtmd_tokenize maps
+    //    markers to bitmaps by order — counts must match).
     // 3. mtmd_tokenize -> TEXT/IMAGE chunks.
     // 4. mtmd_helper_eval_chunks: text chunks -> llama_decode, image chunks ->
     //    mtmd encode + embedding decode. Tracks n_past into kv_position.
     // 5. Plain autoregressive generation (MTP is disabled on the vision path).
     // The text path in completion() is left 100% untouched; this is a separate
-    // branch used only when mmproj is loaded AND an image is provided.
+    // branch used only when mmproj is loaded AND media is provided.
     // ------------------------------------------------------------------
     std::string completion_with_media(
         const std::vector<llama_chat_message> &history,
-        const char *media_path,
+        const std::vector<std::string> &media_paths,
         int max_tokens,
         float temperature,
         float top_p,
         std::function<bool(const std::string &)> on_token) {
 
-        // 1. Chatml template with the media marker on the last user message.
+        // 1. Decode every media file first (image OR audio — mtmd_helper
+        //    auto-detects by magic bytes). Marker count must equal the number
+        //    of SUCCESSFULLY decoded bitmaps, so decode before building the
+        //    prompt. Partial decode failures are skipped (logged), all-fail
+        //    errors out like before.
+        std::vector<mtmd_bitmap *> owned_bitmaps;
+        for (const auto &mp : media_paths) {
+            // b11267 的 mtmd helper 有 init_opt 形参（视频采样选项），补回
+            // mtmd_helper_init_opt_default()。
+            struct mtmd_helper_bitmap_wrapper wrap =
+                mtmd_helper_bitmap_init_from_file(mmproj, mp.c_str(), /*placeholder=*/false,
+                                                  mtmd_helper_init_opt_default());
+            if (!wrap.bitmap) {
+                LOGW("vision: failed to decode media %s", mp.c_str());
+                continue;
+            }
+            owned_bitmaps.push_back(wrap.bitmap);
+        }
+        if (owned_bitmaps.empty()) {
+            LOGW("vision: no media decoded out of %zu path(s)", media_paths.size());
+            return "[ERROR: 媒体文件解码失败]";
+        }
+
+        // 2. Chatml template with one media marker per decoded bitmap on the
+        //    last user message.
         std::vector<llama_chat_message> chat_vec = history;
         std::string last_with_marker;
         {
             const char *marker = mtmd_get_marker(mmproj);
             const std::string m = (marker && marker[0]) ? std::string(marker) : "<__media__>";
-            last_with_marker = std::string(chat_vec.back().content) + "\n" + m;
+            std::string suffix;
+            for (size_t i = 0; i < owned_bitmaps.size(); ++i) {
+                suffix += "\n";
+                suffix += m;
+            }
+            last_with_marker = std::string(chat_vec.back().content) + suffix;
             chat_vec.back().content = last_with_marker.c_str();
         }
 
@@ -1291,6 +1324,7 @@ struct InferenceEngine {
             }
         } else {
             LOGW("vision: chatml template failed -> abort");
+            for (auto *b : owned_bitmaps) mtmd_bitmap_free(b);
             return "[ERROR: 模板生成失败]";
         }
         LOGI("vision formatted_prompt (%zu chars): %.*s",
@@ -1298,30 +1332,20 @@ struct InferenceEngine {
              (int)std::min((size_t)300, formatted_prompt.size()),
              formatted_prompt.c_str());
 
-        // 2. Decode the media file (image OR audio — mtmd_helper auto-detects by
-        //    magic bytes: jpg/png/bmp for images, wav/mp3/flac for audio) to a bitmap.
-        //    b11267 的 mtmd helper 有 init_opt 形参（视频采样选项），补回
-        //    mtmd_helper_init_opt_default()。
-        struct mtmd_helper_bitmap_wrapper wrap =
-            mtmd_helper_bitmap_init_from_file(mmproj, media_path, /*placeholder=*/false,
-                                              mtmd_helper_init_opt_default());
-        if (!wrap.bitmap) {
-            LOGW("vision: failed to decode media %s", media_path);
-            return "[ERROR: 媒体文件解码失败]";
-        }
-        mtmd_bitmap *bm = wrap.bitmap;
-
-        // 3. Tokenize text + image into chunks.
+        // 3. Tokenize text + all bitmaps into chunks（标记与位图按序一一对应）。
         const bool add_bos = llama_vocab_get_add_bos(vocab);
         mtmd_input_text text{ formatted_prompt.c_str(), formatted_prompt.size(),
                               /*add_special=*/add_bos, /*parse_special=*/true };
         mtmd_input_chunks *chunks = mtmd_input_chunks_init();
-        const mtmd_bitmap *bms[] = { bm };
-        int32_t res = mtmd_tokenize(mmproj, chunks, &text, bms, 1);
+        std::vector<const mtmd_bitmap *> bms(owned_bitmaps.begin(),
+                                             owned_bitmaps.end());
+        int32_t res = mtmd_tokenize(mmproj, chunks, &text, bms.data(),
+                                    (int32_t)bms.size());
         if (res != 0) {
-            LOGW("vision: mtmd_tokenize failed res=%d", res);
+            LOGW("vision: mtmd_tokenize failed res=%d (%zu bitmaps)",
+                 res, bms.size());
             mtmd_input_chunks_free(chunks);
-            mtmd_bitmap_free(bm);
+            for (auto *b : owned_bitmaps) mtmd_bitmap_free(b);
             return "[ERROR: 图像预处理失败]";
         }
         const size_t n_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
@@ -1366,7 +1390,7 @@ struct InferenceEngine {
              (long long)n_past, t_prompt_ms, t_vision_ms, t_audio_ms);
 
         mtmd_input_chunks_free(chunks);
-        mtmd_bitmap_free(bm);
+        for (auto *b : owned_bitmaps) mtmd_bitmap_free(b);
 
         if (res != 0) {
             LOGW("vision: mtmd_helper_eval_chunks failed res=%d", res);
@@ -1507,6 +1531,9 @@ struct InferenceEngine {
         // Optional on-disk media path (image OR audio, mmproj must be loaded).
         // When set, completion routes to the mtmd media path. Audio is only
         // accepted if the loaded mmproj ships an audio encoder (mtmd_support_audio).
+        // image_path may hold MULTIPLE image paths separated by '\n'
+        // (long-screenshot slices / multi-image upload) — each becomes one
+        // marker + one bitmap in the vision prompt.
         const char *image_path = nullptr,
         const char *audio_path = nullptr
     ) {
@@ -1526,29 +1553,42 @@ struct InferenceEngine {
         }
 
         // ================================================================
-        // Media path — mmproj loaded + a media file (image/audio) this turn.
+        // Media path — mmproj loaded + media file(s) this turn (image/audio).
         // Routes to completion_with_media() (self-contained mtmd flow).
+        // image_path 可能是 '\n' 分隔的多个路径（上游长图切块/多图上传）；
+        // 单路径无换行 → 与旧行为完全一致。
         // ================================================================
-        const char *media_path = nullptr;
+        std::vector<std::string> media_paths;
         bool media_is_audio = false;
         if (audio_path && audio_path[0] != '\0') {
             if (!audio_loaded) {
                 LOGW("media path: audio requested but mmproj has NO audio encoder -> reject");
                 return "[ERROR: 当前模型不支持语音理解，请加载 Gemma 4 E2B 或开启语音的模型]";
             }
-            media_path = audio_path;
+            media_paths.emplace_back(audio_path);
             media_is_audio = true;
         } else if (image_path && image_path[0] != '\0') {
-            media_path = image_path;
+            const std::string img_join(image_path);
+            size_t start = 0;
+            while (start <= img_join.size()) {
+                const size_t nl = img_join.find('\n', start);
+                std::string tok = (nl == std::string::npos)
+                    ? img_join.substr(start)
+                    : img_join.substr(start, nl - start);
+                if (!tok.empty()) media_paths.push_back(std::move(tok));
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
         }
-        if (mmproj && vision_loaded && media_path && history && !history->empty()) {
+        if (mmproj && vision_loaded && !media_paths.empty() && history && !history->empty()) {
             is_running = true;
             should_stop = false;
-            LOGI("media completion path (mmproj=%p %s=%s)", (void*)mmproj,
-                 media_is_audio ? "audio" : "image", media_path);
+            LOGI("media completion path (mmproj=%p %s n=%zu first=%s)", (void*)mmproj,
+                 media_is_audio ? "audio" : "image", media_paths.size(),
+                 media_paths.front().c_str());
             try {
                 std::string res = completion_with_media(
-                    *history, media_path, max_tokens, temperature, top_p, on_token);
+                    *history, media_paths, max_tokens, temperature, top_p, on_token);
                 is_running = false;
                 return res;
             } catch (const std::exception &e) {

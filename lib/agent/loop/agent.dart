@@ -307,8 +307,8 @@ class ReactLoopAgent {
       {
         'content': userMessage,
         if (imagePath != null) 'imagePath': imagePath,
-        // 多图（WP 多图上传）：本地引擎视觉仍只用 imagePath 首张；
-        // API 路线由投影/adapter 全量发送。
+        // 多图（多图上传/长图切块）：本地与 API 路线均全量发送
+        // （本地原生按序逐张编码；API 由投影/adapter 转多个 image_url part）。
         if (imagePaths != null && imagePaths.length > 1)
           'imagePaths': imagePaths,
       },
