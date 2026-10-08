@@ -140,3 +140,5 @@ scripts/.adb_wifi_*
 README.html
 TongYi-Lite-ProductSpec.html
 spec-images/
+
+.zcode-uploads/
