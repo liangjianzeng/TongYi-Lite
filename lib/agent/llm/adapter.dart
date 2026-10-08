@@ -90,8 +90,8 @@ final class GenerateOptions {
   final String? imagePath;
   final String? audioPath;
 
-  /// 多图（WP 多图上传，≤10）：API 路线全量发送 image_url parts；
-  /// 本地引擎视觉仅 [imagePath] 首张。
+  /// 多图（多图上传/长图切块，≤10）：API 路线全量发送 image_url parts；
+  /// 本地引擎视觉同样按序全量送原生（mtmd 逐张编码），[imagePath] 恒为首张。
   final List<String>? imagePaths;
 
   /// 生成过程状态流（WP5）：adapter 推轻量状态行，UI 据此显示

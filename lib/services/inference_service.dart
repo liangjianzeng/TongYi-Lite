@@ -257,6 +257,7 @@ class InferenceService {
     required String prompt,
     required String messagesJson,
     String? imagePath,
+    List<String>? imagePaths,
     String? audioPath,
     int maxTokens = 2048,
     double temperature = 0.7,
@@ -274,11 +275,13 @@ class InferenceService {
     });
     _currentTokenSubscription = subscription;
 
-    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson, image=$imagePath, audio=$audioPath');
+    debugPrint('[InferenceService] Invoking completionWithMessages, prompt="$prompt", msgs=$messagesJson, image=$imagePath, images=${imagePaths?.length ?? 0}, audio=$audioPath');
     _channel.invokeMethod('completionWithMessages', {
       'prompt': prompt,
       'messagesJson': messagesJson,
       'imagePath': imagePath,
+      // 多图（长图切块/多图上传）：原生视觉按序逐张编码（≤10）。
+      if (imagePaths != null && imagePaths.isNotEmpty) 'imagePaths': imagePaths,
       'audioPath': audioPath,
       'maxTokens': maxTokens,
       'temperature': temperature,

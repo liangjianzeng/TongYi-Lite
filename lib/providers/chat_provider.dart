@@ -68,6 +68,7 @@ import '../agent/metrics/turn_metrics.dart'
 import '../agent/session/trace_export.dart' as trace_export;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
+import '../services/long_image_service.dart';
 import '../services/attachment_service.dart'
     show
         PreparedAttachment,
@@ -608,6 +609,34 @@ class ChatNotifier extends StateNotifier<bool> {
     }
   }
 
+  /// 模型视图预处理（切块发生在**发送时**，选图与 UI 全程只见原图）：
+  /// 原图 → [LongImageService] 长图切块/缩放；宽度上限跟生成路线走
+  /// （本地视觉塔 768 控 token/编码内存，API 视觉 1280）。
+  /// 返回与 [originals] 相同长度且逐项相等时视为"无预处理"（visionPaths 存 null）。
+  Future<List<String>> _prepareVisionPaths(
+    List<String> originals, {
+    required bool useApi,
+  }) async {
+    if (originals.isEmpty) return originals;
+    try {
+      return await LongImageService.prepareVisionImages(
+        originals,
+        widthCap: useApi ? 1280 : 768,
+      );
+    } catch (e) {
+      debugPrint('[ChatNotifier] 视觉预处理失败（按原图发送）: $e');
+      return originals;
+    }
+  }
+
+  static bool _samePaths(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   Future<String> _dispatchMessage(
     String conversationId,
     String prompt,
@@ -700,12 +729,20 @@ class ChatNotifier extends StateNotifier<bool> {
 
     try {
       // Step 2: Save user message first (so it's available in history for template)
+      // 用户视图（imagePaths=原图）入库展示；模型视图（长图切块/缩放）单独
+      // 计算存 visionPaths——切片对用户不可见，只在发给模型时使用。
+      final originals = imagePaths ??
+          (imagePath != null ? [imagePath] : const <String>[]);
+      final vision = await _prepareVisionPaths(originals, useApi: useApi);
+      final visionChanged = !_samePaths(vision, originals);
       final userMsg = ChatMessage(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         conversationId: conversationId,
         role: MessageRole.user,
         content: prompt,
         imagePath: imagePath,
+        imagePaths: imagePaths,
+        visionPaths: visionChanged ? vision : null,
         audioPath: audioPath,
       );
       debugPrint('[ChatNotifier] Saving user message...');
@@ -789,12 +826,16 @@ class ChatNotifier extends StateNotifier<bool> {
                 maxTokens: activeApi.effectiveMaxTokens,
               );
         } else {
-          // 本地路线：原生已集成 mtmd 视觉。当前消息图片路径直接传给原生引擎
+          // 本地路线：原生已集成 mtmd 视觉（多图：长图切块/多图上传一次全送，
+          // 原生按序逐张编码）。当前消息图片路径直接传给原生引擎
           // （mmproj 已加载则编码送图；未加载则该模型仅文本，原生自动忽略）。
           // 历史带图消息本就只取文本，天然安全。
-          if (imagePath != null) {
-            debugPrint('[ChatNotifier] 本地路线携带图片: $imagePath');
-            manager.appendInferenceLog('请求 | 携带当前图片');
+          final localImages = vision;
+          if (localImages.isNotEmpty) {
+            debugPrint('[ChatNotifier] 本地路线携带图片 ${localImages.length} 张');
+            manager.appendInferenceLog(
+                '请求 | 携带图片 ${localImages.length} 张'
+                '${visionChanged && localImages.length > 1 ? '（含长图切块）' : ''}');
           }
           if (audioPath != null) {
             debugPrint('[ChatNotifier] 本地路线携带语音: $audioPath');
@@ -803,7 +844,8 @@ class ChatNotifier extends StateNotifier<bool> {
           stream = _inference.completionWithMessages(
             prompt: prompt,
             messagesJson: messagesJson,
-            imagePath: imagePath,
+            imagePath: vision.isNotEmpty ? vision.first : imagePath,
+            imagePaths: localImages.isNotEmpty ? localImages : null,
             audioPath: audioPath,
             maxTokens:
                 1024, // on-device cap: large token budgets make long runs unbearable
@@ -1056,12 +1098,8 @@ class ChatNotifier extends StateNotifier<bool> {
         effectivePrompt = '$effectivePrompt\n[部分附件导入失败：${errors.join("；")}]';
       }
     }
-    // 本地引擎单图限制：imagePaths 超 1 张时取首张送视觉，其余如实告知。
-    final firstImage = (imagePaths != null && imagePaths.isNotEmpty)
-        ? imagePaths.first
-        : imagePath;
-    final extraImages =
-        (imagePaths?.length ?? 0) > 1 ? imagePaths!.length - 1 : 0;
+    // 视觉输入上限 10 张：模型视图（原图→长图切块）在路由确定后计算，
+    // 见下方 firstImage/droppedImages。
 
     // ---- 模型路由（与旧路径一致）----
     var useApi = false;
@@ -1135,10 +1173,22 @@ class ChatNotifier extends StateNotifier<bool> {
           '或到对应会话点停止]');
     }
     turn.local = !useApi;
+    // ---- 模型视图（发送时才切块；UI/存储的 imagePaths 永远是原图）----
+    // 上限 10 张指**模型视图**张数（长图切块后可能超），超出部分不发送，
+    // 如实告知模型；用户视角始终只有自己选的那几张图。
+    final originals = imagePaths ??
+        (imagePath != null ? [imagePath] : const <String>[]);
+    final vision = await _prepareVisionPaths(originals, useApi: useApi);
+    final visionChanged = !_samePaths(vision, originals);
+    final firstImage = vision.isNotEmpty ? vision.first : imagePath;
+    final visionImageCount = vision.isNotEmpty
+        ? vision.length
+        : (imagePath != null ? 1 : 0);
+    final droppedImages = visionImageCount > 10 ? visionImageCount - 10 : 0;
     // 多图本地降级：本地引擎视觉仅支持单张（native 单图），如实告知模型。
-    if (extraImages > 0 && !useApi) {
-      effectivePrompt = '$effectivePrompt\n[注意：用户共上传了 ${extraImages + 1} 张图片，'
-          '本地引擎当前仅支持单张视觉输入，已发送第一张]';
+    if (droppedImages > 0) {
+      effectivePrompt = '$effectivePrompt\n[注意：共上传 $visionImageCount 张图片，'
+          '超出 10 张上限的 $droppedImages 张未发送]';
     }
     debugPrint('[ChatNotifier] new-agent route='
         '${useApi ? "API(${activeApi?.name})" : "local($targetModelId)"}');
@@ -1516,15 +1566,16 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.register(createSubagentSendMessageTool(subagentProvider));
     }
 
-    // 保存用户消息（UI 立即可见）。附件/多图落库供历史回看（ attachments 存
-    // 原文件名列表；imagePaths 全量，本地引擎视觉只用首张）。
+    // 保存用户消息（UI 立即可见）。存储用**原图**（imagePaths，用户视角完整
+    // 图片）；模型视图（切块序列）存 visionPaths，历史重发模型上下文时用。
     final userMsg = ChatMessage(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       conversationId: conversationId,
       role: MessageRole.user,
       content: prompt,
-      imagePath: firstImage,
+      imagePath: imagePath,
       imagePaths: imagePaths,
+      visionPaths: visionChanged ? vision : null,
       attachments: prepared.map((a) => a.displayName).toList(),
       audioPath: audioPath,
     );
@@ -1700,7 +1751,11 @@ class ChatNotifier extends StateNotifier<bool> {
       reason = await agent.kick(
         effectivePrompt,
         imagePath: firstImage,
-        imagePaths: imagePaths,
+        // 模型视图 = 切块序列（上限 10 张，超出已在 effectivePrompt 如实告知）；
+        // 用户消息本体（imagePaths）仍是原图，两者互不影响。
+        imagePaths: vision.isNotEmpty
+            ? (droppedImages > 0 ? vision.sublist(0, 10) : vision)
+            : imagePaths,
         audioPath: audioPath,
         onToken: tokenController,
         onThinking: thinkingController,

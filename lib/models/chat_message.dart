@@ -51,7 +51,13 @@ class ChatMessage {
   final String? imagePath;
 
   /// 多图（WP 多图上传，≤10；[imagePath] 恒等于首张，兼容旧链路）。
+  /// **用户视图**：UI（输入区预览/气泡/大图）永远展示这里的原图。
   final List<String>? imagePaths;
+
+  /// **模型视图**（长图切块/缩放后的路径序列；null = 与 [imagePaths] 相同）。
+  /// 切块是后端为视觉模型准备的输入细节，用户不应看到碎片——只有发给
+  /// 模型（本地 JNI / API buildMessages / 智能体 kick）时才消费本字段。
+  final List<String>? visionPaths;
 
   /// 智能体附件文件名列表（≤5；本体在 documents/uploads/<convId>/）。
   final List<String>? attachments;
@@ -67,6 +73,7 @@ class ChatMessage {
     required this.content,
     this.imagePath,
     List<String>? imagePaths,
+    List<String>? visionPaths,
     this.attachments,
     this.audioPath,
     DateTime? timestamp,
@@ -75,7 +82,14 @@ class ChatMessage {
   })  : imagePaths = (imagePaths != null && imagePaths.isNotEmpty)
             ? imagePaths
             : (imagePath != null ? [imagePath] : null),
+        visionPaths = (visionPaths != null && visionPaths.isNotEmpty)
+            ? visionPaths
+            : null,
         timestamp = timestamp ?? DateTime.now();
+
+  /// 模型侧取图入口：有切块序列用切块，否则用原图。UI 展示禁用本 getter。
+  List<String>? get modelImagePaths =>
+      (visionPaths != null && visionPaths!.isNotEmpty) ? visionPaths : imagePaths;
 
   Map<String, dynamic> toMap() {
     return {
@@ -87,6 +101,9 @@ class ChatMessage {
       'imagePaths': imagePaths == null
           ? null
           : jsonEncode(imagePaths),
+      'visionPaths': visionPaths == null
+          ? null
+          : jsonEncode(visionPaths),
       'attachments':
           attachments == null ? null : jsonEncode(attachments),
       'audioPath': audioPath,
@@ -116,6 +133,7 @@ class ChatMessage {
       content: map['content'] as String,
       imagePath: map['imagePath'] as String?,
       imagePaths: _decodeList(map['imagePaths']),
+      visionPaths: _decodeList(map['visionPaths']),
       attachments: _decodeList(map['attachments']),
       audioPath: map['audioPath'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),
@@ -137,6 +155,7 @@ class ChatMessage {
       content: content ?? this.content,
       imagePath: imagePath,
       imagePaths: imagePaths,
+      visionPaths: visionPaths,
       attachments: attachments ?? this.attachments,
       audioPath: audioPath,
       timestamp: timestamp,

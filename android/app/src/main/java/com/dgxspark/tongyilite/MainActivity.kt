@@ -691,6 +691,12 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (e: InvalidPasswordException) {
                 runOnMain { result.error("ENCRYPTED", "PDF 加密且需要密码", null) }
+            } catch (e: NoClassDefFoundError) {
+                // BouncyCastle 已从依赖中排除（瘦身）：需 BC 的加密/签名 PDF 到这里
+                // 会缺类——转成可读错误，绝不让 pdfExecutor 线程吞掉 Error 导致
+                // MethodChannel 无响应。
+                logE("handleExtractPdfText", "extractPdfText missing security provider: ${e.message}", e)
+                runOnMain { result.error("UNSUPPORTED", "该 PDF 使用了不支持的加密/签名方式，无法抽取文本", null) }
             } catch (e: Exception) {
                 logE("handleExtractPdfText", "extractPdfText error: ${e.message}", e)
                 runOnMain { result.error("PDF_ERROR", e.message, null) }
@@ -928,9 +934,20 @@ class MainActivity : FlutterActivity() {
         val temperature  = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
         val topP         = call.argument<Double>("topP")?.toFloat() ?: 0.9f
         val imagePath    = call.argument<String>("imagePath")
+        val imagePathsArg = call.argument<List<String>>("imagePaths")
         val audioPath    = call.argument<String>("audioPath")
 
-        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}, image=${imagePath ?: "none"}, audio=${audioPath ?: "none"}")
+        // 多图（长图切块/多图上传）：合并 imagePath + imagePaths（去重保序），
+        // 用 '\n' 连接成单串传给 native —— native 视觉按 '\n' 拆成多张、逐张
+        // 插图标记（JNI 签名不变，单路径无换行 = 行为与旧版完全一致）。
+        val joinedImage = (listOfNotNull(imagePath) + (imagePathsArg ?: emptyList()))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString("\n")
+            .ifBlank { null }
+
+        logI("handleCompletionWithMessages", "prompt=${prompt.take(50)}, msgsJsonLen=${messagesJson.length}, image=${joinedImage?.replace("\n", " | ") ?: "none"}, audio=${audioPath ?: "none"}")
 
         val sink = TokenStream.sink
         updateServiceStatus("AI 思考中...")
@@ -946,7 +963,7 @@ class MainActivity : FlutterActivity() {
                         maxTokens = maxTokens,
                         temperature = temperature,
                         topP = topP,
-                        imagePath = imagePath,
+                        imagePath = joinedImage,
                         audioPath = audioPath,
                         onToken = { token ->
                             mainHandler.post { sink?.success(token) }

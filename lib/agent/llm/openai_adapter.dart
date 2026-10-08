@@ -130,7 +130,7 @@ Future<List<Map<String, dynamic>>> attachWireImages(
       if (b64 == null) continue;
       parts.add({
         'type': 'image_url',
-        'image_url': {'url': 'data:image/jpeg;base64,$b64'},
+        'image_url': {'url': 'data:${OpenAiService.mimeForPath(p)};base64,$b64'},
       });
     }
     if (parts.isEmpty) continue;
