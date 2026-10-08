@@ -60,6 +60,11 @@ dependency_overrides:
   # 本机 Flutter 3.27/Dart 3.6.0 装不上；代码本身无超纲 API，放宽 SDK 约束）。
   edge_tts:
     path: third_party/edge_tts
+  # 包体瘦身（2026-10-08）：sherpa_onnx_web 的 wasm/js assets（压缩 4.3MB）会被
+  # Flutter 无差别打进 Android 包但运行期零使用（ASR 走 android_arm64 native 库）。
+  # vendored stub 去掉 assets 声明；仅影响 web 目标（本项目不构建 web）。
+  sherpa_onnx_web:
+    path: third_party/sherpa_onnx_web
 
 
 dev_dependencies:
