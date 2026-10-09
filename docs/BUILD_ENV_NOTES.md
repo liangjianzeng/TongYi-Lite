@@ -120,7 +120,7 @@ add_compile_definitions(NDEBUG)
 
 ## 排查工具：本机 pwsh 调用原生程序注意事项
 
-- 直接 `& git.exe ...`、`& cmd.exe /c ...` 在 DSH pwsh 包装下**拿不到输出**（原生 stdout 被吞）。
+- 直接 `& git.exe ...`、`& cmd.exe /c ...` 在 pwsh 包装下**拿不到输出**（原生 stdout 被吞）。
 - 可靠姿势：`Start-Process -FilePath <完整路径> -ArgumentList ... -RedirectStandardOutput <文件>
   -RedirectStandardError <文件> -PassThru -Wait`，再读文件。
 - `.bat`（flutter.bat / gradlew.bat）经 `cmd /c "call ..."` 时，**路径带空格必须整体引号**，

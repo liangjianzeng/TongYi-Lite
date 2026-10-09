@@ -208,7 +208,7 @@ AOT 串在 libapp.so 里是 **UTF-16LE**，debug kernel_blob 是 UTF-8；确认 
 > **背景**：用户在手机上用 `E:\DTXY\DSH-Phone` 这个 App 通过 SSH 隧道连回本机，
 > 想在手机上直接下载刚打包的 APK。DSH Phone 的"资源下载"能力链路：
 >
-> - 手机 webview 注入 `artifactBridgeJs`，监听 DSH Web UI 里**成果（artifact）点击**；
+> - 手机 webview 注入 `artifactBridgeJs`，监听该 Web UI 里**成果（artifact）点击**；
 > - 只有当 Web UI 里出现**产物按钮（file-mention chip，`title` 存远端路径、
 >   带 `.apk` 后缀 → 归类为 resource 走下载）**时，手机才会触发 SFTP 隧道下载；
 > - 该产物按钮由 **`write` 工具调用（带 `file_path`）** 触发，**不是** gradle 编译产物。
@@ -556,12 +556,12 @@ release libapp.so `_followStream` 单字节 ASCII 命中；libhardware.so + libt
 > 并发多关键词 = 一次调用覆盖多角度，直接压交互次数；工具结果尾部"以上结果已够，直接回答"
 > 引导收敛留作后续可选优化。
 
-## 2026-09-29 web_search 反复搜索死循环根治（DSH max_uses 语义，commit c9894f4）
+## 2026-09-29 web_search 反复搜索死循环根治（max_uses 语义，commit c9894f4）
 
 > 用户反馈（三连）："为什么要反复调用多次""大部分搜索是重复搜索相同的内容"
 > "经常反复搜索十几次，甚至用完循环次数没输出"。根因：端侧 4B 模型不收敛，
 > 拿到结果后仍用同一/近似关键词反复调用 web_search，直到撞 maxRounds 无答案。
-> 对照 DSH 真源（`/e/deepseek-harness-src/packages/web/web-search-deepseek/src/provider.ts`）：
+
 > **web_search 服务端工具带 `max_uses` 硬上限**（默认 5），达到后拒绝调用、强制模型
 > 基于既有结果回答——平台侧强制收敛，不靠模型自觉。
 
@@ -573,7 +573,7 @@ release libapp.so `_followStream` 单字节 ASCII 命中；libhardware.so + libt
   （`已搜索过，结果同上，未重复联网`），不重复联网；重复同样消耗预算，尽快逼模型收敛。
 - **状态随回合重置**：createWebSearchTool 每次新建回合会话，接入层每回合重建
   注册表（createBuiltinTools 全量新建），无需显式 reset。
-- **设置项** `agentMaxSearchesPerTurn`（1~10，默认 5 = DSH 默认）：settings_service/
+- **设置项** `agentMaxSearchesPerTurn`（1~10，默认 5）：settings_service/
   provider/screen（智能体→执行参数「每回合搜索上限」）/chat_provider 传递。
 - **系统提示**加规则：已有足够结果直接回答；收到"已达上限"立即停止调用 web_search。
 - 回归：test/agent 245 + providers 20 全绿（新增去重/预算/重复消耗 3 测试）。
@@ -807,7 +807,7 @@ Vulkan supports_op 无 PTQ1_0/PQ2_0 → fallback CPU。**升级后新坑**：裸
 ## 2026-10-01 Dev Agent 开发模式（Phase A/B/C，已提交待真机验收）
 
 > 用户需求：安卓沙箱限制智能体，能否集成 dartssh 连手机自身 shell 以系统环境做开发（AI 编程）。
-> 评估定案（docs/ssh_agent_environment_2026-10-01.md）：SSH 只传输不授权限（权限边界=服务端进程）；
+> 评估定案：SSH 只传输不授权限（权限边界=服务端进程）；
 > 路线 A（Termux）+ D（远程 PC），root 排除；dartssh(1.0.3) Dart3 不兼容 → 复用 DSH-Phone 的 dartssh2 fork。
 
 **已实施（docs/ai_dev_agent_design_2026-10-01.md 第 11 节实施记录）**：
@@ -1061,10 +1061,10 @@ sogou `data-url`；百度/搜狗拦截页都是 HTTP 200 小页（判定串
 **构建坑新增**：Git Bash 的 cd 传不进 .bat 子进程 → release assemble 用
 PowerShell `Set-Location` 执行；release 产物在 `build/flutter-assemble/app.so`。
 
-## 2026-10-01 API 档上下文生命周期三修复 + P1 harness 五件套（对照 DSH 差距分析）
+## 2026-10-01 API 档上下文生命周期三修复 + P1 harness 五件套（对照差距分析）
 
 > 定位修正（用户指令）：**本地模型只走简单对话，智能体主力 = API 接入档**。
-> 差距分析全文在 `docs/dsh_gap_analysis_2026-10-01.md`（已对齐项/Tier1-3/P1-P3 分期）。
+
 
 **Tier 1（bug 级，API 档上下文管理此前基本缺位）**：
 1. **溢出分类修复**：此前 400 一律归 `invalidRequest`（终态失败），且
@@ -1075,13 +1075,13 @@ PowerShell `Set-Location` 执行；release 产物在 `build/flutter-assemble/app
    `contextWindowExceeded` → 失败瀑布走压缩 → 有界重试。
 2. **API 主动压缩**：新设置 `agentApiContextBudget`（默认 32768 tok，夹 4096~200000，
    设置页智能体 Tab 滑条）；`_apiContextTokenBudget` = min(设置值, 端点 contextWindow×7/8)。
-3. **工具结果投影剪枝**（DSH tool-result-pruner 语义）：`deriveModelMessages` 对
+3. **工具结果投影剪枝**（长内容中间省略）：`deriveModelMessages` 对
    >8192 字符的 tool/result 投影为头 4096 + `[…中间省略 N 字符…]` + 尾 1024；
    存储原文与 UI 视图不动。
 
 **P1 harness（用户要求"结合人机交互，能优化就优化，必须重构就重构，不自我设限"）**：
 4. **通用重复调用守护**：`ReactLoopAgent` 同一工具本回合第 3/5/8 次 → 结果尾部
-   追加渐进提醒（advisory 不阻断），与签名去重双保险（DSH repeat-tool-reminder）。
+   追加渐进提醒（advisory 不阻断），与签名去重双保险。
 5. **环境段注入（仅 API 档）**：`ReactLoopAgent.environmentNote` 恒追加系统提示
    **最末**（skills/AGENTS.md 之后）——稳定前缀在前、易变快照在后，API prompt cache
    友好；local 档不传（系统提示逐字节稳定保 KV）。
@@ -1187,11 +1187,11 @@ app-release.apk 59886173 B；字符串级验收过（debug kernel UTF-8：验收
 ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18 直连 +
 8 Elite 100.123.25.54 中继，install -r -t 均 Success）。
 
-## 2026-10-03 智能体执行质量九件套（对照 DSH 二次差距分析，commit 5fa142f）
+## 2026-10-03 智能体执行质量九件套（对照二次差距分析，commit 5fa142f）
 
-> 用户反馈"智能体还是笨笨的做不好任务"。重挖 DSH 全仓后定案：差距不在循环骨架
+> 用户反馈"智能体还是笨笨的做不好任务"。重新评估后定案：差距不在循环骨架
 > （已对齐），在执行纪律层——收尾机制/验证纪律/todo 纪律/提示词教学段。
-> DSH 哲学 = 薄系统提示 + 厚工具描述 + 结构化护栏（纪律靠执行期强制不靠自觉）。
+> 设计哲学 = 薄系统提示 + 厚工具描述 + 结构化护栏（纪律靠执行期强制不靠自觉）。
 
 **九件套（P2-A×4 + P2-B×2 + P3×3，全部落地）**：
 1. **maxSteps 收敛注入 + 自动续跑**（头号修复）：剩 2 步注入收敛警告 user 事件；
@@ -1199,7 +1199,7 @@ ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18
    老语义用 `maxWrapups:0` 钉死。引导消息只活在本回合（trace 信封不编码 user 事件，
    跨回合自然消失）。
 2. **【任务执行纪律】系统提示段**（仅 API 档，`taskDiscipline: useApi`）：
-   规划/推进/验证（完成必用工具结果佐证）/诚实 grounding（DSH wrapup 反幻觉句）/停止。
+   规划/推进/验证（完成必用工具结果佐证）/诚实 grounding（收尾反幻觉句）/停止。
 3. **todo_write 执行期强制**：>1 个 in_progress（doing/inprogress/current/active 均为
    别名）→ 直接拒绝 + 修正指引，原清单不污染；结果回显计数。存储保留原词不归一化
    （老测试 `[done]` 兼容）。
@@ -1220,7 +1220,7 @@ ASCII skill-creator 1）。**双机覆盖安装 Success**（小米13 100.70.7.18
 9. **子代理后台化 + send_message 续轮**：`run_in_background` 立即返回 id，完成通知
    经 `injectNotice` 投父回合 + 🔔 消息落库（不入模型上下文）；可续轮表 FIFO 8 个
    （`kContinuableCapacity`），`send_message{id,message}` 续跑；subagent 描述对齐
-   DSH（完整独立任务书/独立委派一条消息并发起/stopReason 非 completed 附注部分输出）。
+   （完整独立任务书/独立委派一条消息并发起/stopReason 非 completed 附注部分输出）。
 
 **回归**：test/agent+providers+services+websearch 全绿 **487 项 + 4 skip**（新增
 loop 6/todo 3/persona 3）；analyze 0 error。**未出包**——真机验收待下次构建。
@@ -1335,7 +1335,7 @@ kv_used/kv_ctx 输出，但 gradle CMake 任务 up-to-date 跳过（git merge �
 
 ## 2026-10-05 智能体执行质量全面提升（对照主流差距分析 P0/P1/P2 全量施工，工作区未提交）
 
-> 全面评估定案：循环骨架已对齐 DSH，真实差距在四层——质量度量（无 eval/遥测）、
+> 全面评估定案：循环骨架已对齐参照实现，真实差距在四层——质量度量（无 eval/遥测）、
 > 长任务编排（无计划模式/goal 续跑）、上下文工程深水区（LLM 压缩/暖前缀）、
 > 生态扩展（无 MCP）。本次全部落地。
 
@@ -1574,10 +1574,10 @@ Dart 字符串必须用 chr(92)+'n' 构造或 Write 工具落片段文件再拼�
   （hf-mirror 主源 + huggingface 兜底，background_downloader 断点续传），
   落 `<documents>/models/asr/<modelId>/` 四文件。`main.dart` 启动 warmup 预读页缓存。
 - 热词：MVP 固定全部内置分类（200+ AI 术语，ContextGraph 偏置 + lpinyin 同音
-  后校正）；档位固定 standard。`lib/asr/asr_settings.dart` 替代 DSH 的 SSHConfig
+  后校正）；档位固定 standard。`lib/asr/asr_settings.dart` 替代 DSH-Phone 的 SSHConfig
   配置面（后续可调时换 SharedPreferences 存取即可）。
 
-**改动**：`lib/asr/` 七文件（6 个 DSH 原文件 + asr_settings.dart 解耦层）；
+**改动**：`lib/asr/` 七文件（6 个 DSH-Phone 原文件 + asr_settings.dart 解耦层）；
 pubspec 加 sherpa_onnx/record/background_downloader 8.9.5/lpinyin；main.dart 预热；
 home_screen 长按说话接 HoldToTalkSession + **删除旧录音路线全部代码**
 （_startRecording/_stopRecording/_recordingNotifier/波形动画横幅/
@@ -1642,7 +1642,7 @@ app-release.apk 81393088 B；字符串级验收过（语音卡文案双包命中
 
 **根因**：`create()` 按签名 'greedy' 预载（入参不含热词信息），`start()` 又因
 热词签名 'hotwords' 不一致**重载一遍**——每个会话双载 ~9.5s，且热词默认启用
-使该问题每会话必现（DSH 原实现无此症状，因其档位/热词多走 greedy）。
+使该问题每会话必现（DSH-Phone 原实现无此症状，因其档位/热词多走 greedy）。
 
 **修复**：`create()` 不再加载（注释写明双载根因），加载统一收口到 `start()`
 按最终形态（enhanced+热词）做一次，签名幂等 → 后续会话瞬时启动；新增诊断
@@ -1657,7 +1657,7 @@ app-release.apk 81393088 B；字符串级验收过（语音卡文案双包命中
 
 ## 2026-10-06 热词分类改版：Agent 智能体开发 + 端侧智能助手（用户指令）
 
-> 用户指令：热词改为 agent 智能体开发、端侧智能助手相关分类。原 DSH 搬来的
+> 用户指令：热词改为 agent 智能体开发、端侧智能助手相关分类。原 DSH-Phone 搬来的
 > 10 类通用 AI 术语（机器学习/CV/NLP 等）与本项目场景不匹配，整体重写。
 
 **新分类（5 类，全部中文词）**：
@@ -2279,7 +2279,7 @@ app-debug.apk 151,453,443 B / app-release.apk 85,416,758 B；字符串级验收�
 > 修复走"消除崩溃类"而非"修触发条件"。
 
 **JNI 安全采样（tongyilite_jni.cpp）**：
-- 新增 `sample_token_safe()`：复刻 `llama_sampler_sample` 语义（同链同序
+- 新增 `sample_token_safe()`：实现 `llama_sampler_sample` 语义（同链同序
   apply+accept）但**绕开两处致命断言**——① logits 为 null → 用"上一次解码的
   token 在其 KV 位置重解码一次"恢复 outputs（一次机会），仍失败 → 返回 -1
   优雅终止生成；② chain 输出 selected 越界 → 回退首候选。候选缓冲
@@ -2565,7 +2565,7 @@ stdio 管道必失败**（`Process.start` → `CreateFile failed 231` ERROR_PIPE
 flutter analyze / flutter test / flutter assemble 全部不可用（工具初始化第一条
 `cmd ver` 就挂）。`dart pub get`、`dart run <单进程脚本>` 可用（不 spawn 子进程）。
 同族于旧坑「沙箱受限 flutter 静默挂死 CreateFile failed 5」，但文件策略已
-danger-full-access 仍复现 → **管道限制来自 DSH 执行器会话本身**。解法=重启 DSH
+danger-full-access 仍复现 → **管道限制来自执行器会话本身**。解法=重启执行器
 会话/服务器后再跑工具链；期间可用 `dart run tool/plan_selfcheck.dart` 类纯 VM 脚本
 做逻辑级验证。
 

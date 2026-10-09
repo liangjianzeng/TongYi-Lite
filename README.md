@@ -226,7 +226,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 - **并发多关键词一次调用**：`additional_queries`（最多 3 个）并行搜索合并返回，一个问题的
   多个角度一次提交；
-- **每回合搜索上限**（DSH `max_uses` 语义，默认 5）：达到上限拒绝联网、强制基于既有结果回答，
+- **每回合搜索上限**（`max_uses` 语义，默认 5）：达到上限拒绝联网、强制基于既有结果回答，
   杜绝端侧小模型反复搜索死循环；同内容查询直接回缓存结果不重复联网；
 - **输出有预算**：按 URL 规范化去重、按相关性排序，总 1500 字截断，不挤占端侧本就不大的上下文窗口。
 
@@ -641,7 +641,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 | 版本 | 日期 | 要点 |
 |------|------|------|
 | **v0.2.9**（当前） | 2026-10-06 | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17 |
-| **v0.2.8** | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（DSH `max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
+| **v0.2.8** | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（`max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
 | **v0.2.7** | 2026-09-29 | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向 |
 | **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控；③ Turnip e2e 乱码根因定案（GEMM 大 n ≥48 编译器错编——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界）；④ tbo 增补 hadamard/PTQ1_0 大 batch 用例防回归；⑤ 双驱动真机全矩阵验证 |
 | **v0.2.5** | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复；真机 174/174 通过 |
@@ -785,8 +785,6 @@ Edge 免费接口的服务端行为：非 Multilingual 的英文音色读中文�
 - [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md) — 本机打包构建环境备忘（快速构建）
 - [`docs/archive/architecture_design_v2.md`](docs/archive/architecture_design_v2.md) — 架构设计 v2
 - [`docs/archive/backend_benchmark_2026-08-04.md`](docs/archive/backend_benchmark_2026-08-04.md) — 三后端实测专报
-- [`docs/agent_light_design.md`](docs/agent_light_design.md) — Agent Lite 设计
-- [`docs/dsh_gap_analysis_2026-10-01.md`](docs/dsh_gap_analysis_2026-10-01.md) — 智能体能力差距分析（对齐路线图）
 - [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md) — Adreno 825 Vulkan 修复全记录（v0.2.2 / v0.2.3）
 - [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md) — PTQ1_0 OpenCL 内核实现机制（v0.2.5）
 - [`docs/bonsai2_opencl_oom_2026-09-27.md`](docs/bonsai2_opencl_oom_2026-09-27.md) — Bonsai-2 OpenCL OOM 整机死机定案与守卫
@@ -794,8 +792,6 @@ Edge 免费接口的服务端行为：非 Multilingual 的英文音色读中文�
 - [`docs/opencl_hadamard_fwht_handoff_2026-09-28.md`](docs/opencl_hadamard_fwht_handoff_2026-09-28.md) — OpenCL FWHT（hadamard）实现交接
 - [`docs/llama_cpp_upgrade_plan_b11267.md`](docs/llama_cpp_upgrade_plan_b11267.md) — llama.cpp b11267 升级计划与四道门验收记录（`0909603`）
 - [`docs/websearch_direct_2026-10-02.md`](docs/websearch_direct_2026-10-02.md) — 端侧直连搜索引擎模块（实测证据/引擎坑速查，动搜索模块先读）
-- [`docs/ssh_agent_environment_2026-10-01.md`](docs/ssh_agent_environment_2026-10-01.md) — Dev Agent 执行环境评估
-- [`docs/ai_dev_agent_design_2026-10-01.md`](docs/ai_dev_agent_design_2026-10-01.md) — Dev Agent 设计与实施记录
 - [`docs/termux_integration_plan_2026-10-04.md`](docs/termux_integration_plan_2026-10-04.md) — 三级执行环境（L0/L1/L2）施工方案
 - [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](docs/dartssh2_termux_pitfalls_2026-10-01.md) — dartssh2 / SshKeyGen / Termux sshd 全部坑点（SSH 排障先读）
 - [`docs/python_support.md`](docs/python_support.md) — `python_exec` 支持说明

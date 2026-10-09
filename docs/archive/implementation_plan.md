@@ -330,7 +330,7 @@ C++: ai_chat.cpp (直接调用 llama C API)
 
 | 任务 | 验证目标 | 产出 |
 |------|---------|------|
-| 0.1 复刻官方 `com.arm.aichat` | 能在 Android 真机加载 Qwen3-1.7B 并对话 | 可运行的 Demo APK |
+| 0.1 参照官方 `com.arm.aichat` | 能在 Android 真机加载 Qwen3-1.7B 并对话 | 可运行的 Demo APK |
 | 0.2 真机基准测试 | 在 2-3 台目标设备测 tok/s | `benchmark_results.md`（真实数据） |
 | 0.3 内存峰值测量 | 记录推理时 RSS/PSS 峰值 | 确认不会 OOM |
 | 0.4 Vulkan 可行性预研 | 评估 NDK 编译 Vulkan 后端的难度 | Go/No-Go 决策 |
