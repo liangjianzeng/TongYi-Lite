@@ -123,6 +123,7 @@ class InferenceEngine(private val context: Context) {
 
     /** Push OOM-guard settings from the UI (设置→推理引擎→内存守卫) into native env. */
     private external fun nativeSetOomGuardParams(enabled: Boolean, preHeadroomMb: Int, postHeadroomMb: Int)
+    private external fun nativeSetKvCacheType(type: String)
 
     // --- Public API ---
 
@@ -216,6 +217,15 @@ class InferenceEngine(private val context: Context) {
      */
     fun setOomGuardParams(enabled: Boolean, preHeadroomMb: Int, postHeadroomMb: Int) {
         nativeSetOomGuardParams(enabled, preHeadroomMb, postHeadroomMb)
+    }
+
+    /**
+     * KV cache 精度（设置→推理引擎→KV 精度）。每次 loadModel 前调用，重载模型后生效。
+     * 仅量化 K（"q4_0"/"q8_0"）；V 恒为 F16 —— V 量化要求开启 flash attention，
+     * 本 app 保持关闭。不兼容的架构（MLA）原生层会自动回退 F16。
+     */
+    fun setKvCacheType(type: String) {
+        nativeSetKvCacheType(type)
     }
 
     /** Clear the KV cache to start a brand-new conversation (multi-turn append-only). */

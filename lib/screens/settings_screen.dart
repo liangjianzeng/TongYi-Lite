@@ -1328,6 +1328,62 @@ class _InferenceEngineTab extends ConsumerWidget {
 
           const SizedBox(height: 10),
 
+          // ---- KV 缓存精度卡片（手机必须量化：默认 Q4） ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '🧮 KV 缓存精度',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'q4_0',
+                        label: Text('Q4（默认）'),
+                        icon: Icon(Icons.compress, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: 'q8_0',
+                        label: Text('Q8'),
+                        icon: Icon(Icons.balance, size: 16),
+                      ),
+                    ],
+                    selected: {gpuSettings.kvCacheType},
+                    onSelectionChanged: (sel) {
+                      final v = sel.first;
+                      if (v != gpuSettings.kvCacheType) {
+                        gpuNotifier.setKvCacheType(v);
+                      }
+                    },
+                    showSelectedIcon: false,
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '端侧内存有限，KV 缓存默认 Q4 量化（所有本地模型生效）；'
+                    'Q8 精度更高、更占内存。仅量化 K 部分，V 保持 F16'
+                    '（V 量化需开启 flash attention，当前保持关闭）。'
+                    '修改后重新加载模型生效',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(

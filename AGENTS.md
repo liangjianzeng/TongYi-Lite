@@ -2666,3 +2666,52 @@ debug 151,486,116 B。local.properties 翻回 debug。
 可把 base 压到 ~48MiB。
 **APK**：`E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\`
 app-release.apk 71,169,325 B（09:32）/ app-debug.apk 151,486,116 B（09:32）。
+
+## 2026-10-09 bonsai2-27B 加载失败定案（prism.hadamard × mmap 时序 bug）+ 打包"旧 Dart 幽灵"再踩实录
+
+**① bonsai2 加载失败根因（真机 logcat 实锤，已修复并真机验证 loadModel result: true）**：
+- 表象：`llama_model_load: error loading model: prism.hadamard weight has no buffer:
+  token_embd.weight`，UI 红条"模型文件加载失败，请检查文件是否完整"（又是误导标题）。
+- 根因：bonsai2 是 `prism.hadamard` tied-output v2 契约（token_embd 参与 Hadamard）；
+  OpenCL 无 PTQ1_0 GET_ROWS → embedding 落 **CPU mmap ctx**；mmap 的 tensor 要等
+  `load_all_data()` 里 `ggml_backend_tensor_alloc` 才绑 `t->buffer`，而 fork 的 hadamard
+  注册块在其**之前**做 `weight->buffer == nullptr` 检查 → 必抛。JNI 固定
+  `LLAMA_LOAD_MODE_MMAP`，16GB 机器也 100% 复现，与文件完整性/内存无关。
+- 修复（third_party/llama.cpp/src/llama-model.cpp ~2097/2289）：hadamard 注册改成 lambda
+  `register_hadamard_weights()`，在 load_all_data 循环后调用（块内只读维度/buft+新建小
+  旋转张量，不动权重数据，后置安全）；no_alloc fit pass 早退不注册（旋转缓冲仅 KB 级）。
+
+**② 打包教训（AGENTS 旧规再犯 + 两个新坑）**：
+- `-x compileFlutterBuildDebug` 沿用 intermediates 旧 kernel（10/04 的包缺 v0.2.9 全部
+  Dart）——**任何重打必须先 flutter assemble → cp flutter_assets → gradlew**，无例外。
+- **pubspec.lock 不入库**：新环境/拉新代码后必须先 `flutter pub get`，否则 flutter
+  assemble 在 kernel 阶段炸 `FileSystemException org-dartlang-untranslatable-uri:
+  package%3Arecord%2Frecord.dart`（`package:record` 未解析→depfile 写挂），报错完全不提
+  依赖，易误判 Flutter 坏了。
+- 本机（E:\Work\DgxSpark）flutter SDK 在 `C:\dev-tools\flutter`；github 不通时命令加
+  `--no-version-check`（`flutter pub get` 不支持该 flag）。assemble 报 `Invalid depfile`
+  是上次炸残留，重跑自动重建。debug 包 run-as 不可用（非 debuggable），模型私有目录
+  文件外部拉不到。
+- 语法快检技巧：取 `.cxx/Debug/*/arm64-v8a/compile_commands.json` 里该文件的命令 +
+  `-fsyntax-only`，30s 验证 C++ 改动，不用全量 gradle。
+
+**③ 16GB 机（Redmi M332BF）跑 bonsai2 OpenCL n_ctx=4096：能加载 ≠ 能用**：
+- 加载成功（权重 5.4GB OpenCL 全载）后发消息 prefill → **整机 thrash**：本进程 minor
+  faults 215 万/major 4.7 万，kswapd0 16~49% CPU，ANR 的是 miui.home（等 GPU 渲染）/
+  systemui/system_server——与 11GB 死机案同族（UMA 权重必 resident + KV + mmap 工作集
+  超 MemAvailable ≈7GB），只是不死机改全系统卡顿。
+- 方向：该规模模型在这类 16GB 机默认降 n_ctx（≤2048）或部分层留 CPU mmap，OOM 守卫
+  预算把 prefill/运行态再收紧（待做）。
+
+**APK 产物**：`E:\Work\DgxSpark\TongYi-Lite\build\app\outputs\flutter-apk\`
+app-debug.apk **117,825,447 B（10-09 11:16）** = 2034f05 最新 Dart + hadamard 原生修复，
+字符串级验收过（kernel `image_preview.dart`×5/`ImagePreview`×14/`long_image_service.dart`×5，
+68,128,128 B），已 `adb install -r -t` 到 43328e37（M332BF，v0.2.9+17 同码覆盖）。
+
+## 2026-10-09 乱码双案（4B 下载损坏 / bonsai2 CPU 引擎回归）+ KV 精度开关上线
+
+- **4B 乱码+OpenCL 空输出 = 手机上的文件损坏，非引擎**。铁证：PC 全新下载同 URL 的 4B，推到 /data/local/tmp 用本树自编 llama-completion（-ngl 0 -fa off -ub 16 --jinja）跑，中文连贯思考流 1.77 tok/s。损坏来源（download_service 三连漏洞）：① Step2「.tmp ≥ catalog 估算 size → 无校验 rename 提升」而 4B 的 sizeGB 写 2.4 实际 2.83GB；② 「已完整则跳过」只看存在且>0，损坏文件永不重下；③ 断点续传可跨镜像拼接不同 revision（unsloth 更新过该文件）→ 尺寸正确内容坏 → 加载成功、数值垃圾（CPU 乱码 / OpenCL NaN 立即 EOS 空输出）。修复：catalog 4B/bonsai2 补 sha256（4B=3874209241c9a…、bonsai2=53107f530aa52…，4B sizeGB 校准 2.83）；download_service 全路径 sha256 强制校验（isolate 内算哈希；Step2 提升前、Step5 rename 前、三处「已完整」判定，不符删损坏文件自动重下）。**用户手机上已损坏的 4B 需删了重下。**
+- **bonsai2 CPU 乱码 = b11267 升级后的引擎回归**（全新文件 CLI 在 app 外照样复现多语言乱码；老树 9-29 同机 CPU -ngl 0 -ub 16 连贯）。bonsai2 = qwen35 GDN 混合架构 + prism.hadamard 折叠权重（11 个 hadamard 键、prec_a4=0）。已静态排除：llama-graph hadamard 区两树逐行一致（纯缩进差）、PTQ1_0 vec_dot/trait 别名/FWHT 实现一致、repack 不含 PTQ1_0、KleidiAI 明示不加速 ptq1_0、prec_policy 无键不生效。对照工具：老树 CLI 已编好放 /data/local/tmp/tycli_old（同文件跑同一命令定回归）。
+- **真机 CLI 复现基建**（新）：`build/cli-android{,-old}/CMakeLists.txt` 复刻 app 编译开关（NDK27、dotprod、KleidiAI vendored 双变量、opencl-stub、LLAMA_BUILD_SERVER=ON 才有 cli 子目录），产物推 /data/local/tmp/tycli(_old)。**坑：非 tty 下 llama-cli 进 REPL 无限打 `> `（几分钟 180MB 日志），别当卡死**——用 llama-completion + `< /dev/null`，输出重定向到文件再 cat。libomp.so 在 NDK `toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64/`（sysroot 里没有）；opencl_stub 的 libopencl_stub.so 要一并推。
+- **MIUI 并非丢 app logcat**：`flutter`/`llama`/`InferenceService` tag 都在（早前「被抑制」是 `-v time` 格式 grep 姿势错的误判）。UI 仍盲（Flutter 无 semantics、无 a11y 服务），驱动不了就用 CLI。USB 一天掉线 N 次：批量命令前先 `adb wait-for-device` 排队 + `svc power stayon true`。
+- **KV 精度开关**（设置→推理引擎→KV 精度，默认 Q4、可选 Q8，全本地模型生效，重新加载模型后生效）：仅量化 **K**；**V 恒 F16**——V 量化要求 flash attention 开启（llama-context 硬报错），本 app FA 保持关闭，UI/注释已写明。链路 kvCacheType(settings_service 持久化)→model_provider 每加载前推→Kotlin→JNI g_kv_cache_type→ctx_params.type_k（MTP/dspark 草稿 ctx 同步）。MLA 架构（K≠V 会被上游拒）→ ctx 创建失败自动回退 F16 KV 重试一次并写推理日志。OOM 守卫 KV 字节估算改为 K=0.5625(q4)/1(q8) + V=2 B/elem。

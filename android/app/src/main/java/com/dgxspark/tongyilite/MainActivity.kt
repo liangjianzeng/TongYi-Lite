@@ -107,6 +107,7 @@ class MainActivity : FlutterActivity() {
                 "stopGeneration"          -> handleStop(result)
                 "setEnableThinking"       -> handleSetEnableThinking(call, result)
                 "setOomGuard"             -> handleSetOomGuard(call, result)
+                "setKvCacheType"          -> handleSetKvCacheType(call, result)
                 "resetContext"            -> handleResetContext(result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
@@ -1080,6 +1081,16 @@ class MainActivity : FlutterActivity() {
         logI("handleSetOomGuard", "enabled=$enabled, pre=${preMb}MB, post=${postMb}MB")
         replyGuard(result, "handleSetOomGuard") {
             engine.setOomGuardParams(enabled, preMb, postMb)
+            result.success(true)
+        }
+    }
+
+    /** KV cache precision from the in-app UI (设置→推理引擎→KV 精度). */
+    private fun handleSetKvCacheType(call: MethodCall, result: MethodChannel.Result) {
+        val type = call.argument<String>("type") ?: "q4_0"
+        logI("handleSetKvCacheType", "type=$type")
+        replyGuard(result, "handleSetKvCacheType") {
+            engine.setKvCacheType(type)
             result.success(true)
         }
     }

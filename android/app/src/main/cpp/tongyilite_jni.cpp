@@ -255,6 +255,13 @@ static int64_t read_mem_available_bytes() {
     return 0;
 }
 
+// KV cache K-type selection (Settings -> Inference Engine -> KV Precision).
+// 0 = q4_0 (default), 1 = q8_0. V is always F16: quantized V requires flash
+// attention (llama-context refuses otherwise) and this app keeps FA disabled.
+// MLA models (DeepSeek family) also keep K/V at F16 - upstream requires
+// type_k == type_v for them.
+static std::atomic<int> g_kv_cache_type{0};
+
 // --- OOM guard configuration (vk_flags.conf overridable, 2026-09-27) ---
 // The guard protects against KGSL/dm wedges (full device reboots) when total
 // demand exceeds physical RAM on UMA phones. Its headroom constants are
@@ -782,14 +789,18 @@ struct InferenceEngine {
                         weights_gpu += (int64_t)dst.st_size;  // draft is offloaded too
                     }
                 }
-                // KV bytes for one position (K+V, f16). Conservative: when the
-                // GQA shape is unknown assume full n_embd width.
+                // KV bytes for one position. K follows the KV precision setting
+                // (q4_0 = 4.5 bits/elem -> 0.5625B, q8_0 = 1B); V stays F16 (2B).
+                // Conservative: when the GQA shape is unknown assume full n_embd width.
                 const int kv_heads   = std::max(1, llama_model_n_head_kv(model));
                 const int n_head_    = llama_model_n_head(model);
                 const int64_t kv_dim = (n_head_ > 0)
                     ? (int64_t)kv_heads * (n_embd / n_head_)
                     : (int64_t)n_embd;
-                const int64_t kv_per_pos = 2LL * n_layer_total * kv_dim * (int64_t)sizeof(uint16_t);
+                const double k_bytes_per_elem =
+                    (g_kv_cache_type.load(std::memory_order_relaxed) == 1) ? 1.0 : 0.5625;
+                const int64_t kv_per_pos = (int64_t)llround(
+                    (double)n_layer_total * (double)kv_dim * (k_bytes_per_elem + 2.0));
 
                 // Headroom for graph compute buffers, upload staging, the mmap
                 // file working set, Android itself. Configurable (default 1536
@@ -924,6 +935,15 @@ struct InferenceEngine {
         // the documented API and works correctly on the unified buffer.
         ctx_params.kv_unified = true;
 
+        // KV cache precision (设置→推理引擎→KV 精度): K quantized per setting,
+        // default q4_0. V stays F16 - quantized V requires flash attention which
+        // this app keeps disabled. Failed archs (MLA) retry at F16 below.
+        ctx_params.type_k =
+            (g_kv_cache_type.load(std::memory_order_relaxed) == 1) ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_0;
+        ctx_params.type_v = GGML_TYPE_F16;
+        LOGI("KV cache: type_k=%s type_v=f16 (flash-attn disabled)",
+             ggml_type_name(ctx_params.type_k));
+
         // For speculative decoding (MTP or DSpark), partial draft acceptance is
         // rolled back via the rollback-sequence (RS) mechanism: llama_memory_seq_rm()
         // removes the unaccepted draft tokens past the commit point. DSV4 (Bonsai)
@@ -948,17 +968,20 @@ struct InferenceEngine {
 
         std::future<llama_context*> future_ctx;
 
-        future_ctx = std::async(std::launch::async, [this]() -> llama_context* {
-            LOGI("Context creation thread started");
-            llama_context *ctx = llama_init_from_model(this->model, this->ctx_params);
-            if (ctx) {
-                LOGI("Context created successfully. n_ctx=%d", llama_n_ctx(ctx));
+        auto spawn_ctx = [this]() {
+            return std::async(std::launch::async, [this]() -> llama_context* {
+                LOGI("Context creation thread started");
+                llama_context *ctx = llama_init_from_model(this->model, this->ctx_params);
+                if (ctx) {
+                    LOGI("Context created successfully. n_ctx=%d", llama_n_ctx(ctx));
+                } else {
+                    LOGE("llama_init_from_model returned nullptr (OOM?)");
+                }
                 return ctx;
-            } else {
-                LOGE("llama_init_from_model returned nullptr (OOM?)");
-                return nullptr;
-            }
-        });
+            });
+        };
+
+        future_ctx = spawn_ctx();
 
         auto wait_result = future_ctx.wait_for(std::chrono::seconds(60));
         if (wait_result == std::future_status::timeout) {
@@ -969,9 +992,27 @@ struct InferenceEngine {
             return false;
         }
 
+        llama_context * new_ctx = future_ctx.get();
+        if (!new_ctx && ctx_params.type_k != GGML_TYPE_F16) {
+            // Rejected by the arch (e.g. MLA models require type_k == type_v):
+            // one automatic retry with an F16 KV cache.
+            LOGW("ctx init failed with quantized KV (type_k=%s) - retrying with F16 KV",
+                 ggml_type_name(ctx_params.type_k));
+            reportLoadingLog("KV 精度 Q4/Q8 与该模型架构不兼容，已自动回退 F16 KV 重试");
+            ctx_params.type_k = GGML_TYPE_F16;
+            future_ctx = spawn_ctx();
+            if (future_ctx.wait_for(std::chrono::seconds(60)) == std::future_status::timeout) {
+                LOGE("Context retry creation timed out after 60s — possible OOM or deadlock");
+                reportLoadingLog("上下文初始化超时（内存不足或设备性能不够）");
+                llama_model_free(model);
+                model = nullptr;
+                return false;
+            }
+            new_ctx = future_ctx.get();
+        }
         {
             std::lock_guard<std::mutex> ctx_lock(mtx);
-            context = future_ctx.get();
+            context = new_ctx;
         }
         if (!context) {
             LOGE("Failed to create context (OOM?)");
@@ -1002,6 +1043,8 @@ struct InferenceEngine {
             mtp_params.ctx_other = context;                       // main target context
             mtp_params.n_ctx     = (uint32_t)ctx_val;
             mtp_params.n_batch   = ctx_params.n_batch;            // room for [id_last + drafts]
+            mtp_params.type_k    = ctx_params.type_k;             // follow KV precision setting
+            mtp_params.type_v    = ctx_params.type_v;
             mtp_params.n_ubatch  = ctx_params.n_ubatch;
             mtp_params.n_rs_seq  = 0;                             // MTP ctx needs no rollback
             mtp_params.n_threads = ctx_params.n_threads;
@@ -1038,6 +1081,8 @@ struct InferenceEngine {
             dspark_params.ctx_other = context;          // mirror target hidden states
             dspark_params.n_ctx     = (uint32_t)ctx_val;
             dspark_params.n_batch   = ctx_params.n_batch;
+            dspark_params.type_k    = ctx_params.type_k;          // follow KV precision setting
+            dspark_params.type_v    = ctx_params.type_v;
             dspark_params.n_ubatch  = ctx_params.n_ubatch;
             dspark_params.n_rs_seq  = 0;
             dspark_params.n_threads = ctx_params.n_threads;
@@ -2767,6 +2812,23 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetOomGuardParams(
     setenv("TONGYILITE_OOM_POST_HEADROOM_MB", buf, 1);
     LOGI("nativeSetOomGuardParams: guard=%s pre=%dMB post=%dMB",
          guard_on ? "on" : "OFF(risk: hard reboot)", (int)j_pre_mb, (int)j_post_mb);
+}
+
+// KV cache precision from the UI (设置→推理引擎→KV 精度). "q4_0" (default) or
+// "q8_0". Applied at the next model load (ctx params are fixed per context).
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetKvCacheType(
+    JNIEnv * env, jobject, jstring j_type
+) {
+    int v = 0;
+    if (j_type) {
+        const char * s = env->GetStringUTFChars(j_type, nullptr);
+        v = (s && std::strcmp(s, "q8_0") == 0) ? 1 : 0;
+        if (s) env->ReleaseStringUTFChars(j_type, s);
+    }
+    g_kv_cache_type.store(v, std::memory_order_relaxed);
+    LOGI("nativeSetKvCacheType: type_k=%s (type_v stays f16, flash-attn off)",
+         v ? "q8_0" : "q4_0");
 }
 
 JNIEXPORT void JNICALL

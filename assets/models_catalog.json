@@ -109,7 +109,7 @@
       "sizeMBDisplay": "5.9 GB",
       "recommended": false,
       "minRamMB": 16384,
-      "sha256Hash": null,
+      "sha256Hash": "53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3",
       "tags": [
         "1.58-bit",
         "纯文本",
@@ -294,11 +294,11 @@
           "source": "modelscope"
         }
       ],
-      "sizeGB": 2.4,
-      "sizeMBDisplay": "2.4 GB",
+      "sizeGB": 2.83,
+      "sizeMBDisplay": "2.8 GB",
       "recommended": true,
       "minRamMB": 3500,
-      "sha256Hash": null,
+      "sha256Hash": "3874209241c9a397e2f62cd3f70f80fd2dfbf0dfccb6838416bdb48a714e8630",
       "mtp": true,
       "tags": [
         "推荐",

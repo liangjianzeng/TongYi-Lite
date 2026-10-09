@@ -139,6 +139,19 @@ class InferenceService {
     }
   }
 
+  /// 推送 KV 缓存精度到原生层（设置→推理引擎→KV 精度）。
+  ///
+  /// 必须在每次 loadModel 之前调用；重载模型后生效。[type] 取 'q4_0' 或 'q8_0'，
+  /// 仅量化 K；V 恒为 F16（V 量化要求开启 flash attention，本 app 保持关闭）。
+  /// 不兼容的模型架构（MLA 系）原生层会自动回退 F16 KV。
+  Future<void> setKvCacheType(String type) async {
+    try {
+      await _channel.invokeMethod('setKvCacheType', {'type': type});
+    } catch (e) {
+      debugPrint('[InferenceService] setKvCacheType failed: $e');
+    }
+  }
+
   Future<bool> isLoaded() async {
     final result = await _channel.invokeMethod('isLoaded');
     return result == true;

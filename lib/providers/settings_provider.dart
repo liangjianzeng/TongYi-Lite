@@ -715,6 +715,15 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// KV 缓存精度：'q4_0'（默认）/ 'q8_0'。仅量化 K，V 恒 F16（见 settings_service
+  /// 注释）。重新加载模型后生效。
+  Future<void> setKvCacheType(String value) async {
+    final v = (value == 'q8_0') ? 'q8_0' : 'q4_0';
+    if (v == state.kvCacheType) return;
+    state = state.copyWith(kvCacheType: v);
+    await _persist();
+  }
+
   /// GPU 推理时限制刷新率（防闪纹）。关 = 推理期间不干预屏幕刷新率。
   Future<void> setInferenceLimitRefreshRate(bool value) async {
     state = state.copyWith(inferenceLimitRefreshRate: value);
