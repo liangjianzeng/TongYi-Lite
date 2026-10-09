@@ -96,7 +96,7 @@ analyze lib+test 0 error。
 - **坑**：NDK 裸 `clang --target=aarch64-linux-android` 缺 crt 文件，须用带 sysroot 的 wrapper
   （`aarch64-linux-androidXX-clang.cmd`）编译。
 
-### web_search：并发多关键词 + 每回合搜索上限（DSH max_uses 语义）
+### web_search：并发多关键词 + 每回合搜索上限（max_uses 语义）
 
 - **并发搜索**：`web_search` 加可选 `additional_queries: string[]`（最多 3 个），`Future.wait` 并行
   搜索全部关键词，合并返回（每关键词一小节 `[搜索：xxx]`，均分 1500 字预算）。描述教模型
@@ -346,7 +346,7 @@ lastTurnAnswer 不回溯、system 晚 append 仍恒队首）。
 
 ### 新增：端侧 Agent Lite 智能体
 
-- **Agent 循环（参照 DSH agent-loop step() 简化）**：模型 ↔ 工具多轮交互，轮次上限可配置（默认 5），
+- **Agent 循环（参照 agent-loop step() 简化）**：模型 ↔ 工具多轮交互，轮次上限可配置（默认 5），
   工具结果以 user 角色消息回填后再生成，直到无工具调用返回最终回答。
 - **协议可插拔**：`ToolProtocol` 抽象 + 按 `EngineCapabilities` 自动选协议；本地/API 首版统一走
   prompt-JSON/XML 文本协议（`PromptJsonProtocol` 双格式解析），原生 tools 留待能力探测后新增 adapter。
@@ -358,7 +358,7 @@ lastTurnAnswer 不回溯、system 晚 append 仍恒队首）。
   + XML/JSON 工具调用块增量隐藏。
 - **llama.cpp fork 升级**：`third_party/llama.cpp` 换为 XHToken 官方 fork（`spark2_5` 架构 +
   function-calling），NDK 全量重建成功；旧版 b10176 仅本地备份不入库。
-- **根治工具调用"缺参数"**（对照 DSH `defineTool/validateArgs` 落地）：工具执行前统一必填校验，
+- **根治工具调用"缺参数"**（对照 `defineTool/validateArgs` 落地）：工具执行前统一必填校验，
   错误信息明确列出缺失参数名与用途并回填"补全后重试"；工具清单渲染带必填参数提示
   （如 `shell_exec（必填: command）`），让模型知道带参数工具必须给出哪些参数。
 - 修复真机工具遵循率问题：提示语规则段与 XML 协议口径一致、强调必填参数、XML 数组参数解码、
@@ -369,9 +369,9 @@ lastTurnAnswer 不回溯、system 晚 append 仍恒队首）。
 - **嵌入式 CPython 3.11**：Chaquopy 17.0.0 集成，APK 内嵌 `libpython3.11.so` + 标准库（stdlib .imy），
   `agent_runner.py` 经 MethodChannel（`com.dgxspark.tongyilite/python`）执行脚本，
   15s 超时 / 4KB 输出截断；无运行时优雅降级为明确错误，不影响其他工具。
-- **沙箱授权体系（对照 DSH escalation）**：严格更宽阶梯 `workspace-write` →
+- **沙箱授权体系（对照 escalation）**：严格更宽阶梯 `workspace-write` →
   `danger-full-access`；模型带 `sandbox_permissions` + `justification` 请求升级，
-  agent 循环执行前经**用户确认框逐次批准**（allowed-once）；拒绝/升级标记与 DSH 同文案
+  agent 循环执行前经**用户确认框逐次批准**（allowed-once）；拒绝/升级标记与平台同文案
   （`[sandbox: file access denied under ...]` / `[sandbox: escalation available ...]`）。
 - **设置页新增开关**：「Python 执行（python_exec）」与「完整文件访问授权」
   （danger-full-access 前置，依赖 MANAGE_EXTERNAL_STORAGE / All-Files-Access）。
