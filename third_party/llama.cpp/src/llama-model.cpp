@@ -2092,7 +2092,12 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    if (!hadamard_weight_blocks.empty() || !hadamard_inverse_blocks.empty()) {
+    // tensors in mmap-backed contexts are bound to their buffer only inside load_all_data(),
+    // so register the Hadamard transforms after the data load below, not here
+    auto register_hadamard_weights = [&]() {
+        if (hadamard_weight_blocks.empty() && hadamard_inverse_blocks.empty()) {
+            return;
+        }
         struct hadamard_rotation {
             uint32_t block_size;
             ggml_backend_buffer_type_t buft;
@@ -2259,7 +2264,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         LLAMA_LOG_INFO("%s: loaded %zu Hadamard-folded weight(s) (%zu inverse-lookup) using %zu rotation(s) and %zu sign vector(s)\n",
                 __func__, hadamard_rotations.size() + hadamard_inverses.size(), hadamard_inverses.size(),
                 rotations.size(), sign_tensors.size());
-    }
+    };
 
     if (ml.no_alloc) {
         return true;
@@ -2279,6 +2284,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             return false;
         }
     }
+
+    register_hadamard_weights();
 
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
