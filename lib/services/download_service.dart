@@ -1,11 +1,33 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import '../models/model_info.dart';
 import 'model_manager.dart';
 import 'model_storage_service.dart';
+
+class _CapturingSink implements Sink<crypto.Digest> {
+  crypto.Digest? value;
+  @override
+  void add(crypto.Digest data) => value = data;
+  @override
+  void close() {}
+}
+
+/// Runs inside an Isolate: sha256 of a file as lowercase hex. Several GB per
+/// model, so it must never hash on the UI isolate.
+Future<String> _computeSha256OfFile(String path) async {
+  final sink = _CapturingSink();
+  final input = crypto.sha256.startChunkedConversion(sink);
+  await for (final chunk in File(path).openRead()) {
+    input.add(chunk);
+  }
+  input.close();
+  return sink.value.toString();
+}
 
 class DownloadService {
   static final DownloadService _instance = DownloadService._internal();
@@ -77,14 +99,15 @@ class DownloadService {
       // 时只补下 mmproj，不会把多 GB 的主 gguf 再拉一遍。
       final ggufTarget = _DownloadTarget(
         mirrors: model.mirrors, sizeBytes: model.sizeBytes, suffix: '.gguf',
+        sha256Hash: model.sha256Hash,
       );
       final ggufTemp = File(p.join(dir.path, model.id + ggufTarget.suffix + '.tmp'));
       final ggufFinal = File(p.join(dir.path, model.id + ggufTarget.suffix));
-      // 完成判定：存在、无残留 .tmp、非空即完整。catalog 估算大小不可靠（常比实际大），
-      // 不再用它卡百分比（与 isFullyCached 一致，a6dc05d 已让下载循环信任 CDN）。
-      final ggufComplete = await ggufFinal.exists() &&
-          !(await ggufTemp.exists()) &&
-          (await ggufFinal.length()) > 0;
+      // 完成判定：存在、无残留 .tmp、非空，且（catalog 配了 sha256 时）哈希相符。
+      // catalog 估算大小不可靠（常与实际不符），配了哈希就以哈希为准——损坏的
+      // 「缓存完成」文件会被删除重下，而不是永远加载出乱码。
+      final ggufComplete = !(await ggufTemp.exists()) &&
+          await _trustedOrClean(ggufFinal, model.sha256Hash, '主 gguf');
       task.stage = '主模型';
       if (ggufComplete) {
         debugPrint('[DownloadService] ${model.id} 主 gguf 已完整，跳过主模型下载');
@@ -110,11 +133,9 @@ class DownloadService {
         );
         final mmprojTemp = File(p.join(dir.path, model.id + mmprojTarget.suffix + '.tmp'));
         final mmprojFinal = File(p.join(dir.path, model.id + mmprojTarget.suffix));
-        // 与主 gguf 同样的「已完整则跳过」：若 mmproj 已完整存在，直接落完成态，
-        // 不再重复拉取已有投影器（此前缺此检查，点「下载」会无条件重下 mmproj）。
-        final mmprojComplete = await mmprojFinal.exists() &&
-            !(await mmprojTemp.exists()) &&
-            (await mmprojFinal.length()) > 0;
+        // 与主 gguf 同样的「已完整则跳过」（mmproj 无 sha256 字段，按存在判定）。
+        final mmprojComplete = !(await mmprojTemp.exists()) &&
+            await _trustedOrClean(mmprojFinal, null, 'mmproj');
         if (mmprojComplete) {
           final done = await mmprojFinal.length();
           debugPrint('[DownloadService] ${model.id} mmproj 已完整，跳过投影器下载');
@@ -149,9 +170,8 @@ class DownloadService {
         );
         final dsparkTemp = File(p.join(dir.path, model.id + dsparkTarget.suffix + '.tmp'));
         final dsparkFinal = File(p.join(dir.path, model.id + dsparkTarget.suffix));
-        final dsparkComplete = await dsparkFinal.exists() &&
-            !(await dsparkTemp.exists()) &&
-            (await dsparkFinal.length()) > 0;
+        final dsparkComplete = !(await dsparkTemp.exists()) &&
+            await _trustedOrClean(dsparkFinal, null, 'dspark 草稿头');
         if (dsparkComplete) {
           final done = await dsparkFinal.length();
           debugPrint('[DownloadService] ${model.id} dspark 已完整，跳过草稿头下载');
@@ -231,17 +251,31 @@ class DownloadService {
           throw DownloadException('所有镜像当前不可达，请检查网络后重试。');
         }
 
-        // Step 2: 已完成？直接落到最终文件。
+        // Step 2: 已有残留且达到估算大小？哈希（配置了的话）相符才提升为最终文件。
+        // 哈希不符 = 损坏/旧版本残留，删除整段重下——此前这里直接 rename，
+        // 造成「尺寸达标但内容损坏」的文件被当已下载（catalog 尺寸常与实际不符）。
         if (hasPartial && target.sizeBytes > 0 &&
             (await tempFile.length()) >= target.sizeBytes) {
-          // 用实文件大小（可能大于估算的 sizeBytes），进度恒为 100%。
-          final done = await tempFile.length();
-          task.downloadedBytes = baseBytes + done;
-          await tempFile.rename(finalFile.path);
-          task.state = DownloadState.completed;
-          task.endTime = DateTime.now();
+          bool hashOk = true;
+          if (target.sha256Hash != null) {
+            hashOk = await _hashMatches(tempFile, target.sha256Hash);
+          }
+          if (hashOk) {
+            // 用实文件大小（可能大于估算的 sizeBytes），进度恒为 100%。
+            final done = await tempFile.length();
+            task.downloadedBytes = baseBytes + done;
+            await tempFile.rename(finalFile.path);
+            task.state = DownloadState.completed;
+            task.endTime = DateTime.now();
+            onProgress(task);
+            return;
+          }
+          debugPrint('[DownloadService] Step 2: .tmp sha256 不符，丢弃后整段重下');
+          try { await tempFile.delete(); } catch (_) {}
+          downloadedSoFar = 0;
+          supportsRange = false;
+          task.downloadedBytes = baseBytes;
           onProgress(task);
-          return;
         }
 
         // Step 3: 下载主体。支持 Range 且有残留则断点续传，否则整段下载。
@@ -325,6 +359,14 @@ class DownloadService {
           throw DownloadException('Download produced empty file');
         }
 
+        // Step 4.5: 配置了 sha256 的条目强制校验（CDN 静默截断/串内容不能把
+        // 损坏文件提升为最终文件——那正是推理乱码/空输出的来源）。
+        if (target.sha256Hash != null &&
+            !await _hashMatches(tempFile, target.sha256Hash)) {
+          try { await tempFile.delete(); } catch (_) {}
+          throw DownloadException('文件校验失败（sha256 不符，下载损坏），已丢弃，自动重新下载');
+        }
+
         // Step 5: 提升 .tmp 为最终文件。
         await tempFile.rename(finalFile.path);
         // 完成态以实文件大小为准（累计到 baseBytes），进度恒为 100%。
@@ -351,6 +393,17 @@ class DownloadService {
         }
         await _fail(task, _cleanErrorMessage(e.toString()), model.id, deletePartial: true);
         onProgress(task);
+      } on DownloadException catch (e) {
+        // 校验类失败（哈希不符等）：tmp 已被清理，重试即整段重下。
+        if (attempt < _maxAttempts) {
+          task.errorMessage = '${e.message}（第 $attempt/${_maxAttempts - 1} 次重试）';
+          onProgress(task);
+          await Future.delayed(const Duration(seconds: 1));
+          if (task.state == DownloadState.paused) return;
+          continue;
+        }
+        await _fail(task, e.message, model.id, deletePartial: true);
+        onProgress(task);
       } catch (e) {
         if (attempt < _maxAttempts) {
           task.errorMessage = '下载中断，正在自动重试 ($attempt/${_maxAttempts - 1})…';
@@ -363,6 +416,33 @@ class DownloadService {
         onProgress(task);
       }
     }
+  }
+
+  /// sha256 校验（isolate 内跑，几 GB 文件十几~几十秒）。相符返回 true。
+  Future<bool> _hashMatches(File f, String? expected) async {
+    if (expected == null) return true;
+    try {
+      final actual = await Isolate.run(() => _computeSha256OfFile(f.path));
+      final ok = actual.toLowerCase() == expected.toLowerCase();
+      debugPrint('[DownloadService] sha256 校验${ok ? "通过" : "不符"}: '
+          '${p.basename(f.path)} actual=$actual');
+      return ok;
+    } catch (e) {
+      debugPrint('[DownloadService] sha256 计算异常: $e');
+      return false;
+    }
+  }
+
+  /// 「磁盘上已完整」可信判定：存在且非空，配置了 sha256 还必须哈希相符；
+  /// 哈希不符时删除损坏文件并返回 false（调用方随即重新下载）。
+  Future<bool> _trustedOrClean(File f, String? sha, String label) async {
+    if (!await f.exists() || (await f.length()) == 0) return false;
+    if (sha == null) return true;
+    debugPrint('[DownloadService] $label: 校验 sha256（可能需要十几秒）…');
+    if (await _hashMatches(f, sha)) return true;
+    debugPrint('[DownloadService] $label: sha256 不符，已删除损坏文件，将重新下载');
+    try { await f.delete(); } catch (_) {}
+    return false;
   }
 
   /// 标记任务失败并（可选）清理残留 .tmp。
@@ -608,10 +688,14 @@ class _DownloadTarget {
   final int sizeBytes;
   final String suffix;
 
+  /// catalog 给出的 sha256（可空）。非空时下载完成后强制校验，损坏文件不落最终名。
+  final String? sha256Hash;
+
   const _DownloadTarget({
     required this.mirrors,
     required this.sizeBytes,
     required this.suffix,
+    this.sha256Hash,
   });
 }
 

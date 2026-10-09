@@ -335,6 +335,11 @@ class InferenceSettings {
   /// 内存预算 = MemAvailable - 该余量；调小可给 KV 更大空间，调大更保守??
   final int oomPostHeadroomMb;
 
+  /// KV 缓存精度（设置→推理引擎→KV 精度）：'q4_0'（默认）或 'q8_0'。
+  /// 端侧内存必须量化：默认 Q4。仅量化 K；V 恒为 F16——V 量化要求开启
+  /// flash attention，本 app 保持关闭（上游会硬报错）。改后重新加载模型生效。
+  final String kvCacheType;
+
   /// GPU 推理时限制刷新率（防闪纹，2026-10-07 小米13 定案）：模型加载/
   /// prefill 的瞬时显存带宽会挤占显示供帧（Adreno UMA），期间临时锁 60Hz、
   /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
@@ -497,6 +502,7 @@ class InferenceSettings {
     this.vkNoSubgroup = false,
     this.oomPreHeadroomMb = 768,
     this.oomPostHeadroomMb = 1536,
+    this.kvCacheType = 'q4_0',
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -664,6 +670,7 @@ class InferenceSettings {
       bool? inferenceLimitRefreshRate,
       int? oomPreHeadroomMb,
       int? oomPostHeadroomMb,
+      String? kvCacheType,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
     Map<String, List<String>>? agentToolsByModel,
@@ -787,6 +794,7 @@ class InferenceSettings {
       vkNoSubgroup: vkNoSubgroup ?? this.vkNoSubgroup,
       oomPreHeadroomMb: oomPreHeadroomMb ?? this.oomPreHeadroomMb,
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
+      kvCacheType: kvCacheType ?? this.kvCacheType,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
       agentPersonas: agentPersonas ?? this.agentPersonas,
@@ -884,6 +892,7 @@ class InferenceSettings {
         'vkNoSubgroup': vkNoSubgroup,
         'oomPreHeadroomMb': oomPreHeadroomMb,
         'oomPostHeadroomMb': oomPostHeadroomMb,
+        'kvCacheType': kvCacheType,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
         'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
@@ -1035,6 +1044,7 @@ class InferenceSettings {
       vkNoSubgroup: json['vkNoSubgroup'] as bool? ?? false,
       oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
+      kvCacheType: (json['kvCacheType'] as String?) == 'q8_0' ? 'q8_0' : 'q4_0',
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
       agentPersonas: _parsePersonas(json['agentPersonas']),
