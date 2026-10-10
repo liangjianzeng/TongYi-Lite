@@ -79,6 +79,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   HoldToTalkSession? _voiceSession;
   Offset? _voiceLongPressPos;
 
+  /// 松手后的收声缓冲计时器：松手先等 [_voiceLinger] 再真正停止录音定稿，
+  /// 避免用户"手比嘴快"（说完才松手）把句尾截断。
+  Timer? _pendingVoiceEnd;
+
+  /// 缓冲期内尚未定稿的会话（供 [_cancelPendingVoiceEnd] 丢弃/收尾）。
+  HoldToTalkSession? _pendingVoiceSession;
+
   // 附件面板的暂存选择（bottom sheet 回调里不能直接 await pick，
   // 先落字段、pop 后统一分发）。
   // 会话批量选择状态
@@ -412,6 +419,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // 语音拾音（按住说话 → 松手自动发送）
   // ------------------------------------------------------------------------
 
+  /// 松手后的收声缓冲：用户往往"手比嘴快"（话说完才松手），松手即停会把句尾
+  /// 截断。松手先等 1 秒让 ASR 继续收声定稿，再真正停止录音。
+  static const Duration _voiceLinger = Duration(milliseconds: 1000);
+
   /// 按住麦克风开始拾音。返回是否真正开始（模型支持语音且权限已授予）。
   // ---- 端侧语音接入（sherpa-onnx 流式 ASR，DSH-Phone 方案）----
   // 放弃「录音文件喂 LLM」的语音方案：长按说话 → 端侧实时转写 → 文本直接
@@ -419,6 +430,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _onVoiceLongPressStart(BuildContext ctx, Offset pos) async {
     if (_voiceSession != null) return;
+    // 若上一段还在松手缓冲期（用户松手后又立刻按住）：先丢弃上一段录音再开新
+    // 录音，别让旧引擎麦克风常开 / 两段录音串味。
+    await _cancelPendingVoiceEnd();
     try {
       debugPrint('[Voice] long-press: requesting mic permission');
       final hasMic =
@@ -475,8 +489,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _voiceSession = null;
     _voiceLongPressPos = null;
     final cancelled = session.cancelMode.value;
-    // end() 触及引擎收尾（引擎往返/录音停止），任何异常都不允许外抛——
-    // release 下未捕获异常会直接杀死 App（语音链路崩溃兜底）。
+    // 上滑取消意图明确 = 立即取消，无需缓冲；普通发送才给 1 秒收声缓冲，
+    // 免得用户手比嘴快、句尾被截断。
+    if (cancelled) {
+      await _finalizeVoice(session, cancelled: true);
+      return;
+    }
+    _pendingVoiceSession = session;
+    _pendingVoiceEnd = Timer(_voiceLinger, () {
+      _pendingVoiceSession = null;
+      _pendingVoiceEnd = null;
+      unawaited(_finalizeVoice(session, cancelled: false));
+    });
+  }
+
+  /// 定稿一段录音：停止引擎 → 取终稿 → 空则提示、非空则补进输入框并发送。
+  /// end() 触及引擎收尾（引擎往返/录音停止），任何异常都不允许外抛——release
+  /// 下未捕获异常会直接杀死 App（语音链路崩溃兜底）。
+  Future<void> _finalizeVoice(HoldToTalkSession session,
+      {required bool cancelled}) async {
     String text = '';
     try {
       text = await session.end(cancelled: cancelled);
@@ -506,6 +537,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } catch (e) {
       debugPrint('[Voice] send error: $e');
     }
+  }
+
+  /// 取消尚未定稿的"松手缓冲"：取消计时器；若缓冲期内又按住开新录音，则立即
+  /// 停止并丢弃上一段（cancelled），别让旧引擎麦克风常开 / 录音串味。
+  Future<void> _cancelPendingVoiceEnd() async {
+    final session = _pendingVoiceSession;
+    final timer = _pendingVoiceEnd;
+    _pendingVoiceSession = null;
+    _pendingVoiceEnd = null;
+    if (timer == null) return;
+    timer.cancel();
+    if (session != null) await _finalizeVoice(session, cancelled: true);
   }
 
   /// 麦克风权限被拒：引导去系统设置授权（无需重装 APK）。
