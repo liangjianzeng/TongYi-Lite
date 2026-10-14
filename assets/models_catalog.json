@@ -485,7 +485,7 @@
       "tags": [
         "GPU 加速",
         "MoE 高效",
-        "OpenCL vendor MoE 内核实测可用"
+        "OpenCL batched MoE 通用内核（全 MoE 模型受益）"
       ]
     },
     {
