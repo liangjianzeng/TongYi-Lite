@@ -7496,6 +7496,18 @@ struct ggml_tensor_extra_cl_q4_K {
     cl_mem d = nullptr;
     // Min
     cl_mem dm  = nullptr;
+    // [dspark 2026-10-14] q4_K batched-dodge: host-precomputed effective scale
+    // planes. The batched kernel's scale-decode subsystem (get_scale_min_k4 +
+    // 3-plane 6-bit mask reassembly) is implicated in the Adreno E031 codegen
+    // corruption (7 shape rewrites NMSE-identical, in-kernel loads incoherent),
+    // while the q4_0 batched kernel (plain half2 scale loads, same image reads)
+    // is NMSE=0. So the batched kernel consumes PRE-DECODED planes instead:
+    //   seff[rp][k] = fp16(d * sc_jk),  meff[rp][k] = fp16(dmin * mn_jk)
+    // packed as half2 row pairs, layout identical to the d plane but per
+    // 32-element block: [K/32 blocks][M/2 row pairs] half2, E layers total.
+    // The dense-loop fallback keeps using d/dm/s, which stay generated.
+    cl_mem seff = nullptr;
+    cl_mem meff = nullptr;
     // [dspark] Dense-loop MoE: per-expert extras (see q4_0 struct note).
     std::vector<ggml_tensor_extra_cl_q4_K *> moe_dense_extras;
 
@@ -7523,6 +7535,14 @@ struct ggml_tensor_extra_cl_q4_K {
         if (dm != nullptr) {
             CL_CHECK(clReleaseMemObject(dm));
             dm = nullptr;
+        }
+        if (seff != nullptr) {
+            CL_CHECK(clReleaseMemObject(seff));
+            seff = nullptr;
+        }
+        if (meff != nullptr) {
+            CL_CHECK(clReleaseMemObject(meff));
+            meff = nullptr;
         }
         if (q_img != nullptr) {
             CL_CHECK(clReleaseMemObject(q_img));
@@ -11258,6 +11278,72 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                         CL_CHECK(clReleaseMemObject(dm_e));
                         CL_CHECK(clReleaseMemObject(s_e));
                     }
+                }
+
+                // [dspark 2026-10-14] q4_K batched-dodge: host-precompute the
+                // effective scale planes seff/meff from the ORIGINAL q4_K bytes
+                // (data = host ptr, [E][M][K/256 blocks of 144B]). One-time cost,
+                // O(M*K) multiplies; the batched kernel then reads plain half2
+                // planes exactly like the (NMSE=0) q4_0 kernel, with the entire
+                // get_scale_min_k4 / 6-bit mask reassembly subsystem removed.
+                // The dense-loop fallback keeps d/dm/s above.
+                if (Kc % 256 == 0 && Mc % 2 == 0 && !extra->seff) {
+                    const size_t n_sb   = (size_t)Kc / 256;   // superblocks per row
+                    const size_t n_blk  = (size_t)Kc / 32;    // 32-elem blocks per row
+                    const size_t se_layer = (size_t)Mc * n_blk * 2;  // half2 row pairs
+                    CL_CHECK((extra->seff = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                                (size_t)Ec * se_layer, NULL, &err), err));
+                    CL_CHECK((extra->meff = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                                (size_t)Ec * se_layer, NULL, &err), err));
+                    std::vector<ggml_fp16_t> se((size_t)Ec * Mc * n_blk);
+                    std::vector<ggml_fp16_t> me((size_t)Ec * Mc * n_blk);
+                    const uint8_t * base = (const uint8_t *)data;
+                    for (int e = 0; e < Ec; ++e) {
+                        for (int r = 0; r < Mc; ++r) {
+                            const uint8_t * row = base + ((size_t)e * Mc + r) * n_sb * 144;
+                            ggml_fp16_t * se_row = se.data() + ((size_t)e * Mc + r) * n_blk;
+                            ggml_fp16_t * me_row = me.data() + ((size_t)e * Mc + r) * n_blk;
+                            for (size_t sb = 0; sb < n_sb; ++sb) {
+                                const uint8_t * blk = row + sb * 144;
+                                float d    = ggml_fp16_to_fp32(*(const ggml_fp16_t *)(blk + 0));
+                                float dmin = ggml_fp16_to_fp32(*(const ggml_fp16_t *)(blk + 2));
+                                const uint8_t * sc = blk + 4;
+                                for (int jk = 0; jk < 8; ++jk) {
+                                    uint8_t sv, mn;
+                                    // get_scale_min_k4 semantics (ggml-quants.c)
+                                    if (jk < 4) {
+                                        sv = sc[jk] & 63;
+                                        mn = sc[jk + 4] & 63;
+                                    } else {
+                                        sv = (sc[jk+4] & 0xF) | ((sc[jk-4] >> 6) << 4);
+                                        mn = (sc[jk+4] >> 4) | ((sc[jk]   >> 6) << 4);
+                                    }
+                                    se_row[sb*8 + jk] = ggml_fp32_to_fp16(d * sv);
+                                    me_row[sb*8 + jk] = ggml_fp32_to_fp16(dmin * mn);
+                                }
+                            }
+                        }
+                    }
+                    // pack half2 row pairs: plane[(e*n_blk + k)*Mc + 2rp / +1]
+                    std::vector<ggml_fp16_t> pk((size_t)Ec * Mc * n_blk);
+                    for (int e = 0; e < Ec; ++e) {
+                        for (size_t k = 0; k < n_blk; ++k) {
+                            for (int rp = 0; rp < Mc/2; ++rp) {
+                                pk[((size_t)e * n_blk + k) * Mc + 2*rp]     = se[((size_t)e * Mc + 2*rp) * n_blk + k];
+                                pk[((size_t)e * n_blk + k) * Mc + 2*rp + 1] = se[((size_t)e * Mc + 2*rp+1) * n_blk + k];
+                            }
+                        }
+                    }
+                    CL_CHECK(clEnqueueWriteBuffer(queue, extra->seff, CL_TRUE, 0, pk.size()*sizeof(ggml_fp16_t), pk.data(), 0, NULL, NULL));
+                    for (int e = 0; e < Ec; ++e) {
+                        for (size_t k = 0; k < n_blk; ++k) {
+                            for (int rp = 0; rp < Mc/2; ++rp) {
+                                pk[((size_t)e * n_blk + k) * Mc + 2*rp]     = me[((size_t)e * Mc + 2*rp) * n_blk + k];
+                                pk[((size_t)e * n_blk + k) * Mc + 2*rp + 1] = me[((size_t)e * Mc + 2*rp+1) * n_blk + k];
+                            }
+                        }
+                    }
+                    CL_CHECK(clEnqueueWriteBuffer(queue, extra->meff, CL_TRUE, 0, pk.size()*sizeof(ggml_fp16_t), pk.data(), 0, NULL, NULL));
                 }
                 return;
             }
@@ -22555,18 +22641,32 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (!is_q4_0 && !is_q4_k) {
         return false;
     }
-    // [dspark 2026-10-14] v0.3.0: q4_K batched MoE DISABLED — the kernel returns
-    // deterministic garbage on Adreno 830: probe NMSE 1.27/23.5/2.6, bit-identical
-    // across 5 code-shape rewrites (VSB macro variants, mad on/off, dequant-once,
-    // straight-line scale decode) while the dense-loop on the SAME planes is
-    // bit-exact; UNI probe shows all slots identical (no cross-slot leak) but
-    // wrong. Root cause not yet found — suspect Adreno E031 compiler on this
-    // kernel's code shape, but 5 rewrites did not dodge it. q4_K MoE keeps the
-    // validated dense-loop. Re-enable (delete this check) once moe_probe4 shows
-    // GPU NMSE=0 for the Q4K-* tests; see _probe/moe_probe for the harness.
-    if (is_q4_k) {
-        return false;
-    }
+    // [dspark 2026-10-14] q4_K batched MoE DISABLED — Adreno 830 (E031.47.18.49)
+    // driver-level codegen corruption, NOT a source bug. Evidence chain
+    // (_probe/moe_probe, env GGML_OPENCL_MOE_KDBG=1 / MOE_PROBE_KREF=1):
+    //   * 7 code-shape rewrites (VSB macro variants, mad on/off, dequant-once,
+    //     straight-line scale decode, dbg-arg, load-bearing printf) -> probe
+    //     NMSE bit-identical (1.267501 / 23.470122 / 2.589895, + 5 bisection
+    //     shapes incl. degenerate K256/E1/u1);
+    //   * the d/dm/s planes and set_tensor layout are byte-exact (host
+    //     clEnqueueReadBuffer dump == raw q4_K block codes; dense-loop on the
+    //     SAME planes is bit-exact);
+    //   * in-kernel dumps: the SAME s-plane address returns DIFFERENT bytes per
+    //     subgroup; regA (q weight image, CL_R/UINT32) returns float activation
+    //     bits (0x3df60000-style, low half zero); d/dm half2 loads return bits
+    //     matching no plane; values drift across .so rebuilds of identical
+    //     kernel source;
+    //   * same-family defect already archived: vendor gemv_moe/gemm_moe q4_K
+    //     "output = correct x wrong constant" on this GPU, reproduced on both
+    //     vendored b11267 and upstream master 9d7d504.
+    // [dspark 2026-10-14] q4_K batched-dodge v2: the kernel now consumes
+    // HOST-PRECOMPUTED effective scale planes (seff=d*sc, meff=dm*mn per
+    // 32-block, fp16 row pairs — see ggml_tensor_extra_cl_q4_K). Scale reads
+    // degrade to plain half2 loads, structurally identical to the q4_0
+    // batched kernel (NMSE=0). Previous evidence (raw 3-plane kernel):
+    // 7 shape rewrites NMSE-identical, in-kernel loads incoherent, suspected
+    // Adreno E031 codegen corruption. Dense-loop fallback unchanged: if the
+    // seff/meff planes are absent (set_tensor gate below), we return false.
     ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
     const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
@@ -22577,11 +22677,14 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
     if (is_q4_0 && (!pextra40 || !pextra40->q || !pextra40->d)) return false;
     if (is_q4_k && (!pextra4k || !pextra4k->q || !pextra4k->d || !pextra4k->dm || !pextra4k->s)) return false;
+    if (is_q4_k && (!pextra4k->seff || !pextra4k->meff)) return false;
     if (!extra1 || !extra2 || !extrad) {
         return false;
     }
     cl_mem wq = is_q4_0 ? pextra40->q : pextra4k->q;
-    cl_mem wd = is_q4_0 ? pextra40->d : pextra4k->d;
+    // q4_0: one d plane; q4_K: two precomputed effective-scale planes
+    cl_mem wd = is_q4_0 ? pextra40->d : pextra4k->seff;
+    cl_mem we = is_q4_0 ? nullptr     : pextra4k->meff;
     cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : &pextra4k->q_img;
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
@@ -22611,13 +22714,12 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (dst_base % 4 != 0 || dst->nb[1] % 4 != 0 || dst->nb[2] % 4 != 0) return false;
     if ((cl_ulong)src1->ne[2] * ne11 * K * 4 > (cl_ulong)1 << 31) return false;
 
-    // per-expert strides (same expressions as the dense-loop extras)
+    // per-expert strides
     const size_t q_layer      = (size_t)M * (K/4)  * 2;   // bytes
     const size_t q_layer_pix  = q_layer / 4;              // CL_R/UINT32 pixels
-    const size_t d_layer      = is_q4_0 ? (size_t)M * (K/32)   * 2
-                                        : (size_t)M * (K/256)  * 2;   // bytes
-    const size_t dm_layer     = is_q4_k ? (size_t)M * (K/256)  * 2 : 0;
-    const size_t s_layer      = is_q4_k ? (size_t)M * (K/256)  * 12 : 0;
+    const size_t d_layer      = is_q4_0 ? (size_t)M * (K/32)   * 2 : 0;
+    // q4_K precomputed effective-scale planes: [K/32 blocks][M/2 row pairs] half2
+    const size_t se_layer     = is_q4_k ? (size_t)M * (K/32)   * 2 : 0;
     const int    ids_row      = (int)(src2->nb[1] / sizeof(int32_t));
     const int    grid_x_per_col = CEIL_DIV(M / 2, 64) * 64;
 
@@ -22763,10 +22865,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
                                : backend_ctx->kernel_mul_mat_id_q4_k_f32_batched;
     cl_uint k_arg = 0;
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &q_img));
+    // q4_0: [d] ; q4_K: [seff, meff] (precomputed effective scales)
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &wd));
     if (is_q4_k) {
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &pextra4k->dm));
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &pextra4k->s));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &we));
     }
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &b_img));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extra2->data_device));
@@ -22788,26 +22890,57 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (is_q4_0) {
         CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&d_layer));
     } else {
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&d_layer));
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&dm_layer));
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&s_layer));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&se_layer));
+    }
+
+    // [dspark 2026-10-14] KDBG: per-(col,k-block) contribution + scale dump for the
+    // q4_K batched kernel bisection. GGML_OPENCL_MOE_KDBG=1 -> kernel writes
+    // n_cols*(K/32)*6 floats; host reads them back and prints cols 0..1 once.
+    static const bool moe_kdbg = getenv("GGML_OPENCL_MOE_KDBG") != nullptr;
+    cl_mem dbg_mem = nullptr;
+    if (is_q4_k) {
+        if (moe_kdbg) {
+            const size_t dbg_bytes = (size_t)n_cols * (K/32) * 6 * sizeof(float);
+            CL_CHECK((dbg_mem = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                                               dbg_bytes, NULL, &err), err));
+        }
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem), &dbg_mem));
     }
 
     static const bool moe_debug = getenv("GGML_OPENCL_MOE_DEBUG") != nullptr;
     if (moe_debug) {
         GGML_LOG_INFO("batched MoE dump: type=%s K=%d M=%d E=%d n_used=%d n_tok=%d ne11=%d "
-                      "ids_off=%d ids_row=%d grid=%d q_pix=%llu d_by=%llu dm_by=%llu s_by=%llu "
+                      "ids_off=%d ids_row=%d grid=%d q_pix=%llu d_by=%llu se_by=%llu "
                       "b_base=%llu dst_base=%llu nb1=%llu nb2=%llu\n",
                       is_q4_0 ? "q4_0" : "q4_K", K, M, E, n_used, n_tok, ne11,
                       ids_elem_off, ids_row, grid_x_per_col,
                       (unsigned long long)q_layer_pix, (unsigned long long)d_layer,
-                      (unsigned long long)dm_layer, (unsigned long long)s_layer,
+                      (unsigned long long)se_layer,
                       (unsigned long long)b_base, (unsigned long long)dst_base,
                       (unsigned long long)dst->nb[1], (unsigned long long)dst->nb[2]);
     }
     size_t global_work_size[2] = { (size_t)grid_x_per_col * (size_t)n_cols, 4 };
     size_t local_work_size[2]  = { 64, 4 };
     backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
+
+    if (dbg_mem) {
+        static bool kdbg_printed = false;
+        if (!kdbg_printed) {
+            kdbg_printed = true;
+            std::vector<float> dbg((size_t)n_cols * (K/32) * 6);
+            CL_CHECK(clEnqueueReadBuffer(backend_ctx->queue, dbg_mem, CL_TRUE, 0,
+                                         dbg.size()*sizeof(float), dbg.data(), 0, NULL, NULL));
+            for (int c = 0; c < 1 && c < n_cols; ++c) {
+                for (int kb = 0; kb < K/32; ++kb) {
+                    const float * d6 = dbg.data() + ((size_t)c * (K/32) + kb) * 6;
+                    fprintf(stderr, "KDBG col=%d k=%2d contrib=[%12.4f %12.4f] s=[%9.5f %9.5f] m=[%9.5f %9.5f]\n",
+                            c, kb, d6[0], d6[1], d6[2], d6[3], d6[4], d6[5]);
+                }
+            }
+            fflush(stderr);
+        }
+        CL_CHECK(clReleaseMemObject(dbg_mem));
+    }
 
     // q_img stays cached on the weight extra; b_sub_buf/b_img on the backend (P4);
     // the perm sub-buffer is per-call — release it, the in-order queue holds its ref

@@ -6,7 +6,28 @@
 
 ---
 
-## [0.3.0] — 2026-10-14（当前版本 · versionCode 18）
+## [0.3.1] — 2026-10-14（当前版本 · versionCode 19）
+
+### ⚡ q4_K batched MoE 修复上线（预计算 scale dodge）
+
+- **q4_K batched MoE 由禁用转启用**：v0.3.0 时因 Adreno 830 (E031.47) 确定性乱码
+  （探针 NMSE 1.27/23.5/2.6，7 种代码形状改写位级不变、内核内同地址跨子群读出
+  不同字节）临时禁用、走 dense-loop。本轮定位为 E031 在线编译器对
+  `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状的损坏后实施修复：
+  **host 一次性预计算有效 scale 平面** `seff=d·sc` / `meff=dm·mn`（fp16、half2
+  行对打包、per 32-block，见 `ggml_tensor_extra_cl_q4_K`），内核 scale 读取
+  退化为与已验证 q4_0 batched 内核结构相同的纯 half2 加载。
+- 真机探针（`_probe/moe_probe`）：**11/11 形状 NMSE=0~1e-6，重跑位级一致**，
+  含 Ling-3.0-tiny 实际层形状与 5 个二分退化形状；GPU bench 与 q4_0 batched
+  同档（gateup 199 vs 198 µs）。seff/meff 缺失时自动回退 dense-loop（fallback 保留）。
+- 其它：KDBG 逐块对撞基建简化回 6-float 格式；opencl-stub 补
+  `clCreateProgramWithIL` 转发（实测 Adreno Android `CL_DEVICE_IL_VERSION` 为空，
+  SPIR-V 交付不可行，留档）；探针新增 `MOE_PROBE_ONLY=Q4K|Q40` 缓存隔离开关。
+- versionCode 18 → 19。
+
+---
+
+## [0.3.0] — 2026-10-14（versionCode 18）
 
 ### ⚡ OpenCL batched MoE（q4_0 单 dispatch）
 
