@@ -2,11 +2,13 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
+  
 [
 
 ![v0.3.1](https://img.shields.io/badge/v0.3.1-8B5CF6)
 
-]
+]  
+
 
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 
@@ -16,7 +18,7 @@
 
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
-> **端到端离线优先的 Android AI 智能体。** 三大支柱：
+> **端到端离线优先的 Android AI 智能体。** 四大支柱：
 >
 > - **🤖 智能体引擎**——事件日志唯一真相源 + ReactLoopAgent 主循环 + 六段工具流水线 +  
 >   子代理 / Skills / MCP / 人格 / 计划模式（`/plan` → 审批 → 无人值守续跑）+  
@@ -28,8 +30,8 @@
 > - **🚀 自研 OpenCL batched MoE**——MUL_MAT_ID 单 dispatch gather（设备端 ids 直读），绕开 Adreno  
 >   驱动级数值 bug 实现 MoE 模型**全 GPU decode/prefill**（q4_0/q4_K 已真机验证，IQ2/IQ3 逐档扩展中，  
 >   详见[技术架构](#技术架构)）；
-> - **🛠️ Dev Agent 开发执行环境**——内嵌工具沙箱（`dev_shell` + JGit 进程内 git）/  
->   Termux 伴侣应用（RUN_COMMAND 免 SSH）/ 远程 PC（SSH）三级后端，  
+> - **🛠️ Dev Agent 开发执行环境**——工作区四级后端（App 沙箱 / 内嵌工具沙箱  
+>   `dev_shell` + JGit 进程内 git / Termux 伴侣应用 RUN_COMMAND 免 SSH / 远程 PC SSH），  
 >   任务规划（task/plan）+ 双向同步 + 远端 `AGENTS.md`，让智能体在真机/远端真实写代码。
 >
 > 另有 OpenAI 兼容远程模型接入、**端侧直连国内六引擎搜索**（零配置，可选自建 SearXNG）、  
@@ -56,6 +58,7 @@
 - [License](#license)
 
 ---
+
 
 ## 功能概览
 
@@ -155,7 +158,6 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 - **推理日志**：`inference_log_screen` 展示加载/卸载/生成全过程，并记录每次交互的性能指标（提示长度、  
   历史条数、生成 token 数、**首 token 延迟**、**tok/s**、总耗时、输出字数）与上下文压缩记录；  
   `tok/s` 已与 JNI 回传的真实 `n_gen` / `t_gen_ms` 对齐。
-
 
 ### 模型下载与管理
 
@@ -377,7 +379,6 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   思考流式输出自动展开跟随滚动、答案开始自动闭合；**界面上同时最多一个 spinner**。
 - **对话文字整体缩放**：`chatTextScale`（0.7~1.3）滑条。
 
-
 ## 技术架构
 
 ```
@@ -420,7 +421,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-三大支柱：
+核心模块总览：
 
 **① 智能体引擎（`lib/agent/`）** — 事件驱动智能体（对照主流产品差距分析持续演进）：
 
@@ -435,16 +436,22 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   子代理编排、计划与无人值守、MCP 客户端、质量度量、17 内置技能、Hook 接缝（`agent/pre-step` 否决单步、  
   `tools/result` 只读审计）、上下文压缩 + 输出溢写。
 - `dev/` — **Dev Agent**：工作区（`workspace.dart` + `workspace_store.dart`）、SSH（`ssh/` 三件套 +  
-  安全存储）、三级执行工具（`tools/`：embedded 内嵌沙箱 + JGit / ssh / git / sync / plan / task /  
-  verify）、Termux RUN_COMMAND intent（`termux_intent.dart`）、危险命令策略（`safety.dart`）。
+  安全存储）、执行工具族（`tools/`：embedded 内嵌沙箱 + JGit / 远程 SSH 族 / Termux intent，  
+  对应[下方](#dev-agent-开发模式)四级后端中的后三级）、Termux RUN_COMMAND intent（`termux_intent.dart`）、危险命令策略（`safety.dart`）。
 - `web_search/` — 直连搜索 provider 接入层（`lib/websearch/` 模块 + SearXNG 可选）。
 
 **② 端侧模型引擎（llama.cpp b11267 + fork 增强 · JNI 直调）** — 全部推理在本机完成：
 
 - **多后端**：ggml-cpu（+ KleidiAI dotprod）、ggml-vulkan（Adreno 825 可经 **Turnip Mesa gen8 直载**）、  
-  ggml-opencl（+ PTQ1_0 三元量化专用内核 + **batched MoE 内核** q4_0/q4_K，Ling / LFM 等 MoE 模型全 GPU  
-  decode/prefill：MUL_MAT_ID 单 dispatch gather、设备端 ids 直读、专家桶排序提升 L2 命中；q4_K 经 host  
-  预计算有效 scale 规避 Adreno 编译器误编）；启动探测 + 设置选择，探测不到自动回落 CPU。
+  ggml-opencl（+ PTQ1_0 三元量化专用内核；MoE 模型走自研 batched MoE 全 GPU 路径，见下条）；  
+  启动探测 + 设置选择，探测不到自动回落 CPU。
+- **🚀 自研 OpenCL batched MoE（v0.3.0 / v0.3.1，全 GPU MoE 路径）**：上游 MUL_MAT_ID 在  
+  Adreno 830 全量化数值损坏（驱动级 bug，原厂 / fork 驱动同挂），MoE 模型此前只能 CPU 专家混合、  
+  GPU 形同虚设；自研 `kernel_mul_mat_id_*_batched`——单 dispatch gather + 设备端 ids 直读 +  
+  专家桶排序（权重 L2 复用）+ q4_K host 预计算有效 scale（绕开 E031 编译器误编）。  
+  **内核级通用能力，非单模型优化**：受益面 = 所有量化已验证的 MoE 模型（q4_0 v0.3.0 → q4_K v0.3.1  
+  逐档真机验证上线，IQ2 / IQ3 在路线图），全 GPU decode/prefill（Adreno 830 实测 prefill 149 t/s /  
+  decode 14–22 t/s），未验证量化自动回退 dense-loop（详见[技术架构](#技术架构)专项小节）。
 - **多模态**：mtmd 视觉投影器编码（跟随主后端）。
 - **投机解码**：MTP（NextN head 多 token 预测）+ dspark（整块投机），按模型独立开启。
 - **多轮 KV checkpoint/restore**：长对话边界 checkpoint，恢复后仅对增量 token prefill  
@@ -464,6 +471,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 - `lib/websearch/` — 纯 Dart（仅依赖 dio）：引擎契约 + 六引擎实现 + Cookie 会话/UA 池  
   （`engine_http.dart`）+ 聚合器（`multi_engine_search.dart`：加权轮转/去重/熔断/窗口预算/诊断）+  
   链接解析（`link_resolver.dart`）。
+
+**④ Dev Agent 开发执行环境** — 详见 [Dev Agent 开发模式](#dev-agent-开发模式)。
 
 
 ### GPU / CPU 推理后端
@@ -645,32 +654,37 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 > （fe8156f → b11267 一步到位升级，commit `0909603`，保留全部 fork 资产：dspark/spark2_5、  
 > PTQ1_0 内核、FWHT、Turnip 直载、KleidiAI vendored、MTP）。
 
-| 版本             | 日期         | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.3.1**（当前） | 2026-10-14 | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
-| **v0.3.0**     | 2026-10-14 | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18    |
-| **v0.2.9**     | 2026-10-06 | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17                                                                                                                                                                                             |
-| **v0.2.8**     | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（`max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
-| **v0.2.7**     | 2026-09-29 | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向                                                                                                                                                                                                                                                                                                           |
-| **v0.2.6**     | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控；③ Turnip e2e 乱码根因定案（GEMM 大 n ≥48 编译器错编——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界）；④ tbo 增补 hadamard/PTQ1_0 大 batch 用例防回归；⑤ 双驱动真机全矩阵验证                                                                                                                                                                                       |
-| **v0.2.5**     | 2026-09-27 | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复；真机 174/174 通过                                                                                                                                                                                                                                                                                       |
-| **v0.2.4**     | 2026-09-27 | **智能体"迭代一两下就停 / 没正确结果"根治**：① 工具调用块被 token 预算截断 → 静默降级成普通回答（主因）→ 截断三分类 + 自动补全 + 有界重试；② 失败轮回溯历史旧答案冒充本轮回复 → 只取本轮 append；③ system 落在消息中段 → OpenAI 兼容服务端 400 → 恒置队首；思考失控守卫 + 天气工具 wttr.in 路径形态修复                                                                                                                                                                                                                                                                                           |
-| **v0.2.3**     | 2026-09-27 | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化）；数值三根因修复——subgroupAdd 错编全局门控、GDN S_V=128 lanes 钳 64；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s）                                                                                                                                                                                                               |
-| **v0.2.2**     | 2026-09-26 | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）                                                                                                                                                                                                                                                                                         |
-| **v0.2.1**     | 2026-09-26 | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI；**联网搜索全面配置化**（SearXNG 自配 + 测试连接 + 保存即热更新）；llama.cpp 升级 b11028（后废弃回退）；移除启动加载页。**229 项单测全绿**                                                                                                                                                                                                                                   |
-| **v0.2.0**     | 2026-09-04 | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、代码质量 P0 加固                                                                                                                                                                                                                                                                                                                                                          |
-| v0.1.6         | 2026-08-19 | llama.cpp 升级上游 master（`fe8156f`）、天玑 Mali Vulkan 崩溃根治、mmproj 视觉编码后端跟随主后端、天玑 OpenCL 置灰、Gradle 16 核并行                                                                                                                                                                                                                                                                                                                                                                                    |
-| v0.1.3         | 2026-08-04 | 多轮对话正确性修复（KV 缓存跨轮残留等根因）、`tok/s` 口径对齐、`n_ubatch` 按后端动态、助手复制 / 自定义模型名 / 加载进度弹窗                                                                                                                                                                                                                                                                                                                                                                                                          |
-| v0.1.2         | 2026-08-03 | 量化 GEMM 路径 / 重复惩罚失效 / flash attention CPU 陷阱修复                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| v0.1.1         | 2026-08-03 | Vulkan GPU 加速（arm64-v8a）、模型下载系统、设置页 UI、对话 SQLite 持久化                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| v0.1.0         | 2025-07-29 | 端侧 LLM 推理引擎（llama.cpp）、Flutter Material3 前端、架构设计文档 v2                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.3.1**（当前）                       | 2026-10-14       | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
+| **v0.3.0**                           | 2026-10-14       | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18    |
+| **v0.2.9**                           | 2026-10-06       | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17                                                                                                                                                                                             |
+| **v0.2.9+**（主干合批 · 同 versionName 复用） | 2026-10-06~10-08 | **🎙️ sherpa-onnx 端侧流式 ASR**——语音输入整体重做（~160MB Zipformer 中文 int8、FFI 进程内推理、飞行模式可用；按住说话实时回显上滑取消；9 类约 290 词热词偏置 + 同音校正 + 差量存储；详见 CHANGELOG `[0.2.9+]`）+ 多会话并发槽位 / Dev Agent 全链路（JGit/Termux/SSH）/ 端侧直连六引擎搜索 / 人格系统 / 技能库 17 个 / 计划模式无人值守 / composer 重构 / eval 12 基线——均合入 main 并双真机（小米 13 / 8 Elite）验证                                                                                                                                                                                    |
+| **v0.2.8**                           | 2026-09-29       | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（`max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
+| **v0.2.7**                           | 2026-09-29       | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向                                                                                                                                                                                                                                                                                                           |
+| **v0.2.6**                           | 2026-09-28       | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控；③ Turnip e2e 乱码根因定案（GEMM 大 n ≥48 编译器错编——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界）；④ tbo 增补 hadamard/PTQ1_0 大 batch 用例防回归；⑤ 双驱动真机全矩阵验证                                                                                                                                                                                       |
+| **v0.2.5**                           | 2026-09-27       | **OpenCL 后端支持 PTQ1_0 三元量化（Bonsai-2 27B）**：新增 `mul_mv_ptq1_0_f32.cl`（Adreno 64-wide subgroup、2 trit/lane、subgroup 归约），402 个 PTQ1_0 张量 decode 全 GPU；Adreno `__constant` 数组误编根因定位与修复；真机 174/174 通过                                                                                                                                                                                                                                                                                       |
+| **v0.2.4**                           | 2026-09-27       | **智能体"迭代一两下就停 / 没正确结果"根治**：① 工具调用块被 token 预算截断 → 静默降级成普通回答（主因）→ 截断三分类 + 自动补全 + 有界重试；② 失败轮回溯历史旧答案冒充本轮回复 → 只取本轮 append；③ system 落在消息中段 → OpenAI 兼容服务端 400 → 恒置队首；思考失控守卫 + 天气工具 wttr.in 路径形态修复                                                                                                                                                                                                                                                                                           |
+| **v0.2.3**                           | 2026-09-27       | **Vulkan 在 Adreno 825 重新可用（Turnip 直载）**：原厂 0800.71 驱动 OTA 回归实锤后，切换 Mesa out-of-tree gen8 Turnip App 内直载（Vulkan HAL 入口逆向 + ggml-vulkan dispatcher 化）；数值三根因修复——subgroupAdd 错编全局门控、GDN S_V=128 lanes 钳 64；tbo GDN 36/36 + SSM_SCAN 12/12，LFM2.5 / Qwen3.5 e2e 连贯（5~11 t/s）                                                                                                                                                                                                               |
+| **v0.2.2**                           | 2026-09-26       | **Vulkan / Adreno 825（8 Elite2）乱码与崩溃根治**：驱动 0800.71 错编 `unpack8()`（Int8）→ shader 层纯 32 位替换（21 处调用点）；subgroup matvec 管线失败 / 图融合全零 / dp4a 数值错 / decode 管线缺失 → 4 个 env 开关默认注入（vk_flags.conf 可覆盖）                                                                                                                                                                                                                                                                                         |
+| **v0.2.1**                           | 2026-09-26       | **智能体引擎全面升级**：事件日志上下文（压缩不丢原文、崩溃自动修复）+ 主循环失败自动恢复 / 可靠停止 + 六段工具流水线（审批 / guard / 溢写 / 并行）+ **子代理**（spawn/fork）+ Skills / Hooks / `AGENTS.md` 指令文件 + 活动面板 UI；**联网搜索全面配置化**（SearXNG 自配 + 测试连接 + 保存即热更新）；llama.cpp 升级 b11028（后废弃回退）；移除启动加载页。**229 项单测全绿**                                                                                                                                                                                                                                   |
+| **v0.2.0**                           | 2026-09-04       | Agent Lite 智能体（工具循环 + 18 工具 + 沙箱授权）、`python_exec`（Chaquopy 17 / CPython 3.11）、MTP 投机解码、远程 API 接入、智能体每轮性能统计 + 长期记忆、代码质量 P0 加固                                                                                                                                                                                                                                                                                                                                                          |
+| v0.1.6                               | 2026-08-19       | llama.cpp 升级上游 master（`fe8156f`）、天玑 Mali Vulkan 崩溃根治、mmproj 视觉编码后端跟随主后端、天玑 OpenCL 置灰、Gradle 16 核并行                                                                                                                                                                                                                                                                                                                                                                                    |
+| v0.1.3                               | 2026-08-04       | 多轮对话正确性修复（KV 缓存跨轮残留等根因）、`tok/s` 口径对齐、`n_ubatch` 按后端动态、助手复制 / 自定义模型名 / 加载进度弹窗                                                                                                                                                                                                                                                                                                                                                                                                          |
+| v0.1.2                               | 2026-08-03       | 量化 GEMM 路径 / 重复惩罚失效 / flash attention CPU 陷阱修复                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| v0.1.1                               | 2026-08-03       | Vulkan GPU 加速（arm64-v8a）、模型下载系统、设置页 UI、对话 SQLite 持久化                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| v0.1.0                               | 2025-07-29       | 端侧 LLM 推理引擎（llama.cpp）、Flutter Material3 前端、架构设计文档 v2                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
-
-> **v0.2.9 之后的主干演进**（同 versionName 复用策略，详见 CHANGELOG 与 git log）：多会话并发槽位、  
-> PDF 原生解析（PdfBox）、Dev Agent 全链路（工作区/SSH/JGit/Termux）、执行质量九件套、端侧直连搜索、  
-> 智能体人格系统、技能库 17 个、规划系统（task/plan）、执行质量全面提升（指标/eval/计划模式/goal/MCP/  
-> LLM 压缩/并行安全/fan-out）、composer 输入区重构、sherpa-onnx 端侧语音、KV 占用圈/手动压缩、  
-> Edge TTS——以上均已合入 main 并双真机（小米 13 / 8 Elite）验证。
+> **v0.2.9 之后的主干演进**（同 versionName 复用策略，详见 CHANGELOG `[0.2.9+]` 与 git log）：
+>
+> - **🎙️ sherpa-onnx 端侧流式 ASR（语音输入整体重做）**——弃用「录音文件喂音频编码器模型」旧方案，  
+>   改为与模型无关的流式 Zipformer 中文 int8（~160MB，首次使用下载），**完全离线零网络依赖**；  
+>   微信式按住说话（实时回显 / 上滑取消 / 松手直接发送）；9 类约 290 词热词偏置 + 同音后校正
+>   - 差量存储 + 增强识别模式（见[语音输入与播报](#语音输入与播报)）；
+> - 多会话并发槽位、PDF 原生解析（PdfBox）、Dev Agent 全链路（工作区/SSH/JGit/Termux）、  
+>   执行质量九件套、端侧直连六引擎搜索、智能体人格系统、技能库 17 个、规划系统（task/plan）、  
+>   执行质量全面提升（指标/eval/计划模式/goal/MCP/LLM 压缩/并行安全/fan-out）、composer 输入区重构、  
+>   KV 占用圈/手动压缩、Edge TTS——以上均已合入 main 并双真机（小米 13 / 8 Elite）验证。
 
 **下载**（release 签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
