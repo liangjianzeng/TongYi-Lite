@@ -1,0 +1,329 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>三步走 · 图 8/9 · 更低量化</title><style>
+:root{
+  --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+  --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+  --green:#059669; --cyan:#0891b2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:1080px;margin:0 auto;padding:34px 0 60px}
+.hero{background:linear-gradient(135deg,#0b1220 0%,#16224a 55%,#241a45 100%);
+  border-radius:20px;padding:28px 34px 24px;color:#fff;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-80px;top:-100px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(96,165,250,.28),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:12px;letter-spacing:2.4px;color:#93c5fd;font-weight:600;position:relative}
+.hero h1{font-size:27px;line-height:1.3;margin-top:9px;font-weight:700;position:relative}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:11px;font-size:13.5px;color:#c3cbe4;line-height:1.72;position:relative;max-width:940px}
+.hero .sub b{color:#fff}
+.hero .meta{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;position:relative}
+.chip{font-size:11.5px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid rgba(255,255,255,.18);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.38);color:#fecaca}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#fde68a}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;font-size:13px;
+  font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:17px;font-weight:700}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);
+  border-radius:13px;overflow:hidden;font-size:12.3px;table-layout:fixed}
+table.m th{background:#f4f7fb;color:var(--ink2);font-weight:700;font-size:11.8px;padding:10px 9px;
+  text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:14px}
+table.m td{padding:9px;text-align:center;border-bottom:1px solid #eef2f7;color:var(--ink2);line-height:1.5;vertical-align:top}
+table.m tr:last-child td{border-bottom:none}
+table.m td:first-child{text-align:left;padding-left:14px;font-weight:700;color:var(--ink)}
+table.m .c0{color:var(--green);font-weight:800;font-size:14px}
+table.m .c1{color:#ca8a04;font-weight:800;font-size:14px}
+table.m .c2{color:#dc2626;font-weight:800;font-size:14px}
+table.m .sub{display:block;font-size:10.6px;color:var(--muted);font-weight:500;margin-top:3px;line-height:1.45}
+table.m tr.hi td{background:#fffdf3}
+table.m tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+
+.verdict{margin-top:12px;padding:11px 14px;border-radius:11px;font-size:12.6px;line-height:1.68;
+  background:#f1f5f9;border-left:3px solid var(--ink);color:var(--ink2)}
+.verdict b{color:var(--ink)}
+.verdict.blue{border-left-color:var(--blue);background:#eff5ff}
+.verdict.amber{border-left-color:var(--amber);background:#fff8ec}
+.verdict.red{border-left-color:var(--rose);background:#fff1f4}
+.verdict.green{border-left-color:var(--green);background:#f0fdf5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.card .h{font-size:13.5px;font-weight:800;margin-bottom:7px}
+.card p{font-size:12.2px;line-height:1.66;color:var(--ink2)}
+.card p+p{margin-top:5px}
+
+.kv{font-size:12.4px;line-height:1.64;color:var(--ink2);padding-left:14px;position:relative;margin-bottom:6px}
+.kv:before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.kv b{color:var(--ink);font-weight:700}
+.hl{background:linear-gradient(transparent 58%,#fde68a 58%);font-weight:700;color:#111827}
+
+/* ---- 步骤识别：顶部色带 + 9 格进度条 ---- */
+.steptop{height:6px;border-radius:999px;margin-bottom:12px}
+.steptop.g0{background:linear-gradient(90deg,#0f172a,#475569)}
+.steptop.g1{background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.steptop.g2{background:linear-gradient(90deg,#b45309,#fbbf24)}
+.steptop.g3{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+.steptop.g4{background:linear-gradient(90deg,#047857,#34d399)}
+
+.rail{display:flex;align-items:center;gap:6px;margin-bottom:13px;background:#fff;
+  border:1px solid var(--line);border-radius:14px;padding:9px 12px;flex-wrap:wrap}
+.rail .rl{font-size:10.4px;font-weight:800;letter-spacing:.3px;padding:3px 7px;border-radius:6px;
+  background:#f1f5f9;color:var(--ink2);white-space:nowrap}
+.rail .rl.g0{background:#e2e8f0;color:#0f172a}
+.rail .rl.g1{background:#dbeafe;color:#1d4ed8}
+.rail .rl.g2{background:#fef3c7;color:#92400e}
+.rail .rl.g3{background:#ede9fe;color:#6d28d9}
+.rail .rl.g4{background:#dcfce7;color:#166534}
+.rail .rp{font-size:10.8px;color:var(--muted);white-space:nowrap;padding:3px 7px;
+  border-radius:7px;border:1px dashed #e2e8f0;background:#fbfcfe}
+.rail .rp b{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+  border-radius:4px;background:#e2e8f0;color:#475569;font-size:10px;margin-right:3px;font-weight:800}
+.rail .rp.on{border-style:solid;font-weight:800;color:#fff}
+.rail .rp.on b{background:rgba(255,255,255,.26);color:#fff}
+.rail .rp.g0.on{background:#0f172a;border-color:#0f172a}
+.rail .rp.g1.on{background:#2563eb;border-color:#2563eb}
+.rail .rp.g2.on{background:#d97706;border-color:#d97706}
+.rail .rp.g3.on{background:#7c3aed;border-color:#7c3aed}
+.rail .rp.g4.on{background:#059669;border-color:#059669}
+
+.tier{background:#fff;border:1px solid var(--line);border-radius:13px;padding:0;overflow:hidden;margin-bottom:10px}
+.tier .th{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+.tier .tag{font-size:11px;font-weight:800;color:#fff;padding:3px 9px;border-radius:6px;letter-spacing:.5px}
+.tier .nm{font-size:14px;font-weight:800}
+.tier .meta{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.tier .tb{padding:13px 16px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px}
+.tier .tb .li{font-size:12.2px;line-height:1.6;color:var(--ink2)}
+.tier .tb .li b{color:var(--ink)}
+.t0{border-left:4px solid #2563eb} .t0 .th{background:#eff6ff} .t0 .tag{background:#2563eb}
+.t1{border-left:4px solid #0891b2} .t1 .th{background:#ecfeff} .t1 .tag{background:#0891b2}
+.t2{border-left:4px solid #7c3aed} .t2 .th{background:#f6f2ff} .t2 .tag{background:#7c3aed}
+
+.flow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.flow .row{display:flex;align-items:stretch;gap:0;margin-top:4px}
+.flow .st{flex:1;background:#f6f8fb;border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center}
+.flow .st .n{font-size:11px;color:var(--muted);letter-spacing:.4px}
+.flow .st .v{font-size:12.2px;font-weight:700;margin-top:3px;line-height:1.4}
+.flow .ar{display:flex;align-items:center;padding:0 4px;color:#cbd5e1;font-size:13px}
+.flow .gpu{border-color:#bfdbfe;background:#eff6ff}
+.flow .cpu{border-color:#a7f3d0;background:#effbf5}
+.flow .ufs{border-color:#ddd6fe;background:#f6f2ff}
+
+.brow{display:grid;grid-template-columns:130px 1fr 108px;align-items:center;gap:10px;margin-bottom:8px;font-size:12.4px}
+.brow .lb{font-weight:700;color:var(--ink)}
+.brow .tr{background:#f1f5f9;border-radius:6px;height:19px;overflow:hidden;display:flex}
+.brow .fl{height:100%;border-radius:6px}
+.brow .vl{text-align:right;font-size:12px;color:var(--ink2);font-weight:700}
+
+.badge{display:inline-block;font-size:11px;font-weight:800;padding:3px 9px;border-radius:6px;min-width:56px;text-align:center}
+.b-lo{background:#dcfce7;color:#166534}
+.b-md{background:#fef3c7;color:#92400e}
+.b-hi{background:#fee2e2;color:#991b1b}
+.b-no{background:#1f2937;color:#f9fafb}
+
+.conc{margin-top:22px;border-radius:18px;padding:24px 32px;
+  background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52);color:#fff}
+.conc .t{font-size:12px;letter-spacing:2.2px;color:#93c5fd;font-weight:600}
+.conc h3{font-size:22px;margin:9px 0 12px;font-weight:700;line-height:1.4}
+.conc h3 em{font-style:normal;color:#fbbf24}
+.conc .body{font-size:13.4px;line-height:1.82;color:#cbd5e1}
+.conc .body b{color:#fff}
+.conc .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.conc .row div{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;padding:12px 14px}
+.conc .row .k{font-size:11px;color:#93c5fd;letter-spacing:.5px}
+.conc .row .v{font-size:13.5px;margin-top:5px;color:#fff;font-weight:600;line-height:1.5}
+.foot{margin-top:13px;font-size:11.5px;color:var(--faint);text-align:center}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.4px;background:#eef2f7;
+  padding:1px 5px;border-radius:4px;color:#334155}
+.tier .tb code{background:#f1f5f9}
+</style></head><body><div class="page">
+<div class="steptop g3"></div><div class="rail"><span class="rl g0">总纲</span><span class="rp g0"><b>1</b>全景/矩阵</span><span class="rl g1">① 同构</span><span class="rp g1"><b>2</b>5060Ti</span><span class="rl g2">② 异构</span><span class="rp g2"><b>3</b>DGX</span><span class="rl g3">③ 端侧</span><span class="rp g3"><b>4</b>后端</span><span class="rp g3"><b>5</b>架构</span><span class="rp g3"><b>6</b>格式</span><span class="rp g3"><b>7</b>分层</span><span class="rp g3 on"><b>8</b>降比特</span><span class="rl g4">结论</span><span class="rp g4"><b>9</b>路线</span></div>
+<div class="hero">
+  <div class="kicker">三步走 · 图 8 / 9 · 第三步 · 更低量化怎么做</div>
+  <h1>要压的不是专家，<em>是 dense 的 Q8_0</em></h1>
+  <div class="sub">
+    直觉上「更低量化」＝把专家的 2.25 bpw 再往下压。但把每 token 的字节账摆开就会发现这条路是死的：
+    专家只占 12%，而<b>占 85% 的 dense 权重用的却是 8.5 bpw 的 Q8_0</b>。
+    唯一有 40% 以上下降空间的地方在那里——而且它<b>全部落在 OpenCL 的内核白名单内</b>，不需要写一行新内核。
+  </div>
+  <div class="meta">
+    <span class="chip g">降 dense · 省 635 MiB · 零新内核</span>
+    <span class="chip a">词表子集 · 省 445 MiB · 需采样映射</span>
+    <span class="chip r">专家再降 · 省 61 MiB · 投入产出最差</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>先找对目标：每 token 2304 MiB 里哪一块还有空间</h2></div>
+  <table class="m">
+    <colgroup><col style="width:20%"><col style="width:15%"><col style="width:13%"><col style="width:9%"><col style="width:13%"><col style="width:30%"></colgroup>
+    <thead><tr><th>组成块</th><th>当前精度</th><th>MiB / token</th><th>占比</th><th>还能降吗</th><th>目标准则</th></tr></thead>
+    <tbody>
+      <tr class="hi">
+        <td>attn / SSM 投影</td><td>Q8_0 · 8.5 bpw</td><td><b>1222</b></td><td>53%</td>
+        <td class="c0">✔ 大幅</td><td style="text-align:left">→ Q4_0 4.5 bpw = <b>647</b></td>
+      </tr>
+      <tr class="hi">
+        <td>lm_head（输出头）</td><td>Q8_0 · 8.5 bpw</td><td><b>600</b></td><td>26%</td>
+        <td class="c0">✔ 大幅</td><td style="text-align:left">→ 64K 子集 = <b>155</b>，再 Q4_0 = <b>82</b></td>
+      </tr>
+      <tr>
+        <td>routed 专家 × 8</td><td>T42 · 2.25 bpw</td><td>274</td><td>12%</td>
+        <td class="c2">✕ 已到底</td><td style="text-align:left">已在 2-bit 实际极限附近</td>
+      </tr>
+      <tr>
+        <td>shared expert</td><td>Q8_0 · 8.5 bpw</td><td>128</td><td>6%</td>
+        <td class="c0">✔ 可降</td><td style="text-align:left">→ Q4_0 = <b>68</b></td>
+      </tr>
+      <tr>
+        <td>norms</td><td>F32</td><td>80</td><td>4%</td>
+        <td class="c2">✕ 不动</td><td style="text-align:left">RMSNorm 数值稳定的关键，且本来就小</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="verdict red">
+    反直觉但关键：<b>把专家从 2.25 bpw 再压到三元 1.75 bpw，只省 61 MiB —— 总量的 2.6%</b>，
+    却要付出「新格式 + 新内核 + 重做质量验证 + 存储工具链」的全套代价。
+    <b>这是投入产出比最差的一条路，明确不做。</b>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>两条真正有效的路径，外加一个白捡</h2></div>
+
+  <div class="card" style="border-left:4px solid #2563eb;margin-bottom:11px">
+    <div class="h" style="color:#1d4ed8">路径 A · dense 降比特：Q8_0 → Q4_0（必须配 imatrix 校准）</div>
+    <div class="grid2" style="margin-top:7px">
+      <div>
+        <div class="kv">attn / SSM 投影 <b>1222 → 647 MiB</b></div>
+        <div class="kv">shared expert <b>128 → 68 MiB</b></div>
+        <div class="kv">合计省 <b>635 MiB</b>，每 token 总量 <b>−27%</b></div>
+      </div>
+      <div>
+        <div class="kv">风险 <b style="color:#059669">低</b>：Q4_0 是上游标准格式，OpenCL 的 MUL_MAT 与 MUL_MAT_ID 都有内核</div>
+        <div class="kv">工具：<code>llama-quantize</code> + <code>--imatrix</code>（llama.cpp 原生，无需自研）</div>
+        <div class="kv" style="color:#b91c1c">禁忌：30 层 DeltaNet 的 <code>ssm_a</code> / <code>ssm_d</code> / <code>ssm_dt</code> 是<b>递推参数</b>，
+        误差会逐 token 累积 ⇒ 必须用 <code>--tensor-type</code> 把这一组单独留在高精度</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="border-left:4px solid #d97706;margin-bottom:11px">
+    <div class="h" style="color:#b45309">路径 B · 词表子集：lm_head 248,320 → 64,000 行</div>
+    <div class="grid2" style="margin-top:7px">
+      <div>
+        <div class="kv">保持 Q8_0：<b>600 → 155 MiB</b>（省 445）</div>
+        <div class="kv">再降到 Q4_0：<b>155 → 82 MiB</b>（再省 73）</div>
+      </div>
+      <div>
+        <div class="kv">风险 <b style="color:#d97706">中</b>：需要裁剪工具 + 采样器映射表</div>
+        <div class="kv">注意：coupled sampling 的 Gumbel 键必须用<b>映射回全词表的 id</b>，否则接受率统计语义会变</div>
+        <div class="kv">DGX 上已定为头号杠杆，手机上是同一件事，可直接复用结论</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="border-left:4px solid #059669">
+    <div class="h" style="color:#047857">白捡 · token_embd 从 BF16 降到 Q8_0</div>
+    <div class="grid2" style="margin-top:7px">
+      <div>
+        <div class="kv">省 <b>0.5 GiB 内存</b></div>
+        <div class="kv"><b>不省任何每 token 带宽</b>——每 token 只查 1 行（2048 × 2B ≈ 4 KB）</div>
+      </div>
+      <div>
+        <div class="kv">这正是「内存换带宽」的免费午餐：</div>
+        <div class="kv">省下的 0.5 GiB 直接加进<b>专家热集</b>，把每层覆盖率从 35.5% 推到 ~40%</div>
+        <div class="kv">在内存比带宽更紧的手机上，这笔兑换是纯赚</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">3</div><h2>累计效果：45 GB/s 有效带宽下</h2></div>
+  <div class="card">
+    <div class="brow"><div class="lb">现状</div>
+      <div class="tr"><div class="fl" style="width:53%;background:#2563eb"></div><div class="fl" style="width:26%;background:#0891b2"></div><div class="fl" style="width:12%;background:#e11d48"></div><div class="fl" style="width:6%;background:#7c3aed"></div><div class="fl" style="width:3%;background:#94a3b8"></div></div>
+      <div class="vl">2304 MiB</div></div>
+    <div class="brow"><div class="lb">+ 词表子集</div>
+      <div class="tr"><div class="fl" style="width:66%;background:#2563eb"></div><div class="fl" style="width:8.4%;background:#0891b2"></div><div class="fl" style="width:14.7%;background:#e11d48"></div><div class="fl" style="width:6.9%;background:#7c3aed"></div><div class="fl" style="width:4%;background:#94a3b8"></div></div>
+      <div class="vl">1859 MiB</div></div>
+    <div class="brow"><div class="lb">+ dense 降 Q4_0</div>
+      <div class="tr"><div class="fl" style="width:53%;background:#2563eb"></div><div class="fl" style="width:12.7%;background:#0891b2"></div><div class="fl" style="width:22.4%;background:#e11d48"></div><div class="fl" style="width:5.6%;background:#7c3aed"></div><div class="fl" style="width:6.5%;background:#94a3b8"></div></div>
+      <div class="vl">1224 MiB</div></div>
+    <div class="brow"><div class="lb">+ lm_head Q4_0</div>
+      <div class="tr"><div class="fl" style="width:56%;background:#2563eb"></div><div class="fl" style="width:7.1%;background:#0891b2"></div><div class="fl" style="width:23.8%;background:#e11d48"></div><div class="fl" style="width:5.9%;background:#7c3aed"></div><div class="fl" style="width:7%;background:#94a3b8"></div></div>
+      <div class="vl">1151 MiB</div></div>
+    <div style="font-size:11.8px;color:#64748b;margin-top:4px">
+      <b style="color:#2563eb">蓝</b> attn/SSM &nbsp;·&nbsp; <b style="color:#0891b2">青</b> lm_head &nbsp;·&nbsp;
+      <b style="color:#e11d48">红</b> routed 专家 &nbsp;·&nbsp; <b style="color:#7c3aed">紫</b> shared &nbsp;·&nbsp; <b style="color:#94a3b8">灰</b> norms
+    </div>
+  </div>
+
+  <table class="m" style="margin-top:12px">
+    <colgroup><col style="width:28%"><col style="width:15%"><col style="width:13%"><col style="width:16%"><col style="width:13%"><col style="width:15%"></colgroup>
+    <thead><tr><th>阶段</th><th>dense</th><th>专家</th><th>合计 / token</th><th>单步耗时</th><th>稳态吐字</th></tr></thead>
+    <tbody>
+      <tr><td>现状（T42 + Q8_0 dense）</td><td>1950</td><td>274</td><td>2304 MiB</td><td>53.7 ms</td><td><b>18.6 t/s</b></td></tr>
+      <tr><td>+ 词表子集 64K</td><td>1505</td><td>274</td><td>1859 MiB</td><td>43.3 ms</td><td><b>23.1 t/s</b></td></tr>
+      <tr class="hi"><td>+ attn/SSM &amp; shared → Q4_0</td><td>870</td><td>274</td><td>1224 MiB</td><td>28.5 ms</td><td><b>35.1 t/s</b></td></tr>
+      <tr><td>+ lm_head 也 → Q4_0</td><td>797</td><td>274</td><td>1151 MiB</td><td>26.8 ms</td><td><b>37.3 t/s</b></td></tr>
+    </tbody>
+  </table>
+
+  <div class="verdict green">
+    <b>只做「dense 降 Q4_0」这一步就拿到 +52% 吐字（23.1 → 35.1 t/s）</b>，
+    而且不引入任何新内核、不增加 UFS 存储压力（反而减少）。相比之下「专家再降比特」只贡献 +3%。
+    <b>这就是「更低量化」在手机端的正解。</b>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">4</div><h2>那专家到底还要不要动？</h2></div>
+  <div class="grid2">
+    <div class="card" style="border-left:4px solid #059669">
+      <div class="h">默认答案：不动，2.25 bpw 就是最优解</div>
+      <p>它同时满足三件事：① 体积已接近 2-bit 的实际极限；② CPU 后端原生支持该格式；③ 不需要任何自研 GPU 内核。
+      把它压到 1.75 bpw 省下的 61 MiB 换不来速度，只会带来质量风险与全套内核工作。</p>
+    </div>
+    <div class="card" style="border-left:4px solid #dc2626">
+      <div class="h">如果一定要让专家上 GPU（两条路，都不推荐先做）</div>
+      <p><b>路线 ①</b>：重打包成 MXFP4 —— 体积反而从 8.44 涨到 <b>15.9 GiB</b>，热集覆盖率腰斩。</p>
+      <p><b>路线 ②</b>：为 T42 写 OpenCL 的 <code>MUL_MAT_ID</code> 内核 —— 可复用本项目 PTQ1_0 内核的成功经验
+      （test-backend-ops 174/174 通过），已知坑是 Adreno 对 <code>__constant</code> 数组变址会错编，用三元表达式绕过。
+      工程量约 1–2 周，但只在「CPU 跑专家确实成为瓶颈」时才值得做。</p>
+    </div>
+  </div>
+</div>
+
+<div class="conc">
+  <div class="t">ANSWER</div>
+  <h3>把 <em>8.5 压到 4.5</em>，而不是把 2.25 压到 1.75</h3>
+  <div class="body">
+    手机端的「更低量化」不是继续折磨那 12% 的专家，而是去动那 85% 的 dense 权重——
+    它们是 <b>Q8_0（8.5 bpw）</b>，是所有块里唯一还留着一半以上冗余的地方，而且目标格式 Q4_0
+    <b>本来就在 OpenCL 白名单里</b>。三步组合（词表子集 → attn/SSM 降 Q4_0 → lm_head 降 Q4_0）
+    把每 token 从 2304 MiB 压到 1151 MiB，<b>吐字从 18.6 提到 37.3 t/s（2 倍）</b>，
+    全程只用到 <code>llama-quantize</code> 与一个采样映射补丁。
+  </div>
+  <div class="row">
+    <div><div class="k">第一优先</div><div class="v">dense Q8_0 → Q4_0 + imatrix（省 635 MiB）</div></div>
+    <div><div class="k">第二优先</div><div class="v">lm_head 词表子集 248K → 64K（省 445 MiB）</div></div>
+    <div><div class="k">明确不做</div><div class="v">专家继续降比特（只省 61 MiB）</div></div>
+  </div>
+</div>
+
+<div class="foot">TongYi-Lite · 三步走合订（同构立原理 / 异构辨边界 / 端侧落地） · 2026-10-13 · 三步走 · 图 8/9 · 第三步 · 更低量化：压 dense 不压专家</div>
+</div></body></html>

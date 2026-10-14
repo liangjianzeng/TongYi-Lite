@@ -1,0 +1,240 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>三步走 · 图 4/9 · 后端能力塌缩</title><style>
+:root{
+  --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+  --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+  --green:#059669; --cyan:#0891b2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:1080px;margin:0 auto;padding:34px 0 60px}
+.hero{background:linear-gradient(135deg,#0b1220 0%,#16224a 55%,#241a45 100%);
+  border-radius:20px;padding:28px 34px 24px;color:#fff;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-80px;top:-100px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(96,165,250,.28),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:12px;letter-spacing:2.4px;color:#93c5fd;font-weight:600;position:relative}
+.hero h1{font-size:27px;line-height:1.3;margin-top:9px;font-weight:700;position:relative}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:11px;font-size:13.5px;color:#c3cbe4;line-height:1.72;position:relative;max-width:940px}
+.hero .sub b{color:#fff}
+.hero .meta{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;position:relative}
+.chip{font-size:11.5px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid rgba(255,255,255,.18);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.38);color:#fecaca}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#fde68a}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;font-size:13px;
+  font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:17px;font-weight:700}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);
+  border-radius:13px;overflow:hidden;font-size:12.3px;table-layout:fixed}
+table.m th{background:#f4f7fb;color:var(--ink2);font-weight:700;font-size:11.8px;padding:10px 9px;
+  text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:14px}
+table.m td{padding:9px;text-align:center;border-bottom:1px solid #eef2f7;color:var(--ink2);line-height:1.5;vertical-align:top}
+table.m tr:last-child td{border-bottom:none}
+table.m td:first-child{text-align:left;padding-left:14px;font-weight:700;color:var(--ink)}
+table.m .c0{color:var(--green);font-weight:800;font-size:14px}
+table.m .c1{color:#ca8a04;font-weight:800;font-size:14px}
+table.m .c2{color:#dc2626;font-weight:800;font-size:14px}
+table.m .sub{display:block;font-size:10.6px;color:var(--muted);font-weight:500;margin-top:3px;line-height:1.45}
+table.m tr.hi td{background:#fffdf3}
+table.m tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+
+.verdict{margin-top:12px;padding:11px 14px;border-radius:11px;font-size:12.6px;line-height:1.68;
+  background:#f1f5f9;border-left:3px solid var(--ink);color:var(--ink2)}
+.verdict b{color:var(--ink)}
+.verdict.blue{border-left-color:var(--blue);background:#eff5ff}
+.verdict.amber{border-left-color:var(--amber);background:#fff8ec}
+.verdict.red{border-left-color:var(--rose);background:#fff1f4}
+.verdict.green{border-left-color:var(--green);background:#f0fdf5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.card .h{font-size:13.5px;font-weight:800;margin-bottom:7px}
+.card p{font-size:12.2px;line-height:1.66;color:var(--ink2)}
+.card p+p{margin-top:5px}
+
+.kv{font-size:12.4px;line-height:1.64;color:var(--ink2);padding-left:14px;position:relative;margin-bottom:6px}
+.kv:before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.kv b{color:var(--ink);font-weight:700}
+.hl{background:linear-gradient(transparent 58%,#fde68a 58%);font-weight:700;color:#111827}
+
+/* ---- 步骤识别：顶部色带 + 9 格进度条 ---- */
+.steptop{height:6px;border-radius:999px;margin-bottom:12px}
+.steptop.g0{background:linear-gradient(90deg,#0f172a,#475569)}
+.steptop.g1{background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.steptop.g2{background:linear-gradient(90deg,#b45309,#fbbf24)}
+.steptop.g3{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+.steptop.g4{background:linear-gradient(90deg,#047857,#34d399)}
+
+.rail{display:flex;align-items:center;gap:6px;margin-bottom:13px;background:#fff;
+  border:1px solid var(--line);border-radius:14px;padding:9px 12px;flex-wrap:wrap}
+.rail .rl{font-size:10.4px;font-weight:800;letter-spacing:.3px;padding:3px 7px;border-radius:6px;
+  background:#f1f5f9;color:var(--ink2);white-space:nowrap}
+.rail .rl.g0{background:#e2e8f0;color:#0f172a}
+.rail .rl.g1{background:#dbeafe;color:#1d4ed8}
+.rail .rl.g2{background:#fef3c7;color:#92400e}
+.rail .rl.g3{background:#ede9fe;color:#6d28d9}
+.rail .rl.g4{background:#dcfce7;color:#166534}
+.rail .rp{font-size:10.8px;color:var(--muted);white-space:nowrap;padding:3px 7px;
+  border-radius:7px;border:1px dashed #e2e8f0;background:#fbfcfe}
+.rail .rp b{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+  border-radius:4px;background:#e2e8f0;color:#475569;font-size:10px;margin-right:3px;font-weight:800}
+.rail .rp.on{border-style:solid;font-weight:800;color:#fff}
+.rail .rp.on b{background:rgba(255,255,255,.26);color:#fff}
+.rail .rp.g0.on{background:#0f172a;border-color:#0f172a}
+.rail .rp.g1.on{background:#2563eb;border-color:#2563eb}
+.rail .rp.g2.on{background:#d97706;border-color:#d97706}
+.rail .rp.g3.on{background:#7c3aed;border-color:#7c3aed}
+.rail .rp.g4.on{background:#059669;border-color:#059669}
+
+.tier{background:#fff;border:1px solid var(--line);border-radius:13px;padding:0;overflow:hidden;margin-bottom:10px}
+.tier .th{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+.tier .tag{font-size:11px;font-weight:800;color:#fff;padding:3px 9px;border-radius:6px;letter-spacing:.5px}
+.tier .nm{font-size:14px;font-weight:800}
+.tier .meta{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.tier .tb{padding:13px 16px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px}
+.tier .tb .li{font-size:12.2px;line-height:1.6;color:var(--ink2)}
+.tier .tb .li b{color:var(--ink)}
+.t0{border-left:4px solid #2563eb} .t0 .th{background:#eff6ff} .t0 .tag{background:#2563eb}
+.t1{border-left:4px solid #0891b2} .t1 .th{background:#ecfeff} .t1 .tag{background:#0891b2}
+.t2{border-left:4px solid #7c3aed} .t2 .th{background:#f6f2ff} .t2 .tag{background:#7c3aed}
+
+.flow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.flow .row{display:flex;align-items:stretch;gap:0;margin-top:4px}
+.flow .st{flex:1;background:#f6f8fb;border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center}
+.flow .st .n{font-size:11px;color:var(--muted);letter-spacing:.4px}
+.flow .st .v{font-size:12.2px;font-weight:700;margin-top:3px;line-height:1.4}
+.flow .ar{display:flex;align-items:center;padding:0 4px;color:#cbd5e1;font-size:13px}
+.flow .gpu{border-color:#bfdbfe;background:#eff6ff}
+.flow .cpu{border-color:#a7f3d0;background:#effbf5}
+.flow .ufs{border-color:#ddd6fe;background:#f6f2ff}
+
+.brow{display:grid;grid-template-columns:130px 1fr 108px;align-items:center;gap:10px;margin-bottom:8px;font-size:12.4px}
+.brow .lb{font-weight:700;color:var(--ink)}
+.brow .tr{background:#f1f5f9;border-radius:6px;height:19px;overflow:hidden;display:flex}
+.brow .fl{height:100%;border-radius:6px}
+.brow .vl{text-align:right;font-size:12px;color:var(--ink2);font-weight:700}
+
+.badge{display:inline-block;font-size:11px;font-weight:800;padding:3px 9px;border-radius:6px;min-width:56px;text-align:center}
+.b-lo{background:#dcfce7;color:#166534}
+.b-md{background:#fef3c7;color:#92400e}
+.b-hi{background:#fee2e2;color:#991b1b}
+.b-no{background:#1f2937;color:#f9fafb}
+
+.conc{margin-top:22px;border-radius:18px;padding:24px 32px;
+  background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52);color:#fff}
+.conc .t{font-size:12px;letter-spacing:2.2px;color:#93c5fd;font-weight:600}
+.conc h3{font-size:22px;margin:9px 0 12px;font-weight:700;line-height:1.4}
+.conc h3 em{font-style:normal;color:#fbbf24}
+.conc .body{font-size:13.4px;line-height:1.82;color:#cbd5e1}
+.conc .body b{color:#fff}
+.conc .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.conc .row div{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;padding:12px 14px}
+.conc .row .k{font-size:11px;color:#93c5fd;letter-spacing:.5px}
+.conc .row .v{font-size:13.5px;margin-top:5px;color:#fff;font-weight:600;line-height:1.5}
+.foot{margin-top:13px;font-size:11.5px;color:var(--faint);text-align:center}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.4px;background:#eef2f7;
+  padding:1px 5px;border-radius:4px;color:#334155}
+.tier .tb code{background:#f1f5f9}
+</style></head><body><div class="page">
+<div class="steptop g3"></div><div class="rail"><span class="rl g0">总纲</span><span class="rp g0"><b>1</b>全景/矩阵</span><span class="rl g1">① 同构</span><span class="rp g1"><b>2</b>5060Ti</span><span class="rl g2">② 异构</span><span class="rp g2"><b>3</b>DGX</span><span class="rl g3">③ 端侧</span><span class="rp g3 on"><b>4</b>后端</span><span class="rp g3"><b>5</b>架构</span><span class="rp g3"><b>6</b>格式</span><span class="rp g3"><b>7</b>分层</span><span class="rp g3"><b>8</b>降比特</span><span class="rl g4">结论</span><span class="rp g4"><b>9</b>路线</span></div>
+<div class="hero">
+  <div class="kicker">三步走 · 图 4 / 9 · 第三步 · 后端能力塌缩</div>
+  <h1>CUDA 上「改代码就生效」的假设，<em>在手机上不成立</em></h1>
+  <div class="sub">
+    步骤一、二的所有结论都建立在「后端是可靠的」这个前提上。到了手机上，这个前提没了：
+    同一个 llama.cpp，在四种后端上的<b>可用内核集合、正确性、可预测性</b>全是不同的世界。
+    方案必须从这个约束出发，而不是从模型出发。
+  </div>
+  <div class="meta">
+    <span class="chip g">CUDA · 成熟</span>
+    <span class="chip a">OpenCL · 受限可用</span>
+    <span class="chip r">原厂 Vulkan · 不可用</span>
+    <span class="chip a">Turnip · 三药后可用</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>四后端真实能力对照（含本项目真机实测）</h2>
+    <div class="note">数据来源：本仓 docs/vulkan_adreno825_fix_2026-09-26.md 等实测记录 + vendored ggml 源码</div></div>
+  <table class="m">
+    <colgroup><col style="width:19%"><col style="width:22%"><col style="width:24%"><col style="width:17%"><col style="width:18%"></colgroup>
+    <thead><tr>
+      <th>维度</th>
+      <th>CUDA<br><span style="font-weight:500;color:#94a3b8">5060 Ti / DGX GB10</span></th>
+      <th>OpenCL<br><span style="font-weight:500;color:#94a3b8">Adreno 825 / 840</span></th>
+      <th>Vulkan 原厂<br><span style="font-weight:500;color:#94a3b8">高通驱动</span></th>
+      <th>Vulkan Turnip<br><span style="font-weight:500;color:#94a3b8">Mesa out-of-tree</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>量化类型覆盖</td>
+        <td class="c0">全<span class="sub">含 IQ2_S / IQ3_S / IQ4_XS；自研格式加内核即可</span></td>
+        <td class="c1">白名单 ~11 种<span class="sub">q1_0 · q4_0 · q4_1 · q4_K · q5_0 · q5_1 · q5_K · q6_K · q8_0 · iq4_nl · mxfp4<br><b>整个 IQ 家族缺席</b></span></td>
+        <td class="c0">全（生成式）<span class="sub">但见下两行</span></td>
+        <td class="c0">全（生成式）</td>
+      </tr>
+      <tr class="hi">
+        <td>MoE 专家运算<br>MUL_MAT_ID</td>
+        <td class="c0">全类型</td>
+        <td class="c1">通用仅 3 种<span class="sub"><b>Q4_0 / Q8_0 / MXFP4</b><br>另有 Q4_1·Q5_0·Q5_1·Q4_K·Q5_K·Q6_K 仅 Adreno，且需形状检查</span></td>
+        <td class="c0">全类型</td>
+        <td class="c0">全类型</td>
+      </tr>
+      <tr>
+        <td>编译器正确性</td>
+        <td class="c0">成熟稳定</td>
+        <td class="c1">有坑<span class="sub">__constant 数组变址被错编（常量 81 恒读成 0）→ 已改用三元表达式绕过</span></td>
+        <td class="c2">三类 bug 并存<span class="sub">错编数值 / 拒建 compute pipeline / 静默挂死</span></td>
+        <td class="c1">需三药<span class="sub">subgroup 算术错编 + GDN S_V=128 shmem 布局错编 → NO_SUBGROUP + lanes 钳位 64</span></td>
+      </tr>
+      <tr>
+        <td>本项目真机结论</td>
+        <td class="c0">改代码即生效</td>
+        <td class="c0">可用<span class="sub">自研 PTQ1_0 内核 test-backend-ops 174/174</span></td>
+        <td class="c2">从未跑通<span class="sub">6 次端到端 CLI 全部乱码或崩溃，0 次正确</span></td>
+        <td class="c1">能跑但慢<span class="sub">三药后 e2e 连贯，5–11 t/s</span></td>
+      </tr>
+      <tr>
+        <td>方案里的风险等级</td>
+        <td><span class="badge b-lo">低</span></td>
+        <td><span class="badge b-md">中</span></td>
+        <td><span class="badge b-no">不可行</span></td>
+        <td><span class="badge b-hi">高</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="verdict blue">
+    <b>第一性约束（本版方案最大的修正）</b>：量化格式不能「先选格式、再找内核」，必须
+    <b>从后端内核白名单反推</b>。上一版建议的「T42 → 重打包成 IQ2_S」在 OpenCL 上是死路——
+    IQ2_S 连一般的 MUL_MAT 都没有内核，更不可能有 MoE 的 MUL_MAT_ID。
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>这对第三步意味着什么</h2></div>
+  <div class="grid3">
+    <div class="card"><div class="h" style="color:#2563eb">① 后端选择变成一次性决策</div>
+      <p>手机上可用的 GPU 路径实际只有 <b>OpenCL</b>。Vulkan 两条路（原厂 / Turnip）都应从主线排除，只留作日后驱动更新后的复测项。</p></div>
+    <div class="card"><div class="h" style="color:#d97706">② 格式选择被白名单锁死</div>
+      <p>只要专家要上 GPU，最小就只能到 <b>MXFP4（4.25 bpw）</b>。T42 的 2.25 bpw 在 GPU 上没有任何内核可用。</p></div>
+    <div class="card"><div class="h" style="color:#059669">③ CPU 是唯一「格式自由」的后端</div>
+      <p>ggml-cpu 支持全部 GGML 类型。把专家留给 CPU，是<b>唯一既不损失体积、又不碰自研 GPU 内核</b>的路。</p></div>
+  </div>
+</div>
+
+<div class="foot">TongYi-Lite · 三步走合订（同构立原理 / 异构辨边界 / 端侧落地） · 2026-10-13 · 三步走 · 图 4/9 · 第三步 · 后端能力塌缩</div>
+</div></body></html>

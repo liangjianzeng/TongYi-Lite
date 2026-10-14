@@ -1,0 +1,256 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>三步走 · 图 7/9 · 三层与调度</title><style>
+:root{
+  --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+  --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+  --green:#059669; --cyan:#0891b2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:1080px;margin:0 auto;padding:34px 0 60px}
+.hero{background:linear-gradient(135deg,#0b1220 0%,#16224a 55%,#241a45 100%);
+  border-radius:20px;padding:28px 34px 24px;color:#fff;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-80px;top:-100px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(96,165,250,.28),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:12px;letter-spacing:2.4px;color:#93c5fd;font-weight:600;position:relative}
+.hero h1{font-size:27px;line-height:1.3;margin-top:9px;font-weight:700;position:relative}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:11px;font-size:13.5px;color:#c3cbe4;line-height:1.72;position:relative;max-width:940px}
+.hero .sub b{color:#fff}
+.hero .meta{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;position:relative}
+.chip{font-size:11.5px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid rgba(255,255,255,.18);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.38);color:#fecaca}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#fde68a}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;font-size:13px;
+  font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:17px;font-weight:700}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);
+  border-radius:13px;overflow:hidden;font-size:12.3px;table-layout:fixed}
+table.m th{background:#f4f7fb;color:var(--ink2);font-weight:700;font-size:11.8px;padding:10px 9px;
+  text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:14px}
+table.m td{padding:9px;text-align:center;border-bottom:1px solid #eef2f7;color:var(--ink2);line-height:1.5;vertical-align:top}
+table.m tr:last-child td{border-bottom:none}
+table.m td:first-child{text-align:left;padding-left:14px;font-weight:700;color:var(--ink)}
+table.m .c0{color:var(--green);font-weight:800;font-size:14px}
+table.m .c1{color:#ca8a04;font-weight:800;font-size:14px}
+table.m .c2{color:#dc2626;font-weight:800;font-size:14px}
+table.m .sub{display:block;font-size:10.6px;color:var(--muted);font-weight:500;margin-top:3px;line-height:1.45}
+table.m tr.hi td{background:#fffdf3}
+table.m tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+
+.verdict{margin-top:12px;padding:11px 14px;border-radius:11px;font-size:12.6px;line-height:1.68;
+  background:#f1f5f9;border-left:3px solid var(--ink);color:var(--ink2)}
+.verdict b{color:var(--ink)}
+.verdict.blue{border-left-color:var(--blue);background:#eff5ff}
+.verdict.amber{border-left-color:var(--amber);background:#fff8ec}
+.verdict.red{border-left-color:var(--rose);background:#fff1f4}
+.verdict.green{border-left-color:var(--green);background:#f0fdf5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.card .h{font-size:13.5px;font-weight:800;margin-bottom:7px}
+.card p{font-size:12.2px;line-height:1.66;color:var(--ink2)}
+.card p+p{margin-top:5px}
+
+.kv{font-size:12.4px;line-height:1.64;color:var(--ink2);padding-left:14px;position:relative;margin-bottom:6px}
+.kv:before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.kv b{color:var(--ink);font-weight:700}
+.hl{background:linear-gradient(transparent 58%,#fde68a 58%);font-weight:700;color:#111827}
+
+/* ---- 步骤识别：顶部色带 + 9 格进度条 ---- */
+.steptop{height:6px;border-radius:999px;margin-bottom:12px}
+.steptop.g0{background:linear-gradient(90deg,#0f172a,#475569)}
+.steptop.g1{background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.steptop.g2{background:linear-gradient(90deg,#b45309,#fbbf24)}
+.steptop.g3{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+.steptop.g4{background:linear-gradient(90deg,#047857,#34d399)}
+
+.rail{display:flex;align-items:center;gap:6px;margin-bottom:13px;background:#fff;
+  border:1px solid var(--line);border-radius:14px;padding:9px 12px;flex-wrap:wrap}
+.rail .rl{font-size:10.4px;font-weight:800;letter-spacing:.3px;padding:3px 7px;border-radius:6px;
+  background:#f1f5f9;color:var(--ink2);white-space:nowrap}
+.rail .rl.g0{background:#e2e8f0;color:#0f172a}
+.rail .rl.g1{background:#dbeafe;color:#1d4ed8}
+.rail .rl.g2{background:#fef3c7;color:#92400e}
+.rail .rl.g3{background:#ede9fe;color:#6d28d9}
+.rail .rl.g4{background:#dcfce7;color:#166534}
+.rail .rp{font-size:10.8px;color:var(--muted);white-space:nowrap;padding:3px 7px;
+  border-radius:7px;border:1px dashed #e2e8f0;background:#fbfcfe}
+.rail .rp b{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+  border-radius:4px;background:#e2e8f0;color:#475569;font-size:10px;margin-right:3px;font-weight:800}
+.rail .rp.on{border-style:solid;font-weight:800;color:#fff}
+.rail .rp.on b{background:rgba(255,255,255,.26);color:#fff}
+.rail .rp.g0.on{background:#0f172a;border-color:#0f172a}
+.rail .rp.g1.on{background:#2563eb;border-color:#2563eb}
+.rail .rp.g2.on{background:#d97706;border-color:#d97706}
+.rail .rp.g3.on{background:#7c3aed;border-color:#7c3aed}
+.rail .rp.g4.on{background:#059669;border-color:#059669}
+
+.tier{background:#fff;border:1px solid var(--line);border-radius:13px;padding:0;overflow:hidden;margin-bottom:10px}
+.tier .th{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+.tier .tag{font-size:11px;font-weight:800;color:#fff;padding:3px 9px;border-radius:6px;letter-spacing:.5px}
+.tier .nm{font-size:14px;font-weight:800}
+.tier .meta{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.tier .tb{padding:13px 16px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px}
+.tier .tb .li{font-size:12.2px;line-height:1.6;color:var(--ink2)}
+.tier .tb .li b{color:var(--ink)}
+.t0{border-left:4px solid #2563eb} .t0 .th{background:#eff6ff} .t0 .tag{background:#2563eb}
+.t1{border-left:4px solid #0891b2} .t1 .th{background:#ecfeff} .t1 .tag{background:#0891b2}
+.t2{border-left:4px solid #7c3aed} .t2 .th{background:#f6f2ff} .t2 .tag{background:#7c3aed}
+
+.flow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.flow .row{display:flex;align-items:stretch;gap:0;margin-top:4px}
+.flow .st{flex:1;background:#f6f8fb;border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center}
+.flow .st .n{font-size:11px;color:var(--muted);letter-spacing:.4px}
+.flow .st .v{font-size:12.2px;font-weight:700;margin-top:3px;line-height:1.4}
+.flow .ar{display:flex;align-items:center;padding:0 4px;color:#cbd5e1;font-size:13px}
+.flow .gpu{border-color:#bfdbfe;background:#eff6ff}
+.flow .cpu{border-color:#a7f3d0;background:#effbf5}
+.flow .ufs{border-color:#ddd6fe;background:#f6f2ff}
+
+.brow{display:grid;grid-template-columns:130px 1fr 108px;align-items:center;gap:10px;margin-bottom:8px;font-size:12.4px}
+.brow .lb{font-weight:700;color:var(--ink)}
+.brow .tr{background:#f1f5f9;border-radius:6px;height:19px;overflow:hidden;display:flex}
+.brow .fl{height:100%;border-radius:6px}
+.brow .vl{text-align:right;font-size:12px;color:var(--ink2);font-weight:700}
+
+.badge{display:inline-block;font-size:11px;font-weight:800;padding:3px 9px;border-radius:6px;min-width:56px;text-align:center}
+.b-lo{background:#dcfce7;color:#166534}
+.b-md{background:#fef3c7;color:#92400e}
+.b-hi{background:#fee2e2;color:#991b1b}
+.b-no{background:#1f2937;color:#f9fafb}
+
+.conc{margin-top:22px;border-radius:18px;padding:24px 32px;
+  background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52);color:#fff}
+.conc .t{font-size:12px;letter-spacing:2.2px;color:#93c5fd;font-weight:600}
+.conc h3{font-size:22px;margin:9px 0 12px;font-weight:700;line-height:1.4}
+.conc h3 em{font-style:normal;color:#fbbf24}
+.conc .body{font-size:13.4px;line-height:1.82;color:#cbd5e1}
+.conc .body b{color:#fff}
+.conc .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.conc .row div{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;padding:12px 14px}
+.conc .row .k{font-size:11px;color:#93c5fd;letter-spacing:.5px}
+.conc .row .v{font-size:13.5px;margin-top:5px;color:#fff;font-weight:600;line-height:1.5}
+.foot{margin-top:13px;font-size:11.5px;color:var(--faint);text-align:center}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.4px;background:#eef2f7;
+  padding:1px 5px;border-radius:4px;color:#334155}
+.tier .tb code{background:#f1f5f9}
+</style></head><body><div class="page">
+<div class="steptop g3"></div><div class="rail"><span class="rl g0">总纲</span><span class="rp g0"><b>1</b>全景/矩阵</span><span class="rl g1">① 同构</span><span class="rp g1"><b>2</b>5060Ti</span><span class="rl g2">② 异构</span><span class="rp g2"><b>3</b>DGX</span><span class="rl g3">③ 端侧</span><span class="rp g3"><b>4</b>后端</span><span class="rp g3"><b>5</b>架构</span><span class="rp g3"><b>6</b>格式</span><span class="rp g3 on"><b>7</b>分层</span><span class="rp g3"><b>8</b>降比特</span><span class="rl g4">结论</span><span class="rp g4"><b>9</b>路线</span></div>
+<div class="hero">
+  <div class="kicker">三步走 · 图 7 / 9 · 第三步 · 三层与调度</div>
+  <h1>手机版 Strata 三层：<em>把 UFS 当作虚拟内存用</em></h1>
+  <div class="sub">
+    手机没有可用的 swap——ZRAM 是「压缩 RAM」，对已经量化过的权重压缩比接近 1，
+    而写回式 swap 会成倍消耗 NAND 寿命。真正可用的「虚拟内存」只有一条：
+    <b>UFS 上的 file-backed mmap</b>，靠内核「干净页可直接丢弃、不需要写回」的语义。
+    但它默认不懂「专家热度」，这才是要补的机制。
+  </div>
+  <div class="meta">
+    <span class="chip">Adreno UMA：权重就是系统 RAM</span>
+    <span class="chip">UFS 4.1：顺序 4.3 GB/s · 4K 随机 590K IOPS</span>
+    <span class="chip r">QD1 随机读延迟 ≈ 100 µs</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>三层存储（对照 Strata 的 GPU / CPU / SSD）</h2></div>
+
+  <div class="tier t0">
+    <div class="th"><span class="tag">L0</span><span class="nm">Adreno 侧 · 匿名内存 · 热集</span>
+      <span class="meta">容量 1.5–2.5 GiB</span></div>
+    <div class="tb">
+      <div class="li"><b>放什么</b>：per-layer pin 的热专家 + KV cache（q8_0）</div>
+      <div class="li"><b>带宽</b>：~85 GB/s 峰值（与 CPU 共享同一 LPDDR5X 单池）</div>
+      <div class="li"><b>延迟</b>：内存级，无额外开销</div>
+      <div class="li"><b>回收语义</b>：匿名页，<b>不可丢弃</b>——所以这里必须放最热的东西</div>
+      <div class="li" style="grid-column:1/3"><b>对应 Strata</b>：expert-cache + <code>--expert-cache-per-layer</code>（DGX 实测该一条把 per-layer 命中率从 54% 拉到 99%）</div>
+    </div>
+  </div>
+
+  <div class="tier t1">
+    <div class="th"><span class="tag">L1</span><span class="nm">CPU Oryon 常驻 · 匿名内存</span>
+      <span class="meta">容量 3–5 GiB</span></div>
+    <div class="tb">
+      <div class="li"><b>放什么</b>：dense 骨干 + 中热专家 + 当前正在计算的冷专家</div>
+      <div class="li"><b>算力</b>：2×Oryon Prime @4.6GHz + 6×Performance @3.62GHz，<b>无小核</b>，24MB 缓存</div>
+      <div class="li"><b>带宽</b>：与 GPU 共享同一 LPDDR5X 池——<b>双路并行会互相争抢</b>，这是必须实测的项</div>
+      <div class="li"><b>格式自由</b>：ggml-cpu 支持全部类型，包括自研 T42</div>
+      <div class="li" style="grid-column:1/3"><b>对应 Strata</b>：CPU 就地算 miss 专家（cpu/expert.cpp）——手机上这里的「miss 专家」是<b>全部</b>专家</div>
+    </div>
+  </div>
+
+  <div class="tier t2">
+    <div class="th"><span class="tag">L2</span><span class="nm">UFS 4.1 · file-backed mmap · 冷专家</span>
+      <span class="meta">容量 5.06 GiB（T42）</span></div>
+    <div class="tb">
+      <div class="li"><b>放什么</b>：未被 pin 的冷专家，以只读文件页形式 mmap</div>
+      <div class="li"><b>吞吐</b>：顺序读 4.3 GB/s；4K 随机读 590K IOPS</div>
+      <div class="li"><b>延迟</b>：<b>QD1 随机读 ≈100 µs</b>——单个专家 0.844 MiB = 216 个 4K 页</div>
+      <div class="li"><b>回收语义</b>：<b>干净页可被内核直接丢弃，不需 swap、不写回</b>——这是它比 ZRAM 更适合权重的原因</div>
+      <div class="li" style="grid-column:1/3"><b>对应 Strata</b>：SSD 层。差别是 Strata 那里只放 PLE 表，这里要放整个冷专家池</div>
+    </div>
+  </div>
+
+  <div class="verdict red">
+    <b>核心风险</b>：216 页 × 100 µs = 21.6 ms——如果按「页故障」的方式触发，
+    <b>只要一层命中一个冷专家就吃掉一整步的时间</b>。所以 L2 的正确用法不是「按需缺页」，
+    而是「按预测提前异步读进 L1/L0」。这一条决定了整个方案能不能成立。
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>调度四件套（逐条对应 Strata 的机制）</h2></div>
+  <div class="grid2">
+    <div class="card"><div class="h">① 热度表 · 离线统计</div>
+      <p>跑一批真实对话样本，统计「每一层 × 每一个专家」被 router 选中的频率，产出 pin 优先级表。
+      对应 Strata 的 expert-profile。这是后面三件事的输入。</p></div>
+    <div class="card"><div class="h">② per-layer 填充</div>
+      <p>热集预算 ÷ 40 层 = 每层常驻配额。3 GiB 预算 ⇒ <b>91 个/层 = 35.5% 覆盖</b>。
+      必须按层分配，不能全局共用——这是 Strata 实测最有效的一条。</p></div>
+    <div class="card" style="border-left:4px solid #dc2626"><div class="h">③ 超集异步预读（最关键）</div>
+      <p>绝不能靠 4KB 页故障。要做的是：<b>批量 <code>pread</code> / <code>MADV_WILLNEED</code> 异步发起</b>，
+      并且<b>按超集预取</b>——读 top-32、只用 top-8。多读的字节远便宜于一次 stall。</p></div>
+    <div class="card"><div class="h">④ 预算切分（KV ↔ 专家热集）</div>
+      <p>两者争同一块匿名内存。35B 的 KV 只有 10.9 KB/token，64K 也才 0.65 GiB，
+      所以大部分预算可以给专家热集。对应 Strata 的 strata-plan。</p></div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">3</div><h2>一层内的流水：预读窗口藏在哪里</h2></div>
+  <div class="flow">
+    <div class="row">
+      <div class="st"><div class="n">STEP 1</div><div class="v">router<br>算 top-8</div></div>
+      <div class="ar">▶</div>
+      <div class="st ufs"><div class="n">异步</div><div class="v">发起第 i+1 层<br>专家预读（UFS）</div></div>
+      <div class="ar">▶</div>
+      <div class="st gpu"><div class="n">GPU</div><div class="v">DeltaNet / 全注意力<br>（本层 dense）</div></div>
+      <div class="ar">▶</div>
+      <div class="st cpu"><div class="n">CPU</div><div class="v">8 个专家 GEMV<br>（热集命中 / 冷专家）</div></div>
+      <div class="ar">▶</div>
+      <div class="st"><div class="n">STEP 5</div><div class="v">加权合并<br>进下一层</div></div>
+    </div>
+    <div class="verdict blue" style="margin-top:13px">
+      <b>「dense 占 85%」在这里第一次变成优势</b>：每层 GPU 算 attention/SSM 的时间足够长，
+      可以完整盖住「下一层专家的 UFS 预读延迟」。也就是说，
+      <b>方案成立的关键不是把专家塞进内存，而是让「必然要读的 dense」成为「冷专家的预读窗口」。</b>
+    </div>
+  </div>
+</div>
+
+<div class="foot">TongYi-Lite · 三步走合订（同构立原理 / 异构辨边界 / 端侧落地） · 2026-10-13 · 三步走 · 图 7/9 · 第三步 · 三层与 UFS 卸载</div>
+</div></body></html>

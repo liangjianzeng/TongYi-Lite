@@ -1,7 +1,7 @@
 # TongYi-Lite 端侧离线 AI 智能体
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![v0.2.9](https://img.shields.io/badge/v0.2.9-8B5CF6)]
+[![v0.3.0](https://img.shields.io/badge/v0.3.0-8B5CF6)]
 [![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)](https://flutter.dev)
 [![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)](https://developer.android.com)
 [![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)](https://github.com/ggerganov/llama.cpp)
@@ -640,7 +640,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本 | 日期 | 要点 |
 |------|------|------|
-| **v0.2.9**（当前） | 2026-10-06 | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17 |
+| **v0.3.0**（当前） | 2026-10-14 | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18 |
+| **v0.2.9** | 2026-10-06 | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17 |
 | **v0.2.8** | 2026-09-29 | **智能体执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复**；**Vulkan 全败定案**（turnip dlopen 缺 `libhardware.so` → jniLibs stub 复活，App 内直载打通）；**web_search 并发多关键词一次调用** + **每回合搜索上限**（`max_uses` 语义，杜绝反复搜索死循环）；智能体回答补 **tok/s 指标**；思考流式自动滚动到底。versionCode 16。**2026-09-30 补丁（`0909603`）**：llama.cpp **fe8156f → 上游 `b11267`（0.5.0）一步到位升级**（保留全部 fork 资产）+ **Vulkan 回归修复**（turnip 直载移植 / NO_SUBGROUP·NO_MMV 移植 / 11 处裸 Vulkan 调用 dispatcher 化）；**Bonsai-2 27B OOM 守卫定案**（11GB 机 GPU 加载物理不可能，旁路必死机/崩溃，宁拒绝不死机） |
 | **v0.2.7** | 2026-09-29 | **API 视觉接通 + 思考流单独展示 + 工具卡紧凑化**：分支停维护、主干统一（spike 快进合并进 main）；API 路线 `image_url` parts 视觉；思考流独立流式卡（自动展开跟随滚动）；工具卡改单行紧凑行；llama.cpp 主仓树 = spike 完整树（fe8156f 基线），废弃 b11028 半升级方向 |
 | **v0.2.6** | 2026-09-28 | **Bonsai-2 双后端补齐 + Turnip 错编双定案**：① OpenCL 补 PTQ1_0 prefill GEMM（桌面 Arc 140T pp128 1.14→18.89 t/s，16.5×）；② Vulkan FWHT subgroup 变体并入三药门控；③ Turnip e2e 乱码根因定案（GEMM 大 n ≥48 编译器错编——App 靠 JNI `n_ubatch=16` 天然避开，`n_ubatch≤32` 为 Turnip 正确性边界）；④ tbo 增补 hadamard/PTQ1_0 大 batch 用例防回归；⑤ 双驱动真机全矩阵验证 |
@@ -667,6 +668,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 > [⬇️ 下载 `TongYi-Lite-v0.2.9.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.2.9.apk)
 > v0.2.9+17 · 71,169,325 B（2026-10-08，含长截图切块与包体瘦身 -14.3MB）
 > `SHA-256: e32ac17f949c0e8ceb67cc34e795a06f29417e4dce774a1532dd262415894b83`
+>
+> ℹ️ v0.3.0 阶段成果（OpenCL batched MoE + KV checkpoint 等）已先行入库，APK 重打中。
 
 > ⚠️ 覆盖安装请用同一签名证书（`CN=TongYiLite`），并保持 versionCode ≥ 已装版本；`adb install -r`
 > 可保留已下载模型缓存，切勿先卸载。后续版本发布流程：构建产物拷入 `releases/` 并在此更新链接与 SHA-256。

@@ -1,0 +1,279 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>三步走 · 图 5/9 · 架构差异</title><style>
+:root{
+  --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+  --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+  --green:#059669; --cyan:#0891b2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:1080px;margin:0 auto;padding:34px 0 60px}
+.hero{background:linear-gradient(135deg,#0b1220 0%,#16224a 55%,#241a45 100%);
+  border-radius:20px;padding:28px 34px 24px;color:#fff;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-80px;top:-100px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(96,165,250,.28),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:12px;letter-spacing:2.4px;color:#93c5fd;font-weight:600;position:relative}
+.hero h1{font-size:27px;line-height:1.3;margin-top:9px;font-weight:700;position:relative}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:11px;font-size:13.5px;color:#c3cbe4;line-height:1.72;position:relative;max-width:940px}
+.hero .sub b{color:#fff}
+.hero .meta{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;position:relative}
+.chip{font-size:11.5px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid rgba(255,255,255,.18);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.38);color:#fecaca}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#fde68a}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;font-size:13px;
+  font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:17px;font-weight:700}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);
+  border-radius:13px;overflow:hidden;font-size:12.3px;table-layout:fixed}
+table.m th{background:#f4f7fb;color:var(--ink2);font-weight:700;font-size:11.8px;padding:10px 9px;
+  text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:14px}
+table.m td{padding:9px;text-align:center;border-bottom:1px solid #eef2f7;color:var(--ink2);line-height:1.5;vertical-align:top}
+table.m tr:last-child td{border-bottom:none}
+table.m td:first-child{text-align:left;padding-left:14px;font-weight:700;color:var(--ink)}
+table.m .c0{color:var(--green);font-weight:800;font-size:14px}
+table.m .c1{color:#ca8a04;font-weight:800;font-size:14px}
+table.m .c2{color:#dc2626;font-weight:800;font-size:14px}
+table.m .sub{display:block;font-size:10.6px;color:var(--muted);font-weight:500;margin-top:3px;line-height:1.45}
+table.m tr.hi td{background:#fffdf3}
+table.m tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+
+.verdict{margin-top:12px;padding:11px 14px;border-radius:11px;font-size:12.6px;line-height:1.68;
+  background:#f1f5f9;border-left:3px solid var(--ink);color:var(--ink2)}
+.verdict b{color:var(--ink)}
+.verdict.blue{border-left-color:var(--blue);background:#eff5ff}
+.verdict.amber{border-left-color:var(--amber);background:#fff8ec}
+.verdict.red{border-left-color:var(--rose);background:#fff1f4}
+.verdict.green{border-left-color:var(--green);background:#f0fdf5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.card .h{font-size:13.5px;font-weight:800;margin-bottom:7px}
+.card p{font-size:12.2px;line-height:1.66;color:var(--ink2)}
+.card p+p{margin-top:5px}
+
+.kv{font-size:12.4px;line-height:1.64;color:var(--ink2);padding-left:14px;position:relative;margin-bottom:6px}
+.kv:before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.kv b{color:var(--ink);font-weight:700}
+.hl{background:linear-gradient(transparent 58%,#fde68a 58%);font-weight:700;color:#111827}
+
+/* ---- 步骤识别：顶部色带 + 9 格进度条 ---- */
+.steptop{height:6px;border-radius:999px;margin-bottom:12px}
+.steptop.g0{background:linear-gradient(90deg,#0f172a,#475569)}
+.steptop.g1{background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.steptop.g2{background:linear-gradient(90deg,#b45309,#fbbf24)}
+.steptop.g3{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+.steptop.g4{background:linear-gradient(90deg,#047857,#34d399)}
+
+.rail{display:flex;align-items:center;gap:6px;margin-bottom:13px;background:#fff;
+  border:1px solid var(--line);border-radius:14px;padding:9px 12px;flex-wrap:wrap}
+.rail .rl{font-size:10.4px;font-weight:800;letter-spacing:.3px;padding:3px 7px;border-radius:6px;
+  background:#f1f5f9;color:var(--ink2);white-space:nowrap}
+.rail .rl.g0{background:#e2e8f0;color:#0f172a}
+.rail .rl.g1{background:#dbeafe;color:#1d4ed8}
+.rail .rl.g2{background:#fef3c7;color:#92400e}
+.rail .rl.g3{background:#ede9fe;color:#6d28d9}
+.rail .rl.g4{background:#dcfce7;color:#166534}
+.rail .rp{font-size:10.8px;color:var(--muted);white-space:nowrap;padding:3px 7px;
+  border-radius:7px;border:1px dashed #e2e8f0;background:#fbfcfe}
+.rail .rp b{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+  border-radius:4px;background:#e2e8f0;color:#475569;font-size:10px;margin-right:3px;font-weight:800}
+.rail .rp.on{border-style:solid;font-weight:800;color:#fff}
+.rail .rp.on b{background:rgba(255,255,255,.26);color:#fff}
+.rail .rp.g0.on{background:#0f172a;border-color:#0f172a}
+.rail .rp.g1.on{background:#2563eb;border-color:#2563eb}
+.rail .rp.g2.on{background:#d97706;border-color:#d97706}
+.rail .rp.g3.on{background:#7c3aed;border-color:#7c3aed}
+.rail .rp.g4.on{background:#059669;border-color:#059669}
+
+.tier{background:#fff;border:1px solid var(--line);border-radius:13px;padding:0;overflow:hidden;margin-bottom:10px}
+.tier .th{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+.tier .tag{font-size:11px;font-weight:800;color:#fff;padding:3px 9px;border-radius:6px;letter-spacing:.5px}
+.tier .nm{font-size:14px;font-weight:800}
+.tier .meta{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.tier .tb{padding:13px 16px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px}
+.tier .tb .li{font-size:12.2px;line-height:1.6;color:var(--ink2)}
+.tier .tb .li b{color:var(--ink)}
+.t0{border-left:4px solid #2563eb} .t0 .th{background:#eff6ff} .t0 .tag{background:#2563eb}
+.t1{border-left:4px solid #0891b2} .t1 .th{background:#ecfeff} .t1 .tag{background:#0891b2}
+.t2{border-left:4px solid #7c3aed} .t2 .th{background:#f6f2ff} .t2 .tag{background:#7c3aed}
+
+.flow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.flow .row{display:flex;align-items:stretch;gap:0;margin-top:4px}
+.flow .st{flex:1;background:#f6f8fb;border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center}
+.flow .st .n{font-size:11px;color:var(--muted);letter-spacing:.4px}
+.flow .st .v{font-size:12.2px;font-weight:700;margin-top:3px;line-height:1.4}
+.flow .ar{display:flex;align-items:center;padding:0 4px;color:#cbd5e1;font-size:13px}
+.flow .gpu{border-color:#bfdbfe;background:#eff6ff}
+.flow .cpu{border-color:#a7f3d0;background:#effbf5}
+.flow .ufs{border-color:#ddd6fe;background:#f6f2ff}
+
+.brow{display:grid;grid-template-columns:130px 1fr 108px;align-items:center;gap:10px;margin-bottom:8px;font-size:12.4px}
+.brow .lb{font-weight:700;color:var(--ink)}
+.brow .tr{background:#f1f5f9;border-radius:6px;height:19px;overflow:hidden;display:flex}
+.brow .fl{height:100%;border-radius:6px}
+.brow .vl{text-align:right;font-size:12px;color:var(--ink2);font-weight:700}
+
+.badge{display:inline-block;font-size:11px;font-weight:800;padding:3px 9px;border-radius:6px;min-width:56px;text-align:center}
+.b-lo{background:#dcfce7;color:#166534}
+.b-md{background:#fef3c7;color:#92400e}
+.b-hi{background:#fee2e2;color:#991b1b}
+.b-no{background:#1f2937;color:#f9fafb}
+
+.conc{margin-top:22px;border-radius:18px;padding:24px 32px;
+  background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52);color:#fff}
+.conc .t{font-size:12px;letter-spacing:2.2px;color:#93c5fd;font-weight:600}
+.conc h3{font-size:22px;margin:9px 0 12px;font-weight:700;line-height:1.4}
+.conc h3 em{font-style:normal;color:#fbbf24}
+.conc .body{font-size:13.4px;line-height:1.82;color:#cbd5e1}
+.conc .body b{color:#fff}
+.conc .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.conc .row div{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;padding:12px 14px}
+.conc .row .k{font-size:11px;color:#93c5fd;letter-spacing:.5px}
+.conc .row .v{font-size:13.5px;margin-top:5px;color:#fff;font-weight:600;line-height:1.5}
+.foot{margin-top:13px;font-size:11.5px;color:var(--faint);text-align:center}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.4px;background:#eef2f7;
+  padding:1px 5px;border-radius:4px;color:#334155}
+.tier .tb code{background:#f1f5f9}
+</style></head><body><div class="page">
+<div class="steptop g3"></div><div class="rail"><span class="rl g0">总纲</span><span class="rp g0"><b>1</b>全景/矩阵</span><span class="rl g1">① 同构</span><span class="rp g1"><b>2</b>5060Ti</span><span class="rl g2">② 异构</span><span class="rp g2"><b>3</b>DGX</span><span class="rl g3">③ 端侧</span><span class="rp g3"><b>4</b>后端</span><span class="rp g3 on"><b>5</b>架构</span><span class="rp g3"><b>6</b>格式</span><span class="rp g3"><b>7</b>分层</span><span class="rp g3"><b>8</b>降比特</span><span class="rl g4">结论</span><span class="rp g4"><b>9</b>路线</span></div>
+<div class="hero">
+  <div class="kicker">三步走 · 图 5 / 9 · 第三步 · 架构差异</div>
+  <h1>35B-A3B 不是「小一号的 Flash」，<em>它换了三个决定成败的结构</em></h1>
+  <div class="sub">
+    步骤一、二全部围绕 Qwen3.8-Flash-Next（qwen4exp）展开。第三步的目标 Qwen3.6-35B-A3B（qwen35moe）
+    在<b>专家表规模、存储依赖、优化比重</b>三件事上与它截然不同——而这三件事恰好决定了手机端方案该怎么做。
+  </div>
+  <div class="meta">
+    <span class="chip">qwen4exp · 48 层 · 24,576 专家</span>
+    <span class="chip">qwen35moe · 40 层 · 10,240 专家实例</span>
+    <span class="chip g">35B 无 PLE / 无 MTP</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>结构对照</h2>
+    <div class="note">35B 数据来自本仓 GGUF 头部实读（_probe/gguf_inspect_35b.py）</div></div>
+  <table class="m">
+    <colgroup><col style="width:17%"><col style="width:24%"><col style="width:26%"><col style="width:33%"></colgroup>
+    <thead><tr><th>维度</th><th>Qwen3.8-Flash-Next</th><th>Qwen3.6-35B-A3B</th><th>对手机端方案的影响</th></tr></thead>
+    <tbody>
+      <tr class="hi">
+        <td>专家表规模</td>
+        <td>48 层 × <b>512 专家/层</b><br>共 24,576 个</td>
+        <td>40 层 × <b>256 专家/层</b><br>共 10,240 个实例</td>
+        <td><b>决定性</b>：专家表小 2.4×、单专家小 2.7×，per-layer 热集第一次能覆盖到有意义的比例（见下）</td>
+      </tr>
+      <tr>
+        <td>激活方式</td>
+        <td>top-10 = <b>2.0%</b></td>
+        <td>top-8 = <b>3.1%</b></td>
+        <td>激活比例更高 ⇒ 路由选择更集中 ⇒ 热度表更有效</td>
+      </tr>
+      <tr>
+        <td>单个专家体积</td>
+        <td>2.31 MiB</td>
+        <td><b>0.844 MiB</b></td>
+        <td>UFS 预取粒度小 2.7×，单次随机读代价更低</td>
+      </tr>
+      <tr>
+        <td>每 token 专家字节</td>
+        <td>48×10×2.31 = <b>1.11 GiB</b></td>
+        <td>40×8×0.844 = <b>270 MiB</b></td>
+        <td>专家侧压力小 <b>4.1×</b>——手机的 MoE 根本没 Flash 那么贵</td>
+      </tr>
+      <tr>
+        <td>注意力</td>
+        <td>QSA 稀疏注意力<br>compress_ratios [0,0,0,4]×12<br>indexer top_k = 2048</td>
+        <td>30 层 DeltaNet + 10 层全注意力<br>full_attention_interval = 4<br>2 个 KV head</td>
+        <td>35B 无 indexer 的 O(ctx) 打分段；但引入了 SSM/DeltaNet 算子，OpenCL 覆盖需逐算子验证</td>
+      </tr>
+      <tr>
+        <td>KV / token</td>
+        <td>需 indexer 打分选择，段长随 ctx</td>
+        <td><b>10.9 KB/token</b><br>（10 层有 KV × 2 head × 256 dim）</td>
+        <td>64K 上下文只要 0.65 GiB——混合架构的纯红利</td>
+      </tr>
+      <tr>
+        <td>PLE n-gram 表</td>
+        <td><b>有，28.8 GB</b><br>（DGX 上唯一真走 SSD 的东西）</td>
+        <td><b>无</b></td>
+        <td>手机上少一个「必须从存储流式读」的子系统，UFS 只服务专家，调度目标单一</td>
+      </tr>
+      <tr>
+        <td>MTP 草稿层</td>
+        <td><b>有</b>（blk.48）</td>
+        <td><b>无</b></td>
+        <td>与「端侧不做投机」天然一致，省下草稿权重的内存与带宽</td>
+      </tr>
+      <tr>
+        <td>量化格式</td>
+        <td>IQ3_S / IQ4_XS<br>（上游标准格式）</td>
+        <td><b>T42 自研 2.25 bpw</b><br>（自研 GSQ，全部 routed expert）</td>
+        <td><b>跨平台格式负债</b>：CPU 与所有 GPU 后端都得自己写内核</td>
+      </tr>
+      <tr class="hi">
+        <td>每 token 比重<br>（decode 单步）</td>
+        <td>MoE <b>69%</b> · KV 26% · attn 4%<br><span style="color:#64748b">合计 ≈1.6 GiB（DGX roofline 实测）</span></td>
+        <td>dense <b>85%</b> · MoE 12% · norms 3%<br><span style="color:#64748b">固定权重 2.25 GiB</span></td>
+        <td><b>优化优先级反转</b>：手机上最值钱的手术是<b>词表子集</b>（砍 lm_head），不是专家调度</td>
+      </tr>
+      <tr>
+        <td>词表</td>
+        <td>248,320</td>
+        <td>248,320</td>
+        <td>一致 ⇒ lm_head 600 MiB 的问题两者共享，手术方案可复用</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>为什么「专家表小」是决定性的：热集覆盖率算一遍</h2></div>
+  <div class="grid2">
+    <div class="card" style="border-left:4px solid #94a3b8">
+      <div class="h">Qwen3.8-Flash-Next · 假设 3 GiB 热集预算</div>
+      <div class="kv">3 GiB ÷ 2.31 MiB = <b>1,330 个专家</b>可常驻</div>
+      <div class="kv">摊到 48 层 = <b>27.7 个 / 层</b></div>
+      <div class="kv">每层有 512 个 ⇒ 覆盖率 <b style="color:#dc2626">5.4%</b></div>
+      <p style="margin-top:8px;font-size:12px;color:#64748b">这正是 DGX 上「专家热缓存没有作用对象」的同一条算术——覆盖率太低，pin 了也没用。</p>
+    </div>
+    <div class="card" style="border-left:4px solid #059669">
+      <div class="h">Qwen3.6-35B-A3B · 同样 3 GiB 热集预算</div>
+      <div class="kv">3 GiB ÷ 0.844 MiB = <b>3,640 个专家</b>可常驻</div>
+      <div class="kv">摊到 40 层 = <b>91 个 / 层</b></div>
+      <div class="kv">每层只有 256 个 ⇒ 覆盖率 <b style="color:#059669">35.5%</b></div>
+      <p style="margin-top:8px;font-size:12px;color:#64748b">覆盖率高出 <b>6.6×</b>。只要路由热度不是均匀分布，top-35% 的专家完全可能覆盖 70%+ 的选择。</p>
+    </div>
+  </div>
+  <div class="verdict green">
+    <b>这就是「分层机制在手机端复活」的数学原因</b>：不是手机的内存更小就自动该分层，而是
+    <b>35B 的「256 专家 / 层」让每层热集第一次能达到 30%+ 的覆盖率</b>。
+    DGX 上那句「统一内存下分层机制没有作用对象」依然成立——但它对 35B 在 16G 手机上不成立。
+  </div>
+  <div class="verdict amber">
+    <b>待实测（不要当结论用）</b>：35.5% 是「容量覆盖率」，实际收益取决于<b>路由热度的集中度</b>。
+    256 专家的模型通常比 24,576 专家的模型集中得多（负载均衡压力小），但这是推断，必须用真实对话样本统计 STRP 式热度表来验证。
+  </div>
+</div>
+
+<div class="verdict">
+  <b>一句话</b>：Flash 的瓶颈在专家与 KV（MoE 69%），35B 的瓶颈在 dense 权重与输出头（85%）。
+  把 Flash 在 DGX 上的杠杆表直接搬到手机上是错的——<b>手机上第一优先是词表子集手术（砍 445 MiB，占每 token 约 15%）</b>。
+</div>
+
+<div class="foot">TongYi-Lite · 三步走合订（同构立原理 / 异构辨边界 / 端侧落地） · 2026-10-13 · 三步走 · 图 5/9 · 第三步 · Flash vs 35B 架构差异</div>
+</div></body></html>

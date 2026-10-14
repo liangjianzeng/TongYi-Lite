@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>三步走 · 图 4/4 · 落地路线</title>
+<style>
+:root{
+  --bg:#080d18; --card:#121a2b; --card2:#18223a; --line:rgba(255,255,255,.10);
+  --ink:#eaf0ff; --ink2:#b8c5de; --muted:#8494b0;
+  --blue:#60a5fa; --cyan:#22d3ee; --purple:#a78bfa; --amber:#fbbf24;
+  --rose:#fb7185; --green:#34d399;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:728px;margin:0 auto;padding:26px 24px 44px}
+b,strong{color:#fff;font-weight:700}
+code{background:rgba(255,255,255,.10);padding:2px 7px;border-radius:6px;font-size:.90em;
+  font-family:Consolas,"Cascadia Mono",monospace;color:#a5f3fc;word-break:break-all}
+
+.hero{background:linear-gradient(135deg,#0d1730 0%,#17224a 55%,#251c46 100%);
+  border:1px solid rgba(255,255,255,.10);border-radius:22px;padding:26px 26px 22px;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-90px;top:-110px;width:300px;height:300px;
+  background:radial-gradient(circle,rgba(96,165,250,.30),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:17px;letter-spacing:2px;color:#93c5fd;font-weight:700;position:relative}
+.hero h1{font-size:40px;line-height:1.24;margin-top:12px;font-weight:800;position:relative;letter-spacing:-.5px}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:14px;font-size:22px;color:#c6cee6;line-height:1.72;position:relative}
+.hero .meta{margin-top:17px;display:flex;gap:9px;flex-wrap:wrap;position:relative}
+.chip{font-size:18px;padding:7px 13px;border-radius:999px;background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.16);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(251,113,133,.15);border-color:rgba(251,113,133,.40);color:#fecdd3}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.40);color:#fde68a}
+.chip.c{background:rgba(34,211,238,.15);border-color:rgba(34,211,238,.40);color:#a5f3fc}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:33px;height:33px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);
+  color:#fff;font-size:19px;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.sec-h .note{margin-left:auto;font-size:17px;color:var(--muted)}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px}
+.card + .card{margin-top:12px}
+.card h4{font-size:22px;font-weight:800;margin-bottom:4px}
+.card .cap{font-size:17px;color:var(--muted);line-height:1.5}
+
+/* 三步平台卡 */
+.step{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:17px 18px 15px;
+  margin-bottom:12px;position:relative;overflow:hidden}
+.step:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+.step.s1:before{background:linear-gradient(#34d399,#22d3ee)}
+.step.s2:before{background:linear-gradient(#60a5fa,#a78bfa)}
+.step.s3:before{background:linear-gradient(#fbbf24,#fb7185)}
+.step .top{display:flex;align-items:center;gap:12px;padding-left:6px}
+.step .idx{width:44px;height:44px;border-radius:13px;font-size:22px;font-weight:800;color:#04121c;
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.step.s1 .idx{background:linear-gradient(135deg,#34d399,#22d3ee)}
+.step.s2 .idx{background:linear-gradient(135deg,#60a5fa,#a78bfa)}
+.step.s3 .idx{background:linear-gradient(135deg,#fbbf24,#fb7185)}
+.step h3{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.step .plat{font-size:17.5px;color:var(--muted);margin-top:3px;line-height:1.45}
+.rowline{display:flex;gap:9px;margin-top:11px;font-size:20.5px;line-height:1.68;padding-left:6px}
+.rowline .k{flex:0 0 64px;color:var(--muted);font-weight:700}
+.rowline .v{flex:1;color:var(--ink2)}
+
+/* 表格 */
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);
+  border:1px solid var(--line);border-radius:15px;overflow:hidden;font-size:19px;table-layout:fixed}
+table.m th{background:rgba(255,255,255,.055);color:#cbd5e1;font-weight:700;font-size:17.5px;
+  padding:11px 8px;text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:13px}
+table.m td{padding:11px 8px;text-align:center;border-bottom:1px solid rgba(255,255,255,.06);
+  color:var(--ink2);line-height:1.55;vertical-align:top}
+table.m td:first-child{text-align:left;padding-left:13px;color:var(--ink)}
+table.m tr:last-child td{border-bottom:none}
+.t-ok{color:#6ee7b7!important;font-weight:700}
+.t-no{color:#fda4af!important;font-weight:700}
+.t-md{color:#fcd34d!important;font-weight:700}
+.t-bl{color:#93c5fd!important;font-weight:700}
+
+/* 条形图 */
+.bar{display:flex;height:50px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+.bar div{display:flex;align-items:center;justify-content:center;font-size:17.5px;font-weight:800;
+  color:#04121c;line-height:1.2;padding:0 4px;text-align:center}
+.lgd{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;font-size:18px;color:var(--ink2)}
+.lgd i{display:inline-block;width:13px;height:13px;border-radius:4px;margin-right:6px;vertical-align:-1px}
+
+/* 层卡 */
+.tier{display:flex;gap:12px;align-items:stretch;background:var(--card);border:1px solid var(--line);
+  border-radius:15px;padding:14px 16px;margin-bottom:9px}
+.tier .tag{flex:0 0 92px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;color:#04121c;text-align:center;line-height:1.2;padding:6px}
+.tier .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.62}
+.tier .bd b{display:block;font-size:20.5px;margin-bottom:2px}
+
+/* 通用小卡网格 */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.mini{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+.mini .k{font-size:17px;color:var(--muted);font-weight:700}
+.mini .v{font-size:21px;color:var(--ink);margin-top:4px;line-height:1.5;font-weight:600}
+
+/* 路线步进 */
+.pl{padding-left:6px}
+.prow{display:flex;gap:12px;margin-bottom:10px}
+.prow .dot{flex:0 0 40px;height:40px;border-radius:12px;background:var(--card2);border:1px solid var(--line);
+  color:#93c5fd;font-weight:800;font-size:19px;display:flex;align-items:center;justify-content:center}
+.prow.hot .dot{background:linear-gradient(135deg,#2563eb,#7c3aed);border-color:transparent;color:#fff}
+.prow .bd{flex:1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+  font-size:20px;color:var(--ink2);line-height:1.6}
+.prow .bd em{font-style:normal;color:#fff;font-weight:800}
+
+.conc{background:linear-gradient(135deg,#0d1730,#1b1640);border:1px solid rgba(255,255,255,.12);
+  border-radius:18px;padding:19px 20px;margin-top:22px}
+.conc .t{font-size:16.5px;letter-spacing:2px;color:#93c5fd;font-weight:800}
+.conc h3{font-size:26px;font-weight:800;margin:8px 0 9px;line-height:1.35}
+.conc h3 em{font-style:normal;color:#7dd3fc}
+.conc .body{font-size:20.5px;color:#c6cee6;line-height:1.75}
+
+.risk{display:flex;gap:10px;align-items:flex-start;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:12px 14px;margin-bottom:9px}
+.risk .lv{flex:0 0 auto;font-size:17px;font-weight:800;padding:5px 11px;border-radius:9px;color:#04121c}
+.risk .lv.h{background:#fb7185}
+.risk .lv.m{background:#fbbf24}
+.risk .lv.l{background:#34d399}
+.risk .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.6}
+.risk .bd b{display:block;color:#fff}
+
+.foot{margin-top:26px;text-align:center;font-size:17px;color:#5f6f8c;line-height:1.7}
+</style></head>
+<body><div class="page">
+
+<div class="hero">
+  <div class="kicker">第三步 · 落地路线与风险</div>
+  <h1>P0 → P4 <em>一两天可判死</em></h1>
+  <div class="sub">每一步都有明确判定物；P0 出带宽数字表，P1 用代理验机制，P4 上 35B 真身给出 17–20 或 6–9 的定案。</div>
+  <div class="meta">
+    <span class="chip g">P0 真机带宽</span>
+    <span class="chip c">P1 代理 = Ling3.0-tiny</span>
+    <span class="chip r">Q4_K_M 先通</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>P0 → P4 步进</h2></div>
+  <div class="pl">
+    <div class="prow hot"><div class="dot">P0</div><div class="bd"><em>真机实测</em>：LPDDR 有效带宽 + UFS 4.x 读带宽 + OpenCL 白名单复核 + <em>DeltaNet 算子可用性调研</em>（小模型先例 / CPU fallback 成本）<br><span style="font-size:18px;color:#8494b0">判定物：带宽数字表（一切账的前提）</span></div></div>
+    <div class="prow hot"><div class="dot">P1</div><div class="bd"><em>代理验机制</em>：Ling3.0-tiny（7.9B/1.3B 激活 MoE，128 专家 top8+1shared，3:1 KDA+MLA，官方 BF16/FP8/INT4）；LFM2.5-8B-A1B 为备选对照<br><em>Q4_K_M 全链路先通</em>（白名单内 + dense loop，零自研）→ 再调 IQ2/Q2；热集 pin ~34% 模拟 35B 失真要求不变；<b>llama.cpp 对 tiny 架构（bailing hybrid + KDA）的 GGUF 支持待 P1.0 核对</b></div></div>
+    <div class="prow"><div class="dot">P2</div><div class="bd"><em>专家分层 + 调度四件套落地</em><br><span style="font-size:18px;color:#8494b0">判定物：冷专家 miss 不 stall 的流水线实测</span></div></div>
+    <div class="prow"><div class="dot">P3</div><div class="bd"><em>自研内核：Q2_K → IQ2_XS</em> + dense loop MoE<br><span style="font-size:18px;color:#8494b0">判定物：数值门 + 带宽效率 vs iq4_nl 同级</span></div></div>
+    <div class="prow"><div class="dot">P4</div><div class="bd"><em>35B-A3B 真身上机</em><br><span style="font-size:18px;color:#8494b0">判定物：17–20 或 6–9，定案</span></div></div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>A / B 双内核线分开管理</h2></div>
+  <div class="card">
+    <h4 style="color:#7dd3fc">A 线 · 通用 GEMV（OpenCL / GPU）</h4>
+    <div class="cap">Q4_K_M 先通 → Q2_K → IQ2_XS。服务 dense 部分 + Ling 代理全链路 + 未来备选专家格式。<br>
+    工期：Q2_K <b>2–3 天</b>（复用 q4_K 超块骨架 + 2bit 解包，零 codebook）；IQ2_XS <b>3–5 天</b>（复用 iq4_nl 的 16 条目 codebook + 新增 2bit/scale 解包）。<br>
+    验收：每层 9 次调用 × ~32 层 ⇒ gate+up 融合砍 launch 数。</div>
+  </div>
+  <div class="card">
+    <h4 style="color:#fcd34d">B 线 · T42 专家（CPU）</h4>
+    <div class="cap">GSQ T42 2.25bpw 是 35B 专属格式，A 线只复用方法论不复用代码；P3 落地。若 T42 内核失败 ⇒ <b>fallback = 专家转 IQ2_XS</b>（A 线成果在此接上）。</div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">3</div><h2>代理验证矩阵 · Ling3.0-tiny</h2><div class="note">官方规格已联网查证</div></div>
+  <table class="m">
+    <tr><th style="width:26%">类别</th><th style="width:74%">内容</th></tr>
+    <tr><td class="t-ok">能验</td><td style="text-align:left">OpenCL dense Q4_K_M 全链路 · dense loop MoE · 数值门流程 · 热度表+超集预读+pin 34% 分层机制 · UFS mmap 冷专家 · P0 带宽探针 · <b>delta-rule 线性注意力算子族可用性</b>（KDA 层，为 35B 的 30 层 DeltaNet 提供近亲先例）</td></tr>
+    <tr><td class="t-no">验不了</td><td style="text-align:left">Qwen DeltaNet 精确变体（KDA ≠ GDN，只证算子族可行、不证等价）· T42 格式</td></tr>
+    <tr><td class="t-md">失真项</td><td style="text-align:left">激活 1.3B vs 3B · 专家 128 vs 256 · 总权 INT4 ~4.4G 热集仍近 100% ⇒ 须人为 <b>pin ~34%</b> 预算模拟；35B 特有杠杆（dense→Q4_0 −635MiB、词表 64K −445MiB）只能解析推演 + 词表手术缩比演练</td></tr>
+  </table>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">4</div><h2>风险登记</h2><div class="note">高×2 / 中×2 / 低×1</div></div>
+  <div class="risk"><div class="lv h">高</div><div class="bd"><b>mul_mat_id 驱动 bug 波及自研内核</b>对策：dense loop + 每类型过 G2 数值门</div></div>
+  <div class="risk"><div class="lv h">高</div><div class="bd"><b>4K 页故障毁步</b>对策：全部预读显式化（async read，禁 fault 路径）</div></div>
+  <div class="risk"><div class="lv m">中</div><div class="bd"><b>热集覆盖 35% 导致流水线断裂</b>对策：超集预读 + per-layer 预算 + 热度表在线更新</div></div>
+  <div class="risk"><div class="lv m">中</div><div class="bd"><b>DeltaNet 30 层 OpenCL 无内核先例</b>对策：P1 代理先行验证算子可用性</div></div>
+  <div class="risk"><div class="lv l">低</div><div class="bd"><b>launch 开销（~290 次/步）</b>对策：gate_up 融合 + 异步 enqueue</div></div>
+</div>
+
+<div class="conc">
+  <div class="t">GATE</div>
+  <h3>成败只押一件事：<em>attention 时间藏住 UFS 冷专家读</em></h3>
+  <div class="body">P0 + P1 合计一两天即可判死：带宽表一出、代理一跑，L0/L1/L2 分层能不能撑住 35B 就有答案。乐观 17–20、悲观 6–9 t/s，没有中间态。</div>
+</div>
+
+<div class="foot">三步走大方案 · 2026-10-13 定档 · 数据源：docs/三步走大方案规划_2026-10-13.md</div>
+</div></body></html>

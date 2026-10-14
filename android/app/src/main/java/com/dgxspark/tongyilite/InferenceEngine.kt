@@ -124,6 +124,7 @@ class InferenceEngine(private val context: Context) {
     /** Push OOM-guard settings from the UI (设置→推理引擎→内存守卫) into native env. */
     private external fun nativeSetOomGuardParams(enabled: Boolean, preHeadroomMb: Int, postHeadroomMb: Int)
     private external fun nativeSetKvCacheType(type: String)
+    private external fun nativeSetFlashAttn(enabled: Boolean)
 
     // --- Public API ---
 
@@ -226,6 +227,15 @@ class InferenceEngine(private val context: Context) {
      */
     fun setKvCacheType(type: String) {
         nativeSetKvCacheType(type)
+    }
+
+    /**
+     * [dspark 2026-10-14] P1: flash attention 开关（设置→推理引擎）。每次 loadModel
+     * 前调用，重载模型后生效。开启后 V 跟随 K 的量化格式（OpenCL FA 内核要求 K/V
+     * 同格式）；hybrid（recurrent 层）架构原生层会强制关闭并在日志说明。
+     */
+    fun setFlashAttn(enabled: Boolean) {
+        nativeSetFlashAttn(enabled)
     }
 
     /** Clear the KV cache to start a brand-new conversation (multi-turn append-only). */

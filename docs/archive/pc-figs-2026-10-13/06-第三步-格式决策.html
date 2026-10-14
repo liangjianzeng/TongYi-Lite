@@ -1,0 +1,247 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>三步走 · 图 6/9 · 格式决策</title><style>
+:root{
+  --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+  --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+  --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+  --green:#059669; --cyan:#0891b2;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:1080px;margin:0 auto;padding:34px 0 60px}
+.hero{background:linear-gradient(135deg,#0b1220 0%,#16224a 55%,#241a45 100%);
+  border-radius:20px;padding:28px 34px 24px;color:#fff;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-80px;top:-100px;width:320px;height:320px;
+  background:radial-gradient(circle,rgba(96,165,250,.28),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:12px;letter-spacing:2.4px;color:#93c5fd;font-weight:600;position:relative}
+.hero h1{font-size:27px;line-height:1.3;margin-top:9px;font-weight:700;position:relative}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:11px;font-size:13.5px;color:#c3cbe4;line-height:1.72;position:relative;max-width:940px}
+.hero .sub b{color:#fff}
+.hero .meta{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;position:relative}
+.chip{font-size:11.5px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid rgba(255,255,255,.18);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.38);color:#fecaca}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#fde68a}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:26px;height:26px;border-radius:8px;background:var(--ink);color:#fff;font-size:13px;
+  font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:17px;font-weight:700}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--muted)}
+
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);
+  border-radius:13px;overflow:hidden;font-size:12.3px;table-layout:fixed}
+table.m th{background:#f4f7fb;color:var(--ink2);font-weight:700;font-size:11.8px;padding:10px 9px;
+  text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:14px}
+table.m td{padding:9px;text-align:center;border-bottom:1px solid #eef2f7;color:var(--ink2);line-height:1.5;vertical-align:top}
+table.m tr:last-child td{border-bottom:none}
+table.m td:first-child{text-align:left;padding-left:14px;font-weight:700;color:var(--ink)}
+table.m .c0{color:var(--green);font-weight:800;font-size:14px}
+table.m .c1{color:#ca8a04;font-weight:800;font-size:14px}
+table.m .c2{color:#dc2626;font-weight:800;font-size:14px}
+table.m .sub{display:block;font-size:10.6px;color:var(--muted);font-weight:500;margin-top:3px;line-height:1.45}
+table.m tr.hi td{background:#fffdf3}
+table.m tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+
+.verdict{margin-top:12px;padding:11px 14px;border-radius:11px;font-size:12.6px;line-height:1.68;
+  background:#f1f5f9;border-left:3px solid var(--ink);color:var(--ink2)}
+.verdict b{color:var(--ink)}
+.verdict.blue{border-left-color:var(--blue);background:#eff5ff}
+.verdict.amber{border-left-color:var(--amber);background:#fff8ec}
+.verdict.red{border-left-color:var(--rose);background:#fff1f4}
+.verdict.green{border-left-color:var(--green);background:#f0fdf5}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}
+.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.card .h{font-size:13.5px;font-weight:800;margin-bottom:7px}
+.card p{font-size:12.2px;line-height:1.66;color:var(--ink2)}
+.card p+p{margin-top:5px}
+
+.kv{font-size:12.4px;line-height:1.64;color:var(--ink2);padding-left:14px;position:relative;margin-bottom:6px}
+.kv:before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--faint)}
+.kv b{color:var(--ink);font-weight:700}
+.hl{background:linear-gradient(transparent 58%,#fde68a 58%);font-weight:700;color:#111827}
+
+/* ---- 步骤识别：顶部色带 + 9 格进度条 ---- */
+.steptop{height:6px;border-radius:999px;margin-bottom:12px}
+.steptop.g0{background:linear-gradient(90deg,#0f172a,#475569)}
+.steptop.g1{background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.steptop.g2{background:linear-gradient(90deg,#b45309,#fbbf24)}
+.steptop.g3{background:linear-gradient(90deg,#6d28d9,#a78bfa)}
+.steptop.g4{background:linear-gradient(90deg,#047857,#34d399)}
+
+.rail{display:flex;align-items:center;gap:6px;margin-bottom:13px;background:#fff;
+  border:1px solid var(--line);border-radius:14px;padding:9px 12px;flex-wrap:wrap}
+.rail .rl{font-size:10.4px;font-weight:800;letter-spacing:.3px;padding:3px 7px;border-radius:6px;
+  background:#f1f5f9;color:var(--ink2);white-space:nowrap}
+.rail .rl.g0{background:#e2e8f0;color:#0f172a}
+.rail .rl.g1{background:#dbeafe;color:#1d4ed8}
+.rail .rl.g2{background:#fef3c7;color:#92400e}
+.rail .rl.g3{background:#ede9fe;color:#6d28d9}
+.rail .rl.g4{background:#dcfce7;color:#166534}
+.rail .rp{font-size:10.8px;color:var(--muted);white-space:nowrap;padding:3px 7px;
+  border-radius:7px;border:1px dashed #e2e8f0;background:#fbfcfe}
+.rail .rp b{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+  border-radius:4px;background:#e2e8f0;color:#475569;font-size:10px;margin-right:3px;font-weight:800}
+.rail .rp.on{border-style:solid;font-weight:800;color:#fff}
+.rail .rp.on b{background:rgba(255,255,255,.26);color:#fff}
+.rail .rp.g0.on{background:#0f172a;border-color:#0f172a}
+.rail .rp.g1.on{background:#2563eb;border-color:#2563eb}
+.rail .rp.g2.on{background:#d97706;border-color:#d97706}
+.rail .rp.g3.on{background:#7c3aed;border-color:#7c3aed}
+.rail .rp.g4.on{background:#059669;border-color:#059669}
+
+.tier{background:#fff;border:1px solid var(--line);border-radius:13px;padding:0;overflow:hidden;margin-bottom:10px}
+.tier .th{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line)}
+.tier .tag{font-size:11px;font-weight:800;color:#fff;padding:3px 9px;border-radius:6px;letter-spacing:.5px}
+.tier .nm{font-size:14px;font-weight:800}
+.tier .meta{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.tier .tb{padding:13px 16px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px}
+.tier .tb .li{font-size:12.2px;line-height:1.6;color:var(--ink2)}
+.tier .tb .li b{color:var(--ink)}
+.t0{border-left:4px solid #2563eb} .t0 .th{background:#eff6ff} .t0 .tag{background:#2563eb}
+.t1{border-left:4px solid #0891b2} .t1 .th{background:#ecfeff} .t1 .tag{background:#0891b2}
+.t2{border-left:4px solid #7c3aed} .t2 .th{background:#f6f2ff} .t2 .tag{background:#7c3aed}
+
+.flow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.flow .row{display:flex;align-items:stretch;gap:0;margin-top:4px}
+.flow .st{flex:1;background:#f6f8fb;border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center}
+.flow .st .n{font-size:11px;color:var(--muted);letter-spacing:.4px}
+.flow .st .v{font-size:12.2px;font-weight:700;margin-top:3px;line-height:1.4}
+.flow .ar{display:flex;align-items:center;padding:0 4px;color:#cbd5e1;font-size:13px}
+.flow .gpu{border-color:#bfdbfe;background:#eff6ff}
+.flow .cpu{border-color:#a7f3d0;background:#effbf5}
+.flow .ufs{border-color:#ddd6fe;background:#f6f2ff}
+
+.brow{display:grid;grid-template-columns:130px 1fr 108px;align-items:center;gap:10px;margin-bottom:8px;font-size:12.4px}
+.brow .lb{font-weight:700;color:var(--ink)}
+.brow .tr{background:#f1f5f9;border-radius:6px;height:19px;overflow:hidden;display:flex}
+.brow .fl{height:100%;border-radius:6px}
+.brow .vl{text-align:right;font-size:12px;color:var(--ink2);font-weight:700}
+
+.badge{display:inline-block;font-size:11px;font-weight:800;padding:3px 9px;border-radius:6px;min-width:56px;text-align:center}
+.b-lo{background:#dcfce7;color:#166534}
+.b-md{background:#fef3c7;color:#92400e}
+.b-hi{background:#fee2e2;color:#991b1b}
+.b-no{background:#1f2937;color:#f9fafb}
+
+.conc{margin-top:22px;border-radius:18px;padding:24px 32px;
+  background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52);color:#fff}
+.conc .t{font-size:12px;letter-spacing:2.2px;color:#93c5fd;font-weight:600}
+.conc h3{font-size:22px;margin:9px 0 12px;font-weight:700;line-height:1.4}
+.conc h3 em{font-style:normal;color:#fbbf24}
+.conc .body{font-size:13.4px;line-height:1.82;color:#cbd5e1}
+.conc .body b{color:#fff}
+.conc .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.conc .row div{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;padding:12px 14px}
+.conc .row .k{font-size:11px;color:#93c5fd;letter-spacing:.5px}
+.conc .row .v{font-size:13.5px;margin-top:5px;color:#fff;font-weight:600;line-height:1.5}
+.foot{margin-top:13px;font-size:11.5px;color:var(--faint);text-align:center}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11.4px;background:#eef2f7;
+  padding:1px 5px;border-radius:4px;color:#334155}
+.tier .tb code{background:#f1f5f9}
+</style></head><body><div class="page">
+<div class="steptop g3"></div><div class="rail"><span class="rl g0">总纲</span><span class="rp g0"><b>1</b>全景/矩阵</span><span class="rl g1">① 同构</span><span class="rp g1"><b>2</b>5060Ti</span><span class="rl g2">② 异构</span><span class="rp g2"><b>3</b>DGX</span><span class="rl g3">③ 端侧</span><span class="rp g3"><b>4</b>后端</span><span class="rp g3"><b>5</b>架构</span><span class="rp g3 on"><b>6</b>格式</span><span class="rp g3"><b>7</b>分层</span><span class="rp g3"><b>8</b>降比特</span><span class="rl g4">结论</span><span class="rp g4"><b>9</b>路线</span></div>
+<div class="hero">
+  <div class="kicker">三步走 · 图 6 / 9 · 第三步 · 格式决策</div>
+  <h1>从内核白名单反推量化格式：<em>GPU 上最小只能到 4.25 bpw</em></h1>
+  <div class="sub">
+    只要专家要在 GPU 上算（MUL_MAT_ID），可选格式就被 OpenCL 白名单锁死在
+    <b>Q4_0 / Q8_0 / MXFP4</b>（+ 一组 Adreno 形状受限的 K-quant）。
+    T42 的 2.25 bpw 在 GPU 上没有任何内核。这一张图决定「专家到底放哪算」。
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>四条路线的体积账</h2></div>
+  <table class="m">
+    <colgroup><col style="width:21%"><col style="width:33%"><col style="width:11%"><col style="width:17%"><col style="width:18%"></colgroup>
+    <thead><tr><th>目标后端</th><th>MoE（MUL_MAT_ID）可用格式</th><th>最小 bpw</th><th>32.2B 专家体积</th><th>全模型</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>OpenCL · 通用内核</td>
+        <td>Q4_0 / Q8_0 / <b>MXFP4</b></td>
+        <td><b>4.25</b></td>
+        <td>15.9 GiB</td>
+        <td>≈19.8 GiB</td>
+      </tr>
+      <tr>
+        <td>OpenCL · Adreno 专用内核</td>
+        <td>+ Q4_1 / Q5_0 / Q5_1 / Q4_K / Q5_K / Q6_K（需形状检查）</td>
+        <td>4.5</td>
+        <td>16.9 GiB</td>
+        <td>≈20.5 GiB</td>
+      </tr>
+      <tr class="hi">
+        <td>CPU（ggml-cpu）</td>
+        <td><b>全部</b>——含 IQ2_S / IQ2_XXS / 自研 T42</td>
+        <td><b>2.25</b></td>
+        <td><b>8.44 GiB</b></td>
+        <td><b>11.37 GiB</b> ← 原样</td>
+      </tr>
+      <tr>
+        <td>Vulkan（任一驱动）</td>
+        <td>生成式全类型</td>
+        <td>2.25</td>
+        <td>8.44 GiB</td>
+        <td>11.37 GiB<br><span style="color:#dc2626;font-weight:700">但驱动不可用</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>重打包到 GPU 格式的代价：比想象小，但不在「吞吐」上</h2></div>
+  <div class="card">
+    <div class="h">每 token 固定必读字节</div>
+    <div class="brow"><div class="lb">T42 原样</div>
+      <div class="tr"><div class="fl" style="width:75.4%;background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div><div class="fl" style="width:10.7%;background:#e11d48"></div><div class="fl" style="width:3.2%;background:#94a3b8"></div></div>
+      <div class="vl">2.25 GiB</div></div>
+    <div class="brow"><div class="lb">重打包 Q4_0</div>
+      <div class="tr"><div class="fl" style="width:75.4%;background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div><div class="fl" style="width:21.4%;background:#e11d48"></div><div class="fl" style="width:3.2%;background:#94a3b8"></div></div>
+      <div class="vl">2.52 GiB</div></div>
+    <div style="font-size:12.2px;color:#64748b;margin-top:2px">
+      <b style="color:#7c3aed">紫</b> = dense（attn/SSM + lm_head + shared，1.90 GiB，不随格式变）&nbsp;·&nbsp;
+      <b style="color:#e11d48">红</b> = routed 专家（0.27 → 0.54 GiB）&nbsp;·&nbsp;
+      <b style="color:#94a3b8">灰</b> = norms
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:13px">
+    <div class="card" style="border-left:4px solid #059669">
+      <div class="h">代价其实很小</div>
+      <div class="kv">每 token 字节只从 <b>2.25 → 2.52 GiB（+12%）</b></div>
+      <div class="kv">因为 dense 占 85%，专家翻倍被稀释掉了</div>
+      <div class="kv">→ 换算速度：18.6 → <b>17.5 t/s</b>，几乎不影响</div>
+    </div>
+    <div class="card" style="border-left:4px solid #dc2626">
+      <div class="h">真正的代价在存储与调度</div>
+      <div class="kv">冷专家落 UFS 的体积：<b>5.06 → 10.1 GiB</b></div>
+      <div class="kv">同容量热集能装的专家数<b>腰斩</b>：每层覆盖率 35.5% → 17.8%</div>
+      <div class="kv">而且要新写 T42 → MXFP4/Q4_0 的量化器（自研格式，无现成工具）</div>
+    </div>
+  </div>
+
+  <div class="verdict green">
+    <b>结论：双轨。</b>
+    ① <b>骨干上 GPU</b>——attention / SSM / lm_head 保持 Q8_0 原样（在 OpenCL 白名单内，体积不变，且这 1.90 GiB 占每 token 的 85%）。
+    这是<b>「先能跑起来」的起点</b>；下一步骤要做的「更低量化」见 FIG 6——把这一块从 Q8_0 压到 Q4_0；
+    ② <b>专家留 T42 走 CPU</b>——CPU 支持全部类型，体积不变，且不需要自研任何 GPU 内核。
+    这条路把「格式负债」限制在 <b>一个 CPU vec_dot 内核</b>上，而不是四个 GPU 后端内核。
+  </div>
+  <div class="verdict amber">
+    <b>保留的升级选项</b>：若后续实测发现 CPU 跑专家是瓶颈，再把专家重打包成 MXFP4 交回 GPU——
+    代价是体积翻倍 + 覆盖率腰斩，所以在被数据逼到之前不做。
+  </div>
+</div>
+
+<div class="foot">TongYi-Lite · 三步走合订（同构立原理 / 异构辨边界 / 端侧落地） · 2026-10-13 · 三步走 · 图 6/9 · 第三步 · 从内核白名单反推格式</div>
+</div></body></html>

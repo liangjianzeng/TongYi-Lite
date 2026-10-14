@@ -381,3 +381,198 @@ __kernel void kernel_gemv_noshuffle_q4_0_f32_mc3(
 #undef MC_COL_Q40
 #undef MC_DQ_HI
 #undef MC_DQ_LO
+
+// [dspark 2026-10-13] Batched MUL_MAT_ID for q4_0 MoE: ONE dispatch computes all
+// (expert-slot, token) GEMV columns, and the expert ids are read on-device —
+// eliminating the dense-loop's per-expert dispatches AND the per-layer ids
+// readback sync. Weight/b/scale addressing is the validated
+// kernel_gemv_noshuffle_q4_0_f32 with three base shifts:
+//   row-pair index  gid -> rp   (gid now encodes column too)
+//   weight base     + e * q_layer_pix   (experts laid out contiguously by
+//                    set_tensor, each layer byte-identical to a dense 2D
+//                    [K, M] noshuffle+transposed weight — the same layout the
+//                    dense-loop GEMV reads, validated NMSE=0)
+//   B column base   + col * (K/4) float4 pixels
+// Requires (host-checked): M % 128 == 0 (no row-pair padding, so every index
+// stays inside its expert layer), K % 32 == 0, ids in [0, E).
+#ifdef VECTOR_SUB_GROUP_BROADCAST
+#define BMO_DQ_HI dequantizeBlockAccum_ns_sgbroadcast_8_hi
+#define BMO_DQ_LO dequantizeBlockAccum_ns_sgbroadcast_8_lo
+#else
+#define BMO_DQ_HI dequantizeBlockAccum_ns_sgbroadcast_1_hi
+#define BMO_DQ_LO dequantizeBlockAccum_ns_sgbroadcast_1_lo
+#endif
+#ifdef ADRENO_GPU
+REQD_SUBGROUP_SIZE_64
+#endif
+__kernel void kernel_mul_mat_id_q4_0_f32_batched(
+        __read_only  image1d_buffer_t src0_q,  // E transposed q4_0 expert layers
+        global half2  * src0_d,                // E layers of fp16 block scales
+        __read_only  image1d_buffer_t src1,    // B: ne11*n_tok columns of K floats
+        global int    * ids,                   // MUL_MAT_ID ids tensor (I32)
+        int ids_elem_off,                      // element offset of ids base
+        global int    * perm,                  // [n_cols] expert-sorted column order (P3); 0 => identity
+        global float * dst,                    // destination buffer
+        ulong offsetd,                         // byte offset of dst base
+        int ne00,                              // K
+        int ne01,                              // M (output rows)
+        int n_used,                            // expert slots per token
+        int n_tok,                             // tokens
+        int ne11,                              // src1 columns (1 => broadcast)
+        int n_expert,                          // E
+        int ids_row,                           // ids row stride in elements
+        ulong dst_nb1,                         // dst->nb[1] bytes
+        ulong dst_nb2,                         // dst->nb[2] bytes
+        int grid_x_per_col,                    // CEIL_DIV(M/2, 64) * 64
+        ulong q_layer_pix,                     // per-expert q stride (uint pixels)
+        ulong d_layer_bytes)                   // per-expert scale stride (bytes)
+{
+    uint gid  = get_global_id(0);
+    uint slid = get_sub_group_local_id();
+    uint groupId = get_local_id(1);
+
+    uint K  = (uint)ne00;
+    uint M  = (uint)ne01;
+    uint M2 = M / 2;
+
+    uint colp = gid / (uint)grid_x_per_col;
+    uint rp   = gid - colp * (uint)grid_x_per_col;   // row-pair index, rp < M2 (no padding)
+
+    // P3 expert-sorted column order: physical columns are grouped so that
+    // (slot, token) columns selecting the SAME expert are adjacent — their
+    // weight reads then hit L2 instead of re-streaming the whole expert layer.
+    uint col = (perm != (global uint *)0) ? (uint)perm[colp] : colp;
+
+    uint t = col / (uint)n_used;
+    uint j = col - t * (uint)n_used;
+
+    int e = ids[ids_elem_off + (int)t * ids_row + (int)j];
+    bool valid = (e >= 0) && (e < n_expert);
+    int  es    = valid ? e : 0;   // safe reads; invalid ids write zeros
+
+    uint LINE_STRIDE_A  = M / 2;
+    uint BLOCK_STRIDE_A = N_SIMDGROUP * M;
+
+    global half2 * drow = (global half2*)((global char*)src0_d + (ulong)es * d_layer_bytes);
+    int qbase = (int)((ulong)es * q_layer_pix);
+    int bbase = (int)((ulong)((j % (uint)ne11) + t * (uint)ne11) * (K / 4));
+    global float * dstc = (global float*)((global char*)dst + offsetd
+                            + (ulong)j * dst_nb1 + (ulong)t * dst_nb2);
+
+    __private uint4  regA;
+    __private half2  regS;
+    __private float8 regB;
+
+    __private float2 totalSum = (float2)(0.0f);
+
+    for (uint k = groupId; k < (K / QK4_0); k += N_SIMDGROUP) {
+        regS = drow[rp + k * LINE_STRIDE_A]; // scale of two rows
+        if (slid < 4) {
+            regB.s0123 = read_imagef(src1, bbase + (int)(slid * 2 + k * 8));
+            regB.s4567 = read_imagef(src1, bbase + (int)(1 + slid * 2 + k * 8));
+        }
+
+        regA.s0 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        regA.s1 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        regA.s2 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        regA.s3 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+        BMO_DQ_HI(totalSum, as_ushort8(regA), regS, regB);
+
+        regA.s0 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+        regA.s1 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+        regA.s2 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;
+        regA.s3 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
+        BMO_DQ_LO(totalSum, as_ushort8(regA), regS, regB);
+    }
+
+    // reduction in local memory, assumes #wave=4
+    __local float2 reduceLM[SIMDGROUP_WIDTH * 3];
+    if (groupId == 1) reduceLM[SIMDGROUP_WIDTH * 0 + slid] = totalSum;
+    if (groupId == 2) reduceLM[SIMDGROUP_WIDTH * 1 + slid] = totalSum;
+    if (groupId == 3) reduceLM[SIMDGROUP_WIDTH * 2 + slid] = totalSum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (groupId == 0) {
+        totalSum += reduceLM[SIMDGROUP_WIDTH * 0 + slid];
+        totalSum += reduceLM[SIMDGROUP_WIDTH * 1 + slid];
+        totalSum += reduceLM[SIMDGROUP_WIDTH * 2 + slid];
+        if (valid) {
+            if (rp * 2 + 0 < M) dstc[rp * 2 + 0] = totalSum.s0;
+            if (rp * 2 + 1 < M) dstc[rp * 2 + 1] = totalSum.s1;
+        } else {
+            if (rp * 2 + 0 < M) dstc[rp * 2 + 0] = 0.0f;
+            if (rp * 2 + 1 < M) dstc[rp * 2 + 1] = 0.0f;
+        }
+    }
+}
+#undef BMO_DQ_HI
+#undef BMO_DQ_LO
+
+// [dspark 2026-10-14] P3: device-side expert bucket sort for the batched MoE
+// kernels. Three tiny pre-pass kernels reorder the (slot, token) columns so
+// same-expert columns are adjacent in the physical dispatch — the main GEMV
+// then re-reads each selected expert's weight layer from L2 instead of
+// re-streaming it from VRAM once per column (prefill n_tok=512, top-8 of
+// E=128 -> ~32 columns share one expert; ideal traffic cut ~= n_cols/E).
+// Layout of the shared scratch buffer:
+//   [0, E+1)        histogram (phase 1) -> exclusive-scan offsets (phase 2)
+//                   -> mutated into cursors (phase 3; host zeroes before use)
+//   [E+1, E+1+n_cols) permuted original column indices
+// Invalid expert ids get the reserved bucket E (sorted last, output zeros —
+// the main kernels already write zeros for invalid ids).
+
+// phase 1: histogram over expert ids. Column index -> (t, j) MUST mirror the
+// main batched kernels exactly: e = ids[ids_elem_off + t*ids_row + j].
+__kernel void kernel_moe_sort_hist(
+        global int * hist,                     // [E+1], pre-zeroed by the host
+        global const int * ids,
+        int ids_elem_off,
+        int ids_row,
+        int n_used,
+        int n_expert,
+        int n_cols)
+{
+    int i = get_global_id(0);
+    if (i >= n_cols) return;
+    int t = i / n_used;
+    int j = i - t * n_used;
+    int e = ids[ids_elem_off + t * ids_row + j];
+    if (e < 0 || e >= n_expert) e = n_expert;
+    atomic_add(&hist[e], 1);
+}
+
+// phase 2: in-place exclusive scan of the [E+1] histogram (start offsets).
+// Single thread: E is tiny (128..256 for current models, cap 2048 host-side),
+// a serial scan costs microseconds vs the milliseconds the sort saves.
+__kernel void kernel_moe_sort_scan(
+        global int * hist,                     // [E+1]
+        int n_buckets)                         // E+1
+{
+    if (get_global_id(0) != 0) return;
+    int sum = 0;
+    for (int i = 0; i < n_buckets; ++i) {
+        int v = hist[i];
+        hist[i] = sum;
+        sum += v;
+    }
+}
+
+// phase 3: scatter original column indices into their expert buckets.
+__kernel void kernel_moe_sort_scatter(
+        global int * hist,                     // [E+1] cursors (mutated)
+        global int * perm,                     // [n_cols] output
+        global const int * ids,
+        int ids_elem_off,
+        int ids_row,
+        int n_used,
+        int n_expert,
+        int n_cols)
+{
+    int i = get_global_id(0);
+    if (i >= n_cols) return;
+    int t = i / n_used;
+    int j = i - t * n_used;
+    int e = ids[ids_elem_off + t * ids_row + j];
+    if (e < 0 || e >= n_expert) e = n_expert;
+    int pos = atomic_add(&hist[e], 1);
+    perm[pos] = i;
+}

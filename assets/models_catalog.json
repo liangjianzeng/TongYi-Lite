@@ -321,52 +321,6 @@
       }
     },
     {
-      "id": "qwen3.5-9b-mtp-ud-iq2_m",
-      "name": "Qwen3.5-9B (MTP UD-IQ2_M)",
-      "type": "text",
-      "mtp": true,
-      "mirrors": [
-        {
-          "url": "https://hf-mirror.com/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-UD-IQ2_M.gguf",
-          "source": "hf-mirror"
-        },
-        {
-          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-UD-IQ2_M.gguf",
-          "source": "modelscope"
-        }
-      ],
-      "sizeGB": 3.7,
-      "sizeMBDisplay": "3.7 GB",
-      "recommended": false,
-      "minRamMB": 4096,
-      "sha256Hash": null,
-      "tags": [
-        "不推荐",
-        "限高端旗舰"
-      ]
-    },
-    {
-      "id": "ornith-1.5-9b-mtp-iq2_m",
-      "name": "Ornith-1.5-9B (MTP IQ2_M)",
-      "type": "text",
-      "mtp": true,
-      "mirrors": [
-        {
-          "url": "https://modelscope.cn/api/v1/models/protoLabsAI/Ornith-1.5-9B-MTP-GGUF/resolve/main/Ornith-1.5-9B-MTP-IQ2_M.gguf",
-          "source": "modelscope"
-        }
-      ],
-      "sizeGB": 3.87,
-      "sizeMBDisplay": "3.87 GB",
-      "recommended": false,
-      "minRamMB": 4096,
-      "sha256Hash": "6a6b51d37b2d40acaf4171f35364fbba78ba025fe2c7e6d60b65e2a85082a135",
-      "tags": [
-        "不推荐",
-        "限高端旗舰"
-      ]
-    },
-    {
       "id": "lfm2.5-2.6b-q4_k_m",
       "name": "LFM 2.5 2.6B (Q4_K_M)",
       "type": "text",
@@ -441,28 +395,29 @@
       }
     },
     {
-      "id": "lfm2.5-8b-a1b-ud-iq3_xxs",
-      "name": "LFM 2.5 8B-A1B (UD-IQ3_XXS 智能体)",
+      "id": "lfm2.5-8b-a1b-q4_k_m",
+      "name": "LFM 2.5 8B-A1B (Q4_K_M 智能体)",
       "type": "text",
       "mirrors": [
         {
-          "url": "https://modelscope.cn/api/v1/models/unsloth/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-UD-IQ3_XXS.gguf",
+          "url": "https://modelscope.cn/api/v1/models/LiquidAI/LFM2.5-8B-A1B-GGUF/resolve/master/LFM2.5-8B-A1B-Q4_K_M.gguf",
           "source": "modelscope"
         },
         {
-          "url": "https://hf-mirror.com/unsloth/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-UD-IQ3_XXS.gguf",
+          "url": "https://hf-mirror.com/LiquidAI/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-Q4_K_M.gguf",
           "source": "hf-mirror"
         }
       ],
-      "sizeGB": 3.05,
-      "sizeMBDisplay": "3.1 GB",
+      "sizeGB": 4.8,
+      "sizeMBDisplay": "4.8 GB",
       "recommended": true,
-      "minRamMB": 4096,
+      "minRamMB": 8192,
       "sha256Hash": null,
       "tags": [
         "推荐",
         "智能体",
-        "MoE 高效"
+        "MoE 高效",
+        "官方量化"
       ],
       "agentCapabilities": {
         "nativeToolCall": false,
@@ -478,6 +433,85 @@
           "calculator"
         ]
       }
+    },
+    {
+      "id": "ling-3.0-tiny-q4_k_m",
+      "name": "Ling 3.0 Tiny (Q4_K_M)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/inclusionAI/Ling-3.0-tiny-GGUF/resolve/master/Ling-3.0-tiny-Q4_K_M.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/inclusionAI/Ling-3.0-tiny-GGUF/resolve/main/Ling-3.0-tiny-Q4_K_M.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 4.49,
+      "sizeMBDisplay": "4.5 GB",
+      "recommended": true,
+      "minRamMB": 8192,
+      "sha256Hash": null,
+      "tags": [
+        "推荐",
+        "MoE 高效",
+        "官方量化"
+      ]
+    },
+    {
+      "id": "ling-3.0-tiny-q4_0",
+      "name": "Ling 3.0 Tiny (Q4_0 GPU加速)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/bartowski/Ling-3.0-tiny-GGUF/resolve/master/Ling-3.0-tiny-Q4_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/bartowski/Ling-3.0-tiny-GGUF/resolve/main/Ling-3.0-tiny-Q4_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/bartowski/Ling-3.0-tiny-GGUF/resolve/main/Ling-3.0-tiny-Q4_0.gguf",
+          "source": "huggingface"
+        }
+      ],
+      "sizeGB": 4.41,
+      "sizeMBDisplay": "4.4 GB",
+      "recommended": false,
+      "minRamMB": 8192,
+      "sha256Hash": null,
+      "tags": [
+        "GPU 加速",
+        "MoE 高效",
+        "OpenCL vendor MoE 内核实测可用"
+      ]
+    },
+    {
+      "id": "lfm2.5-8b-a1b-q4_0",
+      "name": "LFM 2.5 8B-A1B (Q4_0 GPU加速)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/LiquidAI/LFM2.5-8B-A1B-GGUF/resolve/master/LFM2.5-8B-A1B-Q4_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/LiquidAI/LFM2.5-8B-A1B-GGUF/resolve/main/LFM2.5-8B-A1B-Q4_0.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 4.62,
+      "sizeMBDisplay": "4.6 GB",
+      "recommended": false,
+      "minRamMB": 8192,
+      "sha256Hash": null,
+      "tags": [
+        "GPU 加速",
+        "MoE 高效",
+        "官方量化"
+      ]
     },
     {
       "id": "bonsai-8b-q1_0",

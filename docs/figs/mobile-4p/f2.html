@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>三步走 · 图 2/4 · 一二步定案</title>
+<style>
+:root{
+  --bg:#080d18; --card:#121a2b; --card2:#18223a; --line:rgba(255,255,255,.10);
+  --ink:#eaf0ff; --ink2:#b8c5de; --muted:#8494b0;
+  --blue:#60a5fa; --cyan:#22d3ee; --purple:#a78bfa; --amber:#fbbf24;
+  --rose:#fb7185; --green:#34d399;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:728px;margin:0 auto;padding:26px 24px 44px}
+b,strong{color:#fff;font-weight:700}
+code{background:rgba(255,255,255,.10);padding:2px 7px;border-radius:6px;font-size:.90em;
+  font-family:Consolas,"Cascadia Mono",monospace;color:#a5f3fc;word-break:break-all}
+
+.hero{background:linear-gradient(135deg,#0d1730 0%,#17224a 55%,#251c46 100%);
+  border:1px solid rgba(255,255,255,.10);border-radius:22px;padding:26px 26px 22px;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-90px;top:-110px;width:300px;height:300px;
+  background:radial-gradient(circle,rgba(96,165,250,.30),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:17px;letter-spacing:2px;color:#93c5fd;font-weight:700;position:relative}
+.hero h1{font-size:40px;line-height:1.24;margin-top:12px;font-weight:800;position:relative;letter-spacing:-.5px}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:14px;font-size:22px;color:#c6cee6;line-height:1.72;position:relative}
+.hero .meta{margin-top:17px;display:flex;gap:9px;flex-wrap:wrap;position:relative}
+.chip{font-size:18px;padding:7px 13px;border-radius:999px;background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.16);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(251,113,133,.15);border-color:rgba(251,113,133,.40);color:#fecdd3}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.40);color:#fde68a}
+.chip.c{background:rgba(34,211,238,.15);border-color:rgba(34,211,238,.40);color:#a5f3fc}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:33px;height:33px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);
+  color:#fff;font-size:19px;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.sec-h .note{margin-left:auto;font-size:17px;color:var(--muted)}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px}
+.card + .card{margin-top:12px}
+.card h4{font-size:22px;font-weight:800;margin-bottom:4px}
+.card .cap{font-size:17px;color:var(--muted);line-height:1.5}
+
+/* 三步平台卡 */
+.step{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:17px 18px 15px;
+  margin-bottom:12px;position:relative;overflow:hidden}
+.step:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+.step.s1:before{background:linear-gradient(#34d399,#22d3ee)}
+.step.s2:before{background:linear-gradient(#60a5fa,#a78bfa)}
+.step.s3:before{background:linear-gradient(#fbbf24,#fb7185)}
+.step .top{display:flex;align-items:center;gap:12px;padding-left:6px}
+.step .idx{width:44px;height:44px;border-radius:13px;font-size:22px;font-weight:800;color:#04121c;
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.step.s1 .idx{background:linear-gradient(135deg,#34d399,#22d3ee)}
+.step.s2 .idx{background:linear-gradient(135deg,#60a5fa,#a78bfa)}
+.step.s3 .idx{background:linear-gradient(135deg,#fbbf24,#fb7185)}
+.step h3{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.step .plat{font-size:17.5px;color:var(--muted);margin-top:3px;line-height:1.45}
+.rowline{display:flex;gap:9px;margin-top:11px;font-size:20.5px;line-height:1.68;padding-left:6px}
+.rowline .k{flex:0 0 64px;color:var(--muted);font-weight:700}
+.rowline .v{flex:1;color:var(--ink2)}
+
+/* 表格 */
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);
+  border:1px solid var(--line);border-radius:15px;overflow:hidden;font-size:19px;table-layout:fixed}
+table.m th{background:rgba(255,255,255,.055);color:#cbd5e1;font-weight:700;font-size:17.5px;
+  padding:11px 8px;text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:13px}
+table.m td{padding:11px 8px;text-align:center;border-bottom:1px solid rgba(255,255,255,.06);
+  color:var(--ink2);line-height:1.55;vertical-align:top}
+table.m td:first-child{text-align:left;padding-left:13px;color:var(--ink)}
+table.m tr:last-child td{border-bottom:none}
+.t-ok{color:#6ee7b7!important;font-weight:700}
+.t-no{color:#fda4af!important;font-weight:700}
+.t-md{color:#fcd34d!important;font-weight:700}
+.t-bl{color:#93c5fd!important;font-weight:700}
+
+/* 条形图 */
+.bar{display:flex;height:50px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+.bar div{display:flex;align-items:center;justify-content:center;font-size:17.5px;font-weight:800;
+  color:#04121c;line-height:1.2;padding:0 4px;text-align:center}
+.lgd{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;font-size:18px;color:var(--ink2)}
+.lgd i{display:inline-block;width:13px;height:13px;border-radius:4px;margin-right:6px;vertical-align:-1px}
+
+/* 层卡 */
+.tier{display:flex;gap:12px;align-items:stretch;background:var(--card);border:1px solid var(--line);
+  border-radius:15px;padding:14px 16px;margin-bottom:9px}
+.tier .tag{flex:0 0 92px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;color:#04121c;text-align:center;line-height:1.2;padding:6px}
+.tier .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.62}
+.tier .bd b{display:block;font-size:20.5px;margin-bottom:2px}
+
+/* 通用小卡网格 */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.mini{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+.mini .k{font-size:17px;color:var(--muted);font-weight:700}
+.mini .v{font-size:21px;color:var(--ink);margin-top:4px;line-height:1.5;font-weight:600}
+
+/* 路线步进 */
+.pl{padding-left:6px}
+.prow{display:flex;gap:12px;margin-bottom:10px}
+.prow .dot{flex:0 0 40px;height:40px;border-radius:12px;background:var(--card2);border:1px solid var(--line);
+  color:#93c5fd;font-weight:800;font-size:19px;display:flex;align-items:center;justify-content:center}
+.prow.hot .dot{background:linear-gradient(135deg,#2563eb,#7c3aed);border-color:transparent;color:#fff}
+.prow .bd{flex:1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+  font-size:20px;color:var(--ink2);line-height:1.6}
+.prow .bd em{font-style:normal;color:#fff;font-weight:800}
+
+.conc{background:linear-gradient(135deg,#0d1730,#1b1640);border:1px solid rgba(255,255,255,.12);
+  border-radius:18px;padding:19px 20px;margin-top:22px}
+.conc .t{font-size:16.5px;letter-spacing:2px;color:#93c5fd;font-weight:800}
+.conc h3{font-size:26px;font-weight:800;margin:8px 0 9px;line-height:1.35}
+.conc h3 em{font-style:normal;color:#7dd3fc}
+.conc .body{font-size:20.5px;color:#c6cee6;line-height:1.75}
+
+.risk{display:flex;gap:10px;align-items:flex-start;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:12px 14px;margin-bottom:9px}
+.risk .lv{flex:0 0 auto;font-size:17px;font-weight:800;padding:5px 11px;border-radius:9px;color:#04121c}
+.risk .lv.h{background:#fb7185}
+.risk .lv.m{background:#fbbf24}
+.risk .lv.l{background:#34d399}
+.risk .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.6}
+.risk .bd b{display:block;color:#fff}
+
+.foot{margin-top:26px;text-align:center;font-size:17px;color:#5f6f8c;line-height:1.7}
+</style></head>
+<body><div class="page">
+
+<div class="hero">
+  <div class="kicker">第一步 + 第二步 · 平台定案</div>
+  <h1>同构 fork <em>机制就绪</em> · 异构 DGX <em>真实 +42.7%</em></h1>
+  <div class="sub">第一步全部工作是「把 Strata 的机制在 5060Ti 上复刻出来」，第二步是在 ARM 统一内存上量出这些机制的真实边界。</div>
+  <div class="meta">
+    <span class="chip g">5060Ti · 22 文件 · 只差窗口</span>
+    <span class="chip c">DGX · 25.71 t/s</span>
+    <span class="chip a">MTP 不可关</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>第一步 · 5060Ti 同构 fork</h2><div class="note">机制就绪 · 终测待窗口</div></div>
+  <div class="card">
+    <h4>工程事实</h4>
+    <div class="cap">fork <code>D:\MyLLM\llama.cpp-dev</code> · 分支 <code>strata-like</code> · 基线 = 最新主线 <code>23b0202</code><br>
+    模型 Qwen3.8-Flash-Next <b>IQ3_XXS</b>（unsloth UD-IQ3_XXS，后追加 GSQ-RCO iq3xxs 兼容路线）<br>
+    目标：Phase1 prefill 专家 GPU 流式 <b>99→≥300 t/s</b>；Phase2 decode 专家热缓存 <b>22→≥40 t/s</b></div>
+  </div>
+  <table class="m" style="margin-top:12px">
+    <tr><th style="width:16%">机制</th><th style="width:84%">落地内容</th></tr>
+    <tr><td class="t-ok">P1</td><td style="text-align:left">prefill 流式：pinned arena（cudaHostRegister）+ 专用 copy stream 异步专家预读</td></tr>
+    <tr><td class="t-ok">P2b</td><td style="text-align:left">decode 热缓存：remap GET_ROWS 双路 + allow_dup_rows 重写 + <code>LLAMA_MOE_HOT_MODE/GRAPH</code> 运维开关</td></tr>
+    <tr><td class="t-ok">P3</td><td style="text-align:left">常驻钉页：<code>LLAMA_PIN_EXPERTS_MIB=4096</code>（mmap 视图 cudaHostRegister，与热表正交）</td></tr>
+    <tr><td class="t-ok">P4</td><td style="text-align:left">MTP 投机：<code>--spec-type draft-mtp --spec-draft-n-max 8</code>（tg 38 vs Strata 61–68 均 MTP 口径）</td></tr>
+  </table>
+  <div class="card" style="margin-top:12px">
+    <div class="cap"><b>当前状态</b>：DLL 探针在位、P1–P4 驱动脚本生产对齐、端口守卫彩排通过、commit message 已备 —— <b>只差一次 GPU 窗口</b>跑中位数终测。<br>
+    <b>资产</b>：<code>D:\MyLLM\logs\strata_impl_spec.md</code>（260 行全带「文件:行号」）—— 这套三机制正是第三步 L0/L1/L2 分层的同构原型。</div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>第二步 · DGX GB10 真实流量 4 窗口</h2><div class="note">decode 累计 +42.7%</div></div>
+  <table class="m">
+    <tr><th style="width:12%">窗口</th><th style="width:52%">配置</th><th style="width:18%">decode</th><th style="width:18%">增益</th></tr>
+    <tr><td>A</td><td style="text-align:left">基线：双槽 KV Q8_0</td><td>18.02 t/s</td><td class="t-bl">—</td></tr>
+    <tr><td>B</td><td style="text-align:left">单槽</td><td>19.93 t/s</td><td class="t-bl">+10.6%</td></tr>
+    <tr><td>C</td><td style="text-align:left">fork + Q4_0 草稿</td><td>19.96 t/s</td><td class="t-bl">+0.2%</td></tr>
+    <tr><td>D</td><td style="text-align:left">C + <code>--spec-coupled</code></td><td class="t-ok">25.71 t/s</td><td class="t-ok">+28.9%</td></tr>
+  </table>
+  <div class="card" style="margin-top:12px">
+    <div class="cap"><b>coupled sampling 是最大单项</b>：接受率 2.43→2.60 = 真实 decode +28.9%，已上产。<br>
+    <b>Q4_0 MTP 草稿</b>：草稿税 21.2→11.2 ms/轮（−36%）；但 <b>uncoupled 下净收益 ≈0</b> —— 接受率塌陷 2.44→2.23 把草稿税节省吃光，所以真正兑现必须带 coupled。</div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">3</div><h2>GB10 边界账（UMA）</h2></div>
+  <div class="grid2">
+    <div class="mini"><div class="k">单池带宽</div><div class="v">273 GB/s<span style="font-size:17px;color:#8494b0"> · LPDDR5X-8533 256-bit</span></div></div>
+    <div class="mini"><div class="k">零拷贝直读</div><div class="v">≈225 GB/s<span style="font-size:17px;color:#8494b0"> · 设备内存读 ≈250</span></div></div>
+    <div class="mini"><div class="k">拷贝引擎（窄口）</div><div class="v" style="color:#fcd34d">H2D 50 / D2H 30<span style="font-size:17px;color:#8494b0"> · 所以零拷贝是对的</span></div></div>
+    <div class="mini"><div class="k">decode 瓶颈</div><div class="v">ALU / 发射限制<span style="font-size:17px;color:#8494b0"> · Mem 16–20% / SM 48–54% / busy 88.7%</span></div></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="cap"><b>理论地板 7–9 ms/步 vs 实测 52.9 ms/步</b> —— 差距在 kernel 粒度：约 500 个小 kernel 串行，有效带宽仅 ~10% 峰值。<br>
+    <b>M3 探针</b>：MoE grouped-GEMM 带宽效率仅 <b>37% @ M=10</b>；但 ub 大分块对 ~100K 真实负载<b>饱和</b>（MoE 仅占 prefill ~32%）⇒ 诚实口径只有 +9.6%。</div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">4</div><h2>收尾三件（按优先级）</h2></div>
+  <div class="pl">
+    <div class="prow hot"><div class="dot">1</div><div class="bd"><em>nsys prefill 测量</em>：68% 非 MoE 时间的构成 —— 脚本 <code>nsys_ub_driver.sh</code> 就绪（单例锁版，任务 #20）</div></div>
+    <div class="prow hot"><div class="dot">2</div><div class="bd"><em>grammar 修复</em>：去 ngram-mod（bug 根因已定案，待批，需一次重启）</div></div>
+    <div class="prow hot"><div class="dot">3</div><div class="bd"><em>草稿 lm_head 词表手术</em>：248,320 全词表 → 50–64K 子集 + 采样映射，≈ <em>+6%</em></div></div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">5</div><h2>已证伪清单 · 别再碰</h2><div class="note">铁教训：验收必须真实流量终审</div></div>
+  <table class="m">
+    <tr><th style="width:50%">已证伪项</th><th style="width:50%">结论</th></tr>
+    <tr><td>编译档位调优</td><td class="t-no" style="text-align:left">±0.4%，噪声级</td></tr>
+    <tr><td>ub &gt; 2048</td><td class="t-no" style="text-align:left">对真实负载无增益</td></tr>
+    <tr><td>--spec-draft-n-max &gt; 3</td><td class="t-no" style="text-align:left">收益反转</td></tr>
+    <tr><td>ngram-mod</td><td class="t-no" style="text-align:left">grammar 异常根因</td></tr>
+    <tr><td>专家热缓存 / pinned / DMA</td><td class="t-no" style="text-align:left">DGX 专家全常驻，机制无对象</td></tr>
+    <tr><td>M1/M2 自研 kernel</td><td class="t-no" style="text-align:left">双双证伪</td></tr>
+  </table>
+  <div class="card" style="margin-top:12px">
+    <div class="cap">bench 套件（A/B/A 交叉、健康金丝雀、四道验收门）沉淀为方法论资产；<b>bench 会高估 Q4_0、测不出 coupled</b> —— 一切结论只认真实流量。</div>
+  </div>
+</div>
+
+<div class="foot">三步走大方案 · 2026-10-13 定档 · 数据源：docs/三步走大方案规划_2026-10-13.md</div>
+</div></body></html>

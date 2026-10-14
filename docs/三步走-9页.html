@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>三步走 · 9 页速览</title>
+<style>
+:root{
+  --ink:#0d1526; --ink2:#3b4a61; --muted:#7387a0; --line:#e2e8f0;
+  --bg:#e9eef5; --card:#ffffff;
+  --g0:#0f172a; --g1:#2563eb; --g2:#d97706; --g3:#7c3aed; --g4:#059669;
+  --rose:#dc2626;
+}
+/* 深色主题：跟随系统；也可用 ?theme=dark / ?theme=light 显式覆盖（截图用） */
+@media (prefers-color-scheme:dark){
+  :root{
+    --ink:#eaeff7; --ink2:#bcc8da; --muted:#8496ad; --line:#232d3c;
+    --bg:#080d14; --card:#131a25;
+    --g0:#e2e8f0; --g1:#6ea8fe; --g2:#f0b429; --g3:#a78bfa; --g4:#34d399; --rose:#f87171;
+  }
+}
+/* 显式覆盖（截图/调试用）：?theme=light / ?theme=dark，权重高于 @media */
+body.lt{
+  --ink:#0d1526; --ink2:#3b4a61; --muted:#7387a0; --line:#e2e8f0;
+  --bg:#e9eef5; --card:#ffffff;
+  --g0:#0f172a; --g1:#2563eb; --g2:#d97706; --g3:#7c3aed; --g4:#059669;
+  --rose:#dc2626;
+}
+body.dk{
+  --ink:#eaeff7; --ink2:#bcc8da; --muted:#8496ad; --line:#232d3c;
+  --bg:#080d14; --card:#131a25;
+  --g0:#e2e8f0; --g1:#6ea8fe; --g2:#f0b429; --g3:#a78bfa; --g4:#34d399; --rose:#f87171;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);
+  font:15px/1.68 -apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  font-feature-settings:"tnum";overflow:hidden}
+b,strong{font-weight:700;color:var(--ink)}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82em;
+  background:rgba(115,135,160,.16);padding:1px 4px;border-radius:4px}
+
+.deck{height:100%;position:relative}
+.pg{display:none;flex-direction:column;height:100vh;height:100dvh;
+  padding:14px 16px 74px;overflow:hidden}
+.pg.on{display:flex}
+/* 每页顶部一层所属步骤的淡色氛围 */
+.pg::before{content:"";position:absolute;left:0;right:0;top:0;height:240px;pointer-events:none;
+  background:linear-gradient(180deg,var(--tint,rgba(15,23,42,.05)),transparent)}
+
+/* ── 页头 ── */
+.top{display:flex;align-items:center;gap:9px;position:relative}
+.stp{font-size:10.5px;font-weight:800;color:#fff;padding:4px 10px;border-radius:7px;letter-spacing:.5px}
+.pnum{margin-left:auto;font-size:11.5px;font-weight:700;color:var(--muted);
+  font-variant-numeric:tabular-nums;letter-spacing:.6px}
+.pnum i{color:var(--ink);font-style:normal;font-size:14px}
+
+h2{font-size:22px;line-height:1.34;margin:11px 0 5px;font-weight:800;letter-spacing:-.3px;position:relative}
+.sub{font-size:13.2px;color:var(--muted);margin:0;line-height:1.55;position:relative}
+
+/* ── 中段：卡片均匀铺满，不留大片空白 ── */
+.mid{flex:1;display:flex;flex-direction:column;justify-content:space-evenly;
+  gap:12px;min-height:0;position:relative}
+.pts{display:flex;flex-direction:column;gap:12px}
+.pt,.tl{flex-shrink:0}
+.pt{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--g0);
+  border-radius:13px;padding:13px 15px;box-shadow:0 1px 2px rgba(13,21,38,.04)}
+.pt .k{font-size:11px;font-weight:800;color:var(--muted);letter-spacing:.7px;margin-bottom:5px}
+.pt p{margin:0;font-size:15px;line-height:1.62;color:var(--ink2)}
+.pt p b{color:var(--ink)}
+.n{font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums;
+  border-bottom:2px solid rgba(37,99,235,.28);padding-bottom:1px}
+
+.tl{border-radius:13px;padding:13px 15px;font-size:14.4px;line-height:1.6;
+  background:linear-gradient(135deg,var(--tint2,rgba(37,99,235,.10)),rgba(124,58,237,.07));
+  border:1px solid var(--line)}
+.tl .k{font-size:10.5px;font-weight:800;color:var(--muted);letter-spacing:.7px;margin-bottom:4px}
+.tl b{color:var(--ink)}
+
+/* ── 底栏 ── */
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:20;
+  display:flex;align-items:center;gap:10px;padding:9px 14px calc(9px + env(safe-area-inset-bottom));
+  background:var(--card);border-top:1px solid var(--line)}
+.bar button{flex:0 0 auto;width:46px;height:36px;font:inherit;font-size:18px;line-height:1;
+  border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink)}
+.bar button:disabled{opacity:.28}
+.dots{flex:1;display:flex;justify-content:center;gap:6px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--line);cursor:pointer;transition:.18s}
+.dots i.on{background:var(--ink);width:19px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<!-- 1 -->
+<div class="pg on" data-g="g0" style="--tint:rgba(15,23,42,.055);--tint2:rgba(15,23,42,.08)">
+  <div class="top"><span class="stp" style="background:var(--g0)">总纲</span><span class="pnum"><i>1</i> / 9</span></div>
+  <h2>同一批机制，在三种内存环境各验证一次</h2>
+  <p class="sub">价值不在「哪个更快」，而在把每条机制的适用边界钉死。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g1)"><div class="k">① 同构 · 5060 Ti 16G</div><p>复刻 Strata，把机制变成<b>可测判据</b>：prefill 瓶颈 = 窗口内专家重拷贝次数。</p></div>
+    <div class="pt" style="border-left-color:var(--g2)"><div class="k">② 异构 · DGX GB10 统一内存</div><p>分层 / 预取 / pinned 池<b>失去作用对象</b>；带宽真相被校准。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">③ 端侧 · 骁龙 8E Gen5 + 16G</div><p>同一批机制<b>集体复活</b>——内存真的不够了。</p></div>
+  </div>
+  <div class="tl"><div class="k">到处都成立</div>只有两条普适杠杆：<b>零拷贝直读</b> 与 <b>每 token 少读字节</b>。其余全部环境相关。</div>
+  </div>
+</div>
+
+<!-- 2 -->
+<div class="pg" data-g="g1" style="--tint:rgba(37,99,235,.08);--tint2:rgba(37,99,235,.13)">
+  <div class="top"><span class="stp" style="background:var(--g1)">第一步 · 同构</span><span class="pnum"><i>2</i> / 9</span></div>
+  <h2>prefill 的瓶颈，是「窗口内专家重拷贝次数」</h2>
+  <p class="sub">在 5060 Ti 上用 fork 复刻 Strata，换来三条硬结论。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g1)"><div class="k">量出什么</div><p>ub <span class="n">512 → 2048</span>：pp <span class="n">32–72 → 260–372</span>，<b>3.15×</b>，零代码改动。</p></div>
+    <div class="pt" style="border-left-color:var(--g1)"><div class="k">白捡什么</div><p>MTP 深草稿：n_max <span class="n">4→8</span> 仍 <b>+73%</b>，mean acc len <span class="n">8.27</span>。</p></div>
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">证伪什么</div><p>16G 卡上专家热缓存：3 G 缓存 vs 40.9 G 专家，tg <span class="n">34.7 → 15.9</span>。</p></div>
+  </div>
+  <div class="tl"><div class="k">最大收获</div>同机直测 Strata 本体后「硬件墙」假说破产——差的是 <b>fork 完成度</b>，不是档位。</div>
+  </div>
+</div>
+
+<!-- 3 -->
+<div class="pg" data-g="g2" style="--tint:rgba(217,119,6,.08);--tint2:rgba(217,119,6,.13)">
+  <div class="top"><span class="stp" style="background:var(--g2)">第二步 · 异构</span><span class="pnum"><i>3</i> / 9</span></div>
+  <h2>统一内存下，「内存分层」整类机制失去作用对象</h2>
+  <p class="sub">把同一套机制移植到 ARM64 + Blackwell，得到三个边界判决。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g2)"><div class="k">判决一 · 空转</div><p>专家<b>全常驻</b> ⇒ 没有拷贝要避免，分层 / 预取 / pinned 池整体失效。</p></div>
+    <div class="pt" style="border-left-color:var(--g2)"><div class="k">判决二 · 带宽真相</div><p><span class="n">273</span> GB/s 单池；零拷贝读 <span class="n">≈225</span>；拷贝引擎 H2D <span class="n">50</span> / D2H <span class="n">30</span>。</p></div>
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">判决三 · 真瓶颈</div><p>每步 <b>~500 个小 kernel 串行</b>，有效带宽仅峰值 <span class="n">12%</span>——不是带宽也不是算力。</p></div>
+  </div>
+  <div class="tl"><div class="k">结论反转</div>UMA 下唯一杠杆 = <b>每 token 少读字节</b>；「先搬进设备内存再算」才是窄口。</div>
+  </div>
+</div>
+
+<!-- 4 -->
+<div class="pg" data-g="g3" style="--tint:rgba(124,58,237,.08);--tint2:rgba(124,58,237,.13)">
+  <div class="top"><span class="stp" style="background:var(--g3)">第三步 · 端侧</span><span class="pnum"><i>4</i> / 9</span></div>
+  <h2>CUDA 上「改代码就生效」的假设，手机上不成立</h2>
+  <p class="sub">后端能力塌缩，格式选择变成第一性约束。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">Vulkan · 排除</div><p>原厂 e2e <b>0/6</b>；Turnip 三药后也只有 <span class="n">5–11</span> t/s ⇒ 只留作驱动更新后复测。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">OpenCL · 唯一可用</div><p>MoE 算子白名单只有 <b>Q4_0 / Q8_0 / MXFP4</b>，IQ 家族全缺席。</p></div>
+    <div class="pt" style="border-left-color:var(--g4)"><div class="k">CPU · 格式自由</div><p>ggml-cpu 支持<b>全部</b> GGML 类型（含自研 T42）⇒ 专家留给 CPU。</p></div>
+  </div>
+  <div class="tl"><div class="k">第一性约束</div><b>专家给 CPU、dense 给 OpenCL</b>——双后端分工是唯一可行形状。</div>
+  </div>
+</div>
+
+<!-- 5 -->
+<div class="pg" data-g="g3" style="--tint:rgba(124,58,237,.08);--tint2:rgba(124,58,237,.13)">
+  <div class="top"><span class="stp" style="background:var(--g3)">第三步 · 端侧</span><span class="pnum"><i>5</i> / 9</span></div>
+  <h2>35B-A3B 不是「小一号的 Flash」，换了三个结构</h2>
+  <p class="sub">架构差异直接反转了优化优先级。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">结构一 · 更稀疏</div><p><b>256 选 8 + 1 shared</b>（Flash 是每层 512 专家）⇒ 热集覆盖率高 <span class="n">6.6×</span>。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">结构二 · 混合注意力</div><p>30 层 DeltaNet + 10 层全注意力 ⇒ KV 仅 <span class="n">10.9 KB/token</span>（64K 只要 0.65 GiB）。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">结构三 · 无投机层</div><p>无 MTP、无 PLE ⇒ 投机这条路关闭，形状固定 <b>M = 1</b>。</p></div>
+  </div>
+  <div class="tl"><div class="k">优先级反转</div>每 token <b>dense 85% / MoE 12%</b>——Flash 在 DGX 上的杠杆表<b>不能搬</b>。</div>
+  </div>
+</div>
+
+<!-- 6 -->
+<div class="pg" data-g="g3" style="--tint:rgba(124,58,237,.08);--tint2:rgba(124,58,237,.13)">
+  <div class="top"><span class="stp" style="background:var(--g3)">第三步 · 端侧</span><span class="pnum"><i>6</i> / 9</span></div>
+  <h2>从内核白名单反推：GPU 上最小只能到 4.25 bpw</h2>
+  <p class="sub">这个约束决定了「谁上 GPU、谁留 CPU」。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">白名单</div><p><code>q1_0 q4_0 q4_1 q4_K q5_0 q5_1 q5_K q6_K q8_0 iq4_nl mxfp4</code></p></div>
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">关键纠错</div><p><b>IQ 家族全缺席</b> ⇒ 上一版「重打包成 IQ2_S」是错的，GPU 上无路。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">代价</div><p>2.25 → 4.25 bpw，专家 <span class="n">274 → 518</span> MiB/token，体积接近翻倍。</p></div>
+  </div>
+  <div class="tl"><div class="k">所以</div>要保住 T42 的 2.25 bpw，<b>专家必须留在 CPU</b>——这不是性能选择，是格式约束。</div>
+  </div>
+</div>
+
+<!-- 7 -->
+<div class="pg" data-g="g3" style="--tint:rgba(124,58,237,.08);--tint2:rgba(124,58,237,.13)">
+  <div class="top"><span class="stp" style="background:var(--g3)">第三步 · 端侧</span><span class="pnum"><i>7</i> / 9</span></div>
+  <h2>把 UFS 当虚拟内存用，但走 mmap 干净页语义</h2>
+  <p class="sub">手机没有可用 swap（ZRAM 对已量化权重压缩比 ≈1）。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">三层</div><p><b>L0</b> Adreno 匿名热集 · <b>L1</b> CPU 常驻 · <b>L2</b> UFS mmap 冷专家。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">为什么手机端才成立</div><p>3 GiB 热集 ⇒ <span class="n">91 个/层 = 35.5%</span> 覆盖；同样预算 Flash 只有 <span class="n">5.4%</span>。</p></div>
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">红线</div><p>单专家 4K 页 <span class="n">216 × 100 µs = 21.6 ms</span> ⇒ <b>绝不能靠页故障</b>。</p></div>
+  </div>
+  <div class="tl"><div class="k">调度四件套</div>热度表 · per-layer 填充 · <b>超集异步预读（读 top-32、只用 top-8）</b> · 预算切分。</div>
+  </div>
+</div>
+
+<!-- 8 -->
+<div class="pg" data-g="g3" style="--tint:rgba(124,58,237,.08);--tint2:rgba(124,58,237,.13)">
+  <div class="top"><span class="stp" style="background:var(--g3)">第三步 · 端侧</span><span class="pnum"><i>8</i> / 9</span></div>
+  <h2>要压的不是专家，是 dense 的 Q8_0</h2>
+  <p class="sub">专家已经 2.25 bpw 到底，dense 还留着 8.5 bpw。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">每 token 2304 MiB</div><p>attn/SSM <span class="n">1222</span>（53%）+ lm_head <span class="n">600</span>（26%）+ 专家 <span class="n">274</span>（12%）。</p></div>
+    <div class="pt" style="border-left-color:var(--g4)"><div class="k">A 案 · dense → Q4_0</div><p>省 <span class="n">635</span> MiB，<b>零新内核</b>（Q4_0 本就在白名单）。</p></div>
+    <div class="pt" style="border-left-color:var(--g4)"><div class="k">B 案 · 词表 248K → 64K</div><p>省 <span class="n">445</span> MiB，需裁剪工具 + 采样映射。</p></div>
+  </div>
+  <div class="tl"><div class="k">净效果</div>2304 → 1224 MiB ⇒ <b>18.6 → 35 t/s（+88%）</b>。专家再压到三元只省 2.6%，<b>不做</b>。</div>
+  </div>
+</div>
+
+<!-- 9 -->
+<div class="pg" data-g="g4" style="--tint:rgba(5,150,105,.08);--tint2:rgba(5,150,105,.13)">
+  <div class="top"><span class="stp" style="background:var(--g4)">结论</span><span class="pnum"><i>9</i> / 9</span></div>
+  <h2>中等可行性：门控在「冷专家不 stall」，不在算力</h2>
+  <p class="sub">两端的差距没有中间态好猜——这正是 P0/P1 要用低成本先量出来的。</p>
+  <div class="mid">
+    <div class="pts">
+    <div class="pt" style="border-left-color:var(--g4)"><div class="k">乐观</div><p><span class="n">17–20 t/s</span>：热集覆盖 &gt;35%，UFS 预读与 dense 计算完全重叠。</p></div>
+    <div class="pt" style="border-left-color:var(--rose)"><div class="k">悲观</div><p><span class="n">6–9 t/s</span>：UFS 随机读藏不住，每次冷专家命中 stall 一整步。</p></div>
+    <div class="pt" style="border-left-color:var(--g3)"><div class="k">路线 P0 → P4</div><p>能力探测 → <b>双路骨架</b> → 专家分层 → T42 CPU 内核 → 上 35B。</p></div>
+  </div>
+  <div class="tl"><div class="k">下一步</div>P0 量能力、P1 用 <code>lfm2.5-8b-a1b</code>（3.05 GB）做 A3B 缩比代理验机制——<b>成本最低、信息量最大</b>。</div>
+  </div>
+</div>
+
+</div>
+
+<div class="bar">
+  <button id="prev" aria-label="上一页">‹</button>
+  <div class="dots" id="dots"></div>
+  <button id="next" aria-label="下一页">›</button>
+</div>
+
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var th = q.get('theme');
+  if (th === 'dark') document.body.classList.add('dk');
+  if (th === 'light') document.body.classList.add('lt');
+  var pgs = [].slice.call(document.querySelectorAll('.pg'));
+  var dots = document.getElementById('dots');
+  var cur = 0, asked = parseInt((location.search.match(/[?&]p=(\d+)/) || [])[1] || '1', 10) - 1;
+
+  pgs.forEach(function(_, i){
+    var d = document.createElement('i');
+    d.onclick = function(){ go(i); };
+    dots.appendChild(d);
+  });
+
+  function go(n){
+    if (n < 0 || n >= pgs.length) return;
+    pgs[cur].classList.remove('on');
+    cur = n;
+    pgs[cur].classList.add('on');
+    [].forEach.call(dots.children, function(d, i){ d.classList.toggle('on', i === cur); });
+    document.getElementById('prev').disabled = (cur === 0);
+    document.getElementById('next').disabled = (cur === pgs.length - 1);
+    window.scrollTo(0, 0);
+  }
+
+  document.getElementById('prev').onclick = function(){ go(cur - 1); };
+  document.getElementById('next').onclick = function(){ go(cur + 1); };
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowLeft') go(cur - 1);
+    if (e.key === 'ArrowRight') go(cur + 1);
+  });
+  var x0 = null, y0 = null;
+  document.addEventListener('touchstart', function(e){
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+  }, {passive:true});
+  document.addEventListener('touchend', function(e){
+    if (x0 === null) return;
+    var dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+    if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) go(cur + (dx < 0 ? 1 : -1));
+    x0 = y0 = null;
+  }, {passive:true});
+
+  go(isNaN(asked) ? 0 : asked);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>三步走 · 图 3/4 · 端侧 35B</title>
+<style>
+:root{
+  --bg:#080d18; --card:#121a2b; --card2:#18223a; --line:rgba(255,255,255,.10);
+  --ink:#eaf0ff; --ink2:#b8c5de; --muted:#8494b0;
+  --blue:#60a5fa; --cyan:#22d3ee; --purple:#a78bfa; --amber:#fbbf24;
+  --rose:#fb7185; --green:#34d399;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg)}
+body{background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+.page{width:728px;margin:0 auto;padding:26px 24px 44px}
+b,strong{color:#fff;font-weight:700}
+code{background:rgba(255,255,255,.10);padding:2px 7px;border-radius:6px;font-size:.90em;
+  font-family:Consolas,"Cascadia Mono",monospace;color:#a5f3fc;word-break:break-all}
+
+.hero{background:linear-gradient(135deg,#0d1730 0%,#17224a 55%,#251c46 100%);
+  border:1px solid rgba(255,255,255,.10);border-radius:22px;padding:26px 26px 22px;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-90px;top:-110px;width:300px;height:300px;
+  background:radial-gradient(circle,rgba(96,165,250,.30),transparent 66%);border-radius:50%}
+.hero .kicker{font-size:17px;letter-spacing:2px;color:#93c5fd;font-weight:700;position:relative}
+.hero h1{font-size:40px;line-height:1.24;margin-top:12px;font-weight:800;position:relative;letter-spacing:-.5px}
+.hero h1 em{font-style:normal;color:#7dd3fc}
+.hero .sub{margin-top:14px;font-size:22px;color:#c6cee6;line-height:1.72;position:relative}
+.hero .meta{margin-top:17px;display:flex;gap:9px;flex-wrap:wrap;position:relative}
+.chip{font-size:18px;padding:7px 13px;border-radius:999px;background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.16);color:#dbeafe}
+.chip.g{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.42);color:#a7f3d0}
+.chip.r{background:rgba(251,113,133,.15);border-color:rgba(251,113,133,.40);color:#fecdd3}
+.chip.a{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.40);color:#fde68a}
+.chip.c{background:rgba(34,211,238,.15);border-color:rgba(34,211,238,.40);color:#a5f3fc}
+
+.sec{margin-top:24px}
+.sec-h{display:flex;align-items:center;gap:11px;margin-bottom:13px}
+.sec-h .n{width:33px;height:33px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);
+  color:#fff;font-size:19px;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sec-h h2{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.sec-h .note{margin-left:auto;font-size:17px;color:var(--muted)}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px}
+.card + .card{margin-top:12px}
+.card h4{font-size:22px;font-weight:800;margin-bottom:4px}
+.card .cap{font-size:17px;color:var(--muted);line-height:1.5}
+
+/* 三步平台卡 */
+.step{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:17px 18px 15px;
+  margin-bottom:12px;position:relative;overflow:hidden}
+.step:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+.step.s1:before{background:linear-gradient(#34d399,#22d3ee)}
+.step.s2:before{background:linear-gradient(#60a5fa,#a78bfa)}
+.step.s3:before{background:linear-gradient(#fbbf24,#fb7185)}
+.step .top{display:flex;align-items:center;gap:12px;padding-left:6px}
+.step .idx{width:44px;height:44px;border-radius:13px;font-size:22px;font-weight:800;color:#04121c;
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.step.s1 .idx{background:linear-gradient(135deg,#34d399,#22d3ee)}
+.step.s2 .idx{background:linear-gradient(135deg,#60a5fa,#a78bfa)}
+.step.s3 .idx{background:linear-gradient(135deg,#fbbf24,#fb7185)}
+.step h3{font-size:26px;font-weight:800;letter-spacing:-.3px}
+.step .plat{font-size:17.5px;color:var(--muted);margin-top:3px;line-height:1.45}
+.rowline{display:flex;gap:9px;margin-top:11px;font-size:20.5px;line-height:1.68;padding-left:6px}
+.rowline .k{flex:0 0 64px;color:var(--muted);font-weight:700}
+.rowline .v{flex:1;color:var(--ink2)}
+
+/* 表格 */
+table.m{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);
+  border:1px solid var(--line);border-radius:15px;overflow:hidden;font-size:19px;table-layout:fixed}
+table.m th{background:rgba(255,255,255,.055);color:#cbd5e1;font-weight:700;font-size:17.5px;
+  padding:11px 8px;text-align:center;border-bottom:1px solid var(--line);line-height:1.4}
+table.m th:first-child{text-align:left;padding-left:13px}
+table.m td{padding:11px 8px;text-align:center;border-bottom:1px solid rgba(255,255,255,.06);
+  color:var(--ink2);line-height:1.55;vertical-align:top}
+table.m td:first-child{text-align:left;padding-left:13px;color:var(--ink)}
+table.m tr:last-child td{border-bottom:none}
+.t-ok{color:#6ee7b7!important;font-weight:700}
+.t-no{color:#fda4af!important;font-weight:700}
+.t-md{color:#fcd34d!important;font-weight:700}
+.t-bl{color:#93c5fd!important;font-weight:700}
+
+/* 条形图 */
+.bar{display:flex;height:50px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+.bar div{display:flex;align-items:center;justify-content:center;font-size:17.5px;font-weight:800;
+  color:#04121c;line-height:1.2;padding:0 4px;text-align:center}
+.lgd{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;font-size:18px;color:var(--ink2)}
+.lgd i{display:inline-block;width:13px;height:13px;border-radius:4px;margin-right:6px;vertical-align:-1px}
+
+/* 层卡 */
+.tier{display:flex;gap:12px;align-items:stretch;background:var(--card);border:1px solid var(--line);
+  border-radius:15px;padding:14px 16px;margin-bottom:9px}
+.tier .tag{flex:0 0 92px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:800;color:#04121c;text-align:center;line-height:1.2;padding:6px}
+.tier .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.62}
+.tier .bd b{display:block;font-size:20.5px;margin-bottom:2px}
+
+/* 通用小卡网格 */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.mini{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px 14px}
+.mini .k{font-size:17px;color:var(--muted);font-weight:700}
+.mini .v{font-size:21px;color:var(--ink);margin-top:4px;line-height:1.5;font-weight:600}
+
+/* 路线步进 */
+.pl{padding-left:6px}
+.prow{display:flex;gap:12px;margin-bottom:10px}
+.prow .dot{flex:0 0 40px;height:40px;border-radius:12px;background:var(--card2);border:1px solid var(--line);
+  color:#93c5fd;font-weight:800;font-size:19px;display:flex;align-items:center;justify-content:center}
+.prow.hot .dot{background:linear-gradient(135deg,#2563eb,#7c3aed);border-color:transparent;color:#fff}
+.prow .bd{flex:1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+  font-size:20px;color:var(--ink2);line-height:1.6}
+.prow .bd em{font-style:normal;color:#fff;font-weight:800}
+
+.conc{background:linear-gradient(135deg,#0d1730,#1b1640);border:1px solid rgba(255,255,255,.12);
+  border-radius:18px;padding:19px 20px;margin-top:22px}
+.conc .t{font-size:16.5px;letter-spacing:2px;color:#93c5fd;font-weight:800}
+.conc h3{font-size:26px;font-weight:800;margin:8px 0 9px;line-height:1.35}
+.conc h3 em{font-style:normal;color:#7dd3fc}
+.conc .body{font-size:20.5px;color:#c6cee6;line-height:1.75}
+
+.risk{display:flex;gap:10px;align-items:flex-start;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:12px 14px;margin-bottom:9px}
+.risk .lv{flex:0 0 auto;font-size:17px;font-weight:800;padding:5px 11px;border-radius:9px;color:#04121c}
+.risk .lv.h{background:#fb7185}
+.risk .lv.m{background:#fbbf24}
+.risk .lv.l{background:#34d399}
+.risk .bd{flex:1;font-size:20px;color:var(--ink2);line-height:1.6}
+.risk .bd b{display:block;color:#fff}
+
+.foot{margin-top:26px;text-align:center;font-size:17px;color:#5f6f8c;line-height:1.7}
+</style></head>
+<body><div class="page">
+
+<div class="hero">
+  <div class="kicker">第三步 · 手机端侧</div>
+  <h1>16G 里装下 <em>35B-A3B</em></h1>
+  <div class="sub">Qwen3.6-35B-A3B GSQ hybrid<b> 11.37 GiB</b>：专家 T42 2.25bpw 8.56G + dense Q8_0 1.89G + BF16 词嵌入 0.95G。40 层 = 30 DeltaNet + 10 attn，256 专家 top8+1shared，词表 248,320，无 MTP，KV 10.9 KB/token。</div>
+  <div class="meta">
+    <span class="chip g">权重构成</span>
+    <span class="chip c">dense 占 85%</span>
+    <span class="chip a">评级：中等</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">1</div><h2>权重构成 11.37 GiB</h2></div>
+  <div class="bar">
+    <div style="width:75.3%;background:linear-gradient(135deg,#fbbf24,#fb7185)">T42 8.56G</div>
+    <div style="width:16.6%;background:linear-gradient(135deg,#60a5fa,#22d3ee)">Q8_0 1.89G</div>
+    <div style="width:8.1%;background:linear-gradient(135deg,#a78bfa,#c4b5fd);font-size:15px">embd</div>
+  </div>
+  <div class="lgd">
+    <span><i style="background:#fb7185"></i>专家 T42 2.25bpw</span>
+    <span><i style="background:#22d3ee"></i>dense Q8_0 1.89G</span>
+    <span><i style="background:#a78bfa"></i>BF16 embd 0.95G</span>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">2</div><h2>每 token 读量 2304 MiB</h2><div class="note">dense 85% ⇒ 主战场反转</div></div>
+  <div class="bar">
+    <div style="width:53%;background:linear-gradient(135deg,#60a5fa,#3b82f6)">attn 1222</div>
+    <div style="width:26%;background:linear-gradient(135deg,#22d3ee,#0891b2)">lm_head 600</div>
+    <div style="width:12%;background:linear-gradient(135deg,#fbbf24,#f59e0b)">专家 12%</div>
+    <div style="width:9%;background:#475569;font-size:15px">其他</div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="cap"><b>与①②完全相反</b>：DGX 上专家是主战场，端侧 dense（attn + lm_head）占 85%，专家只占 12%。⇒ 端侧优化不抓专家带宽，抓 <b>dense 降档 + 词表手术</b>：dense Q8_0→Q4_0 省 635 MiB、lm_head 词表 64K 省 445 MiB，合计预期 <b>18.6→35 t/s</b>（专家 2.25→1.75 明确不做，只省 61 MiB）。</div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">3</div><h2>三层分层（16G 硬约束下唯一解）</h2></div>
+  <div class="tier"><div class="tag" style="background:linear-gradient(135deg,#34d399,#22d3ee)">L0 GPU</div>
+    <div class="bd"><b>Adreno 常驻</b>dense 1.89G + embd 0.95G + 专家热集 3~3.5G</div></div>
+  <div class="tier"><div class="tag" style="background:linear-gradient(135deg,#60a5fa,#a78bfa)">L1 CPU</div>
+    <div class="bd"><b>冷专家池</b>按预算换入换出（走 CPU 内核线）</div></div>
+  <div class="tier"><div class="tag" style="background:linear-gradient(135deg,#fbbf24,#fb7185)">L2 UFS</div>
+    <div class="bd"><b>冷专家 ~5.06G mmap</b>映射不驻留；绝不依赖 4K 页故障（一次 21.6ms 毁步）</div></div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">4</div><h2>调度四件套</h2></div>
+  <div class="grid2">
+    <div class="mini"><div class="k">① 热度表</div><div class="v" style="font-size:19.5px">离线标定 + 在线 EMA<br><span style="font-size:17px;color:#8494b0">35B 热度须重标，不能搬 3.8 的</span></div></div>
+    <div class="mini"><div class="k">② per-layer 填充</div><div class="v" style="font-size:19.5px">按层预算分配热集<br><span style="font-size:17px;color:#8494b0">冷热混层不齐放</span></div></div>
+    <div class="mini"><div class="k">③ 超集异步预读</div><div class="v" style="font-size:19.5px">读 top-32 只用 top-8<br><span style="font-size:17px;color:#8494b0">attention 时间盖住 UFS 读 = 门控</span></div></div>
+    <div class="mini"><div class="k">④ 预算切分</div><div class="v" style="font-size:19.5px">L0/L1/L2 动态配额<br><span style="font-size:17px;color:#8494b0">内存与 UFS 带宽双约束</span></div></div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><div class="n">5</div><h2>内核缺口与绕行</h2></div>
+  <div class="card">
+    <h4>mul_mat_id（MoE）在 Adreno 830 上全量化数值损坏</h4>
+    <div class="cap">test-backend-ops 实锤：q4_0 ERR≈0.4 / q4_K ERR≈0.9+NaN / mxfp4 abort —— vendored 版与上游 master 同挂，属<b>驱动级 bug</b>。dense Q4 正常，故以 <b>dense loop</b>（host 侧专家循环）绕行中。<br>
+    <b>关键洞察</b>：dense loop 与量化类型<b>解耦</b> ⇒ 任何新类型只要做出 dense GEMV，MoE 自动继承同一条路（IQ2/Q2 因此可行）。自研内核仍需过 test-backend-ops 数值门（自研不免疫驱动 bug）。</div>
+  </div>
+</div>
+
+<div class="conc">
+  <div class="t">VERDICT</div>
+  <h3>评级 <em>中等</em> · 乐观 <em>17–20</em> / 悲观 6–9 t/s</h3>
+  <div class="body">差别只在门控条件：<b>冷专家命中不 stall</b>。热集覆盖仅 ~35.5% 是最大失真点 ⇒ 一切机制成败押在「miss 后的 UFS 读被 attention 算力藏住」。参考锚点：8 Gen5 至尊 + 16G 上 35B-A3B CPU 解码目测 20 出头（用户口径，未上机实测）。</div>
+</div>
+
+<div class="foot">三步走大方案 · 2026-10-13 定档 · 数据源：docs/三步走大方案规划_2026-10-13.md</div>
+</div></body></html>

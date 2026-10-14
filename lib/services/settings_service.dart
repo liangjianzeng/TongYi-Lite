@@ -340,6 +340,11 @@ class InferenceSettings {
   /// flash attention，本 app 保持关闭（上游会硬报错）。改后重新加载模型生效。
   final String kvCacheType;
 
+  /// [dspark 2026-10-14] flash attention（设置→推理引擎）。默认关（历史原因：
+  /// 统一 KV + FA + 每轮 seq_rm 曾在真机 turn 2 出乱码）。开启后 V 跟随 K 的
+  /// 量化格式；hybrid（recurrent 层）架构原生层会强制关闭。改后重新加载生效。
+  final bool flashAttn;
+
   /// GPU 推理时限制刷新率（防闪纹，2026-10-07 小米13 定案）：模型加载/
   /// prefill 的瞬时显存带宽会挤占显示供帧（Adreno UMA），期间临时锁 60Hz、
   /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
@@ -503,6 +508,7 @@ class InferenceSettings {
     this.oomPreHeadroomMb = 768,
     this.oomPostHeadroomMb = 1536,
     this.kvCacheType = 'q4_0',
+    this.flashAttn = false,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -671,6 +677,7 @@ class InferenceSettings {
       int? oomPreHeadroomMb,
       int? oomPostHeadroomMb,
       String? kvCacheType,
+      bool? flashAttn,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
     Map<String, List<String>>? agentToolsByModel,
@@ -795,6 +802,7 @@ class InferenceSettings {
       oomPreHeadroomMb: oomPreHeadroomMb ?? this.oomPreHeadroomMb,
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       kvCacheType: kvCacheType ?? this.kvCacheType,
+      flashAttn: flashAttn ?? this.flashAttn,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
       agentPersonas: agentPersonas ?? this.agentPersonas,
@@ -893,6 +901,7 @@ class InferenceSettings {
         'oomPreHeadroomMb': oomPreHeadroomMb,
         'oomPostHeadroomMb': oomPostHeadroomMb,
         'kvCacheType': kvCacheType,
+        'flashAttn': flashAttn,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
         'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
@@ -1045,6 +1054,7 @@ class InferenceSettings {
       oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
       kvCacheType: (json['kvCacheType'] as String?) == 'q8_0' ? 'q8_0' : 'q4_0',
+      flashAttn: (json['flashAttn'] as bool?) ?? false,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
       agentPersonas: _parsePersonas(json['agentPersonas']),

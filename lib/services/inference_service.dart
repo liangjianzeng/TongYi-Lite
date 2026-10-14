@@ -152,6 +152,16 @@ class InferenceService {
     }
   }
 
+  /// [dspark 2026-10-14] P1: flash attention 开关。必须在每次 loadModel 之前
+  /// 调用；重载模型后生效。hybrid（recurrent 层）架构原生层会强制关闭。
+  Future<void> setFlashAttn(bool enabled) async {
+    try {
+      await _channel.invokeMethod('setFlashAttn', {'enabled': enabled});
+    } catch (e) {
+      debugPrint('[InferenceService] setFlashAttn failed: $e');
+    }
+  }
+
   Future<bool> isLoaded() async {
     final result = await _channel.invokeMethod('isLoaded');
     return result == true;

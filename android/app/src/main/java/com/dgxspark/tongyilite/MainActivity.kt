@@ -108,6 +108,7 @@ class MainActivity : FlutterActivity() {
                 "setEnableThinking"       -> handleSetEnableThinking(call, result)
                 "setOomGuard"             -> handleSetOomGuard(call, result)
                 "setKvCacheType"          -> handleSetKvCacheType(call, result)
+                "setFlashAttn"           -> handleSetFlashAttn(call, result)
                 "resetContext"            -> handleResetContext(result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
@@ -1091,6 +1092,16 @@ class MainActivity : FlutterActivity() {
         logI("handleSetKvCacheType", "type=$type")
         replyGuard(result, "handleSetKvCacheType") {
             engine.setKvCacheType(type)
+            result.success(true)
+        }
+    }
+
+    /** [dspark 2026-10-14] P1: flash attention opt-in (设置→推理引擎). */
+    private fun handleSetFlashAttn(call: MethodCall, result: MethodChannel.Result) {
+        val enabled = call.argument<Boolean>("enabled") ?: false
+        logI("handleSetFlashAttn", "enabled=$enabled")
+        replyGuard(result, "handleSetFlashAttn") {
+            engine.setFlashAttn(enabled)
             result.success(true)
         }
     }

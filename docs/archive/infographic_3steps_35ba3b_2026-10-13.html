@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>TongYi-Lite 三步走 × 35B-A3B 端侧可行性</title>
+<style>
+  :root{
+    --ink:#0f172a; --ink2:#334155; --muted:#64748b; --faint:#94a3b8;
+    --line:#e3e8ef; --bg:#eceff4; --card:#ffffff;
+    --blue:#2563eb; --purple:#7c3aed; --rose:#e11d48; --amber:#d97706;
+    --green:#059669; --cyan:#0891b2;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg);
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Segoe UI",system-ui,sans-serif;
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    font-feature-settings:"tnum";
+  }
+  .page{width:1080px; margin:0 auto; padding:36px 0 64px;}
+
+  /* ---------- header ---------- */
+  .hero{
+    background:linear-gradient(135deg,#0b1220 0%,#16224a 52%,#251a4d 100%);
+    border-radius:22px; padding:40px 44px 34px; color:#fff; position:relative; overflow:hidden;
+  }
+  .hero:after{
+    content:""; position:absolute; right:-90px; top:-110px; width:360px; height:360px;
+    background:radial-gradient(circle,rgba(96,165,250,.30),transparent 66%); border-radius:50%;
+  }
+  .hero:before{
+    content:""; position:absolute; left:-60px; bottom:-140px; width:300px; height:300px;
+    background:radial-gradient(circle,rgba(167,139,250,.24),transparent 68%); border-radius:50%;
+  }
+  .hero .kicker{font-size:13px; letter-spacing:2.6px; color:#93c5fd; font-weight:600; position:relative;}
+  .hero h1{font-size:35px; line-height:1.24; margin-top:12px; font-weight:700; letter-spacing:.4px; position:relative;}
+  .hero h1 em{font-style:normal; color:#7dd3fc;}
+  .hero .sub{margin-top:14px; font-size:15px; color:#c3cbe4; line-height:1.7; position:relative; max-width:900px;}
+  .hero .meta{margin-top:22px; display:flex; gap:10px; flex-wrap:wrap; position:relative;}
+  .chip{
+    font-size:12.5px; padding:6px 13px; border-radius:999px;
+    background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.19); color:#dbeafe;
+  }
+  .chip.on{background:rgba(52,211,153,.16); border-color:rgba(52,211,153,.42); color:#a7f3d0;}
+  .chip.off{background:rgba(248,113,113,.15); border-color:rgba(248,113,113,.38); color:#fecaca;}
+
+  /* ---------- generic ---------- */
+  .sec{margin-top:34px;}
+  .sec-h{display:flex; align-items:center; gap:13px; margin-bottom:16px;}
+  .sec-h .n{
+    width:30px; height:30px; border-radius:9px; background:var(--ink); color:#fff;
+    font-size:15px; font-weight:700; display:flex; align-items:center; justify-content:center; flex:0 0 auto;
+  }
+  .sec-h h2{font-size:20px; font-weight:700; letter-spacing:.3px;}
+  .sec-h .note{margin-left:auto; font-size:12.5px; color:var(--muted);}
+
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:14px;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+
+  .card{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px 20px 18px;}
+  .card.tinted{background:#fbfcfe;}
+
+  .steptop{height:4px; border-radius:4px; margin:-20px -20px 16px; }
+  .s1 .steptop{background:linear-gradient(90deg,#2563eb,#60a5fa);}
+  .s2 .steptop{background:linear-gradient(90deg,#7c3aed,#c4b5fd);}
+  .s3 .steptop{background:linear-gradient(90deg,#e11d48,#fb923c);}
+
+  .tag{display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.6px; padding:4px 9px; border-radius:6px;}
+  .s1 .tag{background:#e8f0ff; color:#1d4ed8;}
+  .s2 .tag{background:#f1ebff; color:#6d28d9;}
+  .s3 .tag{background:#ffeaef; color:#be123c;}
+
+  .stitle{font-size:17px; font-weight:700; margin:11px 0 3px;}
+  .ssub{font-size:12.5px; color:var(--muted); margin-bottom:13px; line-height:1.5;}
+  .kv{font-size:13.2px; line-height:1.62; color:var(--ink2); padding-left:15px; position:relative; margin-bottom:8px;}
+  .kv:before{content:""; position:absolute; left:2px; top:8px; width:5px; height:5px; border-radius:50%; background:var(--faint);}
+  .kv b{color:var(--ink); font-weight:700;}
+  .kv .hl{background:linear-gradient(transparent 58%, #fde68a 58%); font-weight:700; color:#111827;}
+  .kv .r{color:var(--rose); font-weight:700;}
+  .kv .g{color:var(--green); font-weight:700;}
+
+  .verdict{
+    margin-top:12px; padding:10px 12px; border-radius:10px; font-size:12.8px; line-height:1.55;
+    background:#f1f5f9; border-left:3px solid var(--ink); color:var(--ink2);
+  }
+  .s1 .verdict{border-left-color:var(--blue); background:#eff5ff;}
+  .s2 .verdict{border-left-color:var(--purple); background:#f5f1ff;}
+  .s3 .verdict{border-left-color:var(--rose); background:#fff1f4;}
+
+  /* ---------- matrix ---------- */
+  table.mx{width:100%; border-collapse:separate; border-spacing:0; background:#fff; border:1px solid var(--line); border-radius:14px; overflow:hidden; font-size:13px;}
+  table.mx th{background:#f4f7fb; color:var(--ink2); font-weight:700; font-size:12.5px; padding:12px 10px; text-align:center; border-bottom:1px solid var(--line);}
+  table.mx th:first-child{text-align:left; padding-left:18px; width:30%;}
+  table.mx td{padding:11px 10px; text-align:center; border-bottom:1px solid #eef2f7; color:var(--ink2);}
+  table.mx tr:last-child td{border-bottom:none;}
+  table.mx td:first-child{text-align:left; padding-left:18px; font-weight:600; color:var(--ink);}
+  .yes{color:#047857; font-weight:800;}
+  .no{color:#b91c1c; font-weight:800;}
+  .mid{color:#a16207; font-weight:800;}
+  .dash{color:#cbd5e1; font-weight:800;}
+  .rnote{display:block; font-size:11px; color:var(--muted); font-weight:500; margin-top:2px;}
+
+  /* ---------- model spec ---------- */
+  .spec{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:16px;}
+  .spec .b{background:#fff; border:1px solid var(--line); border-radius:12px; padding:13px 14px;}
+  .spec .b .k{font-size:11.5px; color:var(--muted); letter-spacing:.4px;}
+  .spec .b .v{font-size:20px; font-weight:800; margin-top:5px; letter-spacing:-.3px;}
+  .spec .b .u{font-size:12px; color:var(--faint); font-weight:600; margin-left:2px;}
+
+  .barrows{background:#fff; border:1px solid var(--line); border-radius:14px; padding:18px 20px;}
+  .brow{display:grid; grid-template-columns:150px 1fr 116px; align-items:center; gap:12px; margin-bottom:10px; font-size:13px;}
+  .brow:last-child{margin-bottom:0;}
+  .brow .lb{font-weight:600; color:var(--ink);}
+  .brow .tr{background:#f1f5f9; border-radius:7px; height:22px; overflow:hidden;}
+  .brow .fl{height:100%; border-radius:7px;}
+  .brow .vl{text-align:right; font-size:12.5px; color:var(--ink2); font-weight:600;}
+
+  /* ---------- stacked ---------- */
+  .stack{display:flex; height:44px; border-radius:11px; overflow:hidden; margin:6px 0 14px; border:1px solid var(--line);}
+  .stack div{display:flex; align-items:center; justify-content:center; color:#fff; font-size:12px; font-weight:700; letter-spacing:.2px;}
+  .legend{display:flex; flex-wrap:wrap; gap:9px 20px; font-size:12.4px; color:var(--ink2);}
+  .legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px;}
+
+  /* ---------- perf ---------- */
+  .perf{background:#fff; border:1px solid var(--line); border-radius:16px; overflow:hidden;}
+  .perf table{width:100%; border-collapse:collapse; font-size:13.3px;}
+  .perf th{background:#0f172a; color:#e2e8f0; font-size:12.5px; padding:12px 16px; text-align:left; font-weight:600; letter-spacing:.3px;}
+  .perf td{padding:13px 16px; border-bottom:1px solid #eef2f7; color:var(--ink2);}
+  .perf tr:last-child td{border-bottom:none;}
+  .perf td.big{font-weight:800; font-size:16px; color:var(--ink);}
+  .perf .up{color:#dc2626; font-weight:800;}
+
+  /* ---------- list blocks ---------- */
+  .bullets{display:grid; grid-template-columns:repeat(3,1fr); gap:12px;}
+  .bl{background:#fff; border:1px solid var(--line); border-radius:13px; padding:15px 16px;}
+  .bl .h{font-size:13.5px; font-weight:800; margin-bottom:7px;}
+  .bl p{font-size:12.7px; line-height:1.62; color:var(--ink2);}
+
+  /* ---------- obstacles / roadmap ---------- */
+  .obs{background:#fff; border:1px solid var(--line); border-left:4px solid var(--rose); border-radius:13px; padding:16px 18px; margin-bottom:12px;}
+  .obs .h{font-size:14.5px; font-weight:800; color:#9f1239; margin-bottom:7px;}
+  .obs p{font-size:13px; line-height:1.68; color:var(--ink2);}
+  .obs p+p{margin-top:5px;}
+  .obs code{background:#fef2f3; color:#9f1239; padding:1px 6px; border-radius:5px; font-size:12.3px; font-family:ui-monospace,Consolas,monospace;}
+
+  .road{display:grid; grid-template-columns:repeat(4,1fr); gap:12px;}
+  .stp{background:#fff; border:1px solid var(--line); border-radius:14px; padding:0 0 15px; overflow:hidden;}
+  .stp .hd{background:#f4f7fb; padding:11px 14px; font-size:13px; font-weight:800; color:var(--ink); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px;}
+  .stp .hd span{background:var(--ink); color:#fff; font-size:11px; padding:2px 7px; border-radius:5px; letter-spacing:.5px;}
+  .stp p{font-size:12.6px; line-height:1.6; color:var(--ink2); padding:12px 14px 0;}
+  .stp.p1{border-color:#bfdbfe;} .stp.p1 .hd{background:#eff6ff; color:#1d4ed8;} .stp.p1 .hd span{background:#2563eb;}
+  .stp.p1.flash{box-shadow:0 0 0 2px #2563eb inset;}
+  .stp .badge{font-size:10.5px; background:#2563eb; color:#fff; padding:2px 7px; border-radius:999px; margin-left:auto;}
+
+  /* ---------- conclusion ---------- */
+  .conc{
+    margin-top:34px; border-radius:20px; padding:32px 40px;
+    background:linear-gradient(135deg,#0b1220,#1c2a52 60%,#3b1d52); color:#fff;
+  }
+  .conc .t{font-size:13px; letter-spacing:2.4px; color:#93c5fd; font-weight:600;}
+  .conc h3{font-size:26px; margin:12px 0 16px; font-weight:700; line-height:1.35;}
+  .conc h3 em{font-style:normal; color:#fbbf24;}
+  .conc .body{font-size:14.2px; line-height:1.85; color:#cbd5e1; max-width:940px;}
+  .conc .body b{color:#fff;}
+  .conc .row{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:24px;}
+  .conc .row div{background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.14); border-radius:13px; padding:14px 16px;}
+  .conc .row .k{font-size:11.5px; color:#93c5fd; letter-spacing:.6px;}
+  .conc .row .v{font-size:14px; margin-top:6px; color:#fff; font-weight:600; line-height:1.5;}
+  .foot{margin-top:16px; font-size:12px; color:var(--faint); text-align:center; letter-spacing:.3px;}
+
+  .arrowline{display:flex; align-items:center; justify-content:center; gap:0; margin:0 0 14px;}
+  .arrowline .a{font-size:12.6px; color:var(--muted); font-weight:600; padding:0 6px;}
+  .arrowline .ar{color:#cbd5e1; font-size:15px; padding:0 4px;}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ================= HERO ================= -->
+  <div class="hero">
+    <div class="kicker">TONGYI-LITE · 三步走复盘 × 端侧落地推演</div>
+    <h1>从 <em>CUDA 同构 fork</em> 到 <em>ARM 统一内存</em>，<br>再到手机端跑起 <em>Qwen3.6-35B-A3B</em></h1>
+    <div class="sub">
+      同一批 llama.cpp 优化机制，被依次放进三种内存环境里：16G 独显、128G ARM 统一内存、16G 手机 UMA。
+      哪条机制在哪一步生效、哪一步失效，已经全部实测定档——第三步要做的，只是把结论搬到对的地方。
+    </div>
+    <div class="meta">
+      <span class="chip">2026-10-13</span>
+      <span class="chip">目标模型 11.368 GiB · 40 层 · 256 专家 top-8</span>
+      <span class="chip on">原生推理 · 不做投机</span>
+      <span class="chip off">MTP 端侧负收益</span>
+    </div>
+  </div>
+
+  <!-- ================= 1. 三步走 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">1</div><h2>三步走全景</h2><div class="note">同构立原理 → 异构辨边界 → 端侧再迁移</div></div>
+    <div class="arrowline">
+      <span class="a">同构硬件 · 原理</span><span class="ar">▶</span>
+      <span class="a">异构统一内存 · 差异</span><span class="ar">▶</span>
+      <span class="a">手机端 · 挑战</span>
+    </div>
+
+    <div class="grid3">
+      <!-- step 1 -->
+      <div class="card s1">
+        <div class="steptop"></div>
+        <span class="tag">STEP 1</span>
+        <div class="stitle">同构 fork：把原理打通</div>
+        <div class="ssub">RTX 5060 Ti 16G · CUDA · 复刻 Strata 机制</div>
+        <div class="kv"><b>prefill 的真实瓶颈</b>不是算力，而是<span class="hl">窗口内专家的重复拷贝次数</span> ⇒ ubatch 512→2048 拿到 <b>3.15×</b>。</div>
+        <div class="kv"><b>深草稿近乎白送</b>：MTP <code>n_max 8</code> 时接受率仍 <b>0.87</b>，长草稿不塌。</div>
+        <div class="kv"><b>专家热缓存在这张卡上无效</b>：3G 缓存面对 40G 专家，命中率撑不起来。</div>
+        <div class="verdict">同机直测 Strata 本体后，<b>"硬件墙"假说破产</b>——差距来自 fork 完成度，不是档位。</div>
+      </div>
+
+      <!-- step 2 -->
+      <div class="card s2">
+        <div class="steptop"></div>
+        <span class="tag">STEP 2</span>
+        <div class="stitle">异构 ARM UMA：把差异量准</div>
+        <div class="ssub">DGX GB10（Grace + Blackwell）· 128G 统一内存</div>
+        <div class="kv"><b>移植难点全在 CPU 侧</b>，CUDA 内核几乎零改动。</div>
+        <div class="kv"><b>整类机制失去作用对象</b>：内存分层 / 预取流水 / pinned 池 / KV 搬运——专家全部常驻，没有拷贝要避免。</div>
+        <div class="kv"><b>带宽真相校准</b>：单池 <b>273 GB/s</b>；零拷贝直读 <b>≈225 GB/s</b>；真正慢的是拷贝引擎（H2D <b>50</b> / D2H <b>30</b> GB/s），<span class="r">搬运比就地读慢 4–5 倍</span>。</div>
+        <div class="verdict">结论反转：<b>统一内存下唯一杠杆 = 每 token 少读字节</b>。</div>
+      </div>
+
+      <!-- step 3 -->
+      <div class="card s3">
+        <div class="steptop"></div>
+        <span class="tag">STEP 3</span>
+        <div class="stitle">手机端：机制集体复活</div>
+        <div class="ssub">骁龙 8 Gen 5 至尊 · Adreno + LPDDR5X · 16G</div>
+        <div class="kv"><b>内存比 5060 Ti 还紧</b>，分层第一次有了真正的作用对象 ⇒ 步骤二被证伪的那批机制，<span class="hl">在这里全部重新有效</span>。</div>
+        <div class="kv">目标：<b>Qwen3.6-35B-A3B 11.37 GiB</b>，全量常驻直接判死。</div>
+        <div class="kv"><b>不做投机是设计前提</b>，不是缺憾——它把优化目标收敛成单一变量。</div>
+        <div class="verdict">三步走的关系不是"复制"，而是<b>"同一条机制在不同内存环境里的适用边界"</b>。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 2. 矩阵 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">2</div><h2>机制迁移矩阵：哪一步验证了哪条边界</h2></div>
+    <table class="mx">
+      <thead>
+        <tr>
+          <th>机制</th>
+          <th>① 5060 Ti<br><span style="font-weight:500;color:#94a3b8;font-size:11.5px">独显 16G / CUDA</span></th>
+          <th>② DGX GB10<br><span style="font-weight:500;color:#94a3b8;font-size:11.5px">ARM 统一内存 128G</span></th>
+          <th>③ 手机端<br><span style="font-weight:500;color:#94a3b8;font-size:11.5px">UMA 16G / Adreno</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>专家热缓存 / 分层</td>
+          <td><span class="no">✕</span><span class="rnote">3G 缓存 vs 40G 专家</span></td>
+          <td><span class="no">✕</span><span class="rnote">全常驻，无对象</span></td>
+          <td><span class="yes">✔</span><span class="rnote">核心机制</span></td>
+        </tr>
+        <tr>
+          <td>异步预取流水</td>
+          <td><span class="no">✕</span><span class="rnote">收益被拷贝吃掉</span></td>
+          <td><span class="no">✕</span><span class="rnote">无冷数据要取</span></td>
+          <td><span class="yes">✔</span><span class="rnote">必需，否则被随机读延迟打死</span></td>
+        </tr>
+        <tr>
+          <td>pinned / 分页池调优</td>
+          <td><span class="mid">~</span><span class="rnote">有效但收益有限</span></td>
+          <td><span class="no">✕</span><span class="rnote">单池，池间无差异</span></td>
+          <td><span class="yes">✔</span><span class="rnote">配合 mmap 热集</span></td>
+        </tr>
+        <tr>
+          <td>零拷贝直读</td>
+          <td><span class="dash">–</span><span class="rnote">不走该路径</span></td>
+          <td><span class="yes">✔</span><span class="rnote">≈225 GB/s，是正解</span></td>
+          <td><span class="yes">✔</span><span class="rnote">mmap 默认可行</span></td>
+        </tr>
+        <tr>
+          <td>每 token 少读字节</td>
+          <td><span class="yes">✔</span><span class="rnote">有效杠杆之一</span></td>
+          <td><span class="yes">✔</span><span class="rnote">唯一杠杆</span></td>
+          <td><span class="yes">✔</span><span class="rnote">唯一杠杆</span></td>
+        </tr>
+        <tr>
+          <td>prefill 分块（ubatch）</td>
+          <td><span class="yes">✔</span><span class="rnote">3.15×</span></td>
+          <td><span class="no">✕</span><span class="rnote">专家不搬运 ⇒ 失效</span></td>
+          <td><span class="mid">?</span><span class="rnote">待真机验证</span></td>
+        </tr>
+        <tr>
+          <td>投机解码 / MTP</td>
+          <td><span class="yes">✔</span><span class="rnote">n_max 8 仍 0.87</span></td>
+          <td><span class="yes">✔</span><span class="rnote">+61%（1.6–2.2×）</span></td>
+          <td><span class="no">✕</span><span class="rnote">负收益，关闭</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="verdict" style="margin-top:12px;background:#fff;border-left-color:#0f172a">
+      <b>读法</b>：越靠下的两行（少读字节 / 权衡取块）是三种硬件<b>一致成立</b>的普适杠杆；中间的几行是<b>环境相关</b>的机制——DGX 的统一内存把它们"清空"了，而手机端因为内存真的不够，它们又回来了。
+    </div>
+  </div>
+
+  <!-- ================= 3. 模型实读 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">3</div><h2>目标模型 · GGUF 头部实读</h2><div class="note">Qwen3.6-35B-A3B-GSQ-hybrid.gguf · GGUF v3 · 733 张量</div></div>
+
+    <div class="spec">
+      <div class="b"><div class="k">权重总量</div><div class="v">11.368<span class="u">GiB</span></div></div>
+      <div class="b"><div class="k">层数 / 隐维</div><div class="v">40<span class="u">层</span> · 2048</div></div>
+      <div class="b"><div class="k">专家</div><div class="v">256<span class="u">选 8</span>+1 shared</div></div>
+      <div class="b"><div class="k">词表 / 上下文</div><div class="v">248,320<span class="u">· 256K</span></div></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card tinted">
+        <div class="stitle" style="margin-top:0">结构特征：三个"内存友好"的红利</div>
+        <div class="kv"><b>混合注意力</b>：<b>30 层 DeltaNet（线性注意力）+ 10 层全注意力</b>，<code>full_attention_interval=4</code>。</div>
+        <div class="kv"><b>极窄 KV</b>：<code>head_count_kv=2</code>（16 个 Q 头），head_dim 256 ⇒ <span class="hl">每 token 仅约 10.9 KB KV</span>，64K 上下文只要 0.65 GiB。</div>
+        <div class="kv"><b>无 MTP、无 PLE</b>：没有草稿层可以投机，也没有额外嵌入表要读。</div>
+        <div class="kv"><b>专家粒度整齐</b>：每层 routed 专家 <b>≈216 MiB</b>，单个专家 <b>≈0.84 MiB</b>（gate/up/down 各 2048×512）——预取粒度很漂亮。</div>
+      </div>
+
+      <div class="card">
+        <div class="stitle" style="margin-top:0">量化谱：自研 T42 只用在专家上</div>
+        <div class="barrows" style="border:none;padding:4px 0 0">
+          <div class="brow">
+            <div class="lb">T42 · 2.250 bpw</div>
+            <div class="tr"><div class="fl" style="width:100%;background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div></div>
+            <div class="vl">8.4375 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">Q8_0 · 8.5 bpw</div>
+            <div class="tr"><div class="fl" style="width:22.4%;background:linear-gradient(90deg,#2563eb,#60a5fa)"></div></div>
+            <div class="vl">1.8936 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">BF16 · 16 bpw</div>
+            <div class="tr"><div class="fl" style="width:11.3%;background:linear-gradient(90deg,#0891b2,#67e8f9)"></div></div>
+            <div class="vl">0.9546 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">F32 · norms</div>
+            <div class="tr"><div class="fl" style="width:1.0%;background:#94a3b8"></div></div>
+            <div class="vl">0.0827 GiB</div>
+          </div>
+        </div>
+        <div style="font-size:12.6px;line-height:1.7;color:#334155;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+          <b>T42 共 120 个张量，全部是 routed expert</b>（40 层 × gate/up/down）；<br>
+          attention 与 lm_head 走 <b>Q8_0</b>（1.183 + 0.586 GiB），嵌入表走 <b>BF16</b>（0.947 GiB）。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 4. 字节账本 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">4</div><h2>每 token 必读字节账本</h2><div class="note">不做投机 ⇒ 形状固定 M=1 ⇒ 性能只剩这一个变量</div></div>
+
+    <div class="card">
+      <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:14px">
+        <div style="font-size:30px;font-weight:800;letter-spacing:-.5px">2.25 <span style="font-size:15px;color:#64748b;font-weight:700">GiB / token</span></div>
+        <div style="font-size:12.6px;color:#64748b">= 2304 MiB，解码每一步都要从内存完整过一遍</div>
+      </div>
+
+      <div class="stack">
+        <div style="width:53%;background:linear-gradient(180deg,#2563eb,#1d4ed8)">attn / SSM 1222</div>
+        <div style="width:26%;background:linear-gradient(180deg,#0891b2,#0e7490)">lm_head 600</div>
+        <div style="width:12%;background:linear-gradient(180deg,#e11d48,#be123c)">8 专家 274</div>
+        <div style="width:5.6%;background:linear-gradient(180deg,#7c3aed,#6d28d9);font-size:10.5px">sh 128</div>
+        <div style="width:3.4%;background:#94a3b8;font-size:10.5px">80</div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#2563eb"></i>attn / SSM 1222 MiB · 最大单块</span>
+        <span><i style="background:#0891b2"></i>lm_head 600 MiB</span>
+        <span><i style="background:#e11d48"></i>routed 专家 274 MiB</span>
+        <span><i style="background:#7c3aed"></i>shared expert 128 MiB</span>
+        <span><i style="background:#94a3b8"></i>norms 80 MiB</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px">
+        <div class="verdict" style="margin:0;background:#eef5ff;border-left-color:#2563eb">
+          <b>dense 权重占 85%</b>（attn 1222 + lm_head 600 + shared 128 = 1950 MiB），
+          而全部 routed expert 只占 <b>274 MiB（12%）</b>。
+        </div>
+        <div class="verdict" style="margin:0;background:#fff4f6;border-left-color:#e11d48">
+          <b>反直觉但关键</b>：手机端第一瓶颈不是"专家太多"，而是 <b>attention 与输出头</b>。
+          这套账与 DGX 上 "MoE 21% / dense 24.4%" 的构成完全不同。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 5. 内存账 + 吐字 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">5</div><h2>内存账本与吐字推演</h2><div class="note">16G 机可用 ≈10–11 GiB</div></div>
+
+    <div class="grid2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="stitle" style="margin-top:0">内存分配：常驻骨干 + 专家热集 + UFS 冷层</div>
+        <div class="barrows" style="border:none;padding:6px 0 0">
+          <div class="brow">
+            <div class="lb">常驻骨干</div>
+            <div class="tr"><div class="fl" style="width:60%;background:linear-gradient(90deg,#0891b2,#22d3ee)"></div></div>
+            <div class="vl">3.0 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">专家热集 · pin</div>
+            <div class="tr"><div class="fl" style="width:70%;background:linear-gradient(90deg,#e11d48,#fb7185)"></div></div>
+            <div class="vl">3.0–3.5 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">KV cache（64K）</div>
+            <div class="tr"><div class="fl" style="width:13%;background:linear-gradient(90deg,#2563eb,#60a5fa)"></div></div>
+            <div class="vl">0.65 GiB</div>
+          </div>
+          <div class="brow">
+            <div class="lb">冷专家 → UFS mmap</div>
+            <div class="tr"><div class="fl" style="width:100%;background:linear-gradient(90deg,#64748b,#cbd5e1)"></div></div>
+            <div class="vl">5.06 GiB</div>
+          </div>
+        </div>
+        <div class="verdict" style="background:#f0fdf4;border-left-color:#059669">
+          合计 <b>7.1–8.5 GiB</b>，留有约 2 GiB 余量给运行时与系统。冷热切分靠的是
+          <b>"层级预取 + 专家 pin"</b>，这正是步骤二在 DGX 上"没对象可做"的那套东西。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="stitle" style="margin-top:0">带宽与吐字：除数是 Adreno 的有效带宽占比</div>
+        <div style="font-size:13px;line-height:1.85;color:#334155">
+          <div class="kv"><b>峰值带宽 84.8 GB/s</b>（LPDDR5X-5300 · 4×16bit）</div>
+          <div class="kv">取有效占比约 <b>53%</b> ⇒ <b>45 GB/s</b> 可用</div>
+          <div class="kv">原样：2304 MiB ÷ 45 GB/s = <b>53.8 ms/token</b></div>
+          <div class="kv">优化后：降到 <b>1.28 GiB</b> ⇒ <b>29.8 ms</b></div>
+        </div>
+        <div class="verdict" style="background:#fff7ed;border-left-color:#d97706">
+          优化手段只有两条：<b>词表子集</b>（砍 lm_head 的 600 MiB）与 <b>attention 降比特</b>（Q8_0 → Q4_0，约 −582 MiB）。
+        </div>
+      </div>
+    </div>
+
+    <div class="perf">
+      <table>
+        <thead>
+          <tr><th style="width:34%">场景</th><th style="width:22%">每 token 字节</th><th style="width:20%">单步耗时</th><th>稳态吐字</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>原样直跑（T42 + Q8_0）</td>
+            <td>2.25 GiB</td>
+            <td>53.8 ms</td>
+            <td class="big">18.6 <span style="font-size:12px;color:#64748b">t/s</span> <span style="font-size:12px;color:#94a3b8;font-weight:600">≈ 12 汉字/秒</span></td>
+          </tr>
+          <tr>
+            <td>词表子集 + attn 降比特</td>
+            <td>1.28 GiB</td>
+            <td>29.8 ms</td>
+            <td class="big" style="color:#059669">33.6 <span style="font-size:12px;color:#64748b">t/s</span> <span class="up" style="font-size:12px">+81%</span></td>
+          </tr>
+          <tr>
+            <td>全量常驻（对照 · 不可行）</td>
+            <td colspan="2" style="color:#b91c1c;font-weight:700">11.37 GiB 权重顶满可用内存 ⇒ 直接判死</td>
+            <td style="color:#b91c1c;font-weight:800">✕</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ================= 6. 不做投机 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">6</div><h2>为什么"不做投机"反而是优势</h2><div class="note">符号在两端刚好相反：DGX 上 +61%，手机上是负收益</div></div>
+    <div class="bullets">
+      <div class="bl">
+        <div class="h" style="color:#2563eb">① 形状固定 M = 1</div>
+        <p>彻底避开 DGX 上 MMVQ <code>case 1..8</code> 与 <code>MAX_BATCH=8</code> 那套模板地狱，内核实现面大幅收窄。</p>
+      </div>
+      <div class="bl">
+        <div class="h" style="color:#059669">② 省下的内存直接进热集</div>
+        <p>不做草稿模型，省下 <b>0.5–1.5 GB</b>；草稿税按字节外推是 <b>25–40 ms/轮</b>，而接受率只会更低。</p>
+      </div>
+      <div class="bl">
+        <div class="h" style="color:#7c3aed">③ 优化杠杆收敛成唯一变量</div>
+        <p>目标退化为纯粹的"<b>每 token 少读字节</b>"——与步骤二在 DGX 上得到的结论完全一致。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 7. 拦路虎 + 路线 ================= -->
+  <div class="sec">
+    <div class="sec-h"><div class="n">7</div><h2>两个真拦路虎 & 落地顺序</h2></div>
+
+    <div class="obs">
+      <div class="h">拦路虎 ①　T42 / GSQ 在 Adreno 上没有任何反量化内核</div>
+      <p>自研 2.250 bpw 格式没有 Vulkan / OpenCL 内核可调用。</p>
+      <p>⇒ 第一版建议先重打包成上游 <code>IQ2_S</code>（Vulkan 有现成内核），代价是体积 <code>+0.3 ~ 0.6 GiB</code>；自研 Adreno 内核留作后续优化项。</p>
+    </div>
+
+    <div class="obs">
+      <div class="h">拦路虎 ②　手机端 llama.cpp 没有"专家分层 + 异步预取"</div>
+      <p>现有 catalog 最大条目只有 5.95 GB，全部是全量常驻，没有分级调度能力。</p>
+      <p>需要补三件事：<b>专家级热集 pin</b>、<b>知道下一层要哪些专家并提前异步读</b>（这一步是关键——纯靠内核 4KB 页故障会被随机读延迟打死）、<b>KV 与热集的预算切换</b>。</p>
+    </div>
+
+    <div class="road">
+      <div class="stp p1 flash" style="position:relative">
+        <div class="hd"><span>P1</span>A1B 代理验机制<div class="badge">优先</div></div>
+        <p>catalog 里已有 <b>lfm2.5-8b-a1b-ud-iq3_xxs</b>（3.05 GB，MoE A1B）——A3B 的天然缩比代理。用极小代价把"专家 mmap 流式 + 热集 pin + 层间预取"整套机制的风险前置暴露。</p>
+      </div>
+      <div class="stp">
+        <div class="hd"><span>P0</span>真机量带宽</div>
+        <p>测出 Adreno 的<b>有效带宽占比</b>。这个除数是整张推演表的前提，必须先落地。</p>
+      </div>
+      <div class="stp">
+        <div class="hd"><span>P2</span>T42 → IQ2_S</div>
+        <p>重打包让内核可用，先把模型"跑起来"，精度/体积做一次实测取舍。</p>
+      </div>
+      <div class="stp">
+        <div class="hd"><span>P3</span>上 35B 调参</div>
+        <p>扫热集预算 <b>3.0 / 3.5 / 4.0 GiB</b> × ubatch × 预取深度，找稳态最优。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 结论 ================= -->
+  <div class="conc">
+    <div class="t">CONCLUSION</div>
+    <h3>可行，但要换形态：<em>常驻小核 + 专家走 UFS 分层</em></h3>
+    <div class="body">
+      <b>t/s 不是主要矛盾，容量才是</b>——而这个模型的三个结构特征（256 选 8 的专家、30 层线性注意力、
+      10.9 KB/token 的 KV）恰好把容量问题大幅缓解。<b>全量常驻直接判死，分层常驻是唯一成立形态。</b>
+      真正未知的只有三件事：<b>Adreno 的有效带宽</b>、<b>UFS 冷读的延迟隐藏能力</b>、<b>T42 内核</b>——都能用 P0 / P1 在很低成本上先量出来。
+    </div>
+    <div class="row">
+      <div><div class="k">可行性评级</div><div class="v">中等偏高</div></div>
+      <div><div class="k">稳态吐字预期</div><div class="v">18.6 → 33.6 t/s</div></div>
+      <div><div class="k">逻辑前提</div><div class="v">原生推理 · 不做投机</div></div>
+    </div>
+  </div>
+
+  <div class="foot">TongYi-Lite · 三步走复盘与 Qwen3.6-35B-A3B 端侧可行性 · 2026-10-13</div>
+</div>
+</body>
+</html>

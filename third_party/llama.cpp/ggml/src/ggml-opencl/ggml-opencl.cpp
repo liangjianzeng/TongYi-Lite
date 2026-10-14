@@ -1213,6 +1213,37 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_gemm_noshuffle_q4_0_f32;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_mc3;  // multi-column (N=3) verify GEMV (spec/MTP)
+    cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
+    cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
+
+    // [dspark 2026-10-14] P4: batched MoE activation image cache. The dense-loop
+    // fixed q_img is cached on the weight tensor's extra, but the activation
+    // side (b_sub_buf + b_img) used to be created+released per call — 2 driver
+    // object churns per MUL_MAT_ID (x 28 layers x 2 ops/layer). Compute buffers
+    // are pooled per graph, so (buffer, origin, size) recurs every decode step:
+    // a small direct-mapped cache keyed on that triple turns the churn into a
+    // near-100% hit rate. Entries are replaced round-robin when all 8 slots
+    // miss (e.g. prefill chunk sizes changing). Releasing a cl_mem whose
+    // kernels are still in flight is legal (the queue holds a reference), and
+    // our in-order queue serializes reuse after replacement.
+    struct moe_b_cache_entry {
+        cl_mem  sub    = nullptr;
+        cl_mem  img    = nullptr;
+        cl_mem  src    = nullptr;
+        size_t  origin = 0;
+        size_t  size   = 0;
+    };
+    moe_b_cache_entry moe_b_cache[8];
+    int moe_b_cache_next = 0;
+
+    // [dspark 2026-10-14] P3: expert bucket-sort scratch (see moe_sort kernels).
+    // Layout: [0, E+1) hist/cursors, [E+1, E+1+n_cols) permuted column indices.
+    // Grown lazily to max(E+1+n_cols) ints seen so far (~4MB at the 2^20 cap).
+    cl_kernel kernel_moe_sort_hist;
+    cl_kernel kernel_moe_sort_scan;
+    cl_kernel kernel_moe_sort_scatter;
+    cl_mem   moe_sort_buf = nullptr;
+    size_t   moe_sort_cap = 0;   // bytes
     cl_kernel kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin;
     cl_kernel kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_32b_trans;
@@ -3819,6 +3850,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_sort_hist    = clCreateKernel(prog, "kernel_moe_sort_hist", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_sort_scan    = clCreateKernel(prog, "kernel_moe_sort_scan", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_sort_scatter = clCreateKernel(prog, "kernel_moe_sort_scatter", &err), err));
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -4337,8 +4372,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
     // gemv_noshuffle_q4_k_f32
     {
+        // [dspark 2026-10-14] VECTOR_SUB_GROUP_BROADCAST (_8_ macro variants)
+        // disabled for this program: with the batched MoE kernel the Adreno
+        // E031 compiler produces wrong numbers (probe NMSE 0.27-16.7, bit-
+        // stable across runs; dense-loop with identical planes passes). The
+        // _1_ macro variants are the portable fallback path.
         std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
                                        " -cl-mad-enable ";
+        // (VSB intentionally NOT defined here — see note above)
         if (backend_ctx->has_vector_subgroup_broadcast) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
@@ -4370,6 +4411,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_splitk", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -6735,8 +6777,9 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
 
     backend_ctx->adreno_cl_compiler_version = get_adreno_cl_compiler_version(driver_version);
     backend_ctx->has_vector_subgroup_broadcast =
-        (backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
-        (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17);
+        ((backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
+         (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17))
+        || getenv("GGML_OPENCL_FORCE_VSB") != nullptr;  // [dspark probe] force the _8_ macro variants on non-Adreno dev
 
     // The q6_K flat mul_mat miscompile is a defect of the older E031 compilers, not a
     // property of any GPU generation: it reproduces on E031.38 (Adreno 642L) and E031.41
@@ -7009,6 +7052,33 @@ static void transpose_2d_as_32b(
     transpose_2d(backend_ctx, backend_ctx->kernel_transpose_32_buf,
         src, dst, size, stride, rows, blocking);
 }
+
+// [dspark 2026-10-13] Create a sub-buffer at `rel_origin` within `parent`,
+// which may itself be a sub-buffer. Adreno drivers reject nested sub-buffers
+// (clCreateSubBuffer on a sub-buffer fails with CL_INVALID_MEM_OBJECT, -38),
+// so resolve the top-level buffer and its CL_MEM_OFFSET first and always
+// create from the top.
+static cl_mem ggml_cl_subbuffer_from_parent(ggml_backend_opencl_context * backend_ctx, cl_mem parent, size_t rel_origin, size_t size) {
+    cl_mem top = nullptr;
+    size_t off = 0;
+    CL_CHECK(clGetMemObjectInfo(parent, CL_MEM_ASSOCIATED_MEMOBJECT, sizeof(cl_mem), &top, NULL));
+    CL_CHECK(clGetMemObjectInfo(parent, CL_MEM_OFFSET, sizeof(size_t), &off, NULL));
+    // A top-level buffer has no associated memobject (NULL) and offset 0 —
+    // sub-buffer directly from it instead of from NULL (which fails -38).
+    if (top == nullptr) {
+        top = parent;
+        off = 0;
+    }
+
+    cl_buffer_region region;
+    region.origin = off + rel_origin;
+    region.size   = size;
+    cl_int err;
+    cl_mem sub = nullptr;
+    CL_CHECK((sub = clCreateSubBuffer(top, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+    GGML_UNUSED(backend_ctx);
+    return sub;
+}
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
 //------------------------------------------------------------------------------
@@ -7083,6 +7153,10 @@ struct ggml_tensor_extra_cl_q4_0 {
     size_t size_q = 0;
     // Size of scales.
     size_t size_d = 0;
+    // [dspark] Dense-loop MoE: per-expert extras whose q/d are sub-buffers of
+    // this (3D expert-weight) tensor's q/d, one per expert. Lazily created on
+    // first MUL_MAT_ID dense-loop use; owned and freed here.
+    std::vector<ggml_tensor_extra_cl_q4_0 *> moe_dense_extras;
 
     ~ggml_tensor_extra_cl_q4_0() {
         reset();
@@ -7092,6 +7166,10 @@ struct ggml_tensor_extra_cl_q4_0 {
         // q and d are subbuffers into the bigger buffer allocated in ggml_backend_buffer.
         // They must be properly released so that the original buffer can be
         // properly released to avoid memory leak.
+        for (ggml_tensor_extra_cl_q4_0 * ee : moe_dense_extras) {
+            delete ee;
+        }
+        moe_dense_extras.clear();
         if (q != nullptr) {
             CL_CHECK(clReleaseMemObject(q));
             q = nullptr;
@@ -7418,12 +7496,18 @@ struct ggml_tensor_extra_cl_q4_K {
     cl_mem d = nullptr;
     // Min
     cl_mem dm  = nullptr;
+    // [dspark] Dense-loop MoE: per-expert extras (see q4_0 struct note).
+    std::vector<ggml_tensor_extra_cl_q4_K *> moe_dense_extras;
 
     ~ggml_tensor_extra_cl_q4_K() {
         reset();
     }
 
     void reset() {
+        for (ggml_tensor_extra_cl_q4_K * ee : moe_dense_extras) {
+            delete ee;
+        }
+        moe_dense_extras.clear();
         if (q != nullptr) {
             CL_CHECK(clReleaseMemObject(q));
             q = nullptr;
@@ -8615,6 +8699,76 @@ inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ct
     return (((strstr(tensor->name, "ffn") != NULL) && (strstr(tensor->name, "exps") != NULL)) || (strstr(tensor->name, "as") != NULL)) && (ne01 % 32 == 0);
 }
 
+// [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
+// (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830 (SM8750,
+// OpenCL 0800.71 / E031.47.18.49): probe + test-backend-ops show systematic
+// errors for q4_0 (rel err ~0.2-0.3, all shapes) and q4_K (output = correct
+// value x a wrong constant, scale addressing), on both our vendored b11267 and
+// upstream master 9d7d504. Instead of the vendor MoE kernels, run one
+// VALIDATED dense GEMV per selected expert and accumulate with kernel_add_row.
+// Expert weights are stored by set_tensor (dense-MoE branch) as per-layer
+// noshuffle+transposed layouts so each expert slice is byte-identical to a
+// dense 2D [K, N] weight; per-expert tensor extras with sub-buffered
+// q/d(/dm/s) are created lazily at first use and cached on the parent extra.
+// Default ON. GGML_OPENCL_DENSE_MOE=0 falls back to CPU-only MUL_MAT_ID
+// (weights land in the CPU buffer).
+inline bool dense_moe_loop_enabled() {
+    static const bool v = [] {
+        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
+        return !e || e[0] != '0';
+    }();
+    return v;
+}
+
+// [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
+// kernels (q4_0/q8_0/mxfp4) were fixed by reworking the trans4_ns repack
+// kernels whose private-vector uchar* aliasing was miscompiled by Adreno
+// compilers; they pass test-backend-ops on-device (0 FAIL) and have far lower
+// kernel-launch overhead than the dense-loop (which pays one GEMV dispatch per
+// expert per token), so the vendor path is the DEFAULT for its supported
+// types. The dense-loop remains the only GPU path for q4_K (no vendor MoE
+// kernel exists for it).
+//   GGML_OPENCL_DENSE_MOE=0  -> dense-loop fully disabled (q4_K MoE -> CPU)
+//   GGML_OPENCL_DENSE_MOE=1  -> force the dense-loop for all supported types
+//   GGML_OPENCL_MUL_MAT_ID=0 -> vendor MoE disabled (q4_0/q8_0/mxfp4 -> CPU)
+// [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
+// kernels (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830
+// for ALL their supported types, not just via the trans4_ns repack aliasing:
+// moe_probe4 (real model name "ffn...exps" + real Ling-3.0-tiny shapes
+// E=128 K=1536/512 N=512/1536, and even E=8 K=256) shows NMSE ~0.4-2.4 on
+// every expert, while the dense-loop is bit-exact (NMSE 0.000000) on the
+// same shapes. test-backend-ops never catches this because its tensors are
+// unnamed, so use_adreno_moe_kernels() returns false there and the general
+// mul_mat_id kernels (which the trans4_ns fix DID repair) run instead.
+// Vendor MoE is therefore diagnostics-only (GGML_OPENCL_MUL_MAT_ID=1); the
+// dense-loop is the default GPU path for every type it supports.
+//   GGML_OPENCL_DENSE_MOE=0  -> dense-loop fully disabled (MoE -> CPU)
+//   GGML_OPENCL_MUL_MAT_ID=1 -> force vendor MoE kernels (diagnostics)
+inline bool moe_use_dense_loop(ggml_type type) {
+    if (!dense_moe_loop_enabled()) return false;
+    static const bool force = [] {
+        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
+        return e && e[0] == '1';
+    }();
+    if (force) return true;
+    static const bool vendor_diag = [] {
+        const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
+        return e && e[0] == '1';
+    }();
+    if (vendor_diag) return false; // diagnostics: let vendor kernels run
+    return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q4_0;
+}
+
+// MoE expert weight tensors are the only 3D MUL_MAT weights (ne02 = n_expert).
+// The bin/ila repack (transpose_2d_as_32b + full-tensor images) is 2D-only and
+// the dense-loop path stores experts in the noshuffle layout, so exclude them
+// from the bin gates. set_tensor and the GEMV dispatch both consult these
+// gates, and the per-expert fake tensors keep the parent's name, so one check
+// keeps both sides consistent.
+inline bool is_moe_expert_weight(const ggml_tensor * tensor) {
+    return tensor->ne[2] > 1 && strstr(tensor->name, "exps") != nullptr;
+}
+
 // Device default for the tiled-wide lm_head/embed GEMV layout: ON for X2E and A8X.
 //
 // These kernels were previously off everywhere on the grounds that they compute
@@ -8716,7 +8870,8 @@ inline bool use_q4_0_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
         !backend_ctx->kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin) {
         return false;
     }
-    return (tensor->ne[0] % 32 == 0) && (tensor->ne[1] % 64 == 0);
+    return (tensor->ne[0] % 32 == 0) && (tensor->ne[1] % 64 == 0) &&
+           !is_moe_expert_weight(tensor);
 #else
     GGML_UNUSED(backend_ctx);
     GGML_UNUSED(tensor);
@@ -8847,7 +9002,8 @@ inline bool use_q4_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
         return false;
     }
     return (tensor->ne[0] % 256 == 0) && (tensor->ne[1] % 64 == 0) &&
-           !use_q4k_tiled(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor);
+           !use_q4k_tiled(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor) &&
+           !is_moe_expert_weight(tensor);
 #else
     GGML_UNUSED(backend_ctx);
     GGML_UNUSED(tensor);
@@ -9150,29 +9306,68 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             }
             return false;
         case GGML_OP_MUL_MAT_ID:
-            if (op->src[0]->type == GGML_TYPE_Q4_0 ||
-                op->src[0]->type == GGML_TYPE_Q8_0 ||
-                op->src[0]->type == GGML_TYPE_MXFP4) {
-                if (op->src[1]->type == GGML_TYPE_F32) {
-                    return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
+            // [dspark 2026-10-13] The vendor Adreno MoE kernels are numerically
+            // broken on Adreno 830 (SM8750, OpenCL 0800.71 / E031.47.18.49):
+            // llama.cpp's own test-backend-ops fails for q4_0 (ERR ~0.4),
+            // q4_K (ERR ~0.9 + NaN on large shapes) and mxfp4 (GGML_ABORT
+            // crash), on BOTH our vendored b11267 and upstream master
+            // 9d7d504. Real-model symptom: decode emits one fixed broken
+            // token (id 127) -> empty output.
+            //
+            // Instead, the dense-loop path runs one VALIDATED dense GEMV per
+            // selected expert (weights stored per-layer in the dense 2D
+            // noshuffle layout by set_tensor; accumulation via kernel_add_row).
+            // Admit it only when the per-expert slice sizes respect the
+            // sub-buffer alignment and the accumulatioin constraints hold;
+            // otherwise fall back to CPU (same proven GPU-dense + CPU-expert
+            // split as before).
+            if (moe_use_dense_loop(op->src[0]->type) &&
+                (op->src[0]->type == GGML_TYPE_Q4_0 || op->src[0]->type == GGML_TYPE_Q4_K) &&
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_I32 &&
+                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
+                const int N = (int)op->src[0]->ne[1];
+                const int K = (int)op->src[0]->ne[0];
+                const size_t align = backend_ctx->alignment;
+                size_t s_q = 0, s_d = 0, s_dm = 0, s_s = 0;
+                bool shape_ok = false;
+                if (op->src[0]->type == GGML_TYPE_Q4_0) {
+                    shape_ok = (K % 32 == 0);
+                    s_q = (size_t)N * (K/4)  * 2;
+                    s_d = (size_t)N * (K/32) * 2;
+                } else {
+                    shape_ok = (K % 256 == 0);
+                    s_q  = (size_t)N * (K/4)   * 2;
+                    s_d  = (size_t)N * (K/256) * 2;
+                    s_dm = (size_t)N * (K/256) * 2;
+                    s_s  = (size_t)N * (K/256) * 12;
                 }
-            }
-            // q4_0, q8_0 and mxfp4 have general MUL_MAT_ID support,
-            // the quantizations here currently do not - they are only supported by Adreno with certain shapes
-            if (op->src[0]->type == GGML_TYPE_Q4_1 ||
-                op->src[0]->type == GGML_TYPE_Q5_0 ||
-                op->src[0]->type == GGML_TYPE_Q5_1 ||
-                op->src[0]->type == GGML_TYPE_Q4_K ||
-                op->src[0]->type == GGML_TYPE_Q5_K ||
-                op->src[0]->type == GGML_TYPE_Q6_K) {
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-                if (op->src[1]->type == GGML_TYPE_F32) {
-                    return use_adreno_moe_kernels(backend_ctx, op->src[0])
-                        && ggml_is_contiguous(op->src[0])
-                        && ggml_is_contiguous(op->src[1]);
+                // N%4: kernel_add_row works on float4; slice sizes must be
+                // sub-buffer-creatable at expert boundaries.
+                if (shape_ok && N % 4 == 0 &&
+                    s_q % align == 0 && s_d % align == 0 &&
+                    (s_dm == 0 || s_dm % align == 0) &&
+                    (s_s == 0 || s_s % align == 0)) {
+                    return true;
                 }
-#endif
                 return false;
+            }
+            // Vendor single-dispatch MoE kernels (q4_0/q8_0/mxfp4): broken on
+            // Adreno 830 (see moe_use_dense_loop notes) — diagnostics only via
+            // GGML_OPENCL_MUL_MAT_ID=1.
+            {
+                static const bool mul_mat_id_ocl_enabled = [] {
+                    const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
+                    return e && e[0] == '1';
+                }();
+                if (mul_mat_id_ocl_enabled &&
+                    (op->src[0]->type == GGML_TYPE_Q4_0 ||
+                     op->src[0]->type == GGML_TYPE_Q8_0 ||
+                     op->src[0]->type == GGML_TYPE_MXFP4) &&
+                    op->src[1]->type == GGML_TYPE_F32 &&
+                    ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
+                    return true;
+                }
             }
             return false;
         case GGML_OP_RESHAPE:
@@ -10075,6 +10270,54 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
         // Adreno moe q4_0 kernel needs special transpose and unshuffling
         if (use_adreno_moe_kernels(backend_ctx, tensor)) {
+            // [dspark] Dense-loop MoE: store the SAME layout a dense 2D [K, N]
+            // weight would have (noshuffle convert + 2D transposes), applied
+            // per expert layer, so the validated dense GEMV kernels can run
+            // per-expert with sub-buffered slices. The vendor trans4_ns repack
+            // and MoE kernels below are numerically broken on Adreno 830.
+            if (moe_use_dense_loop(tensor->type)) {
+                cl_kernel kernel = backend_ctx->kernel_convert_block_q4_0_noshuffle;
+                CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &data_device));
+                CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &extra->q));
+                CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->d));
+
+                size_t gws[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+                size_t lws[] = {64, 1, 1};
+
+                cl_event evt;
+                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws, 0, NULL, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseMemObject(data_device));
+
+                tensor->extra = extra;
+                ctx->q4_0_soa_tensors.insert(tensor);
+
+                const int  Kc = tensor->ne[0];
+                const int  Mc = tensor->ne[1];
+                const int  Ec = tensor->ne[2];
+                const size_t q_layer = (size_t)Mc * (Kc/4)  * 2;
+                const size_t d_layer = (size_t)Mc * (Kc/32) * 2;
+                // Per-layer sub-buffers require expert-aligned slices. When the
+                // shape does not satisfy this (test-backend-ops uses arbitrary
+                // shapes), skip the transposes and leave the noshuffle row-major
+                // layout: supports_op declines GPU MoE for these shapes anyway.
+                if (Mc % 4 == 0 &&
+                    q_layer % backend_ctx->alignment == 0 &&
+                    d_layer % backend_ctx->alignment == 0) {
+                    cl_buffer_region lregion;
+                    for (int e = 0; e < Ec; ++e) {
+                        cl_mem q_e = nullptr, d_e = nullptr;
+                        q_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->q, (size_t)e * q_layer, q_layer);
+                        d_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->d, (size_t)e * d_layer, d_layer);
+                        transpose_2d_as_16b(backend_ctx, q_e, q_e, q_layer, Kc/4,  Mc);
+                        transpose_2d_as_16b(backend_ctx, d_e, d_e, d_layer, Kc/32, Mc);
+                        CL_CHECK(clReleaseMemObject(q_e));
+                        CL_CHECK(clReleaseMemObject(d_e));
+                    }
+                }
+                return;
+            }
+
             cl_kernel kernel = backend_ctx->kernel_convert_block_q4_0_trans4_ns;
 
             int ne00 = tensor->ne[0];
@@ -10958,6 +11201,67 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
         if (use_adreno_moe_kernels(backend_ctx, tensor)) {
+            // [dspark] Dense-loop MoE: per-layer noshuffle convert + 2D
+            // transposes (same layout as a dense 2D [K, N] q4_K weight), so
+            // the validated dense GEMV kernels can run per-expert. The vendor
+            // trans4_ns repack and MoE kernels below are numerically broken
+            // on Adreno 830.
+            if (moe_use_dense_loop(tensor->type)) {
+                cl_uchar lmask_0F = 0x0F;
+                cl_uchar lmask_F0 = 0xF0;
+
+                cl_kernel kernel = backend_ctx->kernel_convert_block_q4_K_noshuffle;
+                CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &data_device));
+                CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &extra->q));
+                CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->s));
+                CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &extra->d));
+                CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &extra->dm));
+                CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_uchar), &lmask_0F));
+                CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_uchar), &lmask_F0));
+
+                size_t gws[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+                size_t lws[] = {64, 1, 1};
+
+                cl_event evt;
+                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws, 0, NULL, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseMemObject(data_device));
+
+                tensor->extra = extra;
+
+                const int  Kc = tensor->ne[0];
+                const int  Mc = tensor->ne[1];
+                const int  Ec = tensor->ne[2];
+                const size_t q_layer  = (size_t)Mc * (Kc/4)     * 2;
+                const size_t d_layer  = (size_t)Mc * (Kc/256)   * 2;
+                const size_t dm_layer = (size_t)Mc * (Kc/256)   * 2;
+                const size_t s_layer  = (size_t)Mc * (Kc/256)   * 12;
+                // Alignment guard: see the q4_0 dense-MoE branch note.
+                if (Mc % 4 == 0 &&
+                    q_layer  % backend_ctx->alignment == 0 &&
+                    d_layer  % backend_ctx->alignment == 0 &&
+                    dm_layer % backend_ctx->alignment == 0 &&
+                    s_layer  % backend_ctx->alignment == 0) {
+                    cl_buffer_region lregion;
+                    for (int e = 0; e < Ec; ++e) {
+                        cl_mem q_e = nullptr, d_e = nullptr, dm_e = nullptr, s_e = nullptr;
+                        q_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->q,  (size_t)e * q_layer,  q_layer);
+                        d_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->d,  (size_t)e * d_layer,  d_layer);
+                        dm_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->dm, (size_t)e * dm_layer, dm_layer);
+                        s_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->s,  (size_t)e * s_layer,  s_layer);
+                        transpose_2d_as_16b(backend_ctx, q_e,  q_e,  q_layer,  Kc/4,        Mc);
+                        transpose_2d_as_16b(backend_ctx, d_e,  d_e,  d_layer,  Kc/256,      Mc);
+                        transpose_2d_as_16b(backend_ctx, dm_e, dm_e, dm_layer, Kc/256,      Mc);
+                        transpose_2d_as_8b(backend_ctx,  s_e,  s_e,  s_layer,  Kc/256*12,   Mc, true, true);
+                        CL_CHECK(clReleaseMemObject(q_e));
+                        CL_CHECK(clReleaseMemObject(d_e));
+                        CL_CHECK(clReleaseMemObject(dm_e));
+                        CL_CHECK(clReleaseMemObject(s_e));
+                    }
+                }
+                return;
+            }
+
             cl_kernel kernel = backend_ctx->kernel_convert_block_q4_k_trans4_ns;
 
             int ne00 = tensor->ne[0];
@@ -11681,6 +11985,60 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
         ggml_tensor_extra_cl_q4_0 * extra = (ggml_tensor_extra_cl_q4_0 *)extra_src->extra;
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+        // [dspark 2026-10-13] Dense-loop MoE: weights are stored as PER-LAYER
+        // dense-transposed noshuffle (see set_tensor dense-MoE branch). Undo
+        // the per-layer transposes, then restore blocks row-major. The vendor
+        // trans4_ns restore below would misread this layout and corrupt the
+        // CPU reference (test-backend-ops ERR ~2.0, same signature as the
+        // tiled-layout restore issue).
+        if (use_adreno_moe_kernels(backend_ctx, tensor) && moe_use_dense_loop(tensor->type)) {
+            ggml_cl_buffer buf_q, buf_d, buf_unpacked;
+            const int  K = tensor->ne[0];
+            const int  M = tensor->ne[1];
+            const int  E = tensor->ne[2];
+
+            GGML_ASSERT(K % 32 == 0);
+
+            const size_t size_q = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*ggml_blck_size(tensor->type)/2;
+            const size_t size_d = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*sizeof(ggml_fp16_t);
+            const size_t q_layer = (size_t)M * (K/4)  * 2;
+            const size_t d_layer = (size_t)M * (K/32) * 2;
+
+            buf_q.allocate(backend_ctx->context, size_q);
+            buf_d.allocate(backend_ctx->context, size_d);
+            buf_unpacked.allocate(backend_ctx->context, ggml_nbytes(tensor));
+
+            for (int e = 0; e < E; ++e) {
+                cl_mem q_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->q, (size_t)e * q_layer, q_layer);
+                cl_mem d_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->d, (size_t)e * d_layer, d_layer);
+                cl_mem q_t = ggml_cl_subbuffer_from_parent(backend_ctx, buf_q.buffer, (size_t)e * q_layer, q_layer);
+                cl_mem d_t = ggml_cl_subbuffer_from_parent(backend_ctx, buf_d.buffer, (size_t)e * d_layer, d_layer);
+                // inverse of the forward (stride=K/4, rows=M) transpose
+                transpose_2d_as_16b(backend_ctx, q_e, q_t, q_layer, M, K/4);
+                transpose_2d_as_16b(backend_ctx, d_e, d_t, d_layer, M, K/32);
+                CL_CHECK(clReleaseMemObject(q_e));
+                CL_CHECK(clReleaseMemObject(d_e));
+                CL_CHECK(clReleaseMemObject(q_t));
+                CL_CHECK(clReleaseMemObject(d_t));
+            }
+
+            cl_uchar mask_0F = 0x0F;
+            cl_uchar mask_F0 = 0xF0;
+
+            size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+            size_t local_work_size[] = {1, 1, 1};
+
+            cl_kernel kernel = backend_ctx->kernel_restore_block_q4_0_noshuffle;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &buf_q.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem),   &buf_d.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem),   &buf_unpacked.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_uchar), &mask_0F));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_uchar), &mask_F0));
+
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+            CL_CHECK(clEnqueueReadBuffer(queue, buf_unpacked.buffer, CL_TRUE, offset, size, data, 0, NULL, NULL));
+            return;
+        }
         if (use_adreno_moe_kernels(backend_ctx, tensor)) {
             cl_kernel kernel = backend_ctx->kernel_restore_block_q4_0_trans4_ns;
 
@@ -12328,6 +12686,88 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
                 }
             }
             memcpy(data, rebuilt.data() + offset, size);
+            CL_CHECK(clReleaseMemObject(data_device));
+            return;
+        }
+        // [dspark 2026-10-13] Dense-loop MoE: weights are stored as PER-LAYER
+        // dense-transposed noshuffle (see set_tensor dense-MoE branch). Undo
+        // the per-layer transposes, then restore blocks row-major. Mirrors the
+        // q4_0 dense-MoE restore above; the vendor trans4_ns restore would
+        // misread this layout and corrupt the CPU reference.
+        if (use_adreno_moe_kernels(backend_ctx, tensor) && moe_use_dense_loop(tensor->type)) {
+            ggml_cl_buffer buf_q, buf_d, buf_dm, buf_s;
+            const int  K = tensor->ne[0];
+            const int  M = tensor->ne[1];
+            const int  E = tensor->ne[2];
+
+            GGML_ASSERT(K % 256 == 0);
+
+            const size_t size_q  = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*ggml_blck_size(tensor->type)/2;
+            const size_t size_d  = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*sizeof(ggml_fp16_t);
+            const size_t size_dm = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*sizeof(ggml_fp16_t);
+            const size_t size_s  = (size_t)(ggml_nelements(tensor)/ggml_blck_size(tensor->type))*12;
+            const size_t q_layer  = (size_t)M * (K/4)     * 2;
+            const size_t d_layer  = (size_t)M * (K/256)   * 2;
+            const size_t dm_layer = (size_t)M * (K/256)   * 2;
+            const size_t s_layer  = (size_t)M * (K/256)   * 12;
+            // Same alignment guard as set_tensor: when it fails there, the
+            // stored layout is plain row-major noshuffle (no transposes).
+            const bool transposed = M % 4 == 0 &&
+                q_layer  % backend_ctx->alignment == 0 &&
+                d_layer  % backend_ctx->alignment == 0 &&
+                dm_layer % backend_ctx->alignment == 0 &&
+                s_layer  % backend_ctx->alignment == 0;
+
+            buf_q.allocate(backend_ctx->context, size_q);
+            buf_d.allocate(backend_ctx->context, size_d);
+            buf_dm.allocate(backend_ctx->context, size_dm);
+            buf_s.allocate(backend_ctx->context, size_s);
+
+            if (transposed) {
+                for (int e = 0; e < E; ++e) {
+                    cl_mem q_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->q,  (size_t)e * q_layer,  q_layer);
+                    cl_mem d_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->d,  (size_t)e * d_layer,  d_layer);
+                    cl_mem dm_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->dm, (size_t)e * dm_layer, dm_layer);
+                    cl_mem s_e  = ggml_cl_subbuffer_from_parent(backend_ctx, extra->s,  (size_t)e * s_layer,  s_layer);
+                    cl_mem q_t  = ggml_cl_subbuffer_from_parent(backend_ctx, buf_q.buffer,  (size_t)e * q_layer,  q_layer);
+                    cl_mem d_t  = ggml_cl_subbuffer_from_parent(backend_ctx, buf_d.buffer,  (size_t)e * d_layer,  d_layer);
+                    cl_mem dm_t = ggml_cl_subbuffer_from_parent(backend_ctx, buf_dm.buffer, (size_t)e * dm_layer, dm_layer);
+                    cl_mem s_t  = ggml_cl_subbuffer_from_parent(backend_ctx, buf_s.buffer,  (size_t)e * s_layer,  s_layer);
+                    // inverse of the forward (stride=K/4 etc., rows=M) transposes
+                    transpose_2d_as_16b(backend_ctx, q_e,  q_t,  q_layer,  M, K/4);
+                    transpose_2d_as_16b(backend_ctx, d_e,  d_t,  d_layer,  M, K/256);
+                    transpose_2d_as_16b(backend_ctx, dm_e, dm_t, dm_layer, M, K/256);
+                    transpose_2d_as_8b (backend_ctx, s_e,  s_t,  s_layer,  M, K/256*12, true, true);
+                    CL_CHECK(clReleaseMemObject(q_e));
+                    CL_CHECK(clReleaseMemObject(d_e));
+                    CL_CHECK(clReleaseMemObject(dm_e));
+                    CL_CHECK(clReleaseMemObject(s_e));
+                    CL_CHECK(clReleaseMemObject(q_t));
+                    CL_CHECK(clReleaseMemObject(d_t));
+                    CL_CHECK(clReleaseMemObject(dm_t));
+                    CL_CHECK(clReleaseMemObject(s_t));
+                }
+            } else {
+                CL_CHECK(clEnqueueCopyBuffer(queue, extra->q,  buf_q.buffer,  0, 0, size_q,  0, NULL, NULL));
+                CL_CHECK(clEnqueueCopyBuffer(queue, extra->d,  buf_d.buffer,  0, 0, size_d,  0, NULL, NULL));
+                CL_CHECK(clEnqueueCopyBuffer(queue, extra->dm, buf_dm.buffer, 0, 0, size_dm, 0, NULL, NULL));
+                CL_CHECK(clEnqueueCopyBuffer(queue, extra->s,  buf_s.buffer,  0, 0, size_s,  0, NULL, NULL));
+            }
+
+            cl_kernel kernel = backend_ctx->kernel_restore_block_q4_K_noshuffle;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &buf_q.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &buf_s.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &buf_d.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &buf_dm.buffer));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &data_device));
+            CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_uchar), &mask_0F));
+            CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_uchar), &mask_F0));
+
+            size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+            size_t local_work_size[] = {1, 1, 1};
+
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+            CL_CHECK(clEnqueueReadBuffer(queue, data_device, CL_TRUE, offset, size, data, 0, NULL, NULL));
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
@@ -22091,6 +22531,443 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
 #endif
 }
 
+// [dspark 2026-10-13] Batched MUL_MAT_ID (q4_0): one kernel_mul_mat_id_q4_0_f32_batched
+// dispatch computes all (slot, token) GEMV columns with on-device ids — no per-expert
+// launches, no ids readback sync. Requires the same per-expert transposed layout the
+// dense-loop uses (set_tensor lays it out when use_adreno_moe_kernels() passes), plus
+// M % 128 == 0 (row-pair fibers exactly fill their workgroups, so every weight/scale
+// index stays inside the expert layer) and 16B-aligned activations for the float4
+// pixel image. Returns false when any precondition fails; caller falls back to the
+// dense-loop.
+static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
+        const ggml_tensor * src0, const ggml_tensor * src1,
+        const ggml_tensor * src2, ggml_tensor * dst) {
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    if (src1->type != GGML_TYPE_F32 || src2->type != GGML_TYPE_I32) {
+        return false;
+    }
+    // [dspark 2026-10-14] extended to q4_K: same batched-gather structure, the
+    // q4_K dense GEMV's three extra scale planes (d/dm/s) are addressed with
+    // per-expert base shifts. Host constraints per type: q4_0 needs K%32,
+    // q4_K additionally K%256 (superblock scale indexing); both need M%128.
+    const bool is_q4_0 = src0->type == GGML_TYPE_Q4_0;
+    const bool is_q4_k = src0->type == GGML_TYPE_Q4_K;
+    if (!is_q4_0 && !is_q4_k) {
+        return false;
+    }
+    // [dspark 2026-10-14] v0.3.0: q4_K batched MoE DISABLED — the kernel returns
+    // deterministic garbage on Adreno 830: probe NMSE 1.27/23.5/2.6, bit-identical
+    // across 5 code-shape rewrites (VSB macro variants, mad on/off, dequant-once,
+    // straight-line scale decode) while the dense-loop on the SAME planes is
+    // bit-exact; UNI probe shows all slots identical (no cross-slot leak) but
+    // wrong. Root cause not yet found — suspect Adreno E031 compiler on this
+    // kernel's code shape, but 5 rewrites did not dodge it. q4_K MoE keeps the
+    // validated dense-loop. Re-enable (delete this check) once moe_probe4 shows
+    // GPU NMSE=0 for the Q4K-* tests; see _probe/moe_probe for the harness.
+    if (is_q4_k) {
+        return false;
+    }
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
+    ggml_tensor_extra_cl_q4_0 * pextra40 = is_q4_0 ? (ggml_tensor_extra_cl_q4_0 *)soa0->extra : nullptr;
+    ggml_tensor_extra_cl_q4_K * pextra4k = is_q4_k ? (ggml_tensor_extra_cl_q4_K *)soa0->extra : nullptr;
+    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
+    ggml_tensor_extra_cl * extra2 = (ggml_tensor_extra_cl *)src2->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
+    if (is_q4_0 && (!pextra40 || !pextra40->q || !pextra40->d)) return false;
+    if (is_q4_k && (!pextra4k || !pextra4k->q || !pextra4k->d || !pextra4k->dm || !pextra4k->s)) return false;
+    if (!extra1 || !extra2 || !extrad) {
+        return false;
+    }
+    cl_mem wq = is_q4_0 ? pextra40->q : pextra4k->q;
+    cl_mem wd = is_q4_0 ? pextra40->d : pextra4k->d;
+    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : &pextra4k->q_img;
+    // the per-expert transposed layout only exists when set_tensor's dense-MoE
+    // branch ran — same name/shape gate, both sides stay consistent
+    if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
+        return false;
+    }
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
+        return false;
+    }
+
+    const int K      = (int)src0->ne[0];
+    const int M      = (int)src0->ne[1];
+    const int E      = (int)src0->ne[2];
+    const int n_used = (int)src2->ne[0];
+    const int n_tok  = (int)src2->ne[1];
+    const int ne11   = (int)src1->ne[1];
+    const long long n_cols = (long long)n_used * n_tok;
+    if (K % 32 != 0 || M % 128 != 0) return false;   // M%128: no row-pair padding
+    if (is_q4_k && K % 256 != 0) return false;       // q4_K superblock scale indexing
+    if (n_used < 1 || n_tok < 1 || n_cols > (1LL << 20)) return false;
+
+    cl_ulong b_base   = extra1->offset + src1->view_offs;
+    cl_ulong ids_base = extra2->offset + src2->view_offs;
+    cl_ulong dst_base = extrad->offset + dst->view_offs;
+    if (b_base % 16 != 0)  return false;   // float4-pixel image origin
+    if (ids_base % 4 != 0) return false;
+    if (dst_base % 4 != 0 || dst->nb[1] % 4 != 0 || dst->nb[2] % 4 != 0) return false;
+    if ((cl_ulong)src1->ne[2] * ne11 * K * 4 > (cl_ulong)1 << 31) return false;
+
+    // per-expert strides (same expressions as the dense-loop extras)
+    const size_t q_layer      = (size_t)M * (K/4)  * 2;   // bytes
+    const size_t q_layer_pix  = q_layer / 4;              // CL_R/UINT32 pixels
+    const size_t d_layer      = is_q4_0 ? (size_t)M * (K/32)   * 2
+                                        : (size_t)M * (K/256)  * 2;   // bytes
+    const size_t dm_layer     = is_q4_k ? (size_t)M * (K/256)  * 2 : 0;
+    const size_t s_layer      = is_q4_k ? (size_t)M * (K/256)  * 12 : 0;
+    const int    ids_row      = (int)(src2->nb[1] / sizeof(int32_t));
+    const int    grid_x_per_col = CEIL_DIV(M / 2, 64) * 64;
+
+    cl_int err;
+    cl_image_format img_fmt;
+    cl_image_desc   img_desc;
+    cl_buffer_region region;
+
+    // one image over the whole SoA q partition (all E expert layers). Creation
+    // of a ~50MB image costs more than the kernel itself, so cache it on the
+    // extra: the dense-MoE set_tensor branch never sets q_img, and the dense
+    // GEMV builds its own local images, so ownership here is exclusive.
+    cl_mem q_img = *wq_img_slot;
+    if (q_img == nullptr) {
+        img_fmt = { CL_R, CL_UNSIGNED_INT32 };
+        memset(&img_desc, 0, sizeof(img_desc));
+        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+        img_desc.image_width = (size_t)E * q_layer / 4;
+        img_desc.buffer      = wq;
+        CL_CHECK((q_img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        *wq_img_slot = q_img;
+    }
+
+    // one sub-buffer + image over the whole activation tensor ([K, ne11, n_tok]).
+    // P4: cached on the backend keyed on (buffer, origin, size) instead of
+    // created+released per call — compute buffers are pooled per graph, so the
+    // key recurs every decode step and the churn becomes a cache hit.
+    cl_mem b_sub_buf = nullptr;
+    cl_mem b_img     = nullptr;
+    const size_t b_origin = (size_t)b_base;
+    const size_t b_size   = (size_t)src1->ne[2] * ne11 * K * sizeof(float);
+    for (int ci = 0; ci < 8; ++ci) {
+        auto & c = backend_ctx->moe_b_cache[ci];
+        if (c.sub && c.src == extra1->data_device && c.origin == b_origin && c.size == b_size) {
+            b_sub_buf = c.sub;
+            b_img     = c.img;
+            break;
+        }
+    }
+    if (b_img == nullptr) {
+        auto & slot = backend_ctx->moe_b_cache[backend_ctx->moe_b_cache_next];
+        backend_ctx->moe_b_cache_next = (backend_ctx->moe_b_cache_next + 1) % 8;
+        if (slot.sub) {
+            CL_CHECK(clReleaseMemObject(slot.img));
+            CL_CHECK(clReleaseMemObject(slot.sub));
+            slot.sub = nullptr; slot.img = nullptr; slot.src = nullptr;
+            slot.origin = 0; slot.size = 0;
+        }
+        region.origin = b_origin;
+        region.size   = b_size;
+        CL_CHECK((slot.sub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+        img_fmt = { CL_RGBA, CL_FLOAT };
+        memset(&img_desc, 0, sizeof(img_desc));
+        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+        img_desc.image_width = b_size / 16;   // float4 pixels: 1 px = 16 bytes (was /4 → 4x too wide → CL_INVALID_MEM_OBJECT)
+        img_desc.buffer      = slot.sub;
+        CL_CHECK((slot.img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        slot.src    = extra1->data_device;
+        slot.origin = b_origin;
+        slot.size   = b_size;
+        b_sub_buf = slot.sub;
+        b_img     = slot.img;
+    }
+
+    // P3: expert bucket sort (prefill only — decode's n_tok==1 has <=8 columns
+    // and no weight reuse to gain). GGML_OPENCL_MOE_SORT=0 disables. Requires
+    // E+1 <= 2048 buckets (serial scan kernel). Scratch layout: [0, (E+1)*4)
+    // histogram/cursors, [ (E+1)*4, +n_cols*4) permuted column indices (the
+    // perm region is carved out as a sub-buffer per call and released right
+    // after enqueue — the in-order queue holds the reference).
+    const int ids_elem_off = (int)(ids_base / 4);
+    cl_mem perm_mem = nullptr;   // NULL => identity order in the main kernels
+    cl_mem perm_sub = nullptr;
+    static const bool moe_sort_enabled = [] {
+        const char * e = getenv("GGML_OPENCL_MOE_SORT");
+        return !e || e[0] != '0';
+    }();
+    if (moe_sort_enabled && n_tok > 1 && E + 1 <= 2048) {
+        // sub-buffer origin must be device-aligned (CL_DEVICE_MEM_BASE_ADDR_ALIGN;
+        // Adreno 128-256B). (E+1)*4 = 516B for E=128 is unaligned -> CL_INVALID_VALUE
+        // (-13). Pad the perm region start up to a 256B boundary.
+        const size_t hist_bytes  = ((size_t)E + 1) * sizeof(cl_int);
+        const size_t perm_origin = (hist_bytes + 255) & ~(size_t)255;
+        const size_t need = perm_origin + (size_t)n_cols * sizeof(cl_int);
+        if (backend_ctx->moe_sort_cap < need) {
+            if (backend_ctx->moe_sort_buf) {
+                CL_CHECK(clReleaseMemObject(backend_ctx->moe_sort_buf));
+                backend_ctx->moe_sort_buf = nullptr;
+            }
+            CL_CHECK((backend_ctx->moe_sort_buf = clCreateBuffer(backend_ctx->context,
+                    CL_MEM_READ_WRITE, need, NULL, &err), err));
+            backend_ctx->moe_sort_cap = need;
+        }
+        cl_mem sort_buf = backend_ctx->moe_sort_buf;
+        const int n_cols_i = (int)n_cols;
+
+        // zero the histogram region (the scatter pass mutates it into cursors)
+        const cl_int zero = 0;
+        CL_CHECK(clEnqueueFillBuffer(backend_ctx->queue, sort_buf, &zero,
+                sizeof(cl_int), 0, hist_bytes, 0, NULL, NULL));
+
+        cl_kernel kh = backend_ctx->kernel_moe_sort_hist;
+        cl_uint a = 0;
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(cl_mem), &sort_buf));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(cl_mem), &extra2->data_device));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(int),     &ids_elem_off));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(int),     &ids_row));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(int),     &n_used));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(int),     &E));
+        CL_CHECK(clSetKernelArg(kh, a++, sizeof(int),     &n_cols_i));
+        size_t gws_cols = (size_t)n_cols;
+        size_t lws64    = 64;
+        backend_ctx->enqueue_ndrange_kernel(kh, 1, &gws_cols, &lws64, dst);
+
+        cl_kernel ks = backend_ctx->kernel_moe_sort_scan;
+        a = 0;
+        CL_CHECK(clSetKernelArg(ks, a++, sizeof(cl_mem), &sort_buf));
+        const int n_buckets = E + 1;
+        CL_CHECK(clSetKernelArg(ks, a++, sizeof(int),    &n_buckets));
+        size_t gws_one = 1;
+        size_t lws_one = 1;
+        backend_ctx->enqueue_ndrange_kernel(ks, 1, &gws_one, &lws_one, dst);
+
+        region.origin = perm_origin;
+        region.size   = (size_t)n_cols * sizeof(cl_int);
+        CL_CHECK((perm_sub = clCreateSubBuffer(sort_buf, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+        perm_mem = perm_sub;
+
+        cl_kernel kc = backend_ctx->kernel_moe_sort_scatter;
+        a = 0;
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(cl_mem), &sort_buf));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(cl_mem), &perm_sub));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(cl_mem), &extra2->data_device));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(int),     &ids_elem_off));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(int),     &ids_row));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(int),     &n_used));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(int),     &E));
+        CL_CHECK(clSetKernelArg(kc, a++, sizeof(int),     &n_cols_i));
+        backend_ctx->enqueue_ndrange_kernel(kc, 1, &gws_cols, &lws64, dst);
+    }
+
+    cl_kernel kernel = is_q4_0 ? backend_ctx->kernel_mul_mat_id_q4_0_f32_batched
+                               : backend_ctx->kernel_mul_mat_id_q4_k_f32_batched;
+    cl_uint k_arg = 0;
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &q_img));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &wd));
+    if (is_q4_k) {
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &pextra4k->dm));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &pextra4k->s));
+    }
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &b_img));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extra2->data_device));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &ids_elem_off));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &perm_mem));   // P3: NULL => identity
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),&dst_base));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &K));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &M));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &n_used));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &n_tok));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &ne11));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &E));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &ids_row));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[1]));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[2]));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &grid_x_per_col));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&q_layer_pix));
+    if (is_q4_0) {
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&d_layer));
+    } else {
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&d_layer));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&dm_layer));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&s_layer));
+    }
+
+    static const bool moe_debug = getenv("GGML_OPENCL_MOE_DEBUG") != nullptr;
+    if (moe_debug) {
+        GGML_LOG_INFO("batched MoE dump: type=%s K=%d M=%d E=%d n_used=%d n_tok=%d ne11=%d "
+                      "ids_off=%d ids_row=%d grid=%d q_pix=%llu d_by=%llu dm_by=%llu s_by=%llu "
+                      "b_base=%llu dst_base=%llu nb1=%llu nb2=%llu\n",
+                      is_q4_0 ? "q4_0" : "q4_K", K, M, E, n_used, n_tok, ne11,
+                      ids_elem_off, ids_row, grid_x_per_col,
+                      (unsigned long long)q_layer_pix, (unsigned long long)d_layer,
+                      (unsigned long long)dm_layer, (unsigned long long)s_layer,
+                      (unsigned long long)b_base, (unsigned long long)dst_base,
+                      (unsigned long long)dst->nb[1], (unsigned long long)dst->nb[2]);
+    }
+    size_t global_work_size[2] = { (size_t)grid_x_per_col * (size_t)n_cols, 4 };
+    size_t local_work_size[2]  = { 64, 4 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
+
+    // q_img stays cached on the weight extra; b_sub_buf/b_img on the backend (P4);
+    // the perm sub-buffer is per-call — release it, the in-order queue holds its ref
+    if (perm_sub) {
+        CL_CHECK(clReleaseMemObject(perm_sub));
+    }
+    return true;
+#else
+    GGML_UNUSED(backend); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(src2); GGML_UNUSED(dst);
+    return false;
+#endif
+}
+
+// [dspark 2026-10-13] Dense-loop MUL_MAT_ID (see dense_moe_loop_enabled notes).
+// Runs one validated dense GEMV per selected expert, accumulating with
+// kernel_add_row. Expert weight slices were laid out by set_tensor exactly like
+// dense 2D weights, so the per-expert fake tensors below hit the regular dense
+// GEMV arms with sub-buffered per-expert extras (cached on the parent extra).
+static void ggml_cl_mul_mat_id_dense_loop(ggml_backend_t backend,
+        const ggml_tensor * src0, const ggml_tensor * src1,
+        const ggml_tensor * src2, ggml_tensor * dst) {
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
+    ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
+    ggml_tensor_extra_cl * extra2 = (ggml_tensor_extra_cl *)src2->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
+    GGML_UNUSED(extrad); // dst writes go through the fake fd tensor's extra
+
+    const int K     = (int)src0->ne[0];
+    const int N     = (int)src0->ne[1];
+    const int E     = (int)src0->ne[2];
+    const int n_used = (int)src2->ne[0];
+    const int n_tok  = (int)src2->ne[1];
+
+    GGML_ASSERT(ggml_is_contiguous_rows(src0) && "dense-loop MoE expects contiguous expert weights");
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(src2->type == GGML_TYPE_I32);
+
+    // ids live on the device; read them back once. ids may be a VIEW of a
+    // [n_mats, n_tok] tensor (test-backend-ops does this when n_used < n_mats),
+    // so rows are strided by ids->nb[1]/4 elements, not n_used. Read full rows.
+    const size_t ids_row = (size_t)(src2->nb[1] / sizeof(int32_t));
+    std::vector<int> ids((size_t)n_tok * ids_row);
+    CL_CHECK(clEnqueueReadBuffer(backend_ctx->queue, extra2->data_device, CL_TRUE,
+        (size_t)(extra2->offset + src2->view_offs), ids.size()*sizeof(int),
+        ids.data(), 0, NULL, NULL));
+
+    // per-expert extras with sub-buffered weight slices, created lazily and
+    // owned by the parent tensor's extra (freed with the weight buffer)
+    if (src0->type == GGML_TYPE_Q4_0) {
+        ggml_tensor_extra_cl_q4_0 * pextra = (ggml_tensor_extra_cl_q4_0 *)soa0->extra;
+        GGML_ASSERT(pextra && pextra->q && pextra->d && "dense-loop MoE: parent SoA extra missing");
+        if (pextra->moe_dense_extras.empty()) {
+            const size_t q_layer = (size_t)N * (K/4)  * 2;
+            const size_t d_layer = (size_t)N * (K/32) * 2;
+            pextra->moe_dense_extras.reserve(E);
+            for (int e = 0; e < E; ++e) {
+                ggml_tensor_extra_cl_q4_0 * ee = new ggml_tensor_extra_cl_q4_0();
+                ee->q = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->q, (size_t)e * q_layer, q_layer);
+                ee->d = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->d, (size_t)e * d_layer, d_layer);
+                pextra->moe_dense_extras.push_back(ee);
+            }
+        }
+    } else if (src0->type == GGML_TYPE_Q4_K) {
+        ggml_tensor_extra_cl_q4_K * pextra = (ggml_tensor_extra_cl_q4_K *)soa0->extra;
+        GGML_ASSERT(pextra && pextra->q && pextra->d && pextra->dm && pextra->s && "dense-loop MoE: parent SoA extra missing");
+        if (pextra->moe_dense_extras.empty()) {
+            const size_t q_layer  = (size_t)N * (K/4)   * 2;
+            const size_t d_layer  = (size_t)N * (K/256) * 2;
+            const size_t dm_layer = (size_t)N * (K/256) * 2;
+            const size_t s_layer  = (size_t)N * (K/256) * 12;
+            pextra->moe_dense_extras.reserve(E);
+            for (int e = 0; e < E; ++e) {
+                ggml_tensor_extra_cl_q4_K * ee = new ggml_tensor_extra_cl_q4_K();
+                ee->q  = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->q,  (size_t)e * q_layer,  q_layer);
+                ee->d  = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->d,  (size_t)e * d_layer,  d_layer);
+                ee->dm = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->dm, (size_t)e * dm_layer, dm_layer);
+                ee->s  = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->s,  (size_t)e * s_layer,  s_layer);
+                pextra->moe_dense_extras.push_back(ee);
+            }
+        }
+    } else {
+        GGML_ABORT("dense-loop MoE: unsupported expert weight type");
+    }
+
+    // f32 scratch no longer needed: MUL_MAT_ID is a gather (each dst slot gets
+    // exactly one expert's GEMV, written directly — see loop below).
+
+    // fake 2D weight [K, N] (per-expert extra swapped in the loop; the name is
+    // kept so all name-based gates resolve identically at this level)
+    ggml_tensor f0 = *src0;
+    f0.view_src  = nullptr;
+    f0.view_offs = 0;
+    f0.ne[0] = K; f0.ne[1] = N; f0.ne[2] = 1; f0.ne[3] = 1;
+    f0.nb[0] = src0->nb[0];
+    f0.nb[1] = src0->nb[1];
+    f0.nb[2] = f0.nb[1] * N;
+    f0.nb[3] = f0.nb[2];
+
+    // fake activation row [K, 1] carved out of the 3D src1 [K, n_used, n_tok]
+    ggml_tensor f1 = *src1;
+    f1.ne[2] = 1; f1.ne[3] = 1;
+    f1.nb[2] = src1->nb[1];
+    f1.nb[3] = src1->nb[2];
+
+    // fake 2D output row [N, 1]
+    ggml_tensor fd = *dst;
+    fd.ne[0] = N; fd.ne[1] = 1; fd.ne[2] = 1; fd.ne[3] = 1;
+    fd.nb[0] = sizeof(float);
+    fd.nb[1] = (cl_ulong)N * sizeof(float);
+    fd.nb[2] = fd.nb[1];
+    fd.nb[3] = fd.nb[2];
+
+    for (int t = 0; t < n_tok; ++t) {
+        for (int j = 0; j < n_used; ++j) {
+            const int e = ids[(size_t)t * ids_row + j];
+            if (e < 0 || e >= E) {
+                GGML_LOG_WARN("ggml_opencl: dense-loop MoE: expert id %d out of range [0, %d)\n", e, E);
+                return;
+            }
+
+            // Match the CPU reference exactly (ggml_compute_forward_mul_mat_id):
+            //   src1 vector index = (id_slot % ne11) + token*ne11  (b broadcast
+            //   via ne11==1), ids element = token*(ids->nb[1]/4) + slot.
+            f1.view_offs = src1->view_offs
+                + (size_t)(j % (int)src1->ne[1]) * src1->nb[1]
+                + (size_t)t * src1->nb[2];
+            fd.view_offs = dst->view_offs
+                + (size_t)j * dst->nb[1]
+                + (size_t)t * dst->nb[2];
+
+            if (src0->type == GGML_TYPE_Q4_0) {
+                ggml_tensor_extra_cl_q4_0 * ee =
+                    ((ggml_tensor_extra_cl_q4_0 *)soa0->extra)->moe_dense_extras[e];
+                f0.extra = ee;
+                // MUL_MAT_ID is a GATHER, not a sum: each dst slot (j, t) holds
+                // exactly ONE expert's GEMV (the graph-level ffn_moe_weighted
+                // does the weighted sum). Write the slot directly — no scratch,
+                // no accumulation (accumulating would pollute the slot with its
+                // initial contents).
+                ggml_cl_mul_mat_q4_0_f32_adreno(backend, &f0, &f1, &fd);
+            } else { // GGML_TYPE_Q4_K
+                ggml_tensor_extra_cl_q4_K * ee =
+                    ((ggml_tensor_extra_cl_q4_K *)soa0->extra)->moe_dense_extras[e];
+                f0.extra = ee;
+                ggml_cl_mul_mat_q4_k_f32_adreno(backend, &f0, &f1, &fd);
+            }
+        }
+    }
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(src0);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(src2);
+    GGML_UNUSED(dst);
+#endif
+}
+
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
 static void ggml_cl_mul_mat_q6_K_f32_adreno_ila(ggml_backend_t backend, const ggml_tensor * src0,
                                                 const ggml_tensor * src1, ggml_tensor * dst) {
@@ -26007,6 +26884,22 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
     const int dst_rows = ne20*ne21; // ne20 = n_used_experts, ne21 = n_rows
 
     GGML_ASSERT(ne00 == ne10);
+
+    // [dspark] Batched MoE: ONE dispatch for all (slot, token) columns with
+    // on-device ids (q4_0 only, per-expert transposed layout). Falls back to
+    // the per-expert dense-loop when a precondition fails.
+    // GGML_OPENCL_BATCHED_MOE=0 forces the dense-loop (A/B benchmarking).
+    static const bool batched_moe_enabled = [] {
+        const char * e = getenv("GGML_OPENCL_BATCHED_MOE");
+        return !e || e[0] != '0';
+    }();
+    if (moe_use_dense_loop(src0->type)) {
+        if (batched_moe_enabled && ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
+            return;
+        }
+        ggml_cl_mul_mat_id_dense_loop(backend, src0, src1, src2, dst);
+        return;
+    }
 
     int sgs   = 32; // subgroup size
     int nsg   = 1;  // number of subgroups

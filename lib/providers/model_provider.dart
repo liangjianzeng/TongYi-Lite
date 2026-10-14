@@ -363,9 +363,11 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
           ? '内存守卫: 开启（预检余量 ${gpu.oomPreHeadroomMb}MB，加载后余量 ${gpu.oomPostHeadroomMb}MB）'
           : '内存守卫: 关闭 ⚠️（超大模型可强行加载，内存不足时可能整机死机）');
       // KV 缓存精度（设置→推理引擎→KV 精度）：每次加载前推送到原生层。
-      // 默认 Q4；V 恒 F16（V 量化要求开启 flash attention，保持关闭）。
+      // 默认 Q4；FA 关闭时 V 恒 F16，FA 开启时 V 跟随 K 的量化格式。
       await _inference.setKvCacheType(gpu.kvCacheType);
-      mtpLogs.add('KV 精度: ${gpu.kvCacheType == 'q8_0' ? 'Q8' : 'Q4'}（K 量化 / V 为 F16）');
+      mtpLogs.add('KV 精度: ${gpu.kvCacheType == 'q8_0' ? 'Q8' : 'Q4'}（K 量化 / V 为 ${gpu.flashAttn ? '同 K（FA 开）' : 'F16'}）');
+      // flash attention（设置→推理引擎）：默认关。hybrid 架构原生层会强制关闭。
+      await _inference.setFlashAttn(gpu.flashAttn);
       state = ModelState(
         phase: ModelLifecyclePhase.loading,
         modelId: modelId,
