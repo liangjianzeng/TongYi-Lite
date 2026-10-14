@@ -9,7 +9,7 @@ void main() {
   test('目录可加载且含新增智能体模型', () async {
     final models = await ModelCatalog.load();
 
-    expect(models.length, 18);
+    expect(models.length, 17);
 
     final spark = models.firstWhere((m) => m.id == 'spark-x2.5-4b-q4_k_m');
     expect(spark.name, contains('Spark-X2.5 4B'));
@@ -17,11 +17,17 @@ void main() {
     expect(spark.bestMirrorUrl, contains('Spark-X2.5-4B-Q4_K_M.gguf'));
     expect(spark.sizeMB, greaterThan(2400));
 
-    final lfm8b = models.firstWhere((m) => m.id == 'lfm2.5-8b-a1b-ud-iq3_xxs');
+    final lfm8b = models.firstWhere((m) => m.id == 'lfm2.5-8b-a1b-q4_k_m');
     expect(lfm8b.name, contains('LFM 2.5 8B-A1B'));
     expect(lfm8b.type, ModelType.text);
-    expect(lfm8b.bestMirrorUrl, contains('LFM2.5-8B-A1B-UD-IQ3_XXS.gguf'));
-    expect(lfm8b.sizeMB, greaterThan(3000));
+    expect(lfm8b.bestMirrorUrl, contains('LFM2.5-8B-A1B-Q4_K_M.gguf'));
+    expect(lfm8b.sizeMB, greaterThan(4800));
+
+    final ling30 = models.firstWhere((m) => m.id == 'ling-3.0-tiny-q4_k_m');
+    expect(ling30.name, contains('Ling 3.0 Tiny'));
+    expect(ling30.type, ModelType.text);
+    expect(ling30.bestMirrorUrl, contains('Ling-3.0-tiny-Q4_K_M.gguf'));
+    expect(ling30.sizeMB, greaterThan(4400));
 
     final bonsai27b = models.firstWhere((m) => m.id == 'bonsai-27b-q1_0');
     expect(bonsai27b.name, contains('Bonsai 27B'));

@@ -261,6 +261,10 @@ static int64_t read_mem_available_bytes() {
 // MLA models (DeepSeek family) also keep K/V at F16 - upstream requires
 // type_k == type_v for them.
 static std::atomic<int> g_kv_cache_type{0};
+// [dspark 2026-10-14] P1: opt-in flash attention (设置→推理引擎). 0=off (default,
+// legacy behavior), 1=on. Applied at the next model load. See the ctx-creation
+// note: hybrid archs force it off until FA-after-KV-reuse is verified there.
+static std::atomic<int> g_flash_attn{0};
 
 // --- OOM guard configuration (vk_flags.conf overridable, 2026-09-27) ---
 // The guard protects against KGSL/dm wedges (full device reboots) when total
@@ -425,6 +429,36 @@ struct InferenceEngine {
     // prev_prompt_tokens is cached AFTER truncation so it matches the KV exactly.
     std::vector<llama_token> prev_prompt_tokens; // last turn's full prompt tokens (+gen)
     bool                     have_prev_kv = false; // KV currently == prev_prompt_tokens
+
+    // [dspark 2026-10-14] KV checkpoint at a prefill chunk boundary (Tier-1 reuse).
+    // Hybrid (recurrent-cell) archs reject ANY tail truncation via seq_rm unless
+    // RS slots are allocated (n_rs_seq), and llama_state_seq_get_data does NOT
+    // carry the RS rollback planes — so a checkpoint restored mid-sequence can
+    // never be truncated further. The fix: snapshot the KV exactly AT a prefill
+    // chunk boundary (cells + recurrent state), and on the next turn continue
+    // decoding from that boundary — zero rollback, zero RS, zero extra VRAM.
+    // Constraint: the new prompt must match the checkpoint tokens through the
+    // checkpoint's whole length (LCP >= B), which the LCP check enforces.
+    std::vector<uint8_t>     rs_ckp_data;    // llama_state_seq_get_data payload
+    std::vector<llama_token> rs_ckp_tokens;  // prompt tokens [0, B) covered by it
+    bool                     rs_ckp_valid = false;
+
+    // Snapshot sequence-0 KV (cells + recurrent state) together with the token
+    // prefix it corresponds to. Called between llama_decode() calls only.
+    void capture_kv_checkpoint(llama_context * ctx,
+                               const std::vector<llama_token> & toks, int n) {
+        const size_t sz = llama_state_seq_get_size(ctx, 0);
+        if (sz == 0) { rs_ckp_valid = false; return; }
+        rs_ckp_data.resize(sz);
+        const size_t got = llama_state_seq_get_data(ctx, rs_ckp_data.data(), sz, 0);
+        if (got != sz) {
+            LOGW("kv checkpoint capture failed (%zu/%zu bytes)", got, sz);
+            rs_ckp_valid = false;
+            return;
+        }
+        rs_ckp_tokens.assign(toks.begin(), toks.begin() + n);
+        rs_ckp_valid = true;
+    }
 
     // Generation state
     std::vector<llama_token> prompt_tokens;
@@ -901,15 +935,20 @@ struct InferenceEngine {
         }
         LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
-        // Flash attention: AUTO enables it on backends that support it (e.g. Vulkan
-        // GPU on Android). NOTE: on CPU this llama.cpp build also implements
-        // FLASH_ATTN_EXT (ggml-cpu/ops.cpp), so AUTO does NOT no-op on CPU — it
-        // enables flash attn there too. That combination (unified KV + flash attn +
-        // seq_rm per turn) produced garbage logits from the very first sampled
-        // token on turn 2 (KV reused after seq_rm), verified on-device
-        // (turn 1 OK 15 tokens; turn 2: 386 tokens of "rekl bytesRead,}" noise).
-        // Use DISABLED until the flash-attn-after-seq_rm state reset is verified.
-        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        // Flash attention (P1, 2026-10-14): opt-in via 设置→推理引擎→flash-attn.
+        // The old hard-DISABLED existed because "unified KV + flash attn +
+        // per-turn seq_rm" produced garbage logits from the first token of turn
+        // 2 (verified on-device). Two mitigations now:
+        //  - hybrid (recurrent) archs no longer partial-seq_rm — they restore a
+        //    prefill-boundary checkpoint instead. But FA-after-restore on hybrid
+        //    was never verified, so hybrid archs keep FA off until it is.
+        //  - dense archs reuse the KV via plain seq_rm; FA there is llama.cpp's
+        //    mainstream path. Enabled when the user opts in.
+        const bool fa_requested   = g_flash_attn.load(std::memory_order_relaxed) != 0;
+        const bool fa_hybrid_off  = fa_requested && llama_model_is_hybrid(model);
+        ctx_params.flash_attn_type =
+            (fa_requested && !fa_hybrid_off) ? LLAMA_FLASH_ATTN_TYPE_AUTO
+                                             : LLAMA_FLASH_ATTN_TYPE_DISABLED;
         // Thread strategy: use ALL cores on all-big SoCs (e.g. Snapdragon 8s Gen 4
         // = 1×X4 + 7×A720), or only the big cores on big.LITTLE SoCs (little cores
         // cause contention / thermal issues). Falls back to all cores if topology
@@ -936,13 +975,18 @@ struct InferenceEngine {
         ctx_params.kv_unified = true;
 
         // KV cache precision (设置→推理引擎→KV 精度): K quantized per setting,
-        // default q4_0. V stays F16 - quantized V requires flash attention which
-        // this app keeps disabled. Failed archs (MLA) retry at F16 below.
+        // default q4_0. V follows K when flash-attn is on: the OpenCL FA kernel
+        // variants only accept K/V in the SAME format (f32_q4_0 / f32_q8_0), and
+        // quantized V itself requires FA. With FA off, V stays F16 (quantized V
+        // is unsupported without FA). Failed archs (MLA) retry at F16 below.
         ctx_params.type_k =
             (g_kv_cache_type.load(std::memory_order_relaxed) == 1) ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_0;
-        ctx_params.type_v = GGML_TYPE_F16;
-        LOGI("KV cache: type_k=%s type_v=f16 (flash-attn disabled)",
-             ggml_type_name(ctx_params.type_k));
+        ctx_params.type_v = (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
+                                ? ctx_params.type_k : GGML_TYPE_F16;
+        LOGI("KV cache: type_k=%s type_v=%s flash_attn=%s%s",
+             ggml_type_name(ctx_params.type_k), ggml_type_name(ctx_params.type_v),
+             ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED ? "auto" : "off",
+             fa_hybrid_off ? " (hybrid arch: forced off)" : "");
 
         // For speculative decoding (MTP or DSpark), partial draft acceptance is
         // rolled back via the rollback-sequence (RS) mechanism: llama_memory_seq_rm()
@@ -1000,6 +1044,9 @@ struct InferenceEngine {
                  ggml_type_name(ctx_params.type_k));
             reportLoadingLog("KV 精度 Q4/Q8 与该模型架构不兼容，已自动回退 F16 KV 重试");
             ctx_params.type_k = GGML_TYPE_F16;
+            if (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+                ctx_params.type_v = GGML_TYPE_F16;   // FA combos need K/V in the same format
+            }
             future_ctx = spawn_ctx();
             if (future_ctx.wait_for(std::chrono::seconds(60)) == std::future_status::timeout) {
                 LOGE("Context retry creation timed out after 60s — possible OOM or deadlock");
@@ -1232,6 +1279,9 @@ struct InferenceEngine {
         dspark_enabled = false;
         prev_prompt_tokens.clear();
         have_prev_kv = false;
+        rs_ckp_data.clear();      rs_ckp_data.shrink_to_fit();
+        rs_ckp_tokens.clear();    rs_ckp_tokens.shrink_to_fit();
+        rs_ckp_valid = false;
         n_ctx = 0;
         is_running = false;
         model_file_size_bytes_ = 0;
@@ -1264,6 +1314,9 @@ struct InferenceEngine {
         kv_position = 0;
         prev_prompt_tokens.clear();
         have_prev_kv = false;
+        rs_ckp_data.clear();      rs_ckp_data.shrink_to_fit();
+        rs_ckp_tokens.clear();    rs_ckp_tokens.shrink_to_fit();
+        rs_ckp_valid = false;
         LOGI("resetContext(): KV cache cleared (seq_rm), kv_position=0 (new conversation)");
     }
 
@@ -1542,6 +1595,7 @@ struct InferenceEngine {
         // incremental prefill. Force a full clear on the next turn.
         have_prev_kv = false;
         prev_prompt_tokens.clear();
+        rs_ckp_valid = false;   // image embeds sit after the checkpoint boundary too
 
         is_running = false;
 
@@ -1792,6 +1846,7 @@ struct InferenceEngine {
                 if (dspark_ctx) llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, 0, (llama_pos)ctx_val2);
                 kv_position = 0;
                 have_prev_kv = false;
+                rs_ckp_valid = false;   // KV no longer matches the checkpoint's token prefix
                 LOGI("KV full clear for new completion");
             };
 
@@ -1811,13 +1866,44 @@ struct InferenceEngine {
             if (have_prev_kv && !prev_prompt_tokens.empty() && !prompt_tokens.empty()) {
                 prefix_len = longest_common_prefix(prev_prompt_tokens, prompt_tokens);
                 if (prefix_len >= MIN_INCREMENTAL_PREFIX && prefix_len < n_prompt) {
-                    // keep [0, prefix_len), drop [prefix_len, end)
-                    llama_memory_seq_rm(llama_get_memory(context), 0, prefix_len, (llama_pos)ctx_val2);
-                    if (mtp_ctx)    llama_memory_seq_rm(llama_get_memory(mtp_ctx),    0, prefix_len, (llama_pos)ctx_val2);
-                    if (dspark_ctx) llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, prefix_len, (llama_pos)ctx_val2);
-                    kv_position = prefix_len;   // critical: do NOT reset to 0
-                    LOGI("KV incremental: kept prefix=%d, will prefill %d tokens (saved %d)",
-                         prefix_len, n_prompt - prefix_len, prefix_len);
+                    // keep [0, prefix_len), drop [prefix_len, end). CHECK the return
+                    // value now: on hybrid (recurrent-cell) archs without RS slots a
+                    // partial seq_rm is a SILENT no-op — ignoring the false used to
+                    // leave stale cells in KV and trip the position-consistency
+                    // check on the very next decode ("inconsistent sequence
+                    // positions"), forcing a 30s full re-prefill every turn.
+                    bool kept = llama_memory_seq_rm(llama_get_memory(context), 0, prefix_len, (llama_pos)ctx_val2);
+                    if (mtp_ctx)    kept = llama_memory_seq_rm(llama_get_memory(mtp_ctx),    0, prefix_len, (llama_pos)ctx_val2) && kept;
+                    if (dspark_ctx) kept = llama_memory_seq_rm(llama_get_memory(dspark_ctx), 0, prefix_len, (llama_pos)ctx_val2) && kept;
+                    if (kept) {
+                        kv_position = prefix_len;   // critical: do NOT reset to 0
+                        LOGI("KV incremental: kept prefix=%d, will prefill %d tokens (saved %d)",
+                             prefix_len, n_prompt - prefix_len, prefix_len);
+                    } else if (rs_ckp_valid
+                               && (int)rs_ckp_tokens.size() >= MIN_INCREMENTAL_PREFIX
+                               && prefix_len >= (int)rs_ckp_tokens.size()
+                               && mtp_ctx == nullptr && dspark_ctx == nullptr
+                               && llama_state_seq_set_data(context, rs_ckp_data.data(),
+                                                           rs_ckp_data.size(), 0) == rs_ckp_data.size()) {
+                        // Hybrid-safe path: partial seq_rm is unavailable (no RS
+                        // slots), so restore the prefill-boundary snapshot instead.
+                        // state_seq_set_data fully REPLACES seq 0 (cells + recurrent
+                        // state; state_read_meta does seq_rm(-1,-1) first), which
+                        // also wipes the previous turn's generated tokens for free.
+                        // Resume prefill from the checkpoint boundary B: everything
+                        // in [B, prefix_len) is re-prefilled (<= n_batch waste).
+                        const int B = (int)rs_ckp_tokens.size();
+                        const int lcp = prefix_len;
+                        kv_position = B;
+                        prefix_len  = B;
+                        LOGI("KV incremental (ckpt restore): B=%d, LCP=%d, will prefill %d tokens (saved %d)",
+                             B, lcp, n_prompt - B, B);
+                    } else {
+                        LOGW("incremental reuse unavailable (seq_rm=false, ckpt_valid=%d, LCP=%d) -> full clear",
+                             (int)rs_ckp_valid, prefix_len);
+                        prefix_len = 0;
+                        full_clear();
+                    }
                 } else {
                     full_clear();
                 }
@@ -1921,10 +2007,25 @@ struct InferenceEngine {
             const int prefill_end = (mtp_spec != nullptr) ? n_prompt - 1 : n_prompt;
 
             bool done = false;
+            bool ckpt_captured_this_turn = false;   // refreshed the cross-turn checkpoint?
             for (int attempt = 0; attempt < 2 && !done; ++attempt) {
                 bool failed = false;
                 while (i < prefill_end) {
                     const int32_t chunk = std::min((int32_t)n_batch, prefill_end - i);
+                    // Cross-turn checkpoint: snapshot seq-0 state exactly AT the
+                    // final chunk boundary (cur_pos == a multiple of n_batch).
+                    // The next turn's LCP sits a few tokens BEFORE prompt end
+                    // (chatml re-renders the assistant trigger), so a snapshot at
+                    // prompt end could never be reused; the boundary below it can.
+                    // Plain path only — the speculative path has n_rs_seq > 0 and
+                    // keeps its own seq_rm-based rollback working.
+                    if (mtp_spec == nullptr && cur_pos > 0
+                        && cur_pos % n_batch == 0 && i + chunk >= prefill_end) {
+                        capture_kv_checkpoint(context, prompt_tokens, i);
+                        ckpt_captured_this_turn = true;
+                        LOGI("KV checkpoint captured at boundary %d (%.1f MiB)",
+                             (int)cur_pos, (double)rs_ckp_data.size() / 1048576.0);
+                    }
                     llama_batch tok_batch = llama_batch_init(chunk, 0, 1);
                     tok_batch.n_tokens = chunk;
                     for (int32_t j = 0; j < chunk; ++j) {
@@ -1949,6 +2050,7 @@ struct InferenceEngine {
                         LOGE("llama_decode() failed on prompt batch starting at token %d (pos=%d)", i, (int)cur_pos);
                         is_running = false;
                         have_prev_kv = false;   // KV is now partially populated -> don't trust cache
+                        rs_ckp_valid = false;
                         return "[ERROR: Prompt decode failed]";
                     }
                     // MTP: mirror the target hidden states (t_h_nextn) into the MTP
@@ -1959,6 +2061,7 @@ struct InferenceEngine {
                             llama_batch_free(tok_batch);
                             is_running = false;
                             have_prev_kv = false;   // KV may be inconsistent -> don't trust cache
+                            rs_ckp_valid = false;
                             return "[ERROR: MTP process failed]";
                         }
                     }
@@ -1967,6 +2070,13 @@ struct InferenceEngine {
                     i += chunk;
                 }
                 done = !failed;
+            }
+            // If no boundary was crossed this turn (tiny prompt or a resume that
+            // never hit a multiple of n_batch), the stored checkpoint describes a
+            // token prefix that no longer matches what will be in KV — drop it.
+            if (!ckpt_captured_this_turn && rs_ckp_valid) {
+                LOGI("KV checkpoint dropped (no prefill boundary crossed this turn)");
+                rs_ckp_valid = false;
             }
             // Plain path: == n_prompt (full prompt in KV). MTP path: == n_prompt-1
             // (last prompt token is left out of the cache; the speculative loop
@@ -2829,6 +2939,18 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetKvCacheType(
     g_kv_cache_type.store(v, std::memory_order_relaxed);
     LOGI("nativeSetKvCacheType: type_k=%s (type_v stays f16, flash-attn off)",
          v ? "q8_0" : "q4_0");
+}
+
+// [dspark 2026-10-14] P1: flash attention opt-in from the UI. Applied at the
+// next model load (ctx params are fixed per context). Hybrid archs force it
+// off at ctx creation until FA-after-checkpoint-restore is verified there.
+JNIEXPORT void JNICALL
+Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetFlashAttn(
+    JNIEnv *, jobject, jboolean enabled
+) {
+    g_flash_attn.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    LOGI("nativeSetFlashAttn: %s (takes effect on next model load)",
+         enabled ? "ON" : "off");
 }
 
 JNIEXPORT void JNICALL

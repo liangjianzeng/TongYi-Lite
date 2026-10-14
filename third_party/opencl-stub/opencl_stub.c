@@ -18,6 +18,7 @@ typedef void *(*pfn_clGetPlatformIDs)(void);
 typedef void *(*pfn_clGetPlatformInfo)(void);
 typedef void *(*pfn_clGetDeviceIDs)(void);
 typedef void *(*pfn_clGetDeviceInfo)(void);
+typedef void *(*pfn_clGetMemObjectInfo)(void);
 typedef void *(*pfn_clCreateContext)(void);
 typedef void *(*pfn_clCreateCommandQueue)(void);
 typedef void *(*pfn_clCreateBuffer)(void);
@@ -92,6 +93,9 @@ cl_int clGetDeviceIDs(cl_platform_id platform, cl_device_type device_type, cl_ui
 }
 cl_int clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     CL_FORWARD(clGetDeviceInfo, (device, param_name, param_value_size, param_value, param_value_size_ret));
+}
+cl_int clGetMemObjectInfo(cl_mem memobj, cl_mem_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    CL_FORWARD(clGetMemObjectInfo, (memobj, param_name, param_value_size, param_value, param_value_size_ret));
 }
 cl_context clCreateContext(const cl_context_properties *properties, cl_uint num_devices, const cl_device_id *devices, void (CL_CALLBACK *pfn_notify)(const char *, const void *, size_t, void *), void *user_data, cl_int *errcode_ret) {
     CL_FORWARD(clCreateContext, (properties, num_devices, devices, pfn_notify, user_data, errcode_ret));

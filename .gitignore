@@ -112,7 +112,9 @@ gate4_logcat.ps1
 
 # === 本地实验/研究目录与临时产物（不入库）===
 _study/
-_probe/
+_probe/*
+!_probe/moe_probe/
+_probe/moe_probe/build/
 .research/
 assets/flutter_assets/
 out.txt

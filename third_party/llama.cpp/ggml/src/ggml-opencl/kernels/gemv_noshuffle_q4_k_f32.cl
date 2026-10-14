@@ -821,3 +821,184 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_mc3(
         vstore2((float2)(acc.s4, acc.s5), 0, &(dst[2 * M + gid * 2]));
     }
 }
+
+// [dspark 2026-10-14] Batched MUL_MAT_ID for q4_K MoE: ONE dispatch computes all
+// (expert-slot, token) GEMV columns with on-device ids — the q4_K twin of
+// kernel_mul_mat_id_q4_0_f32_batched. Weight addressing is the validated
+// kernel_gemv_noshuffle_q4_k_f32 layout (noshuffle + transposed, 8 uints per
+// K-step per row-pair) with per-expert base shifts on all four planes:
+//   q image  + es * q_layer_pix   (uint pixels)
+//   d / dm   + es * *_layer_bytes (half2)
+//   s codes  + es * s_layer_bytes (uchar)
+// Scale decode (get_scale_min_k4) and the accumulate order are byte-identical
+// to the dense GEMV, so each (slot, token) column equals the dense-loop's
+// per-expert result (NMSE=0 expected — same layout that passed tbo 2/2).
+// Requires (host-checked): M % 128 == 0 (no row-pair padding: with M%128, the
+// x-grid per column is exactly M2, so every weight/scale index stays inside
+// its expert layer), K % 256 == 0 (superblock scale indexing), ids in [0, E).
+#define BMO_Q4K_MASK_D6  0x3F
+#define BMO_Q4K_MASK_D4  0x0F
+#define BMO_Q4K_MASK_HI2 0xC0
+#ifdef VECTOR_SUB_GROUP_BROADCAST
+#define BMO_Q4K_DQ_HI dequantizeBlockAccum_ns_sgbroadcast_8_hi
+#define BMO_Q4K_DQ_LO dequantizeBlockAccum_ns_sgbroadcast_8_lo
+#else
+#define BMO_Q4K_DQ_HI dequantizeBlockAccum_ns_sgbroadcast_1_hi
+#define BMO_Q4K_DQ_LO dequantizeBlockAccum_ns_sgbroadcast_1_lo
+#endif
+#ifdef ADRENO_GPU
+REQD_SUBGROUP_SIZE_64
+#endif
+__kernel void kernel_mul_mat_id_q4_k_f32_batched(
+        read_only  image1d_buffer_t src0_q,   // E transposed q4_K expert layers
+        global half2  * src0_d,               // E layers of fp16 d scales
+        global half2  * src0_m,               // E layers of fp16 m mins
+        global uchar  * src0_s,               // E layers of uchar scale codes
+        read_only  image1d_buffer_t src1,     // B: ne11*n_tok columns of K floats
+        global int    * ids,                  // MUL_MAT_ID ids tensor (I32)
+        int ids_elem_off,                     // element offset of ids base
+        global int    * perm,                 // [n_cols] expert-sorted column order (P3); 0 => identity
+        global float * dst,                   // destination buffer
+        ulong offsetd,                        // byte offset of dst base
+        int ne00,                             // K
+        int ne01,                             // M (output rows)
+        int n_used,                           // expert slots per token
+        int n_tok,                            // tokens
+        int ne11,                             // src1 columns (1 => broadcast)
+        int n_expert,                         // E
+        int ids_row,                          // ids row stride in elements
+        ulong dst_nb1,                        // dst->nb[1] bytes
+        ulong dst_nb2,                        // dst->nb[2] bytes
+        int grid_x_per_col,                   // CEIL_DIV(M/2, 64) * 64 (== M/2 when M%128==0)
+        ulong q_layer_pix,                    // per-expert q stride (uint pixels)
+        ulong d_layer_bytes,                  // per-expert d stride (bytes)
+        ulong dm_layer_bytes,                 // per-expert dm stride (bytes)
+        ulong s_layer_bytes)                  // per-expert s stride (bytes)
+{
+    uint gid     = get_global_id(0);
+    uint slid    = get_sub_group_local_id();
+    uint groupId = get_local_id(1);
+
+    uint K  = (uint)ne00;
+    uint M  = (uint)ne01;
+    uint M2 = M / 2;
+
+    uint colp = gid / (uint)grid_x_per_col;
+    uint rp   = gid - colp * (uint)grid_x_per_col;   // row-pair index, rp < M2 (no padding)
+
+    // P3 expert-sorted column order (see kernel_mul_mat_id_q4_0_f32_batched)
+    uint col = (perm != (global uint *)0) ? (uint)perm[colp] : colp;
+
+    uint t = col / (uint)n_used;
+    uint js = col - t * (uint)n_used;              // expert slot (j taken by scale idx)
+
+    int e = ids[ids_elem_off + (int)t * ids_row + (int)js];
+    bool valid = (e >= 0) && (e < n_expert);
+    int  es    = valid ? e : 0;   // safe reads; invalid ids write zeros
+
+    uint LINE_STRIDE_A  = M / 2;
+    uint BLOCK_STRIDE_A = NSUBGROUPS * M;
+
+    global half2  * drow  = (global half2 *)((global char *)src0_d + (ulong)es * d_layer_bytes);
+    global half2  * dmrow = (global half2 *)((global char *)src0_m + (ulong)es * dm_layer_bytes);
+    global uchar  * srow  = (global uchar *)((global char *)src0_s + (ulong)es * s_layer_bytes);
+    int qbase = (int)((ulong)es * q_layer_pix);
+    int bbase = (int)((ulong)((js % (uint)ne11) + t * (uint)ne11) * (K / 4));
+    global float * dstc = (global float *)((global char *)dst + offsetd
+                            + (ulong)js * dst_nb1 + (ulong)t * dst_nb2);
+
+    private uint4  regA;
+    private half2  regS, regM;
+    private float8 regB;
+    // [dspark 2026-10-14] compiler-bug dodge (probe NMSE 1.27/23.5/2.6 with the
+    // inline dequant macros): use the mc3 dequant-once shape instead — dequant
+    // the 32 weights/row into a private half2[] ONCE, then MAC. Byte-identical
+    // math to the inline macros (see DEQUANT_Q4K_BLOCK comment), different code
+    // shape for the Adreno E031 compiler.
+    private half2  wq[16];
+
+    private float2 totalSum = (float2)(0.0f);
+
+    for (uint k = groupId; k < (K / 32); k += NSUBGROUPS) {
+        uint sb = k / 8;
+        uint jk = k % 8;
+
+        half2 d   = drow[rp + sb * LINE_STRIDE_A];
+        half2 dm  = dmrow[rp + sb * LINE_STRIDE_A];
+
+        global const uchar * sc0 = srow + sb * 12 * M + 2 * rp;
+        global const uchar * sc1 = sc0 + 1;
+
+        // [dspark 2026-10-14] Exp B: straight-line scale decode. The inline
+        // get_scale_min_k4 instance in THIS kernel miscompiles on Adreno E031:
+        // the identical source passes in the dense kernel of the same program,
+        // and the probe NMSE is bit-identical across 4 downstream dequant/MAC
+        // shape rewrites => the error enters at or before regS/regM. Load the
+        // 12 code bytes of the row pair with plain strided reads into a private
+        // array, then decode from registers. Semantics identical to
+        // get_scale_min_k4 (incl. the 0x3F/0x0F/0xC0 mask quirks).
+        global const uchar * sb_s = srow + (size_t)sb * 12 * (size_t)M + (size_t)rp * 2;
+        uchar cs[24];
+        #pragma unroll
+        for (uint c = 0; c < 12; ++c) {
+            cs[2*c]   = sb_s[c * M];
+            cs[2*c+1] = sb_s[c * M + 1];
+        }
+        uchar sv0, mn0, sv1, mn1;
+        if (jk < 4) {
+            sv0 = cs[2*jk]        & 0x3F;
+            mn0 = cs[2*(jk+4)]    & 0x3F;
+            sv1 = cs[2*jk+1]      & 0x3F;
+            mn1 = cs[2*(jk+4)+1]  & 0x3F;
+        } else {
+            sv0 = (cs[2*(jk+4)]      & 0x0F) | ((cs[2*(jk-4)]    & 0xC0) >> 2);
+            mn0 = ((cs[2*(jk+4)]     >> 4) & 0x0F) | ((cs[2*jk]  & 0xC0) >> 2);
+            sv1 = (cs[2*(jk+4)+1]    & 0x0F) | ((cs[2*(jk-4)+1]  & 0xC0) >> 2);
+            mn1 = ((cs[2*(jk+4)+1]   >> 4) & 0x0F) | ((cs[2*jk+1]& 0xC0) >> 2);
+        }
+
+        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));
+        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));
+
+        if (slid < 4) {
+            regB.s0123 = read_imagef(src1, bbase + (int)(slid * 2 + k * 8));
+            regB.s4567 = read_imagef(src1, bbase + (int)(1 + slid * 2 + k * 8));
+        }
+
+        regA.s0 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        regA.s1 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        regA.s2 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        regA.s3 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+        DEQUANT_Q4K_BLOCK(wq, as_ushort8(regA), regS, regM);
+        MAC_Q4K_BLOCK(totalSum, wq, regB, 0, 1);
+
+        regA.s0 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+        regA.s1 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+        regA.s2 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;
+        regA.s3 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
+        DEQUANT_Q4K_BLOCK(wq, as_ushort8(regA), regS, regM);
+        MAC_Q4K_BLOCK(totalSum, wq, regB, 2, 3);
+    }
+
+    // reduction in local memory, assumes #wave=4 (SUBGROUP_SIZE: the q4_K program
+    // build does not define SIMDGROUP_WIDTH)
+    local float2 reduceLM[SUBGROUP_SIZE * 3];
+    if (groupId == 1) reduceLM[SUBGROUP_SIZE * 0 + slid] = totalSum;
+    if (groupId == 2) reduceLM[SUBGROUP_SIZE * 1 + slid] = totalSum;
+    if (groupId == 3) reduceLM[SUBGROUP_SIZE * 2 + slid] = totalSum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (groupId == 0) {
+        totalSum += reduceLM[SUBGROUP_SIZE * 0 + slid];
+        totalSum += reduceLM[SUBGROUP_SIZE * 1 + slid];
+        totalSum += reduceLM[SUBGROUP_SIZE * 2 + slid];
+        if (valid) {
+            if (rp * 2 + 0 < M) dstc[rp * 2 + 0] = totalSum.s0;
+            if (rp * 2 + 1 < M) dstc[rp * 2 + 1] = totalSum.s1;
+        } else {
+            if (rp * 2 + 0 < M) dstc[rp * 2 + 0] = 0.0f;
+            if (rp * 2 + 1 < M) dstc[rp * 2 + 1] = 0.0f;
+        }
+    }
+}
+#undef BMO_Q4K_DQ_HI
+#undef BMO_Q4K_DQ_LO

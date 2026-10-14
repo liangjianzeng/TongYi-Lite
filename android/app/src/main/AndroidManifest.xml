@@ -94,5 +94,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- 禁用 Impeller(Vulkan)：Adreno 驱动上 OpenCL 推理与 Flutter Vulkan
+             渲染并发会冲突——轻则渲染数据污染（加载 >4B 模型 / prefill 时
+             闪屏+随机条纹），重则 raster 线程在 libvulkan CmdEndRenderPass
+             空指针 SIGSEGV 整个 app 崩溃。回退 Skia + OpenGL ES 规避。 -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
     </application>
 </manifest>

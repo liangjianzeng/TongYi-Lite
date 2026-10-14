@@ -6,7 +6,49 @@
 
 ---
 
-## [0.2.9] — 2026-10-06（当前版本 · versionCode 17）
+## [0.3.0] — 2026-10-14（当前版本 · versionCode 18）
+
+### ⚡ OpenCL batched MoE（q4_0 单 dispatch）
+
+- **batched MUL_MAT_ID**：新增 `kernel_mul_mat_id_q4_0_f32_batched`——一次 dispatch 计算
+  全部 (slot, token) GEMV 列，ids 张量驻留设备端直读，免去逐专家 launch 与 ids 回读同步；
+  权重按专家层 SoA 转置布局（q image + d 平面），q4_0 真机（Adreno 830）probe NMSE=0，
+  App 实测 **prefill 149 t/s、decode 14–22 t/s**。
+- **P3 专家桶排序**（prefill）：设备端 hist/scan/scatter 三小内核把同专家列聚邻
+  （`perm` 排序由主内核读取），同专家权重命中 L2 而非反复流式重读；
+  scratch 布局 `[hist | perm]` 的 perm 起点 256B 对齐（修复 clCreateSubBuffer -13 崩溃）。
+- **P4 激活缓存**：激活 sub-buffer + image 8 槽 direct-mapped 缓存（key = buffer/origin/size），
+  decode 每步免重建（修复 image 宽度 `b_size/16` 误写 `/4` 导致的 -38 崩溃）；
+  权重 q image 缓存于张量 extra。
+- **P0 KV checkpoint/restore**：长对话多轮不再整段重 prefill——边界 checkpoint，
+  恢复后仅对增量 token prefill，**多轮对话二次 TTFT 34s → 4.4s**；
+  短对话（<512 单 chunk）自动 full clear，代价 <1s。
+
+### 🧯 修复
+
+- CL 内核写 `nullptr`（OpenCL C 非 C++）→ err=-11 加载即崩，改为 `(global uint *)0`。
+- MoE 激活 image1d_buffer 宽度按字节/16 计算（原 /4 宽 4 倍）→ clCreateImage -38 崩溃。
+- P3 sort scratch perm 区起点按 CL_DEVICE_MEM_BASE_ADDR_ALIGN 对齐 → clCreateSubBuffer -13。
+
+### 🔒 q4_K batched MoE 定案禁用（正确性优先）
+
+- q4_K 版 batched 内核在 Adreno 830 输出确定性乱码：真机探针 NMSE 1.27 / 23.5 / 2.6，
+  **5 种代码形状改写（VSB 宏变体 / mad 开关 / dequant-once / 直线化 scale 解码）NMSE 位级不变**，
+  同程序 dense 内核对同一份平面数据位精确；UNI 探针（全 slot 同专家）各 slot 输出彼此一致但皆错
+  ⇒ 排除跨 slot 泄漏与专家基址偏移，根因未定（疑 Adreno E031 编译器对该内核代码形状的误编，
+  但改写未躲开）。**发布版禁用 q4_K batched（入口直接回退 dense-loop），q4_0 不受影响。**
+- 新增 `_probe/moe_probe` 真机探针工具（本版起入库维护）：`moe_probe*.cpp` 真机 NMSE 对照，
+  支持 `MOE_PROBE_UNI`（跨 slot 泄漏检查）/ `MOE_PROBE_SAME`（专家基址隔离）/
+  `MOE_PROBE_DUMP`（数值形态）诊断 env；配套 adb 工作流（cl-cache 清理、推库、运行）。
+
+### 其它
+
+- `GGML_OPENCL_MOE_DEBUG=1` 打印 batched MoE 全部标量参数；
+  `GGML_OPENCL_BATCHED_MOE=0` 强制 dense-loop（A/B 基准）。
+
+---
+
+## [0.2.9] — 2026-10-06（versionCode 17）
 
 ### 🔊 Edge 在线 TTS 语音播报
 
@@ -61,7 +103,7 @@ analyze lib+test 0 error。
 
 ---
 
-## [0.2.8] — 2026-09-29（当前版本 · versionCode 16）
+## [0.2.8] — 2026-09-29（versionCode 16）
 
 ### 智能体：执行顺序渲染 + 思考流式自动展开 + 空响应重试 + 思考泄漏修复
 

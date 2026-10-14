@@ -1373,7 +1373,64 @@ class _InferenceEngineTab extends ConsumerWidget {
                   Text(
                     '端侧内存有限，KV 缓存默认 Q4 量化（所有本地模型生效）；'
                     'Q8 精度更高、更占内存。仅量化 K 部分，V 保持 F16'
-                    '（V 量化需开启 flash attention，当前保持关闭）。'
+                    '（V 量化需开启下方 flash-attn）。'
+                    '修改后重新加载模型生效',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          // ---- flash attention 卡片（P1：实验性，默认关） ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '⚡ Flash Attention（实验性）',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(
+                        value: false,
+                        label: Text('关（默认）'),
+                        icon: Icon(Icons.shield_outlined, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: true,
+                        label: Text('开'),
+                        icon: Icon(Icons.flash_on, size: 16),
+                      ),
+                    ],
+                    selected: {gpuSettings.flashAttn},
+                    onSelectionChanged: (sel) {
+                      final v = sel.first;
+                      if (v != gpuSettings.flashAttn) {
+                        gpuNotifier.setFlashAttn(v);
+                      }
+                    },
+                    showSelectedIcon: false,
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '开启后 attention 走 FA 内核，长上下文 prefill/decode 显存'
+                    '与速度收益明显；V 缓存跟随 K 一起量化（省一半 KV 内存）。'
+                    'hybrid（recurrent 层）架构会自动保持关闭。历史上该开关'
+                    '在 KV 复用路径上出过乱码，开启后请先做一次多轮对话测试。'
                     '修改后重新加载模型生效',
                     style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                   ),

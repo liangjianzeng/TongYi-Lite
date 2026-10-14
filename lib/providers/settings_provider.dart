@@ -724,6 +724,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// [dspark 2026-10-14] P1: flash attention 开关。默认关。重新加载模型后生效。
+  Future<void> setFlashAttn(bool value) async {
+    if (value == state.flashAttn) return;
+    state = state.copyWith(flashAttn: value);
+    await _persist();
+  }
+
   /// GPU 推理时限制刷新率（防闪纹）。关 = 推理期间不干预屏幕刷新率。
   Future<void> setInferenceLimitRefreshRate(bool value) async {
     state = state.copyWith(inferenceLimitRefreshRate: value);
