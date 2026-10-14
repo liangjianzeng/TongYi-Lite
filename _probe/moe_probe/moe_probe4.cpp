@@ -204,6 +204,51 @@ static void run_shape(ggml_backend_dev_t ocl, ggml_backend_dev_t cpu, ggml_type 
     }
     printf("worst over %d slots: GPU NMSE=%.6f  CPU NMSE=%.6f\n",
            n_used * n_tok, worst_gpu, worst_cpu);
+    if (getenv("MOE_PROBE_KREF")) {
+        // [dspark 2026-10-14] CPU per-k-block contributions for slot 0, rows 0/1
+        // (from the DEQUANTIZED quantized weights = exactly what the GPU kernel
+        // should multiply). Compare with host-side KDBG dump (cols are slot-ordered).
+        for (int n = 0; n < 2; ++n) {
+            for (int kb = 0; kb < K/32; ++kb) {
+                double acc = 0;
+                for (int i = 0; i < 32; ++i)
+                    acc += (double)wdq[(size_t)0 * K * N + (size_t)n * K + kb * 32 + i] * x[kb * 32 + i];
+                fprintf(stderr, "KREF row=%d k=%2d contrib=%12.4f\n", n, kb, (float)acc);
+            }
+        }
+        if (qt == GGML_TYPE_Q4_K) {
+            // expected s/m per (row, k) decoded straight from the raw q4_K blocks
+            // (same math as the kernel: fp16 product of d*sc / dmin*mn).
+            const size_t slice = (size_t)N * K * ggml_type_size(qt) / ggml_blck_size(qt);
+            const uint8_t * base = qdata.data();   // expert ids[0] = 0 for slot 0
+            for (int n = 0; n < 2; ++n) {
+                const uint8_t * row = base + (size_t)n * (K/256) * 144;
+                for (int sb = 0; sb < K/256; ++sb) {
+                    const uint8_t * blk = row + (size_t)sb * 144;
+                    float d    = ggml_fp16_to_fp32(*(const ggml_fp16_t *)(blk + 0));
+                    float dmin = ggml_fp16_to_fp32(*(const ggml_fp16_t *)(blk + 2));
+                    const uint8_t * sc = blk + 4;
+                    if (n < 2 && sb < 8) {
+                        fprintf(stderr, "RAW row=%d sb=%d d=%04x dmin=%04x scales=",
+                                n, sb, *(const uint16_t *)(blk + 0), *(const uint16_t *)(blk + 2));
+                        for (int cc = 0; cc < 12; ++cc) fprintf(stderr, " %02x", sc[cc]);
+                        fprintf(stderr, "\n");
+                    }
+                    for (int jk = 0; jk < 8; ++jk) {
+                        uint8_t sv, mn;
+                        if (jk < 4) { sv = sc[jk] & 63; mn = sc[jk+4] & 63; }
+                        else {
+                            sv = (sc[jk+4] & 0xF) | ((sc[jk-4] & 0xC0) >> 2);
+                            mn = (sc[jk+4] >> 4) | ((sc[jk-4] & 0xC0) >> 2);
+                        }
+                        fprintf(stderr, "KSCAL row=%d k=%2d s_exp=%9.5f m_exp=%9.5f (d=%9.5f dmin=%9.5f sv=%02x mn=%02x)\n",
+                                n, sb*8+jk, d*sv, dmin*mn, d, dmin, sv, mn);
+                    }
+                }
+            }
+        }
+        fflush(stderr);
+    }
     if (getenv("MOE_PROBE_DUMP")) {
         for (int s = 0; s < 2 && s < n_used * n_tok; ++s) {
             printf("slot %d ref[0..5]:", s);
@@ -243,12 +288,33 @@ int main() {
     }
     if (!ocl || !cpu) die("backend missing");
 
+    // [dspark 2026-10-14] MOE_PROBE_ONLY=Q4K|Q40 skips the other family: cache
+    // isolation — the P4 activation cache is keyed (buffer,origin,size) and the
+    // q_img lives on the tensor extra; running q4_K with zero prior q4_0 calls
+    // rules out cross-test image-cache pollution.
+    const char * only = getenv("MOE_PROBE_ONLY");
+    const bool only_q40 = only && strcmp(only, "Q40") == 0;
+    const bool only_q4k = only && strcmp(only, "Q4K") == 0;
+
+    if (!only_q4k) {
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 1536, 512, 128, 8, "REAL-gateup", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 512, 1536, 128, 8, "REAL-down", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 1536, 512, 128, 8, "PREFILL-gateup-tok4", true, 4);
+    }
+    if (!only_q40) {
     // [dspark 2026-10-14] q4_K batched kernel bisection (phone garble)
     run_shape(ocl, cpu, GGML_TYPE_Q4_K, 1536, 512, 128, 8, "Q4K-gateup", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_K, 512, 1536, 128, 8, "Q4K-down", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_K, 1536, 512, 128, 8, "Q4K-PREFILL-tok4", true, 4);
+    // [dspark 2026-10-14] shape bisection: isolate expert addressing (E/used) and
+    // superblock scale offset (K). T1 degenerates to near-dense (E=1, used=1);
+    // T2 isolates es/base on used=1; T3/T4 isolate K=256 (single superblock, sb=0
+    // only) vs K=512 (sb=1 exists).
+    run_shape(ocl, cpu, GGML_TYPE_Q4_K, 256, 128, 1,   1, "B1-K256-E1-u1", true);
+    run_shape(ocl, cpu, GGML_TYPE_Q4_K, 256, 128, 128, 1, "B2-K256-E128-u1", true);
+    run_shape(ocl, cpu, GGML_TYPE_Q4_K, 256, 128, 128, 8, "B3-K256-E128-u8", true);
+    run_shape(ocl, cpu, GGML_TYPE_Q4_K, 512, 128, 128, 8, "B4-K512-E128-u8", true);
+    run_shape(ocl, cpu, GGML_TYPE_Q4_K, 512, 128, 1,   8, "B5-K512-E1-u8", true);
+    }
     return 0;
 }

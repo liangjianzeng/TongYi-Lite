@@ -29,6 +29,7 @@ typedef void *(*pfn_clFinish)(void);
 typedef void *(*pfn_clEnqueueBarrierWithWaitList)(void);
 typedef void *(*pfn_clBuildProgram)(void);
 typedef void *(*pfn_clCreateProgramWithBinary)(void);
+typedef void *(*pfn_clCreateProgramWithIL)(void);
 typedef void *(*pfn_clGetProgramInfo)(void);
 typedef void *(*pfn_clReleaseProgram)(void);
 typedef void *(*pfn_clReleaseMemObject)(void);
@@ -126,6 +127,9 @@ cl_int clBuildProgram(cl_program program, cl_uint num_devices, const cl_device_i
 }
 cl_program clCreateProgramWithBinary(cl_context context, cl_uint num_devices, const cl_device_id *device_list, const size_t *lengths, const unsigned char **binaries, cl_int *binary_status, cl_int *errcode_ret) {
     CL_FORWARD(clCreateProgramWithBinary, (context, num_devices, device_list, lengths, binaries, binary_status, errcode_ret));
+}
+cl_program clCreateProgramWithIL(cl_context context, const void *il, size_t length, cl_int *errcode_ret) {
+    CL_FORWARD(clCreateProgramWithIL, (context, il, length, errcode_ret));
 }
 cl_int clGetProgramInfo(cl_program program, cl_program_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     CL_FORWARD(clGetProgramInfo, (program, param_name, param_value_size, param_value, param_value_size_ret));

@@ -851,9 +851,8 @@ REQD_SUBGROUP_SIZE_64
 #endif
 __kernel void kernel_mul_mat_id_q4_k_f32_batched(
         read_only  image1d_buffer_t src0_q,   // E transposed q4_K expert layers
-        global half2  * src0_d,               // E layers of fp16 d scales
-        global half2  * src0_m,               // E layers of fp16 m mins
-        global uchar  * src0_s,               // E layers of uchar scale codes
+        global half2  * src0_se,              // E layers of fp16 effective scales  (d*sc, precomputed on host)
+        global half2  * src0_me,              // E layers of fp16 effective mins    (dm*mn, precomputed on host)
         read_only  image1d_buffer_t src1,     // B: ne11*n_tok columns of K floats
         global int    * ids,                  // MUL_MAT_ID ids tensor (I32)
         int ids_elem_off,                     // element offset of ids base
@@ -871,9 +870,8 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
         ulong dst_nb2,                        // dst->nb[2] bytes
         int grid_x_per_col,                   // CEIL_DIV(M/2, 64) * 64 (== M/2 when M%128==0)
         ulong q_layer_pix,                    // per-expert q stride (uint pixels)
-        ulong d_layer_bytes,                  // per-expert d stride (bytes)
-        ulong dm_layer_bytes,                 // per-expert dm stride (bytes)
-        ulong s_layer_bytes)                  // per-expert s stride (bytes)
+        ulong se_layer_bytes,                 // per-expert seff/me stride (bytes)
+        global float * dbg)                   // [dspark] KDBG: n_cols*(K/32)*6 floats or NULL
 {
     uint gid     = get_global_id(0);
     uint slid    = get_sub_group_local_id();
@@ -899,9 +897,12 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
     uint LINE_STRIDE_A  = M / 2;
     uint BLOCK_STRIDE_A = NSUBGROUPS * M;
 
-    global half2  * drow  = (global half2 *)((global char *)src0_d + (ulong)es * d_layer_bytes);
-    global half2  * dmrow = (global half2 *)((global char *)src0_m + (ulong)es * dm_layer_bytes);
-    global uchar  * srow  = (global uchar *)((global char *)src0_s + (ulong)es * s_layer_bytes);
+    // [dspark 2026-10-14] precomputed effective-scale planes (host: se=d*sc,
+    // me=dm*mn per 32-block, fp16 row pairs). Scale reads are now plain half2
+    // loads, structurally identical to the q4_0 batched kernel (NMSE=0); the
+    // entire get_scale_min_k4 / 6-bit mask reassembly subsystem is gone.
+    global half2  * serow = (global half2 *)((global char *)src0_se + (ulong)es * se_layer_bytes);
+    global half2  * merow = (global half2 *)((global char *)src0_me + (ulong)es * se_layer_bytes);
     int qbase = (int)((ulong)es * q_layer_pix);
     int bbase = (int)((ulong)((js % (uint)ne11) + t * (uint)ne11) * (K / 4));
     global float * dstc = (global float *)((global char *)dst + offsetd
@@ -910,55 +911,15 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
     private uint4  regA;
     private half2  regS, regM;
     private float8 regB;
-    // [dspark 2026-10-14] compiler-bug dodge (probe NMSE 1.27/23.5/2.6 with the
-    // inline dequant macros): use the mc3 dequant-once shape instead — dequant
-    // the 32 weights/row into a private half2[] ONCE, then MAC. Byte-identical
-    // math to the inline macros (see DEQUANT_Q4K_BLOCK comment), different code
-    // shape for the Adreno E031 compiler.
     private half2  wq[16];
 
     private float2 totalSum = (float2)(0.0f);
 
     for (uint k = groupId; k < (K / 32); k += NSUBGROUPS) {
-        uint sb = k / 8;
-        uint jk = k % 8;
+        float2 ts_prev = totalSum;   // KDBG: per-block contribution = delta
 
-        half2 d   = drow[rp + sb * LINE_STRIDE_A];
-        half2 dm  = dmrow[rp + sb * LINE_STRIDE_A];
-
-        global const uchar * sc0 = srow + sb * 12 * M + 2 * rp;
-        global const uchar * sc1 = sc0 + 1;
-
-        // [dspark 2026-10-14] Exp B: straight-line scale decode. The inline
-        // get_scale_min_k4 instance in THIS kernel miscompiles on Adreno E031:
-        // the identical source passes in the dense kernel of the same program,
-        // and the probe NMSE is bit-identical across 4 downstream dequant/MAC
-        // shape rewrites => the error enters at or before regS/regM. Load the
-        // 12 code bytes of the row pair with plain strided reads into a private
-        // array, then decode from registers. Semantics identical to
-        // get_scale_min_k4 (incl. the 0x3F/0x0F/0xC0 mask quirks).
-        global const uchar * sb_s = srow + (size_t)sb * 12 * (size_t)M + (size_t)rp * 2;
-        uchar cs[24];
-        #pragma unroll
-        for (uint c = 0; c < 12; ++c) {
-            cs[2*c]   = sb_s[c * M];
-            cs[2*c+1] = sb_s[c * M + 1];
-        }
-        uchar sv0, mn0, sv1, mn1;
-        if (jk < 4) {
-            sv0 = cs[2*jk]        & 0x3F;
-            mn0 = cs[2*(jk+4)]    & 0x3F;
-            sv1 = cs[2*jk+1]      & 0x3F;
-            mn1 = cs[2*(jk+4)+1]  & 0x3F;
-        } else {
-            sv0 = (cs[2*(jk+4)]      & 0x0F) | ((cs[2*(jk-4)]    & 0xC0) >> 2);
-            mn0 = ((cs[2*(jk+4)]     >> 4) & 0x0F) | ((cs[2*jk]  & 0xC0) >> 2);
-            sv1 = (cs[2*(jk+4)+1]    & 0x0F) | ((cs[2*(jk-4)+1]  & 0xC0) >> 2);
-            mn1 = ((cs[2*(jk+4)+1]   >> 4) & 0x0F) | ((cs[2*jk+1]& 0xC0) >> 2);
-        }
-
-        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));
-        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));
+        regS = serow[rp + k * M2];
+        regM = merow[rp + k * M2];
 
         if (slid < 4) {
             regB.s0123 = read_imagef(src1, bbase + (int)(slid * 2 + k * 8));
@@ -978,6 +939,14 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
         regA.s3 = read_imageui(src0_q, (int)(rp + qbase + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
         DEQUANT_Q4K_BLOCK(wq, as_ushort8(regA), regS, regM);
         MAC_Q4K_BLOCK(totalSum, wq, regB, 2, 3);
+
+        if (dbg != (global float *)0) {
+            global float * db = dbg + ((ulong)col * (K / 32) + k) * 6;
+            db[0] = totalSum.s0 - ts_prev.s0;
+            db[1] = totalSum.s1 - ts_prev.s1;
+            db[2] = (float)regS.s0;  db[3] = (float)regS.s1;
+            db[4] = (float)regM.s0;  db[5] = (float)regM.s1;
+        }
     }
 
     // reduction in local memory, assumes #wave=4 (SUBGROUP_SIZE: the q4_K program

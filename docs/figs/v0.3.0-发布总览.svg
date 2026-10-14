@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1650" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif">
+  <defs>
+    <linearGradient id="hdr" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141a2e"/><stop offset="1" stop-color="#232d54"/>
+    </linearGradient>
+    <linearGradient id="foot" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#141a2e"/><stop offset="1" stop-color="#2b2350"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8B5CF6"/><stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1080" height="1650" fill="#f5f7fb"/>
+
+  <!-- ============ header ============ -->
+  <rect width="1080" height="148" fill="url(#hdr)"/>
+  <circle cx="985" cy="10" r="130" fill="#8B5CF6" opacity="0.12"/>
+  <text x="42" y="66" font-size="40" font-weight="800" fill="#ffffff">v0.3.0 阶段成果总览</text>
+  <rect x="790" y="36" rx="8" width="250" height="34" fill="#ffffff" opacity="0.12"/>
+  <text x="915" y="59" font-size="16" fill="#dfe4f5" text-anchor="middle" font-weight="600">2026-10-14 · versionCode 18</text>
+  <text x="42" y="108" font-size="17" fill="#c3cbe4">OpenCL batched MoE（q4_0）上线 + P0 KV checkpoint + 三崩溃修复 + q4_K 禁用定案</text>
+  <rect x="42" y="126" width="130" height="4" rx="2" fill="url(#glow)"/>
+
+  <!-- ============ 1 需求与更新 ============ -->
+  <text x="42" y="196" font-size="15" font-weight="800" fill="#8B5CF6">01</text>
+  <text x="74" y="196" font-size="21" font-weight="800" fill="#1c2434">需求与更新</text>
+
+  <g>
+    <rect x="42" y="216" width="492" height="104" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="42" y="216" width="6" height="104" rx="3" fill="#8B5CF6"/>
+    <text x="66" y="248" font-size="17" font-weight="700" fill="#1c2434">batched MUL_MAT_ID（q4_0）单 dispatch</text>
+    <text x="66" y="274" font-size="13.5" fill="#5b6478">一次 gather 计算全部 (slot, token) 列，ids 驻留设备端直读</text>
+    <text x="66" y="296" font-size="13.5" fill="#5b6478">免逐专家 launch 与 ids 回读同步</text>
+  </g>
+  <g>
+    <rect x="550" y="216" width="490" height="104" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="550" y="216" width="6" height="104" rx="3" fill="#3b82f6"/>
+    <text x="574" y="248" font-size="17" font-weight="700" fill="#1c2434">P0 KV checkpoint / restore</text>
+    <text x="574" y="274" font-size="13.5" fill="#5b6478">长对话多轮不再整段重 prefill：边界 checkpoint + 增量恢复</text>
+    <text x="574" y="296" font-size="13.5" fill="#5b6478">短对话自动 full clear，代价 &lt;1s</text>
+  </g>
+  <g>
+    <rect x="42" y="330" width="492" height="104" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="42" y="330" width="6" height="104" rx="3" fill="#10b981"/>
+    <text x="66" y="362" font-size="17" font-weight="700" fill="#1c2434">P3 专家桶排序 + P4 激活缓存</text>
+    <text x="66" y="388" font-size="13.5" fill="#5b6478">prefill：同专家列聚邻，权重 L2 复用（hist/scan/scatter 三小内核）</text>
+    <text x="66" y="410" font-size="13.5" fill="#5b6478">decode：激活 sub-buffer/image 8 槽缓存，每步免重建</text>
+  </g>
+  <g>
+    <rect x="550" y="330" width="490" height="104" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="550" y="330" width="6" height="104" rx="3" fill="#f59e0b"/>
+    <text x="574" y="362" font-size="17" font-weight="700" fill="#1c2434">_probe/moe_probe 探针首次入库</text>
+    <text x="574" y="388" font-size="13.5" fill="#5b6478">真机 GPU/CPU 同权重 NMSE 对照 + UNI / SAME / DUMP 诊断</text>
+    <text x="574" y="410" font-size="13.5" fill="#5b6478">新内核上线门槛：GPU NMSE = 0</text>
+  </g>
+
+  <!-- ============ 2 主要问题 ============ -->
+  <text x="42" y="492" font-size="15" font-weight="800" fill="#ef4444">02</text>
+  <text x="74" y="492" font-size="21" font-weight="800" fill="#1c2434">主要问题（过程实录）</text>
+
+  <g>
+    <rect x="42" y="510" width="1000" height="52" rx="10" fill="#fef2f2" stroke="#fecaca"/>
+    <rect x="58" y="524" rx="7" width="66" height="25" fill="#ef4444"/>
+    <text x="91" y="542" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">崩溃①</text>
+    <text x="142" y="543" font-size="15" fill="#7f1d1d" font-weight="600">CL 内核写 nullptr（OpenCL C 非 C++）→ 加载任意模型即崩，err = -11</text>
+  </g>
+  <g>
+    <rect x="42" y="572" width="1000" height="52" rx="10" fill="#fef2f2" stroke="#fecaca"/>
+    <rect x="58" y="586" rx="7" width="66" height="25" fill="#ef4444"/>
+    <text x="91" y="604" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">崩溃②</text>
+    <text x="142" y="605" font-size="15" fill="#7f1d1d" font-weight="600">MoE 激活 image 宽度按 /4 误写（应为 /16，宽 4 倍）→ 推理首个 MoE op 崩，clCreateImage -38</text>
+  </g>
+  <g>
+    <rect x="42" y="634" width="1000" height="52" rx="10" fill="#fef2f2" stroke="#fecaca"/>
+    <rect x="58" y="648" rx="7" width="66" height="25" fill="#ef4444"/>
+    <text x="91" y="666" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">崩溃③</text>
+    <text x="142" y="667" font-size="15" fill="#7f1d1d" font-weight="600">sort scratch 的 perm 起点 516B 未按 256B 对齐 → prefill 首 MoE op 崩，clCreateSubBuffer -13</text>
+  </g>
+  <g>
+    <rect x="42" y="696" width="1000" height="52" rx="10" fill="#fffbeb" stroke="#fde68a"/>
+    <rect x="58" y="710" rx="7" width="66" height="25" fill="#d97706"/>
+    <text x="91" y="728" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">乱码</text>
+    <text x="142" y="729" font-size="15" fill="#78350f" font-weight="600">q4_K batched MoE 确定性乱码：真机探针 NMSE 1.27 / 23.5 / 2.6（gateup / down / prefill-tok4）</text>
+  </g>
+
+  <!-- ============ 3 措施 ============ -->
+  <text x="42" y="806" font-size="15" font-weight="800" fill="#3b82f6">03</text>
+  <text x="74" y="806" font-size="21" font-weight="800" fill="#1c2434">措施与根因排查</text>
+
+  <g>
+    <rect x="42" y="826" width="492" height="240" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="42" y="826" width="492" height="44" rx="12" fill="#eff6ff"/>
+    <rect x="42" y="856" width="492" height="14" fill="#eff6ff"/>
+    <text x="62" y="855" font-size="16" font-weight="700" fill="#1d4ed8">三崩溃逐一修复（全部复盘归档）</text>
+    <text x="62" y="900" font-size="14" fill="#1c2434">① nullptr → 写 (global uint*)0，两处 .cl</text>
+    <text x="62" y="930" font-size="14" fill="#1c2434">② image 宽度 = b_size / 16（1 px = 16 B float4）</text>
+    <text x="62" y="960" font-size="14" fill="#1c2434">③ perm_origin = align_up(hist_bytes, 256)</text>
+    <text x="62" y="1002" font-size="13" fill="#8a93a8">教训：手排 scratch 的 sub-buffer/图像起点必须</text>
+    <text x="62" y="1022" font-size="13" fill="#8a93a8">按 CL_DEVICE_MEM_BASE_ADDR_ALIGN 对齐</text>
+  </g>
+  <g>
+    <rect x="550" y="826" width="490" height="240" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <rect x="550" y="826" width="490" height="44" rx="12" fill="#f5f3ff"/>
+    <rect x="550" y="856" width="490" height="14" fill="#f5f3ff"/>
+    <text x="570" y="855" font-size="16" font-weight="700" fill="#6d28d9">q4_K 乱码真机二分（5 形状全排除）</text>
+    <text x="570" y="900" font-size="14" fill="#1c2434">· VSB 宏变体 / mad 开关 → 位级不变</text>
+    <text x="570" y="928" font-size="14" fill="#1c2434">· dequant-once 形状（mc3 式）→ 位级不变</text>
+    <text x="570" y="956" font-size="14" fill="#1c2434">· 直线化 scale 解码（24B 入私有数组）→ 位级不变</text>
+    <text x="570" y="984" font-size="14" fill="#1c2434">· UNI 全 slot 同专家：无跨 slot 泄漏（输出彼此一致但皆错）</text>
+    <text x="570" y="1012" font-size="14" fill="#1c2434">· dense-loop 同平面数据位精确 ⇒ 数据面正确</text>
+    <text x="570" y="1048" font-size="13" fill="#8a93a8">结论：错误在共享路径，疑点收敛 enqueue 侧子群映射</text>
+  </g>
+
+  <!-- ============ 4 效果 ============ -->
+  <text x="42" y="1118" font-size="15" font-weight="800" fill="#10b981">04</text>
+  <text x="74" y="1118" font-size="21" font-weight="800" fill="#1c2434">阶段效果（Adreno 830 真机）</text>
+
+  <g>
+    <rect x="42" y="1138" width="192" height="120" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <text x="138" y="1190" font-size="30" font-weight="800" fill="#10b981" text-anchor="middle">149</text>
+    <text x="138" y="1212" font-size="13" fill="#5b6478" text-anchor="middle">t/s · q4_0 prefill</text>
+  </g>
+  <g>
+    <rect x="244" y="1138" width="192" height="120" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <text x="340" y="1190" font-size="30" font-weight="800" fill="#3b82f6" text-anchor="middle">14–22</text>
+    <text x="340" y="1212" font-size="13" fill="#5b6478" text-anchor="middle">t/s · q4_0 decode</text>
+  </g>
+  <g>
+    <rect x="446" y="1138" width="192" height="120" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <text x="542" y="1190" font-size="26" font-weight="800" fill="#8B5CF6" text-anchor="middle">34s→4.4s</text>
+    <text x="542" y="1212" font-size="13" fill="#5b6478" text-anchor="middle">多轮二次 prefill（P0）</text>
+  </g>
+  <g>
+    <rect x="648" y="1138" width="192" height="120" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <text x="744" y="1190" font-size="30" font-weight="800" fill="#10b981" text-anchor="middle">= 0</text>
+    <text x="744" y="1212" font-size="13" fill="#5b6478" text-anchor="middle">q4_0 探针 NMSE</text>
+  </g>
+  <g>
+    <rect x="850" y="1138" width="192" height="120" rx="12" fill="#ffffff" stroke="#e5e8f0"/>
+    <text x="946" y="1190" font-size="24" font-weight="800" fill="#1c2434" text-anchor="middle">ae8ba17</text>
+    <text x="946" y="1212" font-size="13" fill="#5b6478" text-anchor="middle">已 push main · 75 files</text>
+  </g>
+
+  <rect x="42" y="1270" width="1000" height="46" rx="10" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="62" y="1299" font-size="14.5" fill="#065f46" font-weight="600">发布安全动作：q4_K batched 入口禁用 → 自动回退已验证 dense-loop（正确性优先），q4_0 batched 不受影响</text>
+
+  <!-- ============ 5 遗留 ============ -->
+  <text x="42" y="1372" font-size="15" font-weight="800" fill="#f59e0b">05</text>
+  <text x="74" y="1372" font-size="21" font-weight="800" fill="#1c2434">遗留问题 / 下一步</text>
+
+  <g>
+    <rect x="42" y="1390" width="1000" height="46" rx="10" fill="#ffffff" stroke="#e5e8f0"/>
+    <circle cx="66" cy="1413" r="4" fill="#f59e0b"/>
+    <text x="86" y="1419" font-size="15" fill="#1c2434">q4_K batched 乱码根因未定（dense-loop 暂代）——下一刀：enqueue 侧 local size / 子群映射假设 + 探针 per-k-block 部分和 dump</text>
+  </g>
+  <g>
+    <rect x="42" y="1446" width="1000" height="46" rx="10" fill="#ffffff" stroke="#e5e8f0"/>
+    <circle cx="66" cy="1469" r="4" fill="#f59e0b"/>
+    <text x="86" y="1475" font-size="15" fill="#1c2434">v0.3.0 release APK 重打（Dart 未变可复用 app.so AOT 通道），完成后更新 README 下载区 SHA-256</text>
+  </g>
+  <g>
+    <rect x="42" y="1502" width="1000" height="46" rx="10" fill="#ffffff" stroke="#e5e8f0"/>
+    <circle cx="66" cy="1525" r="4" fill="#f59e0b"/>
+    <text x="86" y="1531" font-size="15" fill="#1c2434">真机回收验证：P0 长对话收益（TTFT 稳定性）+ P3 prefill 速度对比（GGML_OPENCL_BATCHED_MOE=0 A/B）</text>
+  </g>
+
+  <!-- ============ footer ============ -->
+  <rect x="0" y="1578" width="1080" height="72" fill="url(#foot)"/>
+  <text x="540" y="1610" font-size="18" font-weight="800" fill="#ffffff" text-anchor="middle">github.com/liangjianzeng/TongYi-Lite</text>
+  <text x="540" y="1634" font-size="12.5" fill="#8a93c8" text-anchor="middle">探针工具与真机调试工作流：_probe/moe_probe/README.md · 版本详情：CHANGELOG.md [0.3.0]</text>
+</svg>
