@@ -34,6 +34,14 @@ GGML_BACKEND_API void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int pl
 // set_tensor pattern; from IO threads it crashes the 740 libCB submission
 // thread (bank7-10). Falls back to the SVM-pointer pack when no staging.
 GGML_BACKEND_API void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const void * src_host);
+// [dspark M2 v3] async batched drain: enqueue the CL_FALSE write + pack and
+// return the write event via ev_out (may be nullptr for fallback records).
+// Caller collects events across the whole wave and waits once via
+// ggml_cl_moe_q3k_stage_wait() — host staging must stay alive until then.
+// Main-thread submission only (IO-thread device commands crash the 740
+// libCB submission thread, bank7-10).
+GGML_BACKEND_API void ggml_cl_moe_q3k_stage_pack_async(struct ggml_tensor * soa, int plane_slot, const void * src_host, void ** ev_out);
+GGML_BACKEND_API void ggml_cl_moe_q3k_stage_wait(void ** evs, int n);
 // eagerly create the (empty) planes for a q3_K slot-bank base tensor — must
 // run at load time for EVERY family base so the batched dispatch never sees a
 // planeless tensor (first compute can precede the first fill)

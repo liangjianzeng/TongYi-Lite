@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include <algorithm>
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -2477,25 +2479,35 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     // 图侧条件必须是运行期 defer 条件的**超集**（runtime 只在窗口模式 defer；图多切
     // 无害 —— trigger 对空 defer_list 是 no-op），否则 kSlotPending 的槽位永远没人
     // 发布，后段会静默读到垃圾。
-    const int32_t moe_split = (moe_slots && moe_slots->uses_layer(il)) ? moe_slots->matmul_split() : 0;
+    const int32_t moe_split_raw = (moe_slots && moe_slots->uses_layer(il)) ? moe_slots->matmul_split() : 0;
+    const int32_t moe_split = std::min(moe_split_raw, (int32_t) n_expert_used);
     ggml_tensor * experts = nullptr;
-    if (moe_split > 0 && n_tokens > 0 && moe_split < n_expert_used) {
-        const int64_t sp = moe_split;
+    if (moe_split > 0 && n_tokens > 0) {
         ggml_tensor * sem  = selected_experts_mm;   // [n_used, n_tokens] I32（phase A 输出）
-        ggml_tensor * sem_f = ggml_view_2d(ctx0, sem, sp, n_tokens, sem->nb[1], 0);
-        ggml_tensor * in_f = cur;
-        ggml_tensor * in_b = cur;
-        if (cur->ne[1] > 1) {
-            // weight_before_ffn 的展开列输入：按 rank 切，保持 ids↔列一一对应
-            in_f = ggml_view_3d(ctx0, cur, cur->ne[0], sp, cur->ne[2], cur->nb[1], cur->nb[2], 0);
-            in_b = ggml_view_3d(ctx0, cur, cur->ne[0], cur->ne[1] - sp, cur->ne[2], cur->nb[1], cur->nb[2], sp * cur->nb[1]);
+        if (moe_split >= (int32_t) n_expert_used) {
+            // 全延后（动态切点遇到 rank0 miss）：前段为空，trigger 只依赖 phase A，
+            // 整段专家 join 之后再算 —— phase A 内零阻塞读，所有 miss 并行异步读。
+            ggml_tensor * trig = moe_slots->build_deferred_trigger(ctx0, sem, sem, il);
+            cb(trig, "ffn_moe_slot_trigger", il);
+            experts = moe_segment(trig, cur);
+            cb(experts, "ffn_moe_down", il);
+        } else {
+            const int64_t sp = moe_split;
+            ggml_tensor * sem_f = ggml_view_2d(ctx0, sem, sp, n_tokens, sem->nb[1], 0);
+            ggml_tensor * in_f = cur;
+            ggml_tensor * in_b = cur;
+            if (cur->ne[1] > 1) {
+                // weight_before_ffn 的展开列输入：按 rank 切，保持 ids↔列一一对应
+                in_f = ggml_view_3d(ctx0, cur, cur->ne[0], sp, cur->ne[2], cur->nb[1], cur->nb[2], 0);
+                in_b = ggml_view_3d(ctx0, cur, cur->ne[0], cur->ne[1] - sp, cur->ne[2], cur->nb[1], cur->nb[2], sp * cur->nb[1]);
+            }
+            ggml_tensor * ex_f = moe_segment(sem_f, in_f);   // [n_embd, sp, n_tokens]
+            ggml_tensor * trig = moe_slots->build_deferred_trigger(ctx0, sem, ex_f, il);
+            ggml_tensor * sem_b = ggml_view_2d(ctx0, trig, sem->ne[0] - sp, n_tokens, trig->nb[1], sp * trig->nb[0]);
+            ggml_tensor * ex_b = moe_segment(sem_b, in_b);   // [n_embd, n_used-sp, n_tokens]
+            experts = ggml_concat(ctx0, ex_f, ex_b, 1);
+            cb(experts, "ffn_moe_down", il);
         }
-        ggml_tensor * ex_f = moe_segment(sem_f, in_f);   // [n_embd, sp, n_tokens]
-        ggml_tensor * trig = moe_slots->build_deferred_trigger(ctx0, sem, ex_f, il);
-        ggml_tensor * sem_b = ggml_view_2d(ctx0, trig, sem->ne[0] - sp, n_tokens, trig->nb[1], sp * trig->nb[0]);
-        ggml_tensor * ex_b = moe_segment(sem_b, in_b);   // [n_embd, n_used-sp, n_tokens]
-        experts = ggml_concat(ctx0, ex_f, ex_b, 1);
-        cb(experts, "ffn_moe_down", il);
     } else {
         experts = moe_segment(selected_experts_mm, cur);
     }

@@ -616,6 +616,11 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa        (const struct llama_model * model);
 
+    // Max routed-expert usage across layers (0 when the model has no MoE
+    // layers). Worst case for slot / ubatch sizing. (n_expert itself lives in
+    // llama-ext.h.)
+    LLAMA_API int32_t llama_model_n_expert_used(const struct llama_model * model);
+
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 
