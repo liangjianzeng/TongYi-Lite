@@ -6501,6 +6501,13 @@ extern struct ggml_backend_device_i ggml_backend_opencl_device_i;
 static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_reg * reg) {
     std::vector<ggml_backend_device> found_devices;
 
+    // [dspark probe] GGML_OPENCL_OFF=1: skip device probe entirely so the
+    // schedule falls back to CPU-only. Used to measure the CPU floor A/B.
+    if (getenv("GGML_OPENCL_OFF") != nullptr) {
+        GGML_LOG_INFO("ggml_opencl: GGML_OPENCL_OFF=1 -> CPU-only mode\n");
+        return found_devices;
+    }
+
 #ifdef GGML_OPENCL_PROFILING
     GGML_LOG_INFO("ggml_opencl: OpenCL profiling enabled\n");
 #endif
@@ -8960,17 +8967,6 @@ inline bool dense_moe_loop_enabled() {
 }
 
 // [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
-// kernels (q4_0/q8_0/mxfp4) were fixed by reworking the trans4_ns repack
-// kernels whose private-vector uchar* aliasing was miscompiled by Adreno
-// compilers; they pass test-backend-ops on-device (0 FAIL) and have far lower
-// kernel-launch overhead than the dense-loop (which pays one GEMV dispatch per
-// expert per token), so the vendor path is the DEFAULT for its supported
-// types. The dense-loop remains the only GPU path for q4_K (no vendor MoE
-// kernel exists for it).
-//   GGML_OPENCL_DENSE_MOE=0  -> dense-loop fully disabled (q4_K MoE -> CPU)
-//   GGML_OPENCL_DENSE_MOE=1  -> force the dense-loop for all supported types
-//   GGML_OPENCL_MUL_MAT_ID=0 -> vendor MoE disabled (q4_0/q8_0/mxfp4 -> CPU)
-// [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
 // kernels (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830
 // for ALL their supported types, not just via the trans4_ns repack aliasing:
 // moe_probe4 (real model name "ffn...exps" + real Ling-3.0-tiny shapes
@@ -9606,7 +9602,14 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             // ggml_cl_mul_mat_id_batched exactly — a tensor admitted here is
             // guaranteed to dispatch. The se planes are standalone cl_buffers
             // (not subbuffers), so only the shape gates apply.
-            if (op->src[0]->type == GGML_TYPE_Q3_K &&
+            // GGML_OPENCL_BATCHED_MOE=0 must reject q3_K here (CPU fallback):
+            // the compute path has no dense q3_K route and would abort.
+            static const bool q3k_batched_moe_enabled = [] {
+                const char * e = getenv("GGML_OPENCL_BATCHED_MOE");
+                return !e || e[0] != '0';
+            }();
+            if (q3k_batched_moe_enabled &&
+                op->src[0]->type == GGML_TYPE_Q3_K &&
                 op->src[0]->ne[2] > 1 &&   // E==1: set_tensor skips packing -> must stay off-GPU
                 op->src[1]->type == GGML_TYPE_F32 &&
                 op->src[2]->type == GGML_TYPE_I32 &&
@@ -23501,7 +23504,8 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (!is_q4_0 && !is_q4_k && !is_q3_k) {
         return false;
     }
-    // [dspark 2026-10-14] q4_K batched MoE DISABLED — Adreno 830 (E031.47.18.49)
+    // [dspark 2026-10-14] HISTORICAL (superseded by the v2 note below): q4_K
+    // batched MoE DISABLED — Adreno 830 (E031.47.18.49)
     // driver-level codegen corruption, NOT a source bug. Evidence chain
     // (_probe/moe_probe, env GGML_OPENCL_MOE_KDBG=1 / MOE_PROBE_KREF=1):
     //   * 7 code-shape rewrites (VSB macro variants, mad on/off, dequant-once,
@@ -23576,6 +23580,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
             return false;
         }
         es_base = (int)(src0->view_offs / slot_bpe);
+    } else if (src0->view_src != nullptr) {
+        // q4_0/q4_K batched path has no view-slot offset handling: reading the
+        // parent planes from slot 0 would silently produce wrong results
+        return false;
     }
     if (K % 32 != 0 || M % 128 != 0) return false;   // M%128: no row-pair padding
     if ((is_q4_k || is_q3_k) && K % 256 != 0) return false;   // superblock scale indexing
@@ -24024,7 +24032,14 @@ static void ggml_cl_mul_mat_id_dense_loop(ggml_backend_t backend,
             const int e = ids[(size_t)t * ids_row + j];
             if (e < 0 || e >= E) {
                 GGML_LOG_WARN("ggml_opencl: dense-loop MoE: expert id %d out of range [0, %d)\n", e, E);
-                return;
+                // gather semantics: zero this dst slot and keep going —
+                // returning here would leave every remaining slot unwritten
+                const cl_ulong slot_off = extrad->offset + dst->view_offs
+                    + (cl_ulong)j * dst->nb[1] + (cl_ulong)t * dst->nb[2];
+                const float zero_val = 0.0f;
+                CL_CHECK(clEnqueueFillBuffer(backend_ctx->queue, extrad->data_device,
+                    &zero_val, sizeof(float), slot_off, (size_t)N * sizeof(float), 0, NULL, NULL));
+                continue;
             }
 
             // Match the CPU reference exactly (ggml_compute_forward_mul_mat_id):

@@ -74,11 +74,12 @@ add_compile_definitions(NDEBUG)
 # and is unaffected by this flag.
 #
 # Set via GGML_CPU_ARM_ARCH (NOT a manual -march flag): ggml-cpu's KleidiAI
-# Cortex-A78 (Dimensity 8200/920 等 ARMv8.2-A) 支持 dotprod 但不支持 i8mm
-# （i8mm 需 ARMv8.6-A/ARMv9），在此架构上使用 i8mm 会触发 SIGILL。
-# 降级为 armv8.2-a+dotprod：兼容所有 Cortex-A78 设备，KleidiAI 的 dotprod
-# 内核仍可被编译和使用，代价是 i8mm 量化内核不可用（性能影响可接受）。
-set(GGML_CPU_ARM_ARCH armv8.2-a+dotprod CACHE STRING "" FORCE)
+# kernels are gated by the arch extensions. Historically this was
+# armv8.2-a+dotprod for Cortex-A78 compatibility; 2026-10-15 真机 A/B (K90/830,
+# 64 tok 交替控温) 证实 v86 满血档 +23% (5.59 vs 4.55 t/s)，且 APK 仅发
+# SM8735 / 8 Gen3(740) / 8 Gen5(K90) 三台 Armv9 测试机（均支持 i8mm/bf16，
+# Oryon 上实测无 SIGILL），故升到官方 MiniCPM-V-Apps 同款满血档。
+set(GGML_CPU_ARM_ARCH armv8.6-a+dotprod+i8mm+fp16+bf16 CACHE STRING "" FORCE)
 
 # Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).

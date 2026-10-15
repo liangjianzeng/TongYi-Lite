@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -52,6 +53,18 @@ static int moe_ssd_io_threads() {
         return (v > 0 && v <= 64) ? v : kMoeSsdIoThreadsDefault;
     }();
     return n;
+}
+
+// A2+ 延后 miss 的异步读取（默认开）。设 LLAMA_MOE_DEFER_ASYNC=0 退回旧行为：
+// trigger 节点（process_deferred）里才开始同步读。开的时候 phase A 结尾就把读
+// 用 IO 线程发出去，与前段 install/matmul 重叠 —— 740 实测 trigger 串行读
+// ~130-150ms/token 是唯一还没动过的大头，这个开关是解它的第一刀。
+static bool moe_defer_async() {
+    static const int v = []() {
+        const char * s = std::getenv("LLAMA_MOE_DEFER_ASYNC");
+        return !(s && std::atoi(s) == 0);
+    }();
+    return v != 0;
 }
 
 // slot_to_expert 的哨兵值。
@@ -620,10 +633,31 @@ struct llama_moe_slot_runtime::impl {
     /// 每层被延后读取的 (expert, slot)，由 phase A 写入、phase B 消费。
     std::vector<std::vector<pending_install>> deferred;
 
+    /// A2+：每层「延后 miss 异步读」的批次状态。phase A 结尾 spawn、
+    /// trigger 节点（process_deferred）join + 发布。读线程写的是 phase A 已标
+    /// kSlotPending 的槽位（无人会动），且不持任何层锁 —— 与预读 worker 的
+    /// 多 helper 并发读同一层是同一套安全前提。
+    struct defer_batch {
+        std::atomic<int> next{0};
+        int n = 0;
+        std::vector<pending_install> * list = nullptr;
+        layer_state * st = nullptr;
+        std::vector<std::thread> ths;
+        std::mutex exc_mtx;
+        std::exception_ptr exc;
+    };
+    std::vector<defer_batch> defer_batches;
+    // 诊断：phase A 发线程的耗时 / trigger join 等待的耗时。join 时间就是
+    // 「读没被前段计算完全盖住」的残余 —— 优化是否生效直接看它掉不掉。
+    std::atomic<int64_t> defer_spawn_ns{0};
+    std::atomic<int64_t> defer_wait_ns{0};
+
     uint64_t miss_pos[16] = {};
     uint64_t miss_pos_steps = 0;
     uint64_t miss_per_layer_steps = 0;
     int64_t last_process_ns = 0;
+    int64_t last_readids_ns = 0;
+    int64_t last_writeids_ns = 0;
     uint64_t last_flush_idx = 0;
     // 预读诊断字段的增量基线，见 flush_ubatch。
     uint64_t last_arm_skipped = 0;
@@ -632,15 +666,18 @@ struct llama_moe_slot_runtime::impl {
     uint64_t last_pred_read = 0;
     uint64_t last_pf_hits = 0;
     uint64_t last_pf_pub = 0;
+    int64_t  last_defer_spawn_ns = 0;
+    int64_t  last_defer_wait_ns = 0;
 
     explicit impl(const llama_model & model) :
+        predicted(model.layers.size()),
+        miss_per_layer(model.layers.size(), 0),
+        deferred(model.layers.size()),
+        defer_batches(model.layers.size()),
         model(model),
         n_expert((int32_t) model.hparams.n_expert),
         n_slots(model.moe_slot_bank_size()),
         layers(model.layers.size()),
-        predicted(model.layers.size()),
-        deferred(model.layers.size()),
-        miss_per_layer(model.layers.size(), 0),
         userdata(model.layers.size()) {
         for (size_t il = 0; il < model.layers.size(); ++il) {
             auto & state = layers[il];
@@ -962,6 +999,81 @@ struct llama_moe_slot_runtime::impl {
         publish_slot_in_window(st, expert, slot);
     }
 
+    /// ── A2+：延后 miss 的异步读（phase A 发、trigger 收）──────────────────
+    ///
+    /// r10/r11 实测：trigger（process_deferred）里的串行读 ~130-150ms/token 是
+    /// 全路径唯一的大头 —— 它在「前段已算完」之后才开始，CPU 图执行时与任何
+    /// 计算都不重叠。这里把读的**起点**提前到 phase A 结尾（router 输出一出来
+    /// 就发），读与前段 install/matmul 并行；trigger 只 join + 发布。
+    ///
+    /// 安全前提（与预读 worker 相同）：
+    ///   * 写的槽位 phase A 已标 kSlotPending，淘汰/分配/预读都不会碰它；
+    ///   * read_expert_directv 并发调用同一层是既有用法（worker 多 helper）；
+    ///   * 读线程不持任何层锁 —— phase A 发线程时持有 st.mutex，不会死锁。
+    /// 图序保证同一层不会有两个批次同时在飞（trigger 在本层 MoE 块内 join），
+    /// spawn 前仍防御性 join 一次。
+    void spawn_deferred_reads(int layer, layer_state & st) {
+        auto & list = deferred[(size_t) layer];
+        auto & batch = defer_batches[(size_t) layer];
+        // 防御：上一个批次若因任何原因没被 trigger 消费，先收干净再开新的。
+        for (auto & t : batch.ths) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+        batch.ths.clear();
+        batch.next.store(0, std::memory_order_relaxed);
+        batch.n = (int) list.size();
+        batch.list = &list;
+        batch.st = &st;
+        {
+            std::lock_guard<std::mutex> lk(batch.exc_mtx);
+            batch.exc = nullptr;
+        }
+        const int n_th = std::max(1, std::min(moe_ssd_io_threads(), batch.n));
+        for (int t = 0; t < n_th; ++t) {
+            batch.ths.emplace_back([this, layer]() { deferred_read_one(layer); });
+        }
+    }
+
+    void deferred_read_one(int layer) {
+        auto & batch = defer_batches[(size_t) layer];
+        const auto & list = *batch.list;
+        auto & st = *batch.st;
+        for (;;) {
+            const int k = batch.next.fetch_add(1, std::memory_order_relaxed);
+            if (k >= batch.n) {
+                break;
+            }
+            try {
+                read_expert_directv(st, list[(size_t) k].expert, list[(size_t) k].slot, true);
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(batch.exc_mtx);
+                if (!batch.exc) {
+                    batch.exc = std::current_exception();
+                }
+            }
+        }
+    }
+
+    /// trigger 节点（process_deferred）里调用：等异步读收工并把异常还回主线程。
+    void join_deferred_reads(int layer) {
+        auto & batch = defer_batches[(size_t) layer];
+        for (auto & t : batch.ths) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+        batch.ths.clear();
+        batch.list = nullptr;
+        batch.st = nullptr;
+        if (batch.exc) {
+            std::exception_ptr e = batch.exc;
+            batch.exc = nullptr;
+            std::rethrow_exception(e);
+        }
+    }
+
     /// ── 缓存预热（LLAMA_MOE_PREWARM）───────────────────────────────────
     ///
     /// 每轮生成开始时各层窗口都是空的（进窗口模式时整表清空 / park 后又清）。
@@ -1267,6 +1379,16 @@ struct llama_moe_slot_runtime::impl {
     }
 
     ~impl() {
+        // 兜底：正常路径上 trigger 节点（process_deferred）已把每层批次 join 掉，
+        // 这里只防「异常退出图执行」的极端情况 —— 线程体捕获 `this`，析构前必须收干净。
+        for (auto & b : defer_batches) {
+            for (auto & t : b.ths) {
+                if (t.joinable()) {
+                    t.join();
+                }
+            }
+            b.ths.clear();
+        }
         if (cur.n_layers > 0) {
             flush_ubatch(cur.n_tokens <= 1 ? "decode" : "prefill",
                 cur.n_tokens <= 1 ? n_decode_step : n_prefill_ubatch);
@@ -2000,30 +2122,42 @@ struct llama_moe_slot_runtime::impl {
         const uint64_t all_now = io_bytes_all.load(std::memory_order_relaxed);
         const uint64_t calls_now = io_calls_all.load(std::memory_order_relaxed);
         const int64_t proc_now = process_ns.load(std::memory_order_relaxed);
+        const int64_t readids_now = readids_ns.load(std::memory_order_relaxed);
+        const int64_t writeids_now = writeids_ns.load(std::memory_order_relaxed);
         const uint64_t arm_skip_now = lookahead.n_arm_skipped.load(std::memory_order_relaxed);
         const uint64_t wait_now     = lookahead.n_waits.load(std::memory_order_relaxed);
         const int64_t  wait_ns_now  = lookahead.n_wait_ns.load(std::memory_order_relaxed);
         const uint64_t pred_read_now = lookahead.n_pred_read.load(std::memory_order_relaxed);
         const uint64_t pf_hits_now = lookahead.n_hits.load(std::memory_order_relaxed);
         const uint64_t pf_pub_now  = lookahead.n_pred_published.load(std::memory_order_relaxed);
+        const int64_t dspawn_now = defer_spawn_ns.load(std::memory_order_relaxed);
+        const int64_t dwait_now  = defer_wait_ns.load(std::memory_order_relaxed);
         const uint64_t all_delta = all_now - last_io_bytes;
         const uint64_t calls_delta = calls_now - last_io_calls;
         const int64_t proc_delta = proc_now - last_process_ns;
+        const int64_t readids_delta = readids_now - last_readids_ns;
+        const int64_t writeids_delta = writeids_now - last_writeids_ns;
         const uint64_t arm_skip_delta = arm_skip_now - last_arm_skipped;
         const uint64_t wait_delta = wait_now - last_wait_count;
         const int64_t wait_ns_delta = wait_ns_now - last_wait_ns;
         const uint64_t pred_read_delta = pred_read_now - last_pred_read;
         const uint64_t pf_hits_delta = pf_hits_now - last_pf_hits;
         const uint64_t pf_pub_delta  = pf_pub_now - last_pf_pub;
+        const int64_t dspawn_delta = dspawn_now - last_defer_spawn_ns;
+        const int64_t dwait_delta  = dwait_now - last_defer_wait_ns;
         last_io_bytes = all_now;
         last_io_calls = calls_now;
         last_process_ns = proc_now;
+        last_readids_ns = readids_now;
+        last_writeids_ns = writeids_now;
         last_arm_skipped = arm_skip_now;
         last_wait_count = wait_now;
         last_wait_ns = wait_ns_now;
         last_pred_read = pred_read_now;
         last_pf_hits = pf_hits_now;
         last_pf_pub  = pf_pub_now;
+        last_defer_spawn_ns = dspawn_now;
+        last_defer_wait_ns  = dwait_now;
 
         // 这些计数器只在 flush 时前进，而 flush 受 should_log_ubatch 节流。
         // 所以必须把「本次 flush 覆盖了多少步」一起打出来，否则消费方会把
@@ -2037,6 +2171,7 @@ struct llama_moe_slot_runtime::impl {
         moe_log("%s #%llu tok=%d used=%d layers=%d unique/l=%.0f miss=%d hit=%d pack=%d/%d nth=%d "
                 "pread_wall=%.0fms pread_sum=%.0fms bytes=%.0fMiB par=%.2f io=%.0fMiB/s "
                 "readall=%.0fMiB calls=%llu realio=%.0fMiB/s span=%llu pmgmt=%.1fms "
+                "readids=%.1fms writeids=%.1fms deferspawn=%.1fms deferwait=%.1fms "
                 "pfskip=%llu pfwait=%llu/%.1fms pfread=%llu pfpub=%llu pfhit=%llu pfpredict=%llu pevsave=%llu pevforced=%llu pfcached=%llu usedpf=%llu "
                 "runs=%d avg_run=%.1f max_run=%d zerocopy=%.0f%%",
             kind,
@@ -2061,6 +2196,10 @@ struct llama_moe_slot_runtime::impl {
             wall_s > 0.0 ? (double) all_delta / (1024.0 * 1024.0) / wall_s : 0.0,
             (unsigned long long) span,
             ms_of(proc_delta),
+            ms_of(readids_delta),
+            ms_of(writeids_delta),
+            ms_of(dspawn_delta),
+            ms_of(dwait_delta),
             (unsigned long long) arm_skip_delta,
             (unsigned long long) wait_delta,
             ms_of(wait_ns_delta),
@@ -2808,6 +2947,16 @@ void llama_moe_slot_runtime::process(
         }
     }
 
+    // A2+：延后 miss 的读**现在就异步发出去**（默认路径），与前段的
+    // install/matmul 重叠；trigger 节点只 join + 发布。旧同步行为用
+    // LLAMA_MOE_DEFER_ASYNC=0 退回。此刻持着 state.mutex —— 读线程不碰任何
+    // 层锁，安全；写的是 kSlotPending 槽位，无人会动。
+    if (!defer_list.empty() && moe_defer_async()) {
+        const int64_t t_spawn = now_ns();
+        pimpl->spawn_deferred_reads(layer, state);
+        pimpl->defer_spawn_ns.fetch_add(now_ns() - t_spawn, std::memory_order_relaxed);
+    }
+
     int n_unique = 0;
     for (int32_t expert = 0; expert < pimpl->n_expert; ++expert) {
         if (requested[expert]) {
@@ -2987,8 +3136,17 @@ void llama_moe_slot_runtime::process_deferred(int layer) {
         return;
     }
 
-    for (const auto & d : list) {
-        pimpl->read_expert_directv(st, d.expert, d.slot, true);
+    if (!pimpl->defer_batches[(size_t) layer].ths.empty()) {
+        // A2+ 异步路径：phase A 已把读发出去（与前段计算重叠），这里只等收工。
+        // join 的耗时 = 读没被前段完全盖住的残余，直接反映优化效果（诊断 defer_wait）。
+        const int64_t t0 = now_ns();
+        pimpl->join_deferred_reads(layer);
+        pimpl->defer_wait_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
+    } else {
+        // 同步兜底（LLAMA_MOE_DEFER_ASYNC=0）：旧行为，在本节点里才开始读。
+        for (const auto & d : list) {
+            pimpl->read_expert_directv(st, d.expert, d.slot, true);
+        }
     }
     {
         std::lock_guard<std::mutex> lk(st.mutex);
