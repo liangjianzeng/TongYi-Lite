@@ -1,122 +1,152 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 
+// [dspark 2026-10-14] SGB bitcast shims. Host passes -DSGB_FLOAT_BROKEN when
+// the driver's online compiler lacks float overloads of sub_group_broadcast
+// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
+// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
+// [dspark 2026-10-14] Scalar-float subgroup broadcast. 740's online compiler
+// lacks float overloads of sub_group_broadcast entirely -> host passes
+// -DSGB_SCALAR_BROKEN and broadcasts go through the uint-bitcast shim.
+// 830 (E031.47) has working float broadcast but miscompiles kernels whose
+// broadcasts go through an inline wrapper, even in pass-through form
+// (NMSE~2.2, 2026-10-14) -> uses the direct builtin. All call sites are
+// per-component scalar: no vector broadcast anywhere.
+#ifdef SGB_SCALAR_BROKEN
+inline float sgb_f(float v, uint lid) {
+    return as_float(sub_group_broadcast(as_uint(v), lid));
+}
+#define SGB_BC(v, lid) sgb_f(v, lid)
+#else
+#define SGB_BC(v, lid) sub_group_broadcast(v, lid)
+#endif
+
 #ifdef cl_qcom_reqd_sub_group_size
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 #define ADRENO_GPU 1
 #define REQD_SUBGROUP_SIZE_64 __attribute__((qcom_reqd_sub_group_size("half")))
 #endif
 
+// the driver's online compiler lacks float overloads of sub_group_broadcast
+// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
+// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
 // assume
 #define QK4_0 32
 #define N_SIMDGROUP 4
 
 #define dequantizeBlockAccum_ns_sgbroadcast_1_hi(total_sums, bits4, scale, y) \
     float shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 0); \
+    shared_y = SGB_BC(y.s0, 0); \
     total_sums.s0 += ((bits4.s0 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s1 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 0); \
+    shared_y = SGB_BC(y.s1, 0); \
     total_sums.s0 += (((bits4.s0 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 0); \
+    shared_y = SGB_BC(y.s2, 0); \
     total_sums.s0 += (((bits4.s0 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 0); \
+    shared_y = SGB_BC(y.s3, 0); \
     total_sums.s0 += (((bits4.s0 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 0); \
+    shared_y = SGB_BC(y.s4, 0); \
     total_sums.s0 += ((bits4.s2 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s3 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 0); \
+    shared_y = SGB_BC(y.s5, 0); \
     total_sums.s0 += (((bits4.s2 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 0); \
+    shared_y = SGB_BC(y.s6, 0); \
     total_sums.s0 += (((bits4.s2 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 0); \
+    shared_y = SGB_BC(y.s7, 0); \
     total_sums.s0 += (((bits4.s2 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 1); \
+    shared_y = SGB_BC(y.s0, 1); \
     total_sums.s0 += ((bits4.s4 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s5 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 1); \
+    shared_y = SGB_BC(y.s1, 1); \
     total_sums.s0 += (((bits4.s4 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 1); \
+    shared_y = SGB_BC(y.s2, 1); \
     total_sums.s0 += (((bits4.s4 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 1); \
+    shared_y = SGB_BC(y.s3, 1); \
     total_sums.s0 += (((bits4.s4 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 1); \
+    shared_y = SGB_BC(y.s4, 1); \
     total_sums.s0 += ((bits4.s6 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s7 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 1); \
+    shared_y = SGB_BC(y.s5, 1); \
     total_sums.s0 += (((bits4.s6 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 1); \
+    shared_y = SGB_BC(y.s6, 1); \
     total_sums.s0 += (((bits4.s6 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 1); \
+    shared_y = SGB_BC(y.s7, 1); \
     total_sums.s0 += (((bits4.s6 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_1_lo(total_sums, bits4, scale, y) \
-    shared_y = sub_group_broadcast(y.s0, 2); \
+    shared_y = SGB_BC(y.s0, 2); \
     total_sums.s0 += ((bits4.s0 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s1 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 2); \
+    shared_y = SGB_BC(y.s1, 2); \
     total_sums.s0 += (((bits4.s0 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 2); \
+    shared_y = SGB_BC(y.s2, 2); \
     total_sums.s0 += (((bits4.s0 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 2); \
+    shared_y = SGB_BC(y.s3, 2); \
     total_sums.s0 += (((bits4.s0 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 2); \
+    shared_y = SGB_BC(y.s4, 2); \
     total_sums.s0 += ((bits4.s2 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s3 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 2); \
+    shared_y = SGB_BC(y.s5, 2); \
     total_sums.s0 += (((bits4.s2 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 2); \
+    shared_y = SGB_BC(y.s6, 2); \
     total_sums.s0 += (((bits4.s2 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 2); \
+    shared_y = SGB_BC(y.s7, 2); \
     total_sums.s0 += (((bits4.s2 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 3); \
+    shared_y = SGB_BC(y.s0, 3); \
     total_sums.s0 += ((bits4.s4 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s5 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 3); \
+    shared_y = SGB_BC(y.s1, 3); \
     total_sums.s0 += (((bits4.s4 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 3); \
+    shared_y = SGB_BC(y.s2, 3); \
     total_sums.s0 += (((bits4.s4 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 3); \
+    shared_y = SGB_BC(y.s3, 3); \
     total_sums.s0 += (((bits4.s4 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 3); \
+    shared_y = SGB_BC(y.s4, 3); \
     total_sums.s0 += ((bits4.s6 & 0x000F) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += ((bits4.s7 & 0x000F) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 3); \
+    shared_y = SGB_BC(y.s5, 3); \
     total_sums.s0 += (((bits4.s6 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 3); \
+    shared_y = SGB_BC(y.s6, 3); \
     total_sums.s0 += (((bits4.s6 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 3); \
+    shared_y = SGB_BC(y.s7, 3); \
     total_sums.s0 += (((bits4.s6 & 0xF000) >> 12) - 8) * scale.s0 * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0xF000) >> 12) - 8) * scale.s1 * shared_y; \
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_8_hi(total_sums, bits4, scale, y) \
     float8 shared_y; \
-    shared_y = sub_group_broadcast(y, 0); \
+    shared_y.s0 = SGB_BC(y.s0, 0); \
+    shared_y.s1 = SGB_BC(y.s1, 0); \
+    shared_y.s2 = SGB_BC(y.s2, 0); \
+    shared_y.s3 = SGB_BC(y.s3, 0); \
+    shared_y.s4 = SGB_BC(y.s4, 0); \
+    shared_y.s5 = SGB_BC(y.s5, 0); \
+    shared_y.s6 = SGB_BC(y.s6, 0); \
+    shared_y.s7 = SGB_BC(y.s7, 0); \
     total_sums.s0 += ((bits4.s0 & 0x000F) - 8) * scale.s0 * shared_y.s0; \
     total_sums.s0 += (((bits4.s0 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y.s1; \
     total_sums.s0 += (((bits4.s0 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y.s2; \
@@ -133,7 +163,14 @@
     total_sums.s1 += (((bits4.s3 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y.s5; \
     total_sums.s1 += (((bits4.s3 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y.s6; \
     total_sums.s1 += (((bits4.s3 & 0xF000) >> 12) - 8) * scale.s1 * shared_y.s7; \
-    shared_y = sub_group_broadcast(y, 1); \
+    shared_y.s0 = SGB_BC(y.s0, 1); \
+    shared_y.s1 = SGB_BC(y.s1, 1); \
+    shared_y.s2 = SGB_BC(y.s2, 1); \
+    shared_y.s3 = SGB_BC(y.s3, 1); \
+    shared_y.s4 = SGB_BC(y.s4, 1); \
+    shared_y.s5 = SGB_BC(y.s5, 1); \
+    shared_y.s6 = SGB_BC(y.s6, 1); \
+    shared_y.s7 = SGB_BC(y.s7, 1); \
     total_sums.s0 += ((bits4.s4 & 0x000F) - 8) * scale.s0 * shared_y.s0; \
     total_sums.s0 += (((bits4.s4 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y.s1; \
     total_sums.s0 += (((bits4.s4 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y.s2; \
@@ -153,7 +190,14 @@
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_8_lo(total_sums, bits4, scale, y) \
-    shared_y = sub_group_broadcast(y, 2); \
+    shared_y.s0 = SGB_BC(y.s0, 2); \
+    shared_y.s1 = SGB_BC(y.s1, 2); \
+    shared_y.s2 = SGB_BC(y.s2, 2); \
+    shared_y.s3 = SGB_BC(y.s3, 2); \
+    shared_y.s4 = SGB_BC(y.s4, 2); \
+    shared_y.s5 = SGB_BC(y.s5, 2); \
+    shared_y.s6 = SGB_BC(y.s6, 2); \
+    shared_y.s7 = SGB_BC(y.s7, 2); \
     total_sums.s0 += ((bits4.s0 & 0x000F) - 8) * scale.s0 * shared_y.s0; \
     total_sums.s0 += (((bits4.s0 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y.s1; \
     total_sums.s0 += (((bits4.s0 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y.s2; \
@@ -170,7 +214,14 @@
     total_sums.s1 += (((bits4.s3 & 0x00F0) >> 4) - 8) * scale.s1 * shared_y.s5; \
     total_sums.s1 += (((bits4.s3 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y.s6; \
     total_sums.s1 += (((bits4.s3 & 0xF000) >> 12) - 8) * scale.s1 * shared_y.s7; \
-    shared_y = sub_group_broadcast(y, 3); \
+    shared_y.s0 = SGB_BC(y.s0, 3); \
+    shared_y.s1 = SGB_BC(y.s1, 3); \
+    shared_y.s2 = SGB_BC(y.s2, 3); \
+    shared_y.s3 = SGB_BC(y.s3, 3); \
+    shared_y.s4 = SGB_BC(y.s4, 3); \
+    shared_y.s5 = SGB_BC(y.s5, 3); \
+    shared_y.s6 = SGB_BC(y.s6, 3); \
+    shared_y.s7 = SGB_BC(y.s7, 3); \
     total_sums.s0 += ((bits4.s4 & 0x000F) - 8) * scale.s0 * shared_y.s0; \
     total_sums.s0 += (((bits4.s4 & 0x00F0) >> 4) - 8) * scale.s0 * shared_y.s1; \
     total_sums.s0 += (((bits4.s4 & 0x0F00) >> 8) - 8) * scale.s0 * shared_y.s2; \
@@ -411,7 +462,6 @@ __kernel void kernel_mul_mat_id_q4_0_f32_batched(
         __read_only  image1d_buffer_t src1,    // B: ne11*n_tok columns of K floats
         global int    * ids,                   // MUL_MAT_ID ids tensor (I32)
         int ids_elem_off,                      // element offset of ids base
-        global int    * perm,                  // [n_cols] expert-sorted column order (P3); 0 => identity
         global float * dst,                    // destination buffer
         ulong offsetd,                         // byte offset of dst base
         int ne00,                              // K
@@ -438,10 +488,7 @@ __kernel void kernel_mul_mat_id_q4_0_f32_batched(
     uint colp = gid / (uint)grid_x_per_col;
     uint rp   = gid - colp * (uint)grid_x_per_col;   // row-pair index, rp < M2 (no padding)
 
-    // P3 expert-sorted column order: physical columns are grouped so that
-    // (slot, token) columns selecting the SAME expert are adjacent — their
-    // weight reads then hit L2 instead of re-streaming the whole expert layer.
-    uint col = (perm != (global uint *)0) ? (uint)perm[colp] : colp;
+    uint col = colp;   // identity (P3 sort is q3_K-only; perm param removed)
 
     uint t = col / (uint)n_used;
     uint j = col - t * (uint)n_used;
@@ -506,73 +553,3 @@ __kernel void kernel_mul_mat_id_q4_0_f32_batched(
 }
 #undef BMO_DQ_HI
 #undef BMO_DQ_LO
-
-// [dspark 2026-10-14] P3: device-side expert bucket sort for the batched MoE
-// kernels. Three tiny pre-pass kernels reorder the (slot, token) columns so
-// same-expert columns are adjacent in the physical dispatch — the main GEMV
-// then re-reads each selected expert's weight layer from L2 instead of
-// re-streaming it from VRAM once per column (prefill n_tok=512, top-8 of
-// E=128 -> ~32 columns share one expert; ideal traffic cut ~= n_cols/E).
-// Layout of the shared scratch buffer:
-//   [0, E+1)        histogram (phase 1) -> exclusive-scan offsets (phase 2)
-//                   -> mutated into cursors (phase 3; host zeroes before use)
-//   [E+1, E+1+n_cols) permuted original column indices
-// Invalid expert ids get the reserved bucket E (sorted last, output zeros —
-// the main kernels already write zeros for invalid ids).
-
-// phase 1: histogram over expert ids. Column index -> (t, j) MUST mirror the
-// main batched kernels exactly: e = ids[ids_elem_off + t*ids_row + j].
-__kernel void kernel_moe_sort_hist(
-        global int * hist,                     // [E+1], pre-zeroed by the host
-        global const int * ids,
-        int ids_elem_off,
-        int ids_row,
-        int n_used,
-        int n_expert,
-        int n_cols)
-{
-    int i = get_global_id(0);
-    if (i >= n_cols) return;
-    int t = i / n_used;
-    int j = i - t * n_used;
-    int e = ids[ids_elem_off + t * ids_row + j];
-    if (e < 0 || e >= n_expert) e = n_expert;
-    atomic_add(&hist[e], 1);
-}
-
-// phase 2: in-place exclusive scan of the [E+1] histogram (start offsets).
-// Single thread: E is tiny (128..256 for current models, cap 2048 host-side),
-// a serial scan costs microseconds vs the milliseconds the sort saves.
-__kernel void kernel_moe_sort_scan(
-        global int * hist,                     // [E+1]
-        int n_buckets)                         // E+1
-{
-    if (get_global_id(0) != 0) return;
-    int sum = 0;
-    for (int i = 0; i < n_buckets; ++i) {
-        int v = hist[i];
-        hist[i] = sum;
-        sum += v;
-    }
-}
-
-// phase 3: scatter original column indices into their expert buckets.
-__kernel void kernel_moe_sort_scatter(
-        global int * hist,                     // [E+1] cursors (mutated)
-        global int * perm,                     // [n_cols] output
-        global const int * ids,
-        int ids_elem_off,
-        int ids_row,
-        int n_used,
-        int n_expert,
-        int n_cols)
-{
-    int i = get_global_id(0);
-    if (i >= n_cols) return;
-    int t = i / n_used;
-    int j = i - t * n_used;
-    int e = ids[ids_elem_off + t * ids_row + j];
-    if (e < 0 || e >= n_expert) e = n_expert;
-    int pos = atomic_add(&hist[e], 1);
-    perm[pos] = i;
-}

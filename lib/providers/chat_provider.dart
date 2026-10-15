@@ -1971,11 +1971,16 @@ class ChatNotifier extends StateNotifier<bool> {
         maxParallelToolCalls: 5,
       );
     }
-    // 本地路线：静态声明。Spark/Qwen 系标 xml 模板；其余默认 prompt-json。
+    // 本地路线：静态声明。Spark/Qwen 系标 xml 模板；Ling（Bailing V3）系
+    // 标 bailing-v3（tool 结果保留 role:tool → OBSERVATION 渲染 + 原生
+    // 闭合标签调用格式）；其余默认 prompt-json。
     final lower = modelId.toLowerCase();
     final isXmlFamily = ['spark', 'qwen', 'tongyi'].any(lower.contains);
+    final isBailingV3 = lower.startsWith('ling');
     return EngineCapabilities(
-      toolTemplate: isXmlFamily ? 'spark-xml' : null,
+      toolTemplate: isXmlFamily
+          ? 'spark-xml'
+          : (isBailingV3 ? 'bailing-v3' : null),
       maxParallelToolCalls: 2,
     );
   }

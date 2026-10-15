@@ -473,6 +473,12 @@ struct ggml_backend_opencl_device_context {
     std::regex *opfilter = nullptr; // regex of ops to not claim
     std::string opfilter_str = ""; // regex string for opfilter
     size_t global_mem_size = 0;
+
+    // [dspark M2] GPU slot bank (FGSVM) buffer type, created on demand by
+    // ggml_backend_opencl_svm_buft(). Kept at the END: this struct is
+    // aggregate-initialized positionally in the device enumeration.
+    ggml_backend_buffer_type buffer_type_svm;
+    bool buffer_type_svm_init = false;
 };
 
 // Lazily-compiled flash-attention kernels and their per-(dk,dv) tile metadata.
@@ -654,6 +660,13 @@ struct ggml_backend_opencl_context {
     size_t max_workgroup_size;
     bool fp16_support;
     bool has_vector_subgroup_broadcast;
+    // [dspark 2026-10-14] Adreno 740 (SM8550, OpenCL 3.0) online compiler only
+    // implements scalar INTEGER overloads of sub_group_broadcast — float and
+    // vector-float calls fail to compile (err=-11 "no matching builtin
+    // function"). Detected at init with a canary compile; when true, all gemv
+    // programs build with -DSGB_SCALAR_BROKEN and route broadcasts through the
+    // uint-bitcast shims (sgb_f/sgb_f4/sgb_f8) baked into the kernel sources.
+    bool sgb_float_broken = false;
     bool has_subgroup_shuffle = false;       // cl_khr_subgroup_shuffle or cl_qcom_subgroup_shuffle
     bool has_integer_dot      = false;       // cl_khr_integer_dot_product or cl_qcom_dot_product8
     bool has_qcom_subgroup_shuffle = false;  // specifically cl_qcom_subgroup_shuffle
@@ -1215,6 +1228,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_mc3;  // multi-column (N=3) verify GEMV (spec/MTP)
     cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
     cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
+    cl_kernel kernel_mul_mat_id_q3_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q3_K, #28)
 
     // [dspark 2026-10-14] P4: batched MoE activation image cache. The dense-loop
     // fixed q_img is cached on the weight tensor's extra, but the activation
@@ -1233,7 +1247,11 @@ struct ggml_backend_opencl_context {
         size_t  origin = 0;
         size_t  size   = 0;
     };
-    moe_b_cache_entry moe_b_cache[8];
+    // [dspark M2] was 8 slots: 40 MoE layers x 3 calls/token = 120 cyclic keys
+    // never fit -> every token recreated ~120 activation sub-buffer+image
+    // pairs (~8ms each on Adreno = ~1s/token pure image churn). 160 slots
+    // cover the full cycle; hits recycle the same image across tokens.
+    moe_b_cache_entry moe_b_cache[160];
     int moe_b_cache_next = 0;
 
     // [dspark 2026-10-14] P3: expert bucket-sort scratch (see moe_sort kernels).
@@ -1244,6 +1262,12 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_moe_sort_scatter;
     cl_mem   moe_sort_buf = nullptr;
     size_t   moe_sort_cap = 0;   // bytes
+
+    // [dspark 2026-10-15] M2 GPU slot bank: raw->plane conversion kernel +
+    // FGSVM capability (set at ggml_cl_init from CL_DEVICE_SVM_* queries).
+    cl_kernel kernel_moe_q3k_pack;
+    bool   has_fgsvm      = false;
+    size_t svm_mem_align  = 128;
     cl_kernel kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin;
     cl_kernel kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_32b_trans;
@@ -1417,23 +1441,81 @@ static cl_program build_program_from_source_ex(cl_context ctx, cl_device_id dev,
     return NULL;
 }
 
+// [dspark 2026-10-14] Canary: does the driver's online compiler support the
+// FLOAT overloads of sub_group_broadcast? Adreno 740 (OpenCL 3.0) exposes
+// sub-groups but its compiler only implements scalar integer overloads, so any
+// kernel touching the float forms fails with err=-11. Compile a minimal kernel
+// using both the scalar-float and vector-float forms; CL_BUILD_PROGRAM_FAILURE
+// => broken. Runs once at backend init, before kernel loading.
+static bool probe_float_subgroup_broadcast(cl_context ctx, cl_device_id dev) {
+    // Scalar-only canary. The batched/GEMV kernels broadcast scalars
+    // (per-component) exclusively; do NOT probe the float8 overload here —
+    // a vector-only gap must not push devices with working scalar broadcast
+    // onto the bitcast path (E031.47 miscompiles the inline-wrapper form,
+    // NMSE~2.2 on Adreno 830, 2026-10-14).
+    static const char * src =
+        "#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
+        "#ifdef cl_qcom_reqd_sub_group_size\n"
+        "#pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable\n"
+        "#endif\n"
+        "__kernel void canary_sgb(global float * o) {\n"
+        "    float  s = (float)get_global_id(0);\n"
+        "    float  a = sub_group_broadcast(s, 0);\n"
+        "    o[0] = a;\n"
+        "}\n";
+    cl_int err;
+    cl_program p = clCreateProgramWithSource(ctx, 1, &src, NULL, &err);
+    if (err != CL_SUCCESS) {
+        return false;
+    }
+    // Match the real-kernel build std: subgroups are core in OpenCL C 3.0 and
+    // Adreno 830 rejects the cl_khr_subgroups extension NAME; without -cl-std
+    // the driver defaults to CL 1.2 and rejects sub_group_broadcast outright
+    // (canary false negative -> wrapper path -> E031.47 miscompile).
+    static const char * opts_try[] = { "-cl-std=CL3.0", NULL };
+    for (int i = 0; ; ++i) {
+        err = clBuildProgram(p, 0, NULL, opts_try[i], NULL, NULL);
+        if (err == CL_SUCCESS) {
+            clReleaseProgram(p);
+            return true;
+        }
+        if (opts_try[i + 1] == NULL) {
+            break;
+        }
+    }
+    {
+        char log[4096] = {0};
+        size_t log_sz = 0;
+        clGetProgramBuildInfo(p, dev, CL_PROGRAM_BUILD_LOG, sizeof(log) - 1, log, &log_sz);
+        GGML_LOG_INFO("\nggml_opencl: sgb canary build failed (err=%d), log:\n%s\n", (int)err, log);
+        clReleaseProgram(p);
+        return false;
+    }
+}
+
 static cl_program build_program_from_source(ggml_backend_opencl_context * backend_ctx, const char* program_buffer, const std::string &compile_opts) {
     cl_context   ctx = backend_ctx->context;
     cl_device_id dev = backend_ctx->device;
 
+    // float-broadcast broken => kernels use the uint-bitcast sgb_* shims
+    std::string opts = compile_opts;
+    if (backend_ctx->sgb_float_broken) {
+        opts += " -DSGB_SCALAR_BROKEN";
+    }
+
     // Try the on-disk binary cache first. Falls through silently on miss or
     // any failure; never blocks the build path. Disabled cache => nullptr.
     cl_program p_cached = cl_program_cache_try_load(
-        backend_ctx->program_cache, ctx, dev, program_buffer, compile_opts);
+        backend_ctx->program_cache, ctx, dev, program_buffer, opts);
     if (p_cached != nullptr) {
         return p_cached;
     }
 
-    cl_program p = build_program_from_source_ex(ctx, dev, program_buffer, compile_opts, /*fatal=*/true);
+    cl_program p = build_program_from_source_ex(ctx, dev, program_buffer, opts, /*fatal=*/true);
 
     // Best-effort save of the freshly-built binary (no-op if cache disabled).
     if (p != nullptr) {
-        cl_program_cache_try_save(backend_ctx->program_cache, p, dev, program_buffer, compile_opts);
+        cl_program_cache_try_save(backend_ctx->program_cache, p, dev, program_buffer, opts);
     }
     return p;
 }
@@ -1521,6 +1603,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     backend_ctx->kernel_compile_opts = compile_opts;
+
+    // [dspark 2026-10-14] canary BEFORE any kernel program is built: broken
+    // float sub_group_broadcast (Adreno 740) must route every gemv program
+    // through the sgb_* uint-bitcast shims via -DSGB_SCALAR_BROKEN.
+    backend_ctx->sgb_float_broken = !probe_float_subgroup_broadcast(backend_ctx->context, backend_ctx->device);
+    if (backend_ctx->sgb_float_broken) {
+        GGML_LOG_INFO("\nggml_opencl: driver lacks float sub_group_broadcast -> SGB bitcast shims enabled");
+    }
 
     GGML_LOG_INFO("ggml_opencl: loading OpenCL kernels");
 
@@ -3851,9 +3941,45 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
         CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
+        // P3 sort kernels moved to their own program (moe_sort_dspark): compiling
+        // them inside the q4_0 program (with the perm param) miscompiled the
+        // q4_0 batched kernel on Adreno 830 / E031.47 (NMSE~2.2, 2026-10-14).
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+    // moe_sort_dspark — P3 expert-bucket-sort kernels (q3_K batched MoE only).
+    {
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src_CL_moe_sort {
+            #include "moe_sort_dspark.cl.h"
+        };
+#else
+        const std::string kernel_src_CL_moe_sort = read_file("moe_sort_dspark.cl");
+#endif
+        const std::string CL_sort_compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_moe_sort.c_str(), CL_sort_compile_opts);
         CL_CHECK((backend_ctx->kernel_moe_sort_hist    = clCreateKernel(prog, "kernel_moe_sort_hist", &err), err));
         CL_CHECK((backend_ctx->kernel_moe_sort_scan    = clCreateKernel(prog, "kernel_moe_sort_scan", &err), err));
         CL_CHECK((backend_ctx->kernel_moe_sort_scatter = clCreateKernel(prog, "kernel_moe_sort_scatter", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+    // moe_q3k_pack — [dspark 2026-10-15] M2 GPU slot bank raw->plane conversion
+    // (q3_K batched MoE + LLAMA_MOE_BANK_GPU=1). Own program: never mixed with
+    // the gemv programs (E031 miscompile history — see 2026-10-14 SGB notes).
+    {
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src_CL_moe_q3k_pack {
+            #include "moe_q3k_pack.cl.h"
+        };
+#else
+        const std::string kernel_src_CL_moe_q3k_pack = read_file("moe_q3k_pack.cl");
+#endif
+        const std::string CL_pack_compile_opts = std::string("-cl-std=") + opencl_c_std;
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_moe_q3k_pack.c_str(), CL_pack_compile_opts);
+        CL_CHECK((backend_ctx->kernel_moe_q3k_pack = clCreateKernel(prog, "kernel_moe_q3k_pack", &err), err));
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -4412,6 +4538,30 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
         CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+    // gemv_noshuffle_q3_k_f32 — [dspark 2026-10-14] q3_K batched MoE (#28).
+    // Same compile opts as the q4_K gemv program; the kernel consumes
+    // host-precomputed effective-scale planes (see ggml_tensor_extra_cl_q3_K),
+    // so the scale path is plain half2 loads exactly like the (NMSE=0) q4_0
+    // batched kernel — the q4_K dodge recipe applied to q3_K's 3-plane
+    // hmask/qs/scales layout.
+    {
+        std::string CL_q3k_compile_opts = std::string("-cl-std=") + opencl_c_std +
+                                       " -cl-mad-enable ";
+
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "gemv_noshuffle_q3_k_f32.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("gemv_noshuffle_q3_k_f32.cl");
+#endif
+
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -6833,6 +6983,27 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(size_t), &backend_ctx->image2d_max_height, NULL));
     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &backend_ctx->max_workgroup_size, NULL));
     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(cl_device_svm_capabilities), &backend_ctx->svm_caps, 0));
+    // [dspark 2026-10-15] M2 GPU slot bank: FGSVM buffer = CPU-writable memory
+    // the GPU can read directly (probe _probe/moe_probe/svm_probe.cpp: 5/5
+    // fill cycles MATCH, GPU read 8-12 GB/s vs 2.3 GB/s via regular cl_mem on
+    // Adreno 740). Alignment must be <= CL_DEVICE_SVM_MEM_ALIGN (4096 fails,
+    // 128 works on Adreno).
+    backend_ctx->has_fgsvm = (backend_ctx->svm_caps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER) != 0;
+    {
+        // CL_DEVICE_SVM_MEM_ALIGN (0x1059): some vendored header builds gate
+        // 2.0 constants off; define locally when missing
+        #ifndef CL_DEVICE_SVM_MEM_ALIGN
+        #define CL_DEVICE_SVM_MEM_ALIGN 0x1059
+        #endif
+        cl_uint svm_align = 0;
+        clGetDeviceInfo(device, CL_DEVICE_SVM_MEM_ALIGN, sizeof(cl_uint), &svm_align, NULL);
+        backend_ctx->svm_mem_align = svm_align ? (size_t)svm_align : (size_t)128;
+        if (backend_ctx->svm_mem_align > 128) {
+            // driver-bug safe floor: Adreno rejects align > mem_align, keep
+            // the query result only when it is at most our tested floor
+            backend_ctx->svm_mem_align = 128;
+        }
+    }
 
     if (opencl_c_version.major >= 3) {
         // Assume it is not available for 3.0, since it is optional in 3.0.
@@ -7547,6 +7718,45 @@ struct ggml_tensor_extra_cl_q4_K {
         if (q_img != nullptr) {
             CL_CHECK(clReleaseMemObject(q_img));
             q_img = nullptr;
+        }
+    }
+};
+
+// [dspark 2026-10-14] q3_K batched-MoE extra (#28). Layout contract with
+// kernel_mul_mat_id_q3_k_f32_batched (see the .cl header comment):
+//   q    : E layers of re-packed codes/hmask uints (host re-packs the raw
+//          block_q3_K bytes; no GPU convert kernel exists for q3_K)
+//   se0/1: E layers of host-decoded fp16 effective-scale half2 pairs,
+//          se0 = row-even (dl elem 0..15, dl elem 16..31), se1 = row-odd.
+// The aux32 scale shuffle, d*(sc-32) decode and hmask gather all happen once
+// in set_tensor; the kernel's scale path is plain half2 loads (q4_0-like).
+// No dense-loop fallback exists (no dense q3_K GEMV) — batched-only.
+struct ggml_tensor_extra_cl_q3_K {
+    cl_mem q    = nullptr;
+    cl_mem q_img = nullptr;
+    cl_mem se0  = nullptr;
+    cl_mem se1  = nullptr;
+
+    ~ggml_tensor_extra_cl_q3_K() {
+        reset();
+    }
+
+    void reset() {
+        if (q != nullptr) {
+            CL_CHECK(clReleaseMemObject(q));
+            q = nullptr;
+        }
+        if (q_img != nullptr) {
+            CL_CHECK(clReleaseMemObject(q_img));
+            q_img = nullptr;
+        }
+        if (se0 != nullptr) {
+            CL_CHECK(clReleaseMemObject(se0));
+            se0 = nullptr;
+        }
+        if (se1 != nullptr) {
+            CL_CHECK(clReleaseMemObject(se1));
+            se1 = nullptr;
         }
     }
 };
@@ -8700,14 +8910,23 @@ static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backen
 }
 
 inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
+    // GGML_OPENCL_MOE_FORCE_A7X=1: probe-only escape hatch. The A7X exclusion
+    // targets the VENDOR trans4_ns repack miscompile; our batched-MoE set_tensor
+    // packing doesn't use it, so forcing A7X in lets a second device (740,
+    // E031.41) validate the batched kernels (2026-10-14 Ling q4_0 garbling bisect).
+    static const bool force_a7x_moe = [] {
+        const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");
+        return e && e[0] == '1';
+    }();
     // The moe weight repack kernels *_trans4_ns alias a private ushort8 through a uchar*.
     // Certain compilers (found with some A7x and A6x) miscompiles this, corrupting the weights.
     // So, exclude A6x and A7x from using Adreno MoE kernels for now.
     // The quants that have a general mul_mat_id kernel fallback to the general version; the
     // rest fallback to CPU.
-    if (backend_ctx && (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A6X ||
-                        backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X ||
-                        backend_ctx->adreno_gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN)) {
+    if (!force_a7x_moe && backend_ctx &&
+        (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A6X ||
+         backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X ||
+         backend_ctx->adreno_gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN)) {
         return false;
     }
 
@@ -9225,8 +9444,18 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                    (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32) ||
                    (op->src[0]->type == GGML_TYPE_F16 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
         case GGML_OP_SSM_CONV:
+            // [dspark 2026-10-14] Adreno 830: OpenCL SSM kernels have never been
+            // numerically validated (TBO has no SSM coverage) and the 830 driver
+            // E031.47 miscompiles several Adreno kernel families. Route SSM ops
+            // to CPU on A8X until validated (conv/scan are compute-trivial).
+            if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
+                return false;
+            }
             return (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
         case GGML_OP_SSM_SCAN: {
+                if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
+                    return false;   // see SSM_CONV note above
+                }
                 if (op->type != GGML_TYPE_F32 || op->src[0]->type != GGML_TYPE_F32 ||
                     op->src[1]->type != GGML_TYPE_F32 || op->src[2]->type != GGML_TYPE_F32 ||
                     op->src[3]->type != GGML_TYPE_F32 || op->src[4]->type != GGML_TYPE_F32 ||
@@ -9371,6 +9600,20 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                     return true;
                 }
                 return false;
+            }
+            // [dspark 2026-10-14] q3_K batched-MoE (#28): batched-only GPU path
+            // (no dense q3_K GEMV). Gates mirror set_tensor's Q3_K branch and
+            // ggml_cl_mul_mat_id_batched exactly — a tensor admitted here is
+            // guaranteed to dispatch. The se planes are standalone cl_buffers
+            // (not subbuffers), so only the shape gates apply.
+            if (op->src[0]->type == GGML_TYPE_Q3_K &&
+                op->src[0]->ne[2] > 1 &&   // E==1: set_tensor skips packing -> must stay off-GPU
+                op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_I32 &&
+                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
+                use_adreno_moe_kernels(backend_ctx, op->src[0]) &&
+                (op->src[0]->ne[0] % 256 == 0) && (op->src[0]->ne[1] % 128 == 0)) {
+                return true;
             }
             // Vendor single-dispatch MoE kernels (q4_0/q8_0/mxfp4): broken on
             // Adreno 830 (see moe_use_dense_loop notes) — diagnostics only via
@@ -9683,6 +9926,12 @@ struct ggml_backend_opencl_buffer_context {
         for (ggml_tensor_extra_cl_q4_K * e : temp_tensor_extras_q4_K_in_use) {
             delete e;
         }
+        for (ggml_tensor_extra_cl_q3_K * e : temp_tensor_extras_q3_K) {
+            delete e;
+        }
+        for (ggml_tensor_extra_cl_q3_K * e : temp_tensor_extras_q3_K_in_use) {
+            delete e;
+        }
         for (ggml_tensor_extra_cl_q6_K * e : temp_tensor_extras_q6_K) {
             delete e;
         }
@@ -9847,6 +10096,21 @@ struct ggml_backend_opencl_buffer_context {
         return extra;
     }
 
+    ggml_tensor_extra_cl_q3_K * ggml_opencl_alloc_temp_tensor_extra_q3_K() {
+        ggml_tensor_extra_cl_q3_K * extra;
+        if (temp_tensor_extras_q3_K.empty()) {
+            extra = new ggml_tensor_extra_cl_q3_K();
+        } else {
+            extra = temp_tensor_extras_q3_K.back();
+            temp_tensor_extras_q3_K.pop_back();
+        }
+
+        temp_tensor_extras_q3_K_in_use.push_back(extra);
+
+        extra->reset();
+        return extra;
+    }
+
     ggml_tensor_extra_cl_q5_K * ggml_opencl_alloc_temp_tensor_extra_q5_K() {
         ggml_tensor_extra_cl_q5_K * extra;
         if (temp_tensor_extras_q5_K.empty()) {
@@ -9967,6 +10231,8 @@ struct ggml_backend_opencl_buffer_context {
     std::vector<ggml_tensor_extra_cl_iq4_nl *> temp_tensor_extras_iq4_nl_in_use;
     std::vector<ggml_tensor_extra_cl_q4_K *> temp_tensor_extras_q4_K;
     std::vector<ggml_tensor_extra_cl_q4_K *> temp_tensor_extras_q4_K_in_use;
+    std::vector<ggml_tensor_extra_cl_q3_K *> temp_tensor_extras_q3_K;
+    std::vector<ggml_tensor_extra_cl_q3_K *> temp_tensor_extras_q3_K_in_use;
     std::vector<ggml_tensor_extra_cl_q5_K *> temp_tensor_extras_q5_K;
     std::vector<ggml_tensor_extra_cl_q5_K *> temp_tensor_extras_q5_K_in_use;
     std::vector<ggml_tensor_extra_cl_q6_K *> temp_tensor_extras_q6_K;
@@ -11162,6 +11428,135 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             transpose_2d_as_16b(backend_ctx, extra->d, extra->d, size_d, K/32, M);
         }
 #endif
+        return;
+    }
+    if (tensor->type == GGML_TYPE_Q3_K) {
+        // [dspark 2026-10-14] q3_K batched-MoE prep (#28, v0.3.2). q3_K MoE is
+        // batched-only (no dense q3_K GEMV exists): re-pack the raw
+        // block_q3_K bytes into the batched kernel's uint plane and
+        // host-decode the effective scales into fp16 half2 planes. All gates
+        // here MUST mirror the dispatch-side checks in
+        // ggml_cl_mul_mat_id_batched / the MUL_MAT_ID support gate so a
+        // prepped tensor can always dispatch.
+        static const bool moe_trace = [] {
+            const char * e = getenv("GGML_MOE_TRACE");
+            return e && e[0] == '1';
+        }();
+        if (moe_trace) {
+            uint32_t h = 2166136261u;
+            const uint32_t * p32 = (const uint32_t *)data;
+            const size_t n32 = ggml_nbytes(tensor)/4;
+            for (size_t i = 0; i < n32; i += 997) { h = (h ^ p32[i]) * 16777619u; }
+            fprintf(stderr, "[q3k-prep] %s view_src=%d K=%d M=%d E=%d data=%p hash=%08x\n",
+                    tensor->name, tensor->view_src ? 1 : 0,
+                    (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2],
+                    data, h);
+        }
+        if (tensor->view_src != nullptr || !ggml_is_contiguous(tensor)) {
+            return;
+        }
+        if (tensor->ne[2] <= 1 || !use_adreno_moe_kernels(backend_ctx, tensor)) {
+            return;   // 2D q3_K / non-MoE: no GPU path, keep raw (CPU handles)
+        }
+        const int Kc = tensor->ne[0];
+        const int Mc = tensor->ne[1];
+        const int Ec = tensor->ne[2];
+        if (Kc % 256 != 0 || Mc % 128 != 0) {
+            return;   // batched kernel shape gates -> op stays on CPU
+        }
+
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        ggml_tensor_extra_cl_q3_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q3_K();
+
+        const size_t n_blk  = (size_t)Kc / 32;    // 32-elem blocks per row
+        const size_t n_sb   = (size_t)Kc / 256;   // superblocks per row
+        const size_t layer_pix      = (size_t)Mc * n_blk * 3;       // uint pixels (6 per rp)
+        const size_t se_layer_half2 = n_blk * ((size_t)Mc / 2);     // half2 per layer
+
+        cl_int err;
+        CL_CHECK((extra->q = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                    (size_t)Ec * layer_pix * sizeof(cl_uint), NULL, &err), err));
+        CL_CHECK((extra->se0 = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                    (size_t)Ec * se_layer_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+        CL_CHECK((extra->se1 = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                    (size_t)Ec * se_layer_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+
+        std::vector<cl_uint>     qplane((size_t)Ec * layer_pix, 0);
+        std::vector<ggml_fp16_t> se0((size_t)Ec * se_layer_half2 * 2);
+        std::vector<ggml_fp16_t> se1((size_t)Ec * se_layer_half2 * 2);
+
+        const uint32_t kmask1 = 0x03030303;
+        const uint32_t kmask2 = 0x0f0f0f0f;
+        const uint8_t * base = (const uint8_t *)data;
+        const size_t q3_blk_bytes = 110;   // sizeof(block_q3_K): hmask32 + qs64 + scales12 + d2
+                                           // NOTE field order: hmask@0, qs@32, scales@96, d@108 (!)
+
+        for (int e = 0; e < Ec; ++e) {
+            for (int r = 0; r < Mc; ++r) {
+                const uint8_t * row = base + ((size_t)e * Mc + r) * n_sb * q3_blk_bytes;
+                const size_t jo = (size_t)(r & 1) * 3;   // q-plane column group for this row
+                const size_t rp = (size_t)r >> 1;
+                // se plane for this row's parity; index (e, k, rp), 2 halves each
+                ggml_fp16_t * se_plane = (r & 1) == 0 ? se0.data() : se1.data();
+                for (size_t sb = 0; sb < n_sb; ++sb) {
+                    const uint8_t * blk = row + sb * q3_blk_bytes;
+                    const float d = ggml_fp16_to_fp32(*(const ggml_fp16_t *)(blk + 108));
+                    const uint8_t * hm = blk + 0;
+                    const uint8_t * qs = blk + 32;
+                    // decode the 16 4-bit scales (aux32 shuffle, ggml-quants.c)
+                    uint32_t aux[4];
+                    memcpy(aux, blk + 96, 12);
+                    uint32_t tmp = aux[2];
+                    aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+                    aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+                    aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+                    aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+                    const int8_t * scales = (const int8_t *)aux;   // 16 values (int8, per ggml-quants.c)
+
+                    for (int pos = 0; pos < 8; ++pos) {   // 32-block k = sb*8 + pos
+                        const size_t k = sb * 8 + (size_t)pos;
+                        const float dl0 = d * ((int)scales[pos * 2]     - 32);  // elems 0..15
+                        const float dl1 = d * ((int)scales[pos * 2 + 1] - 32);  // elems 16..31
+
+                        ggml_fp16_t * se2 = se_plane + ((size_t)e * se_layer_half2
+                                             + k * ((size_t)Mc / 2) + rp) * 2;
+                        se2[0] = ggml_fp32_to_fp16(dl0);
+                        se2[1] = ggml_fp32_to_fp16(dl1);
+
+                        uint32_t qs_lo = 0, qs_hi = 0, hmb = 0;
+                        for (int l = 0; l < 32; ++l) {
+                            const int e_in_sb = pos * 32 + l;
+                            const int chunk = e_in_sb >> 7;                  // 128-chunk
+                            const int half  = (e_in_sb >> 4) & 1;            // 16-elem half
+                            const int shift = 2 * ((e_in_sb >> 5) & 3);      // 2-bit lane
+                            // qs/hmask are per-superblock arrays (qs 64B, hmask 32B);
+                            // qs already points at this superblock's qs[0] (blk+34).
+                            // byte = chunk*32 + half*16 + (e&15), bit-lane shift = 2*((e>>5)&3);
+                            // hmask byte = e&31, bit = e>>5 (see dequantize_row_q3_K).
+                            const uint8_t qs_byte = qs[chunk * 32 + half * 16 + (e_in_sb & 15)];
+                            const uint32_t code2 = (qs_byte >> shift) & 3u;
+                            const uint32_t hbit  = (hm[e_in_sb & 31] >> (e_in_sb >> 5)) & 1u;
+                            if (l < 16) qs_lo |= code2 << (2 * l);
+                            else        qs_hi |= code2 << (2 * (l - 16));
+                            hmb |= hbit << l;
+                        }
+                        const size_t pix = (size_t)e * layer_pix + k * 3 * (size_t)Mc;
+                        qplane[pix + (jo + 0) * ((size_t)Mc / 2) + rp] = qs_lo;
+                        qplane[pix + (jo + 1) * ((size_t)Mc / 2) + rp] = qs_hi;
+                        qplane[pix + (jo + 2) * ((size_t)Mc / 2) + rp] = hmb;
+                    }
+                }
+            }
+        }
+
+        CL_CHECK(clEnqueueWriteBuffer(queue, extra->q, CL_TRUE, 0,
+                    qplane.size() * sizeof(cl_uint), qplane.data(), 0, NULL, NULL));
+        CL_CHECK(clEnqueueWriteBuffer(queue, extra->se0, CL_TRUE, 0,
+                    se0.size() * sizeof(ggml_fp16_t), se0.data(), 0, NULL, NULL));
+        CL_CHECK(clEnqueueWriteBuffer(queue, extra->se1, CL_TRUE, 0,
+                    se1.size() * sizeof(ggml_fp16_t), se1.data(), 0, NULL, NULL));
+
+        tensor->extra = extra;
         return;
     }
     if (tensor->type == GGML_TYPE_Q4_K) {
@@ -13461,6 +13856,430 @@ static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
 };
 
 //
+// [dspark 2026-10-15] M2 GPU slot bank buffer type (FGSVM)
+//
+// Memory allocated with clSVMAlloc(CL_MEM_SVM_FINE_GRAIN_BUFFER): a host
+// pointer the GPU reads directly. The MoE slot bank lives here so that
+//  - llama-moe-slot's preadv loader writes slots with ZERO staging copies
+//    (the buffer reports is_host == true), and
+//  - the batched MoE kernels read slot contents that were per-fill converted
+//    into planes by kernel_moe_q3k_pack (see ggml_cl_moe_q3k_pack_slot).
+// Probe evidence (_probe/moe_probe/svm_probe.cpp, Adreno 740): CPU writes are
+// visible to kernels enqueued afterwards (5/5 cycles), GPU read BW 8-12 GB/s.
+//
+
+struct ggml_backend_opencl_svm_buffer_context {
+    void * svm = nullptr;
+    // [dspark M2 fix] device-side staging for the slot bank raw data: the 740
+    // driver crashes in its libCB submission thread when clEnqueueSVMMemcpy
+    // (host->FGSVM) commands share a queue with kernels (bank8/9 backtrace:
+    // ioctl_kgsl_sharedmem_write in gsl os_thread_launcher). Staged path is
+    // now: preadv -> host buffer -> clEnqueueWriteBuffer (standard, same path
+    // as set_tensor) -> pack kernel reads this cl_mem with a byte offset.
+    cl_mem raw_stage = nullptr;
+    // lazily created q3_K pack extras, owned by the buffer (freed with it)
+    std::vector<ggml_tensor_extra_cl_q3_K *> extras;
+    std::mutex extra_mutex;
+};
+
+static const char * ggml_backend_opencl_svm_buft_get_name(ggml_backend_buffer_type_t buffer_type) {
+    return "OpenCL-SVM";
+
+    GGML_UNUSED(buffer_type);
+}
+
+static void ggml_backend_opencl_svm_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    if (ctx == nullptr) {
+        return;
+    }
+    for (auto * e : ctx->extras) {
+        delete e;
+    }
+    if (ctx->raw_stage != nullptr) {
+        ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer->buft->device);
+        clReleaseMemObject(ctx->raw_stage);
+    }
+    if (ctx->svm != nullptr) {
+        ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer->buft->device);
+        clSVMFree(backend_ctx->context, ctx->svm);
+    }
+    delete ctx;
+}
+
+static void * ggml_backend_opencl_svm_buffer_get_base(ggml_backend_buffer_t buffer) {
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    return ctx->svm;
+}
+
+static void ggml_backend_opencl_svm_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    memcpy((char *) ctx->svm + offset, data, size);
+
+    GGML_UNUSED(tensor);
+}
+
+static void ggml_backend_opencl_svm_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    memcpy(data, (const char *) ctx->svm + offset, size);
+
+    GGML_UNUSED(tensor);
+}
+
+static void ggml_backend_opencl_svm_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    memset(ctx->svm, value, buffer->size);
+}
+
+static ggml_backend_buffer_i ggml_backend_opencl_svm_buffer_interface = {
+    /* .free_buffer     = */ ggml_backend_opencl_svm_buffer_free_buffer,
+    /* .get_base        = */ ggml_backend_opencl_svm_buffer_get_base,
+    /* .init_tensor     = */ NULL,
+    /* .memset_tensor   = */ NULL,
+    /* .set_tensor      = */ ggml_backend_opencl_svm_buffer_set_tensor,
+    /* .get_tensor      = */ ggml_backend_opencl_svm_buffer_get_tensor,
+    /* .set_tensor_2d   = */ NULL,
+    /* .get_tensor_2d   = */ NULL,
+    /* .cpy_tensor      = */ NULL,
+    /* .clear           = */ ggml_backend_opencl_svm_buffer_clear,
+    /* .reset           = */ NULL,
+};
+
+static ggml_backend_buffer_t ggml_backend_opencl_svm_buft_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer_type->device);
+    if (!backend_ctx->has_fgsvm) {
+        GGML_LOG_ERROR("%s: device has no FGSVM buffer support\n", __func__);
+        return nullptr;
+    }
+    if (!backend_ctx->program_cache_initialized) {
+        backend_ctx->program_cache = cl_program_cache_init(backend_ctx->device);
+        backend_ctx->program_cache_initialized = true;
+    }
+    load_cl_kernels(backend_ctx);
+
+    size = std::max(size, (size_t)1);
+    void * svm = clSVMAlloc(backend_ctx->context,
+        CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER, size,
+        (cl_uint) backend_ctx->svm_mem_align);
+    if (svm == nullptr) {
+        GGML_LOG_ERROR("%s: clSVMAlloc %.2f MiB (align %zu) failed\n",
+            __func__, size / 1024.0 / 1024.0, backend_ctx->svm_mem_align);
+        return nullptr;
+    }
+
+    auto * ctx = new ggml_backend_opencl_svm_buffer_context();
+    ctx->svm = svm;
+    cl_int stage_err;
+    ctx->raw_stage = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, size, NULL, &stage_err);
+    if (ctx->raw_stage == nullptr) {
+        GGML_LOG_WARN("%s: raw_stage clCreateBuffer %.2f MiB failed (err %d) — SVM direct path only\n",
+            __func__, size / 1024.0 / 1024.0, stage_err);
+    }
+
+    return ggml_backend_buffer_init(buffer_type, ggml_backend_opencl_svm_buffer_interface, ctx, size);
+}
+
+static size_t ggml_backend_opencl_svm_buft_get_alignment(ggml_backend_buffer_type_t buffer_type) {
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer_type->device);
+    return backend_ctx->svm_mem_align;
+}
+
+static size_t ggml_backend_opencl_svm_buft_get_max_size(ggml_backend_buffer_type_t buffer_type) {
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer_type->device);
+    return backend_ctx->max_alloc_size;
+}
+
+static bool ggml_backend_opencl_svm_buft_is_host(ggml_backend_buffer_type_t buffer_type) {
+    // FGSVM = directly host-accessible: preadv/memcpy loaders write it like a
+    // CPU buffer, and the GPU reads it as SVM. This is the whole point of the
+    // GPU slot bank (moe-slot's CPU-addressable gate passes).
+    return true;
+
+    GGML_UNUSED(buffer_type);
+}
+
+static ggml_backend_buffer_type_i ggml_backend_opencl_svm_buft_interface = {
+    /* .get_name         = */ ggml_backend_opencl_svm_buft_get_name,
+    /* .alloc_buffer     = */ ggml_backend_opencl_svm_buft_alloc_buffer,
+    /* .get_alignment    = */ ggml_backend_opencl_svm_buft_get_alignment,
+    /* .get_max_size     = */ ggml_backend_opencl_svm_buft_get_max_size,
+    /* .get_alloc_size   = */ NULL,
+    /* .is_host          = */ ggml_backend_opencl_svm_buft_is_host,
+};
+
+// forward decl: device section lives below; the SVM buft checks the device
+// interface identity to reject foreign devices
+static const char * ggml_backend_opencl_device_get_name(ggml_backend_dev_t dev);
+
+// backend context that owns the SVM bank (set by ggml_backend_opencl_svm_buft;
+// avoids a ggml-base device-registry dependency here)
+static ggml_backend_opencl_context * g_svm_backend_ctx = nullptr;
+
+// [dspark M2 fix] Serializes ALL driver-side enqueue interactions coming from
+// the MoE fill IO threads onto the shared queue: clEnqueueSVMMemcpy and the
+// SHARED kernel_moe_q3k_pack's arg-set+enqueue. extra_mutex is per-buffer, so
+// it cannot stop two families (different buffers) from concurrently mutating
+// the same cl_kernel — a spec violation that crashed the Adreno libCB
+// submission thread (bank8 backtrace: ioctl_kgsl_sharedmem_write in the gsl
+// os_thread_launcher worker).
+static std::mutex g_svm_enqueue_mutex;
+
+ggml_backend_buffer_type_t ggml_backend_opencl_svm_buft(ggml_backend_dev_t dev) {
+    if (dev == nullptr || dev->iface.get_name != ggml_backend_opencl_device_get_name) {
+        return nullptr;
+    }
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(dev);
+    if (!backend_ctx->has_fgsvm) {
+        return nullptr;
+    }
+    g_svm_backend_ctx = backend_ctx;
+    auto * dev_ctx = (ggml_backend_opencl_device_context *) dev->context;
+    if (!dev_ctx->buffer_type_svm_init) {
+        dev_ctx->buffer_type_svm = ggml_backend_buffer_type{
+            /* .iface   = */ ggml_backend_opencl_svm_buft_interface,
+            /* .device  = */ dev,
+            /* .context = */ nullptr,
+        };
+        dev_ctx->buffer_type_svm_init = true;
+    }
+    return &dev_ctx->buffer_type_svm;
+}
+
+bool ggml_backend_opencl_buft_is_svm(ggml_backend_buffer_type_t buft) {
+    return buft != nullptr && buft->iface.get_name == ggml_backend_opencl_svm_buft_get_name;
+}
+
+void ggml_cl_svm_memcpy_async(void * dst_svm, const void * src_host, size_t size) {
+    if (dst_svm == nullptr || src_host == nullptr || size == 0) {
+        return;
+    }
+    if (g_svm_backend_ctx == nullptr) {
+        return;   // no GPU bank configured
+    }
+    std::lock_guard<std::mutex> lock(g_svm_enqueue_mutex);
+    CL_CHECK(clEnqueueSVMMemcpy(g_svm_backend_ctx->queue, CL_FALSE, dst_svm, src_host, size, 0, NULL, NULL));
+}
+
+int ggml_cl_svm_upload_mode(void) {
+    // [dspark M2 v2] raw upload route for the GPU slot bank:
+    //   1 (default) staged: preadv -> host staging; drain after wave join via
+    //               ggml_cl_moe_q3k_stage_pack (main thread, driver-safe)
+    //   0           preadv writes SVM directly + inline SVM-pointer pack
+    //   2           staged + inline CPU memcpy -> SVM + SVM-pointer pack (bank12)
+    const char * e = getenv("LLAMA_MOE_UPLOAD");
+    if (e && *e == '0') return 0;
+    if (e && *e == '2') return 2;
+    return 1;
+}
+
+void ggml_cl_moe_q3k_ensure_planes(struct ggml_tensor * soa) {
+    if (soa == nullptr || soa->buffer == nullptr || soa->extra != nullptr) {
+        return;
+    }
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(soa->buffer);
+    if (buft->iface.get_name != ggml_backend_opencl_svm_buft_get_name) {
+        return;
+    }
+    if (soa->type != GGML_TYPE_Q3_K || soa->ne[2] <= 1) {
+        return;
+    }
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buft->device);
+    if (!backend_ctx->kernel_moe_q3k_pack) {
+        return;
+    }
+    auto * bctx = (ggml_backend_opencl_svm_buffer_context *) soa->buffer->context;
+    GGML_ASSERT(bctx != nullptr);
+    std::lock_guard<std::mutex> lock(bctx->extra_mutex);
+    if (soa->extra != nullptr) {
+        return;
+    }
+    const int Kc = (int) soa->ne[0];
+    const int Mc = (int) soa->ne[1];
+    const int Ec = (int) soa->ne[2];
+    if (Kc % 256 != 0 || Mc % 128 != 0) {
+        return;   // batched gates unmet: op stays on CPU, keep raw
+    }
+    auto * extra = new ggml_tensor_extra_cl_q3_K();
+    const size_t n_blk     = (size_t) Kc / 32;
+    const size_t layer_pix = (size_t) Mc * n_blk * 3;
+    const size_t se_half2  = n_blk * ((size_t) Mc / 2);
+    cl_int err;
+    CL_CHECK((extra->q   = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                (size_t) Ec * layer_pix * sizeof(cl_uint), NULL, &err), err));
+    CL_CHECK((extra->se0 = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                (size_t) Ec * se_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+    CL_CHECK((extra->se1 = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                (size_t) Ec * se_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+    bctx->extras.push_back(extra);
+    soa->extra = extra;
+}
+
+// [dspark M2] shared tail of the pack routes: set kernel args and enqueue.
+// raw_is_clmem: raw comes from the per-buffer cl_mem staging (fast reads);
+// otherwise raw_svm is an FGSVM pointer (slow GPU reads, bank12 route).
+static void moe_q3k_pack_enqueue(ggml_backend_opencl_context * backend_ctx, ggml_tensor * soa,
+        ggml_tensor_extra_cl_q3_K * extra, int plane_slot,
+        bool raw_is_clmem, cl_mem raw_mem, const void * raw_svm, cl_ulong raw_off) {
+    cl_kernel kernel = backend_ctx->kernel_moe_q3k_pack;
+    cl_uint k_arg = 0;
+    if (raw_is_clmem) {
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem), &raw_mem));
+    } else {
+        CL_CHECK(clSetKernelArgSVMPointer(kernel, k_arg++, raw_svm));
+    }
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem), &extra->q));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem), &extra->se0));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem), &extra->se1));
+    cl_uint plane_slot_u = (cl_uint) plane_slot;
+    cl_uint Mc = (cl_uint) soa->ne[1];
+    cl_uint n_sb = (cl_uint)(soa->ne[0] / 256);
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_uint), &plane_slot_u));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_uint), &Mc));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_uint), &n_sb));
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong), &raw_off));
+
+    const size_t gws = (size_t) Mc * n_sb;
+    // no clFinish: the in-order queue places this before any later GEMV that
+    // reads the planes (fill -> publish -> bind -> dispatch ordering)
+    // [dspark M2] GGML_Q3K_PACK_TIME=1: time the first 24 pack enqueues
+    // (blocking, distorts pipeline — diagnostics only)
+    static const bool pack_time = getenv("GGML_Q3K_PACK_TIME") != nullptr;
+    if (pack_time) {
+        static int pc = 0;
+        const bool do_print = pc++ < 24;
+        auto wall_now = [] {
+            return std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        const double w0 = do_print ? wall_now() : 0;
+        cl_event evt;
+        CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 1, NULL, &gws, NULL, 0, NULL, &evt));
+        if (do_print) {
+            CL_CHECK(clWaitForEvents(1, &evt));
+            const double w1 = wall_now();
+            fprintf(stderr, "[q3k-pack] Mc=%u n_sb=%u gws=%zu wall=%.3fms\n",
+                    Mc, n_sb, gws, w1 - w0);
+            fflush(stderr);
+        }
+        CL_CHECK(clReleaseEvent(evt));
+    } else {
+        CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 1, NULL, &gws, NULL, 0, NULL, NULL));
+    }
+}
+
+void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int plane_slot, const void * raw) {
+    if (soa == nullptr || raw == nullptr || soa->buffer == nullptr) {
+        return;
+    }
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(soa->buffer);
+    if (buft->iface.get_name != ggml_backend_opencl_svm_buft_get_name) {
+        return;
+    }
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buft->device);
+    if (backend_ctx->kernel_moe_q3k_pack == nullptr) {
+        GGML_LOG_ERROR("%s: pack kernel missing — GPU slot bank would serve garbage planes\n", __func__);
+        GGML_ABORT("ggml_cl_moe_q3k_pack_slot: kernel_moe_q3k_pack not built");
+    }
+
+    auto * bctx = (ggml_backend_opencl_svm_buffer_context *) soa->buffer->context;
+    GGML_ASSERT(bctx != nullptr);
+
+    // lazy per-base-tensor planes; guarded — fills run on IO worker threads.
+    // Lock order: extra_mutex (per-buffer) THEN g_svm_enqueue_mutex (global) —
+    // the global lock must cover arg-set+enqueue because kernel_moe_q3k_pack
+    // is shared across buffers (see g_svm_enqueue_mutex comment).
+    std::lock_guard<std::mutex> lock(bctx->extra_mutex);
+    std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
+    if (soa->extra == nullptr) {
+        const int Kc = (int) soa->ne[0];
+        const int Mc = (int) soa->ne[1];
+        const int Ec = (int) soa->ne[2];
+        if (Kc % 256 != 0 || Mc % 128 != 0) {
+            return;   // batched gates unmet: op stays on CPU, keep raw
+        }
+        auto * extra = new ggml_tensor_extra_cl_q3_K();
+        const size_t n_blk     = (size_t) Kc / 32;
+        const size_t layer_pix = (size_t) Mc * n_blk * 3;
+        const size_t se_half2  = n_blk * ((size_t) Mc / 2);
+        cl_int err;
+        CL_CHECK((extra->q   = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                    (size_t) Ec * layer_pix * sizeof(cl_uint), NULL, &err), err));
+        CL_CHECK((extra->se0 = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                    (size_t) Ec * se_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+        CL_CHECK((extra->se1 = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+                    (size_t) Ec * se_half2 * 2 * sizeof(ggml_fp16_t), NULL, &err), err));
+        bctx->extras.push_back(extra);
+        soa->extra = extra;
+    }
+    auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
+
+    // [dspark M2 fix] raw source: default = SVM pointer path (route decided by
+    // the caller; the IO-thread WriteBuffer/SVMMemcpy routes crash the 740
+    // libCB submission thread — bank7-10). LLAMA_MOE_UPLOAD=1 keeps this
+    // legacy inline route for A/B only.
+    static const int upload_mode = [] {
+        const char * e = getenv("LLAMA_MOE_UPLOAD");
+        return (e && *e == '0') ? 0 : 1;
+    }();
+    if (upload_mode == 1 && bctx->raw_stage != nullptr) {
+        // IO-thread staged route (legacy, bank10): async WriteBuffer from the
+        // fill thread + cl_mem pack. CRASHES the driver — kept only to
+        // document the negative result; the production staged route is
+        // ggml_cl_moe_q3k_stage_pack (main thread, after wave join).
+        const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
+        cl_ulong raw_off = (cl_ulong) plane_slot * slot_bpe;
+        CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage, CL_FALSE,
+            (size_t) raw_off, slot_bpe, raw, 0, NULL, NULL));
+        moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, raw_off);
+        return;
+    }
+    moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, false, nullptr, raw, 0);
+}
+
+// [dspark M2 v2] staged route done on the CALLER thread after the fill wave
+// joins (main thread): blocking clEnqueueWriteBuffer into the per-buffer
+// cl_mem staging, then the pack kernel reads the cl_mem (fast) instead of
+// FGSVM (slow). WriteBuffer from the main thread is the set_tensor pattern —
+// never crashes; from IO threads it does (bank7-10). CL_TRUE because the
+// thread_local staging is reused by the next wave.
+void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const void * src_host) {
+    if (soa == nullptr || src_host == nullptr || soa->buffer == nullptr) {
+        return;
+    }
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(soa->buffer);
+    if (buft->iface.get_name != ggml_backend_opencl_svm_buft_get_name) {
+        return;
+    }
+    ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buft->device);
+    if (backend_ctx->kernel_moe_q3k_pack == nullptr) {
+        GGML_ABORT("ggml_cl_moe_q3k_stage_pack: kernel_moe_q3k_pack not built");
+    }
+    ggml_cl_moe_q3k_ensure_planes(soa);
+    auto * bctx = (ggml_backend_opencl_svm_buffer_context *) soa->buffer->context;
+    GGML_ASSERT(bctx != nullptr);
+    if (bctx->raw_stage == nullptr) {
+        // no staging buffer: fall back to the SVM-pointer pack path; the SVM
+        // slot must have been filled directly (LLAMA_MOE_STAGE=0)
+        std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
+        auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
+        if (extra == nullptr) {
+            return;
+        }
+        moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, false, nullptr,
+                             (const uint8_t *) soa->data + (size_t) plane_slot * (ggml_nbytes(soa) / (size_t) soa->ne[2]), 0);
+        return;
+    }
+    const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
+    const size_t raw_off = (size_t) plane_slot * slot_bpe;
+    std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
+    CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage, CL_TRUE,
+        raw_off, slot_bpe, src_host, 0, NULL, NULL));
+    auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
+    GGML_ASSERT(extra != nullptr);
+    moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, (cl_ulong) raw_off);
+}
+
+//
 // backend device
 //
 
@@ -13554,7 +14373,8 @@ static bool ggml_backend_opencl_device_supports_op(ggml_backend_dev_t dev, const
 static bool ggml_backend_opencl_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     // Check 'dev' and 'buffer_type' are not objects belonging to this backend.
     if (dev->iface.get_name != ggml_backend_opencl_device_get_name ||
-        buft->iface.get_name != ggml_backend_opencl_buffer_type_get_name) {
+        (buft->iface.get_name != ggml_backend_opencl_buffer_type_get_name &&
+         buft->iface.get_name != ggml_backend_opencl_svm_buft_get_name)) {
         return false;
     }
 
@@ -22143,9 +22963,32 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
     // unified routes batched Q6_K lm_head to CPU). Per-layer mc3 is byte-identical.
     const bool use_mc3 = q4k_mc3 && (ne1 == 3) && (ne01 < 32768);
 
+    // [dspark 2026-10-14] Adreno 830: every q4_K GEMV variant in the ne1==1
+    // branch (plain / splitk at m=4096, bin 32b-trans) is numerically broken
+    // (TBO MUL_MAT q4_K m=4096 n=1 k=1024 ERR 1.7-1.9, nondeterministic), while
+    // the GEMM section (activation transpose + padded_N) passes TBO for all n.
+    // On A8X decode the ne1==1 shape through the GEMM section instead. Opt out
+    // with GGML_OPENCL_Q4K_GEMV=1 after the driver bug is root-caused.
+    static const bool q4k_gemv_a8x = [] {
+        const char * e = getenv("GGML_OPENCL_Q4K_GEMV");
+        return e && e[0] == '1';
+    }();
+    const bool force_gemm_n1 = backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X &&
+                               ne1 == 1 && !q4k_gemv_a8x && !use_mc3 && ne01 < 32768;
+
     const bool use_bin = use_q4_k_bin_kernels(backend_ctx, src0);
 
-    if (use_bin) {
+    static const bool trace_q4k = getenv("GGML_OPENCL_TRACE_Q4K") != nullptr;
+    if (trace_q4k) {
+        GGML_LOG_INFO("ggml_opencl: q4_K mul_mat M=%d N=%d K=%d use_bin=%d force_gemm_n1=%d\n",
+                      ne01, ne1, ne00, (int) use_bin, (int) force_gemm_n1);
+    }
+
+    // [dspark 2026-10-14] Adreno 830: the q4_K bin (32b-trans ila_a8) GEMV is
+    // numerically broken (TBO MUL_MAT q4_K m=4096 n=1 k=1024 ERR=1.75; bin GEMM
+    // n>=2 passes). On A8X route n==1 to the GEMV branch below, where splitk
+    // (TBO-verified on 830) takes over. Bin GEMM for n>=2 is kept.
+    if (use_bin && !(backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X && ne1 == 1)) {
         if (use_mc3) {
             static bool warned = false;
             if (!warned) {
@@ -22157,7 +23000,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         return;
     }
 
-    if (ne1 == 1 || use_mc3) {
+    if ((ne1 == 1 && !force_gemm_n1) || use_mc3) {
         cl_mem q_img = nullptr;
         cl_mem b_sub_buf = nullptr;
         cl_mem b_img = nullptr;
@@ -22247,7 +23090,13 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         // big-K M=2560 cases (ffn_down K=10240 @182us, attn_output @42us) have a
         // large per-call win that dwarfs the ~5us reduce, so extending to 2560 nets
         // positive end-to-end. ffn_gate/up (M=10240) already fill the CUs -> excluded.
-        const bool use_splitk = splitk_wg_env && !use_tiled && !use_q4k_o4 && !use_mc3 && ne01 <= 2560;
+        // [dspark 2026-10-14] Adreno 830 (A8X, driver V@0800.71 E031) miscompiles
+        // the plain q4_K GEMV at larger M: TBO MUL_MAT q4_K m=4096 n=1 k=1024 gives
+        // ERR=1.93 while m<=1023 passes. Route ALL q4_K decode GEMVs through the
+        // splitk kernel on A8X so the broken plain kernel never runs (splitk passes
+        // TBO on 830, incl. m=4096 after this change). No-op on other gens.
+        const bool use_splitk = (splitk_wg_env || backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X)
+            && !use_tiled && !use_q4k_o4 && !use_mc3 && ne01 <= 32768;
 
         if (use_splitk) {
             const int    nsg    = 8;
@@ -22294,6 +23143,10 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
                : use_tiled  ? backend_ctx->kernel_gemv_noshuffle_q4_k_f32_tiled
                : use_q4k_o4 ? backend_ctx->kernel_gemv_noshuffle_q4_k_f32_o4
                             : backend_ctx->kernel_gemv_noshuffle_q4_k_f32;
+        if (trace_q4k) {
+            GGML_LOG_INFO("ggml_opencl: q4_K GEMV branch: splitk=%d tiled=%d o4=%d mc3=%d M=%d\n",
+                          (int) use_splitk, (int) use_tiled, (int) use_q4k_o4, (int) use_mc3, ne01);
+        }
 
         if (use_tiled) {
             CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0_q4_k->q));
@@ -22540,6 +23393,9 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             CL_CHECK((q_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
         }
 
+        if (trace_q4k) {
+            GGML_LOG_INFO("ggml_opencl: q4_K GEMM section: N=%d padded_N=%d\n", N, N + padding);
+        }
         kernel = use_cok  ? backend_ctx->kernel_gemm_noshuffle_q4_k_f32_cok
                : use_r1   ? backend_ctx->kernel_gemm_noshuffle_q4_k_f32_r1
                : use_kimg ? backend_ctx->kernel_gemm_noshuffle_q4_k_f32_kimg
@@ -22638,7 +23494,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // q4_K additionally K%256 (superblock scale indexing); both need M%128.
     const bool is_q4_0 = src0->type == GGML_TYPE_Q4_0;
     const bool is_q4_k = src0->type == GGML_TYPE_Q4_K;
-    if (!is_q4_0 && !is_q4_k) {
+    // [dspark 2026-10-14] q3_K batched MoE (#28): host-precomputed dl planes
+    // (se0/se1) + re-packed uint q plane — the q4_K dodge recipe applied to
+    // q3_K's hmask/qs/scales layout. Gates: K%256 (superblock scales), M%128.
+    const bool is_q3_k = src0->type == GGML_TYPE_Q3_K;
+    if (!is_q4_0 && !is_q4_k && !is_q3_k) {
         return false;
     }
     // [dspark 2026-10-14] q4_K batched MoE DISABLED — Adreno 830 (E031.47.18.49)
@@ -22672,20 +23532,23 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
     ggml_tensor_extra_cl_q4_0 * pextra40 = is_q4_0 ? (ggml_tensor_extra_cl_q4_0 *)soa0->extra : nullptr;
     ggml_tensor_extra_cl_q4_K * pextra4k = is_q4_k ? (ggml_tensor_extra_cl_q4_K *)soa0->extra : nullptr;
+    ggml_tensor_extra_cl_q3_K * pextra3k = is_q3_k ? (ggml_tensor_extra_cl_q3_K *)soa0->extra : nullptr;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extra2 = (ggml_tensor_extra_cl *)src2->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
     if (is_q4_0 && (!pextra40 || !pextra40->q || !pextra40->d)) return false;
     if (is_q4_k && (!pextra4k || !pextra4k->q || !pextra4k->d || !pextra4k->dm || !pextra4k->s)) return false;
     if (is_q4_k && (!pextra4k->seff || !pextra4k->meff)) return false;
+    if (is_q3_k && (!pextra3k || !pextra3k->q || !pextra3k->se0 || !pextra3k->se1)) return false;
     if (!extra1 || !extra2 || !extrad) {
         return false;
     }
-    cl_mem wq = is_q4_0 ? pextra40->q : pextra4k->q;
-    // q4_0: one d plane; q4_K: two precomputed effective-scale planes
-    cl_mem wd = is_q4_0 ? pextra40->d : pextra4k->seff;
-    cl_mem we = is_q4_0 ? nullptr     : pextra4k->meff;
-    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : &pextra4k->q_img;
+    cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : pextra3k->q);
+    // q4_0: one d plane; q4_K: two precomputed effective-scale planes;
+    // q3_K: two host-decoded dl planes (row-even/row-odd)
+    cl_mem wd = is_q4_0 ? pextra40->d : (is_q4_k ? pextra4k->seff : pextra3k->se0);
+    cl_mem we = is_q4_0 ? nullptr     : (is_q4_k ? pextra4k->meff : pextra3k->se1);
+    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : &pextra3k->q_img);
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
     if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
@@ -22702,9 +23565,34 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     const int n_tok  = (int)src2->ne[1];
     const int ne11   = (int)src1->ne[1];
     const long long n_cols = (long long)n_used * n_tok;
+    // [dspark 2026-10-15] M2 GPU slot bank: src0 is a slot-tensor view whose
+    // slots live at [view_offs/bpe, view_offs/bpe + E) inside the base tensor
+    // (planes cover ALL base slots). ids select within the view; add the view
+    // slot offset when indexing planes.
+    int es_base = 0;
+    if (is_q3_k && src0->view_src != nullptr) {
+        const size_t slot_bpe = ggml_nbytes(src0) / (size_t)src0->ne[2];
+        if (slot_bpe == 0 || (src0->view_offs % slot_bpe) != 0) {
+            return false;
+        }
+        es_base = (int)(src0->view_offs / slot_bpe);
+    }
     if (K % 32 != 0 || M % 128 != 0) return false;   // M%128: no row-pair padding
-    if (is_q4_k && K % 256 != 0) return false;       // q4_K superblock scale indexing
+    if ((is_q4_k || is_q3_k) && K % 256 != 0) return false;   // superblock scale indexing
     if (n_used < 1 || n_tok < 1 || n_cols > (1LL << 20)) return false;
+    {
+        static const bool moe_trace = [] {
+            const char * e = getenv("GGML_MOE_TRACE");
+            return e && e[0] == '1';
+        }();
+        if (moe_trace && is_q3_k) {
+            static int cnt = 0;
+            if (cnt++ < 200) {
+                fprintf(stderr, "[q3k-mm] %s K=%d M=%d E=%d n_used=%d n_tok=%d ne11=%d img=%p\n",
+                        src0->name, K, M, E, n_used, n_tok, ne11, (void*)*wq_img_slot);
+            }
+        }
+    }
 
     cl_ulong b_base   = extra1->offset + src1->view_offs;
     cl_ulong ids_base = extra2->offset + src2->view_offs;
@@ -22715,11 +23603,17 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if ((cl_ulong)src1->ne[2] * ne11 * K * 4 > (cl_ulong)1 << 31) return false;
 
     // per-expert strides
-    const size_t q_layer      = (size_t)M * (K/4)  * 2;   // bytes
+    // q4_0/q4_K: 8 uints per (rp, k); q3_K: 6 uints per (rp, k) with M/2 row
+    // pairs -> 3*M*(K/32) uints per layer (must match set_tensor's layer_pix)
+    const size_t q_layer      = is_q3_k ? (size_t)M * (K/32) * 3 * 4
+                                        : (size_t)M * (K/4)  * 2;   // bytes
     const size_t q_layer_pix  = q_layer / 4;              // CL_R/UINT32 pixels
     const size_t d_layer      = is_q4_0 ? (size_t)M * (K/32)   * 2 : 0;
-    // q4_K precomputed effective-scale planes: [K/32 blocks][M/2 row pairs] half2
-    const size_t se_layer     = is_q4_k ? (size_t)M * (K/32)   * 2 : 0;
+    // q4_K/q3_K precomputed effective-scale planes: [K/32 blocks][M/2 row pairs] half2.
+    // Both store one half2 per (row-pair, 32-block): M*(K/32) half2 per layer
+    // = M*(K/32)*2 bytes — must match set_tensor's se_layer_half2 (the host
+    // writes halves with a *2 index factor, i.e. se_layer_half2*4 bytes/layer).
+    const size_t se_layer     = (is_q4_k || is_q3_k) ? (size_t)M * (K/32) * 2 : 0;   // bytes
     const int    ids_row      = (int)(src2->nb[1] / sizeof(int32_t));
     const int    grid_x_per_col = CEIL_DIV(M / 2, 64) * 64;
 
@@ -22737,7 +23631,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         img_fmt = { CL_R, CL_UNSIGNED_INT32 };
         memset(&img_desc, 0, sizeof(img_desc));
         img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = (size_t)E * q_layer / 4;
+        // [dspark M2] width covers the WHOLE base plane (view-independent so
+        // the per-extra cache stays valid across prefill/decode views)
+        const int E_base = (int)soa0->ne[2];
+        img_desc.image_width = (size_t)E_base * q_layer / 4;
         img_desc.buffer      = wq;
         CL_CHECK((q_img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
         *wq_img_slot = q_img;
@@ -22747,41 +23644,60 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // P4: cached on the backend keyed on (buffer, origin, size) instead of
     // created+released per call — compute buffers are pooled per graph, so the
     // key recurs every decode step and the churn becomes a cache hit.
+    // GGML_OPENCL_MOE_BCACHE=0 disables the cache (per-call create+release,
+    // pre-P4 behavior) — bisect toggle for the 2026-10-14 Ling q4_0 garbling.
+    static const bool moe_bcache_enabled = [] {
+        const char * e = getenv("GGML_OPENCL_MOE_BCACHE");
+        return !e || e[0] != '0';
+    }();
     cl_mem b_sub_buf = nullptr;
     cl_mem b_img     = nullptr;
+    bool   b_nocache = false;   // created per-call (cache off) -> release after enqueue
+    int    b_slot_idx = -1;     // cache slot claimed by this call (cache on)
     const size_t b_origin = (size_t)b_base;
     const size_t b_size   = (size_t)src1->ne[2] * ne11 * K * sizeof(float);
-    for (int ci = 0; ci < 8; ++ci) {
-        auto & c = backend_ctx->moe_b_cache[ci];
-        if (c.sub && c.src == extra1->data_device && c.origin == b_origin && c.size == b_size) {
-            b_sub_buf = c.sub;
-            b_img     = c.img;
-            break;
+    if (moe_bcache_enabled) {
+        for (int ci = 0; ci < 160; ++ci) {
+            auto & c = backend_ctx->moe_b_cache[ci];
+            if (c.sub && c.src == extra1->data_device && c.origin == b_origin && c.size == b_size) {
+                b_sub_buf = c.sub;
+                b_img     = c.img;
+                break;
+            }
         }
     }
     if (b_img == nullptr) {
-        auto & slot = backend_ctx->moe_b_cache[backend_ctx->moe_b_cache_next];
-        backend_ctx->moe_b_cache_next = (backend_ctx->moe_b_cache_next + 1) % 8;
-        if (slot.sub) {
-            CL_CHECK(clReleaseMemObject(slot.img));
-            CL_CHECK(clReleaseMemObject(slot.sub));
-            slot.sub = nullptr; slot.img = nullptr; slot.src = nullptr;
-            slot.origin = 0; slot.size = 0;
-        }
         region.origin = b_origin;
         region.size   = b_size;
-        CL_CHECK((slot.sub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+        if (moe_bcache_enabled) {
+            b_slot_idx = backend_ctx->moe_b_cache_next;
+            backend_ctx->moe_b_cache_next = (backend_ctx->moe_b_cache_next + 1) % 160;
+            auto & slot = backend_ctx->moe_b_cache[b_slot_idx];
+            if (slot.sub) {
+                CL_CHECK(clReleaseMemObject(slot.img));
+                CL_CHECK(clReleaseMemObject(slot.sub));
+                slot.sub = nullptr; slot.img = nullptr; slot.src = nullptr;
+                slot.origin = 0; slot.size = 0;
+            }
+            CL_CHECK((slot.sub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+            b_sub_buf = slot.sub;
+        } else {
+            CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+            b_nocache = true;
+        }
         img_fmt = { CL_RGBA, CL_FLOAT };
         memset(&img_desc, 0, sizeof(img_desc));
         img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
         img_desc.image_width = b_size / 16;   // float4 pixels: 1 px = 16 bytes (was /4 → 4x too wide → CL_INVALID_MEM_OBJECT)
-        img_desc.buffer      = slot.sub;
-        CL_CHECK((slot.img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
-        slot.src    = extra1->data_device;
-        slot.origin = b_origin;
-        slot.size   = b_size;
-        b_sub_buf = slot.sub;
-        b_img     = slot.img;
+        img_desc.buffer      = b_sub_buf;
+        CL_CHECK((b_img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        if (b_slot_idx >= 0) {
+            auto & slot = backend_ctx->moe_b_cache[b_slot_idx];
+            slot.src    = extra1->data_device;
+            slot.origin = b_origin;
+            slot.size   = b_size;
+            slot.img    = b_img;
+        }
     }
 
     // P3: expert bucket sort (prefill only — decode's n_tok==1 has <=8 columns
@@ -22790,6 +23706,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // histogram/cursors, [ (E+1)*4, +n_cols*4) permuted column indices (the
     // perm region is carved out as a sub-buffer per call and released right
     // after enqueue — the in-order queue holds the reference).
+    // [dspark 2026-10-14] q3_K-ONLY: q4_0/q4_K batched kernels lost the perm
+    // param — their perm-param compilation was miscompiled by E031.47 (830,
+    // NMSE~2.2 with perm present even when NULL; q3_K compiles clean), so P3
+    // was reverted to q3_K (which passes 11/11 incl. tok4 on 830).
     const int ids_elem_off = (int)(ids_base / 4);
     cl_mem perm_mem = nullptr;   // NULL => identity order in the main kernels
     cl_mem perm_sub = nullptr;
@@ -22797,7 +23717,7 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         const char * e = getenv("GGML_OPENCL_MOE_SORT");
         return !e || e[0] != '0';
     }();
-    if (moe_sort_enabled && n_tok > 1 && E + 1 <= 2048) {
+    if (moe_sort_enabled && is_q3_k && n_tok > 1 && E + 1 <= 2048) {
         // sub-buffer origin must be device-aligned (CL_DEVICE_MEM_BASE_ADDR_ALIGN;
         // Adreno 128-256B). (E+1)*4 = 516B for E=128 is unaligned -> CL_INVALID_VALUE
         // (-13). Pad the perm region start up to a 256B boundary.
@@ -22862,18 +23782,23 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     }
 
     cl_kernel kernel = is_q4_0 ? backend_ctx->kernel_mul_mat_id_q4_0_f32_batched
-                               : backend_ctx->kernel_mul_mat_id_q4_k_f32_batched;
+                               : (is_q4_k ? backend_ctx->kernel_mul_mat_id_q4_k_f32_batched
+                                          : backend_ctx->kernel_mul_mat_id_q3_k_f32_batched);
     cl_uint k_arg = 0;
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &q_img));
-    // q4_0: [d] ; q4_K: [seff, meff] (precomputed effective scales)
+    // q4_0: [d] ; q4_K: [seff, meff] ; q3_K: [se0, se1] (precomputed effective scales)
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &wd));
-    if (is_q4_k) {
+    if (is_q4_k || is_q3_k) {
         CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &we));
     }
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &b_img));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extra2->data_device));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &ids_elem_off));
-    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &perm_mem));   // P3: NULL => identity
+    // q3_K kernel keeps the P3 perm param; q4_0/q4_K kernels reverted to the
+    // pre-P3 signature (perm param triggered an E031.47 miscompile on 830)
+    if (is_q3_k) {
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &perm_mem));   // NULL => identity
+    }
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extrad->data_device));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),&dst_base));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(int),     &K));
@@ -22891,6 +23816,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&d_layer));
     } else {
         CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong),(cl_ulong *)&se_layer));
+    }
+    if (is_q3_k) {
+        // [dspark M2] view slot offset within the base plane tensor
+        cl_ulong es_base_u = (cl_ulong)es_base;
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_ulong), &es_base_u));
     }
 
     // [dspark 2026-10-14] KDBG: per-(col,k-block) contribution + scale dump for the
@@ -22912,7 +23842,7 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         GGML_LOG_INFO("batched MoE dump: type=%s K=%d M=%d E=%d n_used=%d n_tok=%d ne11=%d "
                       "ids_off=%d ids_row=%d grid=%d q_pix=%llu d_by=%llu se_by=%llu "
                       "b_base=%llu dst_base=%llu nb1=%llu nb2=%llu\n",
-                      is_q4_0 ? "q4_0" : "q4_K", K, M, E, n_used, n_tok, ne11,
+                      is_q4_0 ? "q4_0" : (is_q4_k ? "q4_K" : "q3_K"), K, M, E, n_used, n_tok, ne11,
                       ids_elem_off, ids_row, grid_x_per_col,
                       (unsigned long long)q_layer_pix, (unsigned long long)d_layer,
                       (unsigned long long)se_layer,
@@ -22921,7 +23851,35 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     }
     size_t global_work_size[2] = { (size_t)grid_x_per_col * (size_t)n_cols, 4 };
     size_t local_work_size[2]  = { 64, 4 };
-    backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
+    // [dspark M2] targeted timing: first 24 q3_K calls print kernel GPU time
+    // vs host wall (enqueue->finish). GGML_OPENCL_MOE_TIME=1.
+    static const bool moe_time = getenv("GGML_OPENCL_MOE_TIME") != nullptr;
+    if (moe_time && is_q3_k) {
+        static int tc = 0;
+        const bool do_print = tc++ < 24;
+        auto wall_now = [] {
+            return std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        const double w0 = do_print ? wall_now() : 0;
+        cl_event evt;
+        CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 2, NULL,
+                                        global_work_size, local_work_size, 0, NULL, &evt));
+        if (do_print) {
+            CL_CHECK(clWaitForEvents(1, &evt));
+            const double w1 = wall_now();
+            cl_ulong t0 = 0, t1 = 0;
+            clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_START, sizeof(t0), &t0, nullptr);
+            clGetEventProfilingInfo(evt, CL_PROFILING_COMMAND_END, sizeof(t1), &t1, nullptr);
+            fprintf(stderr, "[q3k-time] K=%d M=%d n_cols=%lld gws=%dx%d kernel=%.3fms wall=%.3fms\n",
+                    K, M, n_cols, (int)global_work_size[0], (int)global_work_size[1],
+                    (t1 - t0) / 1e6, w1 - w0);
+            fflush(stderr);
+        }
+        CL_CHECK(clReleaseEvent(evt));
+    } else {
+        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
+    }
 
     if (dbg_mem) {
         static bool kdbg_printed = false;
@@ -22946,6 +23904,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // the perm sub-buffer is per-call — release it, the in-order queue holds its ref
     if (perm_sub) {
         CL_CHECK(clReleaseMemObject(perm_sub));
+    }
+    // P4 cache disabled: release the per-call b sub-buffer/image (same ref contract)
+    if (b_nocache && b_sub_buf) {
+        CL_CHECK(clReleaseMemObject(b_img));
+        CL_CHECK(clReleaseMemObject(b_sub_buf));
     }
     return true;
 #else
@@ -23358,6 +24321,21 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
 
     const bool use_bin = use_q6_k_bin_kernels(backend_ctx, src0);
 
+    // [dspark 2026-10-14] Adreno 830: the q6_K noshuffle GEMV (ne1==1, per-layer
+    // shapes M%64==0) is numerically broken (probe6 M=2048/4096/8192 x K=512..4096
+    // n=1 ERR 1.13-1.30, same repack-class miscompilation family as the q4_K GEMV
+    // and q5_K). The GEMM section (activation transpose + padded_N) is the only
+    // validated path. On A8X route per-layer n==1 through the GEMM section.
+    // lm_head-scale weights (ne01 >= 32768) keep the flat/o4 GEMV (probe6
+    // M=248144 n=1 ERR 0.0038 OK); tiled-layout weights keep their own pair.
+    static const bool q6k_gemv_a8x = [] {
+        const char * e = getenv("GGML_OPENCL_Q6K_GEMV");
+        return e && e[0] == '1';
+    }();
+    const bool force_gemm_n1_q6k = backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X &&
+                                   ne1 == 1 && !q6k_gemv_a8x && !use_q6k_mc3 &&
+                                   !use_q6k_tiled(backend_ctx, src0) && ne01 < 32768;
+
     if (use_bin) {
         if (use_q6k_mc3 || use_q6k_tiled_mc) {
             static bool warned = false;
@@ -23370,7 +24348,7 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
         return;
     }
 
-    if (ne1 == 1 || use_q6k_mc3 || use_q6k_tiled_mc) {
+    if ((ne1 == 1 && !force_gemm_n1_q6k) || use_q6k_mc3 || use_q6k_tiled_mc) {
         cl_mem ql_img = nullptr;
         cl_mem qh_img = nullptr;
         cl_mem b_sub_buffer = nullptr;
@@ -24443,6 +25421,20 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
     const enum ggml_type src0t = (src0->type == GGML_TYPE_BF16) ? GGML_TYPE_F16 : src0->type;
     const enum ggml_type src1t = src1->type;
 
+    {
+        static const bool mm_trace = [] {
+            const char * e = getenv("GGML_MM_TRACE");
+            return e && e[0] == '1';
+        }();
+        static int mm_cnt = 0;
+        if (mm_trace && mm_cnt++ < 120) {
+            fprintf(stderr, "[mm] type=%s ne=[%d,%d,%d,%d] ne1=%d contig=%d perm=%d\n",
+                    ggml_type_name(src0->type),
+                    (int)src0->ne[0], (int)src0->ne[1], (int)src0->ne[2], (int)src0->ne[3],
+                    (int)src1->ne[1], ggml_is_contiguous(src0), ggml_is_permuted(src0));
+        }
+    }
+
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
     // quant kv without FA
@@ -24884,7 +25876,13 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         }
 
         // q4_k x fp32
-        if (src0t == GGML_TYPE_Q4_K && src1t == GGML_TYPE_F32 && !use_flat_gemv_for_large_m_q4_K(backend_ctx, src0)) {
+        // [dspark 2026-10-14] Adreno 830: the xmem prepack q4_K path is
+        // numerically broken for n==1 decode GEMVs (TBO m=4096 n=1 k=1024 ERR
+        // 1.75-1.93 nondeterministic, repack-class miscompilation; n>=2 GEMM
+        // passes). Route n==1 to the noshuffle path below, where splitk
+        // (TBO-verified on 830) takes over.
+        if (src0t == GGML_TYPE_Q4_K && src1t == GGML_TYPE_F32 &&
+            !use_flat_gemv_for_large_m_q4_K(backend_ctx, src0)) {
             ggml_cl_mul_mat_q4_k_f32_adreno(backend, src0, src1, dst);
             return;
         }
@@ -26932,7 +27930,10 @@ static void moe_router_reoerder(ggml_backend_t backend, const ggml_tensor * src,
 
 static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
-    GGML_ASSERT(src0->extra);
+    // [dspark M2] slot-tensor views carry no extra of their own — the q3_K
+    // planes live on view_src and the batched path resolves soa0 itself. Only
+    // require an extra when this is a plain (non-view) tensor.
+    GGML_ASSERT(src0->view_src != nullptr || src0->extra);
     GGML_ASSERT(src1);
     GGML_ASSERT(src1->extra);
     GGML_ASSERT(dst);
@@ -26944,7 +27945,7 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)(src0->view_src ? src0->view_src->extra : src0->extra);
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extra2 = (ggml_tensor_extra_cl *)src2->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -27032,6 +28033,17 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
         }
         ggml_cl_mul_mat_id_dense_loop(backend, src0, src1, src2, dst);
         return;
+    }
+    // [dspark 2026-10-14] q3_K batched MoE (#28): batched-only GPU path (no
+    // dense q3_K GEMV exists). The MUL_MAT_ID support gate admits q3_K only
+    // when the batched shape gates hold and set_tensor has prepped the
+    // planes, so a failure here is a contract violation — abort loudly
+    // instead of silently degrading.
+    if (src0->type == GGML_TYPE_Q3_K) {
+        if (batched_moe_enabled && ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
+            return;
+        }
+        GGML_ABORT("q3_K batched MoE: precondition failed (set_tensor/support gate mismatch)");
     }
 
     int sgs   = 32; // subgroup size

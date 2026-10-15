@@ -1268,6 +1268,14 @@ class _InferenceEngineTab extends ConsumerWidget {
                     subtitle: 'turnip GPU 挂死嫌疑源之一，开启可能更稳但略降速；'
                         '重启 app 后生效',
                   ),
+                  _buildToggleTitle(
+                    '🧩 智能 MoE 加载',
+                    gpuSettings.smartMoeEnabled,
+                    gpuNotifier.setSmartMoeEnabled,
+                    subtitle: '超大 MoE 模型（拆分专家版）：dense 权重常驻内存，'
+                        '路由专家按需流式读入专家窗口。关闭则整包全加载'
+                        '（内存不足的大模型会失败）。改后重新加载模型生效',
+                  ),
                 ],
               ),
             ),

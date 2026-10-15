@@ -335,6 +335,14 @@ struct llama_layer {
     struct ggml_tensor * ffn_down_exps     = nullptr;
     struct ggml_tensor * ffn_up_exps       = nullptr;
     struct ggml_tensor * ffn_gate_up_exps  = nullptr;
+
+    // split-moe decode-window slot views (base + per-layer lookahead tail).
+    // Only bound when LLAMA_MOE_DECODE_WINDOW > 0; otherwise left null and the
+    // shared prefill slot tensors above serve every phase.
+    struct ggml_tensor * ffn_gate_up_exps_dec = nullptr;
+    struct ggml_tensor * ffn_gate_exps_dec    = nullptr;
+    struct ggml_tensor * ffn_up_exps_dec      = nullptr;
+    struct ggml_tensor * ffn_down_exps_dec    = nullptr;
     struct ggml_tensor * ffn_gate_inp_b    = nullptr;
     struct ggml_tensor * ffn_gate_exps_b   = nullptr;
     struct ggml_tensor * ffn_down_exps_b   = nullptr;
@@ -624,6 +632,15 @@ struct llama_prec_policy {
 };
 
 struct llama_model {
+    // ---- split-moe (llama-moe-experts / llama-moe-slot) ----
+    bool moe_slot_bank_enabled() const;
+    int32_t moe_slot_bank_size() const;
+    int32_t moe_experts_layer_count() const;
+    const struct llama_moe_experts_entry * moe_experts_entry(const char * tensor_name) const;
+    int32_t moe_decode_window() const;
+    int32_t moe_prefetch_slots() const;
+    const std::vector<int32_t> & moe_layer_windows() const;
+
     llm_type type = LLM_TYPE_UNKNOWN;
     llm_arch arch = LLM_ARCH_UNKNOWN;
 

@@ -1,5 +1,7 @@
 #include "llama-model.h"
 
+#include "llama-moe-experts.h"
+
 #include "llama-arch.h"
 #include "llama-ext.h"
 #include "llama-hparams.h"
@@ -1221,6 +1223,9 @@ struct llama_model::impl {
     bool has_tensor_overrides;
 
     std::vector<float> tensor_split_owned;
+
+    // split-moe: parsed experts manifest (nullptr when disabled)
+    std::unique_ptr<llama_moe_experts> moe_experts;
 };
 
 bool llama_prec_policy::apply(ggml_tensor * res) const {
@@ -1274,6 +1279,20 @@ void llama_prec_policy::load(llama_model_loader & ml, const llama_model & model)
 }
 
 llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
+    // split-moe: params with env fallback (probe/App can use either)
+    {
+        const char * env_path = getenv("LLAMA_MOE_EXPERTS_PATH");
+        const char * env_bank = getenv("LLAMA_MOE_SLOT_BANK");
+        if (!this->params.moe_experts_path && env_path && env_path[0]) {
+            this->params.moe_experts_path = env_path;
+        }
+        if (this->params.moe_slot_bank == 0 && env_bank && env_bank[0]) {
+            this->params.moe_slot_bank = atoi(env_bank);
+        }
+        if (this->params.moe_experts_path && this->params.moe_experts_path[0] && this->params.moe_slot_bank > 0) {
+            pimpl->moe_experts = std::make_unique<llama_moe_experts>(this->params.moe_experts_path);
+        }
+    }
     if (params.tensor_split != nullptr) {
         // llama_model_params stores tensor_split as a borrowed pointer, but the model
         // may need it later for tensor-parallel KV-cache split metadata.
@@ -1791,6 +1810,31 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
         layers.resize(n_layer_all);
 
+        // split-moe: validate the experts manifest against the loaded hparams
+        if (pimpl->moe_experts) {
+            const auto * experts = pimpl->moe_experts.get();
+            if (params.moe_slot_bank < (int32_t) hparams.n_expert_used()) {
+                throw std::runtime_error(format(
+                    "moe_slot_bank (%d) must be >= n_expert_used (%d)",
+                    (int) params.moe_slot_bank, (int) hparams.n_expert_used()));
+            }
+            if (experts->expert_count() != (int32_t) hparams.n_expert ||
+                experts->expert_used_count() != (int32_t) hparams.n_expert_used()) {
+                throw std::runtime_error(format(
+                    "MoE experts manifest mismatch: experts=%d used=%d layers=%d vs hparams n_expert=%d n_expert_used=%d",
+                    (int) experts->expert_count(), (int) experts->expert_used_count(),
+                    (int) experts->layer_count(), (int) hparams.n_expert, (int) hparams.n_expert_used()));
+            }
+            const int32_t n_moe_layers = experts->layer_count();
+            if (n_moe_layers > 0) {
+                const size_t bytes_one = experts->bytes_per_slot_all_layers();
+                const size_t bytes_all = bytes_one * (size_t) params.moe_slot_bank;
+                LLAMA_LOG_INFO("%s: split-moe enabled: %d MoE layers, slot bank %d, %.2f MiB/layer-slot, %.2f MiB total\n",
+                    __func__, (int) n_moe_layers, (int) params.moe_slot_bank,
+                    bytes_one / 1024.0 / 1024.0, bytes_all / 1024.0 / 1024.0);
+            }
+        }
+
         // call the per-model loading function
         load_arch_tensors(ml);
 
@@ -2011,6 +2055,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing
         const bool is_lazy_mapped = ctx_key.lazy && !ml.no_alloc;
 
+        bool mapped_from_file = false;
         if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
             GGML_ASSERT(!ml.no_alloc);
             for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
@@ -2031,8 +2076,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 }
                 bufs.emplace_back(buf);
                 buf_map.emplace(idx, buf);
+                mapped_from_file = true;
             }
-        } else {
+        }
+
+        // split-moe: 合成专家张量的 ctx（create_tensor_expert_alloc）不含任何来自
+        // 文件的张量 —— 上面 mmap 分支会对它产出零个 buffer，张量保持未分配。
+        // 必须回落到真实分配路径，否则 slot 绑定校验会报 "not CPU-addressable"。
+        if (!mapped_from_file) {
             ggml_backend_buffer_t buf;
             if (ml.no_alloc) {
                 buf = ggml_backend_buft_alloc_buffer(buft, /*size =*/ 0); // dummy buffer
@@ -3201,6 +3252,8 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 llama_model_params llama_model_default_params() {
     llama_model_params result = {
         /*.dspark_head_source          =*/ nullptr,
+        /*.moe_experts_path            =*/ nullptr,
+        /*.moe_slot_bank               =*/ 0,
         /*.devices                     =*/ nullptr,
         /*.tensor_buft_overrides       =*/ nullptr,
         /*.n_gpu_layers                =*/ -1,
@@ -3863,4 +3916,113 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
     }
 
     return (uint32_t) nelements;
+}
+
+
+// ---- split-moe (llama-moe-experts / llama-moe-slot) ----
+
+bool llama_model::moe_slot_bank_enabled() const {
+    return pimpl->moe_experts != nullptr;
+}
+
+int32_t llama_model::moe_slot_bank_size() const {
+    return pimpl->moe_experts ? params.moe_slot_bank : 0;
+}
+
+int32_t llama_model::moe_experts_layer_count() const {
+    return pimpl->moe_experts ? pimpl->moe_experts->layer_count() : 0;
+}
+
+const llama_moe_experts_entry * llama_model::moe_experts_entry(const char * tensor_name) const {
+    if (!pimpl->moe_experts || !tensor_name) {
+        return nullptr;
+    }
+    std::string name(tensor_name);
+    // tolerate the ".weight" suffix variants the tensor naming may produce
+    const auto pos = name.find(" (");
+    if (pos != std::string::npos) {
+        name.resize(pos);
+    }
+    // decode-window tensors are named `<orig>.dec` (see qwen35moe's window
+    // layout); same weights, same experts entry — strip before lookup.
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, ".dec") == 0) {
+        name.resize(name.size() - 4);
+    }
+    return pimpl->moe_experts->find(name.c_str());
+}
+
+int32_t llama_model::moe_decode_window() const {
+    if (!pimpl->moe_experts) {
+        return 0;
+    }
+    const char * s = getenv("LLAMA_MOE_DECODE_WINDOW");
+    if (!s || !*s) {
+        return 0;                       // unset = disabled (P0 default)
+    }
+    const int v = atoi(s);
+    return v > 0 ? std::min(v, 1024) : 0;
+}
+
+int32_t llama_model::moe_prefetch_slots() const {
+    if (!pimpl->moe_experts) {
+        return 0;
+    }
+    // K resolution MUST match lookahead_expert_prefetch::init() in
+    // llama-moe-slot.cpp: the runtime binds decode tensors sized c + K here.
+    // A divergence silently kills the decode window at bind() ("1" used to be
+    // read as K=1 here while the runtime took it as "on, default 8").
+    const char * s = getenv("LLAMA_MOE_LOOKAHEAD_PREFETCH");
+    if (!s || !*s || *s == '0') {
+        return 0;                       // unset = disabled (P0 default)
+    }
+    const int d = atoi(s);
+    int v = d > 1 ? d : 4;              // "1"/"on" = default depth 4 (fits bank 16)
+    const char * e = getenv("LLAMA_MOE_LOOKAHEAD_PREFETCH_DEPTH");
+    if (e && *e) {
+        const int dv = atoi(e);
+        if (dv >= 0 && dv <= 16) {
+            v = dv;
+        }
+    }
+    return v;
+}
+
+const std::vector<int32_t> & llama_model::moe_layer_windows() const {
+    static const std::vector<int32_t> empty;
+    if (!pimpl->moe_experts) {
+        return empty;
+    }
+    const int32_t n_moe = pimpl->moe_experts->layer_count();
+    if (n_moe <= 0) {
+        return empty;
+    }
+    const int32_t base = moe_decode_window();
+    if (base <= 0) {
+        return empty;                   // window disabled
+    }
+
+    // parse "il:width,il:width" overrides; invalid entries are ignored
+    // (fall back to uniform rather than crash).
+    static std::vector<int32_t> out;    // stable address: callers hold a reference
+    out.assign((size_t) n_moe, base);
+    const char * s = std::getenv("LLAMA_MOE_LAYER_WINDOWS");
+    if (s && *s) {
+        const char * p = s;
+        while (*p) {
+            while (*p == ' ' || *p == ',') ++p;
+            if (!*p) break;
+            char * end = nullptr;
+            const long il = strtol(p, &end, 10);
+            if (end == p || *end != ':') break;
+            p = end + 1;
+            const long w = strtol(p, &end, 10);
+            if (end == p) break;
+            p = end;
+            if (il >= 0 && il < n_moe && w > 0) {
+                const int32_t lo = (int32_t) std::max<int64_t>(1, hparams.n_expert_used());
+                out[(size_t) il] = (int32_t) std::min<long>(std::max<long>(w, lo), 1024);
+            }
+        }
+    }
+    return out;
 }

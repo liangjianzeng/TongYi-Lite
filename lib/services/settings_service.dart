@@ -361,6 +361,12 @@ class InferenceSettings {
   /// 生效（vulkan 设备初始化每进程仅一次）。
   final bool vkNoSubgroup;
 
+  /// 智能 MoE 加载（超大 MoE 统一架构，2026-10-14）：内存预算路由。
+  /// 开启（默认）= 拆分 MoE 模型走专家 slot 动态加载（dense 常驻 + 专家按需
+  /// preadv 流式读入）；关闭 = 走整包全加载（-les 剥离版主文件缺专家，会失败
+  /// 并提示开启本开关）。
+  final bool smartMoeEnabled;
+
   /// 按模型启用的工具清单：`{modelId: [toolName]}`。空 = 使用该模??
   /// 目录声明的默认工具集（agentDefaults.enabledTools）??
   final Map<String, List<String>> agentToolsByModel;
@@ -505,6 +511,7 @@ class InferenceSettings {
     this.inferenceLimitRefreshRate = true,
     this.gpuNUbatch = 0,
     this.vkNoSubgroup = false,
+    this.smartMoeEnabled = true,
     this.oomPreHeadroomMb = 768,
     this.oomPostHeadroomMb = 1536,
     this.kvCacheType = 'q4_0',
@@ -680,6 +687,7 @@ class InferenceSettings {
       bool? flashAttn,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
+    bool? smartMoeEnabled,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -799,6 +807,7 @@ class InferenceSettings {
       inferenceLimitRefreshRate: inferenceLimitRefreshRate ?? this.inferenceLimitRefreshRate,
       gpuNUbatch: gpuNUbatch ?? this.gpuNUbatch,
       vkNoSubgroup: vkNoSubgroup ?? this.vkNoSubgroup,
+      smartMoeEnabled: smartMoeEnabled ?? this.smartMoeEnabled,
       oomPreHeadroomMb: oomPreHeadroomMb ?? this.oomPreHeadroomMb,
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       kvCacheType: kvCacheType ?? this.kvCacheType,
@@ -898,6 +907,7 @@ class InferenceSettings {
         'inferenceLimitRefreshRate': inferenceLimitRefreshRate,
         'gpuNUbatch': gpuNUbatch,
         'vkNoSubgroup': vkNoSubgroup,
+        'smartMoeEnabled': smartMoeEnabled,
         'oomPreHeadroomMb': oomPreHeadroomMb,
         'oomPostHeadroomMb': oomPostHeadroomMb,
         'kvCacheType': kvCacheType,
@@ -1051,6 +1061,7 @@ class InferenceSettings {
       inferenceLimitRefreshRate: json['inferenceLimitRefreshRate'] as bool? ?? true,
       gpuNUbatch: (json['gpuNUbatch'] as num?)?.toInt() ?? 0,
       vkNoSubgroup: json['vkNoSubgroup'] as bool? ?? false,
+      smartMoeEnabled: json['smartMoeEnabled'] as bool? ?? true,
       oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
       kvCacheType: (json['kvCacheType'] as String?) == 'q8_0' ? 'q8_0' : 'q4_0',

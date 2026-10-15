@@ -154,6 +154,8 @@ set(GGML_OPENCL_KERNELS
     moe_reorder_b
     moe_combine
     moe_sort_by_expert
+    moe_sort_dspark
+    moe_q3k_pack
     mul_mm_f32_f32_l4_lm
     mul_mm_f16_f32_l4_lm
     mul_mm_q1_0_f32_l4_lm
@@ -188,6 +190,7 @@ set(GGML_OPENCL_KERNELS
     gemv_noshuffle_q4_k_f32_tiled
     gemm_noshuffle_q4_k_f32
     gemv_noshuffle_q4_k_f32_32b_trans
+    gemv_noshuffle_q3_k_f32
     gemv_noshuffle_q6_k_f32
     gemv_noshuffle_q6_k_f32_o4
     gemv_noshuffle_q6_k_f32_tiled

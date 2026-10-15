@@ -1,12 +1,31 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 
+// [dspark 2026-10-14] Scalar-float subgroup broadcast. 740's online compiler
+// lacks float overloads of sub_group_broadcast entirely -> host passes
+// -DSGB_SCALAR_BROKEN and broadcasts go through the uint-bitcast shim.
+// 830 (E031.47) has working float broadcast but miscompiles kernels whose
+// broadcasts go through an inline wrapper, even in pass-through form
+// (NMSE~2.2, 2026-10-14) -> uses the direct builtin. All call sites are
+// per-component scalar: no vector broadcast anywhere.
+#ifdef SGB_SCALAR_BROKEN
+inline float sgb_f(float v, uint lid) {
+    return as_float(sub_group_broadcast(as_uint(v), lid));
+}
+#define SGB_BC(v, lid) sgb_f(v, lid)
+#else
+#define SGB_BC(v, lid) sub_group_broadcast(v, lid)
+#endif
+
 #ifdef cl_qcom_reqd_sub_group_size
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 #define ADRENO_GPU 1
 #define REQD_SUBGROUP_SIZE_64 __attribute__((qcom_reqd_sub_group_size("half")))
 #endif
 
+// the driver's online compiler lacks float overloads of sub_group_broadcast
+// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
+// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
 #define QK_K  256
 #define NSUBGROUPS 4
 #define SUBGROUP_SIZE 64
@@ -31,110 +50,117 @@ inline void get_scale_min_k4(
 
 #define dequantizeBlockAccum_ns_sgbroadcast_1_hi(total_sums, bits4, bits1, scale, minv, y) \
     float shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 0); \
+    shared_y = SGB_BC(y.s0, 0); \
     total_sums.s0 += (((bits4.s0 & 0x000F) | ((bits1.s0 & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x000F) | ((bits1.s1 & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 0); \
+    shared_y = SGB_BC(y.s1, 0); \
     total_sums.s0 += ((((bits4.s0 & 0x00F0) >> 4) | (((bits1.s0 >> 1) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0x00F0) >> 4) | (((bits1.s1 >> 1) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 0); \
+    shared_y = SGB_BC(y.s2, 0); \
     total_sums.s0 += ((((bits4.s0 & 0x0F00) >> 8) | (((bits1.s0 >> 2) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0x0F00) >> 8) | (((bits1.s1 >> 2) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 0); \
+    shared_y = SGB_BC(y.s3, 0); \
     total_sums.s0 += ((((bits4.s0 & 0xF000) >> 12) | (((bits1.s0 >> 3) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0xF000) >> 12) | (((bits1.s1 >> 3) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 0); \
+    shared_y = SGB_BC(y.s4, 0); \
     total_sums.s0 += (((bits4.s2 & 0x000F) | (((bits1.s0 >> 4) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x000F) | (((bits1.s1 >> 4) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 0); \
+    shared_y = SGB_BC(y.s5, 0); \
     total_sums.s0 += ((((bits4.s2 & 0x00F0) >> 4) | (((bits1.s0 >> 5) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0x00F0) >> 4) | (((bits1.s1 >> 5) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 0); \
+    shared_y = SGB_BC(y.s6, 0); \
     total_sums.s0 += ((((bits4.s2 & 0x0F00) >> 8) | (((bits1.s0 >> 6) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0x0F00) >> 8) | (((bits1.s1 >> 6) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 0); \
+    shared_y = SGB_BC(y.s7, 0); \
     total_sums.s0 += ((((bits4.s2 & 0xF000) >> 12) | (((bits1.s0 >> 7) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0xF000) >> 12) | (((bits1.s1 >> 7) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 1); \
+    shared_y = SGB_BC(y.s0, 1); \
     total_sums.s0 += (((bits4.s4 & 0x000F) | ((bits1.s2 & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x000F) | ((bits1.s3 & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 1); \
+    shared_y = SGB_BC(y.s1, 1); \
     total_sums.s0 += ((((bits4.s4 & 0x00F0) >> 4) | (((bits1.s2 >> 1) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0x00F0) >> 4) | (((bits1.s3 >> 1) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 1); \
+    shared_y = SGB_BC(y.s2, 1); \
     total_sums.s0 += ((((bits4.s4 & 0x0F00) >> 8) | (((bits1.s2 >> 2) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0x0F00) >> 8) | (((bits1.s3 >> 2) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 1); \
+    shared_y = SGB_BC(y.s3, 1); \
     total_sums.s0 += ((((bits4.s4 & 0xF000) >> 12) | (((bits1.s2 >> 3) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0xF000) >> 12) | (((bits1.s3 >> 3) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 1); \
+    shared_y = SGB_BC(y.s4, 1); \
     total_sums.s0 += (((bits4.s6 & 0x000F) | (((bits1.s2 >> 4) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x000F) | (((bits1.s3 >> 4) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 1); \
+    shared_y = SGB_BC(y.s5, 1); \
     total_sums.s0 += ((((bits4.s6 & 0x00F0) >> 4) | (((bits1.s2 >> 5) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0x00F0) >> 4) | (((bits1.s3 >> 5) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 1); \
+    shared_y = SGB_BC(y.s6, 1); \
     total_sums.s0 += ((((bits4.s6 & 0x0F00) >> 8) | (((bits1.s2 >> 6) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0x0F00) >> 8) | (((bits1.s3 >> 6) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 1); \
+    shared_y = SGB_BC(y.s7, 1); \
     total_sums.s0 += ((((bits4.s6 & 0xF000) >> 12) | (((bits1.s2 >> 7) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0xF000) >> 12) | (((bits1.s3 >> 7) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_1_lo(total_sums, bits4, bits1, scale, minv, y) \
-    shared_y = sub_group_broadcast(y.s0, 2); \
+    shared_y = SGB_BC(y.s0, 2); \
     total_sums.s0 += (((bits4.s0 & 0x000F) | ((bits1.s4 & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s1 & 0x000F) | ((bits1.s5 & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 2); \
+    shared_y = SGB_BC(y.s1, 2); \
     total_sums.s0 += ((((bits4.s0 & 0x00F0) >> 4) | (((bits1.s4 >> 1) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0x00F0) >> 4) | (((bits1.s5 >> 1) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 2); \
+    shared_y = SGB_BC(y.s2, 2); \
     total_sums.s0 += ((((bits4.s0 & 0x0F00) >> 8) | (((bits1.s4 >> 2) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0x0F00) >> 8) | (((bits1.s5 >> 2) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 2); \
+    shared_y = SGB_BC(y.s3, 2); \
     total_sums.s0 += ((((bits4.s0 & 0xF000) >> 12) | (((bits1.s4 >> 3) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s1 & 0xF000) >> 12) | (((bits1.s5 >> 3) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 2); \
+    shared_y = SGB_BC(y.s4, 2); \
     total_sums.s0 += (((bits4.s2 & 0x000F) | (((bits1.s4 >> 4) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s3 & 0x000F) | (((bits1.s5 >> 4) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 2); \
+    shared_y = SGB_BC(y.s5, 2); \
     total_sums.s0 += ((((bits4.s2 & 0x00F0) >> 4) | (((bits1.s4 >> 5) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0x00F0) >> 4) | (((bits1.s5 >> 5) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 2); \
+    shared_y = SGB_BC(y.s6, 2); \
     total_sums.s0 += ((((bits4.s2 & 0x0F00) >> 8) | (((bits1.s4 >> 6) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0x0F00) >> 8) | (((bits1.s5 >> 6) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 2); \
+    shared_y = SGB_BC(y.s7, 2); \
     total_sums.s0 += ((((bits4.s2 & 0xF000) >> 12) | (((bits1.s4 >> 7) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s3 & 0xF000) >> 12) | (((bits1.s5 >> 7) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s0, 3); \
+    shared_y = SGB_BC(y.s0, 3); \
     total_sums.s0 += (((bits4.s4 & 0x000F) | ((bits1.s6 & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s5 & 0x000F) | ((bits1.s7 & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s1, 3); \
+    shared_y = SGB_BC(y.s1, 3); \
     total_sums.s0 += ((((bits4.s4 & 0x00F0) >> 4) | (((bits1.s6 >> 1) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0x00F0) >> 4) | (((bits1.s7 >> 1) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s2, 3); \
+    shared_y = SGB_BC(y.s2, 3); \
     total_sums.s0 += ((((bits4.s4 & 0x0F00) >> 8) | (((bits1.s6 >> 2) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0x0F00) >> 8) | (((bits1.s7 >> 2) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s3, 3); \
+    shared_y = SGB_BC(y.s3, 3); \
     total_sums.s0 += ((((bits4.s4 & 0xF000) >> 12) | (((bits1.s6 >> 3) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s5 & 0xF000) >> 12) | (((bits1.s7 >> 3) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s4, 3); \
+    shared_y = SGB_BC(y.s4, 3); \
     total_sums.s0 += (((bits4.s6 & 0x000F) | (((bits1.s6 >> 4) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += (((bits4.s7 & 0x000F) | (((bits1.s7 >> 4) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s5, 3); \
+    shared_y = SGB_BC(y.s5, 3); \
     total_sums.s0 += ((((bits4.s6 & 0x00F0) >> 4) | (((bits1.s6 >> 5) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0x00F0) >> 4) | (((bits1.s7 >> 5) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s6, 3); \
+    shared_y = SGB_BC(y.s6, 3); \
     total_sums.s0 += ((((bits4.s6 & 0x0F00) >> 8) | (((bits1.s6 >> 6) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0x0F00) >> 8) | (((bits1.s7 >> 6) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
-    shared_y = sub_group_broadcast(y.s7, 3); \
+    shared_y = SGB_BC(y.s7, 3); \
     total_sums.s0 += ((((bits4.s6 & 0xF000) >> 12) | (((bits1.s6 >> 7) & 0x01) << 4)) * scale.s0 - minv.s0) * shared_y; \
     total_sums.s1 += ((((bits4.s7 & 0xF000) >> 12) | (((bits1.s7 >> 7) & 0x01) << 4)) * scale.s1 - minv.s1) * shared_y; \
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_8_hi(total_sums, bits4, bits1, scale, minv, y) \
     float8 shared_y; \
-    shared_y = sub_group_broadcast(y, 0); \
+    shared_y.s0 = SGB_BC(y.s0, 0); \
+    shared_y.s1 = SGB_BC(y.s1, 0); \
+    shared_y.s2 = SGB_BC(y.s2, 0); \
+    shared_y.s3 = SGB_BC(y.s3, 0); \
+    shared_y.s4 = SGB_BC(y.s4, 0); \
+    shared_y.s5 = SGB_BC(y.s5, 0); \
+    shared_y.s6 = SGB_BC(y.s6, 0); \
+    shared_y.s7 = SGB_BC(y.s7, 0); \
     total_sums.s0 += (((bits4.s0 & 0x000F)         | ((bits1.s0 & 0x01) << 4))         * scale.s0 - minv.s0) * shared_y.s0; \
     total_sums.s0 += ((((bits4.s0 & 0x00F0) >> 4)  | (((bits1.s0 >> 1) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s1; \
     total_sums.s0 += ((((bits4.s0 & 0x0F00) >> 8)  | (((bits1.s0 >> 2) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s2; \
@@ -151,7 +177,14 @@ inline void get_scale_min_k4(
     total_sums.s1 += ((((bits4.s3 & 0x00F0) >> 4)  | (((bits1.s1 >> 5) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s5; \
     total_sums.s1 += ((((bits4.s3 & 0x0F00) >> 8)  | (((bits1.s1 >> 6) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s6; \
     total_sums.s1 += ((((bits4.s3 & 0xF000) >> 12) | (((bits1.s1 >> 7) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s7; \
-    shared_y = sub_group_broadcast(y, 1); \
+    shared_y.s0 = SGB_BC(y.s0, 1); \
+    shared_y.s1 = SGB_BC(y.s1, 1); \
+    shared_y.s2 = SGB_BC(y.s2, 1); \
+    shared_y.s3 = SGB_BC(y.s3, 1); \
+    shared_y.s4 = SGB_BC(y.s4, 1); \
+    shared_y.s5 = SGB_BC(y.s5, 1); \
+    shared_y.s6 = SGB_BC(y.s6, 1); \
+    shared_y.s7 = SGB_BC(y.s7, 1); \
     total_sums.s0 += (((bits4.s4 & 0x000F)         | ((bits1.s2 & 0x01) << 4))         * scale.s0 - minv.s0) * shared_y.s0; \
     total_sums.s0 += ((((bits4.s4 & 0x00F0) >> 4)  | (((bits1.s2 >> 1) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s1; \
     total_sums.s0 += ((((bits4.s4 & 0x0F00) >> 8)  | (((bits1.s2 >> 2) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s2; \
@@ -171,7 +204,14 @@ inline void get_scale_min_k4(
 
 
 #define dequantizeBlockAccum_ns_sgbroadcast_8_lo(total_sums, bits4, bits1, scale, minv, y) \
-    shared_y = sub_group_broadcast(y, 2); \
+    shared_y.s0 = SGB_BC(y.s0, 2); \
+    shared_y.s1 = SGB_BC(y.s1, 2); \
+    shared_y.s2 = SGB_BC(y.s2, 2); \
+    shared_y.s3 = SGB_BC(y.s3, 2); \
+    shared_y.s4 = SGB_BC(y.s4, 2); \
+    shared_y.s5 = SGB_BC(y.s5, 2); \
+    shared_y.s6 = SGB_BC(y.s6, 2); \
+    shared_y.s7 = SGB_BC(y.s7, 2); \
     total_sums.s0 += (((bits4.s0 & 0x000F)         | ((bits1.s4 & 0x01) << 4))         * scale.s0 - minv.s0) * shared_y.s0; \
     total_sums.s0 += ((((bits4.s0 & 0x00F0) >> 4)  | (((bits1.s4 >> 1) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s1; \
     total_sums.s0 += ((((bits4.s0 & 0x0F00) >> 8)  | (((bits1.s4 >> 2) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s2; \
@@ -188,7 +228,14 @@ inline void get_scale_min_k4(
     total_sums.s1 += ((((bits4.s3 & 0x00F0) >> 4)  | (((bits1.s5 >> 5) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s5; \
     total_sums.s1 += ((((bits4.s3 & 0x0F00) >> 8)  | (((bits1.s5 >> 6) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s6; \
     total_sums.s1 += ((((bits4.s3 & 0xF000) >> 12) | (((bits1.s5 >> 7) & 0x01) << 4))  * scale.s1 - minv.s1) * shared_y.s7; \
-    shared_y = sub_group_broadcast(y, 3); \
+    shared_y.s0 = SGB_BC(y.s0, 3); \
+    shared_y.s1 = SGB_BC(y.s1, 3); \
+    shared_y.s2 = SGB_BC(y.s2, 3); \
+    shared_y.s3 = SGB_BC(y.s3, 3); \
+    shared_y.s4 = SGB_BC(y.s4, 3); \
+    shared_y.s5 = SGB_BC(y.s5, 3); \
+    shared_y.s6 = SGB_BC(y.s6, 3); \
+    shared_y.s7 = SGB_BC(y.s7, 3); \
     total_sums.s0 += (((bits4.s4 & 0x000F)         | ((bits1.s6 & 0x01) << 4))         * scale.s0 - minv.s0) * shared_y.s0; \
     total_sums.s0 += ((((bits4.s4 & 0x00F0) >> 4)  | (((bits1.s6 >> 1) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s1; \
     total_sums.s0 += ((((bits4.s4 & 0x0F00) >> 8)  | (((bits1.s6 >> 2) & 0x01) << 4))  * scale.s0 - minv.s0) * shared_y.s2; \

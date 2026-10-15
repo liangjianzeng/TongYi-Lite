@@ -321,6 +321,15 @@ extern "C" {
         // until the drafter and all drafter contexts are destroyed. No head weights are copied.
         const struct llama_model * dspark_head_source;
 
+        // split-moe: path to experts manifest.json (llama-moe-experts). When set,
+        // routed expert tensors (ffn_*_exps) are synthesized as slot tensors fed by
+        // runtime preadv from the per-layer bins (MiniCPM-V4.7 split layout).
+        const char * moe_experts_path;
+
+        // split-moe: number of expert slots (LRU bank) per MoE layer. 0 = disabled.
+        // Must be >= n_expert_used; practical range 8..32 on mobile RAM budgets.
+        int32_t moe_slot_bank;
+
         // NULL-terminated list of devices to use for offloading (if NULL, all available devices are used)
         ggml_backend_dev_t * devices;
 

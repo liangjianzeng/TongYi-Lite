@@ -56,6 +56,11 @@ typedef void *(*pfn_clCreateBufferWithProperties)(void);
 typedef void *(*pfn_clGetProgramBuildInfo)(void);
 typedef void *(*pfn_clCreateProgramWithSource)(void);
 typedef void *(*pfn_clEnqueueFillBuffer)(void);
+typedef void *(*pfn_clCreateCommandQueueWithProperties)(void);
+typedef void *(*pfn_clSVMAlloc)(void);
+typedef void *(*pfn_clSVMFree)(void);
+typedef void *(*pfn_clSetKernelArgSVMPointer)(void);
+typedef void *(*pfn_clEnqueueSVMMemcpy)(void);
 
 static void *g_opencl_lib = NULL;
 
@@ -210,4 +215,27 @@ cl_program clCreateProgramWithSource(cl_context context, cl_uint count, const ch
 }
 cl_int clEnqueueFillBuffer(cl_command_queue command_queue, cl_mem buffer, const void *pattern, size_t pattern_size, size_t offset, size_t size, cl_uint num_events_in_wait_list, const cl_event *event_wait_list, cl_event *event) {
     CL_FORWARD(clEnqueueFillBuffer, (command_queue, buffer, pattern, pattern_size, offset, size, num_events_in_wait_list, event_wait_list, event));
+}
+/* CL 2.0 entries for SVM (GPU MoE slot bank) */
+cl_command_queue clCreateCommandQueueWithProperties(cl_context context, cl_device_id device, const cl_queue_properties *properties, cl_int *errcode_ret) {
+    CL_FORWARD(clCreateCommandQueueWithProperties, (context, device, properties, errcode_ret));
+}
+void *clSVMAlloc(cl_context context, cl_mem_flags flags, size_t size, cl_uint alignment) {
+    CL_FORWARD(clSVMAlloc, (context, flags, size, alignment));
+}
+cl_int clSetKernelArgSVMPointer(cl_kernel kernel, cl_uint arg_index, const void *arg_value) {
+    CL_FORWARD(clSetKernelArgSVMPointer, (kernel, arg_index, arg_value));
+}
+cl_int clEnqueueSVMMemcpy(cl_command_queue command_queue, cl_bool blocking, void *dst_ptr, const void *src_ptr, size_t size, cl_uint num_events_in_wait_list, const cl_event *event_wait_list, cl_event *event) {
+    CL_FORWARD(clEnqueueSVMMemcpy, (command_queue, blocking, dst_ptr, src_ptr, size, num_events_in_wait_list, event_wait_list, event));
+}
+void clSVMFree(cl_context context, void *svm_pointer) {
+    static pfn_clSVMFree sym = NULL;
+    if (!sym) {
+        void *lib = cl_load();
+        if (!lib) return;
+        sym = (pfn_clSVMFree) dlsym(lib, "clSVMFree");
+        if (!sym) return;
+    }
+    ((void (*)(cl_context, void *)) sym)(context, svm_pointer);
 }

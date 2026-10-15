@@ -74,11 +74,10 @@ class DownloadService {
       throw DownloadException('Only one download at a time.');
     }
 
-    // 多文件模型（主 gguf + mmproj + dspark）：进度按总字节累计显示，
-    // 避免阶段切换时进度「重头」（此前每阶段把 downloadedBytes 重置为 0）。
-    final totalAll = model.sizeBytes +
-        (model.mmproj?.sizeBytes ?? 0) +
-        (model.dspark?.sizeBytes ?? 0);
+    // 多文件模型（主 gguf + mmproj + dspark + 拆分专家包）：进度按总字节
+    // 累计显示，避免阶段切换时进度「重头」（此前每阶段把 downloadedBytes
+    // 重置为 0）。
+    final totalAll = model.totalBytes;
     final task = existingTask ?? DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
@@ -186,6 +185,95 @@ class DownloadService {
           );
         }
       }
+      // ---- splitMoe 拆分专家包（超大 MoE 统一承载形态）----
+      // 主 gguf（-les，专家已剥离）完成后顺序下载 manifest + N 个专家分片，
+      // 落在 `{modelId}.experts/` 子目录（官方 MiniCPM-V Apps 布局对齐）。
+      // 单分片失败只影响该分片（断点续传按分片粒度），不删主文件。
+      final sm = model.splitMoe;
+      if (sm != null) {
+        final expertsDir = Directory(p.join(dir.path, '${model.id}.experts'));
+        await expertsDir.create(recursive: true);
+
+        // 进度基线：主 gguf（+ mmproj/dspark 若有）已完成字节。
+        var smBase = await ggufFinal.length();
+
+        // ---- manifest.json ----
+        task.stage = '专家清单';
+        task.state = DownloadState.downloading;
+        onProgress(task);
+        final manifestFinal = File(p.join(expertsDir.path, 'manifest.json'));
+        final manifestTemp = File('${manifestFinal.path}.tmp');
+        final manifestComplete = !(await manifestTemp.exists()) &&
+            await _trustedOrClean(manifestFinal, null, '专家清单');
+        if (manifestComplete) {
+          debugPrint('[DownloadService] ${model.id} manifest 已完整，跳过');
+          smBase += await manifestFinal.length();
+        } else {
+          await _runDownloadLoop(
+            model,
+            task,
+            _DownloadTarget(
+              mirrors: sm.manifestMirrors,
+              sizeBytes: sm.manifestSizeBytes,
+              suffix: '.experts/manifest.json',
+            ),
+            manifestTemp,
+            manifestFinal,
+            onProgress,
+            progressInterval,
+            baseBytes: smBase,
+          );
+          if (_isTerminalPause(task)) return;
+          smBase += await manifestFinal.length();
+        }
+
+        // ---- 专家分片 ×N ----
+        for (var i = 0; i < sm.layerBinCount; i++) {
+          // 上一阶段把任务标记为 completed（_runDownloadLoop Step 5），
+          // 每个分片开始前重置为 downloading，进度不重头（字节累计）。
+          task.stage = '专家分片 ${i + 1}/${sm.layerBinCount}';
+          task.state = DownloadState.downloading;
+          onProgress(task);
+
+          final rel = sm.layerBinRelativePath(i); // experts/layer_007.bin
+          final name = p.basename(rel); // layer_007.bin
+          final binFinal = File(p.join(expertsDir.path, name));
+          final binTemp = File('${binFinal.path}.tmp');
+          // 分片完整性：存在、非空、大小与 manifest 精确字节数一致
+          //（layerBinSizeBytes 是精确值而非估算，可做强校验）。
+          final binComplete = !(await binTemp.exists()) &&
+              await _isExactSize(binFinal, sm.layerBinSizeBytes);
+          if (binComplete) {
+            smBase += await binFinal.length();
+            task.downloadedBytes = smBase;
+            onProgress(task);
+            continue;
+          }
+          await _runDownloadLoop(
+            model,
+            task,
+            _DownloadTarget(
+              mirrors: _joinBaseMirrors(sm.expertsBaseMirrors, rel),
+              sizeBytes: sm.layerBinSizeBytes,
+              suffix: '.$name',
+            ),
+            binTemp,
+            binFinal,
+            onProgress,
+            progressInterval,
+            baseBytes: smBase,
+          );
+          // 用户暂停/取消 → 停止后续分片；resume 时跳过已完整分片继续。
+          if (_isTerminalPause(task)) return;
+          smBase += await binFinal.length();
+        }
+
+        task.stage = null;
+        task.state = DownloadState.completed;
+        task.endTime = DateTime.now();
+        task.downloadedBytes = model.totalBytes;
+        onProgress(task);
+      }
     } finally {
       // CRITICAL: the entry must be dropped no matter how we leave, otherwise
       // the `maxConcurrentDownloads` guard stays permanently saturated after
@@ -226,7 +314,12 @@ class DownloadService {
         if (hasPartial) {
           downloadedSoFar = await tempFile.length();
           task.downloadedBytes = baseBytes + downloadedSoFar;
-          if (target.sizeBytes > 0) task.totalBytes = target.sizeBytes;
+          // 仅单文件模型（baseBytes==0）按目标大小校准 totalBytes；
+          // 多文件模型保持 download() 预设的累计总字节，避免续传时进度
+          // 「跳变」（此前会把累计 total 覆盖成单文件大小）。
+          if (baseBytes == 0 && target.sizeBytes > 0) {
+            task.totalBytes = target.sizeBytes;
+          }
           onProgress(task);
 
           urlInfo = await _resolveUrl(target.mirrors, requireRange: true);
@@ -445,6 +538,46 @@ class DownloadService {
     return false;
   }
 
+  /// 分片/清单下载是否因用户暂停或取消而终止（true → 不继续后续分片）。
+  bool _isTerminalPause(DownloadTask task) =>
+      task.state == DownloadState.paused || task.state == DownloadState.idle;
+
+  /// 精确大小完整性判定：存在且（配置了预期大小时）字节数完全一致。
+  /// split-moe 分片大小来自 manifest 的 exact_byte_length（精确值），
+  /// 可做强校验——这是分片损坏最廉价可靠的拦截点。
+  Future<bool> _isExactSize(File f, int expectedBytes) async {
+    try {
+      if (!await f.exists()) return false;
+      final len = await f.length();
+      if (len == 0) return false;
+      if (expectedBytes > 0 && len != expectedBytes) return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 把专家分片相对路径拼到各镜像 base URL 上
+  ///（splitMoe 的 expertsBaseMirrors 是目录级 base，非单文件 URL）。
+  List<MirrorEntry> _joinBaseMirrors(List<MirrorEntry> bases, String rel) =>
+      bases
+          .map((m) => MirrorEntry(
+                m.url.endsWith('/') ? '${m.url}$rel' : '${m.url}/$rel',
+                m.source,
+              ))
+          .toList();
+
+  /// 删除拆分专家包子目录 `{modelId}.experts/`（cancel/deleteModel 共用）。
+  Future<void> _deleteExpertsDir(String modelId) async {
+    try {
+      final dir = await _getModelsDir();
+      final expertsDir = Directory(p.join(dir.path, '$modelId.experts'));
+      if (await expertsDir.exists()) {
+        await expertsDir.delete(recursive: true);
+      }
+    } catch (_) {}
+  }
+
   /// 标记任务失败并（可选）清理残留 .tmp。
   Future<void> _fail(DownloadTask task, String message, String modelId, {bool deletePartial = true}) async {
     task.state = DownloadState.failed;
@@ -554,7 +687,7 @@ class DownloadService {
     final task = DownloadTask(
       modelId: model.id,
       state: DownloadState.downloading,
-      totalBytes: model.sizeBytes,
+      totalBytes: model.totalBytes,
       startTime: DateTime.now(),
     );
 
@@ -577,17 +710,19 @@ class DownloadService {
         try { await file.delete(); } catch (_) {}
       }
     }
+    await _deleteExpertsDir(modelId);
   }
 
   Future<void> deleteModel(String modelId) async {
     final dir = await _getModelsDir();
-    // 主模型 + mmproj 投影器一并删除。
+    // 主模型 + mmproj 投影器 + 拆分专家包一并删除。
     for (final suffix in ['.gguf', '.gguf.tmp', '.mmproj', '.mmproj.tmp']) {
       final file = File(p.join(dir.path, modelId + suffix));
       if (await file.exists()) {
         try { await file.delete(); } catch (_) {}
       }
     }
+    await _deleteExpertsDir(modelId);
   }
 
   /// Resolve a reachable mirror, returning whether it supports HTTP Range.

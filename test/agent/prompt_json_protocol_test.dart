@@ -378,5 +378,79 @@ void main() {
       // 受限模型视图不注入该工具。
       expect(protocol.buildToolSection(registry, modelId: 'm1'), isEmpty);
     });
+
+    test('按模型选择调用协议指令：Ling（Bailing V3）用原生闭合标签格式', () {
+      final registry = ToolRegistry();
+      registry.register(ToolDefinition(
+        name: 'get_time',
+        description: '返回当前时间',
+        parameters: const {'type': 'object'},
+        execute: (args) async => const ToolResult(content: 'ok'),
+      ));
+
+      // Ling 系：指令含闭合标签 <arg_key>…</arg_key> 示例（训练分布格式）。
+      final ling = protocol.buildToolSection(
+          registry, modelId: 'ling-3.0-tiny-q4_k_m');
+      expect(ling, contains('<arg_key>query</arg_key>'));
+      expect(ling, contains('<arg_value>今天天气</arg_value>'));
+
+      // LFM 系：JSON 格式指令不变。
+      final lfm = protocol.buildToolSection(
+          registry, modelId: 'lfm2.5-8b-a1b-q4_0');
+      expect(lfm, contains('{"name": "get_time", "arguments": {}}'));
+
+      // 其它（Spark/Qwen 系）：半开标签 XML 格式指令不变。
+      final generic =
+          protocol.buildToolSection(registry, modelId: 'spark-x2.5-4b');
+      expect(generic, contains('<tool_call>web_search<arg_key>query'));
+    });
+  });
+
+  group('Ling（Bailing V3）原生工具调用格式解析', () {
+    test('带参数：换行 + 闭合标签格式', () async {
+      const text = '<tool_call>\nweb_search\n'
+          '<arg_key>query</arg_key>\n'
+          '<arg_value>今天天气</arg_value>\n'
+          '</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'web_search');
+      expect(outcome.toolCalls.single.arguments?['query'], '今天天气');
+    });
+
+    test('无参数：仅工具名一行', () async {
+      const text = '好的，我来查一下。\n<tool_call>\nget_time\n</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+      expect(outcome.toolCalls.single.arguments, isEmpty);
+      expect(outcome.text, contains('好的，我来查一下。'));
+      expect(outcome.text, isNot(contains('<tool_call>')));
+    });
+
+    test('数组参数：JSON 值按 JSON 解码', () async {
+      const text = '<tool_call>\ntodo_write\n'
+          '<arg_key>todos</arg_key>\n'
+          '<arg_value>[{"content": "明天开会", "status": "todo"}]</arg_value>\n'
+          '</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'todo_write');
+      final todos = outcome.toolCalls.single.arguments?['todos'];
+      expect(todos, isA<List<dynamic>>());
+      expect((todos as List).first['content'], '明天开会');
+    });
+
+    test('think 包裹（Bailing V3 思考默认开）：think 块后跟工具调用块', () async {
+      const text = '<think>用户想知道时间，我应该调用 get_time 工具。</think>\n'
+          '<tool_call>\nget_time\n</tool_call>';
+      final outcome = await protocol.parseStream(tokens(text));
+
+      expect(outcome.hasToolCalls, isTrue);
+      expect(outcome.toolCalls.single.name, 'get_time');
+    });
   });
 }

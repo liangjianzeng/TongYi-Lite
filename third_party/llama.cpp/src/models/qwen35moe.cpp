@@ -1,5 +1,10 @@
 #include "models.h"
+
+#include "ggml-backend.h"
+#include "ggml-opencl.h"   // [dspark M2] ggml_backend_opencl_svm_buft (GPU slot bank)
 #include "llama-memory-recurrent.h"
+#include "llama-moe-slot.h"
+#include "llama-moe-experts.h"
 
 void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
@@ -35,6 +40,122 @@ void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
 
 void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
+
+    // ---- split-moe: routed experts synthesized as slot tensors (MiniCPM-V4.7 layout) ----
+    // When an experts manifest is configured, the stripped -les gguf has no
+    // ffn_*_exps tensors; synthesize them from the manifest onto a host-
+    // addressable (CPU) buffer so llama-moe-slot's runtime preadv can feed them.
+    const bool moe_slot = moe_slot_bank_enabled();
+    ggml_backend_buffer_type_t moe_slot_buft = nullptr;
+    if (moe_slot) {
+        // [dspark M2] LLAMA_MOE_BANK_GPU=1: slot bank in OpenCL FGSVM memory.
+        // preadv still writes it directly (is_host == true); per-fill the
+        // raw->plane conversion kernel feeds the batched GPU MoE kernels.
+        // Fall back to CPU on any miss (no GPU dev / no FGSVM).
+        static const bool bank_gpu = [] {
+            const char * e = getenv("LLAMA_MOE_BANK_GPU");
+            return e && e[0] == '1';
+        }();
+        if (bank_gpu) {
+            ggml_backend_dev_t gpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+            if (gpu_dev) {
+                moe_slot_buft = ggml_backend_opencl_svm_buft(gpu_dev);
+            }
+            if (moe_slot_buft) {
+                LLAMA_LOG_INFO("%s: split-moe slot bank on GPU FGSVM (LLAMA_MOE_BANK_GPU=1)\n", __func__);
+            } else {
+                LLAMA_LOG_WARN("%s: LLAMA_MOE_BANK_GPU=1 but no FGSVM-capable OpenCL device — falling back to CPU bank\n", __func__);
+            }
+        }
+        if (!moe_slot_buft) {
+            ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            GGML_ASSERT(cpu_dev && "split-moe requires a CPU device");
+            moe_slot_buft = ggml_backend_dev_buffer_type(cpu_dev);
+        }
+    }
+
+    // ---- split-moe grouping + decode windows --------------------------------
+    //
+    // One physical base per group (family x quant), members become views:
+    //   base: ne[2] = prefill capacity + sum(per-layer decode widths)
+    //     |- prefill view (shared in-group): offset 0, ne[2] = prefill capacity
+    //     |- decode view (per layer):        offset prefill_cap + sum(prev), ne[2] = c_il + K
+    //
+    // prefill and decode segments are physically separated: prefill only
+    // writes [0, prefill_cap), decode windows beyond that stay intact
+    // (prerequisite for idle-time prewarm).
+    const int64_t dec_c = moe_decode_window();
+    const int64_t k_pf = moe_prefetch_slots();
+    const std::vector<int32_t> layer_c = moe_layer_windows();   // index = MoE layer
+    const bool dec_enabled = dec_c > 0 && !layer_c.empty();
+    auto width_of = [&](int moe_idx) -> int64_t {
+        if (!dec_enabled || moe_idx < 0 || moe_idx >= (int) layer_c.size()) {
+            return 0;
+        }
+        return (int64_t) layer_c[(size_t) moe_idx] + k_pf;
+    };
+    const int64_t prefill_cap = moe_slot_bank_size();
+
+    const llm_tensor fam_ids[4] = {
+        LLM_TENSOR_FFN_GATE_UP_EXPS, LLM_TENSOR_FFN_GATE_EXPS,
+        LLM_TENSOR_FFN_UP_EXPS,      LLM_TENSOR_FFN_DOWN_EXPS,
+    };
+    // family -> (bytes_per_expert -> layer indices, ascending)
+    std::map<size_t, std::vector<int>> moe_groups[4];
+    if (moe_slot) {
+        for (int il = 0; il < n_layer; ++il) {
+            for (int fi = 0; fi < 4; ++fi) {
+                const auto * e = moe_experts_entry(tn(fam_ids[fi], "weight", il).str().c_str());
+                if (e) {
+                    moe_groups[fi][e->bytes_per_expert].push_back(il);
+                }
+            }
+        }
+    }
+    // group leader (the layer that really allocates) -> allocated slot count.
+    // non-leaders are created at prefill capacity, then rewritten as views.
+    std::map<std::string, int64_t> group_slots;
+    if (moe_slot) {
+        for (int fi = 0; fi < 4; ++fi) {
+            for (const auto & kv : moe_groups[fi]) {
+                int64_t group_total = 0;
+                for (int il : kv.second) {
+                    group_total += width_of(il);
+                }
+                group_slots[tn(fam_ids[fi], "weight", kv.second.front()).str()] =
+                    dec_enabled ? (prefill_cap + group_total) : prefill_cap;
+            }
+        }
+    }
+    auto slots_for = [&](const std::string & name) -> int64_t {
+        const auto it = group_slots.find(name);
+        return it == group_slots.end() ? prefill_cap : it->second;
+    };
+    auto create_routed_exps = [&](llm_tensor fam, int il, const std::initializer_list<int64_t> & dims, int flags) -> ggml_tensor * {
+        const std::string name = tn(fam, "weight", il).str();
+        if (!moe_slot) {
+            return create_tensor(tn(fam, "weight", il), dims, flags);
+        }
+        const auto * entry = moe_experts_entry(name.c_str());
+        ggml_tensor * tensor = nullptr;
+        if (entry) {
+            // synthesize at n_expert width, then retarget to the group's slot
+            // capacity (prefill_cap, or prefill_cap + per-layer decode windows)
+            tensor = ml.create_tensor_expert_alloc(hparams, moe_slot_buft, name, dims, entry->type);
+            if (ggml_nbytes(tensor) != entry->bytes_per_expert * (size_t) hparams.n_expert) {
+                throw std::runtime_error(format(
+                    "split-moe: expert tensor '%s' byte size mismatch: tensor=%zu manifest=%zu (check dims ordering)",
+                    name.c_str(), ggml_nbytes(tensor),
+                    entry->bytes_per_expert * (size_t) hparams.n_expert));
+            }
+            const int64_t slots = slots_for(name);
+            ml.virtualize_expert_tensor(tensor, hparams.n_expert, slots, entry->type, entry->bytes_per_expert);
+        } else if (!(flags & TENSOR_NOT_REQUIRED)) {
+            throw std::runtime_error(format(
+                "split-moe: routed tensor '%s' in neither the gguf nor the experts manifest", name.c_str()));
+        }
+        return tensor;
+    };
 
     const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
     const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
@@ -93,8 +214,14 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
 
         // Routed experts
         layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", il), { n_embd, n_expert }, flags);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", il), { n_ff_exp, n_embd, n_expert }, flags);
-        create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, flags);
+        layer.ffn_down_exps = create_routed_exps(LLM_TENSOR_FFN_DOWN_EXPS, il, { n_ff_exp, n_embd, n_expert }, flags);
+        if (moe_slot) {
+            // split-moe: gate/up are separate entries in the MiniCPM-V4.7 layout
+            layer.ffn_gate_exps = create_routed_exps(LLM_TENSOR_FFN_GATE_EXPS, il, { n_embd, n_ff_exp, n_expert }, flags);
+            layer.ffn_up_exps   = create_routed_exps(LLM_TENSOR_FFN_UP_EXPS,   il, { n_embd, n_ff_exp, n_expert }, flags);
+        } else {
+            create_tensor_gate_up_exps(layer, il, n_embd, n_ff_exp, n_expert, flags);
+        }
 
         // Shared experts
         layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", il), { n_embd }, flags);
@@ -143,6 +270,101 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
     }
     for (int i = n_layer; i < n_layer_all; ++i) {
         load_block_mtp(i);
+    }
+
+    // ---- split-moe grouping post-pass ---------------------------------------
+    //
+    // Names matter: the runtime binds expert tensors by name, so prefill views
+    // keep the original GGUF name; decode views get a `.dec` suffix that
+    // moe_experts_entry() strips before lookup.
+    if (moe_slot) {
+        struct fam_t {
+            ggml_tensor * llama_layer::* pf;
+            ggml_tensor * llama_layer::* pf_dec;
+        };
+        const fam_t fams[4] = {
+            { &llama_layer::ffn_gate_up_exps, &llama_layer::ffn_gate_up_exps_dec },
+            { &llama_layer::ffn_gate_exps,    &llama_layer::ffn_gate_exps_dec    },
+            { &llama_layer::ffn_up_exps,      &llama_layer::ffn_up_exps_dec      },
+            { &llama_layer::ffn_down_exps,    &llama_layer::ffn_down_exps_dec    },
+        };
+
+        size_t resident = 0;
+        int n_win = 0;
+        int n_grp = 0;
+
+        for (int fi = 0; fi < 4; ++fi) {
+            for (const auto & kv : moe_groups[fi]) {
+                const std::vector<int> & members = kv.second;
+                if (members.empty()) {
+                    continue;
+                }
+                const int first = members.front();
+                ggml_tensor * base = layers[first].*fams[fi].pf;
+                if (!base) {
+                    continue;
+                }
+                const auto * e = moe_experts_entry(ggml_get_name(base));
+                if (!e || e->bytes_per_expert == 0) {
+                    throw std::runtime_error(format(
+                        "MoE base '%s' has no usable experts entry", ggml_get_name(base)));
+                }
+                if (e->bytes_per_expert != kv.first) {
+                    throw std::runtime_error(format(
+                        "MoE group for '%s' has inconsistent expert bytes", ggml_get_name(base)));
+                }
+                resident += ggml_nbytes(base);
+                n_grp++;
+
+                // non-leader members become plain views of the base first —
+                // otherwise they would each really allocate their slot memory.
+                for (size_t j = 1; j < members.size(); ++j) {
+                    ggml_tensor * t = layers[members[j]].*fams[fi].pf;
+                    if (t) {
+                        ml.alias_expert_slot_tensor(t, base);
+                    }
+                }
+
+                // the leader IS the base (ne[2] may exceed prefill capacity):
+                // rename it `.base` and point the layer at a prefill window
+                // view instead.
+                for (size_t j = 0; j < members.size(); ++j) {
+                    auto & L = layers[members[j]];
+                    if (j == 0) {
+                        const std::string orig = ggml_get_name(base);
+                        ggml_set_name(base, (orig + ".base").c_str());
+                        L.*fams[fi].pf = ml.window_expert_slot_tensor(
+                            ml.expert_ctx_for_buft(hparams, moe_slot_buft),
+                            orig.c_str(), base, 0, prefill_cap, e->bytes_per_expert);
+                    }
+                    n_win++;
+                    if (dec_enabled) {
+                        // offset = after the prefill segment + widths of the
+                        // preceding members (per-layer widths may differ).
+                        // prefill segment is fixed at [0, prefill_cap).
+                        int64_t off = prefill_cap;
+                        for (size_t k2 = 0; k2 < j; ++k2) {
+                            off += width_of(members[k2]);
+                        }
+                        const int64_t wj = width_of(members[j]);
+                        if (wj > 0) {
+                            const std::string n2 = format("%s.dec", ggml_get_name(L.*fams[fi].pf));
+                            L.*fams[fi].pf_dec = ml.window_expert_slot_tensor(
+                                ml.expert_ctx_for_buft(hparams, moe_slot_buft),
+                                n2.c_str(), base, off, wj, e->bytes_per_expert);
+                        }
+                    }
+                }
+            }
+        }
+
+        LLAMA_LOG_INFO(
+            "%s: MoE bank %d groups (family x quant), %.2f MiB resident; %d prefill windows%s\n",
+            __func__, n_grp, resident / 1024.0 / 1024.0, n_win,
+            dec_enabled ? format(", %d decode windows (c=%d, per-layer widths %s)",
+                                 n_win, (int) dec_c,
+                                 getenv("LLAMA_MOE_LAYER_WINDOWS") ? "on" : "off").c_str()
+                        : " (no decode windows)");
     }
 }
 
@@ -209,6 +431,22 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
         // Post-attention norm
         ggml_tensor * attn_post_norm = build_norm(cur, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
         cb(attn_post_norm, "attn_post_norm", il);
+
+        // LES-style lookahead prefetch: feed this layer's post-attn hidden into
+        // the NEXT layer's router to predict its top-k experts and start the
+        // UFS read one layer early. Decode only (n_tokens == 1).
+        ggml_tensor * lookahead_next = nullptr;
+        if (moe_slots && moe_slots->lookahead_prefetch_enabled() && ubatch.n_tokens == 1 &&
+            il + 1 < n_layer && model.layers[il + 1].ffn_gate_inp != nullptr) {
+            ggml_tensor * prefetch_router_logits = build_lora_mm(model.layers[il + 1].ffn_gate_inp, attn_post_norm);
+            cb(prefetch_router_logits, "prefetch_router_logits", il);
+            lookahead_next = ggml_cont(ctx0, ggml_argsort_top_k(ctx0, prefetch_router_logits, moe_slots->lookahead_prefetch_depth()));
+            cb(lookahead_next, "prefetch_topk", il);
+            ggml_build_forward_expand(gf, lookahead_next);
+        }
+        if (moe_slots) {
+            moe_slots->set_lookahead_pred(lookahead_next);
+        }
 
         // MOE FFN layer
         cur = build_layer_ffn(attn_post_norm, il);
@@ -495,18 +733,27 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, c
     // Check if this is an MoE layer
     GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
 
+    // MoE-SSD 阶段选张量：decode 用每层独立的窗口张量（base 上的 view），
+    // prefill 用共享窗口。两者 ne[2] 不同，所以必须由阶段决定，不能共用。
+    // decode_window 未开（P0）时 dec 视图为 null，恒走 base 张量。
+    const auto & L = model.layers[il];
+    ggml_tensor * p_up   = moe_decode_phase && L.ffn_up_exps_dec      ? L.ffn_up_exps_dec      : L.ffn_up_exps;
+    ggml_tensor * p_gate = moe_decode_phase && L.ffn_gate_exps_dec    ? L.ffn_gate_exps_dec    : L.ffn_gate_exps;
+    ggml_tensor * p_down = moe_decode_phase && L.ffn_down_exps_dec    ? L.ffn_down_exps_dec    : L.ffn_down_exps;
+    ggml_tensor * p_gu   = moe_decode_phase && L.ffn_gate_up_exps_dec ? L.ffn_gate_up_exps_dec : L.ffn_gate_up_exps;
+
     ggml_tensor * moe_out =
         build_moe_ffn(cur,
             model.layers[il].ffn_gate_inp,
-            model.layers[il].ffn_up_exps,
-            model.layers[il].ffn_gate_exps,
-            model.layers[il].ffn_down_exps,
+            p_up,
+            p_gate,
+            p_down,
             nullptr,
             n_expert, n_expert_used,
             LLM_FFN_SILU, true,
             hparams.expert_weights_scale,
             LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,
-            nullptr, model.layers[il].ffn_gate_up_exps,
+            nullptr, p_gu,
             model.layers[il].ffn_up_exps_s,
             model.layers[il].ffn_gate_exps_s,
             model.layers[il].ffn_down_exps_s);
