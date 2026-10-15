@@ -786,12 +786,14 @@ class MainActivity : FlutterActivity() {
         val draftPath = call.argument<String>("draftPath")
         val nUbatch = call.argument<Int>("nUbatch") ?: 0
         val vkNoSubgroup = call.argument<Boolean>("vkNoSubgroup") ?: false
+        val moeManifest = call.argument<String>("moeManifest")
+        val moeBank = call.argument<Int>("moeBank") ?: 0
 
-        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup")
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup, moe=$moeManifest/$moeBank")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {

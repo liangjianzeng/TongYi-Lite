@@ -36,6 +36,8 @@ struct llama_cparams;
 struct llama_layer;
 struct llama_prec_policy;
 
+class llama_moe_slot_runtime;
+
 struct llama_memory_context_i;
 
 class llama_kv_cache_context;
@@ -845,6 +847,13 @@ struct llm_graph_params {
     const llama_adapter_cvec     * cvec;
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
+    // split-MoE slot 运行时（null = 未启用，走普通全量专家权重路径）。
+    llama_moe_slot_runtime       * moe_slots = nullptr;
+    // MoE-SSD 阶段。决定 FFN 用哪套 slot 张量（prefill 共享 / decode 每层独立）。
+    // **必须进 allow_reuse**：否则图缓存会把上一个阶段的图复用过来，而图里嵌的是
+    // 张量指针 —— 那就会拿 prefill 的共享张量去跑 decode（窗口失效但不报错）。
+    // n_tokens 不足以区分：单 token 的 prefill 与 decode 都是 1。
+    bool                           moe_decode_phase = false;
     const llama_cross            * cross;
     const llama_dspark_ctx *         dspark_ctx;
     bool                             dspark_has_context;
@@ -948,6 +957,8 @@ struct llm_graph_params {
             gtype == other.gtype &&
             cvec  == other.cvec  &&
             loras == other.loras &&
+            moe_slots == other.moe_slots &&
+            moe_decode_phase == other.moe_decode_phase &&
             cross == other.cross;
     }
 };
@@ -1094,6 +1105,8 @@ struct llm_graph_context {
     const llama_adapter_cvec     * cvec;
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
+    llama_moe_slot_runtime       * moe_slots;
+    bool                           moe_decode_phase;
     const llama_cross            * cross;
     const llama_dspark_ctx *         dspark_ctx;
     bool                             dspark_has_context;

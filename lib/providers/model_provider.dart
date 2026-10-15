@@ -332,6 +332,49 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
           'enableGpu=${gpu.enableGpu}, gpuLayers=${gpu.gpuLayers}, '
           'gpuBackend=${gpu.gpuBackend}, contextSize=${gpu.contextSize}, '
           'enableMtp($modelId)=$mtp, draft=$draftPath, skip=$draftSkipReason)');
+      // ---- 智能 MoE 加载路由（超大 MoE 统一架构，2026-10-14）----------
+      // 拆分 MoE 模型（splitMoe 目录声明）：开关开启时走专家 slot 动态加载
+      // （dense 常驻 + 专家按需 preadv 流式读入）；关闭时走整包全加载——
+      // 但 -les 剥离版主文件不含专家张量，预期失败，加载日志明示原因。
+      String? moeManifest;
+      int moeBank = 0;
+      String smartMoeLog = '';
+      final sm = config?.splitMoe;
+      if (sm != null) {
+        if (gpu.smartMoeEnabled) {
+          final storage = ModelStorageService();
+          final expertsDir = await storage.getExpertsDir(modelId);
+          final mf = File('${expertsDir.path}/manifest.json');
+          // 加载前快检：manifest + 全部分片存在且非空（下载器已做精确字节
+          // 校验，这里只防「文件被用户清理/传输中断」的残缺包进原生层）。
+          var binsOk = await mf.exists() && await mf.length() > 0;
+          if (binsOk) {
+            for (var i = 0; i < sm.layerBinCount && binsOk; i++) {
+              final name = sm.layerBinRelativePath(i).split('/').last;
+              final bf = File('${expertsDir.path}/$name');
+              binsOk = await bf.exists() && await bf.length() > 0;
+            }
+          }
+          if (binsOk) {
+            moeManifest = mf.path;
+            moeBank = 16; // 真机 sweet spot（slot_probe: bank16 稳、32 平台期）
+            smartMoeLog = '智能 MoE 加载: 开启 ✓（专家分片 ${sm.layerBinCount} 片完整，bank=$moeBank）';
+          } else {
+            debugPrint('[ModelManager] splitMoe bins incomplete for $modelId');
+            state = ModelState.error(
+              message: '专家分片不完整，请在模型管理页重新下载该模型（智能 MoE 加载需要 manifest + 全部专家分片）',
+              modelId: modelId,
+              modelName: displayName,
+            );
+            return false;
+          }
+        } else {
+          smartMoeLog =
+              '智能 MoE 加载: 关闭 — 将尝试整包全加载（-les 剥离版主文件不含专家张量，'
+              '预期失败；如失败请在设置→推理引擎开启「智能 MoE 加载」后重试）';
+        }
+        debugPrint('[ModelManager] splitMoe: manifest=$moeManifest bank=$moeBank');
+      }
       // 把 MTP/dspark 实际启用状态写进推理日志（loadingLogs），让「推理引擎
       // 日志」页与启动日志都能确认该模型加载时投机加速是否真的生效——此前只
       // debugPrint 到 logcat，App 内查看不到。
@@ -368,6 +411,9 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       mtpLogs.add('KV 精度: ${gpu.kvCacheType == 'q8_0' ? 'Q8' : 'Q4'}（K 量化 / V 为 ${gpu.flashAttn ? '同 K（FA 开）' : 'F16'}）');
       // flash attention（设置→推理引擎）：默认关。hybrid 架构原生层会强制关闭。
       await _inference.setFlashAttn(gpu.flashAttn);
+      if (smartMoeLog.isNotEmpty) {
+        mtpLogs.add(smartMoeLog);
+      }
       state = ModelState(
         phase: ModelLifecyclePhase.loading,
         modelId: modelId,
@@ -385,6 +431,8 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         draftPath: draftPath,
         nUbatch: gpu.gpuNUbatch, // 0=自动；>0 拆小 GPU prefill burst（GPU fault 缓解）
         vkNoSubgroup: gpu.vkNoSubgroup,
+        moeManifest: moeManifest,
+        moeBank: moeBank,
       );
 
       if (ok) {

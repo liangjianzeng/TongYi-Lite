@@ -17,6 +17,7 @@
 
 struct llama_model;
 class llama_batch_allocr;
+class llama_moe_slot_runtime;
 
 class llama_io_read_i;
 class llama_io_write_i;
@@ -298,6 +299,9 @@ private:
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
+
+    // split-MoE slot 运行时（null = 模型未启用 slot bank，走全量专家权重路径）。
+    std::unique_ptr<llama_moe_slot_runtime> moe_slots;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 

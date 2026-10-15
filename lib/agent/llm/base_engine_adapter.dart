@@ -67,15 +67,21 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   // 共享工具（公开，供子类跨库调用）
   // ---------------------------------------------------------------------------
 
-  /// 引擎消息转换（local 用）：tool→user，助手剥除 tool_calls。
+  /// 引擎消息转换（local 用）：助手剥除 tool_calls；tool 结果角色按模板
+  /// 能力分流——Bailing V3（Ling 3.x）模板原生支持 role:tool（渲染为
+  /// `<role>OBSERVATION</role>\n<tool_response>…`，贴合训练分布），其余
+  /// 模板不识别 tool 角色（minja 渲染会**静默丢消息**）→ 保持 tool→user。
   List<Map<String, dynamic>> convertEngineMessages(
       List<Map<String, dynamic>> messages) {
+    // 仅 Bailing V3 模板吃 role:tool（其 jinja 有 `message.role == "tool"`
+    // 分支）；其余模板没有该分支，tool 消息会落不进任何渲染分支被丢弃。
+    final keepToolRole = _capabilities?.toolTemplate == 'bailing-v3';
     final out = <Map<String, dynamic>>[];
     for (final m in messages) {
       final role = m['role'] as String?;
       final content = m['content'] as String? ?? '';
       if (role == 'tool') {
-        out.add({'role': 'user', 'content': content});
+        out.add({'role': keepToolRole ? 'tool' : 'user', 'content': content});
       } else {
         // 文本协议从 response 文本解析，工具调用不入历史。
         out.add({'role': role, 'content': content});

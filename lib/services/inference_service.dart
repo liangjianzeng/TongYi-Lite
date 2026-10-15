@@ -88,10 +88,18 @@ class InferenceService {
 
     /// Vulkan 禁用 subgroup（GGML_VK_NO_SUBGROUP，turnip GPU 挂死缓解）。
     bool vkNoSubgroup = false,
+
+    /// split-MoE manifest 路径（{modelsRoot}/{modelId}.experts/manifest.json）。
+    /// 非空时原生层启用专家 slot 动态加载（超大 MoE 统一架构）。
+    String? moeManifest,
+
+    /// split-MoE 每层 prefill 槽位容量（>= n_expert_used）。0 = 不启用。
+    int moeBank = 0,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
         '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
-        ', mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup)');
+        ', mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup'
+        ', moe=$moeManifest/$moeBank)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
@@ -104,6 +112,8 @@ class InferenceService {
         'draftPath': draftPath,
         'nUbatch': nUbatch,
         'vkNoSubgroup': vkNoSubgroup,
+        'moeManifest': moeManifest,
+        'moeBank': moeBank,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;

@@ -151,12 +151,19 @@ struct llama_model_loader {
     struct ctx_key {
         ggml_backend_buffer_type_t buft;
         bool lazy;
+        // split-moe: 合成专家张量专用隔离位。专家 ctx 绝不能与普通权重 ctx 混用 ——
+        // 若撞 key，专家张量会落进按 mmap 区间建的 buffer 里（文件里没有它们的数据），
+        // buffer 分配循环也不会给它们真实分配，最终 slot 绑定校验 buffer=NULL。
+        bool expert = false;
     };
 
     struct ctx_key_comparator {
         bool operator()(const ctx_key & lhs, const ctx_key & rhs) const {
             if (lhs.lazy != rhs.lazy) {
                 return lhs.lazy < rhs.lazy;
+            }
+            if (lhs.expert != rhs.expert) {
+                return lhs.expert < rhs.expert;
             }
             return strcmp(ggml_backend_buft_name(lhs.buft), ggml_backend_buft_name(rhs.buft)) < 0;
         }
@@ -237,6 +244,47 @@ struct llama_model_loader {
     struct ggml_tensor * create_tensor(
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+
+    ggml_context * expert_ctx_for_buft(const llama_hparams & hparams, ggml_backend_buffer_type_t buft);
+
+    // ---- split-moe (llama-moe-experts / llama-moe-slot) ----
+    // Synthesize a routed-expert slot tensor whose content does NOT come from the
+    // gguf (it is written at runtime by preadv from the expert bins). The tensor
+    // is created in the ctx keyed by `buft` so the regular per-ctx buffer
+    // allocation pass in llama_model::load_tensors picks it up, and is NOT
+    // registered in weights_map (load_all_data must never look for it in a file).
+    struct ggml_tensor * create_tensor_expert_alloc(
+        const llama_hparams & hparams,
+        ggml_backend_buffer_type_t buft,
+        const std::string & name,
+        const std::initializer_list<int64_t> & ne,
+        ggml_type type);
+
+    // Retarget an expert tensor from n_expert to n_slots entries and drop it from
+    // weights_map. The tensor must be unallocated at this point (metadata only).
+    void virtualize_expert_tensor(
+        struct ggml_tensor * tensor,
+        int64_t n_expert,
+        int64_t n_slots,
+        ggml_type experts_type,
+        size_t bytes_per_expert);
+
+    // split-moe grouping: turn a duplicate per-layer expert tensor into a plain
+    // view of the group-leader base (no extra allocation at buffer time).
+    // dst/src must both be unallocated metadata-only tensors; dst may be a
+    // sub-window of src (ne[2] smaller, view_offs = 0).
+    void alias_expert_slot_tensor(struct ggml_tensor * dst, struct ggml_tensor * src);
+
+    // Create a slot-window view of an expert base tensor: ne[2] = n_slots slots
+    // starting at slot_offset. The view is created in `ctx` (must be the same
+    // expert context the base was allocated from) so buffer allocation covers it.
+    struct ggml_tensor * window_expert_slot_tensor(
+        struct ggml_context * ctx,
+        const char * name,
+        struct ggml_tensor * base,
+        int64_t slot_offset,
+        int64_t n_slots,
+        size_t bytes_per_expert);
 
     void done_getting_tensors(bool partial = false) const;
 

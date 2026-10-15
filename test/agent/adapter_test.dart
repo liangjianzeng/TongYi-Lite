@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:tongyi_lite/agent/capability.dart';
 import 'package:tongyi_lite/agent/llm/adapter.dart';
+import 'package:tongyi_lite/agent/llm/base_engine_adapter.dart';
 import 'package:tongyi_lite/agent/protocol/prompt_json_protocol.dart';
 import 'package:tongyi_lite/agent/protocol/protocol_selector.dart';
 import 'package:tongyi_lite/agent/protocol/tool_protocol.dart';
@@ -38,6 +39,7 @@ class _PlainAdapter extends LlmAdapter {
 }
 
 void main() {
+  convertEngineMessagesTests();
   test('prepareCall：覆写版固化能力快照（adapter + model + capabilities）', () {
     final caps = EngineCapabilities(
       nativeToolCall: false,
@@ -133,4 +135,47 @@ class _NoSupportProtocol implements ToolProtocol {
   @override
   Future<StreamOutcome> parseStream(Stream<String> stream) async =>
       const StreamOutcome(text: '');
+}
+
+/// BaseEngineAdapter 具体桩：仅复用 [BaseEngineAdapter.convertEngineMessages]
+/// （generate 沿用基类抛 UnimplementedError，本组测试不触发生成）。
+class _EngineAdapter extends BaseEngineAdapter {
+  _EngineAdapter({required super.protocol, super.capabilities});
+}
+
+void convertEngineMessagesTests() {
+  final protocol = PromptJsonProtocol();
+
+  List<Map<String, dynamic>> input() => [
+        {'role': 'user', 'content': '帮我看下时间'},
+        {'role': 'assistant', 'content': '我来查一下'},
+        {'role': 'tool', 'content': '2026-10-14 12:00:00'},
+      ];
+
+  test('convertEngineMessages：默认（无能力快照）tool→user', () {
+    final adapter = _EngineAdapter(protocol: protocol);
+    final out = adapter.convertEngineMessages(input());
+    expect(out[2]['role'], 'user');
+  });
+
+  test('convertEngineMessages：spark-xml 模板 tool→user（模板不识别 tool 角色）',
+      () {
+    final adapter = _EngineAdapter(
+      protocol: protocol,
+      capabilities: const EngineCapabilities(toolTemplate: 'spark-xml'),
+    );
+    final out = adapter.convertEngineMessages(input());
+    expect(out[2]['role'], 'user');
+  });
+
+  test('convertEngineMessages：bailing-v3（Ling）模板保留 role:tool'
+      '（渲染为 OBSERVATION）', () {
+    final adapter = _EngineAdapter(
+      protocol: protocol,
+      capabilities: const EngineCapabilities(toolTemplate: 'bailing-v3'),
+    );
+    final out = adapter.convertEngineMessages(input());
+    expect(out[2]['role'], 'tool');
+    expect(out[2]['content'], '2026-10-14 12:00:00');
+  });
 }

@@ -133,6 +133,98 @@ class DsparkConfig {
   }
 }
 
+/// 拆分 MoE（split-moe）专家包配置 —— 超大 MoE（>10B）统一承载形态。
+///
+/// 与 [ModelConfig] 的关系：
+/// - 主 `.gguf`（-les 形态）已剥离路由专家，只含 dense 骨架
+///   （attention/router/共享专家/token_embd/lm_head），常驻加载；
+/// - 专家分片（layer_NNN.bin）+ manifest.json 落在 `{modelId}.experts/` 子目录，
+///   由原生 slot runtime 按需流式装载（槽位窗口 + LES 前瞻预取）。
+///
+/// 目录布局（官方 MiniCPM-V Apps 对齐）：
+/// ```
+/// {modelsDir}/{modelId}.gguf                    主文件（专家已剥离）
+/// {modelsDir}/{modelId}.experts/manifest.json   专家清单（schema v1）
+/// {modelsDir}/{modelId}.experts/layer_000.bin   专家分片 ×N
+/// ```
+class SplitMoeConfig {
+  /// manifest.json 的镜像列表（完整文件 URL）。
+  final List<MirrorEntry> manifestMirrors;
+
+  /// manifest.json 预期大小（字节，仅用于进度估算）。
+  final int manifestSizeBytes;
+
+  /// 专家分片镜像 base URL（以 `/` 结尾），分片相对路径由
+  /// [layerBinPattern] 拼接。示例：
+  /// `https://modelscope.cn/models/<repo>/resolve/master/MiniCPM-V-4.7-35B-A3B/`
+  final List<MirrorEntry> expertsBaseMirrors;
+
+  /// 专家分片数量（如 40 层 = 40 个 layer bin）。
+  final int layerBinCount;
+
+  /// 单个分片预期大小（字节）。manifest 的 per-entry exact_byte_length
+  /// 是精确值（非估算），下载完整性校验可直接比对。
+  final int layerBinSizeBytes;
+
+  /// 分片相对路径模板（C/Java 双端 printf 风格），如 `experts/layer_%03d.bin`。
+  final String layerBinPattern;
+
+  const SplitMoeConfig({
+    required this.manifestMirrors,
+    required this.manifestSizeBytes,
+    required this.expertsBaseMirrors,
+    required this.layerBinCount,
+    required this.layerBinSizeBytes,
+    required this.layerBinPattern,
+  });
+
+  String get bestManifestUrl => manifestMirrors.first.url;
+  String get bestExpertsBaseUrl => expertsBaseMirrors.first.url;
+
+  /// 专家分片相对路径（0-based index）。printf 风格模板
+  /// `experts/layer_%03d.bin` → `experts/layer_007.bin`。
+  String layerBinRelativePath(int index) {
+    final m =
+        RegExp(r'^(.*?)(%0(\d+)d)(.*)$').firstMatch(layerBinPattern);
+    if (m == null) return layerBinPattern; // 无模板占位符 → 原样返回
+    final width = int.parse(m.group(3)!);
+    return '${m.group(1)}${index.toString().padLeft(width, '0')}${m.group(4)}';
+  }
+
+  /// 专家包总字节（manifest + 全部分片）。
+  int get expertsTotalBytes =>
+      manifestSizeBytes + layerBinCount * layerBinSizeBytes;
+
+  @override
+  String toString() =>
+      'SplitMoeConfig(bins=$layerBinCount x ${formatBytes(layerBinSizeBytes)})';
+
+  static String formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+    }
+    if (bytes >= 1024 * 1024) return '${(bytes / 1024 / 1024).toStringAsFixed(0)} MB';
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  }
+
+  factory SplitMoeConfig.fromJson(Map<String, dynamic> json) {
+    final manifestSizeMB = (json['manifestSizeMB'] as num?)?.toDouble() ?? 0.0;
+    final layerBinSizeMB = (json['layerBinSizeMB'] as num?)?.toDouble() ?? 0.0;
+    return SplitMoeConfig(
+      manifestMirrors: (json['manifestMirrors'] as List)
+          .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      manifestSizeBytes: (manifestSizeMB * 1024 * 1024).round(),
+      expertsBaseMirrors: (json['expertsBaseMirrors'] as List)
+          .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      layerBinCount: json['layerBinCount'] as int? ?? 0,
+      layerBinSizeBytes: (layerBinSizeMB * 1024 * 1024).round(),
+      layerBinPattern: json['layerBinPattern'] as String? ?? 'experts/layer_%03d.bin',
+    );
+  }
+}
+
 class ModelConfig {
   final String id;
   final String name;
@@ -154,6 +246,10 @@ class ModelConfig {
   /// 可选的 dspark 投机草稿头配置。null → 无投机草稿模型。
   final DsparkConfig? dspark;
 
+  /// 可选的拆分 MoE 专家包配置（超大 MoE 统一承载）。非空 → 主 gguf 为
+  /// -les 形态（专家已剥离），专家分片 + manifest 下载到 `{id}.experts/`。
+  final SplitMoeConfig? splitMoe;
+
   const ModelConfig({
     required this.id,
     required this.name,
@@ -168,6 +264,7 @@ class ModelConfig {
     this.tags = const [],
     this.mmproj,
     this.dspark,
+    this.splitMoe,
   });
 
   String get bestMirrorUrl => mirrors.first.url;
@@ -178,9 +275,13 @@ class ModelConfig {
   /// 原生层依据 [mmproj] 是否存在决定加载方式。
   bool get supportsVision => type == ModelType.vision;
 
-  /// 需要 mmproj/dspark 的模型，其总下载体积（主 gguf + mmproj + dspark）。
+  /// 需要 mmproj/dspark/splitMoe 的模型，其总下载体积
+  /// （主 gguf + mmproj + dspark + 专家包）。
   int get totalBytes =>
-      sizeBytes + (mmproj?.sizeBytes ?? 0) + (dspark?.sizeBytes ?? 0);
+      sizeBytes +
+      (mmproj?.sizeBytes ?? 0) +
+      (dspark?.sizeBytes ?? 0) +
+      (splitMoe?.expertsTotalBytes ?? 0);
 
   @override
   String toString() => 'ModelConfig($id, ${sizeMBDisplay}, type=${modelTypeLabel(type)}, '
@@ -208,6 +309,9 @@ class ModelConfig {
           : null,
       dspark: json['dspark'] != null
           ? DsparkConfig.fromJson(json['dspark'] as Map<String, dynamic>)
+          : null,
+      splitMoe: json['splitMoe'] != null
+          ? SplitMoeConfig.fromJson(json['splitMoe'] as Map<String, dynamic>)
           : null,
     );
   }

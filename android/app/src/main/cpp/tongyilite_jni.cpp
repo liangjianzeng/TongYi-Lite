@@ -502,7 +502,8 @@ struct InferenceEngine {
               bool enable_gpu = true, int gpu_layers = 20,
               const char *gpu_backend = "auto", bool enable_mtp = false,
               const char *mmproj_path = nullptr,
-              const char *draft_path = nullptr) {
+              const char *draft_path = nullptr,
+              const char *moe_manifest = nullptr, int moe_bank = 0) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -511,6 +512,19 @@ struct InferenceEngine {
 
         // Model params
         model_params = llama_model_default_params();
+
+        // ---- split-MoE（超大 MoE 统一架构，2026-10-14）------------------
+        // manifest 存在且 bank > 0 时启用专家 slot 动态加载：主 gguf 只含
+        // dense 权重（专家被剥离），路由专家在运行时按 top-k preadv 读入
+        // slot 窗口。moe_bank = 每层 prefill 槽位容量（>= n_expert_used）。
+        const bool split_moe = moe_manifest && moe_manifest[0] != '\0' && moe_bank > 0;
+        if (split_moe) {
+            model_params.moe_experts_path = moe_manifest;
+            model_params.moe_slot_bank    = moe_bank;
+            LOGI("split-MoE enabled: manifest=%s bank=%d", moe_manifest, moe_bank);
+            reportLoadingLog("智能 MoE 加载: 开启 ✓（专家按需流式读入，dense 常驻）");
+        }
+
         // GPU offloading policy (driven by the UI toggle + layer setting):
         //   - enable_gpu == false                   -> pure CPU (n_gpu_layers = 0)
         //   - gpu_backend == "cpu"                  -> pure CPU
@@ -665,9 +679,16 @@ struct InferenceEngine {
         // against pre-load MemAvailable and refuse early.
         {
             struct stat pst{};
-            if (::stat(model_path, &pst) == 0 && effective_gpu_layers > 0) {
+            // split-MoE：纯 CPU 路径也要做预检（slot 窗口吃 RAM），不只 GPU 档。
+            if (::stat(model_path, &pst) == 0 &&
+                (effective_gpu_layers > 0 || split_moe)) {
                 const int64_t avail_pre = read_mem_available_bytes();
-                const int64_t weights_est = (int64_t)pst.st_size;  // conservative: everything pinned
+                // split-MoE 主 gguf 只含 dense 权重（专家已剥离），文件大小即
+                // dense 常驻；slot 窗口按 bank×1.29MB/槽 + 256MB 运行时缓冲估算。
+                int64_t weights_est = (int64_t)pst.st_size;
+                if (split_moe) {
+                    weights_est += (int64_t)moe_bank * 1351680 + 268435456;
+                }
                 const int64_t pre_headroom = oom_headroom_bytes("TONGYILITE_OOM_PRE_HEADROOM_MB", 768);
                 char cmsg[256];
                 snprintf(cmsg, sizeof(cmsg),
@@ -935,6 +956,17 @@ struct InferenceEngine {
         }
         LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
+        // split-MoE prefill 约束：单个 ubatch 内每层出现的去重专家数不得超过
+        // moe_bank（运行时超限会直接报错）。n_expert_used=8 的 MiniCPM-V4.7：
+        // bank 16 → ubatch ≤ 2，取 bank/16 保守档（bank16→1）。
+        if (split_moe && ctx_params.n_ubatch > 1) {
+            const int safe_ub = std::max(1, moe_bank / 16);
+            if (ctx_params.n_ubatch > safe_ub) {
+                LOGW("split-MoE: n_ubatch %d -> %d (bank=%d prefill constraint)",
+                     (int)ctx_params.n_ubatch, safe_ub, moe_bank);
+                ctx_params.n_ubatch = safe_ub;
+            }
+        }
         // Flash attention (P1, 2026-10-14): opt-in via 设置→推理引擎→flash-attn.
         // The old hard-DISABLED existed because "unified KV + flash attn +
         // per-turn seq_rm" produced garbage logits from the first token of turn
@@ -1723,6 +1755,12 @@ struct InferenceEngine {
 
             // --- Apply chatml template if history is provided ---
             std::string formatted_prompt;
+            // Bailing V3（Ling 3.x）模板把生成期思考开启器渲染进 prompt 尾部
+            // （"<role>ASSISTANT</role>\n<think>"，模板默认 detailed thinking
+            // on）。在模板应用后检测（见下方处理块）；此标志在生成期用于把
+            // "<think>" 前置进输出流（思考开启时 opener 在 prompt 里、输出流
+            // 没有 opener，Dart 思考状态机不启动 → 推理文本泄漏进可见回答）。
+            bool bailing_think_opener_in_prompt = false;
             if (history && !history->empty()) {
                 // NOTE: Dart's completionWithMessages already includes the current
                 // user message as the LAST element of messagesJson/history, so we
@@ -1773,6 +1811,32 @@ struct InferenceEngine {
                              (int)supports_think);
                     } else if (enable_thinking.load()) {
                         LOGI("thinking enabled (user toggle) -> model will reason before answering");
+                    }
+                    // Bailing V3（Ling 3.x）：生成提示以 "<think>" 结尾（模板
+                    // 渲染的思考开启器，默认 detailed thinking on）。
+                    //  - 思考关闭 → 把尾部 "<think>" 改写为 "<think></think>"
+                    //    （官方 documented 关闭触发；不改写模型必然思考，
+                    //    端侧小模型思考失控会烧光生成预算）。
+                    //  - 思考开启 → prompt 尾部 opener 保留，但生成流里没有
+                    //    "<think>"（opener 在 prompt 不在输出）→ Dart 侧思考
+                    //    状态机不启动、推理文本泄漏进可见回答直到 "</think>"。
+                    //    置标志，生成开始时把 "<think>" 作为首个流片段前置。
+                    const std::string think_open_tag = "<think>";
+                    if (formatted_prompt.size() >= think_open_tag.size() &&
+                        formatted_prompt.compare(
+                            formatted_prompt.size() - think_open_tag.size(),
+                            think_open_tag.size(), think_open_tag) == 0) {
+                        if (!enable_thinking.load()) {
+                            formatted_prompt.erase(formatted_prompt.size() -
+                                                   think_open_tag.size());
+                            formatted_prompt += "<think></think>";
+                            LOGI("bailing-v3 style prompt: trailing think opener "
+                                 "closed (<think></think>), thinking disabled");
+                        } else {
+                            bailing_think_opener_in_prompt = true;
+                            LOGI("bailing-v3 style prompt: think opener in "
+                                 "prompt -> will prepend <think> to stream");
+                        }
                     }
                     LOGI("chatml template applied: %d chars, %zu history msgs",
                          (int)formatted_prompt.size(), history->size());
@@ -2095,6 +2159,14 @@ struct InferenceEngine {
             std::string result;
             std::string gen_utf8_buf;   // raw token bytes; forwarded only as complete UTF-8
             std::string flush_buf;      // batches complete UTF-8 sequences before calling on_token
+            // Bailing V3（Ling 3.x）：思考开启时 opener 在 prompt 里，输出流
+            // 需要前置 "<think>" 让 Dart 思考状态机正常路由（推理进思考通道、
+            // "</think>" 后正文进可见回答）。作为首个 flush 片段发出。
+            if (bailing_think_opener_in_prompt) {
+                const char opener[] = "<think>";
+                result += opener;
+                flush_buf += opener;
+            }
             bool gen_stopped = false;
             const llama_token eos = llama_vocab_eos(vocab);
             // Tokens generated this turn (both the MTP and plain loops append via
@@ -2821,12 +2893,14 @@ JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
     jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path,
-    jstring j_draft_path, jint j_n_ubatch, jboolean j_vk_no_subgroup
+    jstring j_draft_path, jint j_n_ubatch, jboolean j_vk_no_subgroup,
+    jstring j_moe_manifest, jint j_moe_bank
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
     std::string mmproj_path = j_mmproj_path ? jstring_to_std(env, j_mmproj_path) : "";
     std::string draft_path = j_draft_path ? jstring_to_std(env, j_draft_path) : "";
+    std::string moe_manifest = j_moe_manifest ? jstring_to_std(env, j_moe_manifest) : "";
 
     // Fresh failure-reason slate per attempt (see g_last_loading_msg above).
     g_last_loading_msg[0] = '\0';
@@ -2869,7 +2943,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     bool ok = g_engine.load(path.c_str(), n_ctx,
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
                             gpu_backend.c_str(), j_enable_mtp == JNI_TRUE,
-                            mmproj_path.c_str(), draft_path.c_str());
+                            mmproj_path.c_str(), draft_path.c_str(),
+                            moe_manifest.c_str(), (int)j_moe_bank);
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {

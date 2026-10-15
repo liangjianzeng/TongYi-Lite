@@ -9,6 +9,7 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-moe-slot.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
@@ -163,6 +164,8 @@ llama_context::llama_context(
     model(model),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
+    moe_slots(model.moe_slot_bank_enabled()
+              ? std::make_unique<llama_moe_slot_runtime>(model) : nullptr),
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
     // TODO warning when creating llama_context with awkward ctx size that is not a power of 2,
     //     may need to be backend-dependent
@@ -2669,6 +2672,12 @@ llm_graph_params llama_context::graph_params(
         /*.cvec        =*/ cvec.get(),
         /*.loras       =*/ loras.get(),
         /*.mctx        =*/ mctx,
+        /*.moe_slots   =*/ moe_slots.get(),
+        // MoE-SSD 阶段：批宽落在窗口覆盖范围内时才是「窗口阶段」。
+        // 判据必须与 llama-moe-slot 的 window_mode（process() 内）逐字一致 ——
+        // 它决定运行期往哪段槽位写、以及建图用哪套张量。两处不一致会静默读错专家权重。
+        /*.moe_decode_phase =*/ moe_slots != nullptr && moe_slots->decode_window() > 0 &&
+                                ubatch.n_tokens <= moe_slots->window_max_rows(),
         /*.cross       =*/ &cross,
         /*.dspark_ctx  =*/&dspark_ctx,
         /*.dspark_has_context =*/!dspark_ctx.v_ctx_feat.empty(),

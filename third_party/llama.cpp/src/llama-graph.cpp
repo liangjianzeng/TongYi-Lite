@@ -16,6 +16,8 @@
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
 
+#include "llama-moe-slot.h"
+
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -1516,7 +1518,12 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     n_embd_head_v    (hparams.n_embd_head_v()),
     n_embd_v_gqa     (hparams.n_embd_v_gqa()),
     n_expert         (hparams.n_expert),
-    n_expert_used    (cparams.warmup ? hparams.n_expert : hparams.n_expert_used()),
+    // warmup 时把 n_expert_used 扩到全量，用于给 compute buffer 定尺寸 —— 但
+    // 仅在全量专家权重路径下有意义。slot 模式下专家权重不进 compute buffer
+    // （是独立的 slot 张量），扩到全量反而会让 warmup 去解析全部专家的 slot
+    // 映射，所以保持真实的 top-k。
+    n_expert_used    (cparams.warmup && params.moe_slots == nullptr ? hparams.n_expert
+                      : hparams.n_expert_used()),
     freq_base        (cparams.rope_freq_base),
     freq_scale       (cparams.rope_freq_scale),
     ext_factor       (cparams.yarn_ext_factor),
@@ -1535,6 +1542,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     cvec             (params.cvec),
     loras            (params.loras),
     mctx             (params.mctx),
+    moe_slots        (params.moe_slots),
+    moe_decode_phase (params.moe_decode_phase),
     cross            (params.cross),
     dspark_ctx       (params.dspark_ctx),
     dspark_has_context(params.dspark_has_context),
@@ -2272,6 +2281,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
 
+    // split-MoE slot 路径：把专家 id 重映射成 slot id（map_custom CPU op 内完成
+    // miss 专家的读盘 + 槽位分配），权重张量本身已按 n_slots 虚拟化
+    // （见 llama-model-loader::virtualize_expert_tensor）。
+    // 注意：weights 的 gather 仍用原始 selected_experts（probs 是按专家索引排的），
+    // 只有 matmul/add_id 走 slot id。
+    ggml_tensor * selected_experts_mm = selected_experts;
+    if (moe_slots && moe_slots->uses_layer(il)) {
+        selected_experts_mm = moe_slots->build_slot_ids_tensor(ctx0, selected_experts, il);
+        cb(selected_experts_mm, "ffn_moe_slots", il);
+    }
+
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
     if (weight_before_ffn) {
@@ -2286,7 +2306,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (gate_up_exps) {
         // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts_mm, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
         cb(gate_up, "ffn_moe_gate_up", il);
 
         if (up_exps_s) {
@@ -2294,7 +2314,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_up_exps_b) {
-            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
+            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts_mm);
             cb(gate_up, "ffn_moe_gate_up_biased", il);
         }
 
@@ -2305,7 +2325,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+        up = build_lora_mm_id(up_exps, cur, selected_experts_mm, up_exps_s); // [n_ff, n_expert_used, n_tokens]
         cb(up, "ffn_moe_up", il);
 
         if (up_exps_s) {
@@ -2313,12 +2333,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (up_exps_b) {
-            up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
+            up = ggml_add_id(ctx0, up, up_exps_b, selected_experts_mm);
             cb(up, "ffn_moe_up_biased", il);
         }
 
         if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cur = build_lora_mm_id(gate_exps, cur, selected_experts_mm, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
         } else {
             cur = up;
@@ -2329,7 +2349,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_exps_b) {
-            cur = ggml_add_id(ctx0, cur, gate_exps_b, selected_experts);
+            cur = ggml_add_id(ctx0, cur, gate_exps_b, selected_experts_mm);
             cb(cur, "ffn_moe_gate_biased", il);
         }
     }
@@ -2419,7 +2439,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+    experts = build_lora_mm_id(down_exps, cur, selected_experts_mm, down_exps_s); // [n_embd, n_expert_used, n_tokens]
     if (arch == LLM_ARCH_MISTRAL4) {
         // src1 can exceed F16 range
         ggml_prec_set_src(experts, GGML_PREC_F32, 1);
@@ -2431,7 +2451,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     if (down_exps_b) {
-        experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
+        experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts_mm);
         cb(experts, "ffn_moe_down_biased", il);
     }
 

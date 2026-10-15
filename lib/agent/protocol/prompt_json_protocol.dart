@@ -49,6 +49,24 @@ class PromptJsonProtocol implements ToolProtocol {
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
+  /// Ling（Bailing V3）系模型指令：**原生 XML 带闭合标签格式**（官方
+  /// chat_template.jinja 训练分布：`<tool_call>` 后换行写工具名，每个参数
+  /// `<arg_key>k</arg_key>` + `<arg_value>v</arg_value>` 成对闭合，一个参数
+  /// 一行。1.3B 激活的 tiny 对自带格式遵循度最高，改用半开标签格式反而
+  /// 掉进非训练分布导致不调用/格式坏）。
+  static const String kProtocolInstructionLing =
+      '当你要调用工具时，输出以下格式（工具调用块前后可以有简短说明文字）：\n'
+      '无参数：<tool_call>\nget_time\n</tool_call>\n'
+      '带参数：<tool_call>\nweb_search\n<arg_key>query</arg_key>\n'
+      '<arg_value>今天天气</arg_value>\n</tool_call>\n'
+      '数组参数：<tool_call>\ntodo_write\n<arg_key>todos</arg_key>\n'
+      '<arg_value>[{"content": "明天开会", "status": "todo"}]</arg_value>\n</tool_call>\n'
+      '键值规则：每个参数写一行，<arg_key>参数名</arg_key> 与 '
+      '<arg_value>参数值</arg_value> 必须成对闭合，先键后值。\n'
+      '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
+      '收到工具结果后，根据真实结果组织最终回答。'
+      '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
+
   @override
   String get id => kId;
 
@@ -407,10 +425,16 @@ class PromptJsonProtocol implements ToolProtocol {
     );
   }
 
-  /// 按模型选择指令：LFM 系（id 以 lfm 开头）用 JSON 风格，其余用 XML 风格。
+  /// 按模型选择指令：LFM 系（id 以 lfm 开头）用 JSON 风格；Ling/Bailing 系
+  /// （id 以 ling 开头）用原生闭合标签 XML 风格（Bailing V3 训练分布）；
+  /// 其余用半开标签 XML 风格。
   String _instructionFor(String modelId) {
-    if (modelId.toLowerCase().startsWith('lfm')) {
+    final lower = modelId.toLowerCase();
+    if (lower.startsWith('lfm')) {
       return kProtocolInstructionJson;
+    }
+    if (lower.startsWith('ling')) {
+      return kProtocolInstructionLing;
     }
     return kProtocolInstruction;
   }

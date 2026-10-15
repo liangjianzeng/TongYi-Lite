@@ -678,6 +678,71 @@
           "calculator"
         ]
       }
+    },
+    {
+      "id": "minicpm-v4.7-35b-a3b-les",
+      "name": "MiniCPM-V 4.7 35B-A3B (拆分 MoE 智能加载)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/zerg13/MiniCPM-V-Apps-gguf/resolve/master/MiniCPM-V-4.7-35B-A3B/MiniCPM-V-4_7-35B-A3B-mix_q3gud_im-les.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/tc-mb/MiniCPM-V-Apps-gguf/resolve/main/MiniCPM-V-4.7-35B-A3B/MiniCPM-V-4_7-35B-A3B-mix_q3gud_im-les.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 1.66,
+      "sizeMBDisplay": "1.7 GB",
+      "recommended": false,
+      "minRamMB": 8192,
+      "sha256Hash": null,
+      "tags": [
+        "超大MoE",
+        "拆分流式",
+        "实验"
+      ],
+      "splitMoe": {
+        "manifestMirrors": [
+          {
+            "url": "https://modelscope.cn/models/zerg13/MiniCPM-V-Apps-gguf/resolve/master/MiniCPM-V-4.7-35B-A3B/experts/manifest.json",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/tc-mb/MiniCPM-V-Apps-gguf/resolve/main/MiniCPM-V-4.7-35B-A3B/experts/manifest.json",
+            "source": "hf-mirror"
+          }
+        ],
+        "manifestSizeMB": 0.04,
+        "expertsBaseMirrors": [
+          {
+            "url": "https://modelscope.cn/models/zerg13/MiniCPM-V-Apps-gguf/resolve/master/MiniCPM-V-4.7-35B-A3B/",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/tc-mb/MiniCPM-V-Apps-gguf/resolve/main/MiniCPM-V-4.7-35B-A3B/",
+            "source": "hf-mirror"
+          }
+        ],
+        "layerBinCount": 40,
+        "layerBinSizeMB": 330.0,
+        "layerBinPattern": "experts/layer_%03d.bin"
+      },
+      "agentCapabilities": {
+        "nativeToolCall": true,
+        "maxContextTokens": 262144,
+        "recommendedNctx": 16384,
+        "mtpSupported": true
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
     }
   ]
 }

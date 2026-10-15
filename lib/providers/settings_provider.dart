@@ -750,6 +750,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 智能 MoE 加载（超大 MoE 统一架构）。改后重新加载模型生效。
+  Future<void> setSmartMoeEnabled(bool value) async {
+    state = state.copyWith(smartMoeEnabled: value);
+    await _persist();
+  }
+
   /// OOM 预检余量（MB??~4096）。加载前 MemAvailable 扣除该余量后与模型体??
   /// 比较；调小更容易放过极限大模型，调大更保守??
   Future<void> setOomPreHeadroomMb(int value) async {

@@ -218,6 +218,13 @@ class ModelStorageService {
     return p.join(dir.path, '${modelId}.dspark.gguf');
   }
 
+  /// 获取拆分 MoE 专家包目录（`{modelId}.experts/`，含 manifest.json +
+  /// layer_NNN.bin 分片）。目录可能尚不存在（未下载）。
+  Future<Directory> getExpertsDir(String modelId) async {
+    final dir = await getModelsRootDir();
+    return Directory(p.join(dir.path, '$modelId.experts'));
+  }
+
   /// Check if model file exists locally
   Future<bool> isModelCached(String modelId) async {
     try {
@@ -295,6 +302,38 @@ class ModelStorageService {
           return false;
         }
         await _cleanStaleTmp(dir, model.id, '.dspark.gguf');
+      }
+      // 拆分 MoE 专家包：manifest + 全部分片必须完整存在（分片大小精确
+      // 匹配 manifest 的 exact_byte_length——错误/截断分片不允许当已缓存）。
+      final sm = model.splitMoe;
+      if (sm != null) {
+        final expertsDir = Directory(p.join(dir.path, '${model.id}.experts'));
+        if (!await _isCompleteFile(
+            File(p.join(expertsDir.path, 'manifest.json')))) {
+          return false;
+        }
+        if (!await expertsDir.exists()) return false;
+        final expected = <String>{};
+        for (var i = 0; i < sm.layerBinCount; i++) {
+          expected.add(p.basename(sm.layerBinRelativePath(i)));
+        }
+        final sizes = <String, int>{};
+        try {
+          await for (final e in expertsDir.list()) {
+            if (e is File && e.path.endsWith('.bin')) {
+              sizes[p.basename(e.path)] = await e.length();
+            }
+          }
+        } catch (_) {
+          return false;
+        }
+        for (final name in expected) {
+          final len = sizes[name];
+          if (len == null || len == 0) return false;
+          if (sm.layerBinSizeBytes > 0 && len != sm.layerBinSizeBytes) {
+            return false;
+          }
+        }
       }
       return true;
     } catch (_) {
@@ -377,7 +416,9 @@ class ModelStorageService {
       int total = 0;
       await for (final entity in dir.list(recursive: true)) {
         if (entity is File &&
-            (entity.path.endsWith('.gguf') || entity.path.endsWith('.mmproj'))) {
+            (entity.path.endsWith('.gguf') ||
+                entity.path.endsWith('.mmproj') ||
+                entity.path.endsWith('.bin'))) {
           total += await entity.length();
         }
       }

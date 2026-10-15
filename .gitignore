@@ -152,3 +152,9 @@ spec-images/
 vkptq_logs/
 # vendored llama.cpp 的本地回滚备份（同 .b10176 口径，约 200MB）
 third_party/llama.cpp.bak-*/
+
+# === 编译/临时垃圾（2026-10-15）===
+*.obj
+*.pdb
+ms_gguf_files.json
+ms_tmp.json
