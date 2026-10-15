@@ -113,12 +113,18 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
             NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
     };
     auto build_moe_feed_forward = [&model, this](ggml_tensor * cur, int il) -> ggml_tensor * {
+        // split-moe: decode phase runs on the per-layer window tensors (c + K);
+        // prefill and non-slot models use the shared bank tensors
+        const auto & L = model.layers[il];
+        ggml_tensor * p_up   = moe_decode_phase && L.ffn_up_exps_dec   ? L.ffn_up_exps_dec   : L.ffn_up_exps;
+        ggml_tensor * p_gate = moe_decode_phase && L.ffn_gate_exps_dec ? L.ffn_gate_exps_dec : L.ffn_gate_exps;
+        ggml_tensor * p_down = moe_decode_phase && L.ffn_down_exps_dec ? L.ffn_down_exps_dec : L.ffn_down_exps;
         return build_moe_ffn(cur,
-                model.layers[il].ffn_gate_inp,
-                model.layers[il].ffn_up_exps,
-                model.layers[il].ffn_gate_exps,
-                model.layers[il].ffn_down_exps,
-                model.layers[il].ffn_exp_probs_b,
+                L.ffn_gate_inp,
+                p_up,
+                p_gate,
+                p_down,
+                L.ffn_exp_probs_b,
                 n_expert, n_expert_used,
                 LLM_FFN_SILU, true,
                 hparams.expert_weights_scale,

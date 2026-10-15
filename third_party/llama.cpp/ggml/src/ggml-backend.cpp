@@ -1858,6 +1858,67 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         prev_backend_id = split_backend_id;
     }
 
+    // [dspark 2026-10-15] env-gated sched stats: where do ops actually run?
+    static int sched_stats_count = 0;
+    if (sched_stats_count < 5 && getenv("GGML_SCHED_STATS")) {
+        int per_backend[GGML_SCHED_MAX_BACKENDS] = {0};
+        int total_ops = 0;
+        for (int si = 0; si < sched->n_splits; si++) {
+            struct ggml_backend_sched_split * sp = &splits[si];
+            for (int ni = 0; ni < sp->graph.n_nodes; ni++) {
+                if (sp->graph.nodes[ni]) {
+                    per_backend[sp->backend_id]++;
+                    total_ops++;
+                }
+            }
+        }
+        int total_cpy = 0, cpy_bytes_hi = 0;
+        for (int si = 0; si < sched->n_splits; si++) {
+            total_cpy += splits[si].n_inputs;
+            for (int ii = 0; ii < splits[si].n_inputs; ii++) {
+                int64_t nb = ggml_nbytes(splits[si].inputs[ii]);
+                if (nb > cpy_bytes_hi) { /* avoid overflow sum, track max */ }
+            }
+        }
+        fprintf(stderr, "[SCHED_STATS] graph#%d splits=%d ops=%d copies(inputs)=%d backends=[",
+                sched_stats_count, sched->n_splits, total_ops, total_cpy);
+        for (int b = 0; b < sched->n_backends; b++) {
+            if (per_backend[b] > 0) {
+                fprintf(stderr, " %s:%d", ggml_backend_name(sched->backends[b]), per_backend[b]);
+            }
+        }
+        fprintf(stderr, " ]\n");
+        if (sched_stats_count == 0) { // first graph: dump op-type histogram per backend
+            int cpu_ops[256] = {0};
+            for (int si = 0; si < sched->n_splits; si++) {
+                struct ggml_backend_sched_split * sp = &splits[si];
+                if (sp->backend_id == 0) continue; // only non-first backends? print all below
+            }
+            // find which backend is CPU
+            int cpu_id = -1;
+            for (int b = 0; b < sched->n_backends; b++) {
+                const char * bn = ggml_backend_name(sched->backends[b]);
+                if (bn && strstr(bn, "CPU")) { cpu_id = b; break; }
+            }
+            if (cpu_id >= 0) {
+                for (int si = 0; si < sched->n_splits; si++) {
+                    struct ggml_backend_sched_split * sp = &splits[si];
+                    if (sp->backend_id != cpu_id) continue;
+                    for (int ni = 0; ni < sp->graph.n_nodes; ni++) {
+                        ggml_tensor * t = sp->graph.nodes[ni];
+                        if (t && (int)t->op < 256) cpu_ops[t->op]++;
+                    }
+                }
+                fprintf(stderr, "[SCHED_STATS] CPU-fallback op histogram:");
+                for (int o = 0; o < 256; o++) {
+                    if (cpu_ops[o] > 0) fprintf(stderr, " %s:%d", ggml_op_name((enum ggml_op)o), cpu_ops[o]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        sched_stats_count++;
+    }
+
     return GGML_STATUS_SUCCESS;
 }
 

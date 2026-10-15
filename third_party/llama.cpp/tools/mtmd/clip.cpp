@@ -1005,7 +1005,9 @@ static std::unique_ptr<clip_graph> clip_get_graph_builder(clip_ctx * ctx, const 
                 builder = std::make_unique<clip_graph_minicpmv>(ctx, img);
             } break;
         case PROJECTOR_TYPE_MINICPMV4_6:
+        case PROJECTOR_TYPE_MINICPMV4_7:
             {
+                // 4.7 reuses the 4.6 merger graph (see clip_graph_minicpmv4_6::build is_4x path)
                 builder = std::make_unique<clip_graph_minicpmv4_6>(ctx, img);
             } break;
         case PROJECTOR_TYPE_INTERNVL:
@@ -1460,6 +1462,30 @@ struct clip_model_loader {
                         hparams.n_merge = 4;
                         get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
                         GGML_ASSERT(hparams.n_merge == 2 || hparams.n_merge == 4);
+
+                        // borrow wa_layer_indexes for vit_merger insertion point
+                        std::vector<int> wa_layer_indexes_vec;
+                        get_arr_int(KEY_WIN_ATTN_LAYER_INDEXES, wa_layer_indexes_vec, false);
+                        if (!wa_layer_indexes_vec.empty()) {
+                            const int insert_lid = wa_layer_indexes_vec[0];
+                            if (insert_lid < 0 || insert_lid >= (int) hparams.n_layer) {
+                                throw std::runtime_error(string_format("%s: layer index %d is out of range (n_layer: %d)",
+                                                                       __func__, insert_lid, hparams.n_layer));
+                            }
+                            hparams.insert_layer_id = insert_lid;
+                        }
+                    } break;
+                case PROJECTOR_TYPE_MINICPMV4_7:
+                    {
+                        // MiniCPM-V 4.7 reuses the 4.6 merger projector (scale_factor 2 -> 4x mode, 4 -> 16x mode)
+                        hparams.n_merge = 4;
+                        get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
+                        GGML_ASSERT(hparams.n_merge == 2 || hparams.n_merge == 4);
+
+                        // 4.7 stretches the refined image to the target size instead of padding
+                        // it, so padding would build every slice from the wrong pixels
+                        hparams.image_pad_ov = PAD_NONE;
+                        hparams.image_pad_rf = PAD_NONE;
 
                         // borrow wa_layer_indexes for vit_merger insertion point
                         std::vector<int> wa_layer_indexes_vec;
@@ -2330,6 +2356,7 @@ struct clip_model_loader {
                     || model.proj_type == PROJECTOR_TYPE_IDEFICS3
                     || model.proj_type == PROJECTOR_TYPE_MINICPMV
                     || model.proj_type == PROJECTOR_TYPE_MINICPMV4_6
+                    || model.proj_type == PROJECTOR_TYPE_MINICPMV4_7
                 ) && layer.ff_up_w && layer.ff_down_w && layer.ff_down_w->ne[0] == hparams.n_embd;
             if (is_ffn_swapped) {
                 // swap up and down weights
@@ -2432,6 +2459,7 @@ struct clip_model_loader {
                     model.mm_model_ln_post_b = get_tensor(string_format(TN_MINICPMV_LN, "post", "bias"));
                 } break;
             case PROJECTOR_TYPE_MINICPMV4_6:
+            case PROJECTOR_TYPE_MINICPMV4_7:
                 {
                     const bool merger_required = hparams.n_merge == 4;
                     auto get_merger_tensor = [&](const std::string & name, bool required = true) {
@@ -4165,6 +4193,7 @@ int clip_n_output_tokens(const clip_ctx * ctx, const clip_image_f32 * img) {
                 }
             } break;
         case PROJECTOR_TYPE_MINICPMV4_6:
+        case PROJECTOR_TYPE_MINICPMV4_7:
             {
                 n_patches /= params.n_merge * params.n_merge;
             } break;
@@ -4721,6 +4750,7 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                 set_input_f32("omega", omega);
             } break;
         case PROJECTOR_TYPE_MINICPMV4_6:
+        case PROJECTOR_TYPE_MINICPMV4_7:
             {
                 const bool is_4x = hparams.n_merge == 2;
 
@@ -5961,6 +5991,7 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
         case PROJECTOR_TYPE_MINICPMV:
             return ctx->model.mm_model_proj->ne[0];
         case PROJECTOR_TYPE_MINICPMV4_6:
+        case PROJECTOR_TYPE_MINICPMV4_7:
             return ctx->model.mm_ffn_down_w->ne[1];
         case PROJECTOR_TYPE_GLM_EDGE:
             return ctx->model.mm_model_mlp_3_w->ne[1];

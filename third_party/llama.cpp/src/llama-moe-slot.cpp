@@ -607,6 +607,12 @@ struct llama_moe_slot_runtime::impl {
     std::atomic<uint64_t> io_calls_all{0};
     uint64_t last_io_bytes = 0;
     uint64_t last_io_calls = 0;
+    // [dspark M2 v3] 主线程 drain（stage WriteBuffer + pack enqueue + 等待）的
+    // 累计耗时/次数 —— GPU bank 每步的固定开销，用来分解 pmgmt。
+    std::atomic<int64_t>  drain_ns{0};
+    std::atomic<uint64_t> n_drain{0};
+    int64_t  last_drain_ns = 0;
+    uint64_t last_n_drain  = 0;
     // 「图执行期间的专家管理耗时」累计，见 add_process_ns。
     std::atomic<int64_t> process_ns{0};
     // 诊断：把 process() 内部再拆三层，用来定位「记账 3.5 → 19.5 ms」那笔异常。
@@ -629,6 +635,31 @@ struct llama_moe_slot_runtime::impl {
     /// 的缺失专家延后到「前面那些已驻留专家算完之后」再读，读就与 GPU 计算重叠了。
     /// 固定按位置切（而不是按是否驻留排序切）能保持求和顺序不变 → 输出逐字节一致。
     int32_t matmul_split = 0;
+
+    /// resident-first 动态切点（LLAMA_MOE_SPLIT_DYNAMIC=1）：
+    ///   - phase A 每遇到一个 miss 就把它的**名次**往 first_miss_rank 里取 min；
+    ///   - flush_ubatch（每步末）把它换算成下一步的切点 next_split：
+    ///       无 miss        -> 0        （全同步，反正全是 hit，无读可省）
+    ///       首个 miss=rank r>0 -> r    （前段 [0,r) 上一步全 hit，phase A 零阻塞读；
+    ///                                    [r,n_used) 全部延后异步读）
+    ///       首个 miss=rank 0   -> n_used（全延后：phase A 内零阻塞读，trigger 后整段算）
+    ///   - 图与运行时都读 split_value()，两边始终看到同一个数。
+    /// 跨步名次相关性来自 router logits 的连续性（40-50% 专家重叠），miss 集中尾部
+    /// 名次的分布特性（r6-r13 实测）保证前段大概率无 miss。
+    std::atomic<int32_t> first_miss_rank{INT32_MAX};
+    std::atomic<int32_t> next_split{-1};
+    bool split_dynamic = false;
+
+    /// 图侧（build_moe_ffn）与运行时（install loop）共用的当前切点值。
+    int32_t split_value() const {
+        if (split_dynamic) {
+            const int32_t v = next_split.load(std::memory_order_relaxed);
+            if (v >= 0) {
+                return v;
+            }
+        }
+        return matmul_split;
+    }
 
     /// 每层被延后读取的 (expert, slot)，由 phase A 写入、phase B 消费。
     std::vector<std::vector<pending_install>> deferred;
@@ -759,9 +790,28 @@ struct llama_moe_slot_runtime::impl {
             }
         }
 
-        moe_log("init pack=%s pack_layers=%d/%d bank=%d shared=%s experts=%d io_threads=%d stride0=%zu preadv=on park_window=%s",
+        // [dspark M2 v3] GPU bank 生效标记：绑定的 q3_K slot 是否落在 OpenCL
+        // SVM buffer（moe_log init 行一眼可见，此前只靠 qwen35moe 的 LLAMA_LOG）。
+        bool bank_is_gpu = false;
+        for (const auto & layer : layers) {
+            for (const auto & b : layer.bindings) {
+                if (b.tensor && b.tensor->buffer && b.tensor->type == GGML_TYPE_Q3_K) {
+                    ggml_tensor * soa = b.tensor->view_src ? b.tensor->view_src : b.tensor;
+                    bank_is_gpu = ggml_backend_opencl_buft_is_svm(ggml_backend_buffer_get_type(soa->buffer));
+                    if (bank_is_gpu) {
+                        break;
+                    }
+                }
+            }
+            if (bank_is_gpu) {
+                break;
+            }
+        }
+
+        moe_log("init pack=%s pack_layers=%d/%d bank=%d bankgpu=%s shared=%s experts=%d io_threads=%d stride0=%zu preadv=on park_window=%s",
             n_pack_ok == n_enabled && n_enabled > 0 ? "on" : (n_pack_ok > 0 ? "partial" : "off"),
-            n_pack_ok, n_enabled, (int) n_slots, shared_bank ? "on" : "off",
+            n_pack_ok, n_enabled, (int) n_slots, bank_is_gpu ? "GPU-FGSVM" : "cpu",
+            shared_bank ? "on" : "off",
             (int) n_expert, moe_ssd_io_threads(), stride0,
             park_window_enabled() ? "on" : "off");
 
@@ -780,6 +830,14 @@ struct llama_moe_slot_runtime::impl {
             if (matmul_split > 0) {
                 moe_log("matmul-split: 末尾 %d 个位置的缺失专家延后读取（读与算重叠）",
                         (int) matmul_split);
+            }
+            const char * d = std::getenv("LLAMA_MOE_SPLIT_DYNAMIC");
+            split_dynamic = d && d[0] == '1';
+            if (split_dynamic) {
+                // 初值 0：首个 prefill ubatch 走静态全同步（r20 实测动态初值会让
+                // prefill +34%），首个 decode 步也保守起步，之后每步按 miss 名次刷新。
+                next_split.store(0, std::memory_order_relaxed);
+                moe_log("split-dynamic: resident-first 动态切点开启（下一步切点 = 上一步首个 miss 名次）");
             }
         }
 
@@ -2018,12 +2076,21 @@ struct llama_moe_slot_runtime::impl {
         // [dspark M2 v2] wave-local upload records: q3_K staging regions for
         // the main-thread drain (route 1). Prefetch/other read_expert_directv
         // callers pass no vector and fall back to the inline route.
-        std::vector<svm_upload_rec> uploads;
-        uploads.reserve((size_t) n * 2);
-        auto read_one = [&](int i) {
+        // [dspark M2 v3][race fix] uploads used to be push_back'ed concurrently
+        // from the IO threads — UB (bank23: SIGSEGV at random decode steps in
+        // stage_pack reading garbage soa, both blocking AND async drain). Each
+        // worker now accumulates into its own vector; merged after join. The
+        // per-expert rec pair (gate_up owner + down non-owner, adjacent) stays
+        // adjacent under thread-grouped merge, so arena ownership is intact.
+        std::vector<std::vector<svm_upload_rec>> per_th((size_t) t.n_th);
+        for (auto & v : per_th) {
+            v.reserve((size_t) n * 4 / (size_t) t.n_th + 4);
+        }
+        auto read_one = [&](int th, int i) {
             try {
                 dts[(size_t) i] = read_expert_directv(
-                    state, pending[(size_t) i].expert, pending[(size_t) i].slot, window_mode, &uploads);
+                    state, pending[(size_t) i].expert, pending[(size_t) i].slot, window_mode,
+                    &per_th[(size_t) th]);
             } catch (const std::exception & e) {
                 errs[(size_t) i] = e.what();
             }
@@ -2037,20 +2104,20 @@ struct llama_moe_slot_runtime::impl {
         // 顺序读文件**，可能接近顺序读速率（实测比 4 线程的随机交织快）。
         if (t.n_th == 1) {
             for (int i = 0; i < n; ++i) {
-                read_one(i);
+                read_one(0, i);
             }
         } else {
             std::atomic<int> next{0};
             std::vector<std::thread> threads;
             threads.reserve((size_t) t.n_th);
             for (int th = 0; th < t.n_th; ++th) {
-                threads.emplace_back([&]() {
+                threads.emplace_back([&, th]() {
                     for (;;) {
                         const int i = next.fetch_add(1, std::memory_order_relaxed);
                         if (i >= n) {
                             break;
                         }
-                        read_one(i);
+                        read_one(th, i);
                     }
                 });
             }
@@ -2058,13 +2125,53 @@ struct llama_moe_slot_runtime::impl {
                 th.join();
             }
         }
+        size_t n_up = 0;
+        for (const auto & v : per_th) {
+            n_up += v.size();
+        }
+        std::vector<svm_upload_rec> uploads;
+        uploads.reserve(n_up);
+        for (auto & v : per_th) {
+            for (auto & r : v) {
+                uploads.push_back(r);
+            }
+            v.clear();
+        }
         t.wall_ns = now_ns() - wall0;
         // [dspark M2 v2] drain: main-thread staged upload + pack (route 1).
         // Blocking WriteBuffer per family (thread-safe set_tensor pattern;
         // ~0.35ms each), pack kernel reads the cl_mem staging — replaces the
         // 1.7ms-per-pack SVM read path (bank15: pack = ~60% of decode step).
+        // [dspark M2 v3] LLAMA_MOE_DRAIN_ASYNC (default on): CL_FALSE writes
+        // + pack enqueues for the whole wave, ONE clWaitForEvents at the end.
+        // 220 blocking writes/token each pay a ~0.35ms driver round-trip
+        // serially; async + single wait pipelines them. The staging arenas
+        // stay alive until the wait (the device copies read from them).
+        // =0 falls back to the legacy per-call CL_TRUE route.
+        static const bool drain_async_ = [] {
+            const char * e = getenv("LLAMA_MOE_DRAIN_ASYNC");
+            return !(e && *e == '0');
+        }();
+        const int64_t drain0 = now_ns();
+        if (drain_async_) {
+            std::vector<void *> evs;
+            evs.reserve(uploads.size());
+            for (auto & r : uploads) {
+                void * ev = nullptr;
+                ggml_cl_moe_q3k_stage_pack_async(r.soa, r.plane_slot, r.src, &ev);
+                if (ev != nullptr) {
+                    evs.push_back(ev);
+                }
+            }
+            ggml_cl_moe_q3k_stage_wait(evs.data(), (int) evs.size());
+        } else {
+            for (auto & r : uploads) {
+                ggml_cl_moe_q3k_stage_pack(r.soa, r.plane_slot, r.src);
+            }
+        }
+        drain_ns.fetch_add(now_ns() - drain0, std::memory_order_relaxed);
+        n_drain.fetch_add(uploads.size(), std::memory_order_relaxed);
         for (auto & r : uploads) {
-            ggml_cl_moe_q3k_stage_pack(r.soa, r.plane_slot, r.src);
             if (r.arena != nullptr) {
                 stage_release(r.arena);
             }
@@ -2118,6 +2225,21 @@ struct llama_moe_slot_runtime::impl {
         if (cur.n_layers <= 0) {
             return;
         }
+        // resident-first 动态切点：本步结束时把「首个 miss 名次」换算成下一步切点。
+        // 必须在日志节流之外 —— 每步都要刷新，否则切点冻结在旧值。
+        //
+        // prefill（多行 ubatch）一律退回静态全同步：prefill 的 miss 又多又散，全延后
+        // 会让每层 trigger join 串行吃掉全部读且与 lookahead 预读抢 UFS（r19 实测
+        // prefill 最劣 6 倍：11.7s -> 71.7s）。动态切点只服务 decode。
+        if (split_dynamic) {
+            const int32_t fm = first_miss_rank.exchange(INT32_MAX, std::memory_order_relaxed);
+            int32_t ns = 0;                       // 无 miss / prefill：全同步
+            if (cur.n_tokens <= 1 && fm != INT32_MAX) {
+                const int32_t nu = (int32_t) model.hparams.n_expert_used_max();
+                ns = (fm <= 0) ? nu : std::min(fm, nu - 1);   // rank0 miss -> 全延后
+            }
+            next_split.store(ns, std::memory_order_relaxed);
+        }
         // 本步的**完整** I/O：主路径 + 预读。用全局计数器的增量，避免口径混淆。
         const uint64_t all_now = io_bytes_all.load(std::memory_order_relaxed);
         const uint64_t calls_now = io_calls_all.load(std::memory_order_relaxed);
@@ -2132,6 +2254,8 @@ struct llama_moe_slot_runtime::impl {
         const uint64_t pf_pub_now  = lookahead.n_pred_published.load(std::memory_order_relaxed);
         const int64_t dspawn_now = defer_spawn_ns.load(std::memory_order_relaxed);
         const int64_t dwait_now  = defer_wait_ns.load(std::memory_order_relaxed);
+        const int64_t drain_now  = drain_ns.load(std::memory_order_relaxed);
+        const uint64_t ndrain_now = n_drain.load(std::memory_order_relaxed);
         const uint64_t all_delta = all_now - last_io_bytes;
         const uint64_t calls_delta = calls_now - last_io_calls;
         const int64_t proc_delta = proc_now - last_process_ns;
@@ -2145,6 +2269,8 @@ struct llama_moe_slot_runtime::impl {
         const uint64_t pf_pub_delta  = pf_pub_now - last_pf_pub;
         const int64_t dspawn_delta = dspawn_now - last_defer_spawn_ns;
         const int64_t dwait_delta  = dwait_now - last_defer_wait_ns;
+        const int64_t drain_delta  = drain_now - last_drain_ns;
+        const uint64_t ndrain_delta = ndrain_now - last_n_drain;
         last_io_bytes = all_now;
         last_io_calls = calls_now;
         last_process_ns = proc_now;
@@ -2158,6 +2284,8 @@ struct llama_moe_slot_runtime::impl {
         last_pf_pub  = pf_pub_now;
         last_defer_spawn_ns = dspawn_now;
         last_defer_wait_ns  = dwait_now;
+        last_drain_ns = drain_now;
+        last_n_drain  = ndrain_now;
 
         // 这些计数器只在 flush 时前进，而 flush 受 should_log_ubatch 节流。
         // 所以必须把「本次 flush 覆盖了多少步」一起打出来，否则消费方会把
@@ -2172,8 +2300,9 @@ struct llama_moe_slot_runtime::impl {
                 "pread_wall=%.0fms pread_sum=%.0fms bytes=%.0fMiB par=%.2f io=%.0fMiB/s "
                 "readall=%.0fMiB calls=%llu realio=%.0fMiB/s span=%llu pmgmt=%.1fms "
                 "readids=%.1fms writeids=%.1fms deferspawn=%.1fms deferwait=%.1fms "
+                "drain=%.1fms/%llu "
                 "pfskip=%llu pfwait=%llu/%.1fms pfread=%llu pfpub=%llu pfhit=%llu pfpredict=%llu pevsave=%llu pevforced=%llu pfcached=%llu usedpf=%llu "
-                "runs=%d avg_run=%.1f max_run=%d zerocopy=%.0f%%",
+                "runs=%d avg_run=%.1f max_run=%d zerocopy=%.0f%% dynsplit=%d",
             kind,
             (unsigned long long) idx,
             cur.n_tokens,
@@ -2200,6 +2329,8 @@ struct llama_moe_slot_runtime::impl {
             ms_of(writeids_delta),
             ms_of(dspawn_delta),
             ms_of(dwait_delta),
+            ms_of(drain_delta),
+            (unsigned long long) ndrain_delta,
             (unsigned long long) arm_skip_delta,
             (unsigned long long) wait_delta,
             ms_of(wait_ns_delta),
@@ -2211,10 +2342,11 @@ struct llama_moe_slot_runtime::impl {
             (unsigned long long) lookahead.n_evict_forced.load(std::memory_order_relaxed),
             (unsigned long long) lookahead.n_pred_cached.load(std::memory_order_relaxed),
             (unsigned long long) lookahead.n_used_from_pf.load(std::memory_order_relaxed),
-            cur.runs.n,
-            avg_run,
-            cur.runs.max,
-            cur.runs.experts > 0 ? 100.0 * (double) cur.runs.ok_ex / (double) cur.runs.experts : 0.0);
+        cur.runs.n,
+        avg_run,
+        cur.runs.max,
+        cur.runs.experts > 0 ? 100.0 * (double) cur.runs.ok_ex / (double) cur.runs.experts : 0.0,
+        split_value());
         cur = ubatch_acc{};
     }
 
@@ -2562,7 +2694,7 @@ bool llama_moe_slot_runtime::uses_layer(int layer) const {
 }
 
 int llama_moe_slot_runtime::matmul_split() const {
-    return pimpl->matmul_split;
+    return pimpl->split_value();
 }
 
 /// A2 的 phase B 节点：把 slot_ids 拷一份作为输出（这样本节点自然依赖 phase A），
@@ -2873,14 +3005,27 @@ void llama_moe_slot_runtime::process(
     auto & defer_list = pimpl->deferred[(size_t) layer];
     defer_list.clear();
     const int32_t n_used_row = (int32_t) expert_ids->ne[0];
-    const int32_t split_at   = n_used_row - pimpl->matmul_split;
-    const bool defer_by_rank = window_mode && pimpl->matmul_split > 0 && split_at > 0;
+    // 与图侧（build_moe_ffn 的 moe_slots->matmul_split()）读同一个值 —— 动态模式下
+    // 两者必须严格一致，否则 phase A 的 defer 名次区间和图的切分对不上。
+    const int32_t split_eff  = pimpl->split_value();
+    const int32_t split_at   = n_used_row - split_eff;
+    // split_eff == n_used_row（全延后）时 split_at == 0：所有名次的 miss 都延后。
+    const bool defer_by_rank = window_mode && split_eff > 0;
 
     for (size_t pos = 0; pos < count; ++pos) {
         const int32_t expert = experts[pos];
         if (state.expert_to_slot[expert] >= 0) {
             slots[pos] = state.expert_to_slot[expert];   // 已驻留，无需读取
             continue;
+        }
+
+        // resident-first 动态切点：记本步**首个** miss 的名次（跨层取 min）。
+        if (pimpl->split_dynamic) {
+            const int32_t rank = (int32_t) (pos % (size_t) n_used_row);
+            int32_t cur_fm = pimpl->first_miss_rank.load(std::memory_order_relaxed);
+            while (rank < cur_fm &&
+                   !pimpl->first_miss_rank.compare_exchange_weak(cur_fm, rank, std::memory_order_relaxed)) {
+            }
         }
 
         int32_t slot = -1;

@@ -14245,12 +14245,25 @@ void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int plane_slot, const v
 // FGSVM (slow). WriteBuffer from the main thread is the set_tensor pattern —
 // never crashes; from IO threads it does (bank7-10). CL_TRUE because the
 // thread_local staging is reused by the next wave.
-void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const void * src_host) {
+// [dspark M2 v3] shared impl of the staged route. blocking=true keeps the
+// legacy CL_TRUE behavior (safe standalone); blocking=false enqueues the
+// write asynchronously and returns the event so the caller can wait ONCE per
+// wave — 220 blocking writes/token each pay the driver round-trip (~0.35ms)
+// serially; async + single wait pipelines them (decode drain ~77ms -> ~copy
+// time). The host staging (src_host) must stay alive until the event fires.
+static void moe_q3k_stage_pack_impl(struct ggml_tensor * soa, int plane_slot,
+        const void * src_host, bool blocking, void ** ev_out) {
     if (soa == nullptr || src_host == nullptr || soa->buffer == nullptr) {
+        if (ev_out) {
+            *ev_out = nullptr;
+        }
         return;
     }
     ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(soa->buffer);
     if (buft->iface.get_name != ggml_backend_opencl_svm_buft_get_name) {
+        if (ev_out) {
+            *ev_out = nullptr;
+        }
         return;
     }
     ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buft->device);
@@ -14266,20 +14279,72 @@ void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const 
         std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
         auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
         if (extra == nullptr) {
+            if (ev_out) {
+                *ev_out = nullptr;
+            }
             return;
         }
         moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, false, nullptr,
                              (const uint8_t *) soa->data + (size_t) plane_slot * (ggml_nbytes(soa) / (size_t) soa->ne[2]), 0);
+        if (ev_out) {
+            *ev_out = nullptr;
+        }
         return;
     }
     const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
     const size_t raw_off = (size_t) plane_slot * slot_bpe;
+    cl_event ev = nullptr;
     std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
-    CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage, CL_TRUE,
-        raw_off, slot_bpe, src_host, 0, NULL, NULL));
+    CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage,
+        blocking ? CL_TRUE : CL_FALSE,
+        raw_off, slot_bpe, src_host, 0, NULL, ev_out ? &ev : NULL));
     auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
     GGML_ASSERT(extra != nullptr);
     moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, (cl_ulong) raw_off);
+    if (ev_out) {
+        *ev_out = (void *) ev;
+    }
+}
+
+void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const void * src_host) {
+    moe_q3k_stage_pack_impl(soa, plane_slot, src_host, true, nullptr);
+}
+
+// [dspark M2 v3] async variant for the wave drain: enqueue CL_FALSE write +
+// pack, hand the write event back. Caller collects events for the whole wave
+// and calls ggml_cl_moe_q3k_stage_wait() once — arenas must stay alive until
+// then. Main-thread submission only (IO-thread device commands crash the 740
+// libCB submission thread, bank7-10).
+void ggml_cl_moe_q3k_stage_pack_async(struct ggml_tensor * soa, int plane_slot,
+        const void * src_host, void ** ev_out) {
+    moe_q3k_stage_pack_impl(soa, plane_slot, src_host, false, ev_out);
+}
+
+void ggml_cl_moe_q3k_stage_wait(void ** evs, int n) {
+    if (evs == nullptr || n <= 0) {
+        return;
+    }
+    // filter nulls (SVM-fallback / non-SVM records produce no event)
+    cl_event wait[64];
+    int nw = 0;
+    for (int i = 0; i < n; ++i) {
+        if (evs[i] != nullptr) {
+            wait[nw++] = (cl_event) evs[i];
+            if (nw == 64) {
+                CL_CHECK(clWaitForEvents(nw, wait));
+                for (int j = 0; j < nw; ++j) {
+                    CL_CHECK(clReleaseEvent(wait[j]));
+                }
+                nw = 0;
+            }
+        }
+    }
+    if (nw > 0) {
+        CL_CHECK(clWaitForEvents(nw, wait));
+        for (int j = 0; j < nw; ++j) {
+            CL_CHECK(clReleaseEvent(wait[j]));
+        }
+    }
 }
 
 //
@@ -14389,6 +14454,33 @@ static bool ggml_backend_opencl_device_supports_buft(ggml_backend_dev_t dev, ggm
 }
 
 namespace /* anonymous */ {
+// [dspark 2026-10-15] Host-resident MoE expert weights (moe-slot CPU buft) with
+// GPU compute: let the scheduler place MUL_MAT_ID on the OpenCL backend so the
+// copy-only-used-experts branch in ggml_backend_sched_compute_splits kicks in.
+// Gate mirrors the MUL_MAT_ID branch of supports_op: if supports_op admits the
+// tensor, offload is safe; otherwise the scheduler keeps the op on CPU (same
+// behavior as before this hook existed). dense MUL_MAT deliberately NOT
+// offloaded - the Adreno A7X dense K-quant GEMV kernels are slower than CPU v86
+// (probe8: proj 4.5x slower on 740), and pass-2 expansion would otherwise drag
+// them onto the GPU.
+// GGML_OPENCL_OFFLOAD_MMID=1 to enable. DEFAULT OFF: sched-copied GPU copies
+// of slot tensors lack the pre-packed se planes that the batched MoE kernels
+// require (set_tensor creates them on the original tensor only) -> SIGSEGV in
+// ggml_cl_mul_mat_id_batched. The proper path is LLAMA_MOE_BANK_GPU=1 (FGSVM
+// zero-copy bank, qwen35moe M2) — 2026-10-15 verified it runs but is untuned
+// (pmgmt 290ms/tok, prefill 2x) on 740.
+static bool ggml_backend_opencl_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    GGML_UNUSED(dev);
+    static const bool enabled = [] {
+        const char * e = getenv("GGML_OPENCL_OFFLOAD_MMID");
+        return e && e[0] == '1';
+    }();
+    if (!enabled) {
+        return false;
+    }
+    return op->op == GGML_OP_MUL_MAT_ID;
+}
+
 struct ggml_backend_device_i ggml_backend_opencl_device_i = {
     /* .get_name             = */ ggml_backend_opencl_device_get_name,
     /* .get_description      = */ ggml_backend_opencl_device_get_description,
@@ -14401,7 +14493,7 @@ struct ggml_backend_device_i ggml_backend_opencl_device_i = {
     /* .buffer_from_host_ptr = */ ggml_backend_opencl_device_buffer_from_ptr,
     /* .supports_op          = */ ggml_backend_opencl_device_supports_op,
     /* .supports_buft        = */ ggml_backend_opencl_device_supports_buft,
-    /* .offload_op           = */ NULL,
+    /* .offload_op           = */ ggml_backend_opencl_device_offload_op,
     /* .event_new            = */ NULL,
     /* .event_free           = */ NULL,
     /* .event_synchronize    = */ NULL,
