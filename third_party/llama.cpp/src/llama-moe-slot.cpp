@@ -517,6 +517,9 @@ struct llama_moe_slot_runtime::impl {
     struct layer_state {
         bool enabled = false;
         bool pack_ok = false;
+        // in-place gguf fallback: families are not contiguous per expert; read
+        // each binding at entry->offset + expert*entry->expert_stride instead
+        bool pack_seg = false;
         int32_t window_start = 0;   // 本层 decode 窗口的起始 slot（0 表示未启用窗口）
         /// 本层窗口的**总宽度**（缓存区 c_il + 预读暂存区 K）。各层可不同 ——
         /// 见 llama_model::moe_layer_windows()：热层给大、冷层给小。
@@ -531,6 +534,7 @@ struct llama_moe_slot_runtime::impl {
 
         // decode 专用的一套（每层独立窗口，ne[2] = c）。prefill 用上面那套。
         bool dec_pack_ok = false;
+        bool dec_pack_seg = false;
         size_t dec_pack_base = 0;
         size_t dec_pack_stride = 0;
         std::string dec_pack_path;
@@ -763,9 +767,9 @@ struct llama_moe_slot_runtime::impl {
         // back to an upload path: private Metal buffers (non-unified memory) expose tensor->data as a
         // virtual address that is not writable from the CPU.
         for (const auto & layer : layers) {
-            if (layer.enabled && !layer.pack_ok) {
+            if (layer.enabled && !layer.pack_ok && !layer.pack_seg) {
                 throw std::runtime_error(
-                    "MoE experts layer is not packed; preadv loading requires gate/up/down contiguous per expert");
+                    "MoE experts layer is not packed and not segment-loadable; preadv loading requires gate/up/down per-expert slices");
             }
             for (const auto & b : layer.bindings) {
                 // vendored ggml 没有 is_host_addressable（omni fork 的新 API）。
@@ -808,9 +812,15 @@ struct llama_moe_slot_runtime::impl {
             }
         }
 
+        int n_pack_seg = 0;
+        for (const auto & layer : layers) {
+            if (layer.enabled && !layer.pack_ok && layer.pack_seg) {
+                n_pack_seg++;
+            }
+        }
         moe_log("init pack=%s pack_layers=%d/%d bank=%d bankgpu=%s shared=%s experts=%d io_threads=%d stride0=%zu preadv=on park_window=%s",
-            n_pack_ok == n_enabled && n_enabled > 0 ? "on" : (n_pack_ok > 0 ? "partial" : "off"),
-            n_pack_ok, n_enabled, (int) n_slots, bank_is_gpu ? "GPU-FGSVM" : "cpu",
+            n_pack_ok == n_enabled && n_enabled > 0 ? "on" : (n_pack_ok > 0 ? "partial" : (n_pack_seg > 0 ? "seg" : "off")),
+            n_pack_ok + n_pack_seg, n_enabled, (int) n_slots, bank_is_gpu ? "GPU-FGSVM" : "cpu",
             shared_bank ? "on" : "off",
             (int) n_expert, moe_ssd_io_threads(), stride0,
             park_window_enabled() ? "on" : "off");
@@ -883,6 +893,10 @@ struct llama_moe_slot_runtime::impl {
                 if (fail.empty()) {
                     finalize_pack(state.dec_bindings, state.dec_pack_order, state.dec_pack_ok,
                                   state.dec_pack_base, state.dec_pack_stride, state.dec_pack_path);
+                    if (!state.dec_pack_ok) {
+                        finalize_seg(state.dec_bindings, state.dec_pack_order, state.dec_pack_seg,
+                                     state.pack_bytes);
+                    }
                     n_dec++;
                 }
             }
@@ -895,6 +909,7 @@ struct llama_moe_slot_runtime::impl {
                     st.dec_bindings.clear();
                     st.dec_pack_order.clear();
                     st.dec_pack_ok = false;
+                    st.dec_pack_seg = false;
                 }
                 decode_window = 0;
             } else {
@@ -1554,6 +1569,35 @@ struct llama_moe_slot_runtime::impl {
         finalize_pack(state.bindings, state.pack_order, state.pack_ok,
                       state.pack_base, state.pack_stride, state.pack_path);
         state.pack_bytes = state.pack_stride;
+        if (!state.pack_ok) {
+            finalize_seg(state.bindings, state.pack_order, state.pack_seg, state.pack_bytes);
+        }
+    }
+
+    // Fallback for layouts where one expert is not a single contiguous span (in-place
+    // gguf: gate/up/down each live in their own segment). Keep per-entry addressing;
+    // read_expert_directv issues one read per binding. bytes = sum of family slices.
+    static void finalize_seg(std::vector<binding> & bindings, std::vector<size_t> & order,
+                             bool & seg, size_t & bytes) {
+        seg = false;
+        bytes = 0;
+        if (bindings.empty()) {
+            return;
+        }
+        for (const auto & b : bindings) {
+            if (b.entry->expert_stride == 0 || b.entry->bytes_per_expert > b.entry->expert_stride) {
+                return;
+            }
+            bytes += b.entry->bytes_per_expert;
+        }
+        order.resize(bindings.size());
+        for (size_t i = 0; i < bindings.size(); ++i) {
+            order[i] = i;
+        }
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return bindings[a].entry->offset < bindings[b].entry->offset;
+        });
+        seg = true;
     }
 
     /// LLAMA_MOE_F_NOCACHE：experts 读是否绕过 page cache。
@@ -1834,7 +1878,8 @@ struct llama_moe_slot_runtime::impl {
                 nbytes += b.entry->bytes_per_expert;
             }
         }
-        const int fd = fd_for(path);
+        const bool seg = window_mode ? state.dec_pack_seg : state.pack_seg;
+        const int fd = seg ? -1 : fd_for(path);
         const size_t offset = base + (size_t) expert * stride;
 
         if (mode == 2) {
@@ -1855,7 +1900,17 @@ struct llama_moe_slot_runtime::impl {
         }
 
         const int64_t t0 = now_ns();
-        readv_span(fd, offset, iov, n);
+        if (seg) {
+            // one read per family segment; each binding addresses its own slice
+            for (int i = 0; i < n; ++i) {
+                const binding & b = bindings[order[(size_t) i]];
+                readv_span(fd_for(b.entry->path),
+                           b.entry->offset + (size_t) expert * b.entry->expert_stride,
+                           &iov[i], 1);
+            }
+        } else {
+            readv_span(fd, offset, iov, n);
+        }
         const int64_t dt = now_ns() - t0;
         stats.pread_ns.fetch_add(dt, std::memory_order_relaxed);
         stats.n_bytes.fetch_add(nbytes, std::memory_order_relaxed);
@@ -3202,7 +3257,7 @@ void llama_moe_slot_runtime::process(
     pimpl->cur.unique_sum += n_unique;
     pimpl->cur.miss_sum += n_miss;
     pimpl->cur.n_th = std::max(pimpl->cur.n_th, timing.n_th);
-    pimpl->cur.pack_layers += state.pack_ok ? 1 : 0;
+    pimpl->cur.pack_layers += (state.pack_ok || state.pack_seg) ? 1 : 0;
     pimpl->cur.wall_ns += timing.wall_ns;
     pimpl->cur.pread_sum_ns += timing.pread_sum_ns;
     pimpl->cur.bytes += timing.bytes;

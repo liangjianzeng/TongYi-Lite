@@ -1991,7 +1991,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
-    ml.done_getting_tensors();
+    // in-place split-moe reads the routed expert tensors straight from the gguf,
+    // so those file tensors are intentionally not created here
+    ml.done_getting_tensors(moe_experts_inplace());
 
     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
     // If sidecar scales exist, the output weight must be an actual output tensor.
@@ -3935,6 +3937,10 @@ int32_t llama_model::moe_slot_bank_size() const {
 
 int32_t llama_model::moe_experts_layer_count() const {
     return pimpl->moe_experts ? pimpl->moe_experts->layer_count() : 0;
+}
+
+bool llama_model::moe_experts_inplace() const {
+    return pimpl->moe_experts && pimpl->moe_experts->inplace();
 }
 
 const llama_moe_experts_entry * llama_model::moe_experts_entry(const char * tensor_name) const {
