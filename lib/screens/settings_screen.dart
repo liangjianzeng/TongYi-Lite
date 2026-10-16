@@ -1275,7 +1275,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                   ),
                   const Divider(height: 20),
                   _buildSliderRow(
-                    label: 'GPU prefill 宽度（n_ubatch）',
+                    label: 'prefill 宽度（n_ubatch）',
                     value: gpuSettings.gpuNUbatch,
                     min: 0,
                     max: 512,
@@ -1284,8 +1284,9 @@ class _InferenceEngineTab extends ConsumerWidget {
                         ? '自动'
                         : '${gpuSettings.gpuNUbatch}',
                     onChanged: gpuNotifier.setGpuNUbatch,
-                    hint: '0=自动（GPU 512/CPU 16）；调小拆单次计算 burst 缓解 GPU '
-                        '挂死，prefill 变慢。32 的倍数步进，改后重新加载模型生效',
+                    hint: '0=自动（统一 512，split-MoE 按 bank 自动收敛）；调小拆'
+                        '单次计算 burst 缓解 GPU 挂死，prefill 变慢。32 的倍数步'
+                        '进，改后重新加载模型生效',
                   ),
                   _buildToggleTitle(
                     'Vulkan 禁用 subgroup',

@@ -378,9 +378,10 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
             // slot_bytes：packed 从 manifest 求和；in-place 用目录元数据。
             // 常驻主权重：packed = -les 主文件；in-place = 整包 − 专家区。
             final memAvailMb = _readMemAvailableMb();
+            final geo = sm.inplaceFullGguf ? null : await _moeManifestBankGeo(mf);
             final slotBytes = sm.inplaceFullGguf
                 ? (sm.slotBytesAllLayers > 0 ? sm.slotBytesAllLayers : null)
-                : await _moeSlotBytesFromManifest(mf);
+                : geo?.total;
             moeSlotBytes = slotBytes ?? 0;
             moeExpertsBytes = sm.inplaceFullGguf ? sm.expertsBytes : 0;
             var autoBank = 16; // 兜底：读不到内存/manifest 时维持旧稳态值
@@ -398,15 +399,35 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
               if (mmprojPath != null) {
                 budgetMb -= (await File(mmprojPath).length()) / (1024 * 1024);
               }
-              autoBank = (0.8 * budgetMb / slotMb).floor().clamp(8, 32);
-              bankLog =
-                  '自动(MemAvailable ${memAvailMb}MB, 预算 ${budgetMb.round()}MB, slot ${slotMb.toStringAsFixed(1)}MB)';
+              // 物理内存模型（2026-10-16 查案修正）：slot base 按（family×bpe）
+              // 分组、prefill 段组内共享（virtualize 实测 656 slots=282MiB，
+              // 旧「54MB×bank」是按每层独立复制的错误口径）。bank 的边际成本
+              // = 每层每专家字节（packed ~1.29MB）；decode 窗口（JNI 预取配方
+              // 8+6/层 × n_moe_layers）是与 bank 无关的固定成本，一并预留。
+              // bank=256(=n_expert) 时 JNI 不再 clamp prefill ubatch →
+              // 单遍专家流（每层 unique ≤ 256 恒成立，prefill 冷读 ≈ 地板）。
+              if (geo != null && geo.perLayer > 0) {
+                final bpeLayerMb = geo.perLayer / (1024 * 1024);
+                budgetMb -= 14.0 * geo.layers * bpeLayerMb; // decode 窗口固定成本
+                autoBank = (0.8 * budgetMb / bpeLayerMb).floor().clamp(8, 256);
+                bankLog =
+                    '自动(MemAvailable ${memAvailMb}MB, 预算 ${budgetMb.round()}MB, '
+                    'slot/层 ${bpeLayerMb.toStringAsFixed(2)}MB × ${geo.layers}层, 上限256)';
+              } else {
+                // in-place 形态（slotBytesAllLayers 口径）保守沿用旧公式。
+                final bankCap = slotMb <= 4 ? 256 : 32;
+                autoBank = (0.8 * budgetMb / slotMb).floor().clamp(8, bankCap);
+                bankLog =
+                    '自动(MemAvailable ${memAvailMb}MB, 预算 ${budgetMb.round()}MB, slot ${slotMb.toStringAsFixed(1)}MB, 上限$bankCap)';
+              }
             }
-            // 手动覆写仅对 packed-bins（MiniCPM，slot~1.3MB）有意义；in-place
-            // 整包 slot 高达 192MB，沿用通配 64 会要求 12.9GB 常驻（物理不可能），
-            // 强制走内存自适应 autoBank。
+            // 手动覆写仅对 packed-bins（MiniCPM，slot/层~1.29MB）有意义；
+            // in-place 整包口径庞大，沿用内存自适应 autoBank。小槽手动上限
+            // 256（=n_expert，再大纯属浪费：每层 unique ≤ 256 恒成立）。
+            final slotMbManual = (slotBytes ?? 0) / (1024 * 1024);
+            final manualCap = slotMbManual > 0 && slotMbManual <= 4 ? 256 : 64;
             final manual = sm.inplaceFullGguf ? null : gpu.moeBankOverride(modelId);
-            moeBank = (manual != null && manual >= 8 && manual <= 64)
+            moeBank = (manual != null && manual >= 8 && manual <= manualCap)
                 ? manual
                 : autoBank;
             smartMoeLog = sm.inplaceFullGguf
@@ -483,7 +504,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         enableMtp: mtp,
         mmprojPath: mmprojPath, // null = 单文件自包含 VL；两文件形态由原生 mtmd_init 加载
         draftPath: draftPath,
-        nUbatch: gpu.gpuNUbatch, // 0=自动；>0 拆小 GPU prefill burst（GPU fault 缓解）
+        nUbatch: gpu.gpuNUbatch, // 0=自动（统一512）；>0 拆小 prefill burst
         vkNoSubgroup: gpu.vkNoSubgroup,
         moeManifest: moeManifest,
         moeBank: moeBank,
@@ -646,17 +667,27 @@ int? _readMemAvailableMb() {
 /// 从 split-MoE manifest.json 求「单专家全层驻留字节」：Σ entries[].bytes_per_expert
 /// （entries = 层 × tensor family，同一专家在所有层/投影上的 slot 总大小）。
 /// 解析失败返回 null，由调用方兜底。
-Future<int?> _moeSlotBytesFromManifest(File manifest) async {
+/// manifest bank 几何信息：total = Σ 全部 entries bytes_per_expert（= 单专家
+/// 全层全族驻留字节，旧口径）；perLayer = 单专家单层全族字节（bank 的真实
+/// 边际内存成本——slot base 按 (family×bpe) 分组、prefill 段组内共享，见
+/// llama-model-loader::virtualize_expert_tensor 实测 656 slots = 282MiB）；
+/// layers = MoE 层数。
+Future<({int total, int perLayer, int layers})?> _moeManifestBankGeo(
+    File manifest) async {
   try {
     final j = jsonDecode(await manifest.readAsString());
     if (j is! Map || j['entries'] is! List) return null;
     int sum = 0;
+    final layers = <int>{};
     for (final e in (j['entries'] as List)) {
       final b = e is Map ? e['bytes_per_expert'] : null;
       if (b is! int || b <= 0) return null;
       sum += b;
+      final l = e is Map ? e['layer'] : null;
+      if (l is int) layers.add(l);
     }
-    return sum > 0 ? sum : null;
+    if (sum <= 0 || layers.isEmpty) return null;
+    return (total: sum, perLayer: sum ~/ layers.length, layers: layers.length);
   } catch (_) {
     return null;
   }

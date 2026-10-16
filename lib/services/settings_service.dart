@@ -360,10 +360,9 @@ class InferenceSettings {
   /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
   final bool inferenceLimitRefreshRate;
 
-  /// GPU prefill 宽度 n_ubatch（2026-10-07 小米13 GPU fault 缓解）：0 = 自动
-  /// （GPU 档 512 / CPU 档 16，默认行为）；32~512 = 拆小单次 dispatch 计算
-  /// burst，缓解 Adreno 持续满血计算触发的 GPU 挂死（代价：prefill 变慢）。
-  /// 仅 GPU 后端生效（JNI 侧 CPU 档恒 16 不受影响）。
+  /// prefill 宽度 n_ubatch：0 = 自动（统一 512，默认行为）；32~512 = 拆小单次
+  /// dispatch 计算 burst，缓解 Adreno 持续满血计算触发的 GPU 挂死（代价：
+  /// prefill 变慢）。2026-10-16 起对任意后端生效（CPU 恒 16 已证伪废除）。
   final int gpuNUbatch;
 
   /// Vulkan 禁用 subgroup 扩展（GGML_VK_NO_SUBGROUP）：turnip 在部分芯片

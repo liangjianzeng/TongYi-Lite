@@ -621,6 +621,11 @@ extern "C" {
     // llama-ext.h.)
     LLAMA_API int32_t llama_model_n_expert_used(const struct llama_model * model);
 
+    // Total routed experts (hparams.n_expert). Vendored: no llama-ext.h in this
+    // build; split-MoE bank sizing needs the hard upper bound on per-layer
+    // unique experts (unique <= n_expert regardless of ubatch width).
+    LLAMA_API int32_t llama_model_n_expert(const struct llama_model * model);
+
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 
