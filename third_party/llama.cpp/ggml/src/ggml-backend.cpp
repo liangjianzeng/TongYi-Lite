@@ -1888,7 +1888,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
         fprintf(stderr, " ]\n");
-        if (sched_stats_count == 0) { // first graph: dump op-type histogram per backend
+        if (sched_stats_count == 4) { // last allowed graph: steady-state decode
             int cpu_ops[256] = {0};
             for (int si = 0; si < sched->n_splits; si++) {
                 struct ggml_backend_sched_split * sp = &splits[si];
@@ -1901,6 +1901,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 if (bn && strstr(bn, "CPU")) { cpu_id = b; break; }
             }
             if (cpu_id >= 0) {
+                int shown[256] = {0};
                 for (int si = 0; si < sched->n_splits; si++) {
                     struct ggml_backend_sched_split * sp = &splits[si];
                     if (sp->backend_id != cpu_id) continue;
@@ -1914,6 +1915,34 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     if (cpu_ops[o] > 0) fprintf(stderr, " %s:%d", ggml_op_name((enum ggml_op)o), cpu_ops[o]);
                 }
                 fprintf(stderr, "\n");
+                // [dspark 2026-10-16] names of the first few CPU-resident ops per
+                // interesting type — pins down exactly which weights stayed CPU.
+                for (int si = 0; si < sched->n_splits; si++) {
+                    struct ggml_backend_sched_split * sp = &splits[si];
+                    if (sp->backend_id != cpu_id) continue;
+                    for (int ni = 0; ni < sp->graph.n_nodes; ni++) {
+                        ggml_tensor * t = sp->graph.nodes[ni];
+                        if (!t || (int)t->op >= 256) continue;
+                        const char * on = ggml_op_name((enum ggml_op)t->op);
+                        const bool interesting = strcmp(on, "MUL_MAT") == 0 ||
+                                                 strcmp(on, "SSM_CONV") == 0 ||
+                                                 strcmp(on, "MAP_CUSTOM") == 0 ||
+                                                 strncmp(on, "MAP_CUSTOM", 10) == 0 ||
+                                                 strcmp(on, "UNARY") == 0 ||
+                                                 strcmp(on, "RMS_NORM") == 0 ||
+                                                 strcmp(on, "SCALE") == 0;
+                        if (!interesting || shown[t->op] >= 4) continue;
+                        shown[t->op]++;
+                        ggml_tensor * s0 = t->src[0];
+                        ggml_tensor * s1 = t->src[1];
+                        fprintf(stderr, "[SCHED_STATS] cpu-op %s #%d node=%s | src0=%s[%s] %s | src1=%s[%s] %s\n",
+                                on, shown[t->op], t->name,
+                                s0 ? s0->name : "-", s0 ? ggml_type_name(s0->type) : "-",
+                                s0 && s0->buffer ? ggml_backend_buffer_name(s0->buffer) : "-",
+                                s1 ? s1->name : "-", s1 ? ggml_type_name(s1->type) : "-",
+                                s1 && s1->buffer ? ggml_backend_buffer_name(s1->buffer) : "-");
+                    }
+                }
             }
         }
         sched_stats_count++;

@@ -9444,13 +9444,22 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             // numerically validated (TBO has no SSM coverage) and the 830 driver
             // E031.47 miscompiles several Adreno kernel families. Route SSM ops
             // to CPU on A8X until validated (conv/scan are compute-trivial).
+            // [dspark 2026-10-16] GGML_OPENCL_SSM_A8X=1 opts in — the CPU fallback
+            // strands the gdn branch in a CPU island (see MUL_MAT small-weight note).
             if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
+                static const char * ssm_a8x_env = getenv("GGML_OPENCL_SSM_A8X");
+                if (ssm_a8x_env && ssm_a8x_env[0] == '1') {
+                    return (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
+                }
                 return false;
             }
             return (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
         case GGML_OP_SSM_SCAN: {
                 if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
-                    return false;   // see SSM_CONV note above
+                    static const char * ssm_a8x_env2 = getenv("GGML_OPENCL_SSM_A8X");
+                    if (!(ssm_a8x_env2 && ssm_a8x_env2[0] == '1')) {
+                        return false;   // see SSM_CONV note above
+                    }
                 }
                 if (op->type != GGML_TYPE_F32 || op->src[0]->type != GGML_TYPE_F32 ||
                     op->src[1]->type != GGML_TYPE_F32 || op->src[2]->type != GGML_TYPE_F32 ||
@@ -9536,7 +9545,16 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                                                 t == GGML_TYPE_Q4_K  || t == GGML_TYPE_Q5_K  ||
                                                 t == GGML_TYPE_Q6_K);
                     const bool uses_gemm = type_has_gemm && use_adreno_kernels(backend_ctx, op->src[0]);
-                    if (!uses_gemm && op->src[1]->ne[1] >= 512) {
+                    // [dspark 2026-10-16] Small weights (use_adreno_kernels declines
+                    // them: ne < 512) must NOT be declined here — the load-time
+                    // weight_buft_supported probe runs with m=512 and would banish
+                    // gdn ssm_alpha/ssm_beta-class weights to a CPU buffer, dragging
+                    // the whole linear-attention chain into a CPU island (measured on
+                    // 830: 432 CPU ops/token, ~60ms split/copy tax). Their compute is
+                    // trivial even on the generic GEMV path, and prefill on them is
+                    // microseconds either way.
+                    const bool small_weight = op->src[0]->ne[0] < 512 || op->src[0]->ne[1] < 512;
+                    if (!uses_gemm && !small_weight && op->src[1]->ne[1] >= 512) {
                         return false;
                     }
                 }
