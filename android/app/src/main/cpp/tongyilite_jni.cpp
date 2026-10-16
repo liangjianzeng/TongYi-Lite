@@ -999,14 +999,16 @@ struct InferenceEngine {
         // and works fine. We now enable the unified buffer (kv_unified=true) so
         // large batches are correct, and raise both batch sizes to 512.
         ctx_params.n_batch  = 512;
-        // n_ubatch: physical prefill chunk size. On the CPU backend, ubatch >= 32
-        // makes ggml-cpu dispatch to the quantized GEMM path, which on this build
-        // (armv8.4-a+dotprod+i8mm) emits garbage logits when the prompt exceeds 32
-        // tokens (verified on-device: turn 2 → nonsense). ubatch=16 forces the
-        // correct vec_dot path, so CPU mode MUST stay at 16. On the GPU backend
-        // (OpenCL/Vulkan) prefill runs on the GPU kernel and does NOT hit that CPU
-        // GEMM bug, so we raise ubatch to 512 for fast prefill there.
-        ctx_params.n_ubatch = enable_gpu ? 512 : 16;
+        // n_ubatch: physical prefill chunk size. 2026-10-16 重查定案：旧注释
+        // "CPU ubatch>=32 -> quantized GEMM garbage" **不属实**——830 真机 dense
+        // GLM-OCR-Q8 + 92-token prompt，ubatch 16/32/512 三档 96 token 贪心输出
+        // 位级一致（md5 1a02cb6c6c1a）。当年（2026-08-04, 7c3c364）的归因无单
+        // 变量隔离：同 commit 还修了 FLASH_ATTN AUTO-on-CPU + seq_rm 污染和
+        // sampler_accept 缺失，garbage 大概率出自那两处；且当前 ggml-cpu
+        // (b11267+KleidiAI) 分发（llamafile_sgemm→vec_dot）与 n_ubatch 无
+        // "≥32 切 GEMM" 联动。split-MoE 路径下方有 bank/k clamp 自动保平安
+        // （bank=64,k=8 -> ubatch 8），故 CPU/GPU 统一 512。
+        ctx_params.n_ubatch = 512;
         // VULKAN_DEBUG: TONGYI_UBATCH overrides the prefill width from vk_flags.conf so
         // we can bisect "large physical batch vs. GPU backend" without a rebuild.
         if (const char * ub = getenv("TONGYI_UBATCH")) {
@@ -1738,7 +1740,7 @@ struct InferenceEngine {
         const int ctx_val = static_cast<int>(n_ctx.load());
         LOGI("completion() ENTER: model=%p context=%p n_ctx=%d is_running=%d",
              (void*)model, (void*)context, ctx_val, (int)is_running.load());
-        LOGI("===== TongYiLite JNI unified-kv+ubatch(16)+no-fa+penalty+accept BUILD 20260804 V0.1.3 =====");
+        LOGI("===== TongYiLite JNI unified-kv+ubatch512(CPU/GPU)+no-fa+penalty+accept BUILD 20261016 V0.3.3 =====");
         // Hold the lock for the ENTIRE duration of completion to prevent unload()
         // from running concurrently and destroying model/context mid-inference.
         std::lock_guard<std::mutex> lock(mtx);
