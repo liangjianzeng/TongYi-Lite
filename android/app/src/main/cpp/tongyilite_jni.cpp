@@ -1259,6 +1259,13 @@ struct InferenceEngine {
             dspark_params.n_threads = ctx_params.n_threads;
             dspark_params.n_threads_batch = ctx_params.n_threads_batch;
             dspark_params.kv_unified = true;
+            // DSpark decodes the whole noise block in ONE llama_process pass and
+            // samples every block row (backend sampling). With the default per-seq
+            // output limit (1) llama_process rejects the block (ret=-1), so every
+            // draft came back empty on device. Mirrors the official spec-init
+            // sizing (common_speculative_init: n_max+1 per seq).
+            dspark_params.n_outputs_max         = (uint32_t)(n_draft_max + 1);
+            dspark_params.n_outputs_max_per_seq = (uint32_t)(n_draft_max + 1);
             dspark_ctx = llama_init_from_model(draft_model, dspark_params);
             if (!dspark_ctx) {
                 LOGE("Failed to create dspark draft context -> dspark disabled");
