@@ -109,7 +109,9 @@ flutter run -d <device_id>
 > ✅ **三方依赖已全部直接入库**：llama.cpp（上游 `b11267` 0.5.0 + fork 增强：`spark2_5` /  
 > dspark 投机 / PTQ1_0 内核 / FWHT / Turnip 直载）、KleidiAI（v1.24.0）、OpenCL-Headers、  
 > opencl-stub 源码都在 `third_party/` 下；`edge_tts`（纯 Dart TTS 协议栈）与 `dartssh2` fork  
-> 同样 vendored 在 `third_party/`。clone 后即可编译，不需要 `git submodule update --init --recursive`。
+> 同样 vendored 在 `third_party/`；`mesa-kgsl/`（rusticl+freedreno+kgsl 构建配方与补丁集，  
+> 全 GPU 卸载 Mesa 路线的可复现唯一真理源）亦已入库。clone 后即可编译，不需要  
+> `git submodule update --init --recursive`。
 
 > **真机覆盖安装铁律**：始终 `adb install -r app-debug.apk`（`-r` 覆盖更新，保留已下载的端侧模型缓存）；  
 > **绝不先卸载再装**（卸载会清掉模型缓存）。设备被 `INSTALL_FAILED_USER_RESTRICTED` 拒绝时加 `-t`。
@@ -467,7 +469,10 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   `cl_khr_command_buffer`**（无 CUDA-Graph 等价物），混合图另有 203 splits + 338 跨后端拷贝/token  
   结构税；CPU 岛收编（小权重豁免 + SSM 解锁）可将 splits 砍至 83、拷贝至 128，但省税被小算子  
   GPU 内核慢吃回。**Mesa（rusticl + freedreno a8x，官方已支持 Adreno 830/840）整图单提交 +  
-  小算子融合路线已立项**（M0 判据探针待跑，详见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。  
+  小算子融合路线已立项并完成 M0 探针裁决 GO（2026-10-16）**：830 真机 rusticl + freedreno(ir3) +  
+  kgsl winsys 全链路跑通（SELinux 下 kgsl 为唯一通路），ir3 GEMV 判据 74%/108%/126% vs 高通  
+  compiler（大形状反超）、录制税 ~2.5-3µs/op 达标。构建配方与补丁集入库  
+  `third_party/mesa-kgsl/`；详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §11。  
   batched MoE 的全 GPU 收益主战场在 **prefill 大分块 GEMM**（830 实测 149 t/s）。
 - **多模态**：mtmd 视觉投影器编码（跟随主后端）。
 - **投机解码**：MTP（NextN head 多 token 预测）+ dspark（整块投机），按模型独立开启。
