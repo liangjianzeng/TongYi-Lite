@@ -1,0 +1,77 @@
+# 0026: pipe_loader KGSL probe hook for mesa 26.2.4
+# 自写补丁（TongYi-Lite M0）。上游 26.2 已有 kgsl_driver_descriptor（= msm 描述符
+# 别名 DRM_DRIVER_DESCRIPTOR_ALIAS），但 pipe_loader 只扫 renderD* 且从不打开
+# /dev/kgsl-3d0。本补丁补上探测入口。
+# 注意：driver_name 必须是 "kgsl"（26.2 pipe_loader 表里没有 "freedreno" 条目），
+# 且必须显式设 RUSTICL_ENABLE=kgsl（rusticl 前端按名单静默过滤）。
+--- a/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
++++ b/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
+@@ -48,6 +48,14 @@
+ #include "virtio/virtio-gpu/drm_hw.h"
+ #include "drm-uapi/virtgpu_drm.h"
+
++#ifdef HAVE_FREEDRENO_KGSL
++#include <sys/ioctl.h>
++#include <errno.h>
++#ifndef __user
++#define __user
++#endif
++#include "../../../freedreno/vulkan/msm_kgsl.h"
++#endif
++
+ #define DRM_RENDER_NODE_DEV_NAME_FORMAT "%s/renderD%d"
+ #define DRM_RENDER_NODE_MAX_NODES 63
+ #define DRM_RENDER_NODE_MIN_MINOR 128
+@@ -138,6 +146,17 @@ pipe_loader_drm_probe_fd_nodup(struct pipe_loader_device **dev, int fd, bool zin
+    if (zink)
+       ddev->base.driver_name = strdup("zink");
+    else
+       ddev->base.driver_name = loader_get_driver_for_fd(fd);
++#ifdef HAVE_FREEDRENO_KGSL
++   /* Qualcomm KGSL KMD: not a DRM device, detect via KGSL ioctl.
++    * driver_name MUST be "kgsl" — the pipe_loader table has no "freedreno"
++    * entry in 26.2 (only the kgsl alias of the msm descriptor). */
++   if (!ddev->base.driver_name) {
++      struct kgsl_devinfo info;
++      struct kgsl_device_getproperty getprop;
++      memset(&info, 0, sizeof(info));
++      getprop.type = KGSL_PROP_DEVICE_INFO;
++      getprop.value = &info;
++      getprop.sizebytes = sizeof(info);
++      if (ioctl(fd, IOCTL_KGSL_DEVICE_GETPROPERTY, &getprop) == 0)
++         ddev->base.driver_name = strdup("kgsl");
++   }
++#endif
+    if (!ddev->base.driver_name)
+       goto fail;
+
+@@ -228,5 +247,27 @@ pipe_loader_drm_probe_internal(struct pipe_loader_device **devs, int ndev, bool
+       j++;
+    }
+
++#ifdef HAVE_FREEDRENO_KGSL
++   /* Qualcomm KGSL KMD has no DRM render node; probe /dev/kgsl-3d0 directly.
++    * fd_device_new() on a non-DRM fd falls back to the KGSL backend. */
++   if (!zink) {
++      struct pipe_loader_device *dev;
++
++      fd = loader_open_device("/dev/kgsl-3d0");
++      if (fd >= 0) {
++         if (pipe_loader_drm_probe_fd_nodup(&dev, fd, zink)) {
++            if (j < ndev) {
++               devs[j] = dev;
++            } else {
++               close(fd);
++               dev->ops->release(&dev);
++            }
++            j++;
++         } else {
++            close(fd);
++         }
++      }
++   }
++#endif
++
+    return j;
+ }
+
