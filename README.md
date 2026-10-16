@@ -452,6 +452,21 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   **内核级通用能力，非单模型优化**：受益面 = 所有量化已验证的 MoE 模型（q4_0 v0.3.0 → q4_K v0.3.1  
   逐档真机验证上线，IQ2 / IQ3 在路线图），全 GPU decode/prefill（Adreno 830 实测 prefill 149 t/s /  
   decode 14–22 t/s），未验证量化自动回退 dense-loop（详见[技术架构](#技术架构)专项小节）。
+- **🧠 智能 MoE 拆分加载（split-MoE）+ LES 前瞻调度（v0.3.2，35B 级大模型上机关键）**：  
+  权重剥离 `.experts/`（40 分片 + manifest）或 **in-place GGUF 直读**（不剥离、按 expert-stride  
+  分段 preadv），slot bank 流式供给专家（热度表 + per-layer 填充 + 超集异步预读 + LES 下一层  
+  router 预测）；CPU bank 热稳态下小米 13（830）跑 MiniCPM-V 4.7 35B-A3B **8.07 t/s**、  
+  740（Adreno 825）3.0–3.4 t/s。配套 **GPU slot bank（FGSVM）/ route0 直写 / drain 异步化**  
+  全套 knob（默认关）。
+- **📊 GPU decode 路线双机定案（2026-10-16）**：740 / 830 真机四配置全矩阵对照（GPU bank route0 /  
+  ngl=99 dense 全 GPU / 全合体 vs CPU bank）——**decode 阶段 CPU 混合全面守擂**（830：CPU 8.07 vs  
+  GPU 最优 5.46 t/s）。SCHED_STATS 插桩 + probe9 提交税探针定量根因：llama.cpp decode 图  
+  ~4000 个小 kernel 串行，OpenCL per-op 提交税 9µs（CPU 0.34µs）且 **Adreno 驱动不暴露  
+  `cl_khr_command_buffer`**（无 CUDA-Graph 等价物），混合图另有 203 splits + 338 跨后端拷贝/token  
+  结构税；CPU 岛收编（小权重豁免 + SSM 解锁）可将 splits 砍至 83、拷贝至 128，但省税被小算子  
+  GPU 内核慢吃回。**Mesa（rusticl + freedreno a8x，官方已支持 Adreno 830/840）整图单提交 +  
+  小算子融合路线已立项**（M0 判据探针待跑，详见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。  
+  batched MoE 的全 GPU 收益主战场在 **prefill 大分块 GEMM**（830 实测 149 t/s）。
 - **多模态**：mtmd 视觉投影器编码（跟随主后端）。
 - **投机解码**：MTP（NextN head 多 token 预测）+ dspark（整块投机），按模型独立开启。
 - **多轮 KV checkpoint/restore**：长对话边界 checkpoint，恢复后仅对增量 token prefill  
@@ -656,7 +671,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.3.1**（当前）                       | 2026-10-14       | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
+| **v0.3.2**（当前）                       | 2026-10-15~16    | **智能 MoE 拆分加载（split-MoE）+ LES 落地 + GPU 路线双机定案**：权重剥离 `.experts/` 与 **in-place GGUF 直读**（seg fallback，免剥离）双形态；CPU slot bank 热稳态 830 实测 **8.07 t/s**（MiniCPM-V 4.7 35B-A3B，740 3.0–3.4）；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` 异步 / uploads race fix——bank23–32 共 14 腿零崩）；动态切点 rank0-miss 全延后 + MiniCPM-V 4.7 projector；**SCHED_STATS 插桩**（op 直方图 + 落点 buffer dump）+ **probe9 提交税探针**（OpenCL 9µs/op vs CPU 0.34µs，`cl_khr_command_buffer` 不暴露）→ decode CPU 混合守擂定案；CPU 岛收编（小权重豁免 + `GGML_OPENCL_SSM_A8X` 解锁，splits 203→83）；Mesa（rusticl/freedreno a8x）整图单提交路线立项（见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。versionCode 19+（主干） |
+| **v0.3.1**                             | 2026-10-14       | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
 | **v0.3.0**                           | 2026-10-14       | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18    |
 | **v0.2.9**                           | 2026-10-06       | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17                                                                                                                                                                                             |
 | **v0.2.9+**（主干合批 · 同 versionName 复用） | 2026-10-06~10-08 | **🎙️ sherpa-onnx 端侧流式 ASR**——语音输入整体重做（~160MB Zipformer 中文 int8、FFI 进程内推理、飞行模式可用；按住说话实时回显上滑取消；9 类约 290 词热词偏置 + 同音校正 + 差量存储；详见 CHANGELOG `[0.2.9+]`）+ 多会话并发槽位 / Dev Agent 全链路（JGit/Termux/SSH）/ 端侧直连六引擎搜索 / 人格系统 / 技能库 17 个 / 计划模式无人值守 / composer 重构 / eval 12 基线——均合入 main 并双真机（小米 13 / 8 Elite）验证                                                                                                                                                                                    |
