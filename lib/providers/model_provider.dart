@@ -424,8 +424,12 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
             // 手动覆写仅对 packed-bins（MiniCPM，slot/层~1.29MB）有意义；
             // in-place 整包口径庞大，沿用内存自适应 autoBank。小槽手动上限
             // 256（=n_expert，再大纯属浪费：每层 unique ≤ 256 恒成立）。
-            final slotMbManual = (slotBytes ?? 0) / (1024 * 1024);
-            final manualCap = slotMbManual > 0 && slotMbManual <= 4 ? 256 : 64;
+            // 注意口径：用 perLayer（1.29MB）判定形态，不能用 total（54MB，
+            // 是全层和，会把 packed 误判成大槽锁死 64——2026-10-16 实测踩坑）。
+            final perLayerMb = geo?.perLayer != null && geo!.perLayer > 0
+                ? geo.perLayer / (1024 * 1024)
+                : (slotBytes ?? 0) / (1024 * 1024);
+            final manualCap = perLayerMb > 0 && perLayerMb <= 4 ? 256 : 64;
             final manual = sm.inplaceFullGguf ? null : gpu.moeBankOverride(modelId);
             moeBank = (manual != null && manual >= 8 && manual <= manualCap)
                 ? manual
