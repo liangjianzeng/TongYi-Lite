@@ -554,12 +554,13 @@ struct InferenceEngine {
                 setenv("LLAMA_MOE_LOOKAHEAD_PREFETCH", "8", 1);
                 setenv("LLAMA_MOE_DECODE_WINDOW", "8", 1);
                 setenv("LLAMA_MOE_PREFETCH_READ", "6", 1);
-                // IO 线程 4→8（2026-10-16）：prefill 单遍后实测 par=3.80 被
-                // nth=4 顶死，aggregate 只跑出 1.5GB/s（830 UFS 4.x 顺序
-                // 能力 2-4GB/s）——翻倍线程把 prefill 的 2.6s 读盘段再压。
-                setenv("LLAMA_MOE_IO_THREADS", "8", 1);
+                // IO_THREADS 保持默认 4（2026-10-16 830 A/B 定案）：试过 8 结果
+                // prefill/decode 双双回退（prompt 5s->6.5s、decode 484->640ms/tok），
+                // moe-ssd 读盘并行度 par 从 3.80 崩到 1.13——decode miss 天然按层
+                // 串行、靠 lookahead 跨层重叠凑并行，IO 线程翻倍 + park_window
+                // 调度切片反而把重叠打碎。4 是实测最优，勿再调大。
                 LOGI("split-MoE decode prefetch recipe injected: "
-                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6 IO_THREADS=8");
+                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6 (IO_THREADS=4 default)");
             } else {
                 LOGI("split-MoE prefetch envs already present, not overriding");
             }
