@@ -289,6 +289,19 @@ static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
 }
 
 // --- Safe token sampling (2026-10-07 voice-input crash fix) ---
+// The split-MoE slot runtime throws std::runtime_error ("requires more than
+// N unique experts in one graph") when a ubatch exceeds the bank; crossing
+// the C API boundary that means std::terminate -> SIGABRT. Catch and report
+// as a decode failure so generation stops gracefully instead of killing the app.
+static int32_t safe_decode(struct llama_context * ctx, llama_batch batch) {
+    try {
+        return llama_decode(ctx, batch);
+    } catch (const std::exception & e) {
+        LOGE("llama_decode threw: %s", e.what());
+        return -1;
+    }
+}
+
 // llama_sampler_sample() contains two unrecoverable GGML_ASSERT aborts
 // (logits == nullptr / selected out of range) that SIGABRT the whole app in
 // release builds — tombstone from the field: ggml_abort inside
@@ -321,7 +334,7 @@ static llama_token sample_token_safe(
         rb.n_seq_id[0] = 1;
         rb.seq_id[0][0] = 0;
         rb.logits[0] = 1;
-        const int ret = llama_decode(ctx, rb);
+        const int ret = safe_decode(ctx, rb);
         llama_batch_free(rb);
         if (ret == 0) logits = llama_get_logits_ith(ctx, -1);
     }
@@ -503,7 +516,8 @@ struct InferenceEngine {
               const char *gpu_backend = "auto", bool enable_mtp = false,
               const char *mmproj_path = nullptr,
               const char *draft_path = nullptr,
-              const char *moe_manifest = nullptr, int moe_bank = 0) {
+              const char *moe_manifest = nullptr, int moe_bank = 0,
+              int64_t moe_slot_bytes = 0, int64_t moe_experts_bytes = 0) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -521,8 +535,24 @@ struct InferenceEngine {
         if (split_moe) {
             model_params.moe_experts_path = moe_manifest;
             model_params.moe_slot_bank    = moe_bank;
+            // ---- decode 预取配方（2026-10-16，830 App 2.9 vs harness 8.46 根因修复）----
+            // harness 热态 8.46 t/s 的既定配方（loop2-loop5/r10 全部如此）：
+            //   DECODE_WINDOW=8 + LOOKAHEAD_PREFETCH=8 + PREFETCH_READ=6（IO_THREADS 默认 4）。
+            // App 从未设这些 env -> lookahead-prefetch off（moe-ssd 日志 pfpredict=0
+            // usedpf=0）-> decode 每 token 同步冷读 UFS（~470MB/token）-> 2.9 t/s。
+            // 必须在 llama_model_load 之前 setenv：lookahead.init() 在模型加载期读。
+            // LLAMA_MOE_LOOKAHEAD_PREFETCH 显式传值不覆盖（调试时可 adb 反向注入优先）。
+            if (!getenv("LLAMA_MOE_LOOKAHEAD_PREFETCH")) {
+                setenv("LLAMA_MOE_LOOKAHEAD_PREFETCH", "8", 1);
+                setenv("LLAMA_MOE_DECODE_WINDOW", "8", 1);
+                setenv("LLAMA_MOE_PREFETCH_READ", "6", 1);
+                LOGI("split-MoE decode prefetch recipe injected: "
+                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6");
+            } else {
+                LOGI("split-MoE prefetch envs already present, not overriding");
+            }
             LOGI("split-MoE enabled: manifest=%s bank=%d", moe_manifest, moe_bank);
-            reportLoadingLog("智能 MoE 加载: 开启 ✓（专家按需流式读入，dense 常驻）");
+            reportLoadingLog("智能 MoE 加载: 开启 ✓（专家按需流式读入 + 解码预取，dense 常驻）");
         }
 
         // GPU offloading policy (driven by the UI toggle + layer setting):
@@ -684,10 +714,21 @@ struct InferenceEngine {
                 (effective_gpu_layers > 0 || split_moe)) {
                 const int64_t avail_pre = read_mem_available_bytes();
                 // split-MoE 主 gguf 只含 dense 权重（专家已剥离），文件大小即
-                // dense 常驻；slot 窗口按 bank×1.29MB/槽 + 256MB 运行时缓冲估算。
+                // dense 常驻；slot 窗口按 bank×单槽全层驻留字节（Dart 从 manifest
+                // Σ bytes_per_expert 算得，缺省回退 MiniCPM 常量）+ 256MB 运行时缓冲。
                 int64_t weights_est = (int64_t)pst.st_size;
                 if (split_moe) {
-                    weights_est += (int64_t)moe_bank * 1351680 + 268435456;
+                    const int64_t slot_bytes = moe_slot_bytes > 0 ? moe_slot_bytes : 1351680;
+                    weights_est += (int64_t)moe_bank * slot_bytes + 268435456;
+                    // in-place 整包 split（manifest=模型 gguf 本身）：文件含专家区，
+                    // 但引擎只 mmap dense + slot 按需读，常驻估算扣掉专家字节
+                    // （Dart 按目录元数据传入）。
+                    if (moe_experts_bytes > 0) {
+                        weights_est -= moe_experts_bytes;
+                        if (weights_est < 0) {
+                            weights_est = 0;
+                        }
+                    }
                 }
                 const int64_t pre_headroom = oom_headroom_bytes("TONGYILITE_OOM_PRE_HEADROOM_MB", 768);
                 char cmsg[256];
@@ -801,6 +842,29 @@ struct InferenceEngine {
                 // block, so on a bandwidth-bound 27B target the speculative path
                 // nets ~zero gain. Use the full trained block.
                 n_draft_max = dspark_block_size;
+                // split-MoE: the verify batch (n_draft+1 tokens x n_expert_used
+                // experts) must fit the slot bank or the slot graph throws
+                // mid-generation. Keep ubatch = bank/k and draft = bank/k-3 so
+                // every graph's expert draws are <= bank no matter the spread.
+                if (split_moe && moe_bank > 0) {
+                    const int k_exp = std::max(1, llama_model_n_expert_used(model));
+                    const int cap = moe_bank / k_exp - 3;
+                    if (cap < 1) {
+                        // bank too small for even a 1-token verify window: keep
+                        // n_ubatch = bank/k would violate the split_equal assert
+                        // (n_ubatch > n_rs_seq+1) on the first decode -> abort.
+                        LOGW("split-MoE: bank=%d 容不下 dspark (k=%d 需 bank>=%d) -> 禁用投机解码",
+                             moe_bank, k_exp, 4 * k_exp);
+                        reportLoadingLog("专家池过小 → dspark 投机解码已自动禁用");
+                        llama_model_free(draft_model);
+                        draft_model = nullptr;
+                        n_draft_max = 0;
+                    } else if (n_draft_max > cap) {
+                        LOGW("split-MoE: n_draft_max %d -> %d (bank=%d/%d-3)",
+                             n_draft_max, cap, moe_bank, k_exp);
+                        n_draft_max = cap;
+                    }
+                }
                 LOGI("DSpark draft model loaded (block_size=%d) -> n_draft_max=%d",
                      dspark_block_size, n_draft_max);
                 char dlog[96] = {};
@@ -956,15 +1020,18 @@ struct InferenceEngine {
         }
         LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
-        // split-MoE prefill 约束：单个 ubatch 内每层出现的去重专家数不得超过
-        // moe_bank（运行时超限会直接报错）。n_expert_used=8 的 MiniCPM-V4.7：
-        // bank 16 → ubatch ≤ 2，取 bank/16 保守档（bank16→1）。
-        if (split_moe && ctx_params.n_ubatch > 1) {
-            const int safe_ub = std::max(1, moe_bank / 16);
-            if (ctx_params.n_ubatch > safe_ub) {
-                LOGW("split-MoE: n_ubatch %d -> %d (bank=%d prefill constraint)",
-                     (int)ctx_params.n_ubatch, safe_ub, moe_bank);
-                ctx_params.n_ubatch = safe_ub;
+        // split-MoE: one physical ubatch's unique experts must fit the slot bank
+        // (worst case T tokens x n_expert_used -> bank/k) while dspark's
+        // split_equal assert needs n_ubatch > n_rs_seq+1 (= n_draft_max+2).
+        // Old bank/16 clamp broke the assert (ubatch 2 vs need 17) and killed
+        // prefill speed.
+        if (split_moe) {
+            const int k_exp = std::max(1, llama_model_n_expert_used(model));
+            const int max_pass = std::max(1, moe_bank / k_exp);
+            if ((int) ctx_params.n_ubatch > max_pass) {
+                LOGW("split-MoE: n_ubatch %d -> %d (bank=%d, k=%d, draft=%d)",
+                     (int) ctx_params.n_ubatch, max_pass, moe_bank, k_exp, n_draft_max);
+                ctx_params.n_ubatch = max_pass;
             }
         }
         // Flash attention (P1, 2026-10-14): opt-in via 设置→推理引擎→flash-attn.
@@ -1597,7 +1664,7 @@ struct InferenceEngine {
             token_batch.n_seq_id[0] = 1;
             token_batch.seq_id[0][0]= 0;
             token_batch.logits[0]   = true;
-            int32_t dec_ret = llama_decode(context, token_batch);
+            int32_t dec_ret = safe_decode(context, token_batch);
             llama_batch_free(token_batch);
             if (dec_ret != 0) { LOGE("vision: gen decode failed ret=%d", dec_ret); break; }
             n_gen++;
@@ -2099,7 +2166,7 @@ struct InferenceEngine {
                         tok_batch.seq_id[j][0] = 0;
                         tok_batch.logits[j] = (i + j == prefill_end - 1) ? 1 : 0;
                     }
-                    if (llama_decode(context, tok_batch) != 0) {
+                    if (safe_decode(context, tok_batch) != 0) {
                         llama_batch_free(tok_batch);
                         if (attempt == 0 && prefix_len > 0) {
                             // incremental prefix keep rejected -> full clear and retry once
@@ -2322,7 +2389,7 @@ struct InferenceEngine {
                         common_batch_add(batch_tgt, draft[k], mtp_n_past + k, { seq_id }, true);
                     }
                     LOGI("[%s] verify batch: id_last=%d n_past=%d n_draft=%zu", driver_tag, mtp_id_last, mtp_n_past - 1, draft.size());
-                    const int dec_ret = llama_decode(context, batch_tgt);
+                    const int dec_ret = safe_decode(context, batch_tgt);
                     t_end = std::chrono::high_resolution_clock::now();
                     if (dec_ret != 0) {
                         LOGE("[%s] llama_decode failed ret=%d at n_past=%d", driver_tag, dec_ret, mtp_n_past - 1);
@@ -2531,7 +2598,7 @@ struct InferenceEngine {
                 token_batch.n_seq_id[0]= 1;
                 token_batch.seq_id[0][0]= 0;
                 token_batch.logits[0]  = true;
-                int32_t dec_ret = llama_decode(context, token_batch);
+                int32_t dec_ret = safe_decode(context, token_batch);
                 if (dec_ret != 0) {
                     LOGE("llama_decode() failed on gen token #%d: ret=%d pos=%d n_ctx=%u",
                          n_gen, dec_ret, decode_pos, llama_n_ctx_seq(context));
@@ -2894,7 +2961,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     JNIEnv *env, jobject, jstring jpath, jint n_ctx, jboolean j_enable_gpu, jint j_gpu_layers,
     jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path,
     jstring j_draft_path, jint j_n_ubatch, jboolean j_vk_no_subgroup,
-    jstring j_moe_manifest, jint j_moe_bank
+    jstring j_moe_manifest, jint j_moe_bank, jlong j_moe_slot_bytes,
+    jlong j_moe_experts_bytes
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
@@ -2944,7 +3012,9 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
                             j_enable_gpu == JNI_TRUE, (int)j_gpu_layers,
                             gpu_backend.c_str(), j_enable_mtp == JNI_TRUE,
                             mmproj_path.c_str(), draft_path.c_str(),
-                            moe_manifest.c_str(), (int)j_moe_bank);
+                            moe_manifest.c_str(), (int)j_moe_bank,
+                            (int64_t)j_moe_slot_bytes,
+                            (int64_t)j_moe_experts_bytes);
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {

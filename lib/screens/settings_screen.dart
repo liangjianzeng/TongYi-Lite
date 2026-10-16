@@ -424,6 +424,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                       ),
                     ],
 
+                    // 图片理解（mmproj 视觉塔）开关：仅视觉模型显示（方案 P4）。
+                    // 关闭不加载视觉塔（省 ~0.9GB 回给专家池/KV），仅文本推理。
+                    if (model.type == ModelType.vision) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            '图片理解',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          Switch(
+                            value: settings.visionEnabled(model.id),
+                            onChanged: (v) => ref
+                                .read(settingsProvider.notifier)
+                                .setVisionEnabled(model.id, v),
+                          ),
+                        ],
+                      ),
+                      const Text(
+                        '关闭后不加载视觉投影器（省 ~0.9GB，只能文本对话）；'
+                        '切换后重新加载模型生效',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                    ],
+
                     // Progress bar for downloading models
                     if (task != null &&
                         task.state == DownloadState.downloading) ...[
@@ -1276,6 +1302,30 @@ class _InferenceEngineTab extends ConsumerWidget {
                         '路由专家按需流式读入专家窗口。关闭则整包全加载'
                         '（内存不足的大模型会失败）。改后重新加载模型生效',
                   ),
+                  const Divider(height: 24),
+                  // 热专家 bank：默认按机型 MemAvailable 自动分档（12G/16G
+                  // 机型预算不同）；手动覆写走通配键 '*'，滑条固定槽数。
+                  _buildToggleTitle(
+                    '专家池手动覆写',
+                    gpuSettings.moeBankOverrideByModel['*'] != null,
+                    (v) => gpuNotifier.setMoeBankOverride('*', v ? 16 : null),
+                    subtitle: '热专家常驻槽数（8–64）。默认自动分档：按机型可用内存 '
+                        '− 系统保留 − KV − 草稿 − 视觉 的预算÷单专家体积；16G 机型'
+                        '自动多驻留专家、少换入。开启后按滑条固定。改后重新加载模型生效',
+                  ),
+                  if (gpuSettings.moeBankOverrideByModel['*'] != null)
+                    _buildSliderRow(
+                      label: '专家池槽数',
+                      value: gpuSettings.moeBankOverrideByModel['*']!,
+                      min: 8,
+                      max: 64,
+                      divisions: 14,
+                      display: '${gpuSettings.moeBankOverrideByModel['*']}',
+                      onChanged: (v) =>
+                          gpuNotifier.setMoeBankOverride('*', v),
+                      hint: '槽数 × 单专家体积 = 常驻内存；过大挤占 KV/视觉，'
+                          '过小换入频繁。参考自动值（推理日志「智能 MoE 加载」行）',
+                    ),
                 ],
               ),
             ),
@@ -4110,9 +4160,9 @@ class _buildAboutTab extends StatelessWidget {
 }
 
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
-// versionName（0.2.1）保持同步。离线沙箱无法下载 package_info_plus 的
-// AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.2.9';
+// versionName（0.3.2 / versionCode 20）保持一致。离线沙箱无法下载
+// package_info_plus 的 AGP 依赖，故不引插件动态读取，直接用此常量。
+const _appVersion = '0.3.3';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
@@ -4151,7 +4201,7 @@ class _AboutCard extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             _AboutRow(label: '版本', value: _appVersion),
-            _AboutRow(label: '推理引擎', value: 'llama.cpp b10173'),
+            _AboutRow(label: '推理引擎', value: 'llama.cpp b11267'),
             _AboutRow(label: '框架', value: 'Flutter 3.x'),
             _AboutRow(label: '平台', value: 'Android API 33+'),
             const SizedBox(height: 8),

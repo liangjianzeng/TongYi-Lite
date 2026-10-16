@@ -2,13 +2,11 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
-  
 [
 
-![v0.3.1](https://img.shields.io/badge/v0.3.1-8B5CF6)
+![v0.3.3](https://img.shields.io/badge/v0.3.3-8B5CF6)
 
-]  
-
+]
 
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 
@@ -17,6 +15,8 @@
 ![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)
 
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
+
 
 > **端到端离线优先的 Android AI 智能体。** 四大支柱：
 >
@@ -379,6 +379,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   思考流式输出自动展开跟随滚动、答案开始自动闭合；**界面上同时最多一个 spinner**。
 - **对话文字整体缩放**：`chatTextScale`（0.7~1.3）滑条。
 
+
 ## 技术架构
 
 ```
@@ -454,7 +455,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   decode 14–22 t/s），未验证量化自动回退 dense-loop（详见[技术架构](#技术架构)专项小节）。
 - **🧠 智能 MoE 拆分加载（split-MoE）+ LES 前瞻调度（v0.3.2，35B 级大模型上机关键）**：  
   权重剥离 `.experts/`（40 分片 + manifest）或 **in-place GGUF 直读**（不剥离、按 expert-stride  
-  分段 preadv），slot bank 流式供给专家（热度表 + per-layer 填充 + 超集异步预读 + LES 下一层  
+  分段 preadv；v0.3.3 起 **LFM2.5-24B-A2B 官方整包单文件直下直读**，免 PC 打包/免分片，  
+  1902 MiB/s readv / zerocopy 100%），slot bank 流式供给专家（热度表 + per-layer 填充 + 超集异步预读 + LES 下一层  
   router 预测）；CPU bank 热稳态下小米 13（830）跑 MiniCPM-V 4.7 35B-A3B **8.07 t/s**、  
   740（Adreno 825）3.0–3.4 t/s。配套 **GPU slot bank（FGSVM）/ route0 直写 / drain 异步化**  
   全套 knob（默认关）。
@@ -671,7 +673,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.3.2**（当前）                       | 2026-10-15~16    | **智能 MoE 拆分加载（split-MoE）+ LES 落地 + GPU 路线双机定案**：权重剥离 `.experts/` 与 **in-place GGUF 直读**（seg fallback，免剥离）双形态；CPU slot bank 热稳态 830 实测 **8.07 t/s**（MiniCPM-V 4.7 35B-A3B，740 3.0–3.4）；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` 异步 / uploads race fix——bank23–32 共 14 腿零崩）；动态切点 rank0-miss 全延后 + MiniCPM-V 4.7 projector；**SCHED_STATS 插桩**（op 直方图 + 落点 buffer dump）+ **probe9 提交税探针**（OpenCL 9µs/op vs CPU 0.34µs，`cl_khr_command_buffer` 不暴露）→ decode CPU 混合守擂定案；CPU 岛收编（小权重豁免 + `GGML_OPENCL_SSM_A8X` 解锁，splits 203→83）；Mesa（rusticl/freedreno a8x）整图单提交路线立项（见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。versionCode 19+（主干） |
+| **v0.3.3**（当前）                       | 2026-10-16       | **LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收**：引擎扫整包 gguf header 绑定 114 个 `_exps.weight` 条目（per-entry offset 原地 readv 读专家，`init pack=seg pack_layers=38/38`），端侧**只下载官方单文件**（12.65GB，sha256 校验），**免 PC 打包 / 免分片传输**；小米13 实测 decode **1.6 t/s**（vs split-bins 0.9，+78%）、专家 I/O **1902 MiB/s**（zerocopy 100%）、PSS 913MB 无 lmkd。修复两 bug：① JNI `nativeLoadModel→load` 漏传 `moe_experts_bytes`（oom-guard 按 24.9GB 误拒整包）② bank 通配覆写泄漏到 in-place（slot 192MB×64=12.9GB 物理不可能，改强制 autoBank）。MiniCPM packed-bins 生产路径回归零变化。详见 `docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md`。versionCode 21 |
+| **v0.3.2**                               | 2026-10-15~16    | **智能 MoE 拆分加载（split-MoE）+ LES 落地 + GPU 路线双机定案**：权重剥离 `.experts/` 与 **in-place GGUF 直读**（seg fallback，免剥离）双形态；CPU slot bank 热稳态 830 实测 **8.07 t/s**（MiniCPM-V 4.7 35B-A3B，740 3.0–3.4）；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` 异步 / uploads race fix——bank23–32 共 14 腿零崩）；动态切点 rank0-miss 全延后 + MiniCPM-V 4.7 projector；**SCHED_STATS 插桩**（op 直方图 + 落点 buffer dump）+ **probe9 提交税探针**（OpenCL 9µs/op vs CPU 0.34µs，`cl_khr_command_buffer` 不暴露）→ decode CPU 混合守擂定案；CPU 岛收编（小权重豁免 + `GGML_OPENCL_SSM_A8X` 解锁，splits 203→83）；Mesa（rusticl/freedreno a8x）整图单提交路线立项（见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。versionCode 19+（主干） |
 | **v0.3.1**                             | 2026-10-14       | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
 | **v0.3.0**                           | 2026-10-14       | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18    |
 | **v0.2.9**                           | 2026-10-06       | **🔊 Edge 在线 TTS 语音播报**（免费无 key，气泡 🔊 点按 / 自动播报，音色/语速/音调/音量可配 + 试听，markdown 清洗 + 按句分段流式播放）+ **输入框圆形上下文占用圈**（点开详情面板：占用数字 / 会话快照 / 压缩记录）+ **存储级手动压缩**（清理旧工具轮结果存摘要，保留最近一轮与全部对话文本）+ **任务清单按会话隔离**（todo v3，旧全局清单一次性迁移）+ SSE 停摆看门狗 / git_clone 修复 / 消息复制按钮 / 计划精简呈现 / KV 占用全链路修复。versionCode 17                                                                                                                                                                                             |

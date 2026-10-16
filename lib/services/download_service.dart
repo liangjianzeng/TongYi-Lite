@@ -189,8 +189,9 @@ class DownloadService {
       // 主 gguf（-les，专家已剥离）完成后顺序下载 manifest + N 个专家分片，
       // 落在 `{modelId}.experts/` 子目录（官方 MiniCPM-V Apps 布局对齐）。
       // 单分片失败只影响该分片（断点续传按分片粒度），不删主文件。
+      // inplaceFullGguf 形态（方案 C）专家就在整包主文件里，无额外下载。
       final sm = model.splitMoe;
-      if (sm != null) {
+      if (sm != null && !sm.inplaceFullGguf) {
         final expertsDir = Directory(p.join(dir.path, '${model.id}.experts'));
         await expertsDir.create(recursive: true);
 

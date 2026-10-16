@@ -99,6 +99,29 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 设置 split-MoE 热专家 bank 手动覆写（8–64）。传 null = 恢复内存自适应
+  /// 自动分档。modelId 用 '*' 表示应用到所有智能 MoE 模型（设置页全局滑条）。
+  Future<void> setMoeBankOverride(String modelId, int? bank) async {
+    final updated = Map<String, int>.from(state.moeBankOverrideByModel);
+    if (bank == null) {
+      updated.remove(modelId);
+    } else {
+      updated[modelId] = bank.clamp(8, 64);
+    }
+    state = state.copyWith(moeBankOverrideByModel: updated);
+    await _persist();
+  }
+
+  /// 设置某个视觉模型是否加载 mmproj 视觉塔（2026-10-15，方案 P4）。
+  /// 切换需重新加载模型生效（视觉塔在 load 时建立）；关闭省 ~0.9GB 内存，
+  /// 释放的预算会回到自动 bank / KV。未配置的模型回退全局 autoLoadMmproj。
+  Future<void> setVisionEnabled(String modelId, bool value) async {
+    final updated = Map<String, bool>.from(state.visionEnabledByModel);
+    updated[modelId] = value;
+    state = state.copyWith(visionEnabledByModel: updated);
+    await _persist();
+  }
+
   /// 设置「默认加载」模型。传 null 表示取消默认??
   /// 持久化到 inference_settings.json（与 MTP 等其他设置同一文件），
   /// 退??App 不会丢失；启动自动加载逻辑按此 id 加载模型??

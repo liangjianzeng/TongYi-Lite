@@ -169,17 +169,35 @@ class SplitMoeConfig {
   /// 分片相对路径模板（C/Java 双端 printf 风格），如 `experts/layer_%03d.bin`。
   final String layerBinPattern;
 
+  /// in-place 形态（方案 C，2026-10-16）：不下载拆分专家包，直接下载官方
+  /// 整包 gguf（单文件），引擎按 gguf 张量表原地 preadv 读专家区。
+  /// 此时 manifest/分片字段全部不用，slot/experts 字节由目录元数据给出。
+  final bool inplaceFullGguf;
+
+  /// in-place：单槽全层驻留字节（Σ bytes_per_expert，全 MoE 层），
+  /// 内存自适应 bank 公式用（packed 形态运行时从 manifest 求和）。
+  final int slotBytesAllLayers;
+
+  /// in-place：整包 gguf 内路由专家区总字节（常驻估算扣减用，
+  /// = 专家区 Σ tensor bytes；dense 常驻 ≈ 文件大小 − 该值）。
+  final int expertsBytes;
+
   const SplitMoeConfig({
-    required this.manifestMirrors,
-    required this.manifestSizeBytes,
-    required this.expertsBaseMirrors,
-    required this.layerBinCount,
-    required this.layerBinSizeBytes,
-    required this.layerBinPattern,
+    this.manifestMirrors = const [],
+    this.manifestSizeBytes = 0,
+    this.expertsBaseMirrors = const [],
+    this.layerBinCount = 0,
+    this.layerBinSizeBytes = 0,
+    this.layerBinPattern = 'experts/layer_%03d.bin',
+    this.inplaceFullGguf = false,
+    this.slotBytesAllLayers = 0,
+    this.expertsBytes = 0,
   });
 
-  String get bestManifestUrl => manifestMirrors.first.url;
-  String get bestExpertsBaseUrl => expertsBaseMirrors.first.url;
+  String? get bestManifestUrl =>
+      manifestMirrors.isEmpty ? null : manifestMirrors.first.url;
+  String? get bestExpertsBaseUrl =>
+      expertsBaseMirrors.isEmpty ? null : expertsBaseMirrors.first.url;
 
   /// 专家分片相对路径（0-based index）。printf 风格模板
   /// `experts/layer_%03d.bin` → `experts/layer_007.bin`。
@@ -191,13 +209,16 @@ class SplitMoeConfig {
     return '${m.group(1)}${index.toString().padLeft(width, '0')}${m.group(4)}';
   }
 
-  /// 专家包总字节（manifest + 全部分片）。
-  int get expertsTotalBytes =>
-      manifestSizeBytes + layerBinCount * layerBinSizeBytes;
+  /// 需要**额外**下载/存储的专家包字节（manifest + 全部分片）。
+  /// in-place 形态专家就在整包主文件里 → 0（不重复计入下载体积）。
+  int get expertsTotalBytes => inplaceFullGguf
+      ? 0
+      : manifestSizeBytes + layerBinCount * layerBinSizeBytes;
 
   @override
-  String toString() =>
-      'SplitMoeConfig(bins=$layerBinCount x ${formatBytes(layerBinSizeBytes)})';
+  String toString() => inplaceFullGguf
+      ? 'SplitMoeConfig(inplace, slot ${formatBytes(slotBytesAllLayers)})'
+      : 'SplitMoeConfig(bins=$layerBinCount x ${formatBytes(layerBinSizeBytes)})';
 
   static String formatBytes(int bytes) {
     if (bytes >= 1024 * 1024 * 1024) {
@@ -210,17 +231,23 @@ class SplitMoeConfig {
   factory SplitMoeConfig.fromJson(Map<String, dynamic> json) {
     final manifestSizeMB = (json['manifestSizeMB'] as num?)?.toDouble() ?? 0.0;
     final layerBinSizeMB = (json['layerBinSizeMB'] as num?)?.toDouble() ?? 0.0;
+    final slotBytesAllLayersMB =
+        (json['slotBytesAllLayersMB'] as num?)?.toDouble() ?? 0.0;
+    final expertsBytesMB = (json['expertsBytesMB'] as num?)?.toDouble() ?? 0.0;
     return SplitMoeConfig(
-      manifestMirrors: (json['manifestMirrors'] as List)
+      manifestMirrors: (json['manifestMirrors'] as List? ?? const [])
           .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
           .toList(),
       manifestSizeBytes: (manifestSizeMB * 1024 * 1024).round(),
-      expertsBaseMirrors: (json['expertsBaseMirrors'] as List)
+      expertsBaseMirrors: (json['expertsBaseMirrors'] as List? ?? const [])
           .map((e) => MirrorEntry.fromJson(e as Map<String, dynamic>))
           .toList(),
       layerBinCount: json['layerBinCount'] as int? ?? 0,
       layerBinSizeBytes: (layerBinSizeMB * 1024 * 1024).round(),
       layerBinPattern: json['layerBinPattern'] as String? ?? 'experts/layer_%03d.bin',
+      inplaceFullGguf: json['inplaceFullGguf'] as bool? ?? false,
+      slotBytesAllLayers: (slotBytesAllLayersMB * 1024 * 1024).round(),
+      expertsBytes: (expertsBytesMB * 1024 * 1024).round(),
     );
   }
 }

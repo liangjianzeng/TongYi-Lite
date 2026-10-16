@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -251,11 +252,13 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       }
 
       // 4. 视觉模型：解析 mmproj（text+mmproj 两文件形态需投影器文件）。
-      //    设置「默认加载视觉投影器」关闭时跳过投影器，仅文本推理。
+      //    按模型「图片理解」开关优先（方案 P4，2026-10-15）；未显式配置的
+      //    模型回退全局「默认加载视觉投影器」（autoLoadMmproj）。关闭时
+      //    mmproj 传 null：不加载视觉塔，省 ~0.9GB 回给 bank/KV。
       final config = _lookupModelConfig(modelId);
       String? mmprojPath;
-      final autoMmproj =
-          (await _ref.read(settingsServiceProvider).load()).autoLoadMmproj;
+      final settingsAll = await _ref.read(settingsServiceProvider).load();
+      final autoMmproj = settingsAll.visionEnabled(modelId);
       if (config != null &&
           config.type == ModelType.vision &&
           autoMmproj) {
@@ -294,7 +297,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       // 5. Call native inference engine to load the model.
       //    直接从持久化文件读取设置，避免 settingsProvider 异步 _load 完成前
       //    读到默认 enableGpu=false，导致启动后直接加载模型时 GPU 未生效。
-      final gpu = await _ref.read(settingsServiceProvider).load();
+      final gpu = settingsAll; // 同文件 load() 幂等，复用步骤 4 已读实例
       // 全局 MTP 总开关关闭时，即使某模型曾配置开启也强制不启用（可见可用控制）。
       final mtp = gpu.enableMtpFeature && gpu.mtpEnabled(modelId);
       // dspark 投机草稿头：全局开关 + 该模型开关都开启、目录声明且文件完整时
@@ -338,27 +341,78 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       // 但 -les 剥离版主文件不含专家张量，预期失败，加载日志明示原因。
       String? moeManifest;
       int moeBank = 0;
+      int moeSlotBytes = 0; // 单槽全层驻留字节（manifest Σ bytes_per_expert）
+      int moeExpertsBytes = 0; // in-place 整包：gguf 内专家区字节（oom 预检扣减）
       String smartMoeLog = '';
       final sm = config?.splitMoe;
       if (sm != null) {
         if (gpu.smartMoeEnabled) {
+          // 形态判定：inplaceFullGguf（方案 C）= 官方整包原地读，无分片子目录；
+          // 否则为 packed-bins（MiniCPM 生产形态）= manifest + N 分片。
           final storage = ModelStorageService();
           final expertsDir = await storage.getExpertsDir(modelId);
           final mf = File('${expertsDir.path}/manifest.json');
-          // 加载前快检：manifest + 全部分片存在且非空（下载器已做精确字节
-          // 校验，这里只防「文件被用户清理/传输中断」的残缺包进原生层）。
-          var binsOk = await mf.exists() && await mf.length() > 0;
-          if (binsOk) {
-            for (var i = 0; i < sm.layerBinCount && binsOk; i++) {
-              final name = sm.layerBinRelativePath(i).split('/').last;
-              final bf = File('${expertsDir.path}/$name');
-              binsOk = await bf.exists() && await bf.length() > 0;
+          var binsOk = sm.inplaceFullGguf; // 原地形态：整包文件本身即专家表
+          if (!sm.inplaceFullGguf) {
+            // 加载前快检：manifest + 全部分片存在且非空（下载器已做精确字节
+            // 校验，这里只防「文件被用户清理/传输中断」的残缺包进原生层）。
+            binsOk = await mf.exists() && await mf.length() > 0;
+            if (binsOk) {
+              for (var i = 0; i < sm.layerBinCount && binsOk; i++) {
+                final name = sm.layerBinRelativePath(i).split('/').last;
+                final bf = File('${expertsDir.path}/$name');
+                binsOk = await bf.exists() && await bf.length() > 0;
+              }
             }
           }
           if (binsOk) {
-            moeManifest = mf.path;
-            moeBank = 16; // 真机 sweet spot（slot_probe: bank16 稳、32 平台期）
-            smartMoeLog = '智能 MoE 加载: 开启 ✓（专家分片 ${sm.layerBinCount} 片完整，bank=$moeBank）';
+            moeManifest = sm.inplaceFullGguf ? path : mf.path;
+            // ---- 内存自适应热专家 bank（2026-10-15，方案 P3；15:5x 小米13 修正）----
+            // bank 是 GPU pinned（UMA 直接扣 MemAvailable，不可回收），且主权重/
+            // draft 加载同样吃掉可用内存——小米13 实测 bank=39 加载后 MemAvail
+            // 掉到 580MB 被 lmkd 杀（OomAdj=200）。公式按"加载后仍留 1.5G 安全
+            // 线"倒推：
+            // bank = clamp(8, floor(0.8 × budget / slot_bytes), 32)
+            //   budget = MemAvailable − 安全线(1.5G) − 主权重(常驻×0.95)
+            //            − KV(contextSize×0.03MB/tok) − dspark 在机 − mmproj 在机
+            // slot_bytes：packed 从 manifest 求和；in-place 用目录元数据。
+            // 常驻主权重：packed = -les 主文件；in-place = 整包 − 专家区。
+            final memAvailMb = _readMemAvailableMb();
+            final slotBytes = sm.inplaceFullGguf
+                ? (sm.slotBytesAllLayers > 0 ? sm.slotBytesAllLayers : null)
+                : await _moeSlotBytesFromManifest(mf);
+            moeSlotBytes = slotBytes ?? 0;
+            moeExpertsBytes = sm.inplaceFullGguf ? sm.expertsBytes : 0;
+            var autoBank = 16; // 兜底：读不到内存/manifest 时维持旧稳态值
+            var bankLog = '自动(兜底16)';
+            if (memAvailMb != null && slotBytes != null && slotBytes > 0) {
+              final slotMb = slotBytes / (1024 * 1024);
+              final kvMb = (gpu.contextSize * 30 / 1000).round();
+              final residentBytes =
+                  ((config?.sizeBytes ?? 0) - moeExpertsBytes).clamp(0, 1 << 62);
+              final mainWeightMb = (residentBytes * 0.95) / (1024 * 1024);
+              double budgetMb = (memAvailMb - 1536 - kvMb).toDouble() - mainWeightMb;
+              if (draftPath != null) {
+                budgetMb -= (await File(draftPath).length()) / (1024 * 1024);
+              }
+              if (mmprojPath != null) {
+                budgetMb -= (await File(mmprojPath).length()) / (1024 * 1024);
+              }
+              autoBank = (0.8 * budgetMb / slotMb).floor().clamp(8, 32);
+              bankLog =
+                  '自动(MemAvailable ${memAvailMb}MB, 预算 ${budgetMb.round()}MB, slot ${slotMb.toStringAsFixed(1)}MB)';
+            }
+            // 手动覆写仅对 packed-bins（MiniCPM，slot~1.3MB）有意义；in-place
+            // 整包 slot 高达 192MB，沿用通配 64 会要求 12.9GB 常驻（物理不可能），
+            // 强制走内存自适应 autoBank。
+            final manual = sm.inplaceFullGguf ? null : gpu.moeBankOverride(modelId);
+            moeBank = (manual != null && manual >= 8 && manual <= 64)
+                ? manual
+                : autoBank;
+            smartMoeLog = sm.inplaceFullGguf
+                ? '智能 MoE 加载: 开启 ✓（官方整包原地读专家 '
+                    '${SplitMoeConfig.formatBytes(sm.expertsBytes)}，bank=$moeBank ${manual != null ? '手动覆写' : bankLog}）'
+                : '智能 MoE 加载: 开启 ✓（专家分片 ${sm.layerBinCount} 片完整，bank=$moeBank ${manual != null ? '手动覆写' : bankLog}）';
           } else {
             debugPrint('[ModelManager] splitMoe bins incomplete for $modelId');
             state = ModelState.error(
@@ -433,6 +487,8 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         vkNoSubgroup: gpu.vkNoSubgroup,
         moeManifest: moeManifest,
         moeBank: moeBank,
+        moeSlotBytes: moeSlotBytes,
+        moeExpertsBytes: moeExpertsBytes,
       );
 
       if (ok) {
@@ -573,3 +629,35 @@ final modelManagerProvider = StateNotifierProvider<ModelManagerNotifier, ModelSt
   final inference = ref.read(inferenceServiceProvider);
   return ModelManagerNotifier(inference, ref);
 });
+
+/// 读 /proc/meminfo 的 MemAvailable（MB）。非 Android 环境或读取失败返回 null
+/// （单测/桌面），由调用方兜底。Android 上该文件 world-readable，无需权限。
+int? _readMemAvailableMb() {
+  if (!Platform.isAndroid) return null;
+  try {
+    final txt = File('/proc/meminfo').readAsStringSync();
+    final m = RegExp(r'MemAvailable:\s+(\d+)\s+kB').firstMatch(txt);
+    return m == null ? null : int.parse(m.group(1)!) ~/ 1024;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 从 split-MoE manifest.json 求「单专家全层驻留字节」：Σ entries[].bytes_per_expert
+/// （entries = 层 × tensor family，同一专家在所有层/投影上的 slot 总大小）。
+/// 解析失败返回 null，由调用方兜底。
+Future<int?> _moeSlotBytesFromManifest(File manifest) async {
+  try {
+    final j = jsonDecode(await manifest.readAsString());
+    if (j is! Map || j['entries'] is! List) return null;
+    int sum = 0;
+    for (final e in (j['entries'] as List)) {
+      final b = e is Map ? e['bytes_per_expert'] : null;
+      if (b is! int || b <= 0) return null;
+      sum += b;
+    }
+    return sum > 0 ? sum : null;
+  } catch (_) {
+    return null;
+  }
+}

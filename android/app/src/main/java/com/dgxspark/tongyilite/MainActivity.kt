@@ -788,12 +788,16 @@ class MainActivity : FlutterActivity() {
         val vkNoSubgroup = call.argument<Boolean>("vkNoSubgroup") ?: false
         val moeManifest = call.argument<String>("moeManifest")
         val moeBank = call.argument<Int>("moeBank") ?: 0
+        // Dart 的 int 在 channel 上按可容纳宽度序列化为 Integer/Long，
+        // 直接 argument<Long> 会在小值时 ClassCastException → 按 Number 收
+        val moeSlotBytes = (call.argument<Number>("moeSlotBytes"))?.toLong() ?: 0L
+        val moeExpertsBytes = (call.argument<Number>("moeExpertsBytes"))?.toLong() ?: 0L
 
-        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup, moe=$moeManifest/$moeBank")
+        logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup, moe=$moeManifest/$moeBank/$moeSlotBytes")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, moeSlotBytes, moeExpertsBytes, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {

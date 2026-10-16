@@ -60,6 +60,16 @@ class InferenceSettings {
   /// 生效——与 MTP 互斥（原生层二选一），互不影响??
   final Map<String, bool> dsparkEnabledByModel;
 
+  /// 智能 MoE 热专家 bank（槽数）手动覆写，按模型 id 持久化（8–64）。
+  /// 无条目 = 自动：按机型 MemAvailable 与 manifest slot 字节估算
+  /// （见 model_provider 的 auto MoE bank 预算公式，2026-10-15）。
+  final Map<String, int> moeBankOverrideByModel;
+
+  /// 视觉投影器（mmproj）按模型开关（2026-10-15，方案 P4）。
+  /// 有条目 = 用户显式配置（开→加载视觉塔，关→纯文本省 ~0.9GB）；
+  /// 无条目回退全局 autoLoadMmproj，保持既有用户行为不变。
+  final Map<String, bool> visionEnabledByModel;
+
   /// 全局 dspark 功能总开关（默认关闭）。用于控制整??APP ??dspark 是否
   /// 「可见可用」：
   /// - 关闭（默认）：模型卡片不显示各模型的 dspark 开关，加载模型时也强制
@@ -434,6 +444,8 @@ class InferenceSettings {
     Map<String, bool>? mtpEnabledByModel,
     this.enableMtpFeature = false,
     Map<String, bool>? dsparkEnabledByModel,
+    Map<String, int>? moeBankOverrideByModel,
+    Map<String, bool>? visionEnabledByModel,
     this.enableDsparkFeature = false,
     this.defaultModelId,
     List<ApiModelConfig>? apiModels,
@@ -529,6 +541,8 @@ class InferenceSettings {
   })  : sshConfigs = sshConfigs ?? const [],
         mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
+        moeBankOverrideByModel = moeBankOverrideByModel ?? const {},
+        visionEnabledByModel = visionEnabledByModel ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
         agentByModel = agentByModel ?? const {},
@@ -548,6 +562,16 @@ class InferenceSettings {
 
   /// 便捷读取：某个模型是否启??dspark（未配置视为关闭）??
   bool dsparkEnabled(String modelId) => dsparkEnabledByModel[modelId] ?? false;
+
+  /// 便捷读取：某模型的手动 MoE bank 覆写（未配置 = null = 自动分档）。
+  /// 通配键 '*' 为全局覆写（设置页滑条），按模型条目优先于通配。
+  int? moeBankOverride(String modelId) =>
+      moeBankOverrideByModel[modelId] ?? moeBankOverrideByModel['*'];
+
+  /// 便捷读取：视觉模型是否加载 mmproj 视觉塔。按模型显式配置优先，
+  /// 未配置回退全局 autoLoadMmproj（既有默认行为不变）。
+  bool visionEnabled(String modelId) =>
+      visionEnabledByModel[modelId] ?? autoLoadMmproj;
 
   /// ??ݶ?ȡ??ĳ??ģ?????õĹ????嵥?????б? = ?????ģ??Ŀ¼??????
   /// agentDefaults.enabledTools（目录合并逻辑??agent 接入层）??
@@ -605,6 +629,8 @@ class InferenceSettings {
       Map<String, bool>? mtpEnabledByModel,
       bool? enableMtpFeature,
       Map<String, bool>? dsparkEnabledByModel,
+      Map<String, int>? moeBankOverrideByModel,
+      Map<String, bool>? visionEnabledByModel,
       bool? enableDsparkFeature,
       String? defaultModelId,
       // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
@@ -709,6 +735,9 @@ class InferenceSettings {
       mtpEnabledByModel: mtpEnabledByModel ?? this.mtpEnabledByModel,
       enableMtpFeature: enableMtpFeature ?? this.enableMtpFeature,
       dsparkEnabledByModel: dsparkEnabledByModel ?? this.dsparkEnabledByModel,
+      moeBankOverrideByModel:
+          moeBankOverrideByModel ?? this.moeBankOverrideByModel,
+      visionEnabledByModel: visionEnabledByModel ?? this.visionEnabledByModel,
       enableDsparkFeature: enableDsparkFeature ?? this.enableDsparkFeature,
       defaultModelId:
           clearDefaultModel ? null : defaultModelId ?? this.defaultModelId,
@@ -834,6 +863,8 @@ class InferenceSettings {
         'mtpEnabledByModel': mtpEnabledByModel,
         'enableMtpFeature': enableMtpFeature,
         'dsparkEnabledByModel': dsparkEnabledByModel,
+        'moeBankOverrideByModel': moeBankOverrideByModel,
+        'visionEnabledByModel': visionEnabledByModel,
         'enableDsparkFeature': enableDsparkFeature,
         'defaultModelId': defaultModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
@@ -940,6 +971,8 @@ class InferenceSettings {
       enableMtpFeature: json['enableMtpFeature'] as bool? ?? false,
       // dspark：按模型 map + 全局开关，旧配置无此字段时默认全关（向后兼容）??
       dsparkEnabledByModel: _parseBoolMap(json['dsparkEnabledByModel']),
+      moeBankOverrideByModel: _parseIntMap(json['moeBankOverrideByModel']),
+      visionEnabledByModel: _parseBoolMap(json['visionEnabledByModel']),
       enableDsparkFeature: json['enableDsparkFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
       // 旧配置缺这两个字段时默认空列??+ 停用，向后兼容??
@@ -1205,6 +1238,17 @@ class InferenceSettings {
   static Map<String, bool> _parseBoolMap(Object? raw) {
     if (raw is! Map) return const {};
     return raw.map((k, v) => MapEntry(k.toString(), v as bool? ?? false));
+  }
+
+  /// 解析按模型 int map（如 moeBankOverrideByModel）；非法条目丢弃，空返回空 map。
+  static Map<String, int> _parseIntMap(Object? raw) {
+    if (raw is! Map) return const {};
+    final out = <String, int>{};
+    raw.forEach((k, v) {
+      final iv = v is int ? v : int.tryParse(v?.toString() ?? '');
+      if (iv != null) out[k.toString()] = iv;
+    });
+    return out;
   }
 
   static Map<String, bool> _migrateLegacyMtp(Map<String, dynamic> json) {
