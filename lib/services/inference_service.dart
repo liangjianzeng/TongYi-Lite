@@ -82,7 +82,7 @@ class InferenceService {
     /// 原生侧加载后启用 DFlash/DSpark 投机加速；null 表示不启用。
     String? draftPath,
 
-    /// GPU prefill 宽度 n_ubatch（0 = 自动：GPU 512 / CPU 16）。
+    /// prefill 宽度 n_ubatch（0 = 自动：统一 512，split-MoE 按 bank 收敛）。
     /// 小值拆小 dispatch burst，缓解 Adreno GPU fault（小米13 定案）。
     int nUbatch = 0,
 

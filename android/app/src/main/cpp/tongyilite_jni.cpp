@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <functional>
 #include <sstream>
@@ -1023,17 +1024,27 @@ struct InferenceEngine {
         LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
         // split-MoE: one physical ubatch's unique experts must fit the slot bank
-        // (worst case T tokens x n_expert_used -> bank/k) while dspark's
-        // split_equal assert needs n_ubatch > n_rs_seq+1 (= n_draft_max+2).
-        // Old bank/16 clamp broke the assert (ubatch 2 vs need 17) and killed
-        // prefill speed.
+        // while dspark's split_equal assert needs n_ubatch > n_rs_seq+1
+        // (= n_draft_max+2). The hard upper bound on per-layer unique experts is
+        // n_expert (NOT tokens x k): every routed expert of the layer at most
+        // once. So bank >= n_expert admits ANY ubatch width -> single-pass
+        // prefill reads each (layer, expert) exactly once (~whole expert set,
+        // e.g. 8.5GB for the 35B) instead of once per 8-token microbatch
+        // (30GB+ measured). Below n_expert, bank/k approximates the
+        // birthday-bound safe width (observed tok=8 @ bank=64, k=8).
         if (split_moe) {
+            const int n_exp = llama_model_n_expert(model);
             const int k_exp = std::max(1, llama_model_n_expert_used(model));
-            const int max_pass = std::max(1, moe_bank / k_exp);
+            const int max_pass = (n_exp > 0 && moe_bank >= n_exp)
+                ? std::numeric_limits<int>::max()
+                : std::max(1, moe_bank / k_exp);
             if ((int) ctx_params.n_ubatch > max_pass) {
-                LOGW("split-MoE: n_ubatch %d -> %d (bank=%d, k=%d, draft=%d)",
-                     (int) ctx_params.n_ubatch, max_pass, moe_bank, k_exp, n_draft_max);
+                LOGW("split-MoE: n_ubatch %d -> %d (bank=%d, n_exp=%d, k=%d, draft=%d)",
+                     (int) ctx_params.n_ubatch, max_pass, moe_bank, n_exp, k_exp, n_draft_max);
                 ctx_params.n_ubatch = max_pass;
+            } else {
+                LOGI("split-MoE: bank=%d >= n_exp=%d -> prefill ubatch %d unclamped "
+                     "(single-pass expert streaming)", moe_bank, n_exp, (int) ctx_params.n_ubatch);
             }
         }
         // Flash attention (P1, 2026-10-14): opt-in via 设置→推理引擎→flash-attn.
@@ -2980,12 +2991,14 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     // 缓解 = 拆小计算块（TONGYI_UBATCH，load() 每次 getenv）+ 可选禁用
     // subgroup（GGML_VK_NO_SUBGROUP，turnip 在 a740 的挂死经典嫌疑源；
     // 注意该 env 在 vulkan 设备首次初始化时读取，中途切换需重启 app 生效）。
-    // CPU 档必须保持 ubatch=16（GEMM 垃圾 logits 老 bug），env 覆盖仅 GPU 档。
-    if (j_enable_gpu == JNI_TRUE && j_n_ubatch >= 32) {
+    // 2026-10-16: CPU 档 ubatch=16 强制已废除（旧 GEMM garbage 故障证伪，
+    // 见 n_ubatch 注释），设置项对任意后端生效。
+    if (j_n_ubatch >= 32) {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d", (int)j_n_ubatch);
         setenv("TONGYI_UBATCH", buf, 1);
-        LOGI("gpu tuning: TONGYI_UBATCH=%d", (int)j_n_ubatch);
+        LOGI("tuning: TONGYI_UBATCH=%d (%s backend)", (int)j_n_ubatch,
+             j_enable_gpu == JNI_TRUE ? "GPU" : "CPU");
     } else {
         unsetenv("TONGYI_UBATCH");
     }

@@ -1828,10 +1828,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             const int32_t n_moe_layers = experts->layer_count();
             if (n_moe_layers > 0) {
                 const size_t bytes_one = experts->bytes_per_slot_all_layers();
-                const size_t bytes_all = bytes_one * (size_t) params.moe_slot_bank;
-                LLAMA_LOG_INFO("%s: split-moe enabled: %d MoE layers, slot bank %d, %.2f MiB/layer-slot, %.2f MiB total\n",
+                // 物理口径：slot base 按（family×bpe）分组、prefill 段组内共享，
+                // 所以 bank 的真实边际成本是「每层每专家」字节（bytes_one/n_layers），
+                // 不是 bytes_one（那是把每层当成独立复制的错误口径，会高估 n_layers 倍）。
+                const size_t bytes_layer = n_moe_layers > 0
+                    ? bytes_one / (size_t) n_moe_layers
+                    : bytes_one;
+                const size_t bytes_all = bytes_layer * (size_t) params.moe_slot_bank;
+                LLAMA_LOG_INFO("%s: split-moe enabled: %d MoE layers, slot bank %d, %.2f MiB/slot/layer, prefill section %.2f MiB (shared in-group; decode windows extra)\n",
                     __func__, (int) n_moe_layers, (int) params.moe_slot_bank,
-                    bytes_one / 1024.0 / 1024.0, bytes_all / 1024.0 / 1024.0);
+                    bytes_layer / 1024.0 / 1024.0, bytes_all / 1024.0 / 1024.0);
             }
         }
 

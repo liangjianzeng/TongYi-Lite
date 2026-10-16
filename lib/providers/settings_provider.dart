@@ -760,8 +760,9 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// GPU prefill 宽度 n_ubatch。0 = 自动（GPU 512 / CPU 16）；改后重新加载
-  /// 模型生效。仅 GPU 后端读取（CPU 档原生恒 16）。
+  /// prefill 宽度 n_ubatch。0 = 自动（统一 512，split-MoE 按 bank 自动收敛）；
+  /// 32~512 = 拆小（GPU fault 缓解等场景）。改后重新加载模型生效。
+  /// 2026-10-16 起对任意后端生效（CPU 档 ubatch=16 强制已证伪废除）。
   Future<void> setGpuNUbatch(int value) async {
     state = state.copyWith(gpuNUbatch: value < 32 ? 0 : value.clamp(32, 512));
     await _persist();
