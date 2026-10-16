@@ -130,6 +130,24 @@ KV q4_0 · 权重 12,941 MiB + ctx 1,440 MiB + compute 660 MiB = 15,042 / 15,170
 | ② | JNI `max_pass = moe_bank / 8`、`cap = moe_bank/8 - 3`（[#L821-L835, #L998-L1002](../android/app/src/main/cpp/tongyilite_jni.cpp#L821)） | 按 top-k=8（MiniCPM） | LFM2.5 top-4 → 除数改 `n_expert_used`（运行期从 hparams 取） |
 | ③ | Dart 自动 bank 公式 `bank = clamp(8, 0.8×budget/slot_bytes, 32)` | ~~未乘 MoE 层数~~ 复核：slot_bytes 已是全层求和 | 无缺陷（helper 对 层×family entries 求 Σ`bytes_per_expert`，天然含层数）；不改 |
 
+> **2026-10-16 小米13（fuxi 12G，Adreno 740，OpenCL）真机验证通过**：
+> UI「加载到内存」→ `[ModelManager] splitMoe: manifest=… bank=15`（自动档）→
+> `load_tensors: split-moe enabled: 38 MoE layers, slot bank 15, 192.38 MiB/layer-slot,
+> 2885.62 MiB total` → `MoE bank 3 groups, 75.94 MiB resident; 114 prefill windows` →
+> `[moe-ssd] init pack=on pack_layers=38/38 bank=15 bankgpu=cpu experts=64 stride0=5308416
+> preadv=on`（decode window 默认 OFF）→ `llama_context: n_ubatch = 3`（bank/4 生效）。
+> 加载 ~3s，推理出中文回答 `Generation done: 14 tokens, 0.9 tok/s (prompt 126s, gen 15.3s)`；
+> 全程 MemAvailable ≥5.8G、无 lmkd 击杀。
+> **两坑记录**：① 设备遗留全局覆写 `moeBankOverrideByModel{"*":48}`（MiniCPM 时代）被新
+> 模型继承 → 48×192.4MiB≈9G 必死；`moeBankOverride(id)=map[id]??map['*']`，清除办法 =
+> force-stop 后 run-as 改 `app_flutter/inference_settings.json`（引擎 tab 的覆写开关因
+> GPU 稳定性卡 overflow 裁切在部分分辨率点不到，属独立 UI bug）。② **adb 多设备**：网络
+> 端第二台机（warsaw）上线后不带 `-s` 的 input/dump 全打错设备，表现酷似"MIUI 吞点击"；
+> 本仓库全部 adb 调用必须 `-s 98fc9410`。
+> 性能观察：P0 档（decode window OFF）0.9 tok/s decode + n_ubatch=3 把 prefill 打成 3
+> token/步；优化方向 = 开 `LLAMA_MOE_DECODE_WINDOW` 解码缓存 + prefill 期放宽 ubatch。
+
+
 ### 4.4 机型预算表（bank 按修正后公式自动落位）
 
 | 机型（MemAvailable 典型） | dense 常驻(GPU) | bank 常驻 | KV@8K+conv+运行时 | 可行性 |

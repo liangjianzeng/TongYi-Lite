@@ -634,6 +634,7 @@ struct llama_prec_policy {
 struct llama_model {
     // ---- split-moe (llama-moe-experts / llama-moe-slot) ----
     bool moe_slot_bank_enabled() const;
+    bool moe_experts_inplace() const;
     int32_t moe_slot_bank_size() const;
     int32_t moe_experts_layer_count() const;
     const struct llama_moe_experts_entry * moe_experts_entry(const char * tensor_name) const;

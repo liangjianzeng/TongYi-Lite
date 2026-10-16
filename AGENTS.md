@@ -1447,6 +1447,19 @@ utf-8（默认 latin1 write 抛 invalid characters）。
   打包坑新增：Git Bash 的 cd 会跨调用保留——assemble/gradlew 前必须显式回项目根
   （上次 `cd android` 后跑 assemble 报 "lib/main.dart 找不到路径"）。
 
+- **2026-10-16 01:23 构建（LFM2.5-24B-A2B split-MoE 落地，v0.2.8+16 复用）**：
+  `E:\DTXY\TongYi-Lite\build\app\outputs\flutter-apk\app-debug.apk` 136887615 B。
+  已 `adb install -r -t` 覆盖装小米13（serial 98fc9410）并真机验证 split-MoE
+  加载+推理通过（bank=15 自动档、3 groups、[moe-ssd] init、无 lmkd，见
+  docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md §4.3 真机验证记录）。
+  **adb 多设备铁律**：本机现常驻两台机（小米13 serial 98fc9410 + 网络 warsaw
+  100.75.247.55:5555），**所有 adb 命令必须带 `-s 98fc9410`**，否则 input/dump
+  打到错机，表现酷似"MIUI 吞掉所有点击"（本次踩了十几轮才定位）。
+  **split-MoE 全局覆写坑**：设备 inference_settings.json 遗留
+  `moeBankOverrideByModel{"*":48}`（MiniCPM 时代）被新 split 模型继承 →
+  48×192.4MiB≈9G 必被 lmkd 杀。清除：force-stop 后
+  `run-as ... cat/edit app_flutter/inference_settings.json` 把 `*` 键删空。
+
 
 ## 2026-10-05 消息输入区重构（标准智能体 composer 形态，P1+P2+P3 全量，工作区未提交）
 
