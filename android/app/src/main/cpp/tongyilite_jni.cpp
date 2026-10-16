@@ -436,6 +436,13 @@ struct InferenceEngine {
     float  mtp_accept_sum   = 0;  // accepted draft tokens (running window)
     float  mtp_draft_sum    = 0;  // drafted tokens (running window)
     int    mtp_adaptive_max = n_draft_max;
+    // 草稿空转自动关闭（2026-10-16）：dspark 连续多轮 drafted 0（如 dflash 头
+    // 加载/对齐坏了）时，每 token 白跑一次草稿前向 + seq_rm，纯亏。连续
+    // kSpecDeadStreak 次空草稿即禁用本会话草稿（adaptive 永不触发的盲区：
+    // 退避门槛 drafted>=12 永远凑不齐）。
+    static constexpr int kSpecDeadStreak = 8;
+    int  mtp_empty_streak = 0;
+    bool mtp_spec_dead    = false;
 
     // Cross-turn KV incremental prefill. Instead of wiping the whole KV and
     // re-prefilling the entire conversation every turn, we keep the common prefix
@@ -547,8 +554,12 @@ struct InferenceEngine {
                 setenv("LLAMA_MOE_LOOKAHEAD_PREFETCH", "8", 1);
                 setenv("LLAMA_MOE_DECODE_WINDOW", "8", 1);
                 setenv("LLAMA_MOE_PREFETCH_READ", "6", 1);
+                // IO 线程 4→8（2026-10-16）：prefill 单遍后实测 par=3.80 被
+                // nth=4 顶死，aggregate 只跑出 1.5GB/s（830 UFS 4.x 顺序
+                // 能力 2-4GB/s）——翻倍线程把 prefill 的 2.6s 读盘段再压。
+                setenv("LLAMA_MOE_IO_THREADS", "8", 1);
                 LOGI("split-MoE decode prefetch recipe injected: "
-                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6");
+                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6 IO_THREADS=8");
             } else {
                 LOGI("split-MoE prefetch envs already present, not overriding");
             }
@@ -2342,7 +2353,9 @@ struct InferenceEngine {
                     // is negligible).
                     t_start = std::chrono::high_resolution_clock::now();
                     // 1) generate a fresh draft from the MTP head
-                    if (draft.empty()) {
+                    // （mtp_spec_dead：草稿引擎连续空产已被判死，跳过整个
+                    // draft+seq_rm 段，verify 退化为 n_draft=0 的普通解码。）
+                    if (draft.empty() && !mtp_spec_dead) {
                         // Adaptive draft budget: shrink n_draft when the head's recent
                         // acceptance is low so the target verify batch stays small and
                         // we stop paying for drafts that get rejected. Restore the full
@@ -2382,6 +2395,19 @@ struct InferenceEngine {
                         common_speculative_draft(mtp_spec);
                         LOGI("[%s] drafted %zu tokens", driver_tag, draft.size());
                         reportSpecLog("[%s] drafted %zu tokens", driver_tag, draft.size());
+                        if (draft.empty()) {
+                            // 空草稿连击判定：adaptive 退避依赖 drafted>=12 的
+                            // 窗口，草稿恒空时永远凑不齐 → 这里独立判死。
+                            if (++mtp_empty_streak >= kSpecDeadStreak && !mtp_spec_dead) {
+                                mtp_spec_dead = true;
+                                LOGW("[%s] 连续 %d 次 drafted 0（草稿引擎空转，"
+                                     "accept 恒 0）→ 本会话禁用投机，省去每 token "
+                                     "草稿前向", driver_tag, mtp_empty_streak);
+                                reportSpecLog("投机已自动关闭：草稿引擎连续 %d 轮 0 产出（疑似 dflash 头加载异常），已切换为纯解码", mtp_empty_streak);
+                            }
+                        } else {
+                            mtp_empty_streak = 0;
+                        }
                         if (!draft.empty()) {
                             // Trim the draft context back to the pre-draft base. The
                             // draft stage decoded id_last at mtp_n_past plus the draft

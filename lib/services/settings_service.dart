@@ -862,7 +862,10 @@ class InferenceSettings {
         'mtpEnabledByModel': mtpEnabledByModel,
         'enableMtpFeature': enableMtpFeature,
         'dsparkEnabledByModel': dsparkEnabledByModel,
-        'moeBankOverrideByModel': moeBankOverrideByModel,
+        // V2（2026-10-16）：旧键里存的手动 bank 值基于已被证伪的
+        // 「slot=54MB×bank」内存口径（当时被告知 64 是上限），全部失真——
+        // 换新键一次性失效，让用户在新物理模型下重新覆写。
+        'moeBankOverrideByModelV2': moeBankOverrideByModel,
         'visionEnabledByModel': visionEnabledByModel,
         'enableDsparkFeature': enableDsparkFeature,
         'defaultModelId': defaultModelId,
@@ -970,7 +973,8 @@ class InferenceSettings {
       enableMtpFeature: json['enableMtpFeature'] as bool? ?? false,
       // dspark：按模型 map + 全局开关，旧配置无此字段时默认全关（向后兼容）??
       dsparkEnabledByModel: _parseBoolMap(json['dsparkEnabledByModel']),
-      moeBankOverrideByModel: _parseIntMap(json['moeBankOverrideByModel']),
+      // V2 键（2026-10-16 bank 物理模型修正后一次性迁移，旧键弃用）。
+      moeBankOverrideByModel: _parseIntMap(json['moeBankOverrideByModelV2']),
       visionEnabledByModel: _parseBoolMap(json['visionEnabledByModel']),
       enableDsparkFeature: json['enableDsparkFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
