@@ -6,7 +6,50 @@
 
 ---
 
-## [0.3.1] — 2026-10-14（当前版本 · versionCode 19）
+## [0.3.3] — 2026-10-16（当前版本 · versionCode 21）
+
+### 🚀 LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收
+
+- **官方整包直下直读**：catalog 新增 `lfm2.5-24b-a2b-q4_0`（`splitMoe.inplaceFullGguf`），
+  端侧只下载 **官方单文件 gguf**（12.65GB，ModelScope/hf-mirror，sha256 校验），
+  **免 PC 打包、免分片传输**。引擎（`llama-moe-experts.cpp`）扫描 gguf header 后为
+  114 个 `blk.N.*_exps.weight` 条目按 `entry->offset + e×expert_stride` 原地绑定，
+  slot 引擎（seg 模式）per-entry `readv` 直读专家——真机日志
+  `init pack=seg pack_layers=38/38 bank=16 experts=64`。
+- **实测（小米13 / OpenCL / n_ctx=4096）**：decode **1.6 t/s**（旧 split-bins 路 0.9，
+  **+78%**）；专家 I/O **1902 MiB/s**、456 preadv/token、**zerocopy 100%**；
+  PSS 913MB 无 lmkd；12.6GB 整包加载 ~70s；回答正确自识。
+- **修复 ① JNI 漏传参**：`nativeLoadModel→g_engine.load(...)` 漏传 `moe_experts_bytes`
+  → in-place 整包被 oom-guard 按 24.9GB 全量误拒；补传后按 dense+bank 常驻估重 3.88GB 放行。
+- **修复 ② bank 通配覆写泄漏**：`moeBankOverrideByModel['*']`（MiniCPM slot~1.3MB 时代
+  遗留）套到 in-place slot 192.38MB 会要求 12.9GB 常驻；in-place 现忽略手动覆写，
+  走内存自适应 autoBank。
+- **回归**：MiniCPM-V 4.7 packed-bins 生产路径同 session 自动加载成功，行为零变化；
+  seg 模式仅在 strict pack 失败时启用。
+- 真机操作通道沉淀：触屏注入失效期经 **VM Service evaluate**（`_probe/vm_eval.py`，
+  裸 websocket JSON-RPC）直达 Riverpod 完成全部驱动，等效 UI 操作。
+- versionCode 20 → 21。详细验收记录：
+  `docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md`「方案 C 真机验收」节。
+
+---
+
+## [0.3.2] — 2026-10-15~16（versionCode 19+，主干未单独发布）
+
+### 🧠 智能 MoE 拆分加载（split-MoE）+ LES 前瞻调度 + GPU 路线双机定案
+
+- **split-MoE 双形态**：权重剥离 `.experts/`（40 分片 + manifest）或 in-place GGUF 直读
+  （seg fallback，按 expert-stride 分段 preadv，免剥离）；slot bank 流式供给专家
+  （热度表 + per-layer 填充 + 超集异步预读 + LES 下一层 router 预测）。
+- CPU slot bank 热稳态小米13（830）MiniCPM-V 4.7 35B-A3B **8.07 t/s**、740（Adreno 825）
+  3.0–3.4 t/s；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` / uploads race fix，
+  bank23–32 共 14 腿零崩）默认关。
+- **GPU decode 路线双机定案**：SCHED_STATS 插桩 + probe9 提交税探针（OpenCL 9µs/op vs
+  CPU 0.34µs，Adreno 不暴露 `cl_khr_command_buffer`）→ decode CPU 混合守擂；CPU 岛收编
+  （小权重豁免 + `GGML_OPENCL_SSM_A8X`，splits 203→83）；Mesa 整图单提交路线立项。
+
+---
+
+## [0.3.1] — 2026-10-14（versionCode 19）
 
 ### ⚡ q4_K batched MoE 修复上线（预计算 scale dodge）
 

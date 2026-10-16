@@ -223,3 +223,55 @@ prefill：dense 全 GPU + 每 ub 窗口每层至多 324 MiB 流式 → 预计 **
 - StrataLike 复盘（坑 #23/#26/#31/#32/#327、ub=2048 杠杆、moe-cache 证死边界条件）：`D:\myllm\reports\StrataLike_工作汇报_2026-10-12.md`
 - MiniCPM-V-4.7 split 实机 `[moe-ssd]` decode 计数：`_probe/adb_r12d.txt`、`_probe/adb_dev2.txt`；manifest 样例 `_probe/minicpm47_experts_manifest.json`
 - 代码：[llama-moe-slot.cpp](../third_party/llama.cpp/src/llama-moe-slot.cpp)、[qwen35moe.cpp](../third_party/llama.cpp/src/models/qwen35moe.cpp)、[lfm2moe.cpp](../third_party/llama.cpp/src/models/lfm2moe.cpp)、[tongyilite_jni.cpp split-MoE 段](../android/app/src/main/cpp/tongyilite_jni.cpp#L529-L539)、[model_provider.dart bank 公式](../lib/providers/model_provider.dart#L363-L395)
+
+
+---
+
+## 方案 C 真机验收（Redmi K90，2026-10-16 09:35）— **通过**
+
+### 形态
+- 用户下载 **官方整包单文件** `LFM2.5-24B-A2B-QAD-Q4_0.gguf`（13,578,190,880 B，
+  sha256 `d1c03f73…f8a5` 双端一致），落位 `/storage/emulated/0/TongYiLite/models/lfm2.5-24b-a2b-q4_0.gguf`。
+  **无 PC 打包、无分片下载**（catalog `splitMoe.inplaceFullGguf=true`，下载页只下一份整包）。
+- 引擎原地读：`llama-moe-experts.cpp` 扫 header（header_end=8,250,910，align=32）→
+  114 个 `_exps.weight` 条目按 `entry->offset + e×1,769,472` 绑定，运行时 readv 直读。
+
+### 关键日志（全部命中）
+```
+split-MoE enabled: manifest=…/lfm2.5-24b-a2b-q4_0.gguf bank=16
+[oom-guard] 预检：可用 6.04 GB，权重估算 3.88 GB → 放行
+load_tensors: split-moe enabled: 38 MoE layers, slot bank 16, 192.38 MiB/layer-slot, 3078.00 MiB total
+load_arch_tensors: split-moe MoE bank 3 groups, 81.00 MiB resident; 114 prefill windows
+[moe-ssd] init pack=seg pack_layers=38/38 bank=16 bankgpu=cpu shared=on experts=64
+          io_threads=4 stride0=5308416 preadv=on park_window=on
+[ModelManager] Loaded: lfm2.5-24b-a2b-q4_0 (LFM 2.5 24B-A2B)
+```
+
+### 推理实测（OpenCL，n_ctx=4096，K90）
+| 指标 | 数值 | 对比 split-bins 旧路 |
+|---|---|---|
+| decode | **1.6 tok/s**（n_gen=19 / 11.8s） | 0.9 tok/s → **+78%** |
+| prefill | t_prompt 9.1s（短 prompt，含首 token 页缓存冷读） | ~3.4 tok/s 同级 |
+| expert I/O | **1902 MiB/s**，770 MiB/token，456 calls/token，par≈2.1 | 读满 UFS 带宽 |
+| zerocopy | **100%**（readv 直读零拷贝） | — |
+| 进程内存 | TOTAL PSS 913 MB（swap 280 MB），无 lmkd 击杀 | 旧 ~313 MB（slot 更小）|
+
+回答正确自识："我是LFM，Liquid Foundation Model，由Liquid AI开发。"
+
+### 验收中抓到并修掉的两个真 bug
+1. **JNI 漏传参**：`nativeLoadModel` 调 `g_engine.load(...)` 时漏 `j_moe_experts_bytes`
+   → oom-guard 按 24.92 GB 全量误拒（实际常驻估算 3.88 GB）。补传即放行。
+2. **bank 通配覆写泄漏**：`moeBankOverrideByModel['*']=64`（MiniCPM 专用，slot 1.3 MB）
+   也套到 in-place（slot 192.38 MB）→ 要求 12.9 GB 常驻。in-place 现忽略手动覆写，
+   走内存自适应 autoBank（本次=16）。
+
+### 回归
+- MiniCPM-V 4.7（packed-bins 生产路径）同 session 启动自动加载成功
+  （`Loaded: minicpm-v4.7-35b-a3b-les`，manifest bank=64），字节行为未动。
+- seg 模式仅在 strict pack 失败时启用；lfm2moe/qwen35moe 之外模型无影响。
+
+### 端侧操作通道备注（K90 触屏注入失效期）
+本次真机验证经 **VM Service evaluate**（debug app + `flutter attach --debug-uri` 提供
+编译服务）直接驱动 Riverpod：`unloadModel()` → `loadModel('lfm2.5-24b-a2b-q4_0')` →
+`inferenceServiceProvider.complete(...)`，结果落盘回读。该通道与 UI 按钮走同一代码路径，
+验证效力等同。工具：`_probe/vm_eval.py`（裸 websocket JSON-RPC，stdlib）。

@@ -1228,6 +1228,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         // decode all sequence's noise block in a single batch
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+        LOG_WRN("%s: [dspark-dbg] n_max=%d block=%d beg=%d ret=%d\n",
+                __func__, params.n_max, n_block[0], i_block_beg[0], ret);
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
             return;
@@ -1329,6 +1331,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 }
             }
 
+            if (is_dspark) {
+                LOG_WRN("%s: [dspark-dbg] done result=%zu n_min=%d p_min=%.3f anchor=%d dflash2=%d mask=%d\n",
+                        __func__, result.size(), params.n_min, params.p_min,
+                        (int) sample_from_anchor, (int) is_dflash2, (int) mask_token_id);
+            }
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }

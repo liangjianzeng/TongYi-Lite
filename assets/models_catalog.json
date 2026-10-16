@@ -682,7 +682,7 @@
     {
       "id": "minicpm-v4.7-35b-a3b-les",
       "name": "MiniCPM-V 4.7 35B-A3B (拆分 MoE 智能加载)",
-      "type": "text",
+      "type": "vision",
       "mirrors": [
         {
           "url": "https://modelscope.cn/models/zerg13/MiniCPM-V-Apps-gguf/resolve/master/MiniCPM-V-4.7-35B-A3B/MiniCPM-V-4_7-35B-A3B-mix_q3gud_im-les.gguf",
@@ -703,6 +703,35 @@
         "拆分流式",
         "实验"
       ],
+      "mmproj": {
+        "mirrors": [
+          {
+            "url": "https://modelscope.cn/models/OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf/resolve/master/mmproj-model-f16-4x.gguf",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf/resolve/main/mmproj-model-f16-4x.gguf",
+            "source": "hf-mirror"
+          }
+        ],
+        "sizeMB": 868.3,
+        "sizeMBDisplay": "868 MB (f16-4x)",
+        "sha256Hash": "30f4daac0f61c2ca28d68b5f901c0501cb7a269a1357a9e380d2c376c6ed6518"
+      },
+      "dspark": {
+        "mirrors": [
+          {
+            "url": "https://modelscope.cn/models/OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf/resolve/master/dspark-MiniCPM-V-4_7-35B-A3B-F16.gguf",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf/resolve/main/dspark-MiniCPM-V-4_7-35B-A3B-F16.gguf",
+            "source": "hf-mirror"
+          }
+        ],
+        "sizeMB": 752.9,
+        "sizeMBDisplay": "753 MB (dspark F16)"
+      },
       "splitMoe": {
         "manifestMirrors": [
           {
@@ -733,7 +762,51 @@
         "nativeToolCall": true,
         "maxContextTokens": 262144,
         "recommendedNctx": 16384,
-        "mtpSupported": true
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 384,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
+      "id": "lfm2.5-24b-a2b-q4_0",
+      "name": "LFM 2.5 24B-A2B (Q4_0 智能MoE 整包原地读)",
+      "type": "text",
+      "recommended": false,
+      "minRamMB": 8192,
+      "sha256Hash": "d1c03f73ecaf61017d70419eec9e5dc0b05d50ae26c23d522829b934fbabf8a5",
+      "tags": [
+        "超大MoE",
+        "原地流式",
+        "官方整包"
+      ],
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/api/v1/models/LiquidAI/LFM2.5-24B-A2B-GGUF/resolve/master/LFM2.5-24B-A2B-QAD-Q4_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/LiquidAI/LFM2.5-24B-A2B-GGUF/resolve/main/LFM2.5-24B-A2B-QAD-Q4_0.gguf",
+          "source": "hf-mirror"
+        }
+      ],
+      "sizeGB": 12.65,
+      "sizeMBDisplay": "12.6 GB (官方整包，专家原地流式读，无额外包)",
+      "splitMoe": {
+        "inplaceFullGguf": true,
+        "slotBytesAllLayersMB": 192.375,
+        "expertsBytesMB": 12312.0
+      },
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 131072,
+        "recommendedNctx": 8192,
+        "mtpSupported": false
       },
       "agentDefaults": {
         "maxRounds": 4,

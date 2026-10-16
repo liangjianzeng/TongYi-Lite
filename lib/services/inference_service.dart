@@ -95,11 +95,18 @@ class InferenceService {
 
     /// split-MoE 每层 prefill 槽位容量（>= n_expert_used）。0 = 不启用。
     int moeBank = 0,
+
+    /// split-MoE 单槽全层驻留字节（manifest Σ bytes_per_expert），oom 预检用。
+    int moeSlotBytes = 0,
+
+    /// in-place 整包 split：整包 gguf 内专家区总字节，oom 预检从常驻估算中扣除。
+    /// packed-bins 形态传 0（主文件本就不含专家）。
+    int moeExpertsBytes = 0,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
         '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
         ', mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup'
-        ', moe=$moeManifest/$moeBank)');
+        ', moe=$moeManifest/$moeBank/$moeSlotBytes/$moeExpertsBytes)');
     try {
       final result = await _channel.invokeMethod('loadModel', {
         'path': path,
@@ -114,6 +121,8 @@ class InferenceService {
         'vkNoSubgroup': vkNoSubgroup,
         'moeManifest': moeManifest,
         'moeBank': moeBank,
+        'moeSlotBytes': moeSlotBytes,
+        'moeExpertsBytes': moeExpertsBytes,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;

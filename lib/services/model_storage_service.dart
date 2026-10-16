@@ -305,8 +305,9 @@ class ModelStorageService {
       }
       // 拆分 MoE 专家包：manifest + 全部分片必须完整存在（分片大小精确
       // 匹配 manifest 的 exact_byte_length——错误/截断分片不允许当已缓存）。
+      // inplaceFullGguf 形态专家在整包主文件里，无专家目录可查。
       final sm = model.splitMoe;
-      if (sm != null) {
+      if (sm != null && !sm.inplaceFullGguf) {
         final expertsDir = Directory(p.join(dir.path, '${model.id}.experts'));
         if (!await _isCompleteFile(
             File(p.join(expertsDir.path, 'manifest.json')))) {

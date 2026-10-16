@@ -1460,6 +1460,19 @@ utf-8（默认 latin1 write 抛 invalid characters）。
   48×192.4MiB≈9G 必被 lmkd 杀。清除：force-stop 后
   `run-as ... cat/edit app_flutter/inference_settings.json` 把 `*` 键删空。
 
+- **2026-10-16 09:30 构建（方案 C：官方整包原地读 in-place，v0.2.8+16 复用）**：
+  \E:\\DTXY\\TongYi-Lite\\build\\app\\outputs\\flutter-apk\\app-debug.apk\ 136888194 B。
+  catalog 起 \inplaceFullGguf\ 形态：用户只下载**官方单文件 gguf**（ModelScope/
+  hf-mirror），引擎 \llama-moe-experts.cpp\ 扫 header 后按 per-entry offset 原地
+  readv 读专家，无 PC 打包/无分片。真机验收过（\pack=seg pack_layers=38/38
+  bank=16\、decode 1.6 tok/s、zerocopy 100%、PSS 913MB、回答正确，见 eval 文档
+  「方案 C 真机验收」节）。**修掉两真 bug**：① JNI ativeLoadModel→load\ 漏传
+  \j_moe_experts_bytes\（oom-guard 24.9GB 误拒）；② bank 通配覆写泄漏到 in-place
+  （model_provider 现 in-place 忽略手动覆写走 autoBank）。**触屏注入失效期的端侧
+  驱动通道**：debug app + \lutter attach --debug-uri\ 提供编译服务 → 裸 websocket
+  VM Service evaluate（\_probe/vm_eval.py\）直达 Riverpod，等效 UI 操作；设置文件
+  shell/run-as 均不可写（scoped storage + SELinux），别再走文件 patch 弯路。
+
 
 ## 2026-10-05 消息输入区重构（标准智能体 composer 形态，P1+P2+P3 全量，工作区未提交）
 
