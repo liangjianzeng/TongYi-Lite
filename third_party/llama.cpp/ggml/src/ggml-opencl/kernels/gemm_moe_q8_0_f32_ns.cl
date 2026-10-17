@@ -3,6 +3,37 @@
 #pragma OPENCL EXTENSION cl_qcom_subgroup_uniform_load: enable
 #pragma OPENCL EXTENSION cl_qcom_subgroup_constant_load: enable
 #pragma OPENCL EXTENSION cl_qcom_extra_vector_types : enable
+// [dspark 2026-10-16] generic backend (rusticl/freedreno): emulate the QCOM
+// extra-vector-types float8/float32 with clang ext_vector_type (guarded by the
+// host-injected GGML_GENERIC_SUBGROUP_SHUFFLE define; no-op on Adreno).
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+typedef float __attribute__((ext_vector_type(8))) float8;
+#ifndef GGML_MESA_SPIRV
+typedef float __attribute__((ext_vector_type(32))) float32;
+#endif
+
+// [dspark 2026-10-17] GGML_MESA_SPIRV: SPIR-V caps vectors at 16 components,
+// so the 32-lane float32 accumulator cannot survive rusticl's SPIR-V path.
+// Emulate it as a lo/hi float16 pair; every access site below (lo/hi
+// quadrants + scalar lanes) maps 1:1, arithmetic is bit-identical.
+#ifdef GGML_MESA_SPIRV
+#define REGC_Q00 reg_c_lo.lo
+#define REGC_Q01 reg_c_lo.hi
+#define REGC_Q10 reg_c_hi.lo
+#define REGC_Q11 reg_c_hi.hi
+#define REGC_LO  reg_c_lo
+#define REGC_HI  reg_c_hi
+#else
+#define REGC_Q00 reg_c.lo.lo
+#define REGC_Q01 reg_c.lo.hi
+#define REGC_Q10 reg_c.hi.lo
+#define REGC_Q11 reg_c.hi.hi
+#define REGC_LO  (reg_c.lo)
+#define REGC_HI  (reg_c.hi)
+#endif
+
+#endif
+
 
 #define TILESIZE_K 16
 #define TILESIZE_M 64
@@ -103,7 +134,12 @@ kernel void kernel_gemm_moe_q8_0_f32_ns(
     }
 
     __private half16 reg_a;
+    #ifdef GGML_MESA_SPIRV
+    __private float16 reg_c_lo = (float16)(0);
+    __private float16 reg_c_hi = (float16)(0);
+    #else
     __private float32 reg_c = (float32)(0);
+    #endif
     __local half4 shared_b[128];
 
     const ushort expert_id = src2_emap[block_id_n];
@@ -144,8 +180,8 @@ kernel void kernel_gemm_moe_q8_0_f32_ns(
         sub_group_barrier(CLK_LOCAL_MEM_FENCE);
 
         half16 acc;
-        dotx16_reduce8(reg_a, shared_b, reg_c.lo, 0);
-        dotx16_reduce8(reg_a, shared_b, reg_c.hi, 16);
+        dotx16_reduce8(reg_a, shared_b, REGC_LO, 0);
+        dotx16_reduce8(reg_a, shared_b, REGC_HI, 16);
 
         // Second sub-block: next 16 weights at K=step+16
         uint half_step = step + TILESIZE_K;
@@ -162,8 +198,8 @@ kernel void kernel_gemm_moe_q8_0_f32_ns(
 
         sub_group_barrier(CLK_LOCAL_MEM_FENCE);
 
-        dotx16_reduce8(reg_a, shared_b, reg_c.lo, 0);
-        dotx16_reduce8(reg_a, shared_b, reg_c.hi, 16);
+        dotx16_reduce8(reg_a, shared_b, REGC_LO, 0);
+        dotx16_reduce8(reg_a, shared_b, REGC_HI, 16);
     }
 
     if ((get_global_id(0) + block_id_m * TILESIZE_M) >= ne01) {
@@ -184,38 +220,38 @@ kernel void kernel_gemm_moe_q8_0_f32_ns(
 
     uint m_offset = row + get_local_id(0);
 
-    write_imagef(dst, out_idx[1] + m_offset, (reg_c.s1));
-    write_imagef(dst, out_idx[2] + m_offset, (reg_c.s2));
-    write_imagef(dst, out_idx[3] + m_offset, (reg_c.s3));
-    write_imagef(dst, out_idx[4] + m_offset, (reg_c.s4));
-    write_imagef(dst, out_idx[5] + m_offset, (reg_c.s5));
-    write_imagef(dst, out_idx[6] + m_offset, (reg_c.s6));
-    write_imagef(dst, out_idx[7] + m_offset, (reg_c.s7));
-    write_imagef(dst, out_idx[8] + m_offset, (reg_c.s8));
-    write_imagef(dst, out_idx[9] + m_offset, (reg_c.s9));
-    write_imagef(dst, out_idx[10] + m_offset, (reg_c.sa));
-    write_imagef(dst, out_idx[11] + m_offset, (reg_c.sb));
-    write_imagef(dst, out_idx[12] + m_offset, (reg_c.sc));
-    write_imagef(dst, out_idx[13] + m_offset, (reg_c.sd));
-    write_imagef(dst, out_idx[14] + m_offset, (reg_c.se));
-    write_imagef(dst, out_idx[15] + m_offset, (reg_c.sf));
-    write_imagef(dst, out_idx[16] + m_offset, (reg_c.sg));
-    write_imagef(dst, out_idx[17] + m_offset, (reg_c.sh));
-    write_imagef(dst, out_idx[18] + m_offset, (reg_c.si));
-    write_imagef(dst, out_idx[19] + m_offset, (reg_c.sj));
-    write_imagef(dst, out_idx[20] + m_offset, (reg_c.sk));
-    write_imagef(dst, out_idx[21] + m_offset, (reg_c.sl));
-    write_imagef(dst, out_idx[22] + m_offset, (reg_c.sm));
-    write_imagef(dst, out_idx[23] + m_offset, (reg_c.sn));
-    write_imagef(dst, out_idx[24] + m_offset, (reg_c.so));
-    write_imagef(dst, out_idx[25] + m_offset, (reg_c.sp));
-    write_imagef(dst, out_idx[26] + m_offset, (reg_c.sq));
-    write_imagef(dst, out_idx[27] + m_offset, (reg_c.sr));
-    write_imagef(dst, out_idx[28] + m_offset, (reg_c.ss));
-    write_imagef(dst, out_idx[29] + m_offset, (reg_c.st));
-    write_imagef(dst, out_idx[30] + m_offset, (reg_c.su));
-    write_imagef(dst, out_idx[31] + m_offset, (reg_c.sv));
+    write_imagef(dst, out_idx[1] + m_offset, (float4)((REGC_LO.s1), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[2] + m_offset, (float4)((REGC_LO.s2), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[3] + m_offset, (float4)((REGC_LO.s3), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[4] + m_offset, (float4)((REGC_LO.s4), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[5] + m_offset, (float4)((REGC_LO.s5), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[6] + m_offset, (float4)((REGC_LO.s6), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[7] + m_offset, (float4)((REGC_LO.s7), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[8] + m_offset, (float4)((REGC_LO.s8), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[9] + m_offset, (float4)((REGC_LO.s9), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[10] + m_offset, (float4)((REGC_LO.sa), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[11] + m_offset, (float4)((REGC_LO.sb), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[12] + m_offset, (float4)((REGC_LO.sc), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[13] + m_offset, (float4)((REGC_LO.sd), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[14] + m_offset, (float4)((REGC_LO.se), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[15] + m_offset, (float4)((REGC_LO.sf), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[16] + m_offset, (float4)((REGC_HI.s0), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[17] + m_offset, (float4)((REGC_HI.s1), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[18] + m_offset, (float4)((REGC_HI.s2), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[19] + m_offset, (float4)((REGC_HI.s3), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[20] + m_offset, (float4)((REGC_HI.s4), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[21] + m_offset, (float4)((REGC_HI.s5), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[22] + m_offset, (float4)((REGC_HI.s6), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[23] + m_offset, (float4)((REGC_HI.s7), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[24] + m_offset, (float4)((REGC_HI.s8), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[25] + m_offset, (float4)((REGC_HI.s9), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[26] + m_offset, (float4)((REGC_HI.sa), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[27] + m_offset, (float4)((REGC_HI.sb), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[28] + m_offset, (float4)((REGC_HI.sc), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[29] + m_offset, (float4)((REGC_HI.sd), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[30] + m_offset, (float4)((REGC_HI.se), 0.0f, 0.0f, 0.0f));
+    write_imagef(dst, out_idx[31] + m_offset, (float4)((REGC_HI.sf), 0.0f, 0.0f, 0.0f));
 
     barrier(CLK_GLOBAL_MEM_FENCE);
-    write_imagef(dst, out_idx[0] + m_offset, (reg_c.s0));
+    write_imagef(dst, out_idx[0] + m_offset, (float4)((REGC_LO.s0), 0.0f, 0.0f, 0.0f));
 }

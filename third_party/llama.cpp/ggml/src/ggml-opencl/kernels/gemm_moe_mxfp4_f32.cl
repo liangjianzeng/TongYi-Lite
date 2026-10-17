@@ -80,7 +80,7 @@ __kernel void kernel_gemm_moe_mxfp4_f32(
     uint i01  = get_global_id(0);
     uint i20  = get_global_id(2);
     uint sgid = get_local_id(1);
-    uint slid = get_sub_group_local_id();
+    uint slid = get_local_id(0);  // [dspark] rusticl sg=128 spans rows; lane==local_id(0) by design
 
     ushort4 router = src2[i20];
     ushort expert_id = router.x;

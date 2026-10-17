@@ -1,6 +1,37 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
+// [dspark 2026-10-16] generic backend (rusticl/freedreno): emulate the QCOM
+// extra-vector-types float8/float32 with clang ext_vector_type (guarded by the
+// host-injected GGML_GENERIC_SUBGROUP_SHUFFLE define; no-op on Adreno).
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+typedef float __attribute__((ext_vector_type(8))) float8;
+#ifndef GGML_MESA_SPIRV
+typedef float __attribute__((ext_vector_type(32))) float32;
+#endif
+
+// [dspark 2026-10-17] GGML_MESA_SPIRV: SPIR-V caps vectors at 16 components,
+// so the 32-lane float32 accumulator cannot survive rusticl's SPIR-V path.
+// Emulate it as a lo/hi float16 pair; every access site below (lo/hi
+// quadrants + scalar lanes) maps 1:1, arithmetic is bit-identical.
+#ifdef GGML_MESA_SPIRV
+#define REGC_Q00 reg_c_lo.lo
+#define REGC_Q01 reg_c_lo.hi
+#define REGC_Q10 reg_c_hi.lo
+#define REGC_Q11 reg_c_hi.hi
+#define REGC_LO  reg_c_lo
+#define REGC_HI  reg_c_hi
+#else
+#define REGC_Q00 reg_c.lo.lo
+#define REGC_Q01 reg_c.lo.hi
+#define REGC_Q10 reg_c.hi.lo
+#define REGC_Q11 reg_c.hi.hi
+#define REGC_LO  (reg_c.lo)
+#define REGC_HI  (reg_c.hi)
+#endif
+
+#endif
+
 
 #define QK_K 256
 #define N_SIMDGROUP 4
@@ -36,7 +67,7 @@ __kernel void kernel_gemv_moe_q6_k_f32_ns(
     uint i01  = get_global_id(0);
     uint i20  = get_global_id(2);
     uint sgid = get_local_id(1);
-    uint slid = get_sub_group_local_id();
+    uint slid = get_local_id(0);  // [dspark] rusticl sg=128 spans rows; lane==local_id(0) by design
 
     if (i01 >= ne01) {
         return;

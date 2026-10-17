@@ -18,6 +18,18 @@
 #define REQD_SUBGROUP_SIZE_128 __attribute__((qcom_reqd_sub_group_size("full")))
 #endif
 
+// [dspark 2026-10-17] rusticl/ir3 subgroup queries LIE: get_max_sub_group_size()
+// and get_sub_group_size() return the static device max (128 on FD740) regardless
+// of dispatch, while shuffle/reduce act on the real active lanes. Effective
+// subgroup size for stride loops is therefore min(max, local_size(0)); on vendor
+// Adreno the qcom attr pins max=64==local so the macro degenerates to max.
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+#define GGML_EFF_SGS (uint)((get_max_sub_group_size() < (uint)get_local_size(0)) ? get_max_sub_group_size() : (uint)get_local_size(0))
+#else
+#define GGML_EFF_SGS get_max_sub_group_size()
+#endif
+
+
 #ifdef ADRENO_GPU
 REQD_SUBGROUP_SIZE_64
 #endif
@@ -73,7 +85,7 @@ kernel void kernel_mul_mat_f16_f32_1row(
 
     float sumf = 0;
     if (ne00 < 128 || !row_aligned) {
-        for (int i = get_sub_group_local_id(); i < ne00; i += get_max_sub_group_size()) {
+        for (int i = get_sub_group_local_id(); i < ne00; i += GGML_EFF_SGS) {
             sumf += (float) x[i] * (float) y[i];
         }
         float all_sum = sub_group_reduce_add(sumf);
@@ -83,7 +95,7 @@ kernel void kernel_mul_mat_f16_f32_1row(
     } else {
         global half4  * x4 = (global half4  *) x;
         global float4 * y4 = (global float4 *) y;
-        for (int i = get_sub_group_local_id(); i < ne00/4; i += get_max_sub_group_size()) {
+        for (int i = get_sub_group_local_id(); i < ne00/4; i += GGML_EFF_SGS) {
             sumf += (float) x4[i].s0 * y4[i].s0;
             sumf += (float) x4[i].s1 * y4[i].s1;
             sumf += (float) x4[i].s2 * y4[i].s2;

@@ -1,5 +1,9 @@
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 
+// NOTE: do NOT #define CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM here (or via
+// -D); rusticl's header declares the enum and the qcom shuffle builtin
+// validates the width — it must remain the enum constant.
+
 #ifdef cl_intel_required_subgroup_size
 #pragma OPENCL EXTENSION cl_intel_required_subgroup_size : enable
 #define INTEL_GPU 1

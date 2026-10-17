@@ -1,4 +1,8 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
+
+// NOTE: do NOT #define CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM here (or via
+// -D); it must stay the enum constant declared by the compiler's header.
+
 #ifdef cl_khr_integer_dot_product
 #pragma OPENCL EXTENSION cl_khr_integer_dot_product : enable
 #define FA_HAVE_INT_DOT 1
