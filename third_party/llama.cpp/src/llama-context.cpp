@@ -1500,6 +1500,14 @@ bool llama_context::set_adapter_cvec(
 }
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: bisect entry of the decode path.
+    static const bool rs_dbg_pu = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    static int rs_pu_cnt = 0;
+    if (rs_dbg_pu && rs_pu_cnt < 40) {
+        LLAMA_LOG_INFO("[rsidx-pu] process_ubatch n_tokens=%d n_seq=%d cnt=%d\n",
+                (int) ubatch.n_tokens, (int) ubatch.n_seq_tokens, rs_pu_cnt);
+        ++rs_pu_cnt;
+    }
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
