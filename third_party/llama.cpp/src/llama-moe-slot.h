@@ -23,6 +23,9 @@ public:
     /// 张量（每层 `.dec` 视图 vs prefill 共享视图），见 llama-context 的
     /// `moe_decode_phase`。两处判据不一致 → 张量所指的槽段与实际写入的槽段错位。
     int  window_max_rows() const;
+    /// true when a batch of n_rows would run in decode-window mode (same predicate
+    /// as process()'s window_mode; use this on the build side, never re-derive it).
+    bool window_mode_for_rows(int n_rows) const;
     static void map_custom_deferred(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b,
                                     int ith, int nth, void * userdata);
     // 0 = off (no next-layer predict / prefetch). 1..16 = predicted experts per layer.

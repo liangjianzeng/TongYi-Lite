@@ -133,6 +133,9 @@ static metal_buf_fn lookup_metal_buf_fn(ggml_backend_buffer_t buf, const char * 
 // the current layer's GPU work. Hits remap for free; misses still install on the critical path.
 struct lookahead_expert_prefetch {
     static constexpr int32_t kMaxDepth = 16;
+    // per-job array capacity: with speculative verify the pred batch is the deduped
+    // union over n_rows x depth experts, not just depth (rows up to 16 x 8 here)
+    static constexpr int32_t kJobCap = 144;
 
     struct hit {
         int32_t expert;
@@ -166,11 +169,11 @@ struct lookahead_expert_prefetch {
     int32_t job_layer = -1;
     int32_t job_bank = -1;
     int32_t job_n = 0;
-    int32_t job_expert[kMaxDepth] = {};
+    int32_t job_expert[kJobCap] = {};
     int32_t arm_layer = -1;
     int32_t arm_bank = -1;
     int32_t arm_n = 0;
-    int32_t arm_expert[kMaxDepth] = {};
+    int32_t arm_expert[kJobCap] = {};
 
     std::function<void(int, int, int)> read_fn;
     // 窗口模式下 slot 由窗口 LRU 决定，不由乒乓区算出来 —— 此时传给 read_fn 的
@@ -383,7 +386,9 @@ struct lookahead_expert_prefetch {
         arm_n = 0;
     }
 
-    void arm(int32_t layer_next, const std::vector<int32_t> & pred) {
+    // n_want < 0 -> read at most read_n (single-token decode semantics);
+    // otherwise read up to n_want deduped experts (multi-row verify union).
+    void arm(int32_t layer_next, const std::vector<int32_t> & pred, int32_t n_want = -1) {
         if (!enabled || layer_next < 1 || layer_next > last_moe_layer || pred.empty()) {
             return;
         }
@@ -393,6 +398,11 @@ struct lookahead_expert_prefetch {
         if (read_n <= 0) {
             n_predict_only.fetch_add(1, std::memory_order_relaxed);
             return;
+        }
+
+        int32_t cap = n_want < 0 ? read_n : n_want;
+        if (cap > kJobCap) {
+            cap = kJobCap;
         }
 
         std::lock_guard<std::mutex> lk(mtx);
@@ -407,7 +417,7 @@ struct lookahead_expert_prefetch {
         job_n = 0;
         std::vector<uint8_t> seen((size_t) n_expert, 0);
         for (int32_t e : pred) {
-            if (job_n >= read_n) {   // 只读 read_n 个（<= depth）；read_n==0 已在上面返回
+            if (job_n >= cap) {   // read_n（单 token）或 verify 并集预算
                 break;
             }
             if (e < 0 || e >= n_expert || seen[(size_t) e]) {
@@ -419,7 +429,7 @@ struct lookahead_expert_prefetch {
         if (job_n <= 0) {
             return;
         }
-        for (int k = job_n; k < kMaxDepth; ++k) {
+        for (int k = job_n; k < kJobCap; ++k) {
             job_expert[k] = -1;
         }
         job_pending = true;
@@ -432,7 +442,7 @@ struct lookahead_expert_prefetch {
             int32_t layer = -1;
             int32_t bank = -1;
             int32_t n = 0;
-            int32_t ex[kMaxDepth];
+            int32_t ex[kJobCap];
             {
                 std::unique_lock<std::mutex> lk(mtx);
                 cv_go.wait(lk, [this]() { return quit || job_pending; });
@@ -547,6 +557,11 @@ struct llama_moe_slot_runtime::impl {
         std::vector<int32_t> slot_to_expert;
         std::vector<int32_t> expert_to_slot;
         std::vector<uint64_t> slot_age;
+        // route persistence (Hook-3a): bitmap of experts the previous window step
+        // actually used; kept out of eviction so the next spec verify batch (rows
+        // share the rolled-back prefix) re-hits them instead of re-reading
+        std::vector<uint8_t> prev_route;
+        std::vector<uint8_t> cur_route;
         uint64_t age = 0;
         std::mutex mutex;
     };
@@ -960,6 +975,8 @@ struct llama_moe_slot_runtime::impl {
         }
         // expert_to_slot 不能整体清：pending 的专家此时还没登记，所以直接全清是安全的。
         std::fill(st.expert_to_slot.begin(), st.expert_to_slot.end(), kSlotFree);
+        st.prev_route.clear();
+        st.cur_route.clear();
     }
 
     /// 预读：把一个预测专家读进**目标层自己的窗口**，与缓存共用同一片 slot 池。
@@ -1355,6 +1372,12 @@ struct llama_moe_slot_runtime::impl {
             moe_log("decode-cache: %s（窗口 %d slot，K=%d）",
                     prefetch_unified ? "预读与缓存共用一个 LRU 窗口" : "预读/缓存分区",
                     (int) (decode_window + prefetch_slots), (int) prefetch_slots);
+        }
+        {
+            // Hook-3a route persistence: keep the previous step's used experts out of
+            // eviction. Default on; LLAMA_MOE_ROUTE_KEEP=0 for A/B.
+            const char * rk = std::getenv("LLAMA_MOE_ROUTE_KEEP");
+            route_keep = !(rk && *rk && *rk == '0');
         }
 
         // 各层窗口起点**不再是 il*c** —— 现在每层有自己的 decode 张量
@@ -2477,6 +2500,8 @@ struct llama_moe_slot_runtime::impl {
     /// 分区当初是为了防「预读把缓存成批挤出去」，但那个前提已被 arm 时的过滤消掉：
     /// 预读每层每步只新增约 2.4 个（而不是 8 个），不会造成成批淘汰。
     bool prefetch_unified = true;
+    /// Hook-3a: evict-protect the previous window step's used expert set (see layer_state)
+    bool route_keep = true;
     bool was_window = false;
     /// 仅在 LLAMA_MOE_F_NOCACHE=auto（按阶段）时被翻转：prefill 绕、decode 不绕。
     /// 必须 atomic：主线程在 process() 里写它时**不持** fd_mutex，而 fd_for() 会被
@@ -2793,6 +2818,10 @@ int llama_moe_slot_runtime::window_max_rows() const {
     return (int) pimpl->window_max_rows;
 }
 
+bool llama_moe_slot_runtime::window_mode_for_rows(int n_rows) const {
+    return pimpl->decode_window > 0 && n_rows <= pimpl->window_max_rows;
+}
+
 void llama_moe_slot_runtime::park_expert_memory() {
     pimpl->park_expert_memory();
 }
@@ -2874,7 +2903,8 @@ void llama_moe_slot_runtime::process(
     // 上限由 window_max_rows 按缓存区容量夹紧（见 resolve_decode_window），
     // 「并集装不下」的风险在那里就被消掉，不会落到这里的运行期。
     const bool window_mode = pimpl->decode_window > 0 && n_rows <= pimpl->window_max_rows;
-    const bool lookahead_step = pimpl->lookahead.enabled && decode;
+    // verify 小批次（投机解码）与单 token 同走窗口 + 预读：pred 是逐行并集
+    const bool lookahead_step = pimpl->lookahead.enabled && (decode || window_mode);
 
     // auto 模式下按阶段切 experts 的缓存策略：prefill 绕过、decode 不绕过。
     //
@@ -3040,6 +3070,18 @@ void llama_moe_slot_runtime::process(
             }
         }
     }
+    // Hook-3a route persistence: next spec verify batch recomputes rolled-back rows,
+    // its route set is mostly the previous step's -> protect it from eviction.
+    if (window_mode && pimpl->route_keep && !state.prev_route.empty()) {
+        if (keep.empty()) {
+            keep.assign((size_t) pimpl->n_expert, 0);
+        }
+        for (size_t e = 0; e < state.prev_route.size() && e < keep.size(); ++e) {
+            if (state.prev_route[e]) {
+                keep[e] = 1;
+            }
+        }
+    }
 
     std::vector<llama_moe_slot_runtime::impl::pending_install> pending;
     pending.reserve((size_t) std::min((int32_t) pimpl->n_slots, pimpl->n_expert));
@@ -3165,6 +3207,11 @@ void llama_moe_slot_runtime::process(
     }
     pimpl->unique_sum.fetch_add(n_unique, std::memory_order_relaxed);
 
+    if (window_mode && pimpl->route_keep) {
+        state.prev_route = std::move(state.cur_route);
+        state.cur_route = requested;
+    }
+
     const llama_moe_slot_runtime::impl::install_timing timing =
         pimpl->install_pending(state, pending, window_mode);
     pimpl->install_ns.fetch_add(timing.wall_ns, std::memory_order_relaxed);
@@ -3205,7 +3252,10 @@ void llama_moe_slot_runtime::process(
         pimpl->lookahead.n_pred_cached.fetch_add(pred.size() - need_read.size(),
                                                  std::memory_order_relaxed);
         if (!need_read.empty()) {
-            pimpl->lookahead.arm(layer + 1, need_read);
+            // single token: read_n budget as before; multi-row verify: whole deduped
+            // union (rows share prefixes, need_read is already target-cache filtered)
+            const int32_t n_want = (n_rows > 1) ? (int32_t) need_read.size() : -1;
+            pimpl->lookahead.arm(layer + 1, need_read, n_want);
         }
         // 记下「给层 layer+1 的预测」，供 layer+1 的扫描记录用。
         // 注意预测本身是用层 layer 的 hidden 算的（见 qwen35moe.cpp），所以

@@ -134,3 +134,16 @@ P0(0.5d) → P1 桌面(0.5d) → **P2 GDN 门(0.5d)** → P1 移植收尾(1d) �
 | P6 基准矩阵 | ⏳ | 待小米13（dspark×视觉×bank 矩阵 + NMSE 复测 P2-2） |
 
 设备状态：小米13 `98fc9410` **USB 离线**（push/装机/真机验证全被卡）；`43328e37`（SM8750）在线但按约定不推模型。APK（含 P1/P5/P3/P4 全部改动）已产出在 `build\app\outputs\flutter-apk\app-debug.apk`，待回线 `adb install -r -t` + push 1.7GB 资产。
+
+---
+
+## 7. dspark 加速无效根因排查（2026-10-16，**用户定案：暂停，等 GPU 全卸载方案**）
+
+结论速览：第一层根因已修复入库；但按 830 实测的账，当前"MoE 流式 bank + GDN 快照回滚"架构上 dspark 期望收益极薄，停止现架构调优。
+
+1. **根因①（已修，commit `d7ca447`）**：JNI 建 dspark draft ctx 未设 `n_outputs_max/n_outputs_max_per_seq = n_draft_max+1`（官方 spec-init 有、App 没抄），draft ctx 挂了 backend sampler 后 `llama_process` 逐行拒绝：`backend sampling supports at most 1 outputs per sequence` → **ret=-1，草稿恒空**（"加速无效"第一真凶；App 侧 8 轮空草稿 auto-dead 掩盖了它）。harness 修复后 `[dspark-dbg] done result=15` 实锤草稿产出正常。APK 已装 K90（18:45 构建，覆盖安装）。
+2. **测量教训**：harness 曾混入 `common_speculative_accept` 重复调用（JNI 侧核对为单次、无误），此前 accept≈0 的数据被其污染；harness 已修（`_probe/moe_probe/minicpm_e2e.cpp`，含行对齐诊断/RS/回滚旁路/E2E_NDMAX/DKV 开关）。
+3. **830 成本账（why 停）**：verify 16 行 ≈4s（0.25s/行，MoE 流式按 unique 专家搬运、摊不平）；draft GPU ≈0.5s/轮；**首次 GDN `seq_rm` 回滚后每步 6.8–8.3s**（plain 同 prompt 0.42s/步；RS 槽位本身只 -18%，回滚动作是大头）。算术上限 accept=16 → ~3.6 tok/s（对 plain 2.4 仅 +48%），而 draft 头真实 accept_len 需 ≥3.5 才净赚，混合 GDN 上 16 行 verify 还引发专家窗口抖动。
+4. **RS 回滚机制备忘**（新架构会再遇到）：`llama_memory_recurrent::seq_rm` 仅当 `1≤rollback≤n_rs_seq` 且无未消费 pending 时经快照回滚，否则 return false（状态不回滚）；delta-net/dsv4 要求**尾部 `1+n_rs_seq` 个 token 必须同 ubatch**；App 里 MTP 用 checkpoint(get/set_data) 是另一条正确路径。
+5. **环境雷（全卸载前仍生效）**：`LOOKAHEAD_PREFETCH=16`+`WINDOW=16` → blk.0 base=1536 slots → q_img 151M px，830 `clCreateImage -40` 崩；8+8=896 在限内，勿加大。
+6. **未竟项（GPU 全卸载方案内重做）**：P2 同 seed greedy dspark on/off 逐 token 等值门；干净 accept 统计（harness `ab830.sh` 现成；注意默认 prompt 短、易一步 EOS，重测用 `GGML_E2E_PROMPT` 强制长回答 + `E2E_TEMP=0`）；dspark×plain 真机 A/B（验收：accept_len≥2.0、decode 中位 ≥+25%）。

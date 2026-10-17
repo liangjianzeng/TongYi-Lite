@@ -389,6 +389,17 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
         for (uint32_t i = 0; i < n_rs; ++i) {
             data[i] = mctx->s_copy(i);
         }
+
+        // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: log the per-call gather
+        // indices + head/rs_z. Host-side only — does not change execution
+        // granularity, so batched-vs-synced callback comparisons stay valid.
+        static const bool rs_dbg = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+        if (rs_dbg) {
+            fprintf(stderr, "[rsidx] n_rs=%d head=%u rs_z=%d idx:", (int) n_rs,
+                    mctx->get_head(), mctx->get_rs_z());
+            for (int64_t i = 0; i < n_rs && i < 8; ++i) fprintf(stderr, " %d", data[i]);
+            fprintf(stderr, "\n");
+        }
     }
 }
 
@@ -1137,6 +1148,9 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
 }
 
 void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
+    // [dspark 2026-10-18] entry trace: is this input's set_input called at all?
+    static const bool rs_dbg0 = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    if (rs_dbg0) fprintf(stderr, "[rsidx-h] set_input enter (s_copy=%d)\n", inp_rs->s_copy ? 1 : 0);
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
@@ -1159,6 +1173,17 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
         for (uint32_t i = 0; i < n_rs; ++i) {
             data[i] = mctx->get_recr()->s_copy(i);
+        }
+
+        // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: per-call gather indices +
+        // head/rs_z for the hybrid (linear-attn + full-attn) memory path.
+        // Host-side only; does not change execution granularity.
+        static const bool rs_dbg = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+        if (rs_dbg) {
+            fprintf(stderr, "[rsidx-h] n_rs=%d head=%u rs_z=%d idx:", (int) n_rs,
+                    mctx->get_recr()->get_head(), mctx->get_recr()->get_rs_z());
+            for (int64_t i = 0; i < n_rs && i < 8; ++i) fprintf(stderr, " %d", data[i]);
+            fprintf(stderr, "\n");
         }
     }
 }
@@ -1405,6 +1430,9 @@ void llm_graph_result::reset() {
 }
 
 void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
+    // [dspark 2026-10-18] entry trace: how many graph inputs get set_input?
+    static const bool rs_dbg0 = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    if (rs_dbg0) fprintf(stderr, "[rsidx] set_inputs n_inputs=%zu\n", inputs.size());
     for (auto & input : inputs) {
         input->set_input(ubatch);
     }

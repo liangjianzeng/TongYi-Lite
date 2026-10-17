@@ -264,7 +264,9 @@ __kernel void kernel_gemv_noshuffle_q5_0_f32(
 
     private float2 totalSum = (float2)(0.0f);
 
-    for (uint k = groupId; k < (K / QK5_0); k += NSUBGROUPS) {
+    // [dspark 2026-10-17] runtime K-split stride (host clamps y-split to 1 on rusticl)
+    uint nsg_rt = get_local_size(1);
+    for (uint k = groupId; k < (K / QK5_0); k += nsg_rt) {
         regS = src0_d[gid + k * LINE_STRIDE_A];
 
         ushort4 qh_raw;
@@ -307,26 +309,16 @@ __kernel void kernel_gemv_noshuffle_q5_0_f32(
 
     // reduction in local memory, assumes #wave=4
     local float2 reduceLM[SUBGROUP_SIZE * 3];
-    if (groupId == 1) {
-        reduceLM[SUBGROUP_SIZE * 0 + slid] = totalSum;
-    }
-    if (groupId == 2) {
-        reduceLM[SUBGROUP_SIZE * 1 + slid] = totalSum;
-    }
-    if (groupId == 3) {
-        reduceLM[SUBGROUP_SIZE * 2 + slid] = totalSum;
+    if (groupId > 0) {
+        reduceLM[SUBGROUP_SIZE * (groupId-1) + slid] = totalSum;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 0 + slid];
-    }
-    if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 1 + slid];
-    }
-    if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 2 + slid];
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
+            totalSum += reduceLM[SUBGROUP_SIZE * i + slid];
+        }
     }
 
     // 2 outputs per fiber in wave 0

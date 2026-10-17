@@ -268,7 +268,11 @@ kernel void kernel_gemv_noshuffle_q6_K_f32(
     int line_stride_a = ne01 / 2;
     int block_stride_a = NSUBGROUPS * ne01;
 
-    for (int k = grp; k < nb; k += NSUBGROUPS) {
+    // [dspark 2026-10-17] K-split stride is now the LAUNCH's y-size (was the
+    // compile-time NSUBGROUPS). The host clamps the y-split to 1 on generic
+    // runtimes (rusticl), so the loop must cover all blocks in that case.
+    uint nsg_rt = get_local_size(1);
+    for (int k = grp; k < nb; k += nsg_rt) {
         reg_d = src0_d[gid + k/8 * line_stride_a];
         reg_s = as_char4(src0_s[gid + k * line_stride_a]);
 
@@ -311,26 +315,16 @@ kernel void kernel_gemv_noshuffle_q6_K_f32(
     }
 
     local float2 reduce_lm[SUBGROUP_SIZE * 3];
-    if (grp == 1) {
-        reduce_lm[SUBGROUP_SIZE*0 + slid] = total_sum;
-    }
-    if (grp == 2) {
-        reduce_lm[SUBGROUP_SIZE*1 + slid] = total_sum;
-    }
-    if (grp == 3) {
-        reduce_lm[SUBGROUP_SIZE*2 + slid] = total_sum;
+    if (grp > 0) {
+        reduce_lm[SUBGROUP_SIZE*(grp-1) + slid] = total_sum;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (grp == 0) {
-        total_sum += reduce_lm[SUBGROUP_SIZE*0 + slid];
-    }
-    if (grp == 0) {
-        total_sum += reduce_lm[SUBGROUP_SIZE*1 + slid];
-    }
-    if (grp == 0) {
-        total_sum += reduce_lm[SUBGROUP_SIZE*2 + slid];
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
+            total_sum += reduce_lm[SUBGROUP_SIZE*i + slid];
+        }
     }
 
     if (grp == 0) {
@@ -381,7 +375,8 @@ kernel void kernel_gemv_noshuffle_q6_K_f32_mc3(
 
     float2  ts0 = 0.0f, ts1 = 0.0f, ts2 = 0.0f;
 
-    for (int k = grp; k < nb; k += NSUBGROUPS) {
+    uint nsg_rt = get_local_size(1);  // [dspark] runtime K-split stride
+    for (int k = grp; k < nb; k += nsg_rt) {
         reg_d = src0_d[gid + k/8 * line_stride_a];
         reg_s = as_char4(src0_s[gid + k * line_stride_a]);
 
@@ -437,16 +432,16 @@ kernel void kernel_gemv_noshuffle_q6_K_f32_mc3(
 
     local float8 reduce_lm[SUBGROUP_SIZE * 3];
     float8 acc = (float8)(ts0.s0, ts0.s1, ts1.s0, ts1.s1, ts2.s0, ts2.s1, 0.0f, 0.0f);
-    if (grp == 1) { reduce_lm[SUBGROUP_SIZE*0 + slid] = acc; }
-    if (grp == 2) { reduce_lm[SUBGROUP_SIZE*1 + slid] = acc; }
-    if (grp == 3) { reduce_lm[SUBGROUP_SIZE*2 + slid] = acc; }
+    if (grp > 0) {
+        reduce_lm[SUBGROUP_SIZE*(grp-1) + slid] = acc;
+    }
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (grp == 0) {
-        acc += reduce_lm[SUBGROUP_SIZE*0 + slid];
-        acc += reduce_lm[SUBGROUP_SIZE*1 + slid];
-        acc += reduce_lm[SUBGROUP_SIZE*2 + slid];
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
+            acc += reduce_lm[SUBGROUP_SIZE*i + slid];
+        }
         dst = (global float*)((global char*)dst + offsetd);
         // dst column-major [ne01 rows x 3 cols]: (row, col) at col*ne01 + row
         vstore2((float2)(acc.s0, acc.s1), 0, &(dst[0*ne01 + gid*2]));
