@@ -10134,6 +10134,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, m, 2, 1024, { 1, 1 }, { 1, 1 }));
     }
 
+    // [dspark 2026-10-17] MiniCPM-V4.7 exact dense GEMM shapes (e2e all-zero bisect).
+    // NOTE: keep in the EVAL list — a previous copy sat in make_test_cases_perf()
+    // where plain MODE_TEST runs never executed it.
+    // [dspark 2026-10-17 round2] e2e byte-diff pinned the first divergence on the
+    // FIRST q4_K GEMV (node_13: m=8192 n=22 k=4096) with identical inputs —
+    // k=4096 was never covered (suite only had k=2048). Test both.
+    for (int64_t kk : {2048, 4096}) {
+        for (int64_t m : {4096, 8192}) {
+            for (int bs : {1, 2, 22}) {
+                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, m, bs, kk, {1, 1}, {1, 1}));
+                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, m, bs, kk, {1, 1}, {1, 1}));
+            }
+        }
+    }
+
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
@@ -11488,7 +11503,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
 
     // [dspark 2026-10-17] MiniCPM-V4.7 exact dense GEMV shapes (e2e all-zero bisect)
     for (int64_t m : {4096, 8192}) {
-        for (int bs : {1, 2}) {
+        for (int bs : {1, 2, 22}) {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, m, bs, 2048, {1, 1}, {1, 1}));
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, m, bs, 2048, {1, 1}, {1, 1}));
         }

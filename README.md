@@ -473,7 +473,10 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   kgsl winsys 全链路跑通（SELinux 下 kgsl 为唯一通路），ir3 GEMV 判据 74%/108%/126% vs 高通  
   compiler（大形状反超）、录制税 ~2.5-3µs/op 达标；**740 真机正确性战役收官 op 级全绿（2026-10-17）**：
   FD740 subgroup 三铁律实锤 + 20+ 内核修复后 MUL_MAT 1001/1009 / SOFT_MAX 214/214 全对，
-  e2e 根因两实锤（FUSE mmap 垃圾页 / offload≥3 层 RS state 坏）详见总档 §12。
+  e2e 根因两实锤（FUSE mmap 垃圾页 / offload≥3 层 RS state 坏）+ 第三根因收窄
+  （CPY 写回审计实锤：批量执行下旧状态 gather GET_ROWS 恒读零 → conv 历史永不累积 →
+  gen-1 读垃圾；逐节点同步模式健康，layer 0 批量下幸存是关键线索；跨 call 异步 /
+  融合吞节点双证伪）详见总档 §12。
   构建配方与补丁集入库
   `third_party/mesa-kgsl/`；详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §11-§12。  
   batched MoE 的全 GPU 收益主战场在 **prefill 大分块 GEMM**（830 实测 149 t/s）。

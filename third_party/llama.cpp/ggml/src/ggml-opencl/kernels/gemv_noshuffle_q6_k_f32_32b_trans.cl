@@ -61,7 +61,10 @@ __kernel void kernel_gemv_noshuffle_q6_k_f32_32b_trans(
     __private float sum = 0.0f;
 
     // Loop over 32-element groups (2 sub-blocks of 16 each), N_SIMDGROUP groups per iter.
-    for (uint ib = sgid; ib < num_subblocks; ib += N_SIMDGROUP) {
+    // [dspark 2026-10-17] K-split stride is now the LAUNCH's y-size (was the
+    // compile-time N_SIMDGROUP); host clamps y-split to 1 on rusticl.
+    uint nsg_rt = get_local_size(1);
+    for (uint ib = sgid; ib < num_subblocks; ib += nsg_rt) {
         uint sb = ib / 8;   // super-block index
         uint j  = ib % 8;   // 32-element group within super-block (0..7)
 
@@ -150,7 +153,7 @@ __kernel void kernel_gemv_noshuffle_q6_k_f32_32b_trans(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     if (sgid == 0) {
-        for (uint i = 0; i < N_SIMDGROUP - 1; ++i) {
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
             sum += reduceLM[SIMDGROUP_WIDTH * i + slid];
         }
     }

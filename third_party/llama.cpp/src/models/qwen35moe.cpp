@@ -434,9 +434,11 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
 
         // LES-style lookahead prefetch: feed this layer's post-attn hidden into
         // the NEXT layer's router to predict its top-k experts and start the
-        // UFS read one layer early. Decode only (n_tokens == 1).
+        // UFS read one layer early. Decode single-token or verify small-batch
+        // (window phase); pred rows are unioned per row at runtime.
         ggml_tensor * lookahead_next = nullptr;
-        if (moe_slots && moe_slots->lookahead_prefetch_enabled() && ubatch.n_tokens == 1 &&
+        if (moe_slots && moe_slots->lookahead_prefetch_enabled() &&
+            (ubatch.n_tokens == 1 || moe_decode_phase) &&
             il + 1 < n_layer && model.layers[il + 1].ffn_gate_inp != nullptr) {
             ggml_tensor * prefetch_router_logits = build_lora_mm(model.layers[il + 1].ffn_gate_inp, attn_post_norm);
             cb(prefetch_router_logits, "prefetch_router_logits", il);

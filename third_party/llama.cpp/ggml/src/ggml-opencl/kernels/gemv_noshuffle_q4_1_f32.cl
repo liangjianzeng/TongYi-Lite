@@ -270,7 +270,9 @@ kernel void kernel_gemv_noshuffle_q4_1_f32(
     private float2 totalSum = (float2)(0.0f);
 
     // loop along K in block granularity, skip 4 blocks every iter
-    for (uint k = groupId; k < (K / QK4_0); k += NSUBGROUPS) {
+    // [dspark 2026-10-17] runtime K-split stride (host clamps y-split to 1 on rusticl)
+    uint nsg_rt = get_local_size(1);
+    for (uint k = groupId; k < (K / QK4_0); k += nsg_rt) {
         regS = src0_d[gid + k * LINE_STRIDE_A]; // each fiber loads scale of two rows
         regM = src0_m[gid + k * LINE_STRIDE_A]; // each fiber loads min of two rows
         // first 4 fibers in each wave load 8 B values to its private scope
@@ -303,26 +305,16 @@ kernel void kernel_gemv_noshuffle_q4_1_f32(
 
     // reduction in local memory, assumes #wave=4
     local float2 reduceLM[SUBGROUP_SIZE * 3];
-    if (groupId == 1) {
-        reduceLM[SUBGROUP_SIZE * 0 + slid] = totalSum;
-    }
-    if (groupId == 2) {
-        reduceLM[SUBGROUP_SIZE * 1 + slid] = totalSum;
-    }
-    if (groupId == 3) {
-        reduceLM[SUBGROUP_SIZE * 2 + slid] = totalSum;
+    if (groupId > 0) {
+        reduceLM[SUBGROUP_SIZE * (groupId-1) + slid] = totalSum;
     }
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 0 + slid];
-    }
-    if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 1 + slid];
-    }
-    if (groupId == 0) {
-        totalSum += reduceLM[SUBGROUP_SIZE * 2 + slid];
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
+            totalSum += reduceLM[SUBGROUP_SIZE * i + slid];
+        }
     }
 
     // 2 outputs per fiber in wave 0
@@ -389,7 +381,8 @@ kernel void kernel_gemv_noshuffle_q4_1_f32_mc3(
     private float2 ts2 = (float2)(0.0f);
     private float2 ts3 = (float2)(0.0f);
 
-    for (uint k = groupId; k < (K / QK4_0); k += NSUBGROUPS) {
+    uint nsg_rt = get_local_size(1);  // [dspark] runtime K-split stride
+    for (uint k = groupId; k < (K / QK4_0); k += nsg_rt) {
         regS = src0_d[gid + k * LINE_STRIDE_A];
         regM = src0_m[gid + k * LINE_STRIDE_A];
 
@@ -412,16 +405,14 @@ kernel void kernel_gemv_noshuffle_q4_1_f32_mc3(
     // cross-subgroup reduce: pack the (up to 4) columns' float2 into a float8.
     local float8 reduceLM[SUBGROUP_SIZE * 3];
     float8 acc = (float8)(ts0.s0, ts0.s1, ts1.s0, ts1.s1, ts2.s0, ts2.s1, ts3.s0, ts3.s1);
-    if (groupId == 1) { reduceLM[SUBGROUP_SIZE * 0 + slid] = acc; }
-    if (groupId == 2) { reduceLM[SUBGROUP_SIZE * 1 + slid] = acc; }
-    if (groupId == 3) { reduceLM[SUBGROUP_SIZE * 2 + slid] = acc; }
+    if (groupId > 0) { reduceLM[SUBGROUP_SIZE * (groupId-1) + slid] = acc; }
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (groupId == 0) {
-        acc += reduceLM[SUBGROUP_SIZE * 0 + slid];
-        acc += reduceLM[SUBGROUP_SIZE * 1 + slid];
-        acc += reduceLM[SUBGROUP_SIZE * 2 + slid];
+        for (uint i = 0; i < nsg_rt - 1; ++i) {
+            acc += reduceLM[SUBGROUP_SIZE * i + slid];
+        }
         dst = (global float*)((global char*)dst + offsetd);
         // dst is column-major [M rows x n_cols cols]: (row, col) at col*M + row
         vstore2((float2)(acc.s0, acc.s1), 0, &(dst[0 * M + gid * 2]));

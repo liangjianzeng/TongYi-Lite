@@ -878,6 +878,17 @@ struct InferenceEngine {
                         n_draft_max = cap;
                     }
                 }
+                // Let the verify batch (n_draft_max+1 rows) enter the MoE decode
+                // window: window reuse + lookahead prefetch across spec rounds.
+                // resolve_decode_window clamps rows back to what the per-layer
+                // window can actually hold, so an over-ambitious cap degrades to
+                // today's behavior, never to a throw.
+                if (split_moe && n_draft_max > 0 && !getenv("LLAMA_MOE_WINDOW_MAX_ROWS")) {
+                    char wr[16] = {};
+                    snprintf(wr, sizeof(wr), "%d", n_draft_max + 1);
+                    setenv("LLAMA_MOE_WINDOW_MAX_ROWS", wr, 1);
+                    LOGI("dspark: LLAMA_MOE_WINDOW_MAX_ROWS=%s (n_draft_max+1)", wr);
+                }
                 LOGI("DSpark draft model loaded (block_size=%d) -> n_draft_max=%d",
                      dspark_block_size, n_draft_max);
                 char dlog[96] = {};
@@ -1252,8 +1263,10 @@ struct InferenceEngine {
             dspark_params.ctx_other = context;          // mirror target hidden states
             dspark_params.n_ctx     = (uint32_t)ctx_val;
             dspark_params.n_batch   = ctx_params.n_batch;
-            dspark_params.type_k    = ctx_params.type_k;          // follow KV precision setting
-            dspark_params.type_v    = ctx_params.type_v;
+            // draft head trains with full-precision attention; official spec-init defaults
+            // draft cache to F16. Do NOT inherit the target's Q4_0 setting.
+            dspark_params.type_k    = GGML_TYPE_F16;
+            dspark_params.type_v    = GGML_TYPE_F16;
             dspark_params.n_ubatch  = ctx_params.n_ubatch;
             dspark_params.n_rs_seq  = 0;
             dspark_params.n_threads = ctx_params.n_threads;

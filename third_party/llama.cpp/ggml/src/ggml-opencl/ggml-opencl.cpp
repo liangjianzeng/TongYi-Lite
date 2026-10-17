@@ -8672,6 +8672,35 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
 static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 static void ggml_opencl_op_group_norm_fused(ggml_backend_t backend, ggml_tensor * gn_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 
+// [dspark 2026-10-17] GEMV K-split clamp for generic (rusticl/freedreno) runtimes.
+// The gemv_noshuffle family (q4_K base/glu/splitk, q6_K 32b_trans) assumes
+// subgroup == one y-wave (64 lanes): the vendor driver pins it via the
+// qcom_reqd_sub_group_size("half") attribute, but rusticl IGNORES the attribute.
+// With lws {64, nsg>=2} the WG has >=128 lanes -> the real subgroup spans TWO
+// y-rows (K-slices), so (a) the activation sub_group_broadcast sources a lane
+// running a DIFFERENT k (divergent control flow -> wrong activation), and (b)
+// the reduceLM[SUBGROUP_SIZE*(groupId-1) + slid] indexing overruns/collides
+// (slid reaches 127 for the second row of each 128-lane subgroup). Symptom:
+// TBO MUL_MAT q4_K/q6_K m=4096/8192 n=1 NaN (k=1024/2048) while every n>=2
+// (GEMM path) and m<512 (flat path) case passes.
+// Clamp: on generic runtimes run ONE y-wave per WG (WG={64,1} -> subgroup=64
+// == x-row, exact vendor semantics, no kernel edits). The K-split latency
+// hiding is lost for now; a proper cross-WG split-K is future work.
+// Override for experiments: GGML_OPENCL_GEMV_KSPLIT=<1..16> forces nsg_y.
+static size_t gemv_ksplit_y(size_t want) {
+    static const size_t forced = [] {
+        const char * e = getenv("GGML_OPENCL_GEMV_KSPLIT");
+        return (e && e[0]) ? (size_t)atoi(e) : 0;
+    }();
+    if (forced) {
+        return forced;
+    }
+    // GGML_OPENCL_FAKE_QCOM_REQD=1 marks a runtime without qcom subgroup pinning
+    // (rusticl/freedreno) -- same convention as the other generic-backend skips.
+    static const bool generic_subgroups = getenv("GGML_OPENCL_FAKE_QCOM_REQD") != NULL;
+    return generic_subgroups ? 1 : want;
+}
+
 static void ggml_cl_mul_mat_q4_k_glu_fused(ggml_backend_t backend, ggml_tensor * gate_tensor, ggml_tensor * up_tensor, ggml_tensor * glu_tensor) {
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
     GGML_ASSERT(gate_tensor && up_tensor && glu_tensor);
@@ -8764,7 +8793,7 @@ static void ggml_cl_mul_mat_q4_k_glu_fused(ggml_backend_t backend, ggml_tensor *
     // byte-identical to the per-op path. Keep the maxwg query as a further floor
     // for any driver that reports < 512.
     size_t maxwg = backend_ctx->get_kernel_workgroup_size(kernel);
-    size_t nsg_y = 8;
+    size_t nsg_y = gemv_ksplit_y(8);
     while (nsg_y > 1 && 64 * nsg_y > maxwg) { nsg_y >>= 1; }
     size_t local_work_size[3]  = { 64, nsg_y, 1 };
     size_t global_work_size[3] = { (size_t)CEIL_DIV(M / 2, 64) * 64, nsg_y, 1 };
@@ -10604,7 +10633,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->d));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
@@ -10796,7 +10830,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->d));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
@@ -10949,7 +10988,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &extra->m));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
@@ -11437,7 +11481,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->d));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
@@ -11979,12 +12028,45 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_uchar), &mask_F0));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
         CL_CHECK(clWaitForEvents(1, &evt));
         CL_CHECK(clReleaseMemObject(data_device));
+
+        // [verify] optional set_tensor self-check: read back the d sub-buffer and
+        // compare against the host source's per-block d (offset 108 in each 144B
+        // block). Isolates convert-kernel write integrity from restore/read bugs.
+        {
+            static const bool verify_set = [] {
+                const char * e = getenv("GGML_OPENCL_VERIFY_SET");
+                return e && e[0] == '1';
+            }();
+            if (verify_set) {
+                const size_t nblk2 = ggml_nelements(tensor)/ggml_blck_size(tensor->type);
+                std::vector<ggml_fp16_t> rb(nblk2);
+                CL_CHECK(clEnqueueReadBuffer(queue, extra->d, CL_TRUE, 0,
+                            nblk2 * sizeof(ggml_fp16_t), rb.data(), 0, NULL, NULL));
+                const unsigned char * hs = (const unsigned char *) data;
+                long mm = 0, first_mm = -1;
+                for (size_t b = 0; b < nblk2; b++) {
+                    ggml_fp16_t want;
+                    memcpy(&want, hs + (size_t) b * 144 + 0, 2); // block_q4_K: d@0
+                    if (memcmp(&rb[b], &want, 2) != 0) {
+                        mm++;
+                        if (first_mm < 0) first_mm = (long) b;
+                    }
+                }
+                fprintf(stderr, "[set-verify] %s nblk=%zu d_mismatch=%ld first=%ld\n",
+                        tensor->name, nblk2, mm, first_mm);
+            }
+        }
 
         tensor->extra  = extra;
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
@@ -12180,7 +12262,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_uchar), &mask_F0));
 
         size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
-        size_t local_work_size[] = {64, 1, 1};
+        // NOTE: pass NULL local size — nblocks is not always a multiple of 64 and
+        // strict runtimes (rusticl) reject non-uniform NDRange with -54, while the
+        // vendor driver silently accepts it. NULL lets the runtime pick a legal
+        // local size; the kernel processes exactly global_size blocks (no guard
+        // needed, no OOB tail).
+        size_t * local_work_size = nullptr;
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
@@ -21671,8 +21758,9 @@ static void ggml_cl_mul_mat_q4_1_f32_adreno(ggml_backend_t backend, const ggml_t
             CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int), &ne1));  // n_cols
         }
 
-        size_t local_work_size[3] = {64, 4, 1};
-        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, 4, 1};
+        size_t nsg_gemv = gemv_ksplit_y(4);  // [dspark] rusticl subgroup clamp
+        size_t local_work_size[3] = {64, nsg_gemv, 1};
+        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, nsg_gemv, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
@@ -21845,8 +21933,9 @@ static void ggml_cl_mul_mat_q5_0_f32_adreno(ggml_backend_t backend, const ggml_t
         CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3] = {64, 4, 1};
-        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, 4, 1};
+        size_t nsg_gemv = gemv_ksplit_y(4);  // [dspark] rusticl subgroup clamp
+        size_t local_work_size[3] = {64, nsg_gemv, 1};
+        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, nsg_gemv, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
@@ -22107,8 +22196,9 @@ static void ggml_cl_mul_mat_q5_1_f32_adreno(ggml_backend_t backend, const ggml_t
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3] = {64, 4, 1};
-        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, 4, 1};
+        size_t nsg_gemv = gemv_ksplit_y(4);  // [dspark] rusticl subgroup clamp
+        size_t local_work_size[3] = {64, nsg_gemv, 1};
+        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, nsg_gemv, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
@@ -22287,8 +22377,9 @@ static void ggml_cl_mul_mat_iq4_nl_f32_adreno(ggml_backend_t backend, const ggml
         CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3] = {64, 4, 1};
-        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, 4, 1};
+        size_t nsg_gemv = gemv_ksplit_y(4);  // [dspark] rusticl subgroup clamp
+        size_t local_work_size[3] = {64, nsg_gemv, 1};
+        size_t global_work_size[3] = {(size_t)CEIL_DIV(ne01/2, 64)*64, nsg_gemv, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
@@ -22948,6 +23039,87 @@ static void ggml_cl_mul_mat_q8_0_f32_adreno(ggml_backend_t backend, const ggml_t
 }
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+// [dspark 2026-10-17] e2e byte-diff bisect: dump the q4_K SoA planes exactly as
+// the GEMV kernels consume them (extra->d/dm/s subbuffers). Compare against the
+// same fields extracted from the CPU-side raw 144B blocks (d@0, dm@2, s@4).
+// GGML_OPENCL_DUMP_Q4K=<name-substr> gates it; one dump per tensor name.
+static void ggml_opencl_debug_dump_q4k_planes(ggml_backend_opencl_context * backend_ctx,
+                                              const ggml_tensor * src0,
+                                              ggml_tensor_extra_cl_q4_K * ex) {
+    static bool entry_once = [] {
+        const char * e = getenv("GGML_OPENCL_DUMP_Q4K");
+        GGML_LOG_INFO("ggml_opencl: dump_q4k entry, filter=%s\n", e ? e : "(null)");
+        return true;
+    }();
+    GGML_UNUSED(entry_once);
+    static const char * filter = getenv("GGML_OPENCL_DUMP_Q4K");
+    static bool name_once = [] { GGML_LOG_INFO("ggml_opencl: dump_q4k first src0=%s\n", "?"); return true; }();
+    GGML_UNUSED(name_once);
+    if (!filter || !strstr(src0->name, filter)) {
+        static int nm = 0;
+        if (strstr(src0->name, "attn_qkv") && nm++ < 5)
+            GGML_LOG_INFO("ggml_opencl: dump_q4k miss src0=%s ne=[%d,%d]\n", src0->name, (int) src0->ne[0], (int) src0->ne[1]);
+        return;
+    }
+    static std::set<std::string> done;
+    if (!done.insert(src0->name).second) return;
+    const int64_t nblk = (src0->ne[0] / 32) * src0->ne[1] * src0->ne[2] * src0->ne[3];
+    char sn[256]; size_t si = 0;
+    for (const char * c = src0->name; *c && si < sizeof(sn) - 1; c++)
+        sn[si++] = ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                    (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') ? *c : '_';
+    sn[si] = 0;
+    char fn[320];
+    auto dump = [&](cl_mem m, size_t bytes, const char * tag) {
+        std::vector<char> buf(bytes);
+        cl_int e = clEnqueueReadBuffer(backend_ctx->queue, m, CL_TRUE, 0, bytes,
+                                       buf.data(), 0, NULL, NULL);
+        if (e != CL_SUCCESS) { GGML_LOG_INFO("ggml_opencl: dump_q4k %s read err %d\n", tag, (int) e); return; }
+        snprintf(fn, sizeof(fn), "/data/local/tmp/cbddump/QPL_%s_%s.bin", sn, tag);
+        FILE * f = fopen(fn, "wb");
+        if (f) { fwrite(buf.data(), 1, bytes, f); fclose(f); }
+        GGML_LOG_INFO("ggml_opencl: dump_q4k %s (%zu B)\n", fn, bytes);
+    };
+    dump(ex->d,  (size_t) nblk * 2,  "dpl");
+    dump(ex->dm, (size_t) nblk * 2,  "dmpl");
+    dump(ex->s,  (size_t) nblk * 12, "spl");
+}
+
+// [dspark 2026-10-17] q6_K flat-kernel plane dump: ql/qh/s/d exactly as
+// kernel_mul_mv_q6_K_f32_flat consumes them. CPU-side reference extracts the
+// same fields from raw 210B blocks (ql@0, qh@128, scales@192, d@208).
+static void ggml_opencl_debug_dump_q6k_planes(ggml_backend_opencl_context * backend_ctx,
+                                              const ggml_tensor * src0,
+                                              ggml_tensor_extra_cl_q6_K * ex) {
+    static const char * filter = getenv("GGML_OPENCL_DUMP_Q6K");
+    if (!filter || !strstr(src0->name, filter)) return;
+    static std::set<std::string> done;
+    if (!done.insert(src0->name).second) return;
+    const int64_t nblk = (src0->ne[0] / 32) * src0->ne[1] * src0->ne[2] * src0->ne[3];
+    GGML_UNUSED(nblk);
+    char sn[256]; size_t si = 0;
+    for (const char * c = src0->name; *c && si < sizeof(sn) - 1; c++)
+        sn[si++] = ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                    (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') ? *c : '_';
+    sn[si] = 0;
+    char fn[320];
+    auto dump = [&](cl_mem m, size_t bytes, const char * tag) {
+        if (bytes == 0) { GGML_LOG_INFO("ggml_opencl: dump_q6k %s skip (0 B)\n", tag); return; }
+        std::vector<char> buf(bytes);
+        cl_int e = clEnqueueReadBuffer(backend_ctx->queue, m, CL_TRUE, 0, bytes,
+                                       buf.data(), 0, NULL, NULL);
+        if (e != CL_SUCCESS) { GGML_LOG_INFO("ggml_opencl: dump_q6k %s read err %d\n", tag, (int) e); return; }
+        snprintf(fn, sizeof(fn), "/data/local/tmp/cbddump/Q6PL_%s_%s.bin", sn, tag);
+        FILE * f = fopen(fn, "wb");
+        if (f) { fwrite(buf.data(), 1, bytes, f); fclose(f); }
+        GGML_LOG_INFO("ggml_opencl: dump_q6k %s (%zu B)\n", fn, bytes);
+    };
+    dump(ex->ql, (size_t) ex->size_ql, "ql");
+    dump(ex->qh, (size_t) ex->size_qh, "qh");
+    dump(ex->s,  (size_t) ex->size_s,  "s");
+    dump(ex->d,  (size_t) ex->size_d,  "d");
+}
+
 static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const ggml_tensor * src0,
                                                 const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
@@ -23001,6 +23173,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
 
         kernel = backend_ctx->kernel_gemv_noshuffle_q4_k_f32_32b_trans;
+        ggml_opencl_debug_dump_q4k_planes(backend_ctx, src0, extra0_q4_k);
         CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0_q4_k->q_img));
         CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem),   &extra0_q4_k->d));
         CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem),   &extra0_q4_k->dm));
@@ -23011,8 +23184,9 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3]  = { 64, 8, 1 };
-        size_t global_work_size[3] = { (size_t)ne01, 8, 1 };
+        size_t q4k32_nsg = gemv_ksplit_y(8);
+        size_t local_work_size[3]  = { 64, q4k32_nsg, 1 };
+        size_t global_work_size[3] = { (size_t)ne01, q4k32_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
         CL_CHECK(clReleaseMemObject(b_sub_buf));
@@ -23223,6 +23397,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
     const bool use_bin = use_q4_k_bin_kernels(backend_ctx, src0);
 
     static const bool trace_q4k = getenv("GGML_OPENCL_TRACE_Q4K") != nullptr;
+    ggml_opencl_debug_dump_q4k_planes(backend_ctx, src0, extra0_q4_k);
     if (trace_q4k) {
         GGML_LOG_INFO("ggml_opencl: q4_K mul_mat M=%d N=%d K=%d use_bin=%d force_gemm_n1=%d\n",
                       ne01, ne1, ne00, (int) use_bin, (int) force_gemm_n1);
@@ -23343,7 +23518,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             && !use_tiled && !use_q4k_o4 && !use_mc3 && ne01 <= 32768;
 
         if (use_splitk) {
-            const int    nsg    = 8;
+            ggml_opencl_debug_dump_q4k_planes(backend_ctx, src0, extra0_q4_k);
+            const int    nsg    = (int)gemv_ksplit_y(8);
             const int    ksplit = (ne01 <= 512) ? 8 : 4;   // -> ~32 total WGs
             const size_t gx     = (size_t)CEIL_DIV(ne01/2, 64) * 64;
 
@@ -23387,6 +23563,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
                : use_tiled  ? backend_ctx->kernel_gemv_noshuffle_q4_k_f32_tiled
                : use_q4k_o4 ? backend_ctx->kernel_gemv_noshuffle_q4_k_f32_o4
                             : backend_ctx->kernel_gemv_noshuffle_q4_k_f32;
+        ggml_opencl_debug_dump_q4k_planes(backend_ctx, src0, extra0_q4_k);
         if (trace_q4k) {
             GGML_LOG_INFO("ggml_opencl: q4_K GEMV branch: splitk=%d tiled=%d o4=%d mc3=%d M=%d\n",
                           (int) use_splitk, (int) use_tiled, (int) use_q4k_o4, (int) use_mc3, ne01);
@@ -23433,7 +23610,7 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             return !e || e[0] == '\0' || e[0] != '0';
         }();
         const bool   splitk_wide = splitk_wide_env && !use_tiled && !use_q4k_o4 && !use_mc3;
-        size_t       nsg_y       = splitk_wide ? 16 : 4;
+        size_t       nsg_y       = gemv_ksplit_y(splitk_wide ? 16 : 4);
         // Cap the wide K-split by the kernel's real max WG. X1-class drivers cap
         // this GEMV at 768 (< 64*16 = 1024), so an uncapped lws aborts the
         // dispatch with CL_INVALID_WORK_GROUP_SIZE (-54) and breaks ALL q4_K
@@ -24384,8 +24561,9 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno_ila(ggml_backend_t backend, const gg
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3]  = { 64, 8, 1 };
-        size_t global_work_size[3] = { (size_t)ne01, 8, 1 };
+        size_t q6k_nsg = gemv_ksplit_y(8);
+        size_t local_work_size[3]  = { 64, q6k_nsg, 1 };
+        size_t global_work_size[3] = { (size_t)ne01, q6k_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
         CL_CHECK(clReleaseMemObject(b_img));
@@ -24545,6 +24723,9 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
     cl_ulong offset1 = extra1->offset + src1->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
+    // [dspark 2026-10-17] q6_K plane dump at the adreno q6_K entry
+    ggml_opencl_debug_dump_q6k_planes(backend_ctx, src0, extra0_q6_K);
+
     const int ne00 = src0->ne[0];
     const int ne01 = src0->ne[1];
 
@@ -24689,8 +24870,9 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
                                  : use_o4
                                  ? (size_t) CEIL_DIV(ne01/4, 64) * 64
                                  : (size_t) CEIL_DIV(ne01/2, 64) * 64;
-        size_t local_work_size[3]  = {64, 4, 1};
-        size_t global_work_size[3] = {gws_x, 4, 1};
+        size_t q6k_nsg2 = gemv_ksplit_y(4);  // [dspark] rusticl subgroup clamp
+        size_t local_work_size[3]  = {64, q6k_nsg2, 1};
+        size_t global_work_size[3] = {gws_x, q6k_nsg2, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
@@ -24985,8 +25167,9 @@ static void ggml_cl_mul_mat_q5_K_f32_adreno_ila(ggml_backend_t backend, const gg
         CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 9, sizeof(cl_int),   &ne01));
 
-        size_t local_work_size[3]  = { 64, 8, 1 };
-        size_t global_work_size[3] = { (size_t)ne01, 8, 1 };
+        size_t q5k32_nsg = gemv_ksplit_y(8);
+        size_t local_work_size[3]  = { 64, q5k32_nsg, 1 };
+        size_t global_work_size[3] = { (size_t)ne01, q5k32_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
         CL_CHECK(clReleaseMemObject(b_img));
@@ -27799,6 +27982,8 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         case GGML_TYPE_Q6_K:
 #ifdef GGML_OPENCL_SOA_Q
             kernel = backend_ctx->kernel_mul_mv_q6_K_f32_flat;
+
+            ggml_opencl_debug_dump_q6k_planes(backend_ctx, src0, extra0_q6_K);
 
             if (backend_ctx->gpu_family == INTEL) {
                 nth0 = 16;

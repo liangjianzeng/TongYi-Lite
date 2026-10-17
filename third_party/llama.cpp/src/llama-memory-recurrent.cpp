@@ -85,10 +85,24 @@ llama_memory_recurrent::llama_memory_recurrent(
         ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
 
         if (offload) {
-            auto * dev = model.dev_layer(i);
-            buft = ggml_backend_dev_buffer_type(dev);
+            // [dspark 2026-10-17] LLAMA_RS_CACHE_CPU=1 pins the recurrent state
+            // cache to host memory. Workaround/diagnostic for the 740 full-GPU
+            // path: in-graph cpy state write-backs into the GPUOpenCL RS buffer
+            // silently lose data for layers >= 1 (layer 0 OK), corrupting every
+            // decode after prefill. Small cache (~63 MiB) so host residency is
+            // viable on unified-memory devices.
+            static const bool rs_cpu = []{
+                const char * e = getenv("LLAMA_RS_CACHE_CPU");
+                return e && e[0] == '1';
+            }();
+            if (!rs_cpu) {
+                auto * dev = model.dev_layer(i);
+                buft = ggml_backend_dev_buffer_type(dev);
 
-            dev_name = ggml_backend_dev_name(dev);
+                dev_name = ggml_backend_dev_name(dev);
+            } else {
+                dev_name = "CPU (LLAMA_RS_CACHE_CPU=1)";
+            }
         }
 
         LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);
