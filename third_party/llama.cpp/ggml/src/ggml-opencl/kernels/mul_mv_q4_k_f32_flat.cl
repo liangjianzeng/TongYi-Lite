@@ -18,6 +18,45 @@
 #define REQD_SUBGROUP_SIZE_128 __attribute__((qcom_reqd_sub_group_size("full")))
 #endif
 
+// [dspark 2026-10-17] WG={64,2}=128 on rusticl/ir3 forms ONE 128-lane subgroup
+// (vendor pins two 64-lane subgroups via qcom attr; reqd_sub_group_size is
+// IGNORED by rusticl, probe4). Kernels that assume 2x64 must therefore:
+//  - use get_local_id(0)/get_local_id(1) instead of subgroup lane/id queries,
+//  - reduce with a xor-32..1 butterfly: on vendor (sg=64) it is the full
+//    subgroup reduce; on rusticl (sg=128, lanes linearized x-fastest) it
+//    reduces exactly the 64 lanes of one y-row.
+// NOTE: no cl_khr_subgroup_shuffle pragma here — enabling it pulls the QCOM
+// enum section of the injected kernel header and collides with build defines.
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+// rusticl/freedreno: the injected kernel header exposes no prototype for the
+// core CL 3.0 sub_group_shuffle_* builtins (probe2/probe5), and a self-declared
+// prototype compiles but fails to lower (err=-6 at the call site). Also, the
+// WG={64,2} forms ONE 128-lane subgroup spanning both y-rows, so even a working
+// sub_group_reduce_add would mix rows. Reduce via local memory, grouped by the
+// get_local_id(1) y-row; x-fastest linearization makes id(0) the in-row lane.
+#define GGML_REDUCE64(v) do { \
+    const uint gry = get_local_id(1) * 64u + get_local_id(0); \
+    ggml_red[gry] = (v); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) < 32u) ggml_red[gry] += ggml_red[gry + 32u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) < 16u) ggml_red[gry] += ggml_red[gry + 16u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  8u) ggml_red[gry] += ggml_red[gry +  8u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  4u) ggml_red[gry] += ggml_red[gry +  4u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  2u) ggml_red[gry] += ggml_red[gry +  2u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  1u) ggml_red[gry] += ggml_red[gry +  1u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (v) = ggml_red[get_local_id(1) * 64u]; \
+} while(0)
+#else
+#define GGML_REDUCE64(v) do { (v) = sub_group_reduce_add((v)); } while(0)
+#endif
+
+
 //------------------------------------------------------------------------------
 // block_q4_K
 //------------------------------------------------------------------------------
@@ -85,12 +124,15 @@ kernel void kernel_mul_mv_q4_K_f32_flat(
     src1 = src1 + offset1;
     dst  = dst  + offsetd;
 
+    // scratch for the rusticl row reduction (must be at kernel function scope)
+    __local float ggml_red[128];
+
     ushort kmask1 = 0x3f3f;
     ushort kmask2 = 0x0f0f;
     ushort kmask3 = 0xc0c0;
 
-    int ix = get_sub_group_local_id()/8;
-    int it = get_sub_group_local_id()%8;
+    int ix = get_local_id(0)/8;
+    int it = get_local_id(0)%8;
     int iq = it/4;
     int ir = it%4;
 
@@ -99,7 +141,7 @@ kernel void kernel_mul_mv_q4_K_f32_flat(
     int r0 = get_group_id(0);
     int r1 = get_group_id(1);
     int im = get_group_id(2);
-    int first_row = (r0 * N_SIMDGROUP + get_sub_group_id()) * N_DST;
+    int first_row = (r0 * N_SIMDGROUP + get_local_id(1)) * N_DST;
 
     int i12 = im%ne12;
     int i13 = im/ne12;
@@ -195,9 +237,9 @@ kernel void kernel_mul_mv_q4_K_f32_flat(
     global float * dst_f32 = (global float *) dst + im*ne0*ne1 + r1*ne0;
 
     for (int row = 0; row < N_DST; ++row) {
-        all_sum = sub_group_reduce_add(sumf[row]);
+        all_sum = sumf[row]; GGML_REDUCE64(all_sum);
         if (first_row + row < ne01) {
-            if (get_sub_group_local_id() == 0) {
+            if (get_local_id(0) == 0) {
                 dst_f32[first_row + row] = all_sum;
             }
         }

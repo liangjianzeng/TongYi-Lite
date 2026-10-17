@@ -18,6 +18,45 @@
 #define REQD_SUBGROUP_SIZE_128 __attribute__((qcom_reqd_sub_group_size("full")))
 #endif
 
+// [dspark 2026-10-17] WG={64,2}=128 on rusticl/ir3 forms ONE 128-lane subgroup
+// (vendor pins two 64-lane subgroups via qcom attr; reqd_sub_group_size is
+// IGNORED by rusticl, probe4). Kernels that assume 2x64 must therefore:
+//  - use get_local_id(0)/get_local_id(1) instead of subgroup lane/id queries,
+//  - reduce with a xor-32..1 butterfly: on vendor (sg=64) it is the full
+//    subgroup reduce; on rusticl (sg=128, lanes linearized x-fastest) it
+//    reduces exactly the 64 lanes of one y-row.
+// NOTE: no cl_khr_subgroup_shuffle pragma here — enabling it pulls the QCOM
+// enum section of the injected kernel header and collides with build defines.
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+// rusticl/freedreno: the injected kernel header exposes no prototype for the
+// core CL 3.0 sub_group_shuffle_* builtins (probe2/probe5), and a self-declared
+// prototype compiles but fails to lower (err=-6 at the call site). Also, the
+// WG={64,2} forms ONE 128-lane subgroup spanning both y-rows, so even a working
+// sub_group_reduce_add would mix rows. Reduce via local memory, grouped by the
+// get_local_id(1) y-row; x-fastest linearization makes id(0) the in-row lane.
+#define GGML_REDUCE64(v) do { \
+    const uint gry = get_local_id(1) * 64u + get_local_id(0); \
+    ggml_red[gry] = (v); \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) < 32u) ggml_red[gry] += ggml_red[gry + 32u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) < 16u) ggml_red[gry] += ggml_red[gry + 16u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  8u) ggml_red[gry] += ggml_red[gry +  8u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  4u) ggml_red[gry] += ggml_red[gry +  4u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  2u) ggml_red[gry] += ggml_red[gry +  2u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    if (get_local_id(0) <  1u) ggml_red[gry] += ggml_red[gry +  1u]; \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    (v) = ggml_red[get_local_id(1) * 64u]; \
+} while(0)
+#else
+#define GGML_REDUCE64(v) do { (v) = sub_group_reduce_add((v)); } while(0)
+#endif
+
+
 //------------------------------------------------------------------------------
 // kernel_mul_mv_q6_K_f32_flat
 //------------------------------------------------------------------------------
@@ -165,6 +204,9 @@ kernel void kernel_mul_mv_q6_K_f32_flat(
 
     int nb = ne00/QK_K;
 
+    // scratch for the rusticl row reduction (must be at kernel function scope)
+    __local float ggml_red[128];
+
     int r0 = get_group_id(0);
     int r1 = get_group_id(1);
     int im = get_group_id(2);
@@ -172,7 +214,7 @@ kernel void kernel_mul_mv_q6_K_f32_flat(
     int i12 = im%ne12;
     int i13 = im/ne12;
 
-    int first_row = (N_SIMDGROUP * r0 + get_sub_group_id()) * N_DST;
+    int first_row = (N_SIMDGROUP * r0 + get_local_id(1)) * N_DST;
 
 #if defined(ADRENO_OLD_COMPILER)
     // 64-bit `ulong` integer arithmetic is miscompiled here -> the base-pointer byte
@@ -203,8 +245,8 @@ kernel void kernel_mul_mv_q6_K_f32_flat(
 #endif
     global float * yy         = (global float *) src1    + r1*ne10 + im*ne00*ne1;
 
-    int tid = get_sub_group_local_id()%(N_SIMDWIDTH/BLOCK_STRIDE); // within-super-block part, 0..15
-    int ix  = get_sub_group_local_id()/(N_SIMDWIDTH/BLOCK_STRIDE); // super-block selector, 0..BLOCK_STRIDE-1
+    int tid = get_local_id(0)%(N_SIMDWIDTH/BLOCK_STRIDE); // within-super-block part, 0..15
+    int ix  = get_local_id(0)/(N_SIMDWIDTH/BLOCK_STRIDE); // super-block selector, 0..BLOCK_STRIDE-1
     int ip  = tid/8;   // first or second half of (super) block (0 or 1)
     int il  = tid%8;   // each half has 8 parts, one per scale
     int n   = 4;       // 4 scales at a time (and 4 sums)
@@ -235,7 +277,7 @@ kernel void kernel_mul_mv_q6_K_f32_flat(
             if (first_row + row < ne01) {
 #if defined(ADRENO_OLD_COMPILER)
                 int dbg = (q6k_mask==0xFE && r0==0 && r1==0 && im==0 && row==0 && ib==0 &&
-                           ne00==256 && ne01==16 && get_sub_group_local_id()==0) ? 1 : 0;
+                           ne00==256 && ne01==16 && get_local_id(0)==0) ? 1 : 0;
                 sumf[row] += block_q_6_K_dot_y_flat(
                     blk_ql + row*nb*128, blk_qh + row*nb*64, blk_scales + row*nb*16, blk_d + row*nb,
                     ib, ip, is, l0, dbg, y0, y1, y2, y3);
@@ -254,14 +296,14 @@ kernel void kernel_mul_mv_q6_K_f32_flat(
     // is never 0xFE (the host always passes 0xFF), so the printf survives compilation
     // but never executes. FRAGILE: the exact set and placement of these guarded
     // printfs is load-bearing on E031.41 -- removing any one re-breaks q6_K.
-    if (q6k_mask==0xFE && r0==0 && r1==0 && im==0 && ne00==256 && ne01==16 && get_sub_group_local_id()<16) {
+    if (q6k_mask==0xFE && r0==0 && r1==0 && im==0 && ne00==256 && ne01==16 && get_local_id(0)<16) {
         printf("Q6KLANE lane=%d ip=%d il=%d is=%d l0=%d sumf0=%f\n",
-            get_sub_group_local_id(), ip, il, is, l0, sumf[0]);
+            get_local_id(0), ip, il, is, l0, sumf[0]);
     }
 #endif
     for (int row = 0; row < N_DST; row++) {
-        float tot = sub_group_reduce_add(sumf[row]);
-        if (get_sub_group_local_id() == 0 && first_row + row < ne01) {
+        float tot = sumf[row]; GGML_REDUCE64(tot);
+        if (get_local_id(0) == 0 && first_row + row < ne01) {
             dst[r1*ne0 + im*ne0*ne1 + first_row + row] = tot;
 #if defined(ADRENO_OLD_COMPILER)
             if (q6k_mask==0xFE && r0==0 && r1==0 && im==0 && row==0 && ne00==256 && ne01==16)

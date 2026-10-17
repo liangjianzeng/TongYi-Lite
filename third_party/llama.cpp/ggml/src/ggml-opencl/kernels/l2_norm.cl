@@ -55,7 +55,7 @@ kernel void kernel_l2_norm_f32(
     barrier(CLK_LOCAL_MEM_FENCE);
 
     // broadcast
-    for (uint i = get_local_size(0) / get_max_sub_group_size() / 2; i > 0; i /= 2) {
+    for (uint i = get_local_size(0) / get_sub_group_size() / 2; i > 0; i /= 2) {
        if (get_local_id(0) < i) {
            sum[get_local_id(0)] += sum[get_local_id(0) + i];
        }

@@ -1192,7 +1192,50 @@ struct ggml_backend_opencl_context {
         }
 #else
         GGML_UNUSED(tensor);
-        CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL));
+        // [dspark 2026-10-17] rusticl enforces CL_KERNEL_WORK_GROUP_SIZE
+        // strictly (-55 CL_INVALID_WORK_ITEM_SIZE) where the Adreno driver
+        // is lenient. Clamp the fastest-varying dimension to the per-kernel
+        // limit (queried once per kernel, cached), keeping divisibility.
+        static std::unordered_map<cl_kernel, std::pair<size_t, size_t>> wgs_cache; // {max_total, max_dim0}
+        size_t max_wgs, max_dim0;
+        auto wgs_it = wgs_cache.find(kernel);
+        if (wgs_it != wgs_cache.end()) {
+            max_wgs = wgs_it->second.first;
+            max_dim0 = wgs_it->second.second;
+        } else {
+            max_wgs = get_kernel_workgroup_size(kernel);
+            // per-device constant: max work item size per dimension
+            static size_t dev_max0 = 0;
+            if (dev_max0 == 0) {
+                size_t items[3] = {0, 0, 0};
+                clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(items), &items, NULL);
+                dev_max0 = items[0] ? items[0] : 1;
+            }
+            max_dim0 = dev_max0;
+            wgs_cache[kernel] = {max_wgs, max_dim0};
+        }
+        if (local_work_size) {
+            size_t ltotal = 1;
+            for (cl_uint i = 0; i < work_dim; i++) ltotal *= local_work_size[i];
+            size_t lim0 = max_wgs < max_dim0 ? max_wgs : max_dim0;
+            if (ltotal > max_wgs || local_work_size[0] > max_dim0) {
+                size_t rest = ltotal / (local_work_size[0] ? local_work_size[0] : 1);
+                size_t new0 = lim0 / (rest ? rest : 1);
+                while (new0 > 1 && global_work_size[0] % new0 != 0) new0--;
+                local_work_size[0] = new0 ? new0 : 1;
+            }
+        }
+        cl_int enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+        if (enq_err != CL_SUCCESS) {
+            // [dspark 2026-10-17] rusticl is stricter than Adreno about local
+            // sizes; fall back to driver-picked local and log the offender.
+            GGML_LOG_ERROR("ggml_opencl: enqueue err=%d tensor='%s' g={%zu,%zu,%zu} l={%zu,%zu,%zu} max_wgs=%zu; retrying with NULL local\n",
+                enq_err, tensor ? tensor->name : "?",
+                global_work_size[0], work_dim > 1 ? global_work_size[1] : 0, work_dim > 2 ? global_work_size[2] : 0,
+                local_work_size[0], work_dim > 1 ? local_work_size[1] : 0, work_dim > 2 ? local_work_size[2] : 0, max_wgs);
+            enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, NULL, 0, NULL, NULL);
+        }
+        CL_CHECK(enq_err);
 #endif
     }
 
@@ -1431,6 +1474,12 @@ static cl_program build_program_from_source_ex(cl_context ctx, cl_device_id dev,
         program_log[log_size] = '\0';
         clGetProgramBuildInfo(p, dev, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
         GGML_LOG_ERROR("ggml_opencl: kernel compile error (err=%d)%s%s:\n\n%s\n", err, tag ? " building " : "", tag ? tag : "", program_log);
+        // [dspark 2026-10-17] dump the failing translation unit for offline triage
+        if (const char * dump_env = getenv("GGML_OPENCL_DUMP_FAILED_SRC")) {
+            FILE * df = fopen(dump_env, "wb");
+            if (df) { fwrite(program_buffer, 1, strlen(program_buffer), df); fclose(df);
+                      GGML_LOG_ERROR("ggml_opencl: dumped failing src to %s\n", dump_env); }
+        }
         free(program_log);
         clReleaseProgram(p);
         if (fatal) {
@@ -1501,6 +1550,41 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
     std::string opts = compile_opts;
     if (backend_ctx->sgb_float_broken) {
         opts += " -DSGB_SCALAR_BROKEN";
+    }
+
+    // [dspark 2026-10-16] rusticl/freedreno: .cl kernels select the ADRENO_GPU
+    // branch via the compiler-predefined cl_qcom_reqd_sub_group_size macro;
+    // rusticl never predefines it, leaving N_DST/N_SUBGROUP_SIZE undefined
+    // (-11 undeclared identifiers). Inject a fake define so kernels take the
+    // Adreno branch; the unknown extension pragma and the qcom attribute both
+    // degrade to warnings on clang, and REQD_SUBGROUP_SIZE_* become no-ops.
+    // GGML_GENERIC_SUBGROUP_SHUFFLE guards the qcom_sub_group_shuffle_xor
+    // redirect inside the kernels (core CL 3.0 shuffle is used instead).
+    static const char * env_fake_qcom = getenv("GGML_OPENCL_FAKE_QCOM_REQD");
+    if (env_fake_qcom && env_fake_qcom[0] == '1') {
+        opts += " -D cl_qcom_reqd_sub_group_size=1"
+                " -D GGML_GENERIC_SUBGROUP_SHUFFLE=1";
+        // NOTE: do NOT define CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM here,
+        // and do NOT #define it in kernels either. rusticl predefines
+        // cl_qcom_subgroup_shuffle; its injected header declares the width
+        // ENUM and the kernels must pass the enum constant — the qcom shuffle
+        // builtin validates the width and rejects plain integers.
+        // NOTE: do NOT inject a qcom->core shuffle shim. The redirect recurses
+        // into itself (the inner name is painted blue) and surfaces as an
+        // implicit-declaration error. rusticl lowers the real qcom builtin.
+        // NOTE: self-declared `float sub_group_shuffle_xor(float, uint);`
+        // prototypes compile but fail to lower (err=-6 at the call site) —
+        // never hand-declare OpenCL builtins for this backend.
+    }
+
+    // [dspark 2026-10-17] Mesa/SPIR-V path: SPIR-V caps vector components at
+    // 16, so the 32-lane float32 accumulator in the batched MoE GEMM kernels
+    // cannot survive rusticl's SPIR-V pipeline (LLVM ERROR on v32 vector).
+    // GGML_MESA_SPIRV switches those kernels to a bit-identical lo/hi float16
+    // pair emulation (see kernels/*moe_*_f32_ns.cl REGC_* macros).
+    static const char * env_mesa = getenv("GGML_OPENCL_MESA_SPIRV");
+    if (env_mesa && env_mesa[0] == '1') {
+        opts += " -D GGML_MESA_SPIRV=1";
     }
 
     // Try the on-disk binary cache first. Falls through silently on miss or
@@ -2598,7 +2682,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-    // gemm_xmem_f16_f32_os8
+    // gemm_xmem_f16_f32_os8 — QCOM-intrinsic-only kernel
+    // (qcom_get_physical_sub_group_id / qcom_sub_group_constant_load8 / qcom_sub_group_sync).
+    // Skip on generic backends (GGML_OPENCL_FAKE_QCOM_REQD=1, rusticl/freedreno):
+    // host dispatch is already gated by GGML_OPENCL_ADRENO_XMEM_GEMM.
+    if (getenv("GGML_OPENCL_FAKE_QCOM_REQD") == NULL) {
     {
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
@@ -2621,11 +2709,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
+    }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-    // Adreno xmem SDPA
-    if (backend_ctx->gpu_family == GPU_FAMILY::ADRENO) {
+    // Adreno xmem SDPA — same QCOM-only intrinsics, same skip guard.
+    if (getenv("GGML_OPENCL_FAKE_QCOM_REQD") == NULL && backend_ctx->gpu_family == GPU_FAMILY::ADRENO) {
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "sdpa_xmem_f32_f16_os8.cl.h"
@@ -6813,6 +6902,7 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
 
     if (strstr(dev_ctx->device_name.c_str(), "Adreno") ||
         strstr(dev_ctx->device_name.c_str(), "Qualcomm") ||
+        strstr(dev_ctx->device_name.c_str(), "FD") || // Mesa freedreno (FD740=Adreno 740); gen parsed below from digits
         strstr(dev_ctx->device_version.c_str(), "Adreno")) {
         dev_ctx->gpu_family = GPU_FAMILY::ADRENO;
 
@@ -6862,8 +6952,12 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
+    // GGML_OPENCL_ALLOW_NO_SUBGROUP=1: bypass for Mesa rusticl (subgroups are
+    // core in CL 3.1 there; it just doesn't advertise the cl_khr_subgroups name)
+    static const char * env_allow_no_subgroup = getenv("GGML_OPENCL_ALLOW_NO_SUBGROUP");
     if (opencl_c_version.major == 3 && strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
-        strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
+        strstr(ext_buffer, "cl_intel_subgroups") == NULL &&
+        (env_allow_no_subgroup == NULL || env_allow_no_subgroup[0] == '0')) {
         GGML_LOG_WARN("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
         return false;
@@ -7139,6 +7233,15 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     }
     if (const char * env = getenv("GGML_OPENCL_F16_MROW")) {
         backend_ctx->f16_mrow = atoi(env) != 0;
+    } else if (getenv("GGML_OPENCL_FAKE_QCOM_REQD") != NULL) {
+        // [dspark 2026-10-17] rusticl/freedreno: mrow packs local {64, MROW=16}
+        // = 1024 work-items, but rusticl forms subgroups of size
+        // min(device_max=128, total_local) = 128, which SPANS two output rows.
+        // The per-row reduce_add then mixes two rows, and for ne00 > nsg*sgs
+        // (>2048) the ysh staging loop never fills the tail -> NaN. The kernel
+        // needs a pinned 64-lane subgroup (qcom attr) which rusticl cannot
+        // guarantee, so default it OFF there; GGML_OPENCL_F16_MROW=1 to force.
+        backend_ctx->f16_mrow = false;
     }
     if (const char * env = getenv("GGML_OPENCL_F16_MROW_RPT")) {
         const int v = atoi(env);
@@ -7186,8 +7289,15 @@ static void transpose_2d(
 
     size_t local_size[3] = {64, 1, 1};
     size_t global_size[3] = {(size_t)stride, (size_t)rows, 1};;
+    // [dspark 2026-10-17] rusticl rejects non-uniform NDRange with -54
+    // (CL_INVALID_WORK_GROUP_SIZE) where the Adreno driver silently accepts
+    // it. Fall back to driver-picked local size whenever the fixed {64,1,1}
+    // does not evenly divide the global size.
+    if (global_size[0] % local_size[0] != 0) {
+        local_size[0] = 0; // mark invalid -> dispatch with NULL below
+    }
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 3, NULL,
-        global_size, auto_local ? NULL : local_size, 0, NULL, NULL));
+        global_size, auto_local ? NULL : (local_size[0] ? local_size : NULL), 0, NULL, NULL));
 
     if (blocking) {
         CL_CHECK(clEnqueueCopyBuffer(backend_ctx->queue, trans, dst, 0, 0, size, 0, NULL, &evt));
@@ -9473,6 +9583,16 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             }
         case GGML_OP_GATED_DELTA_NET:
             {
+                // Debug escape hatch: force the op to the CPU backend to
+                // bisect e2e corruption (rusticl/freedreno bring-up).
+                static int disable_gdn = -1;
+                if (disable_gdn < 0) {
+                    const char * e = getenv("GGML_OPENCL_DISABLE_GDN");
+                    disable_gdn = (e && atoi(e) != 0) ? 1 : 0;
+                }
+                if (disable_gdn) {
+                    return false;
+                }
                 // Match the Vulkan backend: only F32 -> F32, S_v in {16, 32, 64, 128}.
                 if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
                     return false;
@@ -13919,11 +14039,16 @@ static void ggml_backend_opencl_svm_buffer_free_buffer(ggml_backend_buffer_t buf
     }
     if (ctx->raw_stage != nullptr) {
         ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer->buft->device);
+        if (ctx->svm != nullptr) {
+            // persistent map from alloc: release it before freeing the BO
+            clEnqueueUnmapMemObject(backend_ctx->queue, ctx->raw_stage, ctx->svm, 0, NULL, NULL);
+            clFinish(backend_ctx->queue);
+        }
         clReleaseMemObject(ctx->raw_stage);
     }
     if (ctx->svm != nullptr) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer->buft->device);
-        clSVMFree(backend_ctx->context, ctx->svm);
+        // [dspark 2026-10-17] fd_bo model: svm IS the persistent mapping of
+        // raw_stage (unmapped above); no separate clSVMFree allocation.
     }
     delete ctx;
 }
@@ -13968,10 +14093,14 @@ static ggml_backend_buffer_i ggml_backend_opencl_svm_buffer_interface = {
 
 static ggml_backend_buffer_t ggml_backend_opencl_svm_buft_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
     ggml_backend_opencl_context * backend_ctx = ggml_cl_init(buffer_type->device);
-    if (!backend_ctx->has_fgsvm) {
-        GGML_LOG_ERROR("%s: device has no FGSVM buffer support\n", __func__);
-        return nullptr;
-    }
+    // [dspark 2026-10-17] fd_bo persistent-map model (replaces FGSVM):
+    // rusticl/freedreno report no SVM caps and kgsl MAP_USER_MEM gives a
+    // non-host GPU VA (probed: gpuaddr 0x4000000000 != hostptr), so a
+    // pointer-identity SVM is unreachable. But a plain cl_mem with
+    // CL_MEM_ALLOC_HOST_PTR gives the SAME capability the bank needs:
+    // one BO, CPU writes via a persistent clEnqueueMap host mapping,
+    // GPU reads via the cl_mem (kernel-arg path). One copy of the data,
+    // standard OpenCL, works on vendor and Mesa alike.
     if (!backend_ctx->program_cache_initialized) {
         backend_ctx->program_cache = cl_program_cache_init(backend_ctx->device);
         backend_ctx->program_cache_initialized = true;
@@ -13979,23 +14108,29 @@ static ggml_backend_buffer_t ggml_backend_opencl_svm_buft_alloc_buffer(ggml_back
     load_cl_kernels(backend_ctx);
 
     size = std::max(size, (size_t)1);
-    void * svm = clSVMAlloc(backend_ctx->context,
-        CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER, size,
-        (cl_uint) backend_ctx->svm_mem_align);
-    if (svm == nullptr) {
-        GGML_LOG_ERROR("%s: clSVMAlloc %.2f MiB (align %zu) failed\n",
-            __func__, size / 1024.0 / 1024.0, backend_ctx->svm_mem_align);
+    auto * ctx = new ggml_backend_opencl_svm_buffer_context();
+    cl_int stage_err;
+    ctx->raw_stage = clCreateBuffer(backend_ctx->context,
+        CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, size, NULL, &stage_err);
+    if (ctx->raw_stage == nullptr) {
+        GGML_LOG_ERROR("%s: bank clCreateBuffer %.2f MiB failed (err %d)\n",
+            __func__, size / 1024.0 / 1024.0, stage_err);
+        delete ctx;
         return nullptr;
     }
-
-    auto * ctx = new ggml_backend_opencl_svm_buffer_context();
-    ctx->svm = svm;
-    cl_int stage_err;
-    ctx->raw_stage = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, size, NULL, &stage_err);
-    if (ctx->raw_stage == nullptr) {
-        GGML_LOG_WARN("%s: raw_stage clCreateBuffer %.2f MiB failed (err %d) — SVM direct path only\n",
-            __func__, size / 1024.0 / 1024.0, stage_err);
+    // persistent host mapping: preadv/memcpy loaders write it like a CPU
+    // buffer (is_host gate passes); freed after unmap in free_buffer.
+    cl_int map_err;
+    void * host = clEnqueueMapBuffer(backend_ctx->queue, ctx->raw_stage, CL_TRUE,
+        CL_MAP_READ | CL_MAP_WRITE, 0, size, 0, NULL, NULL, &map_err);
+    if (host == nullptr || map_err != CL_SUCCESS) {
+        GGML_LOG_ERROR("%s: persistent clEnqueueMap %.2f MiB failed (err %d)\n",
+            __func__, size / 1024.0 / 1024.0, map_err);
+        clReleaseMemObject(ctx->raw_stage);
+        delete ctx;
+        return nullptr;
     }
+    ctx->svm = host;
 
     return ggml_backend_buffer_init(buffer_type, ggml_backend_opencl_svm_buffer_interface, ctx, size);
 }
@@ -14050,9 +14185,9 @@ ggml_backend_buffer_type_t ggml_backend_opencl_svm_buft(ggml_backend_dev_t dev) 
         return nullptr;
     }
     ggml_backend_opencl_context * backend_ctx = ggml_cl_init(dev);
-    if (!backend_ctx->has_fgsvm) {
-        return nullptr;
-    }
+    // [dspark 2026-10-17] FGSVM gate removed: the fd_bo persistent-map model
+    // needs no SVM caps (plain cl_mem + clEnqueueMap). Works on vendor CL and
+    // Mesa/rusticl alike.
     g_svm_backend_ctx = backend_ctx;
     auto * dev_ctx = (ggml_backend_opencl_device_context *) dev->context;
     if (!dev_ctx->buffer_type_svm_init) {
@@ -14082,15 +14217,16 @@ void ggml_cl_svm_memcpy_async(void * dst_svm, const void * src_host, size_t size
 }
 
 int ggml_cl_svm_upload_mode(void) {
-    // [dspark M2 v2] raw upload route for the GPU slot bank:
-    //   1 (default) staged: preadv -> host staging; drain after wave join via
-    //               ggml_cl_moe_q3k_stage_pack (main thread, driver-safe)
-    //   0           preadv writes SVM directly + inline SVM-pointer pack
-    //   2           staged + inline CPU memcpy -> SVM + SVM-pointer pack (bank12)
+    // [dspark 2026-10-17] fd_bo persistent-map model: the bank BO is host-
+    // mapped, so route 0 (preadv writes the slot directly + cl_mem pack of
+    // the SAME BO) is zero-copy and becomes the default. Route 1 (staged
+    // host arena + WriteBuffer) and route 2 (memcpy + SVM pack, legacy) are
+    // kept for A/B.
     const char * e = getenv("LLAMA_MOE_UPLOAD");
     if (e && *e == '0') return 0;
     if (e && *e == '2') return 2;
-    return 1;
+    if (e && *e == '1') return 1;
+    return 0;
 }
 
 void ggml_cl_moe_q3k_ensure_planes(struct ggml_tensor * soa) {
@@ -14254,7 +14390,16 @@ void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int plane_slot, const v
         moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, raw_off);
         return;
     }
-    moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, false, nullptr, raw, 0);
+    // [dspark 2026-10-17] fd_bo model: `raw` is a persistent host mapping of
+    // bctx->raw_stage — the CPU wrote the slot via preadv directly into the
+    // BO. Pack reads the SAME cl_mem (never the host pointer; a bare host VA
+    // is not device-addressable on rusticl/kgsl — SVM pointer identity was
+    // probed false, kgsl MAP_USER_MEM gpuaddr != hostptr).
+    {
+        const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
+        cl_ulong raw_off = (cl_ulong) plane_slot * slot_bpe;
+        moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, raw_off);
+    }
 }
 
 // [dspark M2 v2] staged route done on the CALLER thread after the fill wave
@@ -14292,22 +14437,8 @@ static void moe_q3k_stage_pack_impl(struct ggml_tensor * soa, int plane_slot,
     auto * bctx = (ggml_backend_opencl_svm_buffer_context *) soa->buffer->context;
     GGML_ASSERT(bctx != nullptr);
     if (bctx->raw_stage == nullptr) {
-        // no staging buffer: fall back to the SVM-pointer pack path; the SVM
-        // slot must have been filled directly (LLAMA_MOE_STAGE=0)
-        std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
-        auto * extra = (ggml_tensor_extra_cl_q3_K *) soa->extra;
-        if (extra == nullptr) {
-            if (ev_out) {
-                *ev_out = nullptr;
-            }
-            return;
-        }
-        moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, false, nullptr,
-                             (const uint8_t *) soa->data + (size_t) plane_slot * (ggml_nbytes(soa) / (size_t) soa->ne[2]), 0);
-        if (ev_out) {
-            *ev_out = nullptr;
-        }
-        return;
+        // unreachable in the fd_bo model (alloc fails hard without the BO)
+        GGML_ABORT("ggml_cl_moe_q3k_stage_pack: bank BO missing");
     }
     const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
     const size_t raw_off = (size_t) plane_slot * slot_bpe;

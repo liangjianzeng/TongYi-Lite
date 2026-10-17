@@ -1,5 +1,10 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
+// NOTE: do NOT #define CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM here (or via
+// -D). rusticl predefines cl_qcom_subgroup_shuffle and its injected header
+// declares the width enum; shadowing it with a plain integer makes the real
+// qcom shuffle builtin reject the width ("valid Width ... is [CLK_...]").
+
 #ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #else
@@ -17,6 +22,18 @@
 #define REQD_SUBGROUP_SIZE_64  __attribute__((qcom_reqd_sub_group_size("half")))
 #define REQD_SUBGROUP_SIZE_128 __attribute__((qcom_reqd_sub_group_size("full")))
 #endif
+
+// [dspark 2026-10-17] rusticl/ir3 subgroup queries LIE: get_max_sub_group_size()
+// and get_sub_group_size() return the static device max (128 on FD740) regardless
+// of dispatch, while shuffle/reduce act on the real active lanes. Effective
+// subgroup size for stride loops is therefore min(max, local_size(0)); on vendor
+// Adreno the qcom attr pins max=64==local so the macro degenerates to max.
+#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE
+#define GGML_EFF_SGS (uint)((get_max_sub_group_size() < (uint)get_local_size(0)) ? get_max_sub_group_size() : (uint)get_local_size(0))
+#else
+#define GGML_EFF_SGS get_max_sub_group_size()
+#endif
+
 
 #ifdef cl_khr_subgroup_shuffle
 #pragma OPENCL EXTENSION cl_khr_subgroup_shuffle : enable
@@ -81,7 +98,7 @@ kernel void kernel_mul_mat_f16_f32_l4(
         global float4 * y4 = (global float4 *) (src1 + offset_src1);
 
         float sumf = 0;
-        for (int i = get_sub_group_local_id(); i < ne00/4; i += get_max_sub_group_size()) {
+        for (int i = get_sub_group_local_id(); i < ne00/4; i += GGML_EFF_SGS) {
             sumf += convert_float(x4[i].s0) * y4[i].s0;
             sumf += convert_float(x4[i].s1) * y4[i].s1;
             sumf += convert_float(x4[i].s2) * y4[i].s2;
@@ -156,7 +173,7 @@ kernel void kernel_mul_mat_f16_f32_l4_dr(
     }
 
     const int n_chunks = ne00 / 4;
-    const int sg_size  = get_max_sub_group_size();
+    const int sg_size  = GGML_EFF_SGS;
     const int lid      = get_sub_group_local_id();
 
     for (int i = lid; i < n_chunks; i += sg_size) {
@@ -185,8 +202,12 @@ kernel void kernel_mul_mat_f16_f32_l4_dr(
 #define MUL_MAT_F16_F32_L4_DR_LS_R2_MAX 8
 
 #ifdef ADRENO_GPU
+#if !defined(GGML_GENERIC_SUBGROUP_SHUFFLE)
 #pragma OPENCL EXTENSION cl_qcom_subgroup_shuffle : enable
 #define sub_group_shuffle_xor(val, mask) qcom_sub_group_shuffle_xor((val), (mask), CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM, 0.0f)
+#endif
+// [dspark 2026-10-16] GGML_GENERIC_SUBGROUP_SHUFFLE (rusticl/freedreno): no
+// qcom shuffle builtin; use the core CL 3.0 sub_group_shuffle_xor directly.
 
 REQD_SUBGROUP_SIZE_64
 kernel void kernel_mul_mat_f16_f32_l4_dr_ls(
@@ -428,7 +449,7 @@ kernel void kernel_mul_mat_f16_f32_l4_x8(
     dst  = (global float*)((global char *)dst  + offsetd);
 
     const int sgs_lid = get_sub_group_local_id();
-    const int sgs_sz  = get_max_sub_group_size();
+    const int sgs_sz  = GGML_EFF_SGS;
 
     const int r0_base = get_group_id(0) * N_ROWS_PER_WG;
     const int im      = get_group_id(2);
@@ -504,7 +525,7 @@ kernel void kernel_mul_mat_f16_f32_l4_y8(
     dst  = (global float*)((global char *)dst  + offsetd);
 
     const int sgs_lid = get_sub_group_local_id();
-    const int sgs_sz  = get_max_sub_group_size();
+    const int sgs_sz  = GGML_EFF_SGS;
 
     const int r0_base = get_group_id(0) * N_OUTS_PER_WG;
     const int im      = get_group_id(2);
@@ -766,7 +787,7 @@ kernel void kernel_mul_mat_f16_f32_l4_y8_gqa(
     dst  = (global float*)((global char *)dst  + offsetd);
 
     const int sgs_lid = get_sub_group_local_id();
-    const int sgs_sz  = get_max_sub_group_size();
+    const int sgs_sz  = GGML_EFF_SGS;
 
     const int r0_base = get_group_id(0) * N_DV_ROWS_Y8GQA;
     const int im_kv   = get_group_id(2);
@@ -964,7 +985,7 @@ kernel void kernel_mul_mat_f16_f32_l4_y8_gqa_img(
     dst  = (global float*)((global char *)dst  + offsetd);
 
     const int sgs_lid = get_sub_group_local_id();
-    const int sgs_sz  = get_max_sub_group_size();
+    const int sgs_sz  = GGML_EFF_SGS;
 
     const int r0_base = get_group_id(0) * N_DV_ROWS_Y8GQA;
     const int im_kv   = get_group_id(2);
