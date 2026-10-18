@@ -266,15 +266,10 @@ __kernel void kernel_gemv_noshuffle_q5_0_f32(
 
     private float2 totalSum = (float2)(0.0f);
 
-<<<<<<< fork
     // [dspark 2026-10-17] runtime K-split stride (host clamps y-split to 1 on rusticl)
     uint nsg_rt = get_local_size(1);
     for (uint k = groupId; k < (K / QK5_0); k += nsg_rt) {
-        regS = src0_d[gid + k * LINE_STRIDE_A];
-=======
-    for (uint k = groupId; k < (K / QK5_0); k += NSUBGROUPS) {
         regS = src0_d[gid_s + k * LINE_STRIDE_A];
->>>>>>> v0.7.0
 
         ushort4 qh_raw;
         qh_raw.s0 = src0_qh[gid_s + (4*k + 0) * LINE_STRIDE_A];

@@ -7182,17 +7182,12 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
-<<<<<<< fork
     // GGML_OPENCL_ALLOW_NO_SUBGROUP=1: bypass for Mesa rusticl (subgroups are
     // core in CL 3.1 there; it just doesn't advertise the cl_khr_subgroups name)
     static const char * env_allow_no_subgroup = getenv("GGML_OPENCL_ALLOW_NO_SUBGROUP");
-    if (opencl_c_version.major == 3 && strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
-        strstr(ext_buffer, "cl_intel_subgroups") == NULL &&
-        (env_allow_no_subgroup == NULL || env_allow_no_subgroup[0] == '0')) {
-=======
     if (opencl_c_version.major == 3 && strstr(ext_buffer.data(), "cl_khr_subgroups") == NULL &&
-        strstr(ext_buffer.data(), "cl_intel_subgroups") == NULL) {
->>>>>>> v0.7.0
+        strstr(ext_buffer.data(), "cl_intel_subgroups") == NULL &&
+        (env_allow_no_subgroup == NULL || env_allow_no_subgroup[0] == '0')) {
         GGML_LOG_WARN("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
         return false;
@@ -7263,15 +7258,10 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
 
     backend_ctx->adreno_cl_compiler_version = get_adreno_cl_compiler_version(driver_version.data());
     backend_ctx->has_vector_subgroup_broadcast =
-<<<<<<< fork
-        ((backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
-         (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17))
-        || getenv("GGML_OPENCL_FORCE_VSB") != nullptr;  // [dspark probe] force the _8_ macro variants on non-Adreno dev
-=======
         (backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
         (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17) ||
-        (backend_ctx->adreno_cl_compiler_version.type == E17);
->>>>>>> v0.7.0
+        (backend_ctx->adreno_cl_compiler_version.type == E17) ||
+        getenv("GGML_OPENCL_FORCE_VSB") != nullptr;  // [dspark probe] force the _8_ macro variants on non-Adreno dev
 
     // The q6_K flat mul_mat miscompile is a defect of the older E031 compilers, not a
     // property of any GPU generation: it reproduces on E031.38 (Adreno 642L) and E031.41
@@ -9609,15 +9599,11 @@ inline bool use_q4_0_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
         !backend_ctx->kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin) {
         return false;
     }
-<<<<<<< fork
-    return (tensor->ne[0] % 32 == 0) && (tensor->ne[1] % 64 == 0) &&
-           !is_moe_expert_weight(tensor);
-=======
 
     // bin kernels require ne2 == 1 and ne3 == 1 for weights
     return tensor->ne[2] == 1 && tensor->ne[3] == 1 &&
-           (tensor->ne[0] % 32 == 0) && (tensor->ne[1] % 64 == 0);
->>>>>>> v0.7.0
+           (tensor->ne[0] % 32 == 0) && (tensor->ne[1] % 64 == 0) &&
+           !is_moe_expert_weight(tensor);
 #else
     GGML_UNUSED(backend_ctx);
     GGML_UNUSED(tensor);
@@ -9757,16 +9743,11 @@ inline bool use_q4_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
         !backend_ctx->kernel_gemm_noshuffle_q4_k_f32_32b_trans_ila_a8_bin) {
         return false;
     }
-<<<<<<< fork
-    return (tensor->ne[0] % 256 == 0) && (tensor->ne[1] % 64 == 0) &&
-           !use_q4k_tiled(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor) &&
-           !is_moe_expert_weight(tensor);
-=======
     // bin kernels require ne2 == 1 and ne3 == 1 for weights
     return tensor->ne[2] == 1 && tensor->ne[3] == 1 &&
            (tensor->ne[0] % 256 == 0) && (tensor->ne[1] % 64 == 0) &&
-           !use_q4k_tiled(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor);
->>>>>>> v0.7.0
+           !use_q4k_tiled(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor) &&
+           !is_moe_expert_weight(tensor);
 #else
     GGML_UNUSED(backend_ctx);
     GGML_UNUSED(tensor);
@@ -10107,7 +10088,6 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             }
             return false;
         case GGML_OP_MUL_MAT_ID:
-<<<<<<< fork
             // [dspark 2026-10-13] The vendor Adreno MoE kernels are numerically
             // broken on Adreno 830 (SM8750, OpenCL 0800.71 / E031.47.18.49):
             // llama.cpp's own test-backend-ops fails for q4_0 (ERR ~0.4),
@@ -10143,19 +10123,6 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                     s_d  = (size_t)N * (K/256) * 2;
                     s_dm = (size_t)N * (K/256) * 2;
                     s_s  = (size_t)N * (K/256) * 12;
-=======
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-            if (ggml_get_op_params_i32(op, 3) == GGML_PREC_F32 &&
-                use_adreno_moe_kernels(backend_ctx, op->src[0])) {
-                return false;
-            }
-#endif
-            if (op->src[0]->type == GGML_TYPE_Q4_0 ||
-                op->src[0]->type == GGML_TYPE_Q8_0 ||
-                op->src[0]->type == GGML_TYPE_MXFP4) {
-                if (op->src[1]->type == GGML_TYPE_F32) {
-                    return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
->>>>>>> v0.7.0
                 }
                 // N%4: kernel_add_row works on float4; slice sizes must be
                 // sub-buffer-creatable at expert boundaries.
@@ -14977,7 +14944,6 @@ static void moe_q3k_stage_pack_impl(struct ggml_tensor * soa, int plane_slot,
     }
 }
 
-<<<<<<< fork
 void ggml_cl_moe_q3k_stage_pack(struct ggml_tensor * soa, int plane_slot, const void * src_host) {
     moe_q3k_stage_pack_impl(soa, plane_slot, src_host, true, nullptr);
 }
@@ -15018,7 +14984,7 @@ void ggml_cl_moe_q3k_stage_wait(void ** evs, int n) {
         }
     }
 }
-=======
+
 static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
     /* .get_name            = */ ggml_backend_opencl_buffer_type_get_name,
     /* .alloc_buffer        = */ ggml_backend_opencl_buffer_type_alloc_buffer,
@@ -15029,7 +14995,6 @@ static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
     /* .get_alloc_size_n    = */ NULL,
     /* .is_host             = */ NULL,
 };
->>>>>>> v0.7.0
 
 //
 // backend device

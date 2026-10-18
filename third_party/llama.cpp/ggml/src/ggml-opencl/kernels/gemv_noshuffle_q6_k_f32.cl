@@ -270,19 +270,13 @@ kernel void kernel_gemv_noshuffle_q6_K_f32(
     int gid_s = min(gid, line_stride_a - 1);
     int block_stride_a = NSUBGROUPS * ne01;
 
-<<<<<<< fork
     // [dspark 2026-10-17] K-split stride is now the LAUNCH's y-size (was the
     // compile-time NSUBGROUPS). The host clamps the y-split to 1 on generic
     // runtimes (rusticl), so the loop must cover all blocks in that case.
     uint nsg_rt = get_local_size(1);
     for (int k = grp; k < nb; k += nsg_rt) {
-        reg_d = src0_d[gid + k/8 * line_stride_a];
-        reg_s = as_char4(src0_s[gid + k * line_stride_a]);
-=======
-    for (int k = grp; k < nb; k += NSUBGROUPS) {
         reg_d = src0_d[gid_s + k/8 * line_stride_a];
         reg_s = as_char4(src0_s[gid_s + k * line_stride_a]);
->>>>>>> v0.7.0
 
         if (slid < 4) {
             reg_b.s0123 = read_imagef(src1, 0 + slid*2 + k*8);
@@ -388,13 +382,8 @@ kernel void kernel_gemv_noshuffle_q6_K_f32_mc3(
 <<<<<<< fork
     uint nsg_rt = get_local_size(1);  // [dspark] runtime K-split stride
     for (int k = grp; k < nb; k += nsg_rt) {
-        reg_d = src0_d[gid + k/8 * line_stride_a];
-        reg_s = as_char4(src0_s[gid + k * line_stride_a]);
-=======
-    for (int k = grp; k < nb; k += NSUBGROUPS) {
         reg_d = src0_d[gid_s + k/8 * line_stride_a];
         reg_s = as_char4(src0_s[gid_s + k * line_stride_a]);
->>>>>>> v0.7.0
 
         // weights loaded ONCE (hi: blocks 0-3, lo: blocks 4-7), reused x3 cols
         ql_hi.s0 = read_imageui(src0_ql, gid_s + k*block_stride_a + line_stride_a*0).x;
