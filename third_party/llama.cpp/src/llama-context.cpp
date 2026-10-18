@@ -2057,6 +2057,36 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+
+                // [dspark 2026-10-18] logits extraction probe: CBD-audited
+                // result_output inside the graph is CORRECT (max 31.34, CPU
+                // agrees), but this host read is garbage (max ~9.3). Identify
+                // the buffer/backend the extraction lands on vs what CBD read.
+                static const bool lgd_probe = [] { const char * e = getenv("LLAMA_LGD_PROBE"); return e && e[0] == '1'; }();
+                if (lgd_probe) {
+                    float mx = -1e30f; int am = -1;
+                    for (int64_t t = 0; t < n_outputs*n_vocab; t++) {
+                        if (logits_out[t] > mx) { mx = logits_out[t]; am = (int) t; }
+                    }
+                    const ggml_tensor * rn = t_logits->src[1];
+                    const ggml_tensor * hn = rn ? rn->src[0] : nullptr;
+                    LLAMA_LOG_INFO("[lgdprobe] ubatch t_logits name=%s buf=%s backend=%s ptr=%p data=%p | host max=%.4f argmax=%d n_outputs=%u n_vocab=%d | raw32: %08x %08x %08x %08x\n",
+                            t_logits->name,
+                            t_logits->buffer ? ggml_backend_buffer_name(t_logits->buffer) : "(null)",
+                            ggml_backend_name(backend_res),
+                            (void*) t_logits, (void*) t_logits->data,
+                            mx, am, n_outputs, (int) n_vocab,
+                            ((const uint32_t*) logits_out)[0], ((const uint32_t*) logits_out)[1],
+                            ((const uint32_t*) logits_out)[2], ((const uint32_t*) logits_out)[3]);
+                    if (rn) {
+                        LLAMA_LOG_INFO("[lgdprobe]   src1=%s buf=%s data=%p | src1->src0=%s buf=%s\n",
+                                rn->name,
+                                rn->buffer ? ggml_backend_buffer_name(rn->buffer) : "(null)",
+                                (void*) rn->data,
+                                hn ? hn->name : "-",
+                                hn && hn->buffer ? ggml_backend_buffer_name(hn->buffer) : "(null)");
+                    }
+                }
             }
         }
 

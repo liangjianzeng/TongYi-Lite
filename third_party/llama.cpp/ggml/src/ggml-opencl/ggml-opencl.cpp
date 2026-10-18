@@ -8929,6 +8929,32 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             continue;
         }
 
+        // [dspark 2026-10-18] graph-loop-level 8192-slot hunt: catches fused
+        // dispatches too (their outputs skip ggml_cl_compute_forward).
+        {
+            extern void * ggml_cl_idx_hunt_dev;
+            if (ggml_cl_idx_hunt_dev) {
+                static const bool offs_dbg2 = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+                static int hunt2_cnt = 0;
+                auto hunt2 = [&](ggml_tensor * t, int slot) {
+                    if (!offs_dbg2 || hunt2_cnt >= 200 || !t || !t->extra) return;
+                    ggml_tensor_extra_cl * ex = (ggml_tensor_extra_cl *) t->extra;
+                    if ((void *) ex->data_device != ggml_cl_idx_hunt_dev) return;
+                    const size_t s = (size_t)(ex->offset + t->view_offs);
+                    const size_t e = s + ggml_nbytes(t);
+                    if (s <= 8192 && e > 8192 && ggml_nbytes(t) > 0) {
+                        ++hunt2_cnt;
+                        fprintf(stderr, "[offs-y] node#%d slot%d op=%-12s name=%-28s off=%lu nbytes=%zu\n",
+                                i, slot, ggml_op_name(node->op), node->name,
+                                (unsigned long)s, ggml_nbytes(t));
+                    }
+                };
+                hunt2(node, 0);
+                hunt2(cgraph->nodes[i+1 < cgraph->n_nodes ? i+1 : i], 1);
+                hunt2(cgraph->nodes[i+2 < cgraph->n_nodes ? i+2 : i], 2);
+            }
+        }
+
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
             ggml_opencl_op_norm_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
             i += 2;
@@ -12596,9 +12622,34 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     ggml_tensor_extra_cl * extra = (ggml_tensor_extra_cl *) tensor->extra;
     GGML_ASSERT(extra);
 
+    // [dspark 2026-10-18] write-side offset probe for the rs_s_copy idx slot.
+    if (tensor->name && strstr(tensor->name, "rs_s_copy")) {
+        static int wr_cnt = 0;
+        if (wr_cnt < 200) {
+            ++wr_cnt;
+            fprintf(stderr, "[offs-wr] %s extra=%p dev=%p off=%lu+%zu size=%zu val0=%d ptr=%p q=%p\n",
+                    tensor->name, (void*)extra, (void*)extra->data_device, (unsigned long)extra->offset, offset, size,
+                    size >= 4 ? *(const int32_t *)data : -1, (void*)tensor, (void*)queue);
+        }
+    }
+
     CL_CHECK(clEnqueueWriteBuffer(
         queue, extra->data_device, CL_TRUE, extra->offset + offset,
         size, data, 0, NULL, NULL));
+
+    // [dspark 2026-10-18] immediate readback: is the write visible right after?
+    if (tensor->name && strstr(tensor->name, "rs_s_copy") && size >= 4) {
+        int32_t rb = 0;
+        clEnqueueReadBuffer(queue, extra->data_device, CL_TRUE, extra->offset + offset,
+                            4, &rb, 0, nullptr, nullptr);
+        static int rb_cnt = 0;
+        if (rb_cnt < 40) {
+            ++rb_cnt;
+            fprintf(stderr, "[offs-wr-rb] %s off=%lu wrote=%d readback=%d\n",
+                    tensor->name, (unsigned long)(extra->offset + offset),
+                    *(const int32_t *)data, rb);
+        }
+    }
 
     GGML_UNUSED(buffer);
 }
@@ -15042,6 +15093,10 @@ static void ggml_cl_nop(ggml_backend_t backend, const ggml_tensor * src0, const 
     UNUSED(dst);
 }
 
+// [dspark 2026-10-18] rs_s_copy idx scratch slot device pointer, captured by the
+// first cache_ gather and used by the clobber-hunter in ggml_cl_compute_forward.
+void * ggml_cl_idx_hunt_dev = nullptr;
+
 static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
     GGML_ASSERT(src0->extra);
@@ -15067,14 +15122,37 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
     cl_ulong offset1 = extra1->offset + src1->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
+    // [dspark 2026-10-18] GGML_CL_OFFS_DEBUG=1: log device-side offsets for the
+    // RS-cache gather chain (batch-mode GET_ROWS reads-zero investigation).
+    static const bool offs_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+    static int offs_cnt = 0;
+    // [dspark 2026-10-18] capture the idx scratch slot and hunt for ops whose
+    // outputs land on it (clobbering the shared rs_s_copy idx buffer).
+    static void * idx_dev = nullptr;
+    if (offs_dbg && !idx_dev && strstr(src0->name, "cache_")) {
+        idx_dev = (void *) extra1->data_device;
+        ggml_cl_idx_hunt_dev = idx_dev;
+    }
+    if (offs_dbg && offs_cnt < 400 && src0->name && strstr(src0->name, "cache_")) {
+        ++offs_cnt;
+        float s4[4] = {0,0,0,0}; int32_t iv = -1;
+        clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, sizeof(s4), s4, 0, nullptr, nullptr);
+        clEnqueueReadBuffer(backend_ctx->queue, extra1->data_device, CL_TRUE, offset1, sizeof(iv), &iv, 0, nullptr, nullptr);
+        fprintf(stderr, "[offs-gr] %-18s src dev=%p off=%lu view=%lu ne=[%d,%d] idxval=%d src4=%g %g %g %g | out off=%lu ne=[%d,%d] | idx_t=%s host=%d buf=%s ex_off=%lu voffs=%lu ptr=%p idxdev=%p q=%p\n",
+                src0->name, (void*)extra0->data_device, (unsigned long)extra0->offset, (unsigned long)src0->view_offs,
+                (int)ne00, (int)src0->ne[1], (int)iv, s4[0], s4[1], s4[2], s4[3],
+                (unsigned long)extrad->offset, (int)dst->ne[0], (int)dst->ne[1],
+                src1->name, ggml_backend_buffer_is_host(src1->buffer) ? 1 : 0,
+                src1->buffer ? ggml_backend_buffer_name(src1->buffer) : "-",
+                (unsigned long)extra1->offset, (unsigned long)src1->view_offs,
+                (void*)src1, (void*)extra1->data_device, (void*)backend_ctx->queue);
+    }
+
     cl_kernel kernel;
 
     switch (src0->type) {
         case GGML_TYPE_F32:
             kernel = backend_ctx->kernel_get_rows_f32;
-            break;
-        case GGML_TYPE_F16:
-            kernel = backend_ctx->kernel_get_rows_f16;
             break;
         case GGML_TYPE_Q4_0:
             kernel = backend_ctx->kernel_get_rows_q4_0;
@@ -30898,7 +30976,19 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
     cl_ulong offset0 = extra0->offset + src0->view_offs;
     cl_ulong offset1 = extra1->offset + src1->view_offs;
 
-    // A contiguous f32 -> f32 copy is a linear move. The kernel below maps one workgroup to
+    // [dspark 2026-10-18] RS-cache write-side offset probe (pairs with [offs-gr]).
+    static const bool offs_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+    static int offs_cnt = 0;
+    if (offs_dbg && offs_cnt < 400 && src1->name &&
+        (strstr(src1->name, "cache_") || strstr(src1->name, "conv_state_update"))) {
+        ++offs_cnt;
+        fprintf(stderr, "[offs-cp] %-18s src0=%s dev=%p off=%lu view=%lu ne=[%d,%d] | dst dev=%p off=%lu view=%lu ne=[%d,%d]\n",
+                src1->name, src0->name,
+                (void*)extra0->data_device, (unsigned long)extra0->offset, (unsigned long)src0->view_offs,
+                (int)src0->ne[0], (int)src0->ne[1],
+                (void*)extra1->data_device, (unsigned long)extra1->offset, (unsigned long)src1->view_offs,
+                (int)src1->ne[0], (int)src1->ne[1]);
+    }
     // each row, so a tensor with few long rows runs on a single compute unit; dispatch those
     // over the whole device instead. GGML_OPENCL_CPY_FLAT=0 restores the row-mapped path.
     static const bool cpy_flat_on = []{
@@ -32210,6 +32300,32 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
 
     ggml_tensor * src0 = tensor->src[0];
     ggml_tensor * src1 = tensor->src[1];
+
+    // [dspark 2026-10-18] clobber-hunter: flag any op whose output lands on the
+    // captured rs_s_copy idx scratch slot (dev ptr + offset 8192).
+    {
+        static void * idx_dev = nullptr;
+        extern void * ggml_cl_idx_hunt_dev;  // set by the get_rows probe below
+        if (ggml_cl_idx_hunt_dev) idx_dev = ggml_cl_idx_hunt_dev;
+        if (idx_dev && tensor->extra) {
+            ggml_tensor_extra_cl * ex = (ggml_tensor_extra_cl *) tensor->extra;
+            if ((void *) ex->data_device == idx_dev) {
+                const size_t start = (size_t)(ex->offset + tensor->view_offs);
+                const size_t end = start + ggml_nbytes(tensor);
+                if (start <= 8192 && end > 8192 && ggml_nbytes(tensor) > 0) {
+                    static int hunt_cnt = 0;
+                    if (hunt_cnt < 120) {
+                        ++hunt_cnt;
+                        fprintf(stderr, "[offs-x] op=%-12s name=%-28s off=%lu nbytes=%zu ne=[%d,%d] src0=%s\n",
+                                ggml_op_name(tensor->op), tensor->name,
+                                (unsigned long)start, ggml_nbytes(tensor),
+                                (int)tensor->ne[0], (int)tensor->ne[1],
+                                src0 ? src0->name : "-");
+                    }
+                }
+            }
+        }
+    }
 
     const bool any_on_device = tensor->extra
         || (src0 != nullptr && src0->extra)

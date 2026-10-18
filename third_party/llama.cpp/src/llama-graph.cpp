@@ -49,6 +49,21 @@ static ggml_tensor * build_attn_inp_kq_mask(
     return res;
 }
 
+// [dspark 2026-10-18] LLAMA_RS_CONST_IDX=1: for the single-seq slot runtime the
+// gather index is provably always 0 (head==0, cells[head].src0==0, no pending
+// rollback). Serve it from a persistent constant tensor living in the RS cache
+// buffer instead of a per-call host-written graph input. This removes s_copy
+// from the sched cross-backend copy / ggml-alloc region-reuse lifecycle
+// entirely — the root cause chain behind the OpenCL batched-mode GET_ROWS
+// reading garbage indices and producing all-zero outputs.
+static bool rs_const_idx_enabled() {
+    static const bool en = [] {
+        const char * e = getenv("LLAMA_RS_CONST_IDX");
+        return e && e[0] == '1';
+    }();
+    return en;
+}
+
 static bool can_reuse_kq_mask(
         ggml_tensor * kq_mask,
         const llama_kv_cache_context * mctx,
@@ -381,7 +396,7 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_n_rs();
 
-    if (s_copy) {
+    if (s_copy && !const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(s_copy->buffer));
         int32_t * data = (int32_t *) s_copy->data;
 
@@ -414,6 +429,9 @@ bool llm_graph_input_rs::can_reuse(const llm_graph_params & params) {
 
     res &= s_copy_main->ne[0]  == params.ubatch.n_seqs;
     res &= s_copy_extra->ne[0] == mctx->get_n_rs() - params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= const_idx == (rs_const_idx_enabled() && mctx->s_copy_is_const_zero());
 
     res &= head == mctx->get_head();
     res &= rs_z == mctx->get_rs_z();
@@ -1166,7 +1184,7 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -1205,6 +1223,9 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
     res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
     res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
 
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
+
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
 
@@ -1221,7 +1242,7 @@ void llm_graph_input_mem_hybrid_k::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -1247,6 +1268,9 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
 
     res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
     res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -1295,7 +1319,7 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -1335,6 +1359,9 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 
     res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
     res &= inp_rs->s_copy_extra->ne[0] == mctx->get_recr()->get_n_rs() - params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -3756,12 +3783,21 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
     const int64_t n_rs   = mctx_cur->get_n_rs();
     const int64_t n_seqs = ubatch.n_seqs;
 
-    inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
-    ggml_set_input(inp->s_copy);
-    ggml_set_name(inp->s_copy, "rs_s_copy");
+    ggml_tensor * s_copy_c = rs_const_idx_enabled() ? mctx_cur->get_s_copy_c() : nullptr;
 
-    inp->s_copy_main  = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
-    inp->s_copy_extra = ggml_view_1d(ctx0, inp->s_copy, n_rs - n_seqs, n_seqs * inp->s_copy->nb[0]);
+    if (s_copy_c && mctx_cur->s_copy_is_const_zero()) {
+        inp->const_idx    = true;
+        inp->s_copy       = s_copy_c;                                         // I32 [1], cache-resident, never written
+        inp->s_copy_main  = s_copy_c;                                         // n_seqs == n_rs == 1
+        inp->s_copy_extra = ggml_view_1d(ctx0, s_copy_c, 0, s_copy_c->nb[0]); // zero-sized, no-op gather
+    } else {
+        inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
+        ggml_set_input(inp->s_copy);
+        ggml_set_name(inp->s_copy, "rs_s_copy");
+
+        inp->s_copy_main  = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
+        inp->s_copy_extra = ggml_view_1d(ctx0, inp->s_copy, n_rs - n_seqs, n_seqs * inp->s_copy->nb[0]);
+    }
 
     inp->head = mctx_cur->get_head();
     inp->rs_z = mctx_cur->get_rs_z();
