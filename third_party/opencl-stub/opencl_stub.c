@@ -42,6 +42,7 @@ typedef void *(*pfn_clEnqueueReadBuffer)(void);
 typedef void *(*pfn_clEnqueueWriteBuffer)(void);
 typedef void *(*pfn_clEnqueueCopyBuffer)(void);
 typedef void *(*pfn_clCreateKernel)(void);
+typedef void *(*pfn_clGetKernelInfo)(void);
 typedef void *(*pfn_clGetKernelWorkGroupInfo)(void);
 typedef void *(*pfn_clGetKernelSubGroupInfo)(void);
 typedef void *(*pfn_clGetEventInfo)(void);
@@ -171,6 +172,9 @@ cl_int clEnqueueCopyBuffer(cl_command_queue command_queue, cl_mem src_buffer, cl
 }
 cl_kernel clCreateKernel(cl_program program, const char *kernel_name, cl_int *errcode_ret) {
     CL_FORWARD(clCreateKernel, (program, kernel_name, errcode_ret));
+}
+cl_int clGetKernelInfo(cl_kernel kernel, cl_kernel_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    CL_FORWARD(clGetKernelInfo, (kernel, param_name, param_value_size, param_value, param_value_size_ret));
 }
 cl_int clGetKernelWorkGroupInfo(cl_kernel kernel, cl_device_id device, cl_kernel_work_group_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     CL_FORWARD(clGetKernelWorkGroupInfo, (kernel, device, param_name, param_value_size, param_value, param_value_size_ret));

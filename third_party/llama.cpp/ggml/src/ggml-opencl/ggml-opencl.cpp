@@ -1201,6 +1201,36 @@ struct ggml_backend_opencl_context {
         return dev_max0;
     }
 
+    // [dspark 2026-10-18] Native subgroup size for a kernel at a given local
+    // size. The vendor driver pins sgs via qcom_reqd_sub_group_size, but
+    // rusticl IGNORES the attribute, so the fused rms_norm family's sum[]
+    // (indexed by native subgroup id and native lane id) needs a runtime-
+    // sized local allocation: with a nominal 64-float allocation and a real
+    // 128-lane subgroup, lanes >= 64 read uninitialized local memory and the
+    // mean diverges (decode degenerates to a repeated token). Falls back to
+    // the whole local size (always an upper bound of the subgroup size) when
+    // the query fails.
+    size_t get_native_subgroup_size(cl_kernel kernel, size_t local0) const {
+        static std::map<std::pair<cl_kernel, size_t>, size_t> cache;
+        cl_kernel key_k = kernel; size_t key_l = local0;
+        auto it = cache.find({key_k, key_l});
+        if (it != cache.end()) {
+            return it->second;
+        }
+        size_t nsg = 0;
+#if CL_TARGET_OPENCL_VERSION >= 210
+        const size_t lws_q[] = { local0, 1, 1 };
+        clGetKernelSubGroupInfo(kernel, device, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE,
+            sizeof(lws_q), lws_q, sizeof(nsg), &nsg, nullptr);
+#endif
+        if (nsg == 0) {
+            nsg = local0;
+        }
+        GGML_LOG_INFO("ggml_opencl: native subgroup size for %p lws=%zu -> %zu\n", (void*)kernel, local0, nsg);
+        cache[{key_k, key_l}] = nsg;
+        return nsg;
+    }
+
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
@@ -1261,9 +1291,14 @@ struct ggml_backend_opencl_context {
                 size_t new0 = lim0 / (rest ? rest : 1);
                 while (new0 > 1 && global_work_size[0] % new0 != 0) new0--;
                 local_work_size[0] = new0 ? new0 : 1;
-                GGML_LOG_WARN("ggml_opencl: local[0] clamped %zu -> %zu (max_wgs=%zu max_dim0=%zu) g0=%zu tensor='%s'\n",
+                // [dspark 2026-10-18] Kernel function name turns each clamp
+                // into a direct audit entry for row-per-group invariants.
+                char kname[128] = {0};
+                size_t kname_sz = 0;
+                clGetKernelInfo(kernel, CL_KERNEL_FUNCTION_NAME, sizeof(kname)-1, kname, &kname_sz);
+                GGML_LOG_WARN("ggml_opencl: local[0] clamped %zu -> %zu (max_wgs=%zu max_dim0=%zu) g0=%zu tensor='%s' kernel='%s'\n",
                     old0, local_work_size[0], max_wgs, max_dim0, global_work_size[0],
-                    tensor ? tensor->name : "?");
+                    tensor ? tensor->name : "?", kname);
             }
         }
         cl_int enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
@@ -8856,6 +8891,9 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         if (!ggml_is_contiguous_rows(mul->src[0]) || !ggml_is_contiguous_rows(mul->src[1])) {
             return false;
         }
+        // [dspark 2026-10-18] A/B TEMP-DISABLED: shape check coincided with a
+        // generation regression ('!'x48); re-enable per-site after locating
+        // the rejected site. The kernel-side row guard already prevents OOB.
     } else if (ops.size() == 3 && ops.begin()[0] == GGML_OP_NORM && ops.begin()[1] == GGML_OP_MUL && ops.begin()[2] == GGML_OP_ADD) {
         const ggml_tensor *norm = cgraph->nodes[node_idx];
         const ggml_tensor *mul  = cgraph->nodes[node_idx+1];
@@ -8875,6 +8913,7 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         if (!ggml_is_contiguous(norm->src[0]) || !ggml_is_contiguous(w) || !ggml_is_contiguous(b)) {
             return false;
         }
+        // [dspark 2026-10-18] A/B TEMP-DISABLED, see 2-op branch comment.
     } else if (ops.size() == 3 && ops.begin()[0] == GGML_OP_RMS_NORM && ops.begin()[1] == GGML_OP_MUL && ops.begin()[2] == GGML_OP_ADD) {
         // rms_norm(x) * w + b, fused (residual). Mirrors the RMS_NORM+MUL gate
         // plus the residual-add operand's constraints.
@@ -8907,6 +8946,7 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
             !ggml_is_contiguous_rows(b)) {
             return false;
         }
+        // [dspark 2026-10-18] A/B TEMP-DISABLED, see 2-op branch comment.
     } else if (ops.size() == 3 && ops.begin()[0] == GGML_OP_GROUP_NORM && ops.begin()[1] == GGML_OP_MUL && ops.begin()[2] == GGML_OP_ADD) {
         const ggml_tensor *gn = cgraph->nodes[node_idx];
         const ggml_tensor *mul = cgraph->nodes[node_idx+1];
@@ -9167,7 +9207,11 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
     CL_CHECK(clSetKernelArg(kernel, 30, sizeof(cl_ulong), &nb2));
     CL_CHECK(clSetKernelArg(kernel, 31, sizeof(cl_ulong), &nb3));
     CL_CHECK(clSetKernelArg(kernel, 32, sizeof(float),    &eps));
-    CL_CHECK(clSetKernelArg(kernel, 33, sizeof(float)*sgs, NULL));
+    // [dspark 2026-10-18] Size sum[] by the NATIVE subgroup size: the kernel
+    // indexes sum by native subgroup id / native lane id, and rusticl ignores
+    // the qcom reqd-subgroup-size attribute (nominal 64 != actual).
+    const size_t nsg_sum = backend_ctx->get_native_subgroup_size(kernel, (size_t)nth);
+    CL_CHECK(clSetKernelArg(kernel, 33, sizeof(float)*nsg_sum, NULL));
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 }
@@ -17550,7 +17594,11 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
     CL_CHECK(clSetKernelArg(kernel, 21, sizeof(cl_ulong),      &nb2));
     CL_CHECK(clSetKernelArg(kernel, 22, sizeof(cl_ulong),      &nb3));
     CL_CHECK(clSetKernelArg(kernel, 23, sizeof(float),         &eps));
-    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(float)*sgs,     NULL));
+    // [dspark 2026-10-18] Size sum[] by the NATIVE subgroup size (see the
+    // 3-op fused site): rusticl ignores qcom reqd-subgroup-size, so a nominal
+    // 64-float allocation leaves lanes >= 64 reading uninitialized local.
+    const size_t nsg_sum = backend_ctx->get_native_subgroup_size(kernel, (size_t)nth);
+    CL_CHECK(clSetKernelArg(kernel, 24, sizeof(float)*nsg_sum,     NULL));
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 }

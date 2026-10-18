@@ -321,8 +321,8 @@ kernel void kernel_gemv_noshuffle_q4_k_f32(
     uint gid_s = min(gid, LINE_STRIDE_A - 1);
 
     private uint4     regA;
-    private half2     regS;
-    private half2     regM;
+    private float2    regS;
+    private float2    regM;
     private float8    regB;
 
     private float2 totalSum = (float2)(0.0f);
@@ -341,8 +341,8 @@ kernel void kernel_gemv_noshuffle_q4_k_f32(
         get_scale_min_k4(j, sc0, M, &sv0, &mn0, mask_d6, mask_d4, mask_hi2);
         get_scale_min_k4(j, sc1, M, &sv1, &mn1, mask_d6, mask_d4, mask_hi2);
 
-        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));
-        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));
+        regS = convert_float2(d)  * convert_float2((uchar2)(sv0, sv1));
+        regM = convert_float2(dm) * convert_float2((uchar2)(mn0, mn1));
 
         if (slid < 4) {
             regB.s0123 = read_imagef(src1, (slid * 2 + k * 8));
@@ -471,7 +471,7 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_glu(
     uint BLOCK_STRIDE_A = 4 * M;
 
     private uint4  regA;
-    private half2  regS, regM;
+    private float2  regS, regM;
     private float8 regB;
 
     private float2 gateSum = (float2)(0.0f);
@@ -494,8 +494,8 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_glu(
         uchar sv0, mn0, sv1, mn1;                                                              \
         get_scale_min_k4(j, sc0, M, &sv0, &mn0, mask_d6, mask_d4, mask_hi2);                      \
         get_scale_min_k4(j, sc1, M, &sv1, &mn1, mask_d6, mask_d4, mask_hi2);                      \
-        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));         \
-        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));         \
+        regS = convert_float2(d)  * convert_float2((uchar2)(sv0, sv1));         \
+        regM = convert_float2(dm) * convert_float2((uchar2)(mn0, mn1));         \
         if (slid < 4) {                                                                        \
             regB.s0123 = read_imagef(src1, (slid * 2 + k * 8));                                \
             regB.s4567 = read_imagef(src1, (1 + slid * 2 + k * 8));                            \
@@ -592,7 +592,7 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_splitk(
     uint gid_s = min(gid, LINE_STRIDE_A - 1);
 
     private uint4  regA;
-    private half2  regS, regM;
+    private float2  regS, regM;
     private float8 regB;
     private float2 totalSum = (float2)(0.0f);
 
@@ -607,8 +607,8 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_splitk(
         uchar sv0, mn0, sv1, mn1;
         get_scale_min_k4(j, sc0, M, &sv0, &mn0, mask_d6, mask_d4, mask_hi2);
         get_scale_min_k4(j, sc1, M, &sv1, &mn1, mask_d6, mask_d4, mask_hi2);
-        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));
-        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));
+        regS = convert_float2(d)  * convert_float2((uchar2)(sv0, sv1));
+        regM = convert_float2(dm) * convert_float2((uchar2)(mn0, mn1));
         if (slid < 4) {
             regB.s0123 = read_imagef(src1, (slid * 2 + k * 8));
             regB.s4567 = read_imagef(src1, (1 + slid * 2 + k * 8));
@@ -770,7 +770,7 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_mc3(
     uint COL_STRIDE     = K / 4;   // float4 pixels per activation column
 
     private uint4  regA_hi, regA_lo;
-    private half2  regS, regM;
+    private float2  regS, regM;
     private float8 regB;
 
     private float2 ts0 = (float2)(0.0f);
@@ -800,8 +800,8 @@ kernel void kernel_gemv_noshuffle_q4_k_f32_mc3(
         get_scale_min_k4(j, sc0, M, &sv0, &mn0, mask_d6, mask_d4, mask_hi2);
         get_scale_min_k4(j, sc1, M, &sv1, &mn1, mask_d6, mask_d4, mask_hi2);
 
-        regS = convert_half2(convert_float2(d)  * convert_float2((uchar2)(sv0, sv1)));
-        regM = convert_half2(convert_float2(dm) * convert_float2((uchar2)(mn0, mn1)));
+        regS = convert_float2(d)  * convert_float2((uchar2)(sv0, sv1));
+        regM = convert_float2(dm) * convert_float2((uchar2)(mn0, mn1));
 
         // weights loaded ONCE, reused across the 3 columns
         regA_hi.s0 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
@@ -997,7 +997,7 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
                             + (ulong)js * dst_nb1 + (ulong)t * dst_nb2);
 
     private uint4  regA;
-    private half2  regS, regM;
+    private float2  regS, regM;
     private float8 regB;
     private half2  wq[16];
 
@@ -1006,8 +1006,8 @@ __kernel void kernel_mul_mat_id_q4_k_f32_batched(
     for (uint k = groupId; k < (K / 32); k += NSUBGROUPS) {
         float2 ts_prev = totalSum;   // KDBG: per-block contribution = delta
 
-        regS = serow[rp + k * M2];
-        regM = merow[rp + k * M2];
+        regS = convert_float2(serow[rp + k * M2]);
+        regM = convert_float2(merow[rp + k * M2]);
 
         if (slid < 4) {
             regB.s0123 = read_imagef(src1, bbase + (int)(slid * 2 + k * 8));
