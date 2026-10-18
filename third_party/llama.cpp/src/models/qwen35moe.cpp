@@ -41,7 +41,6 @@ void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
 void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
-<<<<<<< fork
     // ---- split-moe: routed experts synthesized as slot tensors (MiniCPM-V4.7 layout) ----
     // When an experts manifest is configured, the stripped -les gguf has no
     // ffn_*_exps tensors; synthesize them from the manifest onto a host-
@@ -158,14 +157,9 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
         return tensor;
     };
 
-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
-    int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
-=======
     const auto nf = nextn_flags(ml);
     const int trunk_flags = nf.trunk;
     const int mtp_flags   = nf.mtp;
->>>>>>> v0.7.0
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 

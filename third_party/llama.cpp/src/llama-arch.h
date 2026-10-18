@@ -45,12 +45,9 @@ enum llm_arch {
     LLM_ARCH_QWEN3VLMOE,
     LLM_ARCH_QWEN35,
     LLM_ARCH_QWEN35MOE,
-<<<<<<< fork
-    LLM_ARCH_DSPARK,
-=======
     LLM_ARCH_CLEF,
     LLM_ARCH_VLLM_DECISION2,
->>>>>>> v0.7.0
+    LLM_ARCH_DSPARK,
     LLM_ARCH_QWEN4EXP,
     LLM_ARCH_PHI2,
     LLM_ARCH_PHI3,

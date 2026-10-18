@@ -159,7 +159,10 @@ LLAMA_API bool llama_model_has_dspark_markov_head(const struct llama_model * mod
 // caller must allocate enough memory for out before calling
 LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out);
 
-<<<<<<< fork
+// same as above, but only the rows of the given tokens, in order (n_tokens * n_embd elements)
+// returns the number of elements written or 0 on error
+LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const llama_token * tokens, uint32_t n_tokens, float * out);
+
 //
 // dspark model metadata (fork API, kept for the speculative dspark driver)
 //
@@ -192,11 +195,6 @@ LLAMA_API bool llama_model_dspark_get_meta(const struct llama_model * model, lla
 LLAMA_API bool llama_model_dspark_get_markov(const struct llama_model * model,
                                              std::vector<float> &       w1,
                                              std::vector<float> &       w2);
-=======
-// same as above, but only the rows of the given tokens, in order (n_tokens * n_embd elements)
-// returns the number of elements written or 0 on error
-LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const llama_token * tokens, uint32_t n_tokens, float * out);
 
 // realtime models: number of tokens the output lags behind the audio input, used by mtmd; 0 if not applicable
 LLAMA_API uint32_t llama_model_n_tokens_delay(const struct llama_model * model);
->>>>>>> v0.7.0

@@ -396,7 +396,6 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_DFLASH_SELECTOR_RANK,    "%s.selector_rank"    },
     { LLM_KV_DFLASH_SELECTOR_TOP_K,   "%s.selector_top_k"   },
 
-<<<<<<< fork
     { LLM_KV_DSPARK_BLOCK_SIZE,                      "%s.dspark.block_size"                      },
     { LLM_KV_DSPARK_MASK_TOKEN_ID,                   "%s.dspark.mask_token_id"                   },
     { LLM_KV_DSPARK_TARGET_LAYERS,                   "%s.dspark.target_layers"                   },
@@ -409,7 +408,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_DSPARK_HIDDEN_CORRECTION,               "%s.dspark.hidden_correction"               },
     { LLM_KV_DSPARK_MARKOV_DEPLOY_EXPOSURE,          "%s.dspark.markov_deploy_exposure"          },
     { LLM_KV_DSPARK_CORRECTION_SIZE,                 "%s.dspark.correction_size"                 },
-=======
+
     { LLM_KV_LILICORR_HIDDEN_SIZE,       "lilicorr.hidden_size"      },
     { LLM_KV_LILICORR_CANDIDATE_TOPK,    "lilicorr.candidate_topk"   },
     { LLM_KV_LILICORR_NUM_HEADS,         "lilicorr.num_heads"        },
@@ -418,7 +417,6 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_LILICORR_LOGIT_SCALE,       "lilicorr.logit_scale"      },
     { LLM_KV_LILICORR_FACTOR_DIM,        "lilicorr.factor_dim"       },
     { LLM_KV_LILICORR_MLP_HIDDEN_SIZE,   "lilicorr.mlp_hidden_size"  },
->>>>>>> v0.7.0
 
     { LLM_KV_SHORTCONV_L_CACHE, "%s.shortconv.l_cache" },
     // sentence-transformers dense modules feature dims
