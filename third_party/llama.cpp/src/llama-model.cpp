@@ -360,15 +360,12 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_step35(params);
         case LLM_ARCH_SPARK2_5:
             return new llama_model_spark2_5(params);
-<<<<<<< fork
-        case LLM_ARCH_DSPARK:
-            return new llama_model_dspark(params);
-=======
         case LLM_ARCH_K2_HORIZON:
             return new llama_model_k2_horizon(params);
         case LLM_ARCH_KOLIBRI1:
             return new llama_model_kolibri1(params);
->>>>>>> v0.7.0
+        case LLM_ARCH_DSPARK:
+            return new llama_model_dspark(params);
         default:
             throw std::runtime_error(std::string("unsupported model architecture: '") + llm_arch_name(arch) + "'");
     }
@@ -1392,7 +1389,6 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
         gguf_kv.emplace(name, value);
     }
 
-<<<<<<< fork
     uint32_t hadamard_version = 0;
     ml.get_key("prism.hadamard.tied_output", hadamard_tied_output, false);
     if (ml.get_key("prism.hadamard.version", hadamard_version, false)) {
@@ -1554,9 +1550,6 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     } else if (hadamard_inverse_blocks.count("token_embd.weight") && !ml.get_weight("output.weight")) {
         throw std::runtime_error("a tied Hadamard output requires version 2 and tied_output=true");
     }
-=======
-    load_hparams_hadamard(ml);
->>>>>>> v0.7.0
 
     // get general kv
     ml.get_key(LLM_KV_GENERAL_NAME, name, false);
@@ -2084,14 +2077,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
-<<<<<<< fork
     // in-place split-moe reads the routed expert tensors straight from the gguf,
     // so those file tensors are intentionally not created here
     ml.done_getting_tensors(moe_experts_inplace());
-=======
-
-    ml.done_getting_tensors();
->>>>>>> v0.7.0
 
     if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
         LLAMA_LOG_INFO("%s: enabling prefetch for '%s'\n", __func__, per_layer_tok_embd->name);
@@ -2179,13 +2167,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                         throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
                     }
                     bufs.emplace_back(buf);
+                    mapped_from_file = true;
                 }
-<<<<<<< fork
-                bufs.emplace_back(buf);
-                buf_map.emplace(idx, buf);
-                mapped_from_file = true;
-=======
->>>>>>> v0.7.0
             }
         }
 
@@ -4432,30 +4415,15 @@ uint32_t llama_model_target_layer_ids_n(const struct llama_model * model) {
     return (uint32_t) model->target_layer_ids.size();
 }
 
-<<<<<<< fork
 bool llama_model_has_dspark_markov_head(const struct llama_model * model) {
     return model->dspark_markov_w1 != nullptr;
 }
 
-uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out) {
-    if (model->vocab.n_tokens() == 0 || model->tok_embd == nullptr) {
-        return 0;
-    }
-
-    const ggml_tensor * tensor = model->tok_embd;
-    const size_t nelements = ggml_nelements(tensor);
-    GGML_ASSERT(nelements <= UINT32_MAX); // for the return type
-
-    if (out == nullptr) {
-        return (uint32_t) nelements;
-    }
-=======
 // read rows [row0, row0 + n_rows) of a 2D tensor as F32
 static void llama_tensor_rows_to_f32(const ggml_tensor * tensor, int64_t row0, int64_t n_rows, float * out) {
     const size_t   nelements = (size_t) n_rows * tensor->ne[0];
     const size_t   offset    = (size_t) row0 * tensor->nb[1];
     const size_t   nbytes    = ggml_row_size(tensor->type, tensor->ne[0]) * n_rows;
->>>>>>> v0.7.0
 
     if (tensor->type == GGML_TYPE_F32) {
         ggml_backend_tensor_get(tensor, out, offset, nbytes);
@@ -4494,8 +4462,6 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
 
     return (uint32_t) nelements;
 }
-
-<<<<<<< fork
 
 // ---- split-moe (llama-moe-experts / llama-moe-slot) ----
 
@@ -4607,7 +4573,8 @@ const std::vector<int32_t> & llama_model::moe_layer_windows() const {
         }
     }
     return out;
-=======
+}
+
 uint32_t llama_model_n_tokens_delay(const struct llama_model * model) {
     return model->hparams.n_tokens_delay;
 }
@@ -4626,5 +4593,4 @@ uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const l
     }
 
     return n_tokens * (uint32_t) tensor->ne[0];
->>>>>>> v0.7.0
 }

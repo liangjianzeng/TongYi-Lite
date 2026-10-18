@@ -18,11 +18,8 @@
 
 struct llama_model;
 class llama_batch_allocr;
-<<<<<<< fork
 class llama_moe_slot_runtime;
-=======
 class llama_moe_cache;
->>>>>>> v0.7.0
 
 class llama_io_read_i;
 class llama_io_write_i;
@@ -320,14 +317,11 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
-<<<<<<< fork
     // dspark drafter: staged target-tap context window for the next decode call.
     // see llama_dspark_ctx in llama-graph.h for why this needs its own side channel
     // instead of riding batch.token/embd.
     llama_dspark_ctx dspark_ctx;
-=======
     llama_moe_cache_ptr moe_cache;
->>>>>>> v0.7.0
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     buffer_view<float> logits = {nullptr, 0};

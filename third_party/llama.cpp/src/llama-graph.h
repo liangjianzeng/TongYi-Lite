@@ -878,16 +878,13 @@ struct llm_graph_params {
     // n_tokens 不足以区分：单 token 的 prefill 与 decode 都是 1。
     bool                           moe_decode_phase = false;
     const llama_cross            * cross;
-<<<<<<< fork
     const llama_dspark_ctx *         dspark_ctx;
     bool                             dspark_has_context;
     int64_t                          dspark_ctx_rows;
     int64_t                          dspark_ctx_width;
     const llama_hadamard_rotations * hadamard_rotations;
     const llama_hadamard_rotations * hadamard_inverses;
-=======
     const llama_moe_cache        * moe_cache;
->>>>>>> v0.7.0
 
     const llama_prec_policy * prec_policy = nullptr;
 
@@ -1145,7 +1142,6 @@ struct llm_graph_context {
     llama_moe_slot_runtime       * moe_slots;
     bool                           moe_decode_phase;
     const llama_cross            * cross;
-<<<<<<< fork
     const llama_dspark_ctx *         dspark_ctx;
     bool                             dspark_has_context;
     int64_t                          dspark_ctx_rows;
@@ -1156,9 +1152,7 @@ struct llm_graph_context {
     // Transforms shared by folded weights on the same activation. Key is (input, rotation);
     // both must match. Valid for one graph build only.
     mutable std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hadamard_memo;
-=======
     const llama_moe_cache        * moe_cache;
->>>>>>> v0.7.0
 
     const llama_prec_policy * prec_policy;
 
