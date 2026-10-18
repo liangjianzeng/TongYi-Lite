@@ -4,7 +4,7 @@
 
 [
 
-![v0.3.3](https://img.shields.io/badge/v0.3.3-8B5CF6)
+![v0.3.4](https://img.shields.io/badge/v0.3.4-8B5CF6)
 
 ]
 
@@ -23,7 +23,7 @@
 > - **🤖 智能体引擎**——事件日志唯一真相源 + ReactLoopAgent 主循环 + 六段工具流水线 +  
 >   子代理 / Skills / MCP / 人格 / 计划模式（`/plan` → 审批 → 无人值守续跑）+  
 >   `AGENTS.md`，模型按需调用工具、工具真实执行并回填结果；
-> - **⚙️ 端侧模型引擎**——llama.cpp 上游 `b11267`（0.5.0）+ fork 增强（`spark2_5` / dspark 投机 /  
+> - **⚙️ 端侧模型引擎**——llama.cpp 上游 `0.7.0`（2026-10-18 四道门升级）+ fork 增强（`spark2_5` / dspark 投机 /  
 >   PTQ1_0 三元内核 / FWHT / Turnip 直载）JNI 直调 · Vulkan / OpenCL GPU 加速（Adreno 825 支持  
 >   Turnip 直载）+ KleidiAI CPU 加速 · MTP / dspark 投机解码 · **多轮 KV checkpoint/restore**（二次 prefill 34s → 4.4s）·  
 >   mtmd 视觉 · OOM 内存守卫；
@@ -70,7 +70,7 @@ TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应�
 | **🤖 智能体引擎**                   | 事件日志唯一真相源 + ReactLoopAgent 主循环（失败自动恢复）+ 六段工具流水线 + **子代理**（spawn/fork/fan-out/后台化）+ Skills（内置 17 个）/ Hooks / MCP 远程工具 / `AGENTS.md`；30+ 工具按档位与开关注册，沙箱授权 + 逐次审批；**可一键关闭**（关闭 = 简单聊天，本地小模型友好）                                                                                                                         |
 | **🎭 多人格（Persona）**            | 标准人格 + 用户自定义人格（名称 + 人设提示词），按场景切换；输入区 🎭 图标一键切换；切换自动重置 KV 缓存                                                                                                                                                                                                                                                        |
 | **📋 计划模式 + 无人值守**             | `/plan <任务>` 只读规划 → 计划卡提交审批 → 批准后结构化计划落库并**自动逐轮续跑**（goal 驱动，轮数可配）；对话内常驻计划活卡 + 计划面板逐步推进                                                                                                                                                                                                                             |
-| **⚙️ 端侧模型引擎**                  | llama.cpp 上游 `b11267`（0.5.0）+ **fork 增强树** JNI 直调（无 HTTP Server，MethodChannel/EventChannel 流式直通）：`spark2_5` / **dspark 整块投机** + **MTP 多 token 预测**（按模型独立开关）、**PTQ1_0 三元量化专用 GPU 内核**、FWHT、Turnip 直载、mtmd 视觉、OOM 内存守卫；mmap 加载 + 批量 prefill + 内置采样器 + 线程按 CPU 拓扑取核，纯 CPU 也可跑                                         |
+| **⚙️ 端侧模型引擎**                  | llama.cpp 上游 `0.7.0` + **fork 增强树** JNI 直调（无 HTTP Server，MethodChannel/EventChannel 流式直通）：`spark2_5` / **dspark 整块投机** + **MTP 多 token 预测**（按模型独立开关）、**PTQ1_0 三元量化专用 GPU 内核**、FWHT、Turnip 直载、mtmd 视觉、OOM 内存守卫；mmap 加载 + 批量 prefill + 内置采样器 + 线程按 CPU 拓扑取核，纯 CPU 也可跑                                         |
 | **GPU / CPU 加速**               | Vulkan + OpenCL 双 GPU 后端（运行时自动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 825 上 Vulkan 经 **Turnip（Mesa gen8）App 内直载**可用；PTQ1_0 三元量化专用 GPU 内核（详见[技术架构](#技术架构)）                                                                                                                                                       |
 | **🚀 自研 OpenCL batched MoE**   | **内核级通用能力，非单模型优化**：MUL_MAT_ID 单 dispatch gather（设备端 ids 直读、免逐专家 launch / 回读同步）——绕开 Adreno 驱动级 MUL_MAT_ID 数值 bug，受益面 = 所有量化已验证的 MoE 模型，**全 GPU decode/prefill**（Adreno 830 实测 prefill 149 t/s / decode 14–22 t/s）；q4_0（v0.3.0）→ q4_K host 预计算有效 scale（v0.3.1）逐档真机验证上线，**IQ2 / IQ3 在路线图**，未验证量化自动回退（详见[技术架构](#技术架构)） |
 | **⏩ 多轮 KV checkpoint/restore** | 长对话边界 checkpoint，恢复后仅对增量 token prefill——多轮对话二次 TTFT **34s → 4.4s**；短对话自动 full clear                                                                                                                                                                                                                                |
@@ -106,7 +106,7 @@ flutter build apk --debug
 flutter run -d <device_id>
 ```
 
-> ✅ **三方依赖已全部直接入库**：llama.cpp（上游 `b11267` 0.5.0 + fork 增强：`spark2_5` /  
+> ✅ **三方依赖已全部直接入库**：llama.cpp（上游 `0.7.0` + fork 增强：`spark2_5` /  
 > dspark 投机 / PTQ1_0 内核 / FWHT / Turnip 直载）、KleidiAI（v1.24.0）、OpenCL-Headers、  
 > opencl-stub 源码都在 `third_party/` 下；`edge_tts`（纯 Dart TTS 协议栈）与 `dartssh2` fork  
 > 同样 vendored 在 `third_party/`；`mesa-kgsl/`（rusticl+freedreno+kgsl 构建配方与补丁集，  
@@ -417,7 +417,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 │       无 HTTP Server · OpenAI 兼容 API 走 Dio（可选）                        │
 ├────────────────────────────────────────────────────────────────────────────┤
 │ Android 原生层：Kotlin (InferenceService/MainActivity/DevGitPlugin) → JNI    │
-│  ├─ third_party/ 全量入库：llama.cpp b11267+增强 · KleidiAI · OpenCL-Headers│
+│  ├─ third_party/ 全量入库：llama.cpp 0.7.0+增强 · KleidiAI · OpenCL-Headers│
 │  │   · opencl-stub · turnip 驱动 · edge_tts · dartssh2 fork（clone 即编译） │
 │  ├─ Chaquopy CPython 3.11（python_exec）· JGit 6.10（进程内 git）           │
 │  └─ sherpa-onnx + onnxruntime（端侧 ASR）· jniLibs 内置 busybox/libhardware │
@@ -443,7 +443,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   对应[下方](#dev-agent-开发模式)四级后端中的后三级）、Termux RUN_COMMAND intent（`termux_intent.dart`）、危险命令策略（`safety.dart`）。
 - `web_search/` — 直连搜索 provider 接入层（`lib/websearch/` 模块 + SearXNG 可选）。
 
-**② 端侧模型引擎（llama.cpp b11267 + fork 增强 · JNI 直调）** — 全部推理在本机完成：
+**② 端侧模型引擎（llama.cpp 0.7.0 + fork 增强 · JNI 直调）** — 全部推理在本机完成：
 
 - **多后端**：ggml-cpu（+ KleidiAI dotprod）、ggml-vulkan（Adreno 825 可经 **Turnip Mesa gen8 直载**）、  
   ggml-opencl（+ PTQ1_0 三元量化专用内核；MoE 模型走自研 batched MoE 全 GPU 路径，见下条）；  
@@ -686,14 +686,14 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 ## 版本更新
 
 > 版本历史依据 git 提交维护，详细变更见 [`CHANGELOG.md`](CHANGELOG.md)。  
-> ⚠️ 引擎版本口径：当前 `third_party/llama.cpp` 为 **上游 `b11267`（0.5.0）+ fork 增强树**  
-> （fe8156f → b11267 一步到位升级，commit `0909603`，保留全部 fork 资产：dspark/spark2_5、  
+> ⚠️ 引擎版本口径：当前 `third_party/llama.cpp` 为 **上游 `0.7.0` + fork 增强树**（2026-10-18 四道门升级，master@848bbda 分叉 merge `upgrade/v0.7.0`；历史：fe8156f → b11267(0.5.0) `0909603` → 0.7.0，保留全部 fork 资产：dspark/spark2_5、  
 > PTQ1_0 内核、FWHT、Turnip 直载、KleidiAI vendored、MTP）。
 
 | 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.3.4**（当前） | 2026-10-18 | **llama.cpp 0.5.0 → 0.7.0 主线升级（四道门全过）**：47 冲突 hunk 全解（opencl OOB clamp × nsg_rt 组合、hadamard 双系统、backend copy_input 迁移）；KleidiAI v1.31.0 vendored（**SME2 内核族入包**，per-family march + 运行时派发）；**REGC 宏守卫错位修复**（17 个 moe `_ns` 内核 Adreno 首爆，fork 潜伏 bug）；mtmd/clip MiniCPM-V 4.7 去重、common_batch C++ 化 JNI 包装。真机基准（小米13 Adreno 740 · bonsai-8b-q1_0 · OpenCL）：decode **1.3→1.6 tok/s（+27%）**、首 Tok **10.3s→5.3s（-49%）**。详见 `docs/fork升级v0.7.0主线方案_2026-10-18.md` |
 | **v0.3.3+**（Mesa 全 GPU · 主干）          | 2026-10-17       | **FD740 rusticl 正确性战役（M1 第一阶段）**：FD740 subgroup 三大铁律实锤（查询恒报 128 撒谎 / 真实 subgroup=min(128,WG) 跨行 / reqd_sub_group_size 被无视）→ 20+ 内核修复（EFF_SGS 步长、q4_K/q6_K flat shmem 树归约、10 个 moe 内核 slid 语义、F16_MROW 默认关）；**rusticl 原生实现 qcom shuffle builtin**（再翻案），编译链注入协议钉死三条禁令；op 级全绿（MUL_MAT 1001/1009、SOFT_MAX 214/214、GET_ROWS 21/21）；e2e 全 0 破案两根因实锤（**FUSE mmap 权重垃圾页**——外置存储禁 mmap、**GPU offload ≥3 层即坏**——RS state 首坏，CL API 层三探针洗清）+ 新诊断工具链（E2E_LOGITDUMP / E2E_CBD / E2E_NOMMAP / clprobe1-3）。详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §12 |
-| **v0.3.3**（当前）                       | 2026-10-16       | **LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收**：引擎扫整包 gguf header 绑定 114 个 `_exps.weight` 条目（per-entry offset 原地 readv 读专家，`init pack=seg pack_layers=38/38`），端侧**只下载官方单文件**（12.65GB，sha256 校验），**免 PC 打包 / 免分片传输**；小米13 实测 decode **1.6 t/s**（vs split-bins 0.9，+78%）、专家 I/O **1902 MiB/s**（zerocopy 100%）、PSS 913MB 无 lmkd。修复两 bug：① JNI `nativeLoadModel→load` 漏传 `moe_experts_bytes`（oom-guard 按 24.9GB 误拒整包）② bank 通配覆写泄漏到 in-place（slot 192MB×64=12.9GB 物理不可能，改强制 autoBank）。MiniCPM packed-bins 生产路径回归零变化。详见 `docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md`。versionCode 21 |
+| **v0.3.3**                       | 2026-10-16       | **LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收**：引擎扫整包 gguf header 绑定 114 个 `_exps.weight` 条目（per-entry offset 原地 readv 读专家，`init pack=seg pack_layers=38/38`），端侧**只下载官方单文件**（12.65GB，sha256 校验），**免 PC 打包 / 免分片传输**；小米13 实测 decode **1.6 t/s**（vs split-bins 0.9，+78%）、专家 I/O **1902 MiB/s**（zerocopy 100%）、PSS 913MB 无 lmkd。修复两 bug：① JNI `nativeLoadModel→load` 漏传 `moe_experts_bytes`（oom-guard 按 24.9GB 误拒整包）② bank 通配覆写泄漏到 in-place（slot 192MB×64=12.9GB 物理不可能，改强制 autoBank）。MiniCPM packed-bins 生产路径回归零变化。详见 `docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md`。versionCode 21 |
 | **v0.3.2**                               | 2026-10-15~16    | **智能 MoE 拆分加载（split-MoE）+ LES 落地 + GPU 路线双机定案**：权重剥离 `.experts/` 与 **in-place GGUF 直读**（seg fallback，免剥离）双形态；CPU slot bank 热稳态 830 实测 **8.07 t/s**（MiniCPM-V 4.7 35B-A3B，740 3.0–3.4）；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` 异步 / uploads race fix——bank23–32 共 14 腿零崩）；动态切点 rank0-miss 全延后 + MiniCPM-V 4.7 projector；**SCHED_STATS 插桩**（op 直方图 + 落点 buffer dump）+ **probe9 提交税探针**（OpenCL 9µs/op vs CPU 0.34µs，`cl_khr_command_buffer` 不暴露）→ decode CPU 混合守擂定案；CPU 岛收编（小权重豁免 + `GGML_OPENCL_SSM_A8X` 解锁，splits 203→83）；Mesa（rusticl/freedreno a8x）整图单提交路线立项（见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。versionCode 19+（主干） |
 | **v0.3.1**                             | 2026-10-14       | **q4_K batched MoE 修复上线**：根因定位为 Adreno E031 在线编译器损坏 `get_scale_min_k4` + 三平面 6-bit mask 重组代码形状 → **host 预计算有效 scale 平面**（`seff=d·sc` / `meff=dm·mn`，fp16 half2 行对打包，缺省自动回退 dense-loop），内核 scale 读取退化为 q4_0 同构纯 half2 加载；真机探针 **11/11 形状 NMSE=0~1e-6、重跑位级一致**（含 Ling-3.0-tiny 实际层形状），GPU bench 与 q4_0 batched 同档（gateup 199 µs）。versionCode 19                                                                                                                                         |
 | **v0.3.0**                           | 2026-10-14       | **OpenCL batched MoE（q4_0）**：MUL_MAT_ID 单 dispatch gather（设备端 ids，免逐专家 launch / ids 回读同步），Adreno 830 真机 prefill 149 t/s、decode 14–22 t/s；**P0 KV checkpoint/restore**（多轮对话二次 prefill 34s → 4.4s）；配套三崩溃修复（CL 内核 nullptr 写 / MoE 激活图宽度 / sort scratch 对齐）+ P3 专家桶排序（prefill 同专家列聚邻，权重 L2 复用）+ P4 激活图/子缓冲 8 槽缓存；**q4_K batched MoE 定案禁用**（Adreno 830 确定性乱码，5 种代码形状改写探针 NMSE 位级不变，根因待查，q4_K 走已验证 dense-loop）；新增 `_probe/moe_probe` 真机探针（NMSE 对照 / UNI / SAME / DUMP 诊断）。versionCode 18    |
