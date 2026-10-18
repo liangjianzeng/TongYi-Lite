@@ -9,6 +9,7 @@ typedef float __attribute__((ext_vector_type(8))) float8;
 #ifndef GGML_MESA_SPIRV
 typedef float __attribute__((ext_vector_type(32))) float32;
 #endif
+#endif
 
 // [dspark 2026-10-17] GGML_MESA_SPIRV: SPIR-V caps vectors at 16 components,
 // so the 32-lane float32 accumulator cannot survive rusticl's SPIR-V path.
@@ -30,7 +31,6 @@ typedef float __attribute__((ext_vector_type(32))) float32;
 #define REGC_HI  (reg_c.hi)
 #endif
 
-#endif
 
 
 #define QK_Q4_0 32
