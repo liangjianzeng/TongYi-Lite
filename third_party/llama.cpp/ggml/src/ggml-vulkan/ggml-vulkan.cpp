@@ -1,17 +1,9 @@
 #include "ggml-vulkan-common.h"
 
-<<<<<<< fork
 #if defined(__ANDROID__) || defined(__linux__)
 #include <dlfcn.h>
 #endif
 
-namespace {
-inline std::ostream & operator<<(std::ostream & os, vk::Buffer buffer) {
-    return os << static_cast<VkBuffer>(buffer);
-}
-}
-=======
->>>>>>> v0.7.0
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
