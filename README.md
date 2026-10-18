@@ -476,7 +476,15 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   e2e 根因两实锤（FUSE mmap 垃圾页 / offload≥3 层 RS state 坏）+ 第三根因收窄
   （CPY 写回审计实锤：批量执行下旧状态 gather GET_ROWS 恒读零 → conv 历史永不累积 →
   gen-1 读垃圾；逐节点同步模式健康，layer 0 批量下幸存是关键线索；跨 call 异步 /
-  融合吞节点双证伪）详见总档 §12。
+  融合吞节点双证伪）。**根因全案告破 + GPU 数值正确性证明（2026-10-18）**：
+  ① 根因 = sched 跨后端输入拷贝只注册一次（上游同构）+ ggml-alloc 区域复用，idx 拷贝
+  张量 4 字节区域被图尾 op 输出覆盖 → 后续 gather 读垃圾 idx 越界读零；修复为 per-split
+  注册 + 持久化常量 idx（`LLAMA_RS_CONST_IDX=1`，RS cache buffer 内常量 [0] 张量，
+  彻底脱离 sched 拷贝/区域复用生命周期）；② **CBD 逐节点审计（7.7 万节点 CPU vs GPU）
+  证明 GPU 全图计算数值正确**——31 个输出点 prefill+decode 全对齐（decode#1 logits
+  GPU 31.34 vs CPU 32.42，argmax 一致），dense/conv/融合全家族无罪；「GPU logits 偏低」
+  是读取假象（logits 读回缺少有效同步，等待类修复已全数证伪，悬案收敛到驱动级读回
+  副作用），详见总档 §12.9。
   构建配方与补丁集入库
   `third_party/mesa-kgsl/`；详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §11-§12。  
   batched MoE 的全 GPU 收益主战场在 **prefill 大分块 GEMM**（830 实测 149 t/s）。

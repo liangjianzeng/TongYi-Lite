@@ -337,6 +337,12 @@ public:
     ggml_tensor * s_copy_main;   // I32 [n_seqs]
     ggml_tensor * s_copy_extra;  // I32 [n_rs - n_seqs]
 
+    // [dspark 2026-10-18] true when s_copy points at the persistent constant
+    // zero tensor in the RS cache buffer (LLAMA_RS_CONST_IDX). set_input must
+    // skip the host write in that mode, and can_reuse must reject reuse when
+    // the desired mode flips.
+    bool const_idx = false;
+
     const llama_memory_recurrent_context * mctx;
 
     // used in view offsets, need to match for valid graph reuse

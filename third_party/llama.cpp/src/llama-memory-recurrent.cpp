@@ -51,8 +51,9 @@ llama_memory_recurrent::llama_memory_recurrent(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                // r and s per layer, plus the separate PLE conv row where the model has one
-                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
+                // r and s per layer, plus the separate PLE conv row where the model has one,
+                // plus the persistent constant gather index (LLAMA_RS_CONST_IDX)
+                /*.mem_size   =*/ size_t(((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer + 1)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -125,6 +126,14 @@ llama_memory_recurrent::llama_memory_recurrent(
             ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
             ggml_format_name(p, "cache_ple_r_l%d", i);
             p_l[i] = p;
+        }
+
+        // [dspark 2026-10-18] place the persistent constant gather index in the
+        // first (bottom-most) layer's buffer so the layer-0 GET_ROWS reads it
+        // without a cross-backend copy. Buffer clear below zeroes it to [0].
+        if (!s_copy_c) {
+            s_copy_c = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+            ggml_set_name(s_copy_c, "rs_s_copy_const");
         }
     }
 
@@ -1375,4 +1384,34 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
         }
     }
     return (int32_t)(idx * mem->size) + src0;
+}
+
+ggml_tensor * llama_memory_recurrent_context::get_s_copy_c() const {
+    return mem->s_copy_c;
+}
+
+bool llama_memory_recurrent_context::s_copy_is_const_zero() const {
+    if (is_full) {
+        return false;
+    }
+
+    if (mem->n != 1) {
+        return false;
+    }
+
+    const auto & cell = mem->cells[mem->head];
+
+    if (cell.src0 != 0) {
+        return false;
+    }
+
+    // a pending rollback snapshot would make s_copy(0) = rs_idx[seq]*size + src0 != 0
+    if (mem->n_rs_seq != 0 && !cell.seq_id.empty()) {
+        const llama_seq_id seq = *cell.seq_id.begin();
+        if (seq >= 0 && (size_t) seq < mem->rs_idx.size() && mem->rs_idx[seq] != 0) {
+            return false;
+        }
+    }
+
+    return true;
 }

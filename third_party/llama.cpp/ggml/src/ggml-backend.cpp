@@ -1374,6 +1374,15 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
                 if (src_backend_id != cur_backend_id && !ggml_backend_sched_buffer_supported(sched, src, cur_backend_id)) {
                     // create a copy of the input in the split's backend
+                    // [dspark] probe: log every cross-backend src registration
+                    static const bool p5_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+                    static int p5_cnt = 0;
+                    if (p5_dbg && p5_cnt < 120) {
+                        ++p5_cnt;
+                        fprintf(stderr, "[offs-p5] i_split=%d node=%s op=%s src=%s already=%d\n",
+                                i_split, node->name, ggml_op_name(node->op), src->name,
+                                tensor_id_copy(src_id, cur_backend_id, 0) != NULL ? 1 : 0);
+                    }
                     if (tensor_id_copy(src_id, cur_backend_id, 0) == NULL) {
                         ggml_backend_t backend = sched->backends[cur_backend_id];
                         for (int c = 0; c < sched->n_copies; c++) {
@@ -1386,12 +1395,18 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                             tensor_id_copy(src_id, cur_backend_id, c) = tensor_copy;
                             SET_CAUSE(tensor_copy, "4.cpy");
                         }
-                        int n_inputs = split->n_inputs++;
-                        if (n_inputs >= split->inputs_capacity) {
-                            ggml_backend_sched_split_inputs_grow(split);
-                        }
-                        split->inputs[n_inputs] = src;
                     }
+                    // [dspark 2026-10-18] register the input for EVERY split that uses it,
+                    // not only the first one. With many splits per backend (e.g. MoE CPU
+                    // ping-pong), a copy made only before the first split goes stale:
+                    // ggml-alloc recycles the copy's region after its last in-graph use,
+                    // later ops clobber it, and every later split reads garbage (this
+                    // silently zeroed all rs_s_copy conv-state gathers after layer 0's).
+                    int n_inputs = split->n_inputs++;
+                    if (n_inputs >= split->inputs_capacity) {
+                        ggml_backend_sched_split_inputs_grow(split);
+                    }
+                    split->inputs[n_inputs] = src;
                     node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
                 }
             }
@@ -1685,10 +1700,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
 
         // copy the input tensors to the split backend
+        static const bool inp_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+        static int inp_dbg_cnt = 0;
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
             struct ggml_tensor * input = split->inputs[input_id];
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+
+            if (inp_dbg && inp_dbg_cnt < 200 && input && ggml_nbytes(input) <= 4096) {
+                ++inp_dbg_cnt;
+                fprintf(stderr, "[offs-in] split=%d input=%s cpy=%s ptr=%p flag_input=%d cur_copy=%d nbytes=%zu\n",
+                        split_id, input->name, input_cpy ? input_cpy->name : "-", (void*)input_cpy,
+                        (input->flags & GGML_TENSOR_FLAG_INPUT) ? 1 : 0, sched->cur_copy, ggml_nbytes(input));
+            }
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
@@ -1815,6 +1839,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
+            }
+            // [dspark 2026-10-18] GGML_SCHED_FORCE_SPLIT_SYNC=1: block after
+            // every split. Bisect experiment for the OpenCL batched-mode logits
+            // corruption — full per-node readback (e2e CBD) keeps results
+            // correct while any sparser sync set we tested does not. If split-
+            // granularity sync is sufficient, the dependency is at split
+            // boundaries; if not, it is inside individual ops.
+            static const bool sched_force_sync = [] {
+                const char * e = getenv("GGML_SCHED_FORCE_SPLIT_SYNC");
+                return e && e[0] == '1';
+            }();
+            if (sched_force_sync) {
+                ggml_backend_synchronize(split_backend);
             }
         } else {
             // similar to ggml_backend_compare_graph_backend

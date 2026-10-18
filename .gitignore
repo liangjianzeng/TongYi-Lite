@@ -158,3 +158,5 @@ third_party/llama.cpp.bak-*/
 *.pdb
 ms_gguf_files.json
 ms_tmp.json
+_probe/moe_probe/build5/
+_probe/moe_probe/build_v86/
