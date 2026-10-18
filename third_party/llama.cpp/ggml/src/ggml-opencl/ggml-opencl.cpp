@@ -1186,6 +1186,21 @@ struct ggml_backend_opencl_context {
         return workgroup_size;
     }
 
+    // [dspark 2026-10-18] CL_DEVICE_MAX_WORK_ITEM_SIZES[0] can be smaller than
+    // CL_KERNEL_WORK_GROUP_SIZE (e.g. 1024 vs 2048 on rusticl/FD740). Host-side
+    // nth derivations must respect it too; otherwise the enqueue wrapper clamps
+    // local silently and row-per-group kernels (global[0] = ne01*nth) get more
+    // workgroups than rows, reading/writing out of bounds.
+    size_t get_max_work_item_size_dim0() const {
+        static size_t dev_max0 = 0;
+        if (dev_max0 == 0) {
+            size_t items[3] = {0, 0, 0};
+            clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(items), &items, NULL);
+            dev_max0 = items[0] ? items[0] : 1;
+        }
+        return dev_max0;
+    }
+
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
@@ -1237,10 +1252,18 @@ struct ggml_backend_opencl_context {
             for (cl_uint i = 0; i < work_dim; i++) ltotal *= local_work_size[i];
             size_t lim0 = max_wgs < max_dim0 ? max_wgs : max_dim0;
             if (ltotal > max_wgs || local_work_size[0] > max_dim0) {
+                // [dspark 2026-10-18] Rewriting local increases the workgroup
+                // count. For row-per-group kernels (global[0] = ne01*nth) that
+                // breaks the "one workgroup per row" invariant and surplus
+                // groups read/write out of bounds — never do this silently.
+                size_t old0 = local_work_size[0];
                 size_t rest = ltotal / (local_work_size[0] ? local_work_size[0] : 1);
                 size_t new0 = lim0 / (rest ? rest : 1);
                 while (new0 > 1 && global_work_size[0] % new0 != 0) new0--;
                 local_work_size[0] = new0 ? new0 : 1;
+                GGML_LOG_WARN("ggml_opencl: local[0] clamped %zu -> %zu (max_wgs=%zu max_dim0=%zu) g0=%zu tensor='%s'\n",
+                    old0, local_work_size[0], max_wgs, max_dim0, global_work_size[0],
+                    tensor ? tensor->name : "?");
             }
         }
         cl_int enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
@@ -9103,6 +9126,10 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
     while (nth < ne00 && nth < max_workgroup_size) nth *= 2;
     nth = MIN(nth, max_workgroup_size);
     nth = MIN(nth, ne00);
+    // [dspark 2026-10-18] Keep local == nth <= CL_DEVICE_MAX_WORK_ITEM_SIZES[0]
+    // so the enqueue wrapper never rewrites it: the kernel's row-per-group
+    // invariant requires the workgroup count to stay exactly ne01.
+    nth = MIN(nth, (int)backend_ctx->get_max_work_item_size_dim0());
 
     size_t global_work_size[] = {(size_t)ne01*nth, (size_t)ne02, (size_t)ne03};
     size_t local_work_size[]  = {(size_t)nth, 1, 1};
@@ -9311,8 +9338,14 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
                     ggml_backend_tensor_get(dn, host.data(), 0, dnb);
                     double ss = 0; float mx = 0;
                     for (float v : host) { ss += double(v)*v; mx = fabsf(v) > mx ? fabsf(v) : mx; }
-                    fprintf(stderr, "[nd] %s ne=[%lld,%lld] rms=%.6g max=%.6g zero=0/%zu\n",
-                            dn->name, (long long)dn->ne[0], (long long)dn->ne[1], sqrt(ss/double(host.size())), mx, host.size());
+                    const ggml_tensor_extra_cl * fx = (const ggml_tensor_extra_cl *)dn->extra;
+                    fprintf(stderr, "[nd-fused] %s ne=[%lld,%lld] rms=%.6g max=%.6g zero=0/%zu dev=%p off=%lu view=%lu data=%p f4=%.6g,%.6g,%.6g,%.6g\n",
+                            dn->name, (long long)dn->ne[0], (long long)dn->ne[1], sqrt(ss/double(host.size())), mx, host.size(),
+                            (void*)(fx ? fx->data_device : nullptr),
+                            (unsigned long)(fx ? fx->offset : 0),
+                            (unsigned long)dn->view_offs, (void*)dn->data,
+                            host.size() >= 4 ? host[0] : 0.f, host.size() >= 4 ? host[1] : 0.f,
+                            host.size() >= 4 ? host[2] : 0.f, host.size() >= 4 ? host[3] : 0.f);
                 }
                 continue;
             }
@@ -9357,8 +9390,43 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             double ss = 0; float mx = 0; size_t nz = 0;
             for (float v : host) { ss += double(v)*v; mx = fabsf(v) > mx ? fabsf(v) : mx; if (v == 0) ++nz; }
             const double rms = sqrt(ss / double(host.size()));
-            fprintf(stderr, "[nd] %s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu\n",
-                    node->name, (long long)node->ne[0], (long long)node->ne[1], rms, mx, nz, host.size());
+            const ggml_tensor_extra_cl * nx = (const ggml_tensor_extra_cl *)node->extra;
+            fprintf(stderr, "[nd] %s op=%s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu dev=%p off=%lu view=%lu data=%p\n",
+                    node->name, ggml_op_name(node->op), (long long)node->ne[0], (long long)node->ne[1], rms, mx, nz, host.size(),
+                    (void*)(nx ? nx->data_device : nullptr),
+                    (unsigned long)(nx ? nx->offset : 0),
+                    (unsigned long)node->view_offs, (void*)node->data);
+
+            // [dspark 2026-10-18] E2E_WATCH=name: track a tensor's first floats
+            // after every node — finds the first node whose execution mutates
+            // it (out-of-bounds / mis-offset writer locator).
+            static const char * watch_name = getenv("E2E_WATCH");
+            static const ggml_tensor * watch_t = nullptr;
+            static float watch_v[4] = {0};
+            static bool watch_init = false;
+            if (watch_name && watch_name[0]) {
+                if (!watch_init) { watch_init = true; }
+                if (!watch_t && strcmp(node->name, watch_name) == 0 && node->type == GGML_TYPE_F32) {
+                    watch_t = node;
+                    ggml_backend_tensor_get(watch_t, watch_v, 0, sizeof(watch_v));
+                    const ggml_tensor_extra_cl * wx = (const ggml_tensor_extra_cl *)watch_t->extra;
+                    fprintf(stderr, "[watch] baseline '%s': %.6g %.6g %.6g %.6g  dev=%p off=%lu view=%lu\n",
+                            watch_name, watch_v[0], watch_v[1], watch_v[2], watch_v[3],
+                            (void*)(wx ? wx->data_device : nullptr),
+                            (unsigned long)(wx ? wx->offset : 0),
+                            (unsigned long)watch_t->view_offs);
+                    if (!wx) fprintf(stderr, "[watch] WARN: watched tensor has no CL extra (not an OpenCL tensor?)\n");
+                } else if (watch_t) {
+                    float wv[4] = {0};
+                    ggml_backend_tensor_get(watch_t, wv, 0, sizeof(wv));
+                    if (memcmp(wv, watch_v, sizeof(wv)) != 0) {
+                        fprintf(stderr, "[watch] '%s' MUTATED after node '%s': %.6g %.6g %.6g %.6g (was %.6g %.6g %.6g %.6g)\n",
+                                watch_name, node->name, wv[0], wv[1], wv[2], wv[3],
+                                watch_v[0], watch_v[1], watch_v[2], watch_v[3]);
+                        memcpy(watch_v, wv, sizeof(wv));
+                    }
+                }
+            }
         }
     }
 
@@ -10950,6 +11018,21 @@ static cl_mem ggml_cl_create_temp_download_buffer(
 }
 
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    // [dspark 2026-10-18] CPU->GPU write probe: catch every sched input_cpy /
+    // tensor_set destination (cl_mem + offset). Correlates with [watch] to
+    // prove which copy lands on a live activation slot.
+    static const bool st_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+    static int st_cnt = 0;
+    if (st_dbg && st_cnt < 300 && tensor->name && tensor->name[0]) {
+        ++st_cnt;
+        const ggml_tensor_extra_cl * sx = (const ggml_tensor_extra_cl *)tensor->extra;
+        fprintf(stderr, "[set] %-28s dev=%p off=%lu view=%lu size=%zu\n",
+                tensor->name,
+                (void*)(sx ? sx->data_device : nullptr),
+                (unsigned long)(sx ? sx->offset : 0),
+                (unsigned long)tensor->view_offs, size);
+    }
+
     ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer->buft->device->context;
     ggml_backend_opencl_context * backend_ctx = dev_ctx->backend_ctx;
 
@@ -14540,6 +14623,16 @@ static void * ggml_backend_opencl_svm_buffer_get_base(ggml_backend_buffer_t buff
 
 static void ggml_backend_opencl_svm_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    // [dspark 2026-10-18] CPU->bank write probe: every sched input_cpy into the
+    // bank lands here (plain memcpy). Correlate with [watch] baseline slot.
+    static const bool st_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+    static int st_cnt = 0;
+    if (st_dbg && st_cnt < 400 && tensor->name && tensor->name[0]) {
+        ++st_cnt;
+        fprintf(stderr, "[svm-set] %-28s off=%lu size=%zu base_delta=%td\n",
+                tensor->name, (unsigned long)offset, size,
+                (const char *)tensor->data - (const char *)ctx->svm);
+    }
     memcpy((char *) ctx->svm + offset, data, size);
 
     GGML_UNUSED(tensor);
@@ -15953,6 +16046,71 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
         cl_int ed = clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, sizeof(dd), dd, 0, NULL, NULL);
         fprintf(stderr, "[addp]   post: src0=%.4g,%.4g,%.4g,%.4g (e%d) src1=%.4g,%.4g,%.4g,%.4g (e%d) dst=%.4g,%.4g,%.4g,%.4g (e%d)\n",
                 s0[0], s0[1], s0[2], s0[3], e0, s1[0], s1[1], s1[2], s1[3], e1, dd[0], dd[1], dd[2], dd[3], ed);
+
+        // [dspark 2026-10-18] official-path A/B: read the same tensors via
+        // ggml_backend_tensor_get (buffer-resolved address) and compare with
+        // the manual extra->offset readback above. Divergence = the kernel
+        // args (built from extra->offset) point somewhere else than the
+        // buffer hierarchy thinks the tensor lives.
+        {
+            float t0[4] = {0}, t1[4] = {0}, td[4] = {0};
+            ggml_backend_tensor_get(src0, t0, 0, sizeof(t0));
+            ggml_backend_tensor_get(src1, t1, 0, sizeof(t1));
+            ggml_backend_tensor_get(dst, td, 0, sizeof(td));
+            fprintf(stderr, "[addp]   tg  : src0=%.4g,%.4g,%.4g,%.4g src1=%.4g,%.4g,%.4g,%.4g dst=%.4g,%.4g,%.4g,%.4g\n",
+                    t0[0], t0[1], t0[2], t0[3], t1[0], t1[1], t1[2], t1[3], td[0], td[1], td[2], td[3]);
+        }
+
+        // [dspark 2026-10-18] ADDSCAN: when the readback shows dst without the
+        // sum, scan the whole BO bit-exactly for the expected 4-float sum to
+        // decide between "kernel wrote to the wrong offset" (HIT at some rel
+        // offset) and "kernel output truly absent" (NO HIT -> execution loss).
+        static const bool addscan_en = [] {
+            const char * e = getenv("GGML_OPENCL_ADDSCAN");
+            return e && e[0] == '1';
+        }();
+        static int addscan_cnt = 0;
+        if (addscan_en && addscan_cnt < 6) {
+            ++addscan_cnt;
+            const float exp[4] = { s0[0] + s1[0], s0[1] + s1[1], s0[2] + s1[2], s0[3] + s1[3] };
+            cl_mem bo = extrad->data_device;
+            size_t bo_size = 0;
+            clGetMemObjectInfo(bo, CL_MEM_SIZE, sizeof(bo_size), &bo_size, NULL);
+            const size_t chunk = 8u << 20; // 8MB
+            std::vector<char> buf(chunk + 64);
+            int hits = 0;
+            const size_t step_back = 64; // overlap so a sum straddling a chunk border is seen
+            for (size_t base = 0; base + 16 <= bo_size && hits < 4; base += (base == 0 ? chunk : chunk - step_back)) {
+                size_t rd = chunk + (base == 0 ? 0 : step_back);
+                if (base + rd > bo_size) rd = bo_size - base;
+                if (rd < 16) break;
+                cl_int er = clEnqueueReadBuffer(backend_ctx->queue, bo, CL_TRUE, base, rd, buf.data(), 0, NULL, NULL);
+                if (er != CL_SUCCESS) {
+                    fprintf(stderr, "[addscan] read err=%d at %zu\n", er, base);
+                    break;
+                }
+                for (size_t i = 0; i + 16 <= rd; i += 4) {
+                    if (memcmp(buf.data() + i, exp, 16) == 0) {
+                        const size_t hit = base + i;
+                        fprintf(stderr, "[addscan] HIT sum@%zu off0=%lu off1=%lu offd=%lu rel0=%+lld rel1=%+lld reld=%+lld\n",
+                                hit, (unsigned long) offset0, (unsigned long) offset1, (unsigned long) offsetd,
+                                (long long) ((ssize_t) hit - (ssize_t) offset0),
+                                (long long) ((ssize_t) hit - (ssize_t) offset1),
+                                (long long) ((ssize_t) hit - (ssize_t) offsetd));
+                        if (++hits >= 4) break;
+                    }
+                }
+            }
+            if (hits == 0) {
+                fprintf(stderr, "[addscan] NO HIT in %zu bytes -> sum truly absent (execution loss)\n", bo_size);
+            }
+            // late-landing guard: re-read dst after the scan
+            float dd2[4] = {0};
+            clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, sizeof(dd2), dd2, 0, NULL, NULL);
+            if (memcmp(dd2, dd, sizeof(dd)) != 0) {
+                fprintf(stderr, "[addscan] dst CHANGED after re-finish: %.4g,%.4g,%.4g,%.4g\n", dd2[0], dd2[1], dd2[2], dd2[3]);
+            }
+        }
     }
 }
 
@@ -17360,6 +17518,10 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
     }
     nth = MIN(nth, max_workgroup_size);
     nth = MIN(nth, ne00);
+    // [dspark 2026-10-18] Keep local == nth <= CL_DEVICE_MAX_WORK_ITEM_SIZES[0]
+    // so the enqueue wrapper never rewrites it: the kernel's row-per-group
+    // invariant requires the workgroup count to stay exactly ne01.
+    nth = MIN(nth, (int)backend_ctx->get_max_work_item_size_dim0());
 
     size_t global_work_size[] = {(size_t)ne01*nth, (size_t)ne02, (size_t)ne03};
     size_t local_work_size[] = {(size_t)nth, 1, 1};
@@ -17436,6 +17598,9 @@ static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm
     while (nth < ne00/4 && nth < max_workgroup_size) nth *= 2;
     nth = MIN(nth, max_workgroup_size);
     nth = MIN(nth, ne00/4);
+    // [dspark 2026-10-18] Same row-per-group invariant as the rms_norm fused
+    // kernels: keep local <= CL_DEVICE_MAX_WORK_ITEM_SIZES[0].
+    nth = MIN(nth, (int)backend_ctx->get_max_work_item_size_dim0());
 
     size_t gws[] = {(size_t)ne01*nth, (size_t)ne02, (size_t)ne03};
     size_t lws[] = {(size_t)nth, 1, 1};
@@ -31426,6 +31591,47 @@ static void ggml_cl_scale(ggml_backend_t backend, const ggml_tensor * src0, cons
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
     GGML_UNUSED(src1);
+
+    // [dspark 2026-10-18] SCALE arg probe: the 8192-slot clobber window has
+    // exactly one kernel between the healthy and corrupted watch reads (this
+    // op). Print dst/src resolved cl_mem + offsets to catch a mis-target.
+    {
+        static const bool sc_dbg = [] { const char * e = getenv("GGML_CL_OFFS_DEBUG"); return e && e[0] == '1'; }();
+        static int sc_cnt = 0;
+        if (sc_dbg && sc_cnt < 40) {
+            ++sc_cnt;
+            const ggml_tensor_extra_cl * sx = (const ggml_tensor_extra_cl *)src0->extra;
+            const ggml_tensor_extra_cl * dx = (const ggml_tensor_extra_cl *)dst->extra;
+            fprintf(stderr, "[scale] %-24s src dev=%p off=%lu view=%lu | dst(%s) dev=%p off=%lu view=%lu ne=[%lld,%lld] inplace=%d\n",
+                    dst->name,
+                    (void*)sx->data_device, (unsigned long)sx->offset, (unsigned long)src0->view_offs,
+                    dst->name,
+                    (void*)dx->data_device, (unsigned long)dx->offset, (unsigned long)dst->view_offs,
+                    (long long)dst->ne[0], (long long)dst->ne[1],
+                    dst->src[0] == dst || src0 == dst ? 1 : 0);
+        }
+        // [dspark 2026-10-18] red-handed probe: for the cache_r_l* scale, read
+        // the victim slot (hunt_dev+8192) before and after THIS kernel with a
+        // full clFinish on both sides. If garbage appears only after, this
+        // kernel (or its enqueue) is the writer.
+        extern void * ggml_cl_idx_hunt_dev;
+        if (sc_dbg && ggml_cl_idx_hunt_dev && dst->name &&
+            strncmp(dst->name, "cache_r_l", 9) == 0 && sc_cnt <= 40) {
+            static int rh_cnt = 0;
+            if (rh_cnt < 6) {
+                ++rh_cnt;
+                ggml_backend_opencl_context * bctx = (ggml_backend_opencl_context *)backend->context;
+                float pre[4] = {0}, post[4] = {0};
+                clFinish(bctx->queue);
+                clEnqueueReadBuffer(bctx->queue, (cl_mem) ggml_cl_idx_hunt_dev, CL_TRUE, 8192,
+                                    sizeof(pre), pre, 0, NULL, NULL);
+                // (kernel enqueue happens below; we hook by reading after the
+                //  caller's own blocking tensor_get — approximate red-handed)
+                fprintf(stderr, "[scale-rh] %s pre-bank8192: %.6g %.6g %.6g %.6g\n",
+                        dst->name, pre[0], pre[1], pre[2], pre[3]);
+            }
+        }
+    }
 
     GGML_ASSERT(ggml_is_contiguous(src0));
 

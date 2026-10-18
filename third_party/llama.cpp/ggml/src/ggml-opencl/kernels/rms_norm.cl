@@ -134,6 +134,16 @@ kernel void kernel_rms_norm_mul(
     src1 = src1 + offset1;
     dst  = dst  + offsetd;
 
+    // [dspark 2026-10-18] One workgroup per row: i01 = get_group_id(0) indexes
+    // dst rows and y writes dst + i01*nb1. If the enqueue wrapper clamps local
+    // below nth (CL_DEVICE_MAX_WORK_ITEM_SIZES[0] < CL_KERNEL_WORK_GROUP_SIZE,
+    // e.g. 1024 vs 2048 on rusticl/FD740), the workgroup count exceeds ne01 and
+    // the surplus groups read src0 + i01*nb01 and write dst + i01*nb1 out of
+    // bounds. Make surplus groups no-ops.
+    if (get_group_id(0) >= (uint)ne01 || get_group_id(1) >= (uint)ne02 || get_group_id(2) >= (uint)ne03) {
+        return;
+    }
+
     // The size of sum is sizeof(float)*subgroup_size.
     // Each subgroup writes its partial sum to this array.
     // So the number of subgroups per workgroup for this kernel cannot exceed the subgroup size.
@@ -237,6 +247,11 @@ kernel void kernel_rms_norm_mul_add(
     src2 = src2 + offset2;
     dst  = dst  + offsetd;
 
+    // [dspark 2026-10-18] Row-per-group invariant guard, see kernel_rms_norm_mul.
+    if (get_group_id(0) >= (uint)ne01 || get_group_id(1) >= (uint)ne02 || get_group_id(2) >= (uint)ne03) {
+        return;
+    }
+
     if (get_sub_group_id() == 0) {
         sum[get_sub_group_local_id()] = 0.0f;
     }
@@ -326,6 +341,11 @@ kernel void kernel_rms_norm_mul_add_scale(
     src2 = src2 + offset2;
     src3 = src3 + offset3;
     dst  = dst  + offsetd;
+
+    // [dspark 2026-10-18] Row-per-group invariant guard, see kernel_rms_norm_mul.
+    if (get_group_id(0) >= (uint)ne01 || get_group_id(1) >= (uint)ne02 || get_group_id(2) >= (uint)ne03) {
+        return;
+    }
 
     const float sc = *((global float *) src3);
 
