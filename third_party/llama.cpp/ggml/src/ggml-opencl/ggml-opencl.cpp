@@ -8916,6 +8916,49 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
 
+        // [dspark 2026-10-18] GGML_OPENCL_OPSYNC=1: clFinish before every node —
+        // op-level sync WITHOUT any readback, covers fused dispatches too.
+        // Discriminates queue-submission-ordering races (fixed by this) from
+        // in-kernel concurrency (not fixed).
+        static const bool opsync_en = [] {
+            const char * e = getenv("GGML_OPENCL_OPSYNC");
+            return e && e[0] == '1';
+        }();
+        // [dspark 2026-10-18] GGML_OPENCL_OPBATCH=<n>: clFinish every n-th node
+        // instead of every node. Ring-pressure bisect: 118586 submits were
+        // observed for 271390 enqueued ops — kernels go missing under deep
+        // enqueue on rusticl+kgsl. If batch-16/32 restores logits, the loss is
+        // a queue-depth/IB-size limit in the kgsl submission path.
+        static const char * opbatch_s = getenv("GGML_OPENCL_OPBATCH");
+        static const int    opbatch = opbatch_s ? atoi(opbatch_s) : 1;
+        static int opbatch_cnt = 0;
+        if (opsync_en || opbatch > 1) {
+            if (opsync_en || ++opbatch_cnt >= opbatch) {
+                clFinish(backend_ctx->queue);
+                opbatch_cnt = 0;
+            }
+        }
+        // [dspark 2026-10-18] GGML_OPENCL_OPSYNC_READ=1: minimal 16-byte
+        // host readback after the clFinish. Hypothesis: on rusticl+kgsl the
+        // GPU->GPU kernel data flow loses coherence across host ioctls — a
+        // host read (cache-sync ioctl) before the next kernel makes the next
+        // kernel see the previous kernel's writes. If 16B/op restores correct
+        // logits, the fix belongs in the kgsl BO cache-sync path (Mesa side),
+        // not in ggml.
+        static const bool opsync_read_en = [] {
+            const char * e = getenv("GGML_OPENCL_OPSYNC_READ");
+            return e && e[0] == '1';
+        }();
+        if (opsync_read_en && node->src[0] && node->src[0]->extra) {
+            ggml_tensor_extra_cl * xs = (ggml_tensor_extra_cl *) node->src[0]->extra;
+            if (xs->data_device) {
+                float sync_buf[4];
+                clEnqueueReadBuffer(backend_ctx->queue, xs->data_device, CL_TRUE,
+                                    xs->offset + node->src[0]->view_offs, sizeof(sync_buf),
+                                    sync_buf, 0, NULL, NULL);
+            }
+        }
+
         // NOTE: this may oversynchronize by synchronizing with
         //       backends/devices which don't compute 'cgraph's
         //       dependencies.
@@ -9011,9 +9054,33 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             continue;
         }
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
-            ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
-            i++;
-            continue;
+            // [dspark 2026-10-18] opt-out GGML_OPENCL_FUSE_RMS_MUL=0: race hunt —
+            // the 2-op rms_norm+mul fuse runs every layer (attn_post_norm etc.)
+            // and has no standalone env of its own; the whole-graph race
+            // disappears only with GGML_OPENCL_DISABLE_FUSION=1.
+            static const bool fuse_rms_mul_en = [] {
+                const char * e = getenv("GGML_OPENCL_FUSE_RMS_MUL");
+                return !(e && e[0] == '0');
+            }();
+            if (fuse_rms_mul_en) {
+                ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
+                i++;
+                // [dspark] nodedump for fused rms output (attn_norm / attn_post_norm chain)
+                static const bool nd_en0 = [] { const char * e = getenv("GGML_OPENCL_NODEDUMP"); return e && e[0] == '1'; }();
+                static int nd_cnt0 = 0;
+                if (nd_en0 && nd_cnt0 < 600 && cgraph->nodes[i]->type == GGML_TYPE_F32) {
+                    ++nd_cnt0;
+                    ggml_tensor * dn = cgraph->nodes[i];
+                    const size_t dnb = ggml_nbytes(dn);
+                    std::vector<float> host(dnb / sizeof(float));
+                    ggml_backend_tensor_get(dn, host.data(), 0, dnb);
+                    double ss = 0; float mx = 0;
+                    for (float v : host) { ss += double(v)*v; mx = fabsf(v) > mx ? fabsf(v) : mx; }
+                    fprintf(stderr, "[nd] %s ne=[%lld,%lld] rms=%.6g max=%.6g zero=0/%zu\n",
+                            dn->name, (long long)dn->ne[0], (long long)dn->ne[1], sqrt(ss/double(host.size())), mx, host.size());
+                }
+                continue;
+            }
         }
         // Fuse mul_mat(Wg,x) + mul_mat(Wu,x) + glu — fold the FFN's two decode
         // GEMVs and the GLU into one dispatch. q4_K only (guarded below); the
@@ -9036,6 +9103,28 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
         GGML_ASSERT(ok);
+
+        // [dspark 2026-10-18] GGML_OPENCL_NODEDUMP=1: non-invasive per-node
+        // audit — readback (proven side-effect-free under opsync) right after
+        // each compute, printing rms/max. Locates the first divergent node in
+        // the whole-graph submission WITHOUT segmentation (which perturbs
+        // fusion structure). Capped to the first ubatches.
+        static const bool nodedump_en = [] {
+            const char * e = getenv("GGML_OPENCL_NODEDUMP");
+            return e && e[0] == '1';
+        }();
+        static int nodedump_cnt = 0;
+        if (nodedump_en && nodedump_cnt < 1200 && node->type == GGML_TYPE_F32 && ggml_is_contiguous(node)) {
+            ++nodedump_cnt;
+            const size_t nb = ggml_nbytes(node);
+            std::vector<float> host(nb / sizeof(float));
+            ggml_backend_tensor_get(node, host.data(), 0, nb);
+            double ss = 0; float mx = 0; size_t nz = 0;
+            for (float v : host) { ss += double(v)*v; mx = fabsf(v) > mx ? fabsf(v) : mx; if (v == 0) ++nz; }
+            const double rms = sqrt(ss / double(host.size()));
+            fprintf(stderr, "[nd] %s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu\n",
+                    node->name, (long long)node->ne[0], (long long)node->ne[1], rms, mx, nz, host.size());
+        }
     }
 
     return GGML_STATUS_SUCCESS;
@@ -15442,6 +15531,15 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
     cl_ulong offset1 = extra1->offset + src1->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
+    // [dspark 2026-10-18] ADD probe flag — function scope so the post-enqueue
+    // readback at the tail can see it.
+    static const bool addprobe_en = [] {
+        const char * e = getenv("GGML_OPENCL_ADDPROBE");
+        return e && e[0] == '1';
+    }();
+    static int addprobe_cnt = 0;
+    const bool addprobe_hit = addprobe_en && addprobe_cnt < 24 && dst->name && strstr(dst->name, "attn_residual") == dst->name;
+
     cl_kernel kernel;
 
     const bool bcast_row = ggml_nelements(src1) == ne10 && ggml_is_contiguous(src1) && ne00 % 4 == 0 && ne10 % 4 == 0;
@@ -15453,6 +15551,16 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
 
     if (dst->type == GGML_TYPE_F32) {
         GGML_ASSERT(src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32);
+        // [dspark 2026-10-18] ADD probe: print the exact arg addresses the
+        // kernel will use; the post-enqueue readback at the function tail
+        // reads back 4 floats from those addresses.
+        if (addprobe_hit) {
+            ++addprobe_cnt;
+            fprintf(stderr, "[addp] %s src0=%s off0=%lu dev0=%p src1=%s off1=%lu dev1=%p dst offd=%lu devd=%p\n",
+                    dst->name, src0->name, (unsigned long) offset0, (void*) extra0->data_device,
+                    src1->name, (unsigned long) offset1, (void*) extra1->data_device,
+                    (unsigned long) offsetd, (void*) extrad->data_device);
+        }
         if (bcast_row) {
             kernel = backend_ctx->kernel_add_row;
             const int ne = ne00 / 4;
@@ -15569,6 +15677,16 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
         size_t local_work_size[] = {nth, 1, 1};
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+    }
+
+    if (addprobe_hit) {
+        clFinish(backend_ctx->queue);
+        float s0[4] = {0}, s1[4] = {0}, dd[4] = {0};
+        cl_int e0 = clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, sizeof(s0), s0, 0, NULL, NULL);
+        cl_int e1 = clEnqueueReadBuffer(backend_ctx->queue, extra1->data_device, CL_TRUE, offset1, sizeof(s1), s1, 0, NULL, NULL);
+        cl_int ed = clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, sizeof(dd), dd, 0, NULL, NULL);
+        fprintf(stderr, "[addp]   post: src0=%.4g,%.4g,%.4g,%.4g (e%d) src1=%.4g,%.4g,%.4g,%.4g (e%d) dst=%.4g,%.4g,%.4g,%.4g (e%d)\n",
+                s0[0], s0[1], s0[2], s0[3], e0, s1[0], s1[1], s1[2], s1[3], e1, dd[0], dd[1], dd[2], dd[3], ed);
     }
 }
 

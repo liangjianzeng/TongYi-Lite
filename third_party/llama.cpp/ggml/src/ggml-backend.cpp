@@ -1830,6 +1830,30 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             ggml_backend_synchronize(split_backend);
                         }
                         ggml_backend_tensor_copy(input, input_cpy);
+
+                        // [dspark 2026-10-18] decisive discriminator for the OpenCL
+                        // batched-mode logits artifact: read the JUST-COPIED dst
+                        // (host side, memcpy) and re-read src (GPU, blocking get).
+                        // If dst is already garbage here, the GPU->CPU visibility /
+                        // copy itself is broken; if dst is fine, corruption happens
+                        // after the copy (CPU-side or region reuse).
+                        static const bool cpyp_en = [] {
+                            const char * e = getenv("GGML_SCHED_CPY_PROBE");
+                            return e && e[0] == '1';
+                        }();
+                        static const char * cpyp_name = getenv("GGML_SCHED_CPY_NAME");
+                        static int cpyp_cnt = 0;
+                        if (cpyp_en && cpyp_cnt < 400 && ggml_backend_buffer_is_host(input_cpy->buffer) &&
+                                (!cpyp_name || strstr(input->name, cpyp_name))) {
+                            ++cpyp_cnt;
+                            float d[4] = {0}, s[4] = {0};
+                            memcpy(d, input_cpy->data, sizeof(d));
+                            ggml_backend_tensor_get(input, s, 0, sizeof(s));
+                            fprintf(stderr, "[cpyp] split=%d in=%s cpy=%s nb=%zu dst4=%.4g,%.4g,%.4g,%.4g src4=%.4g,%.4g,%.4g,%.4g dptr=%p sptr=%p\n",
+                                    split_id, input->name, input_cpy->name, ggml_nbytes(input),
+                                    d[0], d[1], d[2], d[3], s[0], s[1], s[2], s[3],
+                                    input_cpy->data, input->data);
+                        }
                     }
                 }
             }
