@@ -292,15 +292,10 @@ kernel void kernel_gemv_noshuffle_iq4_nl_f32(
     private float2 totalSum = (float2)(0.0f);
 
     // loop along K in block granularity, skip 4 blocks every iter
-<<<<<<< fork
     // [dspark 2026-10-17] runtime K-split stride (host clamps y-split to 1 on rusticl)
     uint nsg_rt = get_local_size(1);
     for (uint k = groupId; k < (K / QK4_NL); k += nsg_rt) {
-        regS = src0_d[gid + k * LINE_STRIDE_A]; // each fiber loads scale of two rows
-=======
-    for (uint k = groupId; k < (K / QK4_NL); k += NSUBGROUPS) {
         regS = src0_d[gid_s + k * LINE_STRIDE_A]; // each fiber loads scale of two rows
->>>>>>> v0.7.0
         // first 4 fibers in each wave load 8 B values to its private scope
         if (slid < 4) {
             regB.s0123 = read_imagef(src1, (slid * 2 + k * 8));

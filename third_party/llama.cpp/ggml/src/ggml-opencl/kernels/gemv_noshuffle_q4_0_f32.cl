@@ -27,11 +27,6 @@ inline float sgb_f(float v, uint lid) {
 #define REQD_SUBGROUP_SIZE_64 __attribute__((qcom_reqd_sub_group_size("half")))
 #endif
 
-<<<<<<< fork
-// the driver's online compiler lacks float overloads of sub_group_broadcast
-// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
-// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
-=======
 // A6X compiler incorrectly constant-folds get_local_size() results;
 // force runtime materialization via a no-op ALU round-trip.
 #ifdef GGML_CL_A6X_CONSTFOLD_FIX
@@ -40,7 +35,6 @@ inline float sgb_f(float v, uint lid) {
 #define MATERIALIZE_WG(x)
 #endif
 
->>>>>>> v0.7.0
 // assume
 #define QK4_0 32
 #define N_SIMDGROUP 4
