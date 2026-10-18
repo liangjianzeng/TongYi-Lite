@@ -9238,6 +9238,20 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         static const char * opbatch_s = getenv("GGML_OPENCL_OPBATCH");
         static const int    opbatch = opbatch_s ? atoi(opbatch_s) : 1;
         static int opbatch_cnt = 0;
+        // [dspark 2026-10-19] GGML_OPENCL_OPFLUSH=<n>: clFlush (force hardware
+        // submission, NO wait) every n-th node. Discriminates "kernels stuck
+        // in the soft queue / lost at depth on rusticl+kgsl" (fixed by flush,
+        // near-zero cost) from "in-order violated on hardware" (flush won't
+        // help; needs events or kgsl backend fix). 2026-10-19: OPSYNC=1 (full
+        // clFinish) makes free-run text healthy = whole fragmentation was the
+        // submission race; flush is the production-grade candidate.
+        static const char * opflush_s = getenv("GGML_OPENCL_OPFLUSH");
+        static const int    opflush = opflush_s ? atoi(opflush_s) : 0;
+        static int opflush_cnt = 0;
+        if (opflush > 0 && ++opflush_cnt >= opflush) {
+            clFlush(backend_ctx->queue);
+            opflush_cnt = 0;
+        }
         if (opsync_en || opbatch > 1) {
             if (opsync_en || ++opbatch_cnt >= opbatch) {
                 clFinish(backend_ctx->queue);
