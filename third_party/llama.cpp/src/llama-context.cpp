@@ -9,11 +9,8 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
-<<<<<<< fork
 #include "llama-moe-slot.h"
-=======
 #include "llama-moe-cache.h"
->>>>>>> v0.7.0
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
@@ -32,14 +29,6 @@
 // llama_context
 //
 
-<<<<<<< fork
-// An architecture whose matmul path bypasses the transform helpers would
-// otherwise load cleanly and silently compute wrong results.
-static void llama_verify_hadamard_graph(
-        ggml_cgraph * gf,
-        const llama_hadamard_rotations & rotations,
-        const llama_hadamard_rotations & inverses) {
-=======
 // check that each folded weight in the graph gets its Hadamard transform, and each latent lookup gets the inverse
 // without this check, an arch that skips the transform helpers loads and computes wrong results
 static void llama_verify_hadamard_graph(
@@ -55,7 +44,6 @@ static void llama_verify_hadamard_graph(
         }
     }
 
->>>>>>> v0.7.0
     auto unwrap = [](const ggml_tensor * t) {
         while (t && (t->op == GGML_OP_RESHAPE || t->op == GGML_OP_VIEW)) {
             t = t->src[0];
@@ -85,13 +73,8 @@ static void llama_verify_hadamard_graph(
             continue;
         }
 
-<<<<<<< fork
-        const auto it = rotations.find(node->src[0]);
-        if (it == rotations.end()) {
-=======
         const auto it = forward.find(node->src[0]);
         if (it == forward.end()) {
->>>>>>> v0.7.0
             if (inverses.count(node->src[0])) {
                 throw std::runtime_error(format(
                     "Hadamard-latent table '%s' is used as a head without a forward transform", node->src[0]->name));
@@ -191,15 +174,11 @@ llama_context::llama_context(
     model(model),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
-<<<<<<< fork
     moe_slots(model.moe_slot_bank_enabled()
               ? std::make_unique<llama_moe_slot_runtime>(model) : nullptr),
-    balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
-=======
     // MTP uses the embd input for the hidden state
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd(),
                 llm_arch_supports_mixed_batch(model.arch) && params.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT)) {
->>>>>>> v0.7.0
     // TODO warning when creating llama_context with awkward ctx size that is not a power of 2,
     //     may need to be backend-dependent
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
@@ -2751,16 +2730,10 @@ ggml_cgraph * llama_context::graph_reserve(
 
     auto * gf = model.build_graph(gparams);
 
-<<<<<<< fork
     // verify transform coverage on the pristine graph: after scheduling,
     // cross-backend copies break the producer chain the check follows
     if (!hadamard_verified && gf && (!hadamard_rotations.empty() || !hadamard_inverses.empty())) {
-        llama_verify_hadamard_graph(gf, hadamard_rotations, hadamard_inverses);
-=======
-    // check the graph before scheduling: cross-backend copies break the producer chain that the check follows
-    if (!hadamard_verified && gf && (!model.hdmd.rot.empty() || !model.hdmd.inv.empty())) {
-        llama_verify_hadamard_graph(gf, model.hdmd.rot, model.hdmd.inv, moe_cache.get());
->>>>>>> v0.7.0
+        llama_verify_hadamard_graph(gf, hadamard_rotations, hadamard_inverses, moe_cache.get());
         hadamard_verified = true;
     }
 
@@ -2806,16 +2779,13 @@ llm_graph_params llama_context::graph_params(
         /*.moe_decode_phase =*/ moe_slots != nullptr && moe_slots->decode_window() > 0 &&
                                 ubatch.n_tokens <= moe_slots->window_max_rows(),
         /*.cross       =*/ &cross,
-<<<<<<< fork
         /*.dspark_ctx  =*/&dspark_ctx,
         /*.dspark_has_context =*/!dspark_ctx.v_ctx_feat.empty(),
         /*.dspark_ctx_rows =*/dspark_ctx.n_ctx_rows,
         /*.dspark_ctx_width =*/dspark_ctx.n_embd_cap,
         /*.hadamard_rotations =*/&hadamard_rotations,
         /*.hadamard_inverses  =*/&hadamard_inverses,
-=======
         /*.moe_cache   =*/ moe_cache.get(),
->>>>>>> v0.7.0
         /*.prec_policy =*/ &model.prec_policy,
         /*.hdmd        =*/ model.hdmd.rot.empty() ? nullptr : &model.hdmd,
         /*.samplers    =*/ sampling.samplers,
