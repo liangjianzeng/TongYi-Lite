@@ -379,7 +379,6 @@ kernel void kernel_gemv_noshuffle_q6_K_f32_mc3(
 
     float2  ts0 = 0.0f, ts1 = 0.0f, ts2 = 0.0f;
 
-<<<<<<< fork
     uint nsg_rt = get_local_size(1);  // [dspark] runtime K-split stride
     for (int k = grp; k < nb; k += nsg_rt) {
         reg_d = src0_d[gid_s + k/8 * line_stride_a];
