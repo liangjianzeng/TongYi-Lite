@@ -15,6 +15,8 @@
 
 #include "test/common/assert.hpp"
 #include "test/common/data_type.hpp"
+#include "test/common/float16.hpp"
+#include "test/common/int2.hpp"
 #include "test/common/int4.hpp"
 #include "test/common/memory.hpp"
 #include "test/common/round.hpp"
@@ -66,17 +68,25 @@ PrintFn make_print_array(DataType dtype) {
         case DataType::FP32:
             return print_array<float>;
 
+        case DataType::FP16:
+            return print_array<Float16>;
+
         case DataType::I32:
             return print_array<int32_t>;
 
         case DataType::I8:
             return print_array<int8_t>;
 
+        case DataType::U8:
+            return print_array<uint8_t>;
+
         case DataType::U4:
             return print_array<UInt4>;
 
         case DataType::I4:
             return print_array<Int4>;
+        case DataType::U2:
+            return print_array<UInt2>;
 
         default:
             KAI_TEST_ERROR("Not supported.");

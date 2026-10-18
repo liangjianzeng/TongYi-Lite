@@ -1520,30 +1520,6 @@ struct clip_model_loader {
                             hparams.insert_layer_id = insert_lid;
                         }
                     } break;
-                case PROJECTOR_TYPE_MINICPMV4_7:
-                    {
-                        // MiniCPM-V 4.7 reuses the 4.6 merger projector (scale_factor 2 -> 4x mode, 4 -> 16x mode)
-                        hparams.n_merge = 4;
-                        get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
-                        GGML_ASSERT(hparams.n_merge == 2 || hparams.n_merge == 4);
-
-                        // 4.7 stretches the refined image to the target size instead of padding
-                        // it, so padding would build every slice from the wrong pixels
-                        hparams.image_pad_ov = PAD_NONE;
-                        hparams.image_pad_rf = PAD_NONE;
-
-                        // borrow wa_layer_indexes for vit_merger insertion point
-                        std::vector<int> wa_layer_indexes_vec;
-                        get_arr_int(KEY_WIN_ATTN_LAYER_INDEXES, wa_layer_indexes_vec, false);
-                        if (!wa_layer_indexes_vec.empty()) {
-                            const int insert_lid = wa_layer_indexes_vec[0];
-                            if (insert_lid < 0 || insert_lid >= (int) hparams.n_layer) {
-                                throw std::runtime_error(string_format("%s: layer index %d is out of range (n_layer: %d)",
-                                                                       __func__, insert_lid, hparams.n_layer));
-                            }
-                            hparams.insert_layer_id = insert_lid;
-                        }
-                    } break;
                 case PROJECTOR_TYPE_INTERNVL:
                     {
                         // use default llava-uhd preprocessing params

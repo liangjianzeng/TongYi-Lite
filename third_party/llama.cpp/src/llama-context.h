@@ -440,9 +440,6 @@ private:
     llama_hadamard_rotations hadamard_rotations;
     llama_hadamard_rotations hadamard_inverses;
 
-    // one-time Hadamard transform-coverage check on the first built graph
-    bool hadamard_verified = false;
-
     // keep copies of the per-sequence memory on the device
     std::map<llama_seq_id, llama_memory_buffers> mem_storage;
 

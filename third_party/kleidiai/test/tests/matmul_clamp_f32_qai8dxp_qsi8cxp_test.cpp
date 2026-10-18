@@ -50,7 +50,7 @@ using F32Qai8Qsi8CacheDataId = std::tuple<
     DataFormat,   // lhs format
     DataFormat,   // rhs format
     DataFormat,   // bias format
-    float>;
+    std::optional<float>>;
 
 struct F32Qai8Qsi8CacheData {
     Buffer ref_dst_nt_t;
@@ -76,7 +76,8 @@ F32Qai8Qsi8CacheData ReferenceGenerator<F32Qai8Qsi8CacheDataId, F32Qai8Qsi8Cache
     const auto key = std::string("F32Qai8Qsi8_cache:") + std::to_string(M) + "x" + std::to_string(N) + "x" +
         std::to_string(K) + ":" + std::to_string(static_cast<uint32_t>(lhs_format.data_type())) + ":" +
         std::to_string(static_cast<uint32_t>(rhs_format.data_type())) + ":" +
-        std::to_string(static_cast<uint32_t>(bias_format.data_type())) + ":" + std::to_string(clamp_keep_ratio);
+        std::to_string(static_cast<uint32_t>(bias_format.data_type())) + ":" +
+        (clamp_keep_ratio.has_value() ? std::to_string(clamp_keep_ratio.value()) : "noclamp");
     auto& feed = seed_stream(key);
 
     Buffer lhs = fill_matrix_random(shape.m, shape.k, lhs_format, feed());
@@ -135,6 +136,15 @@ F32Qai8Qsi8CacheData ReferenceGenerator<F32Qai8Qsi8CacheDataId, F32Qai8Qsi8Cache
     return out;
 }
 
+#ifdef _MSC_VER
+static const std::array<UkernelVariant<kai_matmul_clamp_f32_qai8dxp_qsi8cxp_ukernel>, 2>
+    variants_kai_matmul_clamp_f32_qai8dxp_qsi8cxp = {{
+        {UKERNEL_MATMUL_VARIANT(clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod),
+         "kai_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod", cpu_has_dotprod},
+        {UKERNEL_MATMUL_VARIANT(clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm),
+         "kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm", cpu_has_i8mm},
+    }};
+#else
 static const std::array<UkernelVariant<kai_matmul_clamp_f32_qai8dxp_qsi8cxp_ukernel>, 8>
     variants_kai_matmul_clamp_f32_qai8dxp_qsi8cxp = {{
         {UKERNEL_MATMUL_VARIANT(clamp_f32_qai8dxp1x8_qsi8cxp4x8_1x4_neon_dotprod),
@@ -154,8 +164,9 @@ static const std::array<UkernelVariant<kai_matmul_clamp_f32_qai8dxp_qsi8cxp_uker
         {UKERNEL_MATMUL_VARIANT(clamp_f32_qai8dxp1vlx4_qsi8cxp4vlx4_1vlx4vl_sme2_mopa),
          "kai_matmul_clamp_f32_qai8dxp1vlx4_qsi8cxp4vlx4_1vlx4vl_sme2_mopa", cpu_has_sme2},
     }};
+#endif
 
-using MatMulClampTestPortionedParams = std::tuple<size_t, MatMulShape, MatrixPortion, float>;
+using MatMulClampTestPortionedParams = std::tuple<size_t, MatMulShape, MatrixPortion, std::optional<float>>;
 
 class MatMulTest_f32_qai8dxp_qsi8cxp : public ::testing::TestWithParam<MatMulClampTestPortionedParams> {};
 
@@ -172,14 +183,14 @@ TEST_P(MatMulTest_f32_qai8dxp_qsi8cxp, Offset_RHS) {
     const auto kr = ukernel_variant.interface.get_kr();
     const auto sr = ukernel_variant.interface.get_sr();
 
-    auto n_step = ukernel_variant.interface.get_n_step();
+    const auto n_idx = nr;
 
-    auto rhs_packed_offset_kxn = kai_get_rhs_packed_offset_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(n_step, K, nr, kr, sr);
-    auto rhs_packed_offset_nxk = kai_get_rhs_packed_offset_rhs_pack_nxk_qsi8cxp_qsi8cx_neon(n_step, K, nr, kr, sr);
+    auto rhs_packed_offset_kxn = kai_get_rhs_packed_offset_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(n_idx, K, nr, kr, sr);
+    auto rhs_packed_offset_nxk = kai_get_rhs_packed_offset_rhs_pack_nxk_qsi8cxp_qsi8cx_neon(n_idx, K, nr, kr, sr);
 
     ASSERT_EQ(rhs_packed_offset_kxn, rhs_packed_offset_nxk);
 
-    auto rhs_matmul_offset = ukernel_variant.interface.get_rhs_packed_offset(n_step, K);
+    auto rhs_matmul_offset = ukernel_variant.interface.get_rhs_packed_offset(n_idx, K);
     ASSERT_EQ(rhs_packed_offset_kxn, rhs_matmul_offset);
 }
 
@@ -196,10 +207,10 @@ TEST_P(MatMulTest_f32_qai8dxp_qsi8cxp, Offset_LHS) {
     const auto kr = ukernel_variant.interface.get_kr();
     const auto sr = ukernel_variant.interface.get_sr();
 
-    auto m_step = ukernel_variant.interface.get_m_step();
+    const auto m_idx = mr;
 
-    auto lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qai8dxp_f32(m_step, K, mr, kr, sr);
-    auto lhs_matmul_offset = ukernel_variant.interface.get_lhs_packed_offset(m_step, K);
+    auto lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qai8dxp_f32(m_idx, K, mr, kr, sr);
+    auto lhs_matmul_offset = ukernel_variant.interface.get_lhs_packed_offset(m_idx, K);
 
     ASSERT_EQ(lhs_packed_offset, lhs_matmul_offset);
 }
@@ -264,7 +275,7 @@ TEST_P(MatMulTest_f32_qai8dxp_qsi8cxp, EndToEnd_RHS_nxk_qsi8cx) {
     const auto imp_packed_rhs_size = kai_get_rhs_packed_size_rhs_pack_nxk_qsi8cxp_qsi8cx_neon(N, K, nr, kr, sr);
 
     Buffer imp_packed_rhs(imp_packed_rhs_size);
-    const kai_rhs_pack_qsi8cx_params params{.lhs_zero_point = 1, .scale_multiplier = 1.0f};
+    const kai_rhs_pack_qsi8cx_params params{1, 1.0f};
     kai_run_rhs_pack_nxk_qsi8cxp_qsi8cx_neon(
         1, N, K, nr, kr, sr, reinterpret_cast<const int8_t*>(ref_rhs_qsi8.data()),
         reinterpret_cast<const float*>(ref_bias.data()), reinterpret_cast<const float*>(ref_rhs_scales.data()),
@@ -360,7 +371,7 @@ TEST_P(MatMulTest_f32_qai8dxp_qsi8cxp, EndToEnd_RHS_kxn_qsi8cx) {
     const auto imp_packed_rhs_size = kai_get_rhs_packed_size_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(N, K, nr, kr, sr);
 
     Buffer imp_packed_rhs(imp_packed_rhs_size);
-    const kai_rhs_pack_qsi8cx_params params{.lhs_zero_point = 1, .scale_multiplier = 1.0f};
+    const kai_rhs_pack_qsi8cx_params params{1, 1.0f};
     kai_run_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(
         1, N, K, nr, kr, sr, reinterpret_cast<const int8_t*>(ref_rhs_qsi8.data()),
         reinterpret_cast<const float*>(ref_bias.data()), reinterpret_cast<const float*>(ref_rhs_scales.data()),
@@ -408,6 +419,7 @@ INSTANTIATE_TEST_SUITE_P(
             MatMulShape{1, 65, 35},   //
             MatMulShape{1, 64, 65},   //
             MatMulShape{1, 63, 15},   //
+            MatMulShape{1, 71, 32},   //
             MatMulShape{1, 130, 15},  //
             MatMulShape{15, 65, 35},  //
             MatMulShape{16, 64, 65},  //
@@ -422,13 +434,17 @@ INSTANTIATE_TEST_SUITE_P(
             MatrixPortion(0.75, 0, 1, 1),      // Partial rows
             MatrixPortion(0.4, 0.5, 0.6, 0.8)  // Somewhere Middle
             ),
-        testing::ValuesIn(std::initializer_list<float>({1.0f, 0.9f, 0.5f}))),  // clamp_keep_ratio
+        testing::ValuesIn(std::initializer_list<std::optional<float>>{
+            std::nullopt,  // Disable clamping
+            1.0f,          // Clamp to full range
+            0.9f,          // Clamp to 90% range
+            0.5f})),       // Clamp to 50% range
     [](const auto& info) {
         const auto variant_idx = std::get<0>(info.param);
         const std::string name{variants_kai_matmul_clamp_f32_qai8dxp_qsi8cxp.at(variant_idx).name};
         const auto shape = std::get<MatMulShape>(info.param);
         const auto portion = std::get<MatrixPortion>(info.param);
-        const auto clamp_keep_ratio = std::get<float>(info.param);
+        const auto clamp_keep_ratio = std::get<std::optional<float>>(info.param);
 
         return test_description(name, shape, portion, true, clamp_keep_ratio);
     });

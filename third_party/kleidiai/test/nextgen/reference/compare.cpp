@@ -15,6 +15,8 @@
 
 #include "test/common/assert.hpp"
 #include "test/common/data_type.hpp"
+#include "test/common/float16.hpp"
+#include "test/common/int2.hpp"
 #include "test/common/int4.hpp"
 #include "test/common/memory.hpp"
 #include "test/common/span.hpp"
@@ -99,14 +101,22 @@ CompareFn make_compare_plain_2d(DataType dtype) {
         case DataType::FP32:
             return compare_plain_2d<float>;
 
+        case DataType::FP16:
+            return compare_plain_2d<Float16>;
+
         case DataType::I32:
             return compare_plain_2d<int32_t>;
 
         case DataType::I8:
             return compare_plain_2d<int8_t>;
 
+        case DataType::U8:
+            return compare_plain_2d<uint8_t>;
+
         case DataType::I4:
             return compare_plain_2d<Int4>;
+        case DataType::U2:
+            return compare_plain_2d<UInt2>;
 
         default:
             KAI_TEST_ERROR("Not implemented.");

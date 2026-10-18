@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 namespace kai::test {
 
@@ -45,10 +46,12 @@ enum class DataType : uint16_t {
     I32 = 0b1'1'0'0'0000'00100000,  ///< 32-bit signed integer.
     I8 = 0b1'1'0'0'0000'00001000,   ///< 8-bit signed integer.
     I4 = 0b1'1'0'0'0000'00000100,   ///< 4-bit signed integer.
+    I2 = 0b1'1'0'0'0000'00000010,   ///< 2-bit signed integer.
 
     U32 = 0b1'0'0'0'0000'00100000,  ///< 32-bit unsigned integer.
     U8 = 0b1'0'0'0'0000'00001000,   ///< 8-bit unsigned integer.
     U4 = 0b1'0'0'0'0000'00000100,   ///< 4-bit unsigned integer.
+    U2 = 0b1'0'0'0'0000'00000010,   ///< 2-bit unsigned integer.
 
     QAI8 = 0b1'1'1'1'0000'00001000,  ///< 8-bit signed asymmetric quantized.
     QSI8 = 0b1'1'1'0'0000'00001000,  ///< 8-bit signed symmetric quantized.
@@ -60,12 +63,44 @@ enum class DataType : uint16_t {
     QSI2 = 0b1'1'1'0'0000'00000010,  ///< 2-bit signed symmetric quantized.
 };
 
+/// Gets the data type, or the default data type if unknown.
+///
+/// @param[in] dt The data type.
+/// @param[in] default_dt The default data type.
+///
+/// @return The data type if known, otherwise the default data type.
+[[nodiscard]] constexpr DataType data_type_default(DataType dt, DataType default_dt) {
+    return dt != DataType::UNKNOWN ? dt : default_dt;
+}
+
+/// Gets the name of the specified data type.
+///
+/// @param[in] dt The data type.
+///
+/// @return The data type name.
+[[nodiscard]] const char* to_cstring(DataType dt);
+
+/// Gets a short unique identifier for the data type (e.g. f32, bf16, i8).
+///
+/// @param[in] dt The data type.
+///
+/// @return String identifier.
+[[nodiscard]] std::string data_type_uid(DataType dt);
+
 /// Gets the size in bits of the specified data type.
 ///
 /// @param[in] dt The data type.
 ///
 /// @return The size in bits.
 [[nodiscard]] size_t data_type_size_in_bits(DataType dt);
+
+/// Gets the size in bytes of an array of the specified data type
+///
+/// @param[in] dt The data type.
+/// @param[in] len The number of elements in the vector
+///
+/// @return size in bytes
+[[nodiscard]] size_t data_type_array_size_in_bytes(DataType dt, size_t len);
 
 /// Gets a value indicating whether the data type is integral.
 ///

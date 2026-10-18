@@ -457,7 +457,7 @@ std::tuple<Buffer, size_t> pack_rhs_qsi4c32pscalebf16_neon(
 
 std::string test_description(
     const std::string& name, const RhsPackType rhs_pack_type, const MatMulShape& shape, const size_t bl,
-    const MatrixPortion& portion, const float clamp_keep_ratio) {
+    const MatrixPortion& portion, const std::optional<float> clamp_keep_ratio) {
     // Remove redundant prefix to make output easier to read
     std::string clean_name = name;
     const std::string prefix = "kai_matmul_clamp_";
@@ -500,7 +500,7 @@ using BF16QMatMulRefKey = std::tuple<
     size_t,                          // sr
     size_t, size_t, size_t, size_t,  // rect.start_row, rect.start_col, rect.height, rect.width
     RhsPackType,                     // rhs_pack_type
-    float                            // clamp_keep_ratio
+    std::optional<float>             // clamp_keep_ratio
     >;
 
 struct BF16TestData {
@@ -521,7 +521,8 @@ struct BF16TestData {
 
 }  // anonymous namespace
 
-using QMatmulClampF32ParamT = std::tuple<size_t, bool, MatMulShape, size_t, MatrixPortion, RhsPackType, float>;
+using QMatmulClampF32ParamT =
+    std::tuple<size_t, bool, MatMulShape, size_t, MatrixPortion, RhsPackType, std::optional<float>>;
 
 class QMatMulClampF32Test : public ::testing::TestWithParam<QMatmulClampF32ParamT> {
     struct TestParams {
@@ -534,7 +535,7 @@ class QMatMulClampF32Test : public ::testing::TestWithParam<QMatmulClampF32Param
         MatrixPortion portion;
         RhsPackType rhs_pack_type;
         Rect rect;
-        float clamp_keep_ratio;
+        std::optional<float> clamp_keep_ratio;
         bool is_sme2;
 
         TestParams() :
@@ -545,7 +546,7 @@ class QMatMulClampF32Test : public ::testing::TestWithParam<QMatmulClampF32Param
             portion(0, 0, 1, 1),
             rhs_pack_type(RhsPackType::NxK),
             rect(0, 0, 0, 0),
-            clamp_keep_ratio(0.8F),
+            clamp_keep_ratio(std::optional<float>(0.8F)),
             is_sme2(false) {
         }
 
@@ -554,7 +555,7 @@ class QMatMulClampF32Test : public ::testing::TestWithParam<QMatmulClampF32Param
                 kai_matmul_clamp_f32_qai8dxp_qsi4c32p_ukernel, kai_qai8dxp_pack_functions, kai_qsi4c32p_pack_functions>*
                 variant,
             const size_t v_idx, const MatMulShape& shape, const size_t bl, const MatrixPortion p, const RhsPackType r,
-            const Rect& rect, const float clamp_keep_ratio) :
+            const Rect& rect, const std::optional<float> clamp_keep_ratio) :
             variant(variant),
             variant_index(v_idx),
             matmul_shape(shape),
@@ -646,18 +647,18 @@ protected:
 };
 
 using F32QMatMulRefKey = std::tuple<
-    MatMulShape,  // shape
-    size_t,       // bl
-    size_t,       // mr
-    size_t,       // kr
-    size_t,       // sr
-    size_t,       // rect_start_row
-    size_t,       // rect_start_col
-    size_t,       // rect_height
-    size_t,       // rect_width
-    RhsPackType,  // rhs_pack_type
-    int,          // clamp_pct
-    const void*   // lhs_pack_key
+    MatMulShape,         // shape
+    size_t,              // bl
+    size_t,              // mr
+    size_t,              // kr
+    size_t,              // sr
+    size_t,              // rect_start_row
+    size_t,              // rect_start_col
+    size_t,              // rect_height
+    size_t,              // rect_width
+    RhsPackType,         // rhs_pack_type
+    std::optional<int>,  // clamp_pct
+    const void*          // lhs_pack_key
     >;
 
 template <>
@@ -667,7 +668,8 @@ TestData ReferenceGenerator<F32QMatMulRefKey, TestData>::generate_reference(cons
     const auto& [shape, bl, mr, kr, sr, rect_start_row, rect_start_col, rect_height, rect_width, rhs_pack_type, clamp_pct, lhs_pack_key] =
         test_id;
     KAI_UNUSED(lhs_pack_key);
-    const float clamp_keep_ratio = static_cast<float>(clamp_pct) / 100.0F;
+    const std::optional<float> clamp_keep_ratio =
+        clamp_pct.has_value() ? std::optional<float>(static_cast<float>(clamp_pct.value()) / 100.0F) : std::nullopt;
     const Rect rect(rect_start_row, rect_start_col, rect_height, rect_width);
 
     ref.M = shape.m;
@@ -679,7 +681,7 @@ TestData ReferenceGenerator<F32QMatMulRefKey, TestData>::generate_reference(cons
     // Creates a unique seed for the test data.
     const auto key = std::string("F32QMatMulRefKey:") + std::to_string(ref.M) + "x" + std::to_string(ref.N) + "x" +
         std::to_string(ref.K) + "_" + std::to_string(bl) + "_" + ((rhs_pack_type == RhsPackType::NxK) ? "NxK" : "KxN") +
-        "_" + std::to_string(clamp_keep_ratio);
+        "_" + (clamp_keep_ratio.has_value() ? std::to_string(clamp_keep_ratio.value()) : "noclamp");
     auto& feed = seed_stream(key);
 
     ref.lhs = fill_random<float>(ref.M * ref.K, feed());
@@ -768,7 +770,7 @@ const TestData& QMatMulClampF32Test::test_data() {
     const size_t bl = std::get<3>(param);
     const MatrixPortion& portion = std::get<4>(param);
     const RhsPackType rhs_pack_type = std::get<5>(param);
-    const float clamp_keep_ratio = std::get<6>(param);
+    const std::optional<float> clamp_keep_ratio = std::get<6>(param);
 
     const auto& variant =
         is_gemm ? get_f32_gemm_variants().at(variant_index) : get_f32_gemv_variants().at(variant_index);
@@ -781,7 +783,9 @@ const TestData& QMatMulClampF32Test::test_data() {
     const size_t n_step = iface.get_n_step();
     const Rect rect = portion.compute_portion(shape.m, shape.n, m_step, n_step);
 
-    const int clamp_pct = static_cast<int>(clamp_keep_ratio * 100 + 0.5F);
+    const std::optional<int> clamp_pct = clamp_keep_ratio.has_value()
+        ? std::optional<int>(static_cast<int>(clamp_keep_ratio.value() * 100 + 0.5F))
+        : std::nullopt;
 
     const F32QMatMulRefKey key{
         shape,
@@ -801,7 +805,7 @@ const TestData& QMatMulClampF32Test::test_data() {
 }
 
 using MatMulTestParams_withBL_withRHSPackType =
-    std::tuple<size_t, MatMulShape, size_t, MatrixPortion, RhsPackType, float>;
+    std::tuple<size_t, MatMulShape, size_t, MatrixPortion, RhsPackType, std::optional<float>>;
 
 [[maybe_unused]] static void PrintTo(const MatMulTestParams_withBL_withRHSPackType& param, std::ostream* os) {
     const size_t variant_idx = std::get<0>(param);
@@ -810,7 +814,7 @@ using MatMulTestParams_withBL_withRHSPackType =
     const MatrixPortion portion = std::get<3>(param);
     const RhsPackType rhs_pack_type = std::get<4>(param);
     const std::string name{get_bf16_gemm_variants().at(variant_idx).name};
-    const float clamp_keep_ratio = std::get<5>(param);
+    const std::optional<float> clamp_keep_ratio = std::get<5>(param);
     *os << test_description(name, rhs_pack_type, shape, bl, portion, clamp_keep_ratio);
 }
 
@@ -830,7 +834,7 @@ BF16TestData ReferenceGenerator<BF16QMatMulRefKey, BF16TestData>::generate_refer
     const size_t rect_height = std::get<8>(test_id);
     const size_t rect_width = std::get<9>(test_id);
     const RhsPackType rhs_pack_type = std::get<10>(test_id);
-    const float clamp_keep_ratio = std::get<11>(test_id);
+    const std::optional<float> clamp_keep_ratio = std::get<11>(test_id);
 
     ref.M = shape.m;
     ref.N = shape.n;
@@ -841,7 +845,7 @@ BF16TestData ReferenceGenerator<BF16QMatMulRefKey, BF16TestData>::generate_refer
     // Creates a unique seed for the test data.
     const auto key = std::string("BF16QMatMulRefKey:") + std::to_string(ref.M) + "x" + std::to_string(ref.N) + "x" +
         std::to_string(ref.K) + "_" + std::to_string(bl) + "_" + ((rhs_pack_type == RhsPackType::NxK) ? "NxK" : "KxN") +
-        "_" + std::to_string(clamp_keep_ratio);
+        "_" + (clamp_keep_ratio.has_value() ? std::to_string(clamp_keep_ratio.value()) : "noclamp");
     auto& feed = seed_stream(key);
 
     // Inputs
@@ -921,7 +925,7 @@ BF16TestData ReferenceGenerator<BF16QMatMulRefKey, BF16TestData>::generate_refer
     return ref;
 }
 
-/// Verifies RHS packed offsets (KxN vs NxK) match each other and the matmul interface at n_step.
+/// Verifies RHS packed offsets (KxN vs NxK) match each other and the matmul interface at nr.
 TEST_P(QMatMulClampF32Test, OffsetRHS) {
     const auto& p = GetParams();
     const auto fn_supported = p.variant->ukernel.fn_is_supported;
@@ -936,27 +940,26 @@ TEST_P(QMatMulClampF32Test, OffsetRHS) {
     const auto nr = ukernel.interface.get_nr();
     const auto kr = ukernel.interface.get_kr();
     const auto sr = ukernel.interface.get_sr();
-    const auto n_step = ukernel.interface.get_n_step();
+    const auto n_idx = nr;
 
     const auto rhs_packed_offset_kxn =
-        kai_get_rhs_packed_offset_rhs_pack_kxn_qsi4c32p_qsu4c32s1s0(n_step, K, nr, kr, sr, bl, kai_dt_bf16);
-    const auto rhs_packed_offset_kxn_ps1s0 = kai_get_rhs_packed_offset_rhs_pack_kxn_qsi4c32ps1s0nrx4_qsu4c32s1s0_neon(
-        n_step, K, nr, kr, sr, bl, kai_dt_bf16);
+        kai_get_rhs_packed_offset_rhs_pack_kxn_qsi4c32p_qsu4c32s1s0(n_idx, K, nr, kr, sr, bl, kai_dt_bf16);
+    const auto rhs_packed_offset_kxn_ps1s0 =
+        kai_get_rhs_packed_offset_rhs_pack_kxn_qsi4c32ps1s0nrx4_qsu4c32s1s0_neon(n_idx, K, nr, kr, sr, bl, kai_dt_bf16);
     const auto rhs_packed_offset_nxk =
-        kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32p_qsu4c32s1s0(n_step, K, nr, kr, sr, bl, kai_dt_bf16);
+        kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32p_qsu4c32s1s0(n_idx, K, nr, kr, sr, bl, kai_dt_bf16);
     const auto rhs_packed_offset_nxk_ps1s0_nrx4 =
-        kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32ps1s0nrx4_qsu4c32s1s0_neon(
-            n_step, K, nr, kr, sr, bl, kai_dt_bf16);
+        kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32ps1s0nrx4_qsu4c32s1s0_neon(n_idx, K, nr, kr, sr, bl, kai_dt_bf16);
 
     ASSERT_EQ(rhs_packed_offset_kxn, rhs_packed_offset_kxn_ps1s0);
     ASSERT_EQ(rhs_packed_offset_kxn_ps1s0, rhs_packed_offset_nxk);
     ASSERT_EQ(rhs_packed_offset_nxk, rhs_packed_offset_nxk_ps1s0_nrx4);
 
-    const auto rhs_matmul_offset = ukernel.interface.get_rhs_packed_offset(n_step, K, bl);
+    const auto rhs_matmul_offset = ukernel.interface.get_rhs_packed_offset(n_idx, K, bl);
     ASSERT_EQ(rhs_packed_offset_kxn, rhs_matmul_offset);
 }
 
-/// Verifies LHS packed offset matches the matmul interface at m_step.
+/// Verifies LHS packed offset matches the matmul interface at mr.
 TEST_P(QMatMulClampF32Test, OffsetLHS) {
     const auto& p = GetParams();
     const auto fn_supported = p.variant->ukernel.fn_is_supported;
@@ -970,10 +973,10 @@ TEST_P(QMatMulClampF32Test, OffsetLHS) {
     const auto mr = ukernel.interface.get_mr();
     const auto kr = ukernel.interface.get_kr();
     const auto sr = ukernel.interface.get_sr();
-    const auto m_step = ukernel.interface.get_m_step();
+    const auto m_idx = mr;
 
-    const auto lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qai8dxp_f32(m_step, K, mr, kr, sr);
-    const auto lhs_matmul_offset = ukernel.interface.get_lhs_packed_offset(m_step, K);
+    const auto lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qai8dxp_f32(m_idx, K, mr, kr, sr);
+    const auto lhs_matmul_offset = ukernel.interface.get_lhs_packed_offset(m_idx, K);
 
     ASSERT_EQ(lhs_packed_offset, lhs_matmul_offset);
 }
@@ -1056,11 +1059,10 @@ TEST_P(QMatMulClampF32Test, RhsStrideByDifference) {
     const size_t K = p.matmul_shape.k;
     const size_t bl = p.bl;
     const auto nr = ukernel.interface.get_nr();
-    const auto n_step = ukernel.interface.get_n_step();
 
-    // Stride by difference using kernel offsets at 0 and n_step.
+    // Stride by difference using kernel offsets at 0 and nr.
     const size_t off0 = ukernel.interface.get_rhs_packed_offset(0, K, bl);
-    const size_t off1 = ukernel.interface.get_rhs_packed_offset(n_step, K, bl);
+    const size_t off1 = ukernel.interface.get_rhs_packed_offset(nr, K, bl);
     const size_t stride_by_diff = off1 - off0;
 
     // Expected stride formula for qsi4c32p with BF16 scales:
@@ -1471,6 +1473,7 @@ static constexpr std::array gemm_shapes_large{
 static constexpr std::array gemv_shapes_small{
     MatMulShape{  1,   16,  64},
     MatMulShape{  1,   31,  64},
+    MatMulShape{  1,   71,  64},
     MatMulShape{  1,  128, 256},
     MatMulShape{  1,  256, 256},
     MatMulShape{  1,  320, 320},
@@ -1497,10 +1500,11 @@ static constexpr std::array bf16_shapes {
 };
 
 /// Dedicated clamp sweep ratios
-static constexpr std::array<float, 3> clamp_keep_ratios_sweep{
-    1.0F,  // no clamp
-    0.5F,  // clamp away 50%
-    0.1F,  // clamp away 90%
+static constexpr std::array<std::optional<float>, 4> clamp_keep_ratios_sweep{
+    std::nullopt,   // Disable clamping
+    1.0F,           // Clamp to full range
+    0.5F,           // Clamp to 50% range
+    0.1F,           // Clamp to 10% range
 };
 
 INSTANTIATE_TEST_SUITE_P(
