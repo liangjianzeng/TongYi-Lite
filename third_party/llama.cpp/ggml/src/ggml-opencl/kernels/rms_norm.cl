@@ -149,6 +149,10 @@ kernel void kernel_rms_norm_mul(
     // So the number of subgroups per workgroup for this kernel cannot exceed the subgroup size.
     // This is generally true -
     // for subgroup size 64, workgroup size should be less than 4096 (the max is usually 1024).
+    // [dspark 2026-10-18] A/B: original subgroup-0 zero fill restored (see
+    // git history for the in-bounds variant that coincided with a decode
+    // regression). NOTE: when the backend ignores qcom_reqd_sub_group_size
+    // and native sgs > 64, this writes past the 64-float local allocation.
     if (get_sub_group_id() == 0) {
         sum[get_sub_group_local_id()] = 0.0f;
     }
@@ -252,6 +256,10 @@ kernel void kernel_rms_norm_mul_add(
         return;
     }
 
+    // [dspark 2026-10-18] A/B: original subgroup-0 zero fill restored (see
+    // git history for the in-bounds variant that coincided with a decode
+    // regression). NOTE: when the backend ignores qcom_reqd_sub_group_size
+    // and native sgs > 64, this writes past the 64-float local allocation.
     if (get_sub_group_id() == 0) {
         sum[get_sub_group_local_id()] = 0.0f;
     }
@@ -349,6 +357,10 @@ kernel void kernel_rms_norm_mul_add_scale(
 
     const float sc = *((global float *) src3);
 
+    // [dspark 2026-10-18] A/B: original subgroup-0 zero fill restored (see
+    // git history for the in-bounds variant that coincided with a decode
+    // regression). NOTE: when the backend ignores qcom_reqd_sub_group_size
+    // and native sgs > 64, this writes past the 64-float local allocation.
     if (get_sub_group_id() == 0) {
         sum[get_sub_group_local_id()] = 0.0f;
     }
