@@ -9,16 +9,18 @@
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <type_traits>
 
 #include "kai/kai_common.h"
 #include "test/common/buffer.hpp"
 #include "test/common/data_format.hpp"
+#include "test/common/data_type.hpp"
 #include "test/common/float16.hpp"
 #include "test/common/matrix_portion.hpp"
+#include "test/common/range.hpp"
 #include "test/common/seed.hpp"
 
 namespace kai::test {
@@ -47,39 +49,42 @@ private:
     friend std::ostream& operator<<(std::ostream& os, const MatMulShape& shape);
 };
 
-/// Value range
-template <typename T>
-struct Range {
-    T min;
-    T max;
+// NOLINTBEGIN(misc-non-private-member-variables-in-classes)
 
-    [[nodiscard]] std::size_t inclusive_count() const {
-        static_assert(std::is_integral_v<T>);
-        return max - min + 1;
-    }
-
-    [[nodiscard]] bool is_valid() const {
-        return min <= max;
-    }
+enum class MatMulMethodCapability : uint8_t {
+    NONE = 0,
+    PACKED_LHS = 1U << 0,
+    PACKED_RHS = 1U << 1,
+    PACKED_TRANSPOSED_RHS = 1U << 2,
+    OUTPUT = 1U << 3,
 };
 
-// NOLINTBEGIN(misc-non-private-member-variables-in-classes)
+[[nodiscard]] constexpr MatMulMethodCapability operator|(
+    const MatMulMethodCapability lhs, const MatMulMethodCapability rhs) {
+    return static_cast<MatMulMethodCapability>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
 
 /// Matrix multiplication method.
 struct MatMulMethod {
-    std::string_view name{};  ///< Name of matmul method.
+    std::string_view name{};                                            ///< Name of matmul method.
+    MatMulMethodCapability capabilities{MatMulMethodCapability::NONE};  ///< Expected test capabilities.
 
     size_t m0{0};  ///< Block size in M dimension.
     size_t n0{0};  ///< Block size in N dimension.
     size_t k0{0};  ///< Block size in K dimension.
 
-    DataFormat dst_format{};         ///< Data format of the destination matrix.
-    DataFormat lhs_format{};         ///< Data format of the LHS matrix.
-    DataFormat packed_lhs_format{};  ///< Data format of the packed LHS matrix.
-    DataFormat rhs_format{};         ///< Data format of the RHS matrix.
-    DataFormat packed_rhs_format{};  ///< Data format of the packed RHS matrix.
-    DataFormat bias_format{};        ///< Data format of the bias vector.
-    bool nb_support{};               ///< Does the kernel support null_bias.
+    DataFormat dst_format{};             ///< Data format of the destination matrix.
+    DataFormat lhs_format{};             ///< Data format of the LHS matrix.
+    DataFormat packed_lhs_format{};      ///< Data format of the packed LHS matrix.
+    DataFormat rhs_format{};             ///< Data format of the RHS matrix.
+    DataFormat packed_rhs_format{};      ///< Data format of the packed RHS matrix.
+    DataFormat bias_format{};            ///< Data format of the bias vector.
+    DataType acc_dt{DataType::UNKNOWN};  ///< Reference accumulator data type, if specified.
+    bool nb_support{};                   ///< Does the kernel support null_bias.
+
+    [[nodiscard]] bool has_capability(const MatMulMethodCapability capability) const {
+        return (static_cast<uint8_t>(capabilities) & static_cast<uint8_t>(capability)) != 0;
+    }
 
     /// Generate LHS matrix.
     ///
@@ -529,11 +534,12 @@ enum class BiasMode {
 };
 
 /// Matrix multiplication test information.
-using MatMulClampTestParams = std::tuple<MatMulMethod, MatMulShape, MatrixPortion, BiasMode, float>;
-using MatMulClampTestPortionedParams = std::tuple<size_t, MatMulShape, MatrixPortion, float>;
-using MatMulClampTestPortionedParamsWithBias = std::tuple<size_t, MatMulShape, MatrixPortion, float, bool>;
+using MatMulClampTestParams = std::tuple<MatMulMethod, MatMulShape, MatrixPortion, BiasMode, std::optional<float>>;
+using MatMulClampTestPortionedParams = std::tuple<size_t, MatMulShape, MatrixPortion, std::optional<float>>;
+using MatMulClampTestPortionedParamsWithBias =
+    std::tuple<size_t, MatMulShape, MatrixPortion, std::optional<float>, bool>;
 using MatMulClampTestPortionedParamsWithBias_WithBL =
-    std::tuple<size_t, MatMulShape, size_t, MatrixPortion, float, bool>;
+    std::tuple<size_t, MatMulShape, size_t, MatrixPortion, std::optional<float>, bool>;
 
 /// Prints the test information.
 void PrintTo(const MatMulClampTestParams& param, std::ostream* os);
@@ -544,7 +550,7 @@ void PrintTo(const BiasMode& bias_mode, std::ostream* os);
 /// Generate test information
 std::string test_description(
     const std::string_view& name, const MatMulShape& shape, const MatrixPortion& portion, bool bias,
-    float clamp_keep_ratio);
+    std::optional<float> clamp_keep_ratio);
 
 }  // namespace kai::test
 

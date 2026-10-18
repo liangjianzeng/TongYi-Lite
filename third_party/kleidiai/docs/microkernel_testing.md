@@ -23,7 +23,7 @@ The test suite is built around a small set of components and entry points:
   subdirectories of `test/nextgen/operators/matmul`. The files here adapt the
   micro-kernel C API into the common test harness API. Micro-kernel factory
   declarations are listed in wrapper interface headers, e.g.,
-  `test/nextgen/operators/matmul/matmul/matmul_wrapper.hpp`.
+  `test/nextgen/operators/matmul/matmul/matmul_wrapper_registry.hpp`.
 - A test bench in `test/nextgen/operators/matmul/matmul_tb.cpp` that generates
   inputs, runs the implementation, and compares to a reference.
 
@@ -43,9 +43,9 @@ transition to _NextGen_ is completely done.
   as to test tiling functionality.
 - *RHS* - Right-hand side. The $B$ matrix in $C = A * B + β$.
 - *tensor slot* - a named entry in `MatMulSlot` used by `MatMulTb` tensor
-  storage to hold configuration/arguments and tensor data (source, derived, packed, and
-  destination). Wrappers declare required slots via `run_inputs()` and
-  `ref_inputs()`.
+  storage to hold configuration/arguments and tensor data (source, derived,
+  packed, bias, and destination). Wrappers declare required slots via
+  `run_inputs()` and `ref_inputs()`.
 - *Wrapper* - a wrapper around the micro-kernel as to expose a standardized API
   to the test framework.
 
@@ -72,9 +72,12 @@ Its flow is:
 1. Enumerate available operators from `get_available_matmul_operators()`.
 1. Skip operators that current CPU doesn't support. This is checked by calling
    `is_cpu_supported()` on operator.
-1. For each operator, sample random shapes and keep only shapes that satisfy
+1. For each operator and tested output portion, sample random shapes and keep
+   only shapes that satisfy
    `is_shape_suitable(shape_m, shape_n, shape_k, portion)` on operator.
-1. Register tests for LHS pack, RHS pack, and matmul.
+1. Select a supported bias mode set and clamp configuration for the operator.
+1. Register tests for each component present on the operator: LHS pack, RHS
+   pack, and matmul.
 1. Build a cached `MatMulTb` per fixture, generate test data once, then run
    tile-level tests against precomputed references.
 
@@ -84,8 +87,9 @@ Inside `MatMulTb::generate_test_data()`, the sequence is:
    wrapper's `run_inputs()` and `ref_inputs()`.
 1. Let wrappers populate constant slot metadata and argument payloads such as
    `PACK_ARGS`, `MATMUL_ARGS`, and packed tensor formats.
-1. Generate the source tensors (`LHS_DATA`, `RHS_DATA`, `BIAS_DATA`), then
-   derive any always-needed source variants such as `RHS_T_DATA`.
+1. Generate the source tensors (`LHS_DATA`, `RHS_DATA`, and any required
+   logical bias or scale slots), then derive any always-needed source variants
+   such as `RHS_T_DATA`.
 1. Apply optional quantization (`lhs_quant`, `rhs_quant`, `bias_quant`).
 1. Compute extra derived tensors required by wrappers (for example
    `LHS_QZP_NEG`, `RHS_T_QDATA_SIGN`, `RHS_T_QDATA_SIGN_SUM`).
@@ -109,6 +113,27 @@ reference packing. Optional derived slots such as `LHS_QZP_NEG` or
 `RHS_T_QDATA_SIGN_SUM` are only computed when some wrapper has declared that it
 needs them.
 
+Bias is configured at operator level with `MatMulBiasModeSet`. Each
+`MatMulOperator` lists the supported sets in `supported_bias_mode_sets`; an
+empty set means no bias. The current logical bias modes are
+`ACCUMULATION_PER_M` for row bias, `ACCUMULATION_PER_N` for column bias, and
+`SCALE_BIAS_PER_N` for column bias applied after accumulator scaling. The test
+framework uses these modes to model the operator result. It does not matter to
+the high-level flow which component consumes or precomputes a particular value.
+
+The reference path computes the operator result in the same logical order:
+matmul, accumulation-stage bias, destination conversion when needed,
+accumulator scaling, scaled bias, and finally clamping. The exact tensors are
+generated only when the selected wrappers declare them as required inputs.
+
+Operators also declare clamping support with `MatMulClampMode`. Use
+`UNSUPPORTED` for micro-kernels with no clamp arguments, `OPTIONAL` for
+micro-kernels that can run with or without clamp arguments, and `REQUIRED` for
+micro-kernels whose API always requires clamp limits. Current matmul clamp
+arguments are carried in `MATMUL_ARGS` as `std::optional<MatMulClampArgsF32>`.
+For `REQUIRED` operators, the test bench supplies a full output-range clamp when
+the random test case does not select dynamic clamping.
+
 ## Adding a new micro-kernel to the test suite
 
 This section outlines the steps needed to be able to add a new micro-kernel to
@@ -119,7 +144,8 @@ High-level steps:
 - Add wrapper factory functions for any required pack micro-kernels and the
   matmul micro-kernel.
 - Register a `MatMulOperator` entry pointing at those wrappers and setting
-  data types, bias modes, quantizers, and shape suitability.
+  data types, supported bias mode sets, clamp mode, quantizers, and shape
+  suitability.
 
 ### Step 1: Add or extend matmul wrapper factories
 
@@ -138,7 +164,7 @@ For a simple F16 example, with no LHS packing:
 As an example, the matmul factory can be implemented as follows:
 
 ```cpp
-// test/nextgen/operators/matmul/matmul/matmul_wrapper.cpp
+// test/nextgen/operators/matmul/matmul/matmul_wrapper_registry.cpp
 std::unique_ptr<KernelWrapper<MatMulShape>>
 create_matmul_clamp_f16_f16_f16p_neon() {
     return std::make_unique<MatMulFpWrapper>(
@@ -160,25 +186,25 @@ create_matmul_clamp_f16_f16_f16p_neon() {
 
 For this example, the matmul wrapper uses unpacked FP16 LHS, packed FP16 RHS
 with block size of $16 ⨯ 1$, and a plain FP16 destination format. Use existing
-factories in `matmul_wrapper.cpp` and packer wrappers as a model.
+factories in `matmul_wrapper_registry.cpp` and packer wrappers as a model.
 
 Make sure there is a `create_matmul_...` factory declaration added to
-`test/nextgen/operators/matmul/matmul/matmul_wrapper.hpp` for the new micro-kernel.
+`test/nextgen/operators/matmul/matmul/matmul_wrapper_registry.hpp` for the new micro-kernel.
 
 ### Step 2: Add packing micro-kernel wrapper factories
 
 For the F16 example, only RHS packing is needed. Add or reuse the RHS
 packer wrapper in:
 
-- `test/nextgen/operators/matmul/pack_rhs/matmul_pack_rhs_wrapper.cpp`
+- `test/nextgen/operators/matmul/pack_rhs/matmul_pack_rhs_wrapper_registry.cpp`
 
 If another micro-kernel also packs the LHS, add or reuse a packer wrapper in
-`test/nextgen/operators/matmul/pack_lhs/matmul_pack_lhs_wrapper.cpp`.
+`test/nextgen/operators/matmul/pack_lhs/matmul_pack_lhs_wrapper_registry.cpp`.
 
 Example skeleton for RHS packing:
 
 ```cpp
-// test/nextgen/operators/matmul/pack_rhs/matmul_pack_rhs_wrapper.cpp
+// test/nextgen/operators/matmul/pack_rhs/matmul_pack_rhs_wrapper_registry.cpp
 std::unique_ptr<KernelWrapper<MatShape>>
 create_matmul_rhs_pack_kxn_f16p16x1biasf16_f16_f16_neon() {
     return std::make_unique<MatMulPackRhsFpNtWrapper>(
@@ -203,10 +229,10 @@ create_matmul_rhs_pack_kxn_f16p16x1biasf16_f16_f16_neon() {
 
 In this example the wrapper is for a non-transposed RHS packing micro-kernel,
 which is why the RHS input matrix is consumed from `RHS_DATA` in plain row
-major $K × N$ layout, while the bias row vector is consumed from `BIAS_DATA` in
-plain row major $N$ layout. The packed output is a bit more complex, as it uses
-`Block2dRowFormat` to describe a $16 × 1$ packing format with the per-$N$ bias
-stored alongside the packed RHS data.
+major $K × N$ layout, while the logical per-$N$ accumulation bias is represented
+by `ACC_BIAS_N_DATA` in plain row major $N$ layout. The packed output is a bit
+more complex, as it uses `Block2dRowFormat` to describe a $16 × 1$ packing
+format with the per-$N$ bias stored alongside the packed RHS data.
 
 If the packing micro-kernel instead expects a transposed RHS, the source format
 is still `PlainFormat`, but the logical shape changes to plain row major $N × K$
@@ -226,7 +252,8 @@ operator declares:
 
 - Micro-kernel availability (`is_cpu_supported`).
 - Shape suitability for matrix portions (`is_shape_suitable(...)`).
-- Supported bias modes.
+- Supported bias mode sets.
+- Clamp support mode.
 - Input/output/accumulator data types.
 - Optional quantizers (for quantized micro-kernels).
 - Wrapper factories for any required packers and matmul.
@@ -243,7 +270,10 @@ operators[i].is_shape_suitable =
         return is_shape_suitable_rhs_f16_example(shape_m, shape_n, shape_k, portion);
     };
 
-operators[i].supported_bias_modes = { MatMulBiasMode::PER_N, };
+operators[i].supported_bias_mode_sets = {
+    MatMulBiasModeSet{MatMulBiasMode::ACCUMULATION_PER_N},
+};
+operators[i].clamp_mode = MatMulClampMode::REQUIRED;
 
 operators[i].lhs_dtype = DataType::FP16;
 operators[i].rhs_dtype = DataType::FP16;

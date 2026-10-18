@@ -303,6 +303,17 @@ static int32_t safe_decode(struct llama_context * ctx, llama_batch batch) {
     }
 }
 
+// 0.7.0: common_speculative_process() takes the C++ common_batch; wrap a legacy
+// llama_batch (id/pos/first-seq/logits, which is all the spec impls read here)
+static common_batch legacy_to_common_batch(const llama_batch & b) {
+    common_batch cb;
+    for (int32_t i = 0; i < b.n_tokens; ++i) {
+        const llama_seq_id seq = (b.seq_id[i] != nullptr && b.n_seq_id[i] > 0) ? b.seq_id[i][0] : 0;
+        cb.add(b.token[i], b.pos[i], seq, b.logits[i] != 0);
+    }
+    return cb;
+}
+
 // llama_sampler_sample() contains two unrecoverable GGML_ASSERT aborts
 // (logits == nullptr / selected out of range) that SIGABRT the whole app in
 // release builds — tombstone from the field: ggml_abort inside
@@ -2232,7 +2243,7 @@ struct InferenceEngine {
                     // MTP: mirror the target hidden states (t_h_nextn) into the MTP
                     // context so the draft head can predict from the full prompt.
                     if (mtp_spec) {
-                        if (!common_speculative_process(mtp_spec, tok_batch)) {
+                        if (!common_speculative_process(mtp_spec, legacy_to_common_batch(tok_batch))) {
                             LOGE("common_speculative_process() failed on prefill batch %d", i);
                             llama_batch_free(tok_batch);
                             is_running = false;
@@ -2443,10 +2454,20 @@ struct InferenceEngine {
                     }
 
                     // 2) evaluate [id_last, draft0..N] on the target model
-                    common_batch_clear(batch_tgt);
-                    common_batch_add(batch_tgt, mtp_id_last, mtp_n_past++, { seq_id }, true);
-                    for (size_t k = 0; k < draft.size(); ++k) {
-                        common_batch_add(batch_tgt, draft[k], mtp_n_past + k, { seq_id }, true);
+                    batch_tgt.n_tokens = 0;
+                    {
+                        auto mtp_add_tok = [&](llama_token id_, llama_pos pos_) {
+                            const int32_t t = batch_tgt.n_tokens++;
+                            batch_tgt.token[t] = id_;
+                            batch_tgt.pos[t] = pos_;
+                            batch_tgt.n_seq_id[t] = 1;
+                            batch_tgt.seq_id[t][0] = seq_id;
+                            batch_tgt.logits[t] = true;
+                        };
+                        mtp_add_tok(mtp_id_last, mtp_n_past++);
+                        for (size_t k = 0; k < draft.size(); ++k) {
+                            mtp_add_tok(draft[k], mtp_n_past + k);
+                        }
                     }
                     LOGI("[%s] verify batch: id_last=%d n_past=%d n_draft=%zu", driver_tag, mtp_id_last, mtp_n_past - 1, draft.size());
                     const int dec_ret = safe_decode(context, batch_tgt);
@@ -2465,7 +2486,7 @@ struct InferenceEngine {
                     //    re-drafts from the trimmed base — same as official speculative
                     //    empty-draft fallback.
                     if (!draft.empty()) {
-                        const bool proc_ok = common_speculative_process(mtp_spec, batch_tgt);
+                        const bool proc_ok = common_speculative_process(mtp_spec, legacy_to_common_batch(batch_tgt));
                         LOGI("[%s] process ok=%d", driver_tag, (int)proc_ok);
                         if (!proc_ok) {
                             LOGE("[%s] common_speculative_process failed", driver_tag);

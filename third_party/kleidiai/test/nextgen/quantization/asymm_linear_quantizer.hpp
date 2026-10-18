@@ -40,12 +40,18 @@ public:
         m_block_width(block_width) {
     }
 
+    void determine_qinfo(
+        DataType fp_dtype, Shape shape, Span<const std::byte> fp_data, Tensor& qscale, Tensor& qzp) const override;
+    void quantize(
+        DataType fp_dtype, Shape shape, Span<const std::byte> fp_data, Span<const std::byte> qscale,
+        Span<const std::byte> qzp, Tensor& qdata) const override;
     void dynamic_quantize(
         DataType fp_dtype, Shape shape, Span<const std::byte> fp_data, Tensor& qdata, Tensor& qscale,
         Tensor& qzp) const override;
     [[nodiscard]] Buffer dequantize(
         DataType fp_dtype, Shape shape, Span<const std::byte> qdata, Span<const std::byte> qscale,
         Span<const std::byte> qzp) const override;
+    [[nodiscard]] std::string uid() const override;
 
 private:
     DataType m_qdata_dtype;
