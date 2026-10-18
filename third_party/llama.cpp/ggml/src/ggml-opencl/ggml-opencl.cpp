@@ -14476,15 +14476,6 @@ static size_t ggml_backend_opencl_buffer_type_get_alloc_size(ggml_backend_buffer
     return size;
 }
 
-static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
-    /* .get_name         = */ ggml_backend_opencl_buffer_type_get_name,
-    /* .alloc_buffer     = */ ggml_backend_opencl_buffer_type_alloc_buffer,
-    /* .get_alignment    = */ ggml_backend_opencl_buffer_type_get_alignment,
-    /* .get_max_size     = */ ggml_backend_opencl_buffer_type_get_max_size,
-    /* .get_alloc_size   = */ ggml_backend_opencl_buffer_type_get_alloc_size,
-    /* .is_host          = */ NULL,
-};
-
 //
 // [dspark 2026-10-15] M2 GPU slot bank buffer type (FGSVM)
 //
@@ -14646,9 +14637,11 @@ static bool ggml_backend_opencl_svm_buft_is_host(ggml_backend_buffer_type_t buff
 static ggml_backend_buffer_type_i ggml_backend_opencl_svm_buft_interface = {
     /* .get_name         = */ ggml_backend_opencl_svm_buft_get_name,
     /* .alloc_buffer     = */ ggml_backend_opencl_svm_buft_alloc_buffer,
+    /* .alloc_buffer_n   = */ NULL,
     /* .get_alignment    = */ ggml_backend_opencl_svm_buft_get_alignment,
     /* .get_max_size     = */ ggml_backend_opencl_svm_buft_get_max_size,
     /* .get_alloc_size   = */ NULL,
+    /* .get_alloc_size_n = */ NULL,
     /* .is_host          = */ ggml_backend_opencl_svm_buft_is_host,
 };
 

@@ -17,19 +17,8 @@ struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
 
-// Maps a folded model weight to the activation-side transform applied
-// immediately before the matmul: optional sign flip, then the normalized
-// blockwise Hadamard rotation.
-struct llama_hadamard_transform {
-    ggml_tensor * rot;
-    ggml_tensor * signs; // nullptr for identity sign mode
-    // when perm_rep > 1 the activation arrives with its feature axis in tiled
-    // head order [hd, nk, rep] and must be permuted to the grouped order
-    // [hd, rep, nk] the fold was computed in, before signs and rotation
-    int64_t perm_hd  = 0;
-    int64_t perm_nk  = 0;
-    int64_t perm_rep = 0;
-};
+// transform types live in llama-model.h; forward decls keep this header light
+struct llama_hadamard_transform;
 using llama_hadamard_rotations = std::unordered_map<const ggml_tensor *, llama_hadamard_transform>;
 
 struct llama_cparams;

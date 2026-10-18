@@ -10,11 +10,101 @@ KleidiAI follows the [Semantic Versioning](https://semver.org/) specification fo
 
 ## Upcoming Release
 
+## v1.31.0
+
+- New micro-kernels
+  - SME2 FP16 elastic GEMM/GEMV kernels with corresponding packing kernels.
+  - SME2.1 INT8 8vsx8vs MOPA matmul micro-kernel with a 2vsx32vs MOP4A fast path for eligible output regions whose height is half the accumulator vector length (2vs).
+  - SME2 QAI4C32K256 GEMM/GEMV micro-kernels along with corresponding packing kernels.
+  - SME2 GEMM/GEMV micro-kernels with QAI8 LHS, QSU2CXP RHS and QAI8 output along with RHS packing kernel
+- Fixes
+  - Corrected the documented indirection-table size and bounds assertions for SME LHS imatmul packing micro-kernels.
+
+## v1.30.0
+
+- New SME2 micro-kernels
+  - Matrix multiplication (MxN) micro-kernel of QAI8 LHS and QSI4CXP RHS with QAI8 output.
+  - Matrix multiplication (1xN) micro-kernel of QAI8 LHS and QSI4CXP RHS with QAI8 output.
+
+## v1.29.0
+
+- New SME2 micro-kernels
+  - Matrix Multiplication (1xN) Micro-Kernel of QAI8DXP LHS and QSI4CXP RHS with F16 output.
+- Improve performance of SME2 F32 elastic GEMM micro-kernels.
+- Added MSVC support for NEON Dotprod and I8MM matmul micro-kernels:
+  - kai_matmul_clamp_f32_qai8dxp4x8_qsi4cxp4x4_16x4x32_neon_dotprod
+  - kai_matmul_clamp_f32_qai8dxp4x8_qsi4cxp8x8_8x8x32_neon_i8mm
+  - kai_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod
+  - kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm
+- Fixed MSVC build by preprocessing `.S` assembly files via `cl.exe` prior to `armasm64` assembly (omitting incompatible C compiler flags like `/arch`).
+
+## v1.28.0
+
+- New SVE2.1 micro-kernels:
+  - Matrix multiplication (MxN) for FP16 inputs/output with F32 accumulation.
+
+## v1.27.0
+
+- New SME micro-kernels:
+  - Matrix multiplication (MxN) for BF16 inputs with F32 output.
+- New SME2 micro-kernels
+  - Matrix Multiplication (MxN) Micro-Kernel of QAI8DXP LHS and QSI4CXP RHS with F16 output.
+  - Added `kai_lhs_pack_bf16p2vlx2_f32_sme2`, which is renaming of the `kai_lhs_pack_bf16p2vlx2_f32_sme` SME2 implementation.
+- Fixes
+  - Updated `kai_lhs_pack_bf16p2vlx2_f32_sme` to avoid SME2-only instructions.
+
+## v1.26.0
+
+- New SME micro-kernels
+  - Added an x8 matmul pack micro-kernel family with 4vsx4 blocked layout, without packing bias.
+  - Added SME RHS depthwise packing kernel for FP16
+- New SME2 micro-kernels
+  - Added SME2 depthwise indirect micro-kernel for FP16.
+  - kai_matmul_i32_u8p4vsx4_u8p4vsx4_i32_i32_8vsx8vs_sme2_mopa.
+  - kai_matmul_clamp_f32_u8p4vsx4_u8p4vsx4_i32_i32_f32_f32_8vsx8vs_sme2_mopa.
+- Extended the following micro-kernels to support variable block length
+  - kai_matmul_clamp_f32_qsi8d32p1x4_qsi4c32p4x4_1x4_neon_dotprod
+  - kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod
+  - kai_matmul_clamp_f32_qsi8d32p4x4_qsi4c32p4x4_16x4_neon_dotprod
+  - kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_8x4x32_neon_i8mm
+  - kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_16x4_neon_i8mm
+  - kai_rhs_pack_nxk_qsi4c32ps1s0scalef16_qsu4c32s16s0
+  - kai_lhs_quant_pack_qsi8d32p4x8sb_f32_neon
+- Fixes
+  - Added ZA lazy save to kai_matmul_clamp_f32_qsi8d32p1x4_qsi4c32p4vlx4_1x4vl_sme_dot
+  - Fix QAI8/QSI8CXP matmul test failures by constraining generated qsi32 bias values to preserve int32 accumulator headroom.
+  - Fix a clamping issue in matmul_clamp_qai8_qai8p_qai8p_test.cpp
+  - Fix traditional matmul and imatmul packed offset helpers to use packing panel boundaries.
+- New Advanced SIMD micro-kernels
+  - Matrix Multiplication MxN and 1xN Micro-Kernels of QAI8DXP LHS and QSU2CXP RHS with F32 output, optimized for FEAT_DotProd, along with RHS packing kernel.
+- Documentation
+  - Contribution policy updates as part of third party contribution enablement
+  - Added coding standard and conventions
+- New Transposed-B RHS packing micro-kernel versions of kai_rhs_pack_kxn_x32p16x1b_x32_x32_neon and kai_rhs_pack_kxn_x16p32x1b_x16_x16_neon:
+  - kai_rhs_pack_nxk_x16p32x1bx16_x16_x16_neon
+  - kai_rhs_pack_nxk_x32p16x1bx32_x32_x32_neon
+- New SME2 FP32 GEMV micro-kernel with 4vsx1 RHS format
+- New SME2 static Int8 GEMM/GEMV kernels and the RHS packing kernel.
+  - kai_matmul_clamp_qai8_qai8p4vsx4_qsi8cxp4vsx4bi32sf32_8vsx8vs_sme2_mopa
+  - kai_matmul_clamp_qai8_qai8_qsi8cxp4vsx4bi32sf32_1x32vs_sme2_dot
+  - kai_matmul_pack_rhs_kxn_qsi8cxp4vsx4bi32sf32_qsi8_i32_f32_sme
+
+## v1.25.0
+
+- Optimizations
+  - Optimize rhs_pack_nxk_qsi4c32ps1s0scalef16_qsu4c32s16s0_neon for Int4 GEMM/GEMV kernels
+- Fixes
+  - Fix RHS tail handling in `kai_matmul_clamp_f32_qai8dxp1vlx4_qsi4cxp4vlx4_1vlx4vl_sme_mopa`.
+
 ## v1.24.0
 
 - New SME micro-kernels
   - Matrix Multiplication (1xN) Micro-Kernel of QAI8DXP LHS and QSI4CXP RHS with F32 output.
   - Matrix Multiplication (MxN) Micro-Kernel of QAI8DXP LHS and QSI4CXP RHS with F32 output.
+  - Matrix Multiplication (1xN) Micro-Kernel of QSI8D32P LHS and QSI4C32P RHS variable block with F32 output.
+  - Matrix Multiplication (MxN) Micro-Kernel of QSI8D32P LHS and QSI4C32P RHS variable block with F32 output.
+- New RHS packing kernels to support SME int4 variable block kernels:
+  - Add common RHS packer `kai_rhs_pack_nxk_qsi4c32ps4s0sf16_qsu4c32s16s0_neon` for new SME micro-kernels, using K+0/K+4 nibble order for more efficient int4 decode.
 
 ## v1.23.0
 

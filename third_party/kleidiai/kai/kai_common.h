@@ -134,7 +134,7 @@ enum {
 ///
 /// @return Project version as a string literal.
 inline const char* kai_get_version(void) {
-    return "1.24.0";
+    return "1.31.0";
 }
 
 /// KleidiAI data types
@@ -212,8 +212,14 @@ inline static uint16_t kai_cast_f16_f32(float f32) {
 }
 #endif
 
+/// Divide a value, `a`, with a value `b` and round up the result
+inline static size_t kai_div_ceil(size_t a, size_t b) {
+    return (a + b - 1) / b;
+}
+
+/// Round up a value, `a` to a multiple of `b`
 inline static size_t kai_roundup(size_t a, size_t b) {
-    return ((a + b - 1) / b) * b;
+    return kai_div_ceil(a, b) * b;
 }
 
 #if defined(__ARM_FEATURE_SVE2) || defined(_M_ARM64)
@@ -250,6 +256,11 @@ inline static uint64_t kai_get_sve_vector_length_u16(void) {
 /// Gets the SVE vector length for 32-bit elements.
 inline static uint64_t kai_get_sve_vector_length_u32(void) {
     return kai_get_sve_vector_length_u8() / 4;
+}
+
+/// Gets the vscale scale factor for SVE
+inline static uint64_t kai_get_sve_vscale(void) {
+    return kai_get_sve_vector_length_u8() / KAI_VSCALE_UNIT_BYTES;
 }
 
 /// Extends the sign bit of int 4-bit value (stored in int8_t variable)
