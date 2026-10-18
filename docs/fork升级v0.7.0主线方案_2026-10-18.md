@@ -104,6 +104,15 @@ CONFLICT 50 的上游漂移量（b11267→v0.7.0 diffstat 摘要）：
 
 **静态核查过**：src/CMakeLists 上游 `llama-moe-cache.cpp` + fork 追加文件并存在册；models GLOB 收 dspark.cpp；model.h `hadamard_rotations` 成员齐（dspark.cpp 借用链编译安全）；`nextn_flags` 上游新 API 可用；graph.h params/成员双系统字段齐；vulkan `operator<<` 上游 common.h 已供（fork 重复定义已删）；KleidiAI FetchContent 名=`kleidiai`（app 双名兜底命中）。
 
-**疑点登记**：① 上游 KleidiAI pin 升 v1.31.0，vendored 仍 v1.24.0——API 漂移以编译门为准，必要时 vendored 升级；② wt 构建需补 gitignored 三件（local.properties/key.properties/key.jks/gradle-wrapper.jar，已做）。
+**疑点登记**：① ~~上游 KleidiAI pin 升 v1.31.0，vendored 仍 v1.24.0~~ → **已定案解决**：上游 kernels.cpp 对 v1.31.0 新内核是强引用（无 `#ifdef` 守卫），vendored 已换 v1.31.0（官方 CMake 每 kernel 族自带 per-file `-march=armv8.x-a+扩展` 编译，SME/SME2/SVE2 全族入库）+ 运行期 `required_cpu` 分派——**830（A78/armv8.2）运行路径不变零风险，ARMv9 新机（高端机渐多，用户定案方向）直接吃到 SME2 GEMM**（q4_0/q4_k/q8_0 等 SME2 mopa 内核）。注意 kleidiai 换源后必须清 `.cxx` 全量重建（增量会留旧对象文件集 → 新内核符号 undefined）。② wt 构建需补 gitignored 三件（local.properties/key.properties/key.jks/gradle-wrapper.jar，已做）。
 
 **当前**：编译门 NDK arm64 全量重编进行中（buildCMakeDebug）。
+
+**编译门实战记录（2026-10-18 晚，下次升级照单核）**：
+1. **stale configure 缓存**：清 `.cxx` 后首轮 configure 生成的 compile_commands 可能不带 `-march`（app `GGML_CPU_ARM_ARCH` 的 FORCE 值未进首轮 generate）——别信第一份 compile_commands；重跑 `:app:configureCMakeDebug[arm64-v8a]` 后 grep `build.ninja` 确认 ggml-cpu.c 带 `-march=armv8.6-a+dotprod+i8mm+fp16+bf16`（Mesa 满血档）再全量编。`.cxx\tools\profile\` 会混入 compile_commands glob，机检锁 `\Debug\` 路径。
+2. **KleidiAI v1.31.0 落地**：官方 CMake 全族 per-file march（SME2 在册 107 units），换源必清 `.cxx`（对象不随源刷新）。
+3. **hadamard 类型双定义**：graph.h fork struct × 上游 model.h L679 → graph.h 改前向声明 + using 别名（同类型别名合法共存）。
+4. **buffer_type_i 新字段**（`alloc_buffer_n`/`get_alloc_size_n`）：SVM buft 旧 6 字段初始化错位 → 补 NULL；主 buft 接口 fork 副本删（上游已实现，fork 对函数体的 SOA_Q 等改动存活，已 diff 验证函数体一致）。
+5. **mtmd MiniCPM-V 4.7 上游已收编**：`PROJECTOR_TYPE_MINICPMV4_7` case 与 `use_image_id` 成员在 fork 侧成重复 → 删 fork 重复块。
+6. **common_batch C++ 化**：`common_batch_clear/add` 已删 → JNI `legacy_to_common_batch()` 包装喂 `common_speculative_process`；verify batch 改 llama_batch 直写（语义等价）。
+7. **Mesa 在途代码随镜像入树**：`transpose_activation_q8.cl`（cpp 已引用）需补注册 `GGML_OPENCL_KERNELS`；`fwht.cl` 无引用不入编。
