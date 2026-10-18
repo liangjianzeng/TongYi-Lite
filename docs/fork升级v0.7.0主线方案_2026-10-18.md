@@ -116,3 +116,11 @@ CONFLICT 50 的上游漂移量（b11267→v0.7.0 diffstat 摘要）：
 5. **mtmd MiniCPM-V 4.7 上游已收编**：`PROJECTOR_TYPE_MINICPMV4_7` case 与 `use_image_id` 成员在 fork 侧成重复 → 删 fork 重复块。
 6. **common_batch C++ 化**：`common_batch_clear/add` 已删 → JNI `legacy_to_common_batch()` 包装喂 `common_speculative_process`；verify batch 改 llama_batch 直写（语义等价）。
 7. **Mesa 在途代码随镜像入树**：`transpose_activation_q8.cl`（cpp 已引用）需补注册 `GGML_OPENCL_KERNELS`；`fwht.cl` 无引用不入编。
+8. **REGC 宏守卫错位（fork 潜伏 bug，本次 Adreno 首爆）**：17 个 `gemm/gemv_moe_*_f32_ns.cl` 把 `REGC_Q00/Q01/Q10/Q11/LO/HI` 宏定义包在 `#ifdef GGML_GENERIC_SUBGROUP_SHUFFLE` 内（该宏仅 rusticl 经 `GGML_OPENCL_FAKE_QCOM_REQD=1` 注入），但 kernel 体内使用处无守卫 → Adreno 上 `use of undeclared identifier 'REGC_Q00'`（err=-11）。fork HEAD 同构，只是旧 init 从不预编译这些 bundle；0.7.0 init 全量预编译才暴露。修复 = 把 `#ifdef GGML_MESA_SPIRV/#else/#endif` 宏块移出 GENERIC 守卫（Mesa 位等，Adreno 走 `reg_c.lo/hi` 正常路径）。wt commit `40d1b31`。**教训：`.cl` 宏守卫作用域要看使用处，不只看定义处；Adreno 内核门要覆盖全部 bundle（0.7.0 init 预编译天然覆盖，是升级红利）。**
+
+**四道门收官（2026-10-18 晚，wt `upgrade/v0.7.0`）**：
+- **编译门 PASS**：`gate_compile070.ps1` 全绿（725 units：ggml-cpu 18 全带 march，`-O3 -DNDEBUG` 零违规，kleidiai 369 vendored，SME2 units 107）。
+- **内核门 PASS**：Adreno 740（小米13 `98fc9410`）加载 bonsai-8b OpenCL 全 bundle 编译零 `kernel compile error`（REGC 修复后，commit `40d1b31`）。
+- **参数门 PASS**：`[handleLoadModel]` 逐项对平基线：`nCtx=4096, gpuLayers=100, gpuBackend=opencl, nUbatch=512, flash_attn=off, KV q4_0/f16, backend_ptrs.size()=2, oom-guard 旁路=关`。
+- **基准门 PASS（有提升）**：同机同模型 bonsai-8b-q1_0 OpenCL，同 prompt `count_1_to_20` 各 3 轮 decode：升级前（主仓 10-16 旧包）1.3/1.3/1.2 tok/s → 升级后 **1.5/1.6/1.6 tok/s（+27%）**；首 Tok/prefill ~10.3s → 5.3s（-49%，含 0.7.0 prefill 改进）。AGENTS 四门 ±10% 判据满足（正向）。
+- 附注：App 侧驱动注意（本次调试踩坑）——小米13 MIUI 冷启动后 Flutter 需先盲点一次屏幕激活事件通道；发送必须点 FAB（`input keyevent 66` 不透传 TextField action）；FAB 随键盘上移（(976,1369) vs (976,2263)）。
