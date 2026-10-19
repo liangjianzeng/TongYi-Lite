@@ -1,7 +1,86 @@
-# 打包调测标准流程（真机）
+# TongYi-Lite 打包指南（Windows / Linux 双宿主）
+
+> 一台 Windows 开发机 + 一台 DGX Spark（aarch64 Linux）都能**不改任何入库文件**直接出包。
+> 目标：`git clone` 后只配置"机器层"（一次性），即可 `tool/build_apk.ps1` / `tool/build_apk.sh` 一键构建。
+
+## 三层配置模型（重构定案，勿再回退）
+
+| 层 | 载体 | 进 git？ | 内容 |
+|---|---|---|---|
+| **项目层** | `android/gradle.properties`、`cpp/CMakeLists.txt`、`tool/*` | ✅ | 只放平台无关配置。CMake 里**禁止**出现 `C:\`、`/home/xxx` 等宿主路径，一律走宿主分派 + `VULKAN_SDK` 环境变量 |
+| **机器层** | `~/.gradle/gradle.properties`、`android/local.properties`、`android/key.*`、`%USERPROFILE%\.gradle\gradle.properties` | ❌ | JDK 路径、堆大小、并行度、sdk.dir、签名密钥 |
+| **环境层** | `JAVA_HOME` / `ANDROID_HOME` / `VULKAN_SDK` / `CMAKE_BUILD_PARALLEL_LEVEL` | ❌ | 由构建入口脚本探测注入 |
+
+**历史教训**：机器层值曾被提交进项目层（Windows JDK 路径、`C:/VulkanSDK`、NDK 目录写死
+`windows-x86_64`、`.gitignore` 误忽略 `gradle-wrapper.jar`），导致 Linux 机一切 `reset`
+即瘫痪。以上四处已在本次重构中修正，**评审 PR 时盯住项目层文件不得再混入本机路径**。
+
+## 双平台一键入口
+
+```powershell
+# Windows（PowerShell）——整合旧 build.bat/build_release.bat
+tool\build_apk.ps1                 # debug+release 都打（默认策略）
+tool\build_apk.ps1 -Check          # 只自检
+tool\build_apk.ps1 -Fast           # 两步法增量（只改 Dart ~2min）
+tool\build_apk.ps1 -CleanNative    # 改了 cpp/llama.cpp 必用（防 .so 陈旧）
+tool\build_apk.ps1 -Install        # adb install -r（绝不 uninstall）
+```
+
+```bash
+# Linux（含 aarch64/DGX Spark）——与 DSH-Phone tool/build_apk.sh 同构
+tool/build_apk.sh                  # debug+release 都打（默认策略）
+tool/build_apk.sh --check
+tool/build_apk.sh --clean-native
+tool/build_apk.sh --fix-artifacts  # 一次性：补 flutter arm64 主机 gen_snapshot
+tool/setup_vulkan_sdk.sh           # 一次性：组装 Linux 原生 Vulkan SDK（glslc 走 apt，免 FEX）
+```
+
+两个入口尾部都做**签名验收**：`apksigner` 校验 APK 指纹必须等于
+`fbbe1b6c…6992`（`CN=TongYiLite, O=DGXSpark`），不符即失败退出（AGENTS 铁律，防错签名包覆盖不了线上版）。
+
+`dart tool/env_check.dart` 可在任一平台输出同一口径的环境清单（CI/新人自查）。
+
+## 新机器一次性 setup
+
+**Windows**：① 装 Flutter（`C:\src\flutter` 或 PATH）、JDK17（Adoptium）、Android SDK
+（platform-tools/platforms/ndk/build-tools/cmake）；② 写 `%USERPROFILE%\.gradle\gradle.properties`：
+`org.gradle.java.home`、`org.gradle.jvmargs=-Xmx8g`、`org.gradle.workers.max=16`；
+③ 拷 `android/key.jks` + `key.properties`（或 `-KeyFrom <备份路径>`）；④ 可选：LunarG SDK
+装到 `C:\VulkanSDK` + MinGW-w64 到 `C:\mingw64`（Vulkan 后端）。
+
+**Linux aarch64**（DGX Spark 已就绪，换机照做）：① Flutter arm64 于 `~/flutter`、JDK17、
+Android SDK 于 `~/android-sdk`（含 ndk 27 + cmake）；② amd64 多架构运行库
+（`dpkg --add-architecture amd64` + `libc6/libstdc++6/zlib1g:amd64`，官方 x64 aapt2/工具靠它）；
+③ FEX（`ppa:fex-emu/fex`，跑 gen_snapshot，qemu 会崩）；④ `tool/build_apk.sh --fix-artifacts`；
+⑤ `tool/setup_vulkan_sdk.sh`（可选，Vulkan 后端）；⑥ 写 `~/.gradle/gradle.properties`
+（java.home=/usr/lib/jvm/java-17-openjdk-arm64、`-Xmx6g`、workers=8——vLLM 常驻机慎用默认）；
+⑦ 拷 `android/key.*`。密钥源备份：Geekpro `E:\DTXY\TongYi-Lite\android\key.*`。
+
+## APK 产物与验收
+
+- 输出目录：`build/app/outputs/flutter-apk/`（两平台一致）
+- release 正式签名 = `CN=TongYiLite`；debug 也统一用同证书（可互相覆盖安装）
+- 覆盖安装一律 `adb install -r`（先卸载会清端侧模型缓存——AGENTS 铁律）
+- Dart 改动后建议字符串级验收（见 [docs/BUILD_ENV_NOTES.md](docs/BUILD_ENV_NOTES.md) 根因 4 与 AGENTS「AOT 暂存 app.so 原名」条）
+
+## VULKAN / OpenCL 后端矩阵
+
+| 宿主 | OpenCL | Vulkan | 条件 |
+|---|---|---|---|
+| Windows | 自动启用 | 装 LunarG(`C:\VulkanSDK`)+MinGW(`C:\mingw64`) | 缺则自动降级，构建仍成功 |
+| Linux x86_64/aarch64 | 自动启用 | `tool/setup_vulkan_sdk.sh` 或 `VULKAN_SDK=<dir>` | 缺则自动降级，构建仍成功 |
+
+CMake 宿主分派逻辑在 `android/app/src/main/cpp/CMakeLists.txt`（宿主探测 →
+`host-toolchain-mingw.cmake` / `host-toolchain-linux.cmake`；NDK prebuilt 目录名按宿主生成）。
+
+---
+---
+
+# 附录 A：Windows 真机打包调测标准流程（原文保留）
 
 > 目标：用当前源码编出 debug 包并装到已连接的真机，平均 ~1 分钟
 > （llama.cpp 原生库已缓存；改写 `third_party/` 下 C++ 会触发 NDK 重编，耗时显著变长）。
+> 注：本机路径（`E:\Work\DgxSpark`、`C:\dev-tools\flutter`）为 Windows 开发机专属，属机器层。
 
 ## 环境（本机 Windows）
 
@@ -30,6 +109,7 @@ cd "/e/Work/DgxSpark/TongYi-Lite"
 
 > ⚠️ **mingw 必须加进 PATH**：KleidiAI / Vulkan 的 CMake 构建需要主机端
 > `vulkan-shaders-gen`（NDK clang 顶替不了——没有配套 mingw C++ 标准库）。
+> （Linux 侧对应物：`tool/setup_vulkan_sdk.sh` 的 glslc + host-toolchain-linux.cmake）
 
 ### 1. 确认设备在线
 
@@ -48,6 +128,7 @@ flutter.bat pub get
 ```bash
 flutter.bat build apk --debug --target-platform android-arm64
 # 成功标志：√ Built build\app\outputs\flutter-apk\app-debug.apk
+# 推荐直接用 tool\build_apk.ps1（含 PATHEXT 修复 + 签名验收）
 ```
 
 ### 3b. 打开产物文件夹（方便自取安装包）
@@ -91,6 +172,7 @@ PID=$("$ADB" shell pidof com.dgxspark.tongyilite | tr -d '\r')
   （命令看似成功、目录仍在、Gradle 7 秒"编译完成"却产物没变）。用 **PowerShell**：
   `Remove-Item -LiteralPath 'E:\Work\DgxSpark\TongYi-Lite\android\app\.cxx' -Recurse -Force`
   判断是否真重编：看 `build/app/intermediates/cxx/Debug/*/obj/arm64-v8a/` 时间戳与文件清单。
+  （或用 `tool\build_apk.ps1 -CleanNative`）
 - **构建写入失败 / 锁文件拒绝访问**：build 中断或 Gradle daemon 残留（java.exe /
   FlutterPlugins.exe 持锁）会导致 `flutter_assets` 写不进或
   `fileHashes.lock 拒绝访问`。处理顺序（均带 `dangerouslyDisableSandbox:true`）：
@@ -111,16 +193,16 @@ PID=$("$ADB" shell pidof com.dgxspark.tongyilite | tr -d '\r')
 |---|---|---|
 | applicationId / namespace | `android/app/build.gradle.kts` | `com.dgxspark.tongyilite` |
 | minSdk / targetSdk / compileSdk | 同上 | 33 / 36 / 36 |
-| versionCode / versionName | 同上 | 4 / 0.1.3 |
+| versionCode / versionName | `pubspec.yaml`（flutter 注入） | 见 pubspec（版本号策略见 AGENTS：复用不轻抬） |
 | ABI | 同上 `ndk.abiFilters` | `arm64-v8a` |
 | KleidiAI | `android/app/src/main/cpp/CMakeLists.txt` | `GGML_CPU_KLEIDIAI=ON` + vendor 路径 |
-| ARM 微架构 | 同上 | `GGML_CPU_ARM_ARCH=armv8.4-a+dotprod+i8mm` |
-| Debug 优化 | 同上 | `CMAKE_C_FLAGS_DEBUG "-O3 -DNDEBUG"` |
+| ARM 微架构 | 同上 | `GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm+fp16+bf16`（三台 Armv9 实测档） |
+| Debug 优化 | 同上 | `add_compile_options(-O3)` 目录级（勿再用 CMAKE_C_FLAGS_DEBUG，会被 NDK 顶掉） |
+| Vulkan 后端 | 同上（宿主分派） | Win: `C:\VulkanSDK`+mingw；Linux: `~/vulkan-sdk` 或 `$VULKAN_SDK` |
 
 ## 推送代码
 
 ```bash
-cd "/e/Work/DgxSpark/TongYi-Lite"
 git add <改动文件>
 git commit -m "fix: 描述修改内容"
 git push origin main

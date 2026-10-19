@@ -70,8 +70,9 @@ add_compile_definitions(NDEBUG)
 # Target the device's real microarchitecture so ggml-cpu / KleidiAI can emit
 # dotprod + i8mm kernels instead of the slow armv8-a baseline. This APK only
 # ships to the test device (SM8735 / Adreno 825, Armv9), so the narrower -march
-# is safe. Host vulkan-shaders-gen uses its own MinGW toolchain (ExternalProject)
-# and is unaffected by this flag.
+# is safe. Host vulkan-shaders-gen uses its own host toolchain (ExternalProject,
+# see host-toolchain-mingw.cmake / host-toolchain-linux.cmake) and is
+# unaffected by this flag.
 #
 # Set via GGML_CPU_ARM_ARCH (NOT a manual -march flag): ggml-cpu's KleidiAI
 # kernels are gated by the arch extensions. Historically this was
@@ -85,24 +86,52 @@ set(GGML_CPU_ARM_ARCH armv8.6-a+dotprod+i8mm+fp16+bf16 CACHE STRING "" FORCE)
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).
 option(GGML_VULKAN "ggml: use Vulkan for GPU acceleration" OFF)
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
-    # Host toolchain is fixed (see host-toolchain-mingw.cmake: MinGW-w64 GCC +
-    # the Android SDK's ninja + fully static linking), so the Vulkan backend
-    # can be enabled for arm64 devices.
-    # The LunarG SDK (glslc + vulkan.hpp) and a host C++ compiler (MinGW-w64)
-    # are required to build ggml-vulkan. If either is absent, skip the Vulkan
-    # backend so the build still succeeds (OpenCL + CPU remain); see README.
-    set(_vk_sdk "C:/VulkanSDK/1.4.357.0")
-    set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
-    if(EXISTS "${_vk_sdk}/Bin/glslc.exe" AND EXISTS "${_vk_sdk}/Include/vulkan/vulkan.hpp" AND EXISTS "${_vk_host_tc}")
+    # Host dispatch (Win/Linux dual-host): the Vulkan backend needs a Vulkan
+    # SDK (glslc + vulkan.hpp) plus a host C++ toolchain to build
+    # `vulkan-shaders-gen` (ExternalProject).
+    #   Windows host: LunarG SDK at C:/VulkanSDK + MinGW-w64 GCC
+    #                 (host-toolchain-mingw.cmake)
+    #   Linux host:   SDK dir assembled by tool/setup_vulkan_sdk.sh
+    #                 (default ~/vulkan-sdk) + host GCC
+    #                 (host-toolchain-linux.cmake)
+    # The VULKAN_SDK environment variable overrides the SDK dir on both hosts.
+    # If anything is absent, skip the Vulkan backend so the build still
+    # succeeds (OpenCL + CPU remain); see README.
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+        set(_vk_sdk_default "C:/VulkanSDK/1.4.357.0")
+        set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
+        set(_vk_glslc "glslc.exe")
+    else()
+        if(DEFINED ENV{HOME})
+            set(_vk_sdk_default "$ENV{HOME}/vulkan-sdk")
+        else()
+            set(_vk_sdk_default "/opt/vulkan-sdk")
+        endif()
+        set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-linux.cmake")
+        set(_vk_glslc "glslc")
+    endif()
+    set(_vk_sdk "${_vk_sdk_default}")
+    if(DEFINED ENV{VULKAN_SDK} AND IS_DIRECTORY "$ENV{VULKAN_SDK}")
+        set(_vk_sdk "$ENV{VULKAN_SDK}")
+    endif()
+    if(EXISTS "${_vk_sdk}/Bin/${_vk_glslc}" AND EXISTS "${_vk_sdk}/Include/vulkan/vulkan.hpp" AND EXISTS "${_vk_host_tc}")
         set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-        message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a")
+        message(STATUS "Vulkan ENABLED (GPU backend) for arm64-v8a (host=${CMAKE_HOST_SYSTEM_NAME}, sdk=${_vk_sdk})")
     else()
         set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
-        message(WARNING "Vulkan SDK (${_vk_sdk}) / MinGW host toolchain missing -> Vulkan backend skipped; OpenCL + CPU remain")
+        message(WARNING "Vulkan SDK (${_vk_sdk}/Bin/${_vk_glslc}) / host toolchain (${_vk_host_tc}) missing -> Vulkan backend skipped; OpenCL + CPU remain")
     endif()
 
     # Point FindVulkan (glslc) and find_package(SPIRV-Headers) at the LunarG SDK.
     set(ENV{VULKAN_SDK} "${_vk_sdk}")
+    # The Android toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=ONLY, so
+    # FindVulkan's find_program(glslc) cannot see the host SDK's Bin/
+    # (symptom: "Vulkan_GLSLC_EXECUTABLE-NOTFOUND" in shader compile lines).
+    # Pin it to the dispatched SDK dir, same technique as SPIRV-Headers_DIR.
+    if(EXISTS "${_vk_sdk}/Bin/${_vk_glslc}")
+        set(Vulkan_GLSLC_EXECUTABLE "${_vk_sdk}/Bin/${_vk_glslc}" CACHE FILEPATH "glslc used for ggml-vulkan shader generation" FORCE)
+        message(STATUS "Vulkan_GLSLC_EXECUTABLE -> ${Vulkan_GLSLC_EXECUTABLE}")
+    endif()
     # RESEARCH(vendor fix): use the newer glslc (shaderc v2026.3) from the local
     # study SDK for SPIR-V generation -- numerically verified on Adreno 825
     # (unpack8/Int8 + subgroup + fusion fixes were validated with this exact
@@ -128,14 +157,15 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
         message(WARNING "SPIRV-HeadersConfig.cmake not found under ${_vk_sdk}")
     endif()
 
-    # ggml-vulkan builds `vulkan-shaders-gen` as a host (Windows) tool. The
-    # build host has no MSVC/gcc, so we use the portable MinGW-w64 toolchain.
-    set(_vk_host_tc "${CMAKE_CURRENT_SOURCE_DIR}/host-toolchain-mingw.cmake")
+    # ggml-vulkan builds `vulkan-shaders-gen` as a host tool. The build host
+    # may have no MSVC (Windows) or a restricted toolchain (Android cross),
+    # so we pin a dedicated host toolchain per host OS (dispatched above:
+    # MinGW-w64 on Windows, host GCC on Linux).
     if(EXISTS "${_vk_host_tc}")
         set(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "${_vk_host_tc}" CACHE FILEPATH "Host toolchain for vulkan-shaders-gen" FORCE)
         message(STATUS "Vulkan shaders-gen host toolchain -> ${_vk_host_tc}")
     else()
-        message(WARNING "host-toolchain-mingw.cmake missing; ggml may fail to find a host C++ compiler")
+        message(WARNING "host toolchain ${_vk_host_tc} missing; ggml may fail to find a host C++ compiler")
     endif()
 
     # On Android the Vulkan loader (libvulkan.so) is provided by the OS at
@@ -164,12 +194,29 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
         else()
             set(_vk_api 33)
         endif()
-        set(_vk_stub "${ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/${_vk_api}/libvulkan.so")
-        if(EXISTS "${_vk_stub}")
-            set(Vulkan_LIBRARY "${_vk_stub}" CACHE FILEPATH "Android Vulkan loader stub" FORCE)
-            message(STATUS "Vulkan loader -> ${Vulkan_LIBRARY}")
+        # NDK prebuilt dir name follows the BUILD HOST (windows-x86_64 /
+        # linux-x86_64 / linux-aarch64 / darwin-*); the sysroot layout is
+        # identical across them.
+        if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+            set(_ndk_host_tags "windows-x86_64")
+        elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+            set(_ndk_host_tags "linux-aarch64;linux-x86_64")
         else()
-            message(WARNING "NDK Vulkan stub not found at ${_vk_stub}; linking may fail")
+            set(_ndk_host_tags "linux-x86_64;linux-aarch64")
+        endif()
+        set(_vk_stub "")
+        foreach(_tag ${_ndk_host_tags})
+            set(_cand "${ANDROID_NDK}/toolchains/llvm/prebuilt/${_tag}/sysroot/usr/lib/aarch64-linux-android/${_vk_api}/libvulkan.so")
+            if(EXISTS "${_cand}")
+                set(_vk_stub "${_cand}")
+                break()
+            endif()
+        endforeach()
+        if(_vk_stub)
+            set(Vulkan_LIBRARY "${_vk_stub}" CACHE FILEPATH "Android Vulkan loader stub" FORCE)
+            message(STATUS "Vulkan loader -> ${_vk_stub}")
+        else()
+            message(WARNING "NDK Vulkan stub not found under ${ANDROID_NDK}/toolchains/llvm/prebuilt/{${_ndk_host_tags}}; linking may fail")
         endif()
     else()
         message(WARNING "ANDROID_NDK not defined; cannot pin Vulkan loader stub")

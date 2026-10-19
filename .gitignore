@@ -13,6 +13,10 @@
 *.dex
 *.class
 *.jar
+# 例外：gradle wrapper jar 必须入库，否则新 clone 的机器无法执行 ./gradlew
+# （官方 Flutter 模板同样跟踪它；缺失时重生成：cd android && gradle wrapper
+#  --gradle-version 8.9 --distribution-type all）。
+!android/gradle/wrapper/gradle-wrapper.jar
 *.so
 # 例外：jniLibs 下随 APK 分发的捆绑原生库必须入库（同 KleidiAI/OpenCL-Headers 入库理由，
 # 否则其他开发机 clone 后打不出 Turnip 包）。目前仅 libturnip_freedreno.so，见其旁 README。
@@ -63,7 +67,8 @@ docs/学习- 不做git提交/
 # === Android build artifacts ===
 android/app/.cxx/
 android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
-android/gradle/wrapper/gradle-wrapper.jar
+# 注意：gradle-wrapper.jar 必须入库（官方 Flutter 模板即跟踪它），
+# 否则新 clone 的机器无法运行 ./gradlew / flutter build（勿再加忽略）。
 
 # === OS ===
 .DS_Store
