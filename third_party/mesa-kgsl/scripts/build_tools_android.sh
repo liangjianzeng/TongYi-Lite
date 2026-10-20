@@ -34,6 +34,7 @@ for n in $NAMES; do
   case "$n" in *_shm) extra="-lpthread";; esac
   echo "[$n] CC=$CC"
   "$CC" --target=$TRIPLE-linux-android$APILVL -D__ANDROID_API__=$APILVL -D_GNU_SOURCE \
+    -DCL_TARGET_OPENCL_VERSION=310 -I"$ROOT/third_party/OpenCL-Headers" \
     --sysroot="$SYSROOT" -O3 -DNDEBUG -fno-omit-frame-pointer -Wall -Wextra \
     -o "$OUT/$n" "$src" $extra
   BUILT="$BUILT $n"
