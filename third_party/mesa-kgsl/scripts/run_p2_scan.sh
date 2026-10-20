@@ -12,13 +12,13 @@
 set -u
 PHASE=${1:-all}
 NPRED=${2:-24}
-RUN=/data/local/tmp/mesa_run; B=/data/local/tmp/mesa_bionic
-M=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.gguf
-E=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts
+RUN=${RUN:-/data/local/tmp/mesa_run}; B=${B:-/data/local/tmp/mesa_bionic}
+M=${M:-/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.gguf}
+E=${E:-/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts}
 OUT=/data/local/tmp/p2_$(date +%H%M); mkdir -p $OUT
 cd "$RUN" || exit 1
 
-export LD_LIBRARY_PATH=$RUN/lib:$B/lib:/data/local/tmp
+export LD_LIBRARY_PATH=$RUN:$RUN/lib:$B/lib:$B:/data/local/tmp
 export OCL_ICD_VENDORS=$B/lib/libRusticlOpenCL.so RUSTICL_ENABLE=kgsl
 export HOME=$B/tmp XDG_CACHE_HOME=$B/tmp CLC_RESOURCE_DIR=$B/lib/clang/21/include
 export GGML_OPENCL_ALLOW_NO_SUBGROUP=1 GGML_OPENCL_FAKE_QCOM_REQD=1
