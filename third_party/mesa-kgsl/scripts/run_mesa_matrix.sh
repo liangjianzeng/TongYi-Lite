@@ -63,13 +63,19 @@ one () {  # $1=tag  $2..=env 覆盖
     L="$LOGDIR/${TAG}_r$R.log"
     echo "-- LEG $TAG round=$R $(date -Iseconds)"
     echo "--   env: $(env "$@" printenv 2>/dev/null | grep -aE 'OPFLUSH|OCL_ICD|RUSTICL|GGML_OPENCL_(ALLOW|FAKE|MESA|ADRENO)|LD_LIBRARY' | tr '\n' ' ')"
-    env "$@" E2E_TOKDUMP="$LOGDIR/${TAG}_r$R.tok" timeout "$TMO" "./$BIN" "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2>/dev/null
+    env "$@" E2E_TOKDUMP="$LOGDIR/${TAG}_r$R.tok" timeout "$TMO" "./$BIN" "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2> "$LOGDIR/${TAG}_r$R.err"
     RC=$?
     MET=$(grep -a 'e2e\]\[METRIC' "$L" | tail -1)
     PF=$(grep -a 'prefill' "$L" | tail -1)
     IO=$(grep -a 'total\[decode\]' "$L" | tail -1)
     HT=$(grep -acE '上海|四大发明|造纸|印刷|指南针|火药' "$L")
-    echo "--   rc=$RC | ${MET:-NO_METRIC} | ${PF:-no_prefill} | health_hits=$HT"
+    # GPU 证据硬闸：Mesa 腿若"退回 CPU"就与 CPU 腿同速，t/s 好看也是假的（本仓库已被这类假绿骗过两次）。
+    # 只有 CPU 腿允许 drop/off；Mesa 腿必须看到 opencl 设备行且没有 drop。
+    GDEV=$(grep -ac "ggml_opencl" "$LOGDIR/${TAG}_r$R.err" 2>/dev/null)
+    GDROP=$(grep -ac "drop unsupported device" "$LOGDIR/${TAG}_r$R.err" 2>/dev/null)
+    VERD=ok
+    case $TAG in MESA_*) [ "$GDEV" -gt 0 ] && [ "$GDROP" -eq 0 ] || VERD="!!没在GPU上(退回CPU，此数不可用)";; esac
+    echo "--   rc=$RC | ${MET:-NO_METRIC} | ${PF:-no_prefill} | health_hits=$HT | gpu[opencl_lines=$GDEV drop=$GDROP]=$VERD"
     echo "--   io: ${IO:-no_decode_io_stats}"
     R=$((R+1))
     [ $R -le "$ROUNDS" ] && sleep "$COOLDOWN"
