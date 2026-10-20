@@ -42,7 +42,9 @@ leg () { # $1=tag $2=OPFLUSH $3..=env
   echo "-- LEG $T OFL=$OF [$*] $(date +%H:%M:%S)"
   env "$@" GGML_OPENCL_OPFLUSH=$OF E2E_TOKDUMP=$OUT/$T.tok timeout 900 \
     ./$BIN "$M" "$E" 99 "$NPRED" 512 > $OUT/$T.out 2> $OUT/$T.err
-  echo "   rc=$? tok=$(ls -l $OUT/$T.tok 2>/dev/null | awk '{print $5}')B sub=$(grep -ac 'KGSLSUBMIT cmd\[' $OUT/$T.err 2>/dev/null) health=$(grep -acE '造纸|印刷|指南针|火药' $OUT/$T.out)"
+  # 注意：`sub=` 数的是 `KGSLSUBMIT cmd[` 行 = **IB 条数**，合并与否不改变它（曾据此误判门 A 失败）；
+  # 真观测量是 submits（ioctl 行数）与 merged（numcmds>=2 的次数）。
+  echo "   rc=$? tok=$(ls -l $OUT/$T.tok 2>/dev/null | awk '{print $5}')B submits=$(grep -ac 'KGSLSUBMIT ioctl' $OUT/$T.err 2>/dev/null) ibs=$(grep -ac 'KGSLSUBMIT cmd\[' $OUT/$T.err 2>/dev/null) merged=$(grep -acE 'numcmds=[2-9]' $OUT/$T.err 2>/dev/null) health=$(grep -acE '造纸|印刷|指南针|火药' $OUT/$T.out)"
   sleep 60
 }
 # CPU 参照（同一 prompt / 同一构），再四种组合
@@ -56,5 +58,6 @@ leg a1          1
 leg a1_nodefer  1    FD_NODEFER=1
 echo "=== P2_NODEFER_DONE dir=$OUT ==="
 echo "读法：python3 third_party/mesa-kgsl/scripts/token_diff.py $OUT/cpu.tok $OUT/a0.tok $OUT/a0_nodefer.tok $OUT/a1.tok $OUT/a1_nodefer.tok"
-echo "门 A（开关活着）：a0_nodefer 的 sub 必须明显大于 a0 的 13817 量级；不涨就整组作废"
+echo "门 A（开关活着，正确观测量）：a0 的 merged 必须 >0、a0_nodefer 的 merged 必须 =0。"
+echo "     ——不要用 sub= 判门 A：它数的是 IB 条数（KGSLSUBMIT cmd[），合并前后不变（实测 16301 对 16301 曾误判）"
 echo "门 B（病灶）：830 上 a0 崩而 a0_nodefer 与 cpu 全等 => 根因定为延迟提交合并"
