@@ -54,6 +54,7 @@ tyl_add_probe(moe_probe7)
 tyl_add_probe(moe_probe8)
 tyl_add_probe(moe_probe9)
 tyl_add_probe(svm_probe ${OpenCL_LIBRARY})
+tyl_add_probe(graph_ops_export llama ggml)
 
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
@@ -68,4 +69,15 @@ if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/minicpm_e2e.cpp)
   target_include_directories(minicpm_e2e PRIVATE
     ${LLAMA_DIR}/include ${LLAMA_DIR}/src ${LLAMA_DIR} ${LLAMA_DIR}/common)
   target_link_libraries(minicpm_e2e PRIVATE llama llama-common)
+endif()
+
+# [Mesa 线 P4] 把上游 tests/test-export-graph-ops.cpp 编出来：它导出**真实 decode/prefill 图**的
+# 算子+形状清单，喂给 test-backend-ops --test-file，就能问 GPUOpenCL "生产图里哪些算子落 CPU"。
+# 上游把 LLAMA_BUILD_TESTS 关了（下面第 60 行），所以在这里点名建，不改上游一行。
+set(EXPORT_OPS_SRC ${LLAMA_DIR}/tests/test-export-graph-ops.cpp)
+if(EXISTS ${EXPORT_OPS_SRC})
+  add_executable(test-export-graph-ops ${EXPORT_OPS_SRC})
+  target_include_directories(test-export-graph-ops PRIVATE
+    ${LLAMA_DIR}/include ${LLAMA_DIR}/src ${LLAMA_DIR} ${LLAMA_DIR}/common ${LLAMA_DIR}/tests)
+  target_link_libraries(test-export-graph-ops PRIVATE llama llama-common)
 endif()
