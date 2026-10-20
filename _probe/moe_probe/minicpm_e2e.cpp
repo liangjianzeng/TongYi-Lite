@@ -920,6 +920,10 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[e2e-spec] %.2f tok/s wall | accept_len=%.2f accept_rate=%.3f\n",
                     n_gen * 1000.0 / gen_ms, iters ? (double) n_gen / iters : 0.0,
                     draft_sum > 0 ? accept_sum / draft_sum : 0.0);
+            printf("[e2e][METRIC] leg=spec gen=%d wall_ms=%.0f tok_s=%.2f accept_len=%.2f\n",
+                   n_gen, gen_ms, n_gen * 1000.0 / gen_ms,
+                   iters ? (double) n_gen / iters : 0.0);
+            fflush(stdout);
         }
     }
 
@@ -943,6 +947,9 @@ int main(int argc, char ** argv) {
         }
         const double gen_ms = ms_since(tg0);
         fprintf(stderr, "[e2e-plain] gen=%d wall=%.0f -> %.2f tok/s\n", n_gen, gen_ms, n_gen * 1000.0 / gen_ms);
+        printf("[e2e][METRIC] leg=plain gen=%d wall_ms=%.0f tok_s=%.2f\n",
+               n_gen, gen_ms, n_gen * 1000.0 / gen_ms);
+        fflush(stdout);
     }
 
     // ---- legacy greedy path (unchanged behavior) ----
@@ -1069,6 +1076,11 @@ int main(int argc, char ** argv) {
         const double gen_ms = ms_since(tg0);
         fprintf(stderr, "[e2e] %d gen in %.0f ms -> %.2f tok/s (load %.0f ms)\n",
                 n_gen, gen_ms, n_gen * 1000.0 / gen_ms, t_load);
+        // [2026-10-20 Mesa 线] 性能数必须走 stdout：Mesa 调试版把逐提交 trace 打在 stderr，
+        // 取数时只能 2>/dev/null，于是 t/s 一起被丢掉（历史上"没数"就是这么来的）。
+        printf("[e2e][METRIC] leg=decode gen=%d wall_ms=%.0f tok_s=%.2f load_ms=%.0f\n",
+               n_gen, gen_ms, n_gen * 1000.0 / gen_ms, t_load);
+        fflush(stdout);
         llama_sampler_free(greedy);
     }
 

@@ -165,3 +165,7 @@ ms_gguf_files.json
 ms_tmp.json
 _probe/moe_probe/build5/
 _probe/moe_probe/build_v86/
+# Mesa 线测量体构建目录（third_party/mesa-kgsl/scripts/build_probes_android.sh 的输出）
+_probe/moe_probe/build-android/
+_probe/oclstub_build/
+
