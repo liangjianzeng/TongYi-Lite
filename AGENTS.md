@@ -2741,3 +2741,88 @@ app-debug.apk **117,825,447 B（10-09 11:16）** = 2034f05 最新 Dart + hadamar
 - **真机 CLI 复现基建**（新）：`build/cli-android{,-old}/CMakeLists.txt` 复刻 app 编译开关（NDK27、dotprod、KleidiAI vendored 双变量、opencl-stub、LLAMA_BUILD_SERVER=ON 才有 cli 子目录），产物推 /data/local/tmp/tycli(_old)。**坑：非 tty 下 llama-cli 进 REPL 无限打 `> `（几分钟 180MB 日志），别当卡死**——用 llama-completion + `< /dev/null`，输出重定向到文件再 cat。libomp.so 在 NDK `toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64/`（sysroot 里没有）；opencl_stub 的 libopencl_stub.so 要一并推。
 - **MIUI 并非丢 app logcat**：`flutter`/`llama`/`InferenceService` tag 都在（早前「被抑制」是 `-v time` 格式 grep 姿势错的误判）。UI 仍盲（Flutter 无 semantics、无 a11y 服务），驱动不了就用 CLI。USB 一天掉线 N 次：批量命令前先 `adb wait-for-device` 排队 + `svc power stayon true`。
 - **KV 精度开关**（设置→推理引擎→KV 精度，默认 Q4、可选 Q8，全本地模型生效，重新加载模型后生效）：仅量化 **K**；**V 恒 F16**——V 量化要求 flash attention 开启（llama-context 硬报错），本 app FA 保持关闭，UI/注释已写明。链路 kvCacheType(settings_service 持久化)→model_provider 每加载前推→Kotlin→JNI g_kv_cache_type→ctx_params.type_k（MTP/dspark 草稿 ctx 同步）。MLA 架构（K≠V 会被上游拒）→ ctx 创建失败自动回退 F16 KV 重试一次并写推理日志。OOM 守卫 KV 字节估算改为 K=0.5625(q4)/1(q8) + V=2 B/elem。
+## 2026-10-20 TTS「播报不了」定案：微软强制 Sec-MS-GEC **v2**，vendored edge_tts 移植 v2 token
+
+> 症状：点 🔊 / 试听全都不出声，音色列表却正常。探针实测 = `voices/list` HTTP 200
+> （322 音色），但合成 WebSocket `edge/v1` **全音色一律 403**；本地时钟偏差 0 秒，
+> 换 Sec-MS-GEC-Version（120/131/138/140/141/142/143）、去掉 Origin/Cookie/Sec-MS-GEC
+> 全都仍 403 → 不是网络、不是时钟、不是机型，是**服务端换了 token 版本**。
+
+**根因（上游实锤，rany2/edge-tts issue #490 + PR #492，2026-10-10 起）**：微软免费
+readaloud 端点强制 **Sec-MS-GEC v2**。v1 = `SHA256(<ticks100ns><trustedClientToken>)`
+64 hex，服务端从此拒收；v2 = `<16hex>-<64hex>`，其中 64hex 是**魔改 SHA-256**
+（K[14] 由 0x9BDC06A7 换成 0xC9DC06A7，σ0/σ1 各再异或 0x059C0B80 / 0x000B92C0，
+并隐含 57 字节常量前缀，故 length 字段 = 57+len(data)），16hex 是以 SHA-256 摘要前
+8 字节为密钥的 **CS64** 摘要。**`Sec-MS-GEC-Version` 前缀必须同步 `1-`→`2-`**：
+只改前缀或只改 token 都仍 403（成对切换）。`api.msedgeservices.com` 那条例外通路
+（PR #491）已被拒未合，别指望。
+
+**修复（vendored `third_party/edge_tts`）**：
+- 新增 `lib/src/gec_v2.dart`：上游 `drm.py` 的机械移植（含其「跳过首块前 14 轮」
+  预计算捷径，`_sha256State`/`_sha256Schedule` 即预计算常量）。
+- `drm.dart`：`generateSecMsGec()` 改出 v2，保留 `generateSecMsGecV1()` 作对照；
+  `constants.dart`：`secMsGecVersion` 前缀改 `2-`（`chromiumFullVersion` 仍 143，实测可用）。
+
+**移植血泪点（下次改这块先看这条）**：Python 是大整数，Dart 是 64 位有符号——
+轮函数里 `rot = x * 0x100000001`（ROTR 的 64 位拼接技巧）会 ≥2^63 变负，
+**右移必须用无符号 `>>>`**；写成 `>>` 会符号扩展，token 全错且**症状与服务端故障
+一模一样（403 静默）**，只有 golden 校验能抓到。乘法积 <2^64 所以 mod 2^64 语义安全。
+
+**验证（不许只看"跑得出字符串"）**：
+1. `test/tts/sec_ms_gec_v2_test.dart` 14 组 golden（上游 PR #492 抓包值 +
+   上游 `drm.py` 参考实现同戳输出）逐字节比对，另钉「前缀必须 2-」「默认 token 含连字符」。
+2. `tool/tts_diag_probe.dart`（新）：voices/list 状态 → 裸握手码 → 服务端逐条
+   text 原文 → 库 toBytes → 多音色矩阵。修复后 `OK(20304B)`、mp3 实测
+   `MPEG layer III 48kbps 24kHz mono`。
+3. `tool/tts_voice_probe.dart` 复跑 36 音色全出音（zh-CN 8/zh-HK 3/zh-TW 3 中文全 OK；
+   非 Multilingual 英文音色读中文仍 EMPTY = 服务端固有行为，不是回归）。
+4. `flutter test test/tts test/providers test/services test/websearch` = 168 通过 + 2 skip。
+   本机 flutter 3.29 在 `~/flutter`（SDK 目录不可写时走
+   `FLUTTER_ROOT=$HOME/flutter ~/flutter/bin/cache/dart-sdk/bin/dart
+   ~/flutter/bin/cache/flutter_tools.snapshot test <dir>`，绕开 engine.version/lockfile）。
+
+**顺手堵的雷：播报失败不再静默**。过去 `_synthesize` 任何异常只 debugPrint，用户侧
+= 「点了没反应」，这次整整哑了两天。现 `EdgeTtsService.lastFailure/lastError` 留痕，
+分类函数 `classifyTtsError`（401/403→denied「token 失效需升级内置 edge_tts」/
+超时·DNS→network/空音频→empty「换 Multilingual 或中文音色」/playback/unknown），
+**手动点 🔊 与试听失败上 SnackBar**，自动播报仍保持静默（不打断聊天，原设计不动）。
+
+**排障工具留存**：`tool/tts_diag_probe.dart`（全链路分层定位，首选）、
+`tool/tts_gec_matrix.dart`（token/版本/头矩阵 + 时钟偏差核对）、
+`tool/tts_gec_golden.dart`（Dart 端 token 打印，与 Python 参考 diff）、
+`tool/tts_raw_upgrade.dart`（裸 HTTP Upgrade 取 403 响应头/体）、
+既有 `tool/tts_voice_probe.dart` / `tts_dialect_probe.dart` / `tts_locale_dump.dart`。
+TTS「不出声」一律先跑 `dart run tool/tts_diag_probe.dart`，别猜。
+
+**下次微软再换 token 的处置清单**：① 跑 diag 探针分清 200/403/EMPTY；② 403 且
+时钟 0 偏差 → 看上游 rany2/edge-tts 的 issues/PR（关键词 Sec-MS-GEC）；③ 上游改
+`drm.py`/`constants.py` → 同步进 `gec_v2.dart`/`constants.dart`；④ **先补 golden
+向量再改代码**（`/tmp/gec_ref.py` 那份 Python 参考可与 Dart 输出直接 diff）；
+⑤ 重跑 `flutter test test/tts` + 探针多音色。
+
+## 铁律：Mesa 线（全 GPU 卸载）性能数字的三条准入门槛（2026-10-20 接管后立规）
+
+> **背景（事故级）**：2026-10-19 那批"Mesa 全 GPU 只有 1.2 t/s、提交税 45µs/op 比 vendor 差 5 倍、整线意义重估"的结论，
+> 事后复测证明是**三重测量污染**合成的假象：① 设备侧 `830env.sh` 把 `GGML_OPENCL_OPFLUSH=1`（每 op 一次 clFlush）写死；
+> ② 在机 Mesa 是逐次提交打 printf 的调试版（每 token ≈15000 行 trace），`MESA_LOG_LEVEL=0`/`FD_MESA_DEBUG=none` 压不住；
+> ③ CPU 对照腿不交错、不冷却，同一批实验里自己漂了 1.5–2.2 倍。同一二进制关 flush：tiny-op **11.42µs/op**（vs 45.02）。
+> **拿这种数判整条自研路线死刑，是本仓库最贵的一次方法论错误。**
+
+**三条门槛（缺一即"该数不入档、不得据此做决策"）**：
+
+1. **构建/环境指纹**：日志头必须有 `BUILD_INFO`（git rev、编译开关、时间）+ 完整 env dump。
+   构建只走 `third_party/mesa-kgsl/scripts/build_probes_android.sh`（内含 `-O3 -DNDEBUG` 编译门机检，
+   aarch64 宿主必须用 `toolchain-android-aarch64.cmake`：NDK 的 `android.toolchain.cmake` 对 Linux 写死
+   `linux-x86_64`，在 arm64 宿主上走 FEX 且链接期丢 compiler-rt）。
+2. **干净驱动体**：Mesa 侧任何性能数必须出自 **trace-off 构建**（`strings` 机检无 `KGSLSUBMIT/FDBATCH/BORERELEASE`）。
+   调试版 Mesa 只能出"计数/诊断"，不得出 t/s。取数时计时腿 `2>/dev/null`，性能数只认 stdout 的 `[e2e][METRIC]`
+   （e2e 的 t/s 已从 stderr 搬到 stdout —— stderr 被 Mesa trace 占用，历史上"没数"就是这么丢的）。
+3. **交错 A/B + 冷却 + 多轮**：CPU 对手腿与 Mesa 腿**同一会话交错**、腿间 90s 冷却、≥2 轮取中位并报极差。
+   对手数必须**锁配置并写进表里**：`LLAMA_MOE_IO_THREADS=1 / DECODE_WINDOW=8 / LOOKAHEAD_PREFETCH=8` 下 830 CPU bank
+   ≈3.4 t/s（同会话）；`IO_THREADS=4` 会掉到 3.0–4.2，扫参首轮冷启动见过 7.00 —— **"8.07 t/s" 不得脱离配置与冷热态引用**。
+
+**入口脚本（别再手搓 adb 命令行）**：`third_party/mesa-kgsl/scripts/run_mesa_matrix.sh`（四腿矩阵）
+→ `parse_matrix.py`（折成"每 token 预算分解表"：decode 墙上 / 专家 pread / kgsl 提交计数 / 文本健康）
+→ `run_kgsl_probe.sh`（FD_* 变体矩阵，查提交层 kernel 丢失）。
+**口径**：只看单一 t/s 就下结论 = 没做分解 = 无效。必须同时给 GPU 执行、提交税、专家 IO（`total[decode] pread`，
+`IO_THREADS=1` 时即串行墙上时间）、同步四项归属；缺哪项就在结论里写明"该项未量"。
