@@ -19,5 +19,6 @@
 library;
 
 export 'src/communicate.dart';
+export 'src/http_client.dart';
 export 'src/submaker.dart';
 export 'src/voices.dart';

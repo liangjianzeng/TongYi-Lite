@@ -1,8 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'constants.dart';
 import 'drm.dart';
+import 'http_client.dart';
 
 /// Represents a Microsoft Edge neural TTS voice.
 class Voice {
@@ -99,7 +99,7 @@ Future<List<Voice>> listVoices({int retryCount = 0}) async {
     '&Sec-MS-GEC-Version=$secMsGecVersion',
   );
 
-  final client = HttpClient()..userAgent = null;
+  final client = createTtsHttpClient();
   try {
     final request = await client.getUrl(url);
 

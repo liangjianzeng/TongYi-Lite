@@ -1,7 +1,10 @@
 const String trustedClientToken = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
 const String chromiumFullVersion = '143.0.3650.75';
 const String chromiumMajorVersion = '143';
-const String secMsGecVersion = '1-$chromiumFullVersion';
+// 2026-10-10 起微软免费 readaloud 端点强制 v2 token：前缀必须是 `2-`，且 token
+// 必须是 `<16hex>-<64hex>`（见 drm.dart / gec_v2.dart）。只改前缀或只改 token
+// 都仍然 403 —— 两者必须成对切换。
+const String secMsGecVersion = '2-$chromiumFullVersion';
 
 const String baseUrl =
     'speech.platform.bing.com/consumer/speech/synthesize/readaloud';
