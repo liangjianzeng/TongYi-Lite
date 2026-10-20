@@ -114,6 +114,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: error: failed to tokenize the prompt\n", __func__);
         return 1;
     }
+    if (getenv("LLAMA_PRINT_TOKENS")) {
+        fprintf(stderr, "TOKENS %d:", n_prompt);
+        for (auto id : prompt_tokens) fprintf(stderr, " %d", id);
+        fprintf(stderr, "\n");
+    }
 
     // initialize the context
 
@@ -124,6 +129,10 @@ int main(int argc, char ** argv) {
     ctx_params.n_batch = n_prompt;
     // enable performance counters
     ctx_params.no_perf = false;
+    // A/B knob: keep KV cache (and KQV ops) on CPU
+    if (getenv("LLAMA_NO_KV_OFFLOAD") != NULL) {
+        ctx_params.offload_kqv = false;
+    }
 
     llama_context * ctx = llama_init_from_model(model, ctx_params);
 
@@ -193,6 +202,10 @@ int main(int argc, char ** argv) {
         // sample the next token
         {
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
+
+            if (getenv("LLAMA_PRINT_TOKENS")) {
+                fprintf(stderr, "\nGEN %d: %d", n_pos, new_token_id);
+            }
 
             // is it an end of generation?
             if (llama_vocab_is_eog(vocab, new_token_id)) {
