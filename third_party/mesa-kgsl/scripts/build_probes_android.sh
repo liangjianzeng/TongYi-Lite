@@ -130,6 +130,23 @@ built=$(date -Iseconds)
 EOF
 cp -f "$STUB_DIR/libopencl_stub.so" "$BUILD_DIR/" 2>/dev/null || true
 
+# ---------- DT_NEEDED 归一化（否则某些测量体上机直接起不来） ----------
+# 坑：某些目标把 stub 以**绝对宿主路径**链进 DT_NEEDED（test-backend-ops 就是这样），
+# 而 Android linker 不按 soname 回退搜索 => 上机报 "library /home/.../libopencl_stub.so
+# not found" 整条腿作废；minicpm_e2e 是 basename 能跑，所以这坑只在换测量体时踩到。
+STUB_ABS="$STUB_DIR/libopencl_stub.so"
+if command -v patchelf >/dev/null 2>&1; then
+  for b in "$BUILD_DIR"/minicpm_e2e "$BUILD_DIR"/bin/* "$BUILD_DIR"/moe_probe*; do
+    [ -f "$b" ] || continue
+    if readelf -d "$b" 2>/dev/null | grep -q "$STUB_ABS"; then
+      patchelf --replace-needed "$STUB_ABS" libopencl_stub.so "$b" \
+        && echo "   [patchelf] DT_NEEDED -> basename: $(basename "$b")"
+    fi
+  done
+else
+  echo "   !! 无 patchelf：绝对路径 DT_NEEDED 的测量体上机会起不来（先手动 patchelf --replace-needed）" >&2
+fi
+
 echo "== 产物 =="
 find "$BUILD_DIR" -maxdepth 2 -type f \( -name 'minicpm_e2e' -o -name 'moe_probe*' -o -name 'lib*.so' \) \
   -printf '%TY-%Tm-%Td %TH:%TM %10s %p\n' | sort
