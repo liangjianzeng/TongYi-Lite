@@ -55,6 +55,15 @@ echo "#### run=$RUN rounds=$ROUNDS legs=$LEGS npred=$NPRED ngl=$NGL date=$(date 
 echo "#### loadavg=$(cat /proc/loadavg) temp=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -d ' ')"
 echo "#### cpu7=$(cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_cur_freq 2>/dev/null) gpuclk=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null)"
 echo "#### logdir=$LOGDIR"
+# 裁决级跑测的强制前置：bundle 体检 + env 指纹。规矩是今天立的——两次差点把"其实没在 GPU 上跑"
+# 的数当成 Mesa 的数（设备被 drop -> CPU 回落 -> token 与 CPU"全等"是同义反复），所以没指纹就不出数。
+VERIFY=${VERIFY:-/data/local/tmp/verify_mesa_bundle.sh}
+if [ -f "$VERIFY" ]; then
+  sh "$VERIFY" || { echo "!! bundle 体检不过：这份数据不许进任何表格，拒绝开跑" >&2; exit 4; }
+else
+  echo "!! 缺 $VERIFY（先 adb push third_party/mesa-kgsl/scripts/verify_mesa_bundle.sh）：无 env 指纹不出数" >&2; exit 4
+fi
+[ -f "$RUN/BUILD_INFO" ] || { echo "!! $RUN 没有 BUILD_INFO：不知道是哪次构建的数，拒绝开跑" >&2; exit 4; }
 
 one () {  # $1=tag  $2..=env 覆盖
   TAG=$1; shift
