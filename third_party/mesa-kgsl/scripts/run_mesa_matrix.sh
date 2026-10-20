@@ -46,6 +46,10 @@ MESA_ENV="LD_LIBRARY_PATH=$RUN:$RUN/lib:$B/lib:/data/local/tmp OCL_ICD_VENDORS=$
 VENDOR_ENV="LD_LIBRARY_PATH=$RUN:$RUN/lib:/vendor/lib64:/system/lib64:/data/local/tmp OCL_ICD_VENDORS= RUSTICL_ENABLE= HOME=/data/local/tmp XDG_CACHE_HOME=/data/local/tmp"
 
 cd "$RUN" || exit 1
+# 预检：跑完 6 条腿才发现"二进制找不到"是白烧半小时（rc=127 与 rc=1 在日志里长得一样）
+[ -x "$RUN/$BIN" ] || { echo "!! 预检失败：$RUN/$BIN 不存在或不可执行（BIN= 可覆盖）" >&2; exit 2; }
+[ -f "$M" ] || { echo "!! 预检失败：模型 $M 不存在" >&2; exit 2; }
+[ -d "$E" ] || { echo "!! 预检失败：专家目录 $E 不存在" >&2; exit 2; }
 echo "#### run=$RUN rounds=$ROUNDS legs=$LEGS npred=$NPRED ngl=$NGL date=$(date -Iseconds)"
 [ -f "$RUN/BUILD_INFO" ] && { echo "#### BUILD_INFO"; cat "$RUN/BUILD_INFO"; }
 echo "#### loadavg=$(cat /proc/loadavg) temp=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -d ' ')"
@@ -59,7 +63,7 @@ one () {  # $1=tag  $2..=env 覆盖
     L="$LOGDIR/${TAG}_r$R.log"
     echo "-- LEG $TAG round=$R $(date -Iseconds)"
     echo "--   env: $(env "$@" printenv 2>/dev/null | grep -aE 'OPFLUSH|OCL_ICD|RUSTICL|GGML_OPENCL_(ALLOW|FAKE|MESA|ADRENO)|LD_LIBRARY' | tr '\n' ' ')"
-    env "$@" E2E_TOKDUMP="$LOGDIR/${TAG}_r$R.tok" timeout "$TMO" "$BIN" "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2>/dev/null
+    env "$@" E2E_TOKDUMP="$LOGDIR/${TAG}_r$R.tok" timeout "$TMO" "./$BIN" "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2>/dev/null
     RC=$?
     MET=$(grep -a 'e2e\]\[METRIC' "$L" | tail -1)
     PF=$(grep -a 'prefill' "$L" | tail -1)

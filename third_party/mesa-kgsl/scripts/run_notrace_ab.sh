@@ -9,6 +9,7 @@
 #
 # 用法：RUN=<dir> B=<mesa_dir> M=<gguf> E=<experts> sh run_notrace_ab.sh [npred=128] [rounds=2]
 set -u
+BIN=${BIN:-minicpm_e2e}   # 设备上有多个构时必显式指定，否则悄悄跑成旧构
 NPRED=${1:-128}; ROUNDS=${2:-2}
 RUN=${RUN:-/data/local/tmp/k40moe}; B=${B:-/data/local/tmp/mesa_clean}
 M=${M:?需要 M=<gguf>}
@@ -32,7 +33,7 @@ leg () { # $1=tag $2=preload($NT 或空) $3..=其它 env
   T=$1; PRE=$2; shift 2
   echo "-- LEG $T preload=[$PRE] $* $(date +%H:%M:%S)"
   env LD_PRELOAD="$PRE" "$@" E2E_TOKDUMP=$OUT/$T.tok timeout 900 \
-    ./minicpm_e2e "$M" "$E" 99 "$NPRED" 512 2>/dev/null > $OUT/$T.out
+    ./$BIN "$M" "$E" 99 "$NPRED" 512 2>/dev/null > $OUT/$T.out
   echo "   rc=$? tok=$(grep -aoE 'tok_s=[0-9.]+' $OUT/$T.out | tail -1) tokbytes=$(ls -l $OUT/$T.tok 2>/dev/null | awk '{print $5}') nt=$(grep -aoE 'swallowed=[0-9]+' $OUT/$T.out | tail -1)"
   sleep 90
 }

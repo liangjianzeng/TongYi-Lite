@@ -5,6 +5,7 @@
 # 用法：sh run_p2_accept.sh [n_predict=48] [legs=cpu,cpu2,flush1,flush2,async]
 #   cpu2 = 第二条 CPU 腿，作**确定性对照**：temp=0 下 cpu 与 cpu2 若都不等，先修测量体再谈 GPU 病灶。
 set -u
+BIN=${BIN:-minicpm_e2e}   # 设备上有多个构时必显式指定，否则悄悄跑成旧构
 NPRED=${1:-48}
 LEGS=${2:-cpu,flush1,async,flush2}
 RUN=${RUN:-/data/local/tmp/mesa_run}; B=${B:-/data/local/tmp/mesa_bionic}
@@ -27,7 +28,7 @@ echo "#### accept npred=$NPRED legs=$LEGS temp=0 seed=42 $(date -Iseconds)"
 one () { # $1=name $2..=env
   N=$1; shift
   echo "-- LEG $N $(date +%H:%M:%S) env=$*"
-  env "$@" E2E_TOKDUMP=$TOK/$N.bin timeout 900 ./minicpm_e2e "$M" "$E" 99 "$NPRED" 512 > $TOK/$N.out 2>/dev/null
+  env "$@" E2E_TOKDUMP=$TOK/$N.bin timeout 900 ./$BIN "$M" "$E" 99 "$NPRED" 512 > $TOK/$N.out 2>/dev/null
   echo "   rc=$? tok=$(grep -aoE 'tok_s=[0-9.]+' $TOK/$N.out | tail -1) bytes=$(ls -l $TOK/$N.bin 2>/dev/null | awk '{print $5}')"
   sleep 60
 }
