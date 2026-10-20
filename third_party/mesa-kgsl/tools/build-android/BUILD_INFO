@@ -1,5 +1,5 @@
-tool=trace_tax
-git=bb2f648f
+git=3ac6767a
 cc=/home/jianzengliang/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-aarch64/bin/clang
-flags=-O3 -DNDEBUG
-built=2026-10-20T16:22:01+08:00
+abi=arm64-v8a platform=android-28 flags=-O3 -DNDEBUG
+built=2026-10-20T17:14:39+08:00
+tools= kgsl_props

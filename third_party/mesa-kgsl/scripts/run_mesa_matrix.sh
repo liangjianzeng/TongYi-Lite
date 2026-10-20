@@ -26,6 +26,7 @@ COOLDOWN=${COOLDOWN:-90}
 NPRED=${NPRED:-128}                                # n_predict（历史 256 token 协议：NPRED=256）
 NGL=${NGL:-99}
 TMO=${TMO:-900}
+BIN=${BIN:-minicpm_e2e}          # K40 上是 minicpm_e2e_dspark（本机 HEAD 构），830 上是 minicpm_e2e
 LOGDIR=${LOGDIR:-/data/local/tmp/matrix_$(date +%m%d_%H%M)}
 mkdir -p "$LOGDIR"
 
@@ -39,8 +40,10 @@ export LLAMA_MOE_LOOKAHEAD_PREFETCH=8 LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_IO_THR
 
 # libopencl_stub.so 是二进制的 DT_NEEDED：任何腿（连纯 CPU 腿）都必须能让动态加载器找到它，
 # 否则进程连 exec 都失败（rc=1，症状像"模型打不开"）。VENDOR 腿给 $RUN/lib 但不给 $B/lib。
-MESA_ENV="LD_LIBRARY_PATH=$RUN/lib:$B/lib:/data/local/tmp OCL_ICD_VENDORS=$B/lib/libRusticlOpenCL.so RUSTICL_ENABLE=kgsl HOME=$B/tmp XDG_CACHE_HOME=$B/tmp CLC_RESOURCE_DIR=$B/lib/clang/21/include GGML_OPENCL_ALLOW_NO_SUBGROUP=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_MESA_SPIRV=1 GGML_OPENCL_ADRENO_XMEM_GEMM=0"
-VENDOR_ENV="LD_LIBRARY_PATH=$RUN/lib:/vendor/lib64:/system/lib64:/data/local/tmp OCL_ICD_VENDORS= RUSTICL_ENABLE= HOME=/data/local/tmp XDG_CACHE_HOME=/data/local/tmp"
+# 坑（K40 实测踩过，整轮矩阵 2 分钟全腿 rc=1）：libggml*.so 与 stub 在 K40 上直接躺在 $RUN
+# 根目录而不是 $RUN/lib，所以 $RUN 本身必须在 LD_LIBRARY_PATH 里。
+MESA_ENV="LD_LIBRARY_PATH=$RUN:$RUN/lib:$B/lib:/data/local/tmp OCL_ICD_VENDORS=$B/lib/libRusticlOpenCL.so RUSTICL_ENABLE=kgsl HOME=$B/tmp XDG_CACHE_HOME=$B/tmp CLC_RESOURCE_DIR=$B/lib/clang/21/include GGML_OPENCL_ALLOW_NO_SUBGROUP=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_MESA_SPIRV=1 GGML_OPENCL_ADRENO_XMEM_GEMM=0"
+VENDOR_ENV="LD_LIBRARY_PATH=$RUN:$RUN/lib:/vendor/lib64:/system/lib64:/data/local/tmp OCL_ICD_VENDORS= RUSTICL_ENABLE= HOME=/data/local/tmp XDG_CACHE_HOME=/data/local/tmp"
 
 cd "$RUN" || exit 1
 echo "#### run=$RUN rounds=$ROUNDS legs=$LEGS npred=$NPRED ngl=$NGL date=$(date -Iseconds)"
@@ -56,7 +59,7 @@ one () {  # $1=tag  $2..=env 覆盖
     L="$LOGDIR/${TAG}_r$R.log"
     echo "-- LEG $TAG round=$R $(date -Iseconds)"
     echo "--   env: $(env "$@" printenv 2>/dev/null | grep -aE 'OPFLUSH|OCL_ICD|RUSTICL|GGML_OPENCL_(ALLOW|FAKE|MESA|ADRENO)|LD_LIBRARY' | tr '\n' ' ')"
-    env "$@" timeout "$TMO" ./minicpm_e2e "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2>/dev/null
+    env "$@" E2E_TOKDUMP="$LOGDIR/${TAG}_r$R.tok" timeout "$TMO" "$BIN" "$M" "$E" "$NGL" "$NPRED" 512 > "$L" 2>/dev/null
     RC=$?
     MET=$(grep -a 'e2e\]\[METRIC' "$L" | tail -1)
     PF=$(grep -a 'prefill' "$L" | tail -1)
@@ -71,7 +74,7 @@ one () {  # $1=tag  $2..=env 覆盖
 
 for L in $(echo "$LEGS" | tr ',' ' '); do
   case $L in
-    CPU)         one CPU_BANK   LD_LIBRARY_PATH=$RUN/lib:/data/local/tmp GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;;
+    CPU)         one CPU_BANK   LD_LIBRARY_PATH=$RUN:$RUN/lib:/data/local/tmp GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;;
     VENDOR)      one VENDOR_ICD $VENDOR_ENV ;;
     MESA_ASYNC)  one MESA_ASYNC $MESA_ENV GGML_OPENCL_OPFLUSH=0 ;;
     MESA_FLUSH1) one MESA_FLUSH1 $MESA_ENV GGML_OPENCL_OPFLUSH=1 ;;
