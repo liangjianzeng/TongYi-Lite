@@ -20,8 +20,8 @@ ROUNDS=${2:-3}
 LEGS=${3:-CPU,MESA_ASYNC,MESA_FLUSH1}
 
 B=${B:-/data/local/tmp/mesa_bionic}                # bionic 版 rusticl + freedreno + kgsl
-M=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.gguf
-E=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts
+M=${M:-/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.gguf}
+E=${E:-/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts}
 COOLDOWN=${COOLDOWN:-90}
 NPRED=${NPRED:-128}                                # n_predict（历史 256 token 协议：NPRED=256）
 NGL=${NGL:-99}
@@ -37,6 +37,8 @@ export GGML_E2E_PROMPT='请详细介绍一下中国的四大发明，分别说�
 export LLAMA_MOE_BANK_GPU=0 LLAMA_MOE_UPLOAD=0 LLAMA_MOE_PREFETCH_READ=6
 export LLAMA_MOE_LOOKAHEAD_PREFETCH=8 LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_IO_THREADS=1
 
+# libopencl_stub.so 是二进制的 DT_NEEDED：任何腿（连纯 CPU 腿）都必须能让动态加载器找到它，
+# 否则进程连 exec 都失败（rc=1，症状像"模型打不开"）。VENDOR 腿给 $RUN/lib 但不给 $B/lib。
 MESA_ENV="LD_LIBRARY_PATH=$RUN/lib:$B/lib:/data/local/tmp OCL_ICD_VENDORS=$B/lib/libRusticlOpenCL.so RUSTICL_ENABLE=kgsl HOME=$B/tmp XDG_CACHE_HOME=$B/tmp CLC_RESOURCE_DIR=$B/lib/clang/21/include GGML_OPENCL_ALLOW_NO_SUBGROUP=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_MESA_SPIRV=1 GGML_OPENCL_ADRENO_XMEM_GEMM=0"
 VENDOR_ENV="LD_LIBRARY_PATH=$RUN/lib:/vendor/lib64:/system/lib64:/data/local/tmp OCL_ICD_VENDORS= RUSTICL_ENABLE= HOME=/data/local/tmp XDG_CACHE_HOME=/data/local/tmp"
 
@@ -69,7 +71,7 @@ one () {  # $1=tag  $2..=env 覆盖
 
 for L in $(echo "$LEGS" | tr ',' ' '); do
   case $L in
-    CPU)         one CPU_BANK   GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;;
+    CPU)         one CPU_BANK   LD_LIBRARY_PATH=$RUN/lib:/data/local/tmp GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;;
     VENDOR)      one VENDOR_ICD $VENDOR_ENV ;;
     MESA_ASYNC)  one MESA_ASYNC $MESA_ENV GGML_OPENCL_OPFLUSH=0 ;;
     MESA_FLUSH1) one MESA_FLUSH1 $MESA_ENV GGML_OPENCL_OPFLUSH=1 ;;
