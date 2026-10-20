@@ -1,5 +1,15 @@
 # TongYi-Lite 推理后端性能实测报告
 
+> **[2026-10-20 标注：本文件的 Vulkan 行不得再作为验收基准]**
+> 两个独立理由，任一都足以否决：
+> ① **从未验证输出正确性** —— 只记了 tok/s。同一天同机型后来证明"在乱码上也能算出漂亮的 tok/s"
+> （2026-10-20 实测：Vulkan 输出乱码/答非所问时仍有 19.1 t/s）。
+> ② **机型与模型都不同** —— 本文是 Adreno **825** / Xiaomi 25053RT47C / qwen3.5-4b，
+> 当前工作是 Adreno **830** / M332BF / Ling-3.0-Tiny。
+> 现状基准见 `docs/backend_benchmark_2026-10-20.md`（**正确性是 tok/s 的前置条件**，
+> 每行必须同时给出 op 级 FAIL 计数与端到端输出判定）。
+> 本文件其余数据（OpenCL/CPU）在 825 语境下仍有参考价值，故保留不删。
+
 > **测试日期**：2026-08-04
 > **测试设备**：Xiaomi 25053RT47C（Android 16 / API 36，Snapdragon 8 Elite + **Adreno 825**）
 > **App 版本**：V0.1.3（llama.cpp 内置 b10173；推理管线 `flash_attn=DISABLED`、`n_ubatch=16`、`sampler: penalties→top_k(128)→top_p(0.9)→temp(0.8)→dist`、每轮 `llama_sampler_accept`）
