@@ -21,6 +21,16 @@ inline float sgb_f(float v, uint lid) {
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 #define ADRENO_GPU 1
 #define REQD_SUBGROUP_SIZE_64 __attribute__((qcom_reqd_sub_group_size("half")))
+#else
+// [dspark 2026-10-19] rusticl (FD650/FD740) picks its native subgroup size
+// (measured 128) unless pinned. The GEMV protocol below is written for 64:
+// lanes slid<4 load B and broadcast to the subgroup, and the local-memory
+// reduce indexes SIMDGROUP_WIDTH(=64) slots per y-group. With sgs=128 the
+// broadcast crosses y-groups (wrong B per k) and the reduce writes past the
+// 192-slot array (OOB) -> garbage/NaN outputs for any multi-workgroup M.
+// intel_reqd_sub_group_size is honored by rusticl; unknown on the qcom
+// proprietary compiler, where the qcom attribute above applies instead.
+#define REQD_SUBGROUP_SIZE_64 __attribute__((intel_reqd_sub_group_size(64)))
 #endif
 
 // the driver's online compiler lacks float overloads of sub_group_broadcast
@@ -152,9 +162,7 @@ inline float sgb_f(float v, uint lid) {
 // Placed BEFORE the base kernel deliberately: on A6X no kernel may be defined
 // after one that uses a subgroup builtin, or it silently miscompiles.
 // ============================================================================
-#ifdef ADRENO_GPU
 REQD_SUBGROUP_SIZE_64
-#endif
 __kernel void kernel_gemv_noshuffle_q8_0_f32_splitk(
         __read_only  image1d_buffer_t src0_q,   // quantized A (weights)
         global half  * src0_d,                  // A scales
@@ -220,9 +228,54 @@ __kernel void kernel_gemv_noshuffle_q8_0_f32_splitk(
     }
 }
 
-#ifdef ADRENO_GPU
 REQD_SUBGROUP_SIZE_64
-#endif
+
+// [dspark] self-B accumulation macro: lane loads its own B pixels, no
+// subgroup broadcast. 32 FMAs for one q8_0 block.
+#define DEQUANT_ACCUM_SELFB_1(total_sums, bits8, sc, img, kk) \
+{ \
+    float4 b0 = read_imagef(img, (kk * 8 + 0)); \
+    float4 b1 = read_imagef(img, (kk * 8 + 1)); \
+    total_sums += convert_int((char)(bits8.s0 & 0xFF)) * sc * b0.x \
+              + convert_int((char)((bits8.s0 >> 8) & 0xFF)) * sc * b0.y \
+              + convert_int((char)((bits8.s0 >> 16) & 0xFF)) * sc * b0.z \
+              + convert_int((char)((bits8.s0 >> 24) & 0xFF)) * sc * b0.w \
+              + convert_int((char)(bits8.s1 & 0xFF)) * sc * b1.x \
+              + convert_int((char)((bits8.s1 >> 8) & 0xFF)) * sc * b1.y \
+              + convert_int((char)((bits8.s1 >> 16) & 0xFF)) * sc * b1.z \
+              + convert_int((char)((bits8.s1 >> 24) & 0xFF)) * sc * b1.w; \
+    float4 b2 = read_imagef(img, (kk * 8 + 2)); \
+    float4 b3 = read_imagef(img, (kk * 8 + 3)); \
+    total_sums += convert_int((char)(bits8.s2 & 0xFF)) * sc * b2.x \
+              + convert_int((char)((bits8.s2 >> 8) & 0xFF)) * sc * b2.y \
+              + convert_int((char)((bits8.s2 >> 16) & 0xFF)) * sc * b2.z \
+              + convert_int((char)((bits8.s2 >> 24) & 0xFF)) * sc * b2.w \
+              + convert_int((char)(bits8.s3 & 0xFF)) * sc * b3.x \
+              + convert_int((char)((bits8.s3 >> 8) & 0xFF)) * sc * b3.y \
+              + convert_int((char)((bits8.s3 >> 16) & 0xFF)) * sc * b3.z \
+              + convert_int((char)((bits8.s3 >> 24) & 0xFF)) * sc * b3.w; \
+    float4 b4 = read_imagef(img, (kk * 8 + 4)); \
+    float4 b5 = read_imagef(img, (kk * 8 + 5)); \
+    total_sums += convert_int((char)(bits8.s4 & 0xFF)) * sc * b4.x \
+              + convert_int((char)((bits8.s4 >> 8) & 0xFF)) * sc * b4.y \
+              + convert_int((char)((bits8.s4 >> 16) & 0xFF)) * sc * b4.z \
+              + convert_int((char)((bits8.s4 >> 24) & 0xFF)) * sc * b4.w \
+              + convert_int((char)(bits8.s5 & 0xFF)) * sc * b5.x \
+              + convert_int((char)((bits8.s5 >> 8) & 0xFF)) * sc * b5.y \
+              + convert_int((char)((bits8.s5 >> 16) & 0xFF)) * sc * b5.z \
+              + convert_int((char)((bits8.s5 >> 24) & 0xFF)) * sc * b5.w; \
+    float4 b6 = read_imagef(img, (kk * 8 + 6)); \
+    float4 b7 = read_imagef(img, (kk * 8 + 7)); \
+    total_sums += convert_int((char)(bits8.s6 & 0xFF)) * sc * b6.x \
+              + convert_int((char)((bits8.s6 >> 8) & 0xFF)) * sc * b6.y \
+              + convert_int((char)((bits8.s6 >> 16) & 0xFF)) * sc * b6.z \
+              + convert_int((char)((bits8.s6 >> 24) & 0xFF)) * sc * b6.w \
+              + convert_int((char)(bits8.s7 & 0xFF)) * sc * b7.x \
+              + convert_int((char)((bits8.s7 >> 8) & 0xFF)) * sc * b7.y \
+              + convert_int((char)((bits8.s7 >> 16) & 0xFF)) * sc * b7.z \
+              + convert_int((char)((bits8.s7 >> 24) & 0xFF)) * sc * b7.w; \
+}
+
 __kernel void kernel_gemv_noshuffle_q8_0_f32(
         __read_only  image1d_buffer_t src0_q,  // quantized A
         global half  * src0_d,  // A scales
@@ -252,11 +305,100 @@ __kernel void kernel_gemv_noshuffle_q8_0_f32(
     uint gid_s = min(gid, LINE_STRIDE_A - 1);
     uint BLOCK_STRIDE_A = 8 * M;   // 32 / 4 = 8
 
+    // [dspark 2026-10-19] staged diagnostics (ne12 repurposed as stage selector
+    // via GGML_OPENCL_Q8_DBG_STAGE on the host):
+    //   1: launch/dst addressing only (expect dst[gid] = gid + 0.5)
+    //   2: reduceLM protocol with constant 1.0 (expect dst[gid] = 4.0)
+    //   3: b_img pixel 0 read
+    //   4: q_img pixel gid read (expect dst[gid] = first q byte of row gid)
+    //   5: d scale read for k=0 (expect dst[gid] = scale(row gid, block 0))
+    __local float dbg_lm[SIMDGROUP_WIDTH * 3];
+    int dbg_stage = -ne12; /* real calls: ne12>=1 */
+    if (dbg_stage >= 1 && dbg_stage <= 8) {
+        dst = (global float*)((global char*)dst + offsetd);
+        if (gid >= M) return;
+        if (dbg_stage == 8) {
+            // compile-time branch discriminator: 1 = ADRENO path compiled,
+            // 0 = rusticl-safe v2 path compiled; +10 = VECTOR_SUB_GROUP_BROADCAST
+#if defined(ADRENO_GPU)
+            dst[gid] = 1.0f;
+#else
+            dst[gid] = 0.0f;
+#endif
+#ifdef VECTOR_SUB_GROUP_BROADCAST
+            dst[gid] += 10.0f;
+#endif
+            return;
+        }
+        if (dbg_stage == 1) { dst[gid] = (float)gid + 0.5f; return; }
+        if (dbg_stage == 2) {
+            float t = 1.0f;
+            if (groupId == 1) dbg_lm[SIMDGROUP_WIDTH * 0 + slid] = t;
+            if (groupId == 2) dbg_lm[SIMDGROUP_WIDTH * 1 + slid] = t;
+            if (groupId == 3) dbg_lm[SIMDGROUP_WIDTH * 2 + slid] = t;
+            barrier(CLK_LOCAL_MEM_FENCE);
+            if (groupId == 0) {
+                t += dbg_lm[SIMDGROUP_WIDTH * 0 + slid];
+                t += dbg_lm[SIMDGROUP_WIDTH * 1 + slid];
+                t += dbg_lm[SIMDGROUP_WIDTH * 2 + slid];
+            }
+            if (groupId == 0) dst[gid] = t;
+            return;
+        }
+        if (dbg_stage == 3) {
+            float t = 0.0f;
+            if (slid < 4) {
+                float4 v = read_imagef(src1, (slid * 2 + 0));
+                t = v.x + v.y + v.z + v.w;
+            }
+            t = SGB_BC(t, slid % 4);
+            if (groupId == 0) dst[gid] = t;
+            return;
+        }
+        if (dbg_stage == 4) {
+            uint t = read_imageui(src0_q, (gid_s + 0 * (8 * M) + LINE_STRIDE_A * 0)).x;
+            if (groupId == 0) dst[gid] = (float)(t & 0xFF);
+            return;
+        }
+        if (dbg_stage == 7) {
+            float t = 0.0f;
+            uint8 rA;
+            #pragma unroll 1
+            for (uint k = 0; k < (K / QK8_0); k++) {
+                half rS = src0_d[gid_s + k * LINE_STRIDE_A];
+                rA.s0 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+                rA.s1 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+                rA.s2 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+                rA.s3 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+                rA.s4 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+                rA.s5 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+                rA.s6 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;
+                rA.s7 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
+                DEQUANT_ACCUM_SELFB_1(t, rA, convert_float(rS), src1, k);
+            }
+            if (groupId == 0 && gid < M) dst[gid] = t;
+            return;
+        }
+        if (dbg_stage == 6) {
+            if (groupId == 0) dst[gid] = (float)get_sub_group_size();
+            return;
+        }
+        if (dbg_stage == 5) {
+            float s = (float)(src0_d[gid_s + 0 * LINE_STRIDE_A]);
+            if (groupId == 0) dst[gid] = s;
+            return;
+        }
+    }
+
     __private uint8     regA;
     __private half      regS;
-    __private float8    regB;
 
     __private float totalSum = (float)(0.0f);
+
+#if defined(ADRENO_GPU)
+    // Proprietary qcom stack: subgroup size is pinned to 64 by the qcom
+    // attribute, so the broadcast + slid-indexed protocol is safe there.
+    __private float8    regB;
 
     // loop along K in block granularity, skip 4 blocks every iter
     #pragma unroll 1 /* tell compiler not to unroll */
@@ -280,16 +422,52 @@ __kernel void kernel_gemv_noshuffle_q8_0_f32(
 
         dequantizeBlockAccum_ns_sgbroadcast_1(totalSum, regA, convert_float(regS), regB);
     }
+#else
+    // [dspark 2026-10-19] rusticl-safe variant v2. Measured on FD650
+    // rusticl+kgsl: the compiler hands this kernel a 128-wide subgroup that
+    // SPANS local y-groups, and with that layout neither subgroup broadcast
+    // (lanes of groupId 1 receive groupId 0's B for a different k) nor the
+    // work-group barrier + local-memory reduce (partial sums never become
+    // visible across y-groups) works -- stage-isolated probes showed a pure
+    // full-K loop with zero cross-thread communication computes bit-exact
+    // results (corr 1-1e-15 vs python) while any y-group reduce corrupts.
+    // So: one lane owns an output row end-to-end. No barrier, no local mem,
+    // no subgroup ops. 4x redundant B reads, but B is a few KB and cached.
+    #pragma unroll 1
+    for (uint k = 0; k < (K / QK8_0); k++) {
+        regS = src0_d[gid_s + k * LINE_STRIDE_A];
 
-    // reduction in local memory, assumes #wave=4
+        regA.s0 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        regA.s1 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        regA.s2 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        regA.s3 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+        regA.s4 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+        regA.s5 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+        regA.s6 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;
+        regA.s7 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
+
+        DEQUANT_ACCUM_SELFB_1(totalSum, regA, convert_float(regS), src1, k);
+    }
+
+    // single-lane totals: write directly, no reduce
+    if (gid < M) {
+        dst = (global float*)((global char*)dst + offsetd);
+        dst[gid] = totalSum;
+    }
+    return;
+#endif
+
+#if defined(ADRENO_GPU)
+    // reduction in local memory, assumes #wave=4 (qcom stack pins sgs=64)
     __local float reduceLM[SIMDGROUP_WIDTH * 3];
-    if (groupId == 1) reduceLM[SIMDGROUP_WIDTH * 0 + slid] = totalSum;
-    if (groupId == 2) reduceLM[SIMDGROUP_WIDTH * 1 + slid] = totalSum;
-    if (groupId == 3) reduceLM[SIMDGROUP_WIDTH * 2 + slid] = totalSum;
+    const uint lid_x = (uint)get_local_id(0);
+    if (groupId == 1) reduceLM[SIMDGROUP_WIDTH * 0 + lid_x] = totalSum;
+    if (groupId == 2) reduceLM[SIMDGROUP_WIDTH * 1 + lid_x] = totalSum;
+    if (groupId == 3) reduceLM[SIMDGROUP_WIDTH * 2 + lid_x] = totalSum;
     barrier(CLK_LOCAL_MEM_FENCE);
-    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 0 + slid];
-    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 1 + slid];
-    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 2 + slid];
+    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 0 + lid_x];
+    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 1 + lid_x];
+    if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 2 + lid_x];
 
     // 1 outputs per fiber in wave 0
     if (groupId == 0) {
@@ -300,4 +478,5 @@ __kernel void kernel_gemv_noshuffle_q8_0_f32(
         // when ne01 is wave-aligned (no padding).
         if (gid < M) dst[gid] = totalSum;
     }
+#endif // ADRENO_GPU
 }

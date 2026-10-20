@@ -8,6 +8,7 @@
 #include "llama-impl.h"
 #include "llama-memory.h"
 #include "llama-moe-cache.h"
+#include "llama-model.h" // TEMP: golden baseline build (libstdc++ needs complete type)
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"

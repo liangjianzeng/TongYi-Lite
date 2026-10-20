@@ -124,8 +124,14 @@ inline float block_q_6_K_dot_y_flat(
     float d3 = y3.s0*Q6W(q2[0],4,qh[0],3) + y3.s1*Q6W(q2[1],4,qh[1],3) + y3.s2*Q6W(q2[2],4,qh[2],3) + y3.s3*Q6W(q2[3],4,qh[3],3);
     #undef Q6W
 
+    // [dspark 2026-10-19] runtime-gated printf still makes NIR allocate the
+    // device printf buffer; on rusticl the host then reads back a garbage
+    // header -> Rust range panic -> abort (K40 a650, kernel.rs:2047). Gate it
+    // at compile time as well.
+    #ifndef GGML_NO_ADRENO_PRINTF_HACK
     if (dbg) printf("HELPER dall=%f s=[%d %d %d %d] d=[%f %f %f %f] ql0=%d qh0=%d y00=%f\n",
         dall, s0, s2, s4, s6, d0, d1, d2, d3, (int)q1[0], (int)qh[0], y0.s0);
+    #endif
 
     return dall * (d0 * s0 + d1 * s2 + d2 * s4 + d3 * s6);
 #else
