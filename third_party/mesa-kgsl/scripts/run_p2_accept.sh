@@ -2,7 +2,8 @@
 # [Mesa 线 P2 验收] 逐 token 一致性：CPU 参照 vs Mesa 各提交策略，同一 seed/temp。
 # 判据（写死在总档）：OPFLUSH=0 与 CPU 参照 48 token 全等 = 提交层 kernel 丢失修好。
 # 取数后用 host 侧 scripts/token_diff.py 比对（E2E_TOKDUMP 落 i32 序列）。
-# 用法：sh run_p2_accept.sh [n_predict=48] [legs=cpu,flush1,async,flush2]
+# 用法：sh run_p2_accept.sh [n_predict=48] [legs=cpu,cpu2,flush1,flush2,async]
+#   cpu2 = 第二条 CPU 腿，作**确定性对照**：temp=0 下 cpu 与 cpu2 若都不等，先修测量体再谈 GPU 病灶。
 set -u
 NPRED=${1:-48}
 LEGS=${2:-cpu,flush1,async,flush2}
@@ -31,6 +32,7 @@ one () { # $1=name $2..=env
   sleep 60
 }
 case ",$LEGS," in *,cpu,*)   one cpu     GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;; esac
+case ",$LEGS," in *,cpu2,*)   one cpu2    GGML_OPENCL_OFF=1 GGML_OPENCL_OPFLUSH=0 ;; esac
 case ",$LEGS," in *,flush1,*) one flush1  GGML_OPENCL_OPFLUSH=1 ;; esac
 case ",$LEGS," in *,flush2,*) one flush2  GGML_OPENCL_OPFLUSH=2 ;; esac
 case ",$LEGS," in *,async,*)  one async   GGML_OPENCL_OPFLUSH=0 ;; esac
