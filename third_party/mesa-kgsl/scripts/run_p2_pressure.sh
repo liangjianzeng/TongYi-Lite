@@ -14,6 +14,7 @@
 #
 # 用法：RUN=<dir> B=<mesa_dir> M=<gguf> E=<experts> sh run_p2_pressure.sh [npred=128]
 set -u
+BIN=${BIN:-minicpm_e2e}   # 设备上有多个构时必显式指定，否则悄悄跑成旧构
 NPRED=${1:-128}
 RUN=${RUN:-/data/local/tmp/k40moe}; B=${B:-/data/local/tmp/mesa_clean}
 M=${M:?需要 M=<gguf 路径>}
@@ -34,7 +35,7 @@ leg () { # $1=tag $2=OPFLUSH $3..=env
   T=$1; OF=$2; shift 2
   echo "-- LEG $T OFL=$OF $* $(date +%H:%M:%S)"
   env "$@" GGML_OPENCL_OPFLUSH=$OF E2E_TOKDUMP=$OUT/$T.tok timeout 900 \
-    ./minicpm_e2e "$M" "$E" 99 "$NPRED" 512 > $OUT/$T.out 2> $OUT/$T.err
+    ./$BIN "$M" "$E" 99 "$NPRED" 512 > $OUT/$T.out 2> $OUT/$T.err
   echo "   rc=$? tokbytes=$(ls -l $OUT/$T.tok 2>/dev/null | awk '{print $5}') sub=$(grep -ac 'KGSLSUBMIT cmd\[' $OUT/$T.err 2>/dev/null) health=$(grep -acE '造纸|印刷|指南针|火药' $OUT/$T.out)"
   sleep 60
 }
