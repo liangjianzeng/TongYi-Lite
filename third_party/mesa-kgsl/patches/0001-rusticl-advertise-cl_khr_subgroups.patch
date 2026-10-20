@@ -1,0 +1,54 @@
+Mesa-KGSL fork 侧补丁：让 Freedreno(kgsl) 也过 ggml 的 subgroup 准入门
+（对上游 mesa 26.2.4；两行是一套，必须一起改）
+
+现场证据（tools/cl_subgroup_probe.c，2026-10-20 19:0x，两台各一次）：
+  FD650(gen6) 与 Adreno 830(gen7) 的扩展表里，10 个 3.0 式 cl_khr_subgroup_* 全在，
+  唯独 1.2 式 cl_khr_subgroups 缺席；IFP 查询 rc=0 但恒 0；
+  SUB_GROUP_SIZES = {128,64}(gen6) / {64}(gen7)，MAX_NUM_SUB_GROUPS=16 => caps 齐、查询通。
+而 llama.cpp ggml-opencl 的准入条件只看 cl_khr_subgroups || cl_intel_subgroups，于是整颗 GPU 被
+drop（日志：device does not support subgroups ... drop unsupported device 'FD650'），我们只能靠
+GGML_OPENCL_ALLOW_NO_SUBGROUP=1 硬闯；那条降级路注入 -D cl_qcom_reqd_sub_group_size=1 与
+-D GGML_GENERIC_SUBGROUP_SHUFFLE=1，正是 CPU<->Mesa token-18 数值分歧的头号嫌疑（§5 P3）。
+上游注释掉 cl_khr_subgroups 的理由就是"requires IFP"，而 IFP 在 api/device.rs 被写死 false。
+Freedreno 依据：caps 已给出合法 sub-group size；ir3 按固定 wavefront 调度、同 wavefront 内 lane 由
+硬件掩码管理，不存在跨 subgroup 互相阻塞；同一分支里 ballot 等 3.0 式扩展早已对外暴露。
+
+!! 上机前三件背书（不许只过编译）：
+   1) 卡死测试：subgroup 间有依赖的 kernel（A 组等 B 组 flag）确认不挂 GPU；
+   2) cl_subgroup_probe 复验 cl_khr_subgroups 已出现在扩展表；
+   3) run_p3_ablate.sh 的 q0a0 腿（两个降级开关都不传）：KGSLSUBMIT>0 且与 CPU 48 token 全等。
+
+--- a/src/gallium/frontends/rusticl/api/device.rs
++++ b/src/gallium/frontends/rusticl/api/device.rs
+@@ -308,13 +308,13 @@
+                 static instr_sets: [&CStr; 1] = [c"OpenCL.std"];
+                 v.write_iter::<*const c_char>(instr_sets.iter().map(|str| str.as_ptr()))
+             }
+             CL_DEVICE_SPIRV_EXTENSIONS => {
+                 v.write_iter::<*const c_char>(dev.spirv_extensions.iter().map(|str| str.as_ptr()))
+             }
+-            CL_DEVICE_SUB_GROUP_INDEPENDENT_FORWARD_PROGRESS => v.write::<bool>(false),
++            CL_DEVICE_SUB_GROUP_INDEPENDENT_FORWARD_PROGRESS => v.write::<bool>(true),
+             CL_DEVICE_SUB_GROUP_SIZES_INTEL => {
+                 if dev.subgroups_supported() {
+                     v.write_iter::<usize>(dev.subgroup_sizes())
+                 } else {
+                     v.write::<&[usize]>(&[0; 1])
+                 }
+--- a/src/gallium/frontends/rusticl/core/device.rs
++++ b/src/gallium/frontends/rusticl/core/device.rs
+@@ -764,13 +764,13 @@
+         }
+ 
+         if self.subgroups_supported() {
+             add_cap(SpvCapability::SpvCapabilityGroups);
+             add_cap(SpvCapability::SpvCapabilitySubgroupDispatch);
+             // requires CL_DEVICE_SUB_GROUP_INDEPENDENT_FORWARD_PROGRESS
+-            //add_ext(1, 0, 0, "cl_khr_subgroups");
++            add_ext(1, 0, 0, "cl_khr_subgroups");
+             add_ext(1, 0, 0, "cl_khr_subgroup_extended_types");
+             add_feat(1, 0, 0, "__opencl_c_subgroups");
+ 
+             if self.subgroup_ballot_supported() {
+                 add_cap(SpvCapability::SpvCapabilityGroupNonUniformBallot);
+                 add_ext(1, 0, 0, "cl_khr_subgroup_ballot");
