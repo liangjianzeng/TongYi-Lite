@@ -59,3 +59,6 @@ echo "读法：python3 third_party/mesa-kgsl/scripts/token_diff.py $OUT/cpu.tok 
 echo "判定：q1a1 必须复现 @18/66%（否则本组全部作废，说明 run 间不可比）；"
 echo "      某腿分歧点离开 18 且 rc=0 => 那个开关就是数值分歧成因 = P3 第一块肉；"
 echo "      某腿 tokbytes=0 => 该开关关不掉（记为降级不可解除），同样是有用的结论。"
+echo "!! 假 PASS 硬闸（实测差点被它骗两次）：任何'全等 PASS'必须先证明它真在 GPU 上跑——"
+echo "   查该腿 .err 里有没有 'drop unsupported device' / 'does not support subgroups'，以及 KGSLSUBMIT 行数>0。"
+echo "   退回 CPU 的腿与 CPU 全等 = 同义反复，一律不算数（q0a1/q0a0 就是这样：err 268KB vs GPU 腿 52.7MB、KGSLSUBMIT=0）。"
