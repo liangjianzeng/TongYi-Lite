@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'constants.dart';
 import 'drm.dart';
+import 'http_client.dart';
 
 // ---------------------------------------------------------------------------
 // Events
@@ -194,9 +195,10 @@ class Communicate {
 
     WebSocket ws;
     try {
-      // Use a custom HttpClient with no default User-Agent to prevent
-      // dart:io from adding "Dart/x.x (dart:io)" alongside our custom one.
-      final httpClient = HttpClient()..userAgent = null;
+      // 自定义 HttpClient：无默认 UA（防 dart:io 追加 "Dart/x.x (dart:io)"），
+      // 且 IPv4 优先——IPv6 半死通道 TCP 连得上、TLS 被 RST，而 dart:io 在 TLS
+      // 阶段失败不会自动换下一个地址。
+      final httpClient = createTtsHttpClient();
       ws = await WebSocket.connect(
         wsUrlString,
         headers: {
@@ -320,7 +322,7 @@ class Communicate {
   Future<void> _calibrateClock({bool force = false}) async {
     if (_clockCalibrated && !force) return;
 
-    final client = HttpClient()..userAgent = null;
+    final client = createTtsHttpClient();
     try {
       // Use the voice list endpoint — we know it responds
       final gec = generateSecMsGec();

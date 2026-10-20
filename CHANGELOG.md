@@ -6,6 +6,33 @@
 
 ---
 
+## [Unreleased] — 2026-10-20
+
+### 🔊 TTS 播报修复：微软强制 Sec-MS-GEC v2（内置 edge_tts 已移植）+ 失败不再静默
+
+- **症状**：回答气泡点 🔊、设置页「试听」全都不出声，音色列表却正常（HTTP 200 / 322 音色）。
+- **根因**：微软免费 readaloud 端点自 2026-10-10 起**强制 Sec-MS-GEC v2** token，
+  旧的 v1（纯 SHA-256，64 hex）一律 **403** —— 合成 WebSocket 握手即被拒，全音色无解。
+  与网络、时钟偏差（实测 0 秒）、Edge 版本号声明、Origin/Cookie 均无关。
+- **修复**：vendored `third_party/edge_tts` 新增 `lib/src/gec_v2.dart`（上游 python
+  edge-tts PR #492 的机械移植：魔改 SHA-256 + CS64，输出 `<16hex>-<64hex>`），
+  `Sec-MS-GEC-Version` 前缀同步 `1-`→`2-`（两者必须成对切换，只改一边仍 403）。
+- **验证**：14 组 golden 值与上游抓包/参考实现逐字节一致；探针实测恢复出音
+  （mp3 48kbps/24kHz mono），36 音色矩阵全出音；`flutter test test/tts test/providers
+  test/services test/websearch` = 168 通过 + 2 skip。
+- **顺手堵雷**：合成/播放失败不再只写 debugPrint。新增 `EdgeTtsService.lastFailure`
+  与分类器 `classifyTtsError`（鉴权失败/网络/空音频/播放），**手动点 🔊 或试听失败
+  会上 SnackBar**（自动播报仍保持静默、不打断聊天）。
+- **手机侧第二层坑（同日追加）**：手机到 `speech.platform.bing.com` 的 **IPv6 通道半死**
+  （TCP 连上、TLS 被 RST；`curl -6` = 000、`curl -4` = 200），而 dart:io 只在 TCP 连接失败时
+  才换地址、TLS 阶段失败不回退 → 连接层静默哑掉。TTS 的三个 HttpClient 改为
+  **IPv4 优先、IPv6 兜底**（`createTtsHttpClient()`，不是只走 IPv4）。
+- **排障工具（新）**：`tool/tts_diag_probe.dart`（全链路分层定位，TTS 不出声首选）、
+  `tool/tts_conn_probe.dart`（连接层：HTTP/WS 双模式，专抓 connectionFactory 的 TLS/端口坑）、
+  `tool/tts_gec_matrix.dart`、`tool/tts_gec_golden.dart`、`tool/tts_raw_upgrade.dart`。
+
+---
+
 ## [0.3.3] — 2026-10-16（当前版本 · versionCode 21）
 
 ### 🚀 LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收

@@ -78,6 +78,22 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
   PATH 无 python，用 `$LOCALAPPDATA/Programs/Python/Python310/python.exe`。
 - wt/ 工作区构建产物在 `wt\<name>\build\app\outputs\flutter-apk\`，不在主仓 build/
   （2026-09-28 v0.2.6 实测，另一台开发机用 wt 工作区，别看错目录）。
+- **DGX Spark 宿主（Linux aarch64）打包入口**：`tool/build_apk.sh --release`（默认 debug+release 都打；
+  `--install` 装机、`--check` 只自检、`--clean-native` 强制重编 NDK）。它自带环境自检 + apksigner
+  签名验收（非 `CN=TongYiLite` 直接 exit 1）。产物目录：
+  `/home/jianzengliang/MyWork/TongYi-Lite/TongYi-Lite/build/app/outputs/flutter-apk/`。
+  本机 flutter 在 `~/flutter`（CLI 可用；受限沙箱下会因写不了 `engine.version` 挂掉）。
+- **2026-10-20 15:11 最新 release（TTS 修复）**：`app-release.apk` 67740809 B
+  （sha256 `c8586519ed6b6a1c…`），签名验收 `CN=TongYiLite`；字符串级验收：libapp.so UTF-16LE
+  `没能播报`/`试听失败`/`语音服务拒绝了请求`/`该音色对这段文本没有返回音频` 各 1 次，
+  ASCII `orderAddressesPreferIPv4`/`createTtsHttpClient` 命中。14:5x 那包（无 IPv4 加固）已
+  `adb install -r` 装进 M332BF 并由用户实测"能出声"。
+- **adb 远程安装两个坑（2026-10-20 踩到，已在 build_apk.sh 里堵）**：
+  ① `adb install` 不带 `-s` 在多设备时报 `more than one device/emulator`，但**仍然退出 0**
+  ——脚本会"成功"收尾而一个包都没装；现在改为机检输出里的 `Success`，多设备必须
+  `DEVICE=<ip:5555>` 指定。② 手机 adbd 的 TCP 模式会掉（abb_exec 崩成 offline、或手机侧重启），
+  本机无 USB，只能回 USB 主机跑 `scripts\adb-wifi.ps1` 重新 `adb tcpip 5555`，再
+  `bash scripts/adb-wifi-remote.sh` 重连（tailscale IP 会变，别照抄旧 IP）。
 - 构建后**必须**列出该目录的 APK 名/大小/时间，并把目录地址发给用户。
 
 ## APK 签名（重要记忆）
@@ -2799,6 +2815,38 @@ TTS「不出声」一律先跑 `dart run tool/tts_diag_probe.dart`，别猜。
 `drm.py`/`constants.py` → 同步进 `gec_v2.dart`/`constants.dart`；④ **先补 golden
 向量再改代码**（`/tmp/gec_ref.py` 那份 Python 参考可与 Dart 输出直接 diff）；
 ⑤ 重跑 `flutter test test/tts` + 探针多音色。
+
+**追加（同日）：手机侧第二层静默失败 = IPv6 半死通道 + `connectionFactory` 两个 dart:io 硬坑**
+
+真机取证（M332BF，同 WiFi 下 PC 一切正常）：手机 `curl -6 https://speech.platform.bing.com/...`
+= **000**（TLS Client Hello 后被 RST），`curl -4` = 200，baidu/microsoft 都 200（**不是断网**）。
+而 dart:io 只在 *TCP 连接失败* 时才换下一个地址（`_NativeSocket.startConnect` 的 connectNext
+循环），**TLS 阶段被 RST 不回退** → 解析返回 IPv6 在前时，手机整条 TTS 链路静默哑掉。
+
+修复：vendored `third_party/edge_tts/lib/src/http_client.dart` 的 `createTtsHttpClient()` ——
+**IPv4 优先、IPv6 兜底**（不是只走 IPv4，纯 IPv6-only 网络仍可工作），三处 HttpClient
+（communicate 合成 / 时钟校准、voices 列表）统一走它。
+
+⚠️ **`HttpClient.connectionFactory` 两个坑（本次自己踩了、被探针当场抓住）**：
+
+1. 设了工厂之后 **HttpClient 不再自己做 TLS 升级**（`_ConnectionTarget.connect` 直连分支把工厂
+   返回的 socket 原样交给 `_HttpClientConnection`）。忘了 `SecureSocket.secure` = 明文打 443 =
+   `Connection reset by peer` / 握手 30s 超时，**不会**给你清楚的 TLS 报错。
+   例外：走代理时（`proxyHost != null`）必须交回**明文** socket，dart:io 自己发 CONNECT 再升级
+   （`createProxyTunnel`）。
+2. 直连时工厂只拿到 `cf(uri, null, null)`，而 `WebSocket.connect` 把 `wss://` 改写成 `https://`
+   时带的是 `port: 0`（wss 不在 Uri 的默认端口表里），`_openUrl` 的 `port==0→443` 归一化**只在它
+   自己那条路上做** → 工厂里必须自己补（已抽成纯函数 `effectivePort()`）。
+
+踩中任一坑的现场指纹 = **「裸 WebSocket 探针能通，库路径全音色 30s 超时」**——这种分裂就是
+连接工厂层的信号，别去怀疑 token 或服务端。
+
+防线（都离线、进 CI）：`test/tts/tts_ip_pref_test.dart`（本地 `HttpServer` +
+`WebSocketTransformer` 起服务，两种模式各跑一遍 GET + WS upgrade，另有排序/端口归一化纯函数用例）；
+真端点侧 `tool/tts_conn_probe.dart`（两种模式验 GET 200 / WS 按预期被鉴权拒 403；
+**"竟然握手成功"或"超时/reset"都算连接层坏了**）。
+验收：`test/tts` 29 用例全绿；`test/tts test/providers test/services test/websearch` 174 passed +
+2 skip；diag 探针恢复 `OK(20304B)`；release APK 覆盖安装真机后用户复测**能出声**。
 
 ## 铁律：Mesa 线（全 GPU 卸载）性能数字的三条准入门槛（2026-10-20 接管后立规）
 

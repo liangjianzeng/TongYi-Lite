@@ -134,9 +134,55 @@ const List<TtsVoiceInfo> kFallbackVoices = [
       gender: 'Female'),
 ];
 
+/// 播报失败的分类（供 UI 给一句人话，不再"点了没反应"）。
+enum TtsFailureKind {
+  /// 服务端拒绝（401/403）：多为 Sec-MS-GEC token 失效——微软 2026-10-10 起
+  /// 强制 v2 token，vendored edge_tts 停在 v1 时全站 403。
+  denied,
+
+  /// 连不上/超时：网络不通或被墙。
+  network,
+
+  /// 服务端返回空音频：常见于「英文音色读中文」这类音色与文本语言不匹配。
+  empty,
+
+  /// 本地播放器出错。
+  playback,
+
+  /// 其它。
+  unknown,
+}
+
+/// 一次播报失败：[kind] 分类 + [message] 用户可读文案。
+class TtsFailure {
+  final TtsFailureKind kind;
+  final String message;
+  const TtsFailure(this.kind, this.message);
+
+  @override
+  String toString() => '${kind.name}: $message';
+}
+
+/// 把底层异常分类成用户可读原因（纯函数，单测钉死）。
+TtsFailure classifyTtsError(Object error) {
+  final s = error.toString();
+  if (s.contains('403') || s.contains('401')) {
+    return const TtsFailure(TtsFailureKind.denied,
+        '语音服务拒绝了请求（鉴权 token 失效，需升级内置 edge_tts）');
+  }
+  if (error is TimeoutException) {
+    return const TtsFailure(TtsFailureKind.network, '语音合成超时，请检查网络后重试');
+  }
+  if (s.contains('SocketException') ||
+      s.contains('Failed host lookup') ||
+      s.contains('Connection refused')) {
+    return const TtsFailure(TtsFailureKind.network, '连不上语音服务，请检查网络');
+  }
+  return TtsFailure(TtsFailureKind.unknown, '语音合成失败：$s');
+}
+
 class EdgeTtsService {
-  EdgeTtsService._();
-  static final EdgeTtsService instance = EdgeTtsService._();
+  EdgeTtsService._();  static final EdgeTtsService instance = EdgeTtsService._();
 
   final AudioPlayer _player = AudioPlayer();
 
@@ -147,6 +193,15 @@ class EdgeTtsService {
   final ValueNotifier<String?> playingKey = ValueNotifier(null);
 
   bool get isPlaying => playingKey.value != null;
+
+  /// 最近一次播报的失败原因（成功/被用户停止 = null）。
+  ///
+  /// 合成失败过去只 debugPrint，用户侧表现是「点了 🔊 什么也没发生」——
+  /// 2026-10 微软强制 Sec-MS-GEC v2 造成全站 403 时，整整哑了两天无人察觉。
+  /// 故失败必须留痕并让 UI 可提示（自动播报仍不打断聊天，只在手动点按时提示）。
+  TtsFailure? _lastFailure;
+  TtsFailure? get lastFailure => _lastFailure;
+  String? get lastError => _lastFailure?.message;
 
   // ---- 音色列表（30 分钟缓存）----
 
@@ -226,7 +281,12 @@ class EdgeTtsService {
         volume: _signed(volume, '%'),
       );
       final bytes = await comm.toBytes().timeout(const Duration(seconds: 60));
-      if (bytes.isEmpty) return null;
+      if (bytes.isEmpty) {
+        _lastFailure = const TtsFailure(TtsFailureKind.empty,
+            '该音色对这段文本没有返回音频（英文音色读中文常见，换 Multilingual 或中文音色）');
+        debugPrint('[EdgeTts] 合成返回空音频 voice=$voice');
+        return null;
+      }
       final dir = await _cacheDir();
       final file = File(p.join(
           dir.path,
@@ -234,6 +294,7 @@ class EdgeTtsService {
       await file.writeAsBytes(bytes);
       return file;
     } catch (e) {
+      _lastFailure = classifyTtsError(e);
       debugPrint('[EdgeTts] 合成失败: $e');
       return null;
     }
@@ -263,6 +324,7 @@ class EdgeTtsService {
       return false;
     }
     await stop();
+    _lastFailure = null; // 新一轮播报：清掉上一次的失败痕迹
     final seq = ++_seq;
     playingKey.value = key;
     try {
@@ -306,6 +368,10 @@ class EdgeTtsService {
       await completer.future.timeout(const Duration(minutes: 10),
           onTimeout: () {});
     } catch (e) {
+      // 用户 stop() 引发的播放异常不算失败（seq 已作废）。
+      if (seq == _seq) {
+        _lastFailure ??= const TtsFailure(TtsFailureKind.playback, '音频播放失败');
+      }
       debugPrint('[EdgeTts] play 异常: $e');
     } finally {
       await sub.cancel();

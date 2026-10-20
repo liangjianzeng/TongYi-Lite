@@ -5,21 +5,24 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 
 import 'constants.dart';
+import 'gec_v2.dart';
 
 int _clockSkew = 0;
 
+int _nowSeconds() =>
+    DateTime.now().millisecondsSinceEpoch ~/ 1000 + _clockSkew;
+
 /// Generates the Sec-MS-GEC token required for authentication.
 ///
-/// Algorithm:
-/// 1. Get Unix timestamp (with clock skew correction)
-/// 2. Add Windows epoch offset
-/// 3. Round down to nearest 5 minutes
-/// 4. Convert to 100-nanosecond intervals
-/// 5. Concatenate with trusted client token
-/// 6. SHA-256 hash → uppercase hex
-String generateSecMsGec() {
-  int nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  nowSeconds += _clockSkew;
+/// 2026-10-10 起服务端只接受 **v2** token（`<16hex>-<64hex>`，魔改 SHA-256 +
+/// CS64，见 gec_v2.dart）；v1 纯 SHA-256 一律 403。[secMsGecVersion] 前缀
+/// 必须同步为 `2-`。
+String generateSecMsGec() =>
+    generateSecMsGecV2(_nowSeconds(), trustedClientToken);
+
+/// 旧版 v1 token（纯 SHA-256，64 hex）。服务端已拒收，仅留作对照/回归用。
+String generateSecMsGecV1() {
+  int nowSeconds = _nowSeconds();
 
   int ticks = nowSeconds + winEpoch;
   ticks -= ticks % 300; // round to nearest 5 minutes

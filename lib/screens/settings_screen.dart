@@ -2058,12 +2058,12 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             size: 18,
                           ),
                           label: Text(isPreview ? '停止' : '试听'),
-                          onPressed: () {
+                          onPressed: () async {
                             if (isPreview) {
-                              tts.stop();
+                              await tts.stop();
                               return;
                             }
-                            tts.speak(
+                            final ok = await tts.speak(
                               // 英文音色读不出中文（服务端返回空音频），
                               // 试听文本按音色语言选择。
                               settings.edgeTtsVoice.startsWith('en-')
@@ -2078,6 +2078,15 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                               pitch: settings.edgeTtsPitch,
                               volume: settings.edgeTtsVolume,
                             );
+                            if (ok || !mounted) return;
+                            final err = tts.lastError;
+                            if (err == null) return;
+                            ScaffoldMessenger.of(context)
+                              ..hideCurrentSnackBar()
+                              ..showSnackBar(SnackBar(
+                                content: Text('🔊 试听失败：$err'),
+                                duration: const Duration(seconds: 4),
+                              ));
                           },
                         );
                       },

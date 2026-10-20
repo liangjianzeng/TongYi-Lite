@@ -72,8 +72,8 @@ class ChatBubble extends StatelessWidget {
             final isThis = playing == content.hashCode.toString();
             return InkWell(
               borderRadius: BorderRadius.circular(12),
-              onTap: () {
-                tts.speak(
+              onTap: () async {
+                final ok = await tts.speak(
                   content,
                   key: content.hashCode.toString(),
                   voice: settings.edgeTtsVoice,
@@ -81,6 +81,17 @@ class ChatBubble extends StatelessWidget {
                   pitch: settings.edgeTtsPitch,
                   volume: settings.edgeTtsVolume,
                 );
+                // 手动点按 = 明确要听，失败必须说清楚为什么没声音；
+                // 自动播报走 chat_provider，保持静默不打断聊天。
+                if (ok || !context.mounted) return;
+                final err = tts.lastError;
+                if (err == null) return; // 用户主动停止 → 不打扰
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(
+                    content: Text('🔊 没能播报：$err'),
+                    duration: const Duration(seconds: 4),
+                  ));
               },
               child: Padding(
                 padding: const EdgeInsets.all(2),

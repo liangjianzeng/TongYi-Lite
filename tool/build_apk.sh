@@ -19,6 +19,7 @@
 #   tool/build_apk.sh --clean-native  # 清 .cxx 全量重编 NDK（改了 native/cpp 必须用它，
 #                                     #   防 AGENTS 记录的 "NDK up-to-date 跳过致 .so 陈旧"）
 #   tool/build_apk.sh --install       # 成功后 adb install -r（绝不卸载，AGENTS 铁律）
+#                                     #   多设备时必须 DEVICE=<ip:5555> 指定，否则报错退出
 #   tool/build_apk.sh --analyze       # 构建前 flutter analyze
 # 环境变量覆盖：FLUTTER_BIN / ANDROID_HOME / JAVA_HOME / VULKAN_SDK
 set -euo pipefail
@@ -268,10 +269,42 @@ done
 [[ "$CLEAN_NATIVE" == 0 ]] && warn "如本次改过 cpp/ 或 third_party/llama.cpp，请用 --clean-native 重编（up-to-date 判定会跳过）"
 
 if [[ "$RUN_INSTALL" == 1 ]]; then
-  if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
-    for APK in "${APKS[@]}"; do adb install -r "$APK" || adb install -r -t "$APK"; done   # 绝不 uninstall（模型缓存）
+  # 安装验收必须机检 "Success"：adb 在多设备/offline 时会打印一堆错误却**仍然退出 0**
+  # （2026-10-20 实测：手机 abb_exec 崩成 offline + 另一台 unauthorized，脚本"成功"收尾，
+  #  实际一个包都没装进去）。只信 adb 的退出码 = 自欺。
+  install_one() {   # $1=device $2=apk
+    local dev="$1" apk="$2" out
+    for extra in "" " -t"; do
+      out="$(adb -s "$dev" install -r$extra "$apk" 2>&1)"; echo "$out"
+      grep -q "Success" <<<"$out" && return 0
+    done
+    return 1
+  }
+
+  if ! command -v adb >/dev/null 2>&1; then
+    echo "无 adb，跳过安装。" >&2
   else
-    echo "无 adb 设备，跳过安装（scripts/adb-wifi-remote.sh 可连手机）" >&2
+    mapfile -t DEVS < <(adb devices | awk 'NR>1 && $2=="device" {print $1}')
+    if [[ -n "${DEVICE:-}" ]]; then
+      DEVS=("$DEVICE")
+    elif [[ ${#DEVS[@]} -eq 0 ]]; then
+      echo "无在线 adb 设备，跳过安装（bash scripts/adb-wifi-remote.sh 重连；" >&2
+      echo "  掉 offline/tcp 模式失效时要回 USB 主机跑 scripts/adb-wifi.ps1）。" >&2
+      DEVS=()
+    elif [[ ${#DEVS[@]} -gt 1 ]]; then
+      bad "多台设备在线（${DEVS[*]}）——adb 不指定 -s 会静默失败。请 DEVICE=<ip:5555> 重跑 --install。"
+      exit 1
+    fi
+    for DEV in "${DEVS[@]}"; do
+      for APK in "${APKS[@]}"; do
+        echo "== adb install -r -> $DEV ($(basename "$APK"))"
+        # 绝不 uninstall：会清掉已下载的端侧模型缓存（AGENTS 铁律）
+        install_one "$DEV" "$PROJ_ROOT/$APK" || {
+          bad "安装失败：$DEV / $APK —— 先 `adb devices` 看是不是 offline/unauthorized"
+          exit 1
+        }
+      done
+    done
   fi
 fi
 echo; echo "== 完成。APK 目录：$PROJ_ROOT/build/app/outputs/flutter-apk/"

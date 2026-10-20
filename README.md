@@ -78,7 +78,7 @@ TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应�
 | **模型下载与管理**                    | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + HTTP Range 断点续传）、加载/卸载、单模型约束、存储信息扫描                                                                                                                                                                                                                                          |
 | **🖼️ 视觉理解**                   | Qwen3.5 / Gemma 4 视觉模型（`.gguf` + `mmproj` 两文件闭环下载），本地档与 API 档均支持图片输入                                                                                                                                                                                                                                               |
 | **🎙️ 语音输入（端侧 ASR）**           | sherpa-onnx 流式 Zipformer 中文 int8（~160MB，首次使用下载），FFI 进程内推理，**完全离线零网络依赖**；微信式按住说话、实时回显、上滑取消；9 类约 290 词热词偏置 + 自定义热词（可查看/编辑，差量存储）                                                                                                                                                                                      |
-| **🔊 语音播报（Edge TTS）**          | 微软 Edge 免费 neural 音色（免 key），气泡 🔊 点按播报 / 回复后自动播报；音色/语速/音调/音量可配 + 试听；markdown 清洗成可朗读文本、长回复按句分段逐段播放；失败静默降级                                                                                                                                                                                                           |
+| **🔊 语音播报（Edge TTS）**          | 微软 Edge 免费 neural 音色（免 key，**Sec-MS-GEC v2** token 本地算），气泡 🔊 点按播报 / 回复后自动播报；音色/语速/音调/音量可配 + 试听；markdown 清洗成可朗读文本、长回复按句分段逐段播放；**IPv4 优先连接**绕 IPv6 半死通道；手动点按失败给 SnackBar 提示（自动播报保持静默）                                                                                                                                                                                                           |
 | **上下文占用圈 + 手动压缩**              | 输入框圆形占用环（API `prompt_tokens/n_ctx` 实测 · 本地 KV `kv_used/kv_ctx`），阈值变色；点开详情面板，支持**存储级手动压缩**（清理旧工具结果存摘要，聊天记录不受影响）；回合内 LLM 摘要压缩（专用便宜模型，失败回退确定性摘要）                                                                                                                                                                      |
 | **🌐 联网搜索**                    | **端侧直连国内六引擎**（必应/百度/搜狗/360/夸克/中国搜索）——零配置默认可用，带每 10 分钟窗口请求预算、指数熔断、UA 池、引擎开关；配置了自建 **SearXNG** 地址则自动切换走实例；`web_search` 支持并发多关键词、每回合搜索上限、同内容去重、新闻意图过滤                                                                                                                                                                 |
 | **🛠️ Dev Agent 开发模式**         | 工作区四级后端（App 沙箱 / 内嵌工具沙箱 / Termux / 远程 PC）+ `dev_shell`（jniLibs busybox）+ **JGit 进程内 git**（clone/commit/push，免系统 git）+ Termux **RUN_COMMAND 免 SSH** 通道 + SSH 多配置向导（密钥自动生成、一键安装、自动执行）+ 任务/规划管理 + `workspace_sync` 双向同步                                                                                               |
@@ -201,14 +201,27 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 **语音播报（Edge TTS）**：
 
-- 微软 Edge 免费 neural 语音（`speech.platform.bing.com`，免 API key，`Sec-MS-GEC` 本地 token  
-  鉴权；纯 Dart vendored 包 `third_party/edge_tts`）。回答气泡 🔊 按钮点按播报 / 回复后自动播报  
-  （设置可关）；合成/播放失败静默降级不打断聊天。
+- 微软 Edge 免费 neural 语音（`speech.platform.bing.com`，免 API key；纯 Dart vendored 包  
+  `third_party/edge_tts`）。回答气泡 🔊 按钮点按播报 / 回复后自动播报（设置可关）。
+- **鉴权 = `Sec-MS-GEC` v2 token**（微软 2026-10-10 起强制；v1 一律 403）：形如  
+  `<16hex CS64>-<64hex 魔改 SHA-256>`，本地按当前时间算，与 `Sec-MS-GEC-Version` 的 `2-` 前缀  
+  **成对**下发——只改一边服务端照样 403。微软下次换算法：先 `dart run tool/tts_diag_probe.dart`  
+  分清 200 / 403 / EMPTY，再对照上游 python `edge-tts` 的 `drm.py` **先补 golden 向量再改代码**  
+  （`test/tts/sec_ms_gec_v2_test.dart` 已用上游抓包钉死）。
+- **IPv4 优先连接**（`third_party/edge_tts/lib/src/http_client.dart`）：国内网络常见 IPv6 半死  
+  通道——TCP 连得上、TLS 握手被 RST，而 dart:io 只在 *TCP 连接失败* 时才换下一个地址、TLS 阶段  
+  失败不回退，表现就是「PC 正常、手机全哑」。IPv6 仍留作兜底，纯 IPv6-only 网络照常可用。
+- **失败可见**：`classifyTtsError` 把失败归类为 鉴权拒绝 / 网络 / 空音频 / 播放 四类，手动点 🔊  
+  或试听失败会上 SnackBar 并给可行动提示（例：英文音色读中文返回空音频 → 换 Multilingual 变体）；  
+  **自动播报仍保持静默**，绝不打断聊天。
 - 音色（在线拉取 300+，zh 系置顶）、语速（-50%~+100%）、音调（±50Hz）、音量（±50%）  
   设置页可配 + 试听。⚠️ 免费接口实测定案：中文音色共 14 个，大陆方言仅辽宁/陕西两个女声  
   （Azure 独有方言音色蹭不到）；英文音色读不出中文（混合内容建议选 Multilingual 变体）。
 - 管线：markdown 清洗成可朗读文本（代码块/URL/表格符号剔除）→ 按句分段（≤600 字）→  
   逐段合成（mp3 按 SHA-256 落缓存复用）→ 逐段播放。
+- 排障工具（`tool/`，可直接 `dart run`）：`tts_diag_probe.dart`（全链路分层定位，**不出声首选**）、  
+  `tts_conn_probe.dart`（连接层 HTTP/WS 双模式）、`tts_gec_matrix.dart`（token/版本/头矩阵 +  
+  时钟偏差）、`tts_gec_golden.dart`（Dart 端 token 打印）、`tts_raw_upgrade.dart`（裸 Upgrade 取 403 响应）。
 
 ### 远程 API 接入（OpenAI 兼容）
 
@@ -503,7 +516,9 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   热词（`default_hotwords.dart` 9 类 + `hotword_corrector.dart` 同音后校正 + 差量编辑）+  
   模型管理（`asr_model_manager.dart` 下载/删除）。
 - `lib/tts/` — Edge TTS（`edge_tts_service.dart` 单例：合成缓存 + 分段播放 + 代次防回写 +  
-  音色列表）+ 文本清洗/分段纯函数（`tts_text.dart`）。
+  音色列表 + `TtsFailure`/`classifyTtsError` 失败分类）+ 文本清洗/分段纯函数（`tts_text.dart`）。  
+  协议栈在 `third_party/edge_tts`：`gec_v2.dart`（Sec-MS-GEC v2 token）+ `http_client.dart`  
+  （IPv4 优先的 HttpClient，绕 IPv6 半死通道）。
 - `lib/websearch/` — 纯 Dart（仅依赖 dio）：引擎契约 + 六引擎实现 + Cookie 会话/UA 池  
   （`engine_http.dart`）+ 聚合器（`multi_engine_search.dart`：加权轮转/去重/熔断/窗口预算/诊断）+  
   链接解析（`link_resolver.dart`）。
@@ -679,6 +694,11 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
   `libtongyilite_jni.so` 含新增日志串/字段名（`touch` 源文件强制重编）。
 - **回归防线**：动智能体循环/协议先跑 `flutter test test/agent`；全量 `flutter test` 当前  
   **600 余项 + 4 skip**（test/agent · providers · services · websearch · asr · tts）。
+- **一键打包**：Windows 用 `tool/build_apk.ps1`，DGX Spark（Linux aarch64）用 `tool/build_apk.sh`——  
+  默认 debug + release 一起打（`--release` / `--debug` 单选），自带环境自检（`--check`）、apksigner  
+  签名验收（证书不是 `CN=TongYiLite` 直接判失败）、`--install` **覆盖安装**（机检 adb 输出里的  
+  `Success`；多设备须 `DEVICE=<ip>:5555`；**绝不 uninstall**，否则清掉已下载的端侧模型缓存）、  
+  `--clean-native` 强制重编 NDK。产物在 `build/app/outputs/flutter-apk/`。
 
 ---
 
@@ -691,7 +711,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.3.4**（当前） | 2026-10-18 | **llama.cpp 0.5.0 → 0.7.0 主线升级（四道门全过）**：47 冲突 hunk 全解（opencl OOB clamp × nsg_rt 组合、hadamard 双系统、backend copy_input 迁移）；KleidiAI v1.31.0 vendored（**SME2 内核族入包**，per-family march + 运行时派发）；**REGC 宏守卫错位修复**（17 个 moe `_ns` 内核 Adreno 首爆，fork 潜伏 bug）；mtmd/clip MiniCPM-V 4.7 去重、common_batch C++ 化 JNI 包装。真机基准（小米13 Adreno 740 · bonsai-8b-q1_0 · OpenCL）：decode **1.3→1.6 tok/s（+27%）**、首 Tok **10.3s→5.3s（-49%）**。详见 `docs/fork升级v0.7.0主线方案_2026-10-18.md` |
+| **v0.3.4+**（当前 · 🔊 TTS 修复 · 同 versionName 复用） | 2026-10-20 | **Edge TTS 恢复播报（两层故障）**：① 微软 2026-10-10 起强制 **Sec-MS-GEC v2**，v1 token 全音色握手 403 → vendored `edge_tts` 移植 v2（魔改 SHA-256 + CS64，`<16hex>-<64hex>`；14 组 golden 与上游抓包逐字节一致；`Sec-MS-GEC-Version` 前缀必须**成对**翻 `2-`）② 真机第二层：手机 IPv6 到端点 TLS 被 RST 而 dart:io 在 TLS 阶段失败不换地址 → TTS 连接改 **IPv4 优先 / IPv6 兜底**。失败不再静默：`classifyTtsError` 四类（鉴权/网络/空音频/播放）+ 手动点按上 SnackBar（自动播报仍静默不打断聊天）。新增 5 个 `tool/tts_*` 排障探针；`test/tts` 29 项全绿（含本地 WS 服务端钉死 `connectionFactory` 的 TLS/端口契约）。versionCode 22 |
+| **v0.3.4** | 2026-10-18 | **llama.cpp 0.5.0 → 0.7.0 主线升级（四道门全过）**：47 冲突 hunk 全解（opencl OOB clamp × nsg_rt 组合、hadamard 双系统、backend copy_input 迁移）；KleidiAI v1.31.0 vendored（**SME2 内核族入包**，per-family march + 运行时派发）；**REGC 宏守卫错位修复**（17 个 moe `_ns` 内核 Adreno 首爆，fork 潜伏 bug）；mtmd/clip MiniCPM-V 4.7 去重、common_batch C++ 化 JNI 包装。真机基准（小米13 Adreno 740 · bonsai-8b-q1_0 · OpenCL）：decode **1.3→1.6 tok/s（+27%）**、首 Tok **10.3s→5.3s（-49%）**。详见 `docs/fork升级v0.7.0主线方案_2026-10-18.md` |
 | **v0.3.3+**（Mesa 全 GPU · 主干）          | 2026-10-17       | **FD740 rusticl 正确性战役（M1 第一阶段）**：FD740 subgroup 三大铁律实锤（查询恒报 128 撒谎 / 真实 subgroup=min(128,WG) 跨行 / reqd_sub_group_size 被无视）→ 20+ 内核修复（EFF_SGS 步长、q4_K/q6_K flat shmem 树归约、10 个 moe 内核 slid 语义、F16_MROW 默认关）；**rusticl 原生实现 qcom shuffle builtin**（再翻案），编译链注入协议钉死三条禁令；op 级全绿（MUL_MAT 1001/1009、SOFT_MAX 214/214、GET_ROWS 21/21）；e2e 全 0 破案两根因实锤（**FUSE mmap 权重垃圾页**——外置存储禁 mmap、**GPU offload ≥3 层即坏**——RS state 首坏，CL API 层三探针洗清）+ 新诊断工具链（E2E_LOGITDUMP / E2E_CBD / E2E_NOMMAP / clprobe1-3）。详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §12 |
 | **v0.3.3**                       | 2026-10-16       | **LFM2.5-24B-A2B 官方整包 in-place split-MoE 真机验收**：引擎扫整包 gguf header 绑定 114 个 `_exps.weight` 条目（per-entry offset 原地 readv 读专家，`init pack=seg pack_layers=38/38`），端侧**只下载官方单文件**（12.65GB，sha256 校验），**免 PC 打包 / 免分片传输**；小米13 实测 decode **1.6 t/s**（vs split-bins 0.9，+78%）、专家 I/O **1902 MiB/s**（zerocopy 100%）、PSS 913MB 无 lmkd。修复两 bug：① JNI `nativeLoadModel→load` 漏传 `moe_experts_bytes`（oom-guard 按 24.9GB 误拒整包）② bank 通配覆写泄漏到 in-place（slot 192MB×64=12.9GB 物理不可能，改强制 autoBank）。MiniCPM packed-bins 生产路径回归零变化。详见 `docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md`。versionCode 21 |
 | **v0.3.2**                               | 2026-10-15~16    | **智能 MoE 拆分加载（split-MoE）+ LES 落地 + GPU 路线双机定案**：权重剥离 `.experts/` 与 **in-place GGUF 直读**（seg fallback，免剥离）双形态；CPU slot bank 热稳态 830 实测 **8.07 t/s**（MiniCPM-V 4.7 35B-A3B，740 3.0–3.4）；GPU bank 全套（FGSVM / route0 直写 drain 归零 / `pack_async` 异步 / uploads race fix——bank23–32 共 14 腿零崩）；动态切点 rank0-miss 全延后 + MiniCPM-V 4.7 projector；**SCHED_STATS 插桩**（op 直方图 + 落点 buffer dump）+ **probe9 提交税探针**（OpenCL 9µs/op vs CPU 0.34µs，`cl_khr_command_buffer` 不暴露）→ decode CPU 混合守擂定案；CPU 岛收编（小权重豁免 + `GGML_OPENCL_SSM_A8X` 解锁，splits 203→83）；Mesa（rusticl/freedreno a8x）整图单提交路线立项（见 `全GPU卸载_Mesa自研路线总档_2026-10-16.md`）。versionCode 19+（主干） |
@@ -822,11 +843,22 @@ embedded 后端走 JGit 进程内 git（git_clone/commit/push 等），Termux/�
 
 <details>
 
-<summary><b>Q: TTS 有些音色不出声？</b></summary>
+<summary><b>Q: TTS 完全不出声 / 某些音色不出声？</b></summary>
 
-Edge 免费接口的服务端行为：非 Multilingual 的英文音色读中文一律返回空音频（英文正常）；  
-大陆方言音色仅辽宁/陕西两个女声。混合语言内容建议选 Multilingual 变体。中文回复配英文音色  
-自动播报无声属固有限制。
+**完全不出声（所有音色、PC 却能出音）** 多半是这两条之一：
+
+1. **微软换了 token 算法**——合成 WebSocket 握手被 403（音色列表 `voices/list` 仍是 200，容易误判成  
+   网络问题）。跑 `dart run tool/tts_diag_probe.dart`：全音色 403 + 时钟 0 偏差 = token 版本落后，  
+   需把上游 python `edge-tts` 的新 `drm.py` 移植进 `third_party/edge_tts/lib/src/gec_v2.dart`，  
+   并**成对**翻转 `Sec-MS-GEC-Version` 前缀。
+2. **手机那条 IPv6 通道半死**（TCP 连上、TLS 被 RST；`adb shell curl -6 <端点>` = 000 而 `-4` = 200）。  
+   已用 IPv4 优先连接规避（`third_party/edge_tts/lib/src/http_client.dart`）；连接层本身可用  
+   `dart run tool/tts_conn_probe.dart` 验。
+
+手动点 🔊 / 试听失败会有 SnackBar 说明原因（鉴权 / 网络 / 空音频 / 播放）；自动播报按设计静默。
+
+**个别音色不出声**属 Edge 免费接口的服务端行为：非 Multilingual 的英文音色读中文一律返回空音频  
+（英文正常）；大陆方言音色仅辽宁/陕西两个女声。混合语言内容建议选 Multilingual 变体。
 
 </details>
 
