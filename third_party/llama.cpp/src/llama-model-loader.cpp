@@ -2031,3 +2031,8 @@ void llama_model_loader::print_info() const {
         LLAMA_LOG_INFO("%s: file size   = %.2f GiB (%.2f BPW) \n", __func__, n_bytes/1024.0/1024.0/1024.0, n_bytes*8.0/n_elements);
     }
 }
+
+// TEMP: explicit instantiations for libstdc++ golden-baseline build
+template bool llama_model_loader::get_arr<int>(const std::string &, std::vector<int> &, bool);
+template bool llama_model_loader::get_arr<std::string>(const std::string &, std::vector<std::string> &, bool);
+template bool llama_model_loader::get_key<bool>(const std::string &, bool &, bool);

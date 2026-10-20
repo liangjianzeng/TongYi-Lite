@@ -10138,6 +10138,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
+    // [dspark] qwen2.5-0.5b e2e shapes (K40 a650 rusticl ffn corruption hunt):
+    // exact prefill/decode shapes from the model graph.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 896,  9, 4864, {1, 1}, {1, 1})); // ffn_down prefill
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 896,  1, 4864, {1, 1}, {1, 1})); // ffn_down decode
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0, GGML_TYPE_F32, 4864, 9, 896,  {1, 1}, {1, 1})); // ffn gate/up prefill
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0, GGML_TYPE_F32, 896,  9, 896,  {1, 1}, {1, 1})); // attn_q control (known good)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128,  9, 896,  {1, 1}, {1, 1})); // attn_v prefill
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, 896,  9, 4864, {1, 1}, {1, 1}));
+
     // m == 1, with n on both sides of MMVF_MAX_BATCH_SIZE (8): mmvf below, operand swap above
     for (int64_t n : {1, 7, 8, 9, 16, 127, 128, 511, 512}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 1, n, 2048, {1, 1}, {1, 1}));

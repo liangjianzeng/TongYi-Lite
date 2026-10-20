@@ -704,6 +704,12 @@ struct ggml_backend_opencl_context {
     bool adreno_use_bin_kernels;
     get_adreno_bin_kernel_func_t get_adreno_bin_kernel_func = nullptr;
     ggml_cl_compiler_version adreno_cl_compiler_version;
+    // [dspark 2026-10-19] True when the driver is Mesa/rusticl (clang-based offline
+    // compilation) rather than the Qualcomm online compiler. All adreno_cl_compiler_version
+    // gates below exist to dodge QC E031/E17/DX compiler bugs; on rusticl the version
+    // string is a Mesa version (e.g. "26.2.4") that parses to the E031 0.0.0 default,
+    // which must NOT be treated as "old QC compiler".
+    bool is_mesa_rusticl;
     // The q6_K flat mul_mat codegen workarounds are needed by old E031 compilers only.
     bool q6_k_flat_old_compiler;
 
@@ -1644,7 +1650,12 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
     static const char * env_fake_qcom = getenv("GGML_OPENCL_FAKE_QCOM_REQD");
     if (env_fake_qcom && env_fake_qcom[0] == '1') {
         opts += " -D cl_qcom_reqd_sub_group_size=1"
-                " -D GGML_GENERIC_SUBGROUP_SHUFFLE=1";
+                " -D GGML_GENERIC_SUBGROUP_SHUFFLE=1"
+                // [dspark 2026-10-19] the never-firing printf hack in cvt.cl is a QC
+                // online-compiler workaround; under rusticl it makes NIR allocate a
+                // device printf buffer whose uninitialized header is read back as a
+                // bogus length -> Rust panic -> abort (K40 a650, tbo MUL_MAT q5_0).
+                " -D GGML_NO_ADRENO_PRINTF_HACK=1";
         // NOTE: do NOT define CLK_SUB_GROUP_SHUFFLE_WIDTH_WAVE_SIZE_QCOM here,
         // and do NOT #define it in kernels either. rusticl predefines
         // cl_qcom_subgroup_shuffle; its injected header declares the width
@@ -1656,6 +1667,25 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
         // NOTE: self-declared `float sub_group_shuffle_xor(float, uint);`
         // prototypes compile but fail to lower (err=-6 at the call site) —
         // never hand-declare OpenCL builtins for this backend.
+    }
+
+    // [dspark 2026-10-19] on rusticl ANY kernel containing printf (even
+    // runtime-gated never-firing ones) makes NIR allocate a device printf
+    // buffer whose uninitialized header is read back as a bogus length ->
+    // Rust range panic -> abort. Strip all adreno printf hacks unconditionally.
+    if (backend_ctx->is_mesa_rusticl) {
+        opts += " -D GGML_NO_ADRENO_PRINTF_HACK=1";
+        // [dspark 2026-10-20] GEMV sgs guard. rusticl assigns subgroup sizes per
+        // kernel without honoring any reqd attribute we can emit (qcom attr is
+        // an unknown-attribute warning; intel attr ignored). The noshuffle GEMV
+        // protocol (slid<4 B load + subgroup broadcast + slid-indexed local
+        // reduce) silently corrupts when sgs > 64 because subgroups then span
+        // local y-groups (wrong B per k) and the slid-indexed reduce aliases.
+        // Measured on FD650 2026-10-20: q8_0 base drew sgs=64 (passes), while
+        // q4_0/q1_0 drew sgs=128 and fail at m>=128 (2+ workgroups). Kernels
+        // take a sync-free per-lane full-K path under this define; vendor
+        // Adreno (real qcom attr pins sgs=64) is unaffected.
+        opts += " -D GGML_OPENCL_RUSTICL=1";
     }
 
     // [dspark 2026-10-17] Mesa/SPIR-V path: SPIR-V caps vector components at
@@ -2210,7 +2240,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     // mul_mv_q4_0_f32_1d_8x_flat
     // This kernel does not compiler on Adreno cl compiler 38.01. Skip it for
     // those compiler versions since it is anyway not used for Adreno.
+    // [dspark 2026-10-19] Always build on rusticl: the guard below is a QC online
+    // compiler (E031 < 38.11) workaround; rusticl compiles with clang and leaves
+    // this kernel NULL, crashing clSetKernelArg (-48) on small-shape SOA-Q MUL_MAT.
     if (backend_ctx->gpu_family != ADRENO ||
+        backend_ctx->is_mesa_rusticl ||
         backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 38, 11, 0) ||
         backend_ctx->adreno_cl_compiler_version.type == E17 ||
         backend_ctx->adreno_cl_compiler_version.type == DX) {
@@ -2231,7 +2265,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     // mul_mv_q4_0_f32_1d_16x_flat
     // This kernel does not compiler on Adreno cl compiler 38.01. Skip it for
     // those compiler versions since it is anyway not used for Adreno.
+    // [dspark 2026-10-19] Always build on rusticl (see 1d_8x_flat note above).
     if (backend_ctx->gpu_family != ADRENO ||
+        backend_ctx->is_mesa_rusticl ||
         backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 38, 11, 0) ||
     backend_ctx->adreno_cl_compiler_version.type == DX) {
 #ifdef GGML_OPENCL_EMBED_KERNELS
@@ -7238,6 +7274,14 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
         return false;
     }
 
+    // The flash_attn_repack wmm kernels write to 3D images (kernel compile fails
+    // with err=-11 where the driver lacks the extension, seen on Adreno 650).
+    // Fall back to generic kernels on such devices.
+    if (strstr(ext_buffer.data(), "cl_khr_3d_image_writes") == NULL) {
+        GGML_LOG_WARN("ggml_opencl: device lacks cl_khr_3d_image_writes, disabling Adreno kernels\n");
+        return false;
+    }
+
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
     // GGML_OPENCL_ALLOW_NO_SUBGROUP=1: bypass for Mesa rusticl (subgroups are
@@ -7315,6 +7359,13 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     backend_ctx->driver_version = driver_version.data();
 
     backend_ctx->adreno_cl_compiler_version = get_adreno_cl_compiler_version(driver_version.data());
+    // [dspark 2026-10-19] rusticl reports a bare Mesa version ("26.2.4") — no QC
+    // compiler marker (E031/E17/DX) anywhere in the driver string. Detect by the
+    // absence of those markers; do NOT look for the word "Mesa" (not present).
+    backend_ctx->is_mesa_rusticl =
+        strstr(driver_version.data(), "E031") == NULL &&
+        strstr(driver_version.data(), "E17") == NULL &&
+        strstr(driver_version.data(), "DX") == NULL;
     backend_ctx->has_vector_subgroup_broadcast =
         (backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
         (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17) ||
@@ -7328,6 +7379,11 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     // required: newer_than_or_same() is false for every non-E031 compiler, so negating it
     // alone would enable the workarounds on E17/DX.
     backend_ctx->q6_k_flat_old_compiler =
+        !backend_ctx->is_mesa_rusticl &&  // [dspark 2026-10-19] E031 0.0.0 is the
+            // default parse for any unrecognized driver string (rusticl reports a
+            // bare Mesa version); on rusticl the ADRENO_OLD_COMPILER workarounds
+            // — including the load-bearing Q6KLANE/Q6KTOT printfs — would compile
+            // in and each execution then panics on the NIR printf buffer readback.
         backend_ctx->adreno_cl_compiler_version.type == E031 &&
         !backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 45, 0, 0);
 
@@ -9254,7 +9310,21 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         }
         if (opsync_en || opbatch > 1) {
             if (opsync_en || ++opbatch_cnt >= opbatch) {
-                clFinish(backend_ctx->queue);
+                // [dspark 2026-10-19] -54 localization (K40 a650): the error
+                // surfaced at a later wait-free enqueue is stale in-order-queue
+                // state from an earlier kernel; check clFinish here to attribute
+                // the first exec failure to a concrete graph node.
+                cl_int fin_err = clFinish(backend_ctx->queue);
+                if (fin_err != CL_SUCCESS) {
+                    ggml_tensor * prev = i > 0 ? cgraph->nodes[i-1] : NULL;
+                    GGML_LOG_ERROR("ggml_opencl: clFinish err=%d before node %d/%d cur op=%s name='%s' | prev op=%s name='%s' type=%d ne={%d,%d,%d,%d}\n",
+                        fin_err, i, cgraph->n_nodes,
+                        ggml_op_name(node->op), node->name,
+                        prev ? ggml_op_name(prev->op) : "?", prev ? prev->name : "?",
+                        prev ? prev->type : 0,
+                        prev ? prev->ne[0] : 0, prev ? prev->ne[1] : 0,
+                        prev ? prev->ne[2] : 0, prev ? prev->ne[3] : 0);
+                }
                 opbatch_cnt = 0;
             }
         }
@@ -9440,7 +9510,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             return e && e[0] == '1';
         }();
         static int nodedump_cnt = 0;
-        if (nodedump_en && nodedump_cnt < 1200 && node->type == GGML_TYPE_F32 && ggml_is_contiguous(node)) {
+        if (nodedump_en && nodedump_cnt < 4000 && node->type == GGML_TYPE_F32 && ggml_is_contiguous(node)) {
             ++nodedump_cnt;
             const size_t nb = ggml_nbytes(node);
             std::vector<float> host(nb / sizeof(float));
@@ -9449,11 +9519,63 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             for (float v : host) { ss += double(v)*v; mx = fabsf(v) > mx ? fabsf(v) : mx; if (v == 0) ++nz; }
             const double rms = sqrt(ss / double(host.size()));
             const ggml_tensor_extra_cl * nx = (const ggml_tensor_extra_cl *)node->extra;
-            fprintf(stderr, "[nd] %s op=%s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu dev=%p off=%lu view=%lu data=%p\n",
+            fprintf(stderr, "[nd] %s op=%s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu dev=%p off=%lu view=%lu data=%p f4=%.6g,%.6g,%.6g,%.6g\n",
                     node->name, ggml_op_name(node->op), (long long)node->ne[0], (long long)node->ne[1], rms, mx, nz, host.size(),
                     (void*)(nx ? nx->data_device : nullptr),
                     (unsigned long)(nx ? nx->offset : 0),
-                    (unsigned long)node->view_offs, (void*)node->data);
+                    (unsigned long)node->view_offs, (void*)node->data,
+                    host.size() >= 4 ? host[0] : 0.f, host.size() >= 4 ? host[1] : 0.f,
+                    host.size() >= 4 ? host[2] : 0.f, host.size() >= 4 ? host[3] : 0.f);
+
+            // [dspark] GGML_OPENCL_BIASAUDIT=1: dump small ADD bias srcs —
+            // locates corrupt small-tensor device placement (K bias rms 32 vs
+            // ~0.5 expected on a650 e2e while Q/V biases are healthy).
+            static const bool bias_audit = getenv("GGML_OPENCL_BIASAUDIT") != NULL;
+            if (bias_audit && node->op == GGML_OP_ADD && node->src[1] &&
+                ggml_nbytes(node->src[1]) <= 4096 && ggml_is_contiguous(node->src[1])) {
+                ggml_tensor * b = node->src[1];
+                const size_t bnb = ggml_nbytes(b);
+                std::vector<float> hb(bnb / sizeof(float));
+                ggml_backend_tensor_get(b, hb.data(), 0, bnb);
+                double bss = 0; float bmx = 0;
+                for (float v : hb) { bss += double(v)*v; bmx = fabsf(v) > bmx ? fabsf(v) : bmx; }
+                const ggml_tensor_extra_cl * bx = (const ggml_tensor_extra_cl *)b->extra;
+                fprintf(stderr, "[bias] %s ne=[%lld] rms=%.6g max=%.6g f4=%.6g,%.6g,%.6g,%.6g dev=%p off=%lu view=%lu data=%p\n",
+                        b->name, (long long)b->ne[0], sqrt(bss/double(hb.size())), bmx,
+                        hb.size() >= 4 ? hb[0] : 0.f, hb.size() >= 4 ? hb[1] : 0.f,
+                        hb.size() >= 4 ? hb[2] : 0.f, hb.size() >= 4 ? hb[3] : 0.f,
+                        (void*)(bx ? bx->data_device : nullptr),
+                        (unsigned long)(bx ? bx->offset : 0),
+                        (unsigned long)b->view_offs, (void*)b->data);
+            }
+
+            // [dspark] GGML_OPENCL_DUMPTENSOR=name1,name2: write full raw F32
+            // tensors to /data/local/tmp/dump_<name>.bin (first match only) for
+            // offline python comparison.
+            static const char * dump_names = getenv("GGML_OPENCL_DUMPTENSOR");
+            // GGML_OPENCL_DUMP_DECODE=1: only match nodes with ne1==1 (decode steps)
+            static const bool dump_decode_only = getenv("GGML_OPENCL_DUMP_DECODE") != NULL;
+            if (dump_names && dump_names[0] && !(dump_decode_only && node->ne[1] != 1)) {
+                static std::set<std::string> done;
+                std::string names(dump_names);
+                size_t start = 0;
+                while (start <= names.size()) {
+                    size_t comma = names.find(',', start);
+                    std::string one = names.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                    if (!one.empty() && node->name == one && !done.count(one)) {
+                        done.insert(one);
+                        std::string path = std::string("/data/local/tmp/dump_") + one + ".bin";
+                        FILE * fp = fopen(path.c_str(), "wb");
+                        if (fp) {
+                            fwrite(host.data(), 1, nb, fp);
+                            fclose(fp);
+                            fprintf(stderr, "[dump] wrote %s (%zu bytes)\n", path.c_str(), nb);
+                        }
+                    }
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+            }
 
             // [dspark 2026-10-18] E2E_WATCH=name: track a tensor's first floats
             // after every node — finds the first node whose execution mutates
@@ -10351,6 +10473,11 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         case GGML_OP_MEAN:
             return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_FLASH_ATTN_EXT: {
+            // A/B knob: force fallback (dequant + MUL_MAT) attention path
+            static bool no_fa = getenv("GGML_OPENCL_NO_FA") != NULL;
+            if (no_fa) {
+                return false;
+            }
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
             if (use_fa_bin_kernels_prefill(backend_ctx, op->src[0], op->src[1], op->src[2])) {
                 return true;
@@ -11097,6 +11224,21 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
 
+    // [dspark 2026-10-19] -54 hunt (K40 a650): the failing prepack enqueue
+    // returns -54 synchronously with an empty wait list — stale in-order-queue
+    // state from an earlier command. Checkpoint at entry bisects the source:
+    // error here = predates this set_tensor (previous case / cleanup).
+    {
+        static const bool tbo54 = [] { const char * e = getenv("GGML_OPENCL_SET_TENSOR_FINISH"); return e && e[0] == '1'; }();
+        if (tbo54) {
+            cl_int ferr = clFinish(queue);
+            if (ferr != CL_SUCCESS) {
+                GGML_LOG_ERROR("ggml_opencl: set_tensor entry clFinish err=%d tensor='%s' type=%d ne={%d,%d,%d,%d}\n",
+                    ferr, tensor->name, tensor->type, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
+            }
+        }
+    }
+
 #ifdef GGML_OPENCL_SOA_Q
     if (tensor->type == GGML_TYPE_Q1_0) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
@@ -11258,9 +11400,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
                 size_t gws[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
                 size_t lws[] = {64, 1, 1};
+                // [dspark 2026-10-19] -54 = CL_INVALID_WORK_GROUP_SIZE on rusticl
+                // for non-uniform NDRange; NULL local when not divisible by 64.
+                size_t * lws_u = (gws[0] % 64 == 0) ? lws : NULL;
 
                 cl_event evt;
-                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws, 0, NULL, &evt));
+                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws_u, 0, NULL, &evt));
                 CL_CHECK(clWaitForEvents(1, &evt));
                 CL_CHECK(clReleaseMemObject(data_device));
 
@@ -11645,16 +11790,39 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
         if (use_adreno_kernels(backend_ctx, tensor)) {
             cl_kernel kernel = backend_ctx->kernel_convert_block_q5_0_noshuffle;
+            // [dspark 2026-10-19] checkpoint B: is the queue still clean right
+            // before this enqueue? clean here + -54 on enqueue = the enqueue
+            // itself generates the error (kernel/arg-specific), not stale state.
+            {
+                static const bool tbo54 = [] { const char * e = getenv("GGML_OPENCL_SET_TENSOR_FINISH"); return e && e[0] == '1'; }();
+                if (tbo54) {
+                    cl_int ferr = clFinish(queue);
+                    if (ferr != CL_SUCCESS) {
+                        GGML_LOG_ERROR("ggml_opencl: prepack-pre clFinish err=%d tensor='%s' ne={%d,%d,%d}\n",
+                            ferr, tensor->name, tensor->ne[0], tensor->ne[1], tensor->ne[2]);
+                    }
+                }
+            }
             CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &data_device));
             CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &extra->qs));
             CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra->qh));
             CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &extra->d));
 
             size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+            // [dspark 2026-10-19] -54 root cause: -54 is CL_INVALID_WORK_GROUP_SIZE
+            // (NOT EXEC_STATUS_ERROR — that is -14; my code table was wrong). rusticl
+            // rejects non-uniform NDRange where the Adreno driver accepted it. When
+            // n_blocks is not divisible by 64, pass NULL local (driver picks a
+            // uniform size; one-work-item-per-block semantics unchanged, no OOB).
             size_t local_work_size[] = {64, 1, 1};
-
+            size_t nblk50 = (size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type);
+            size_t * lws50 = (nblk50 % 64 == 0) ? local_work_size : NULL;
             cl_event evt;
-            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
+            GGML_LOG_ERROR("ggml_opencl: q5_0 prepack enqueue tensor='%s' ne={%d,%d,%d} nblk=%zu gws=%zu lws=64\n",
+                tensor->name, tensor->ne[0], tensor->ne[1], tensor->ne[2],
+                (size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type),
+                global_work_size[0]);
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, lws50, 0, NULL, &evt));
             CL_CHECK(clWaitForEvents(1, &evt));
             CL_CHECK(clReleaseMemObject(data_device));
 
@@ -11799,10 +11967,13 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &extra->m));
 
             size_t global_work_size[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
+            // [dspark 2026-10-19] uniform-safe local (see q5_0 comment: -54 =
+            // CL_INVALID_WORK_GROUP_SIZE on rusticl for non-uniform NDRange).
             size_t local_work_size[] = {64, 1, 1};
-
+            size_t nblk51 = (size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type);
+            size_t * lws51 = (nblk51 % 64 == 0) ? local_work_size : NULL;
             cl_event evt;
-            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
+            CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, lws51, 0, NULL, &evt));
             CL_CHECK(clWaitForEvents(1, &evt));
             CL_CHECK(clReleaseMemObject(data_device));
 
@@ -11927,9 +12098,13 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
         size_t global_work_size[3] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
         size_t local_work_size[3] = {64, 1, 1};
+        // [dspark 2026-10-19] uniform-safe local: rusticl rejects non-uniform
+        // NDRange with -54 (CL_INVALID_WORK_GROUP_SIZE) where the Adreno driver
+        // accepted it. NULL local keeps one-item-per-block semantics.
+        size_t * lws_mxfp4 = (global_work_size[0] % 64 == 0) ? local_work_size : NULL;
 
         cl_event evt;
-        CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
+        CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, lws_mxfp4, 0, NULL, &evt));
         CL_CHECK(clWaitForEvents(1, &evt));
         CL_CHECK(clReleaseMemObject(data_device));
 
@@ -12053,6 +12228,41 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             transpose_2d_as_32b(backend_ctx, extra->q, extra->q, size_q, K/4,  M);
             transpose_2d_as_16b(backend_ctx, extra->d, extra->d, size_d, K/32, M);
         } // end transpose
+
+        // [dspark 2026-10-19] q8_0 prepack dump (post-transpose): tbo m=128 n=1
+        // NaN hunt. GGML_OPENCL_DUMP_Q8=name[,SHAPE=KxM via GGML_OPENCL_DUMP_Q8_SHAPE]
+        if (getenv("GGML_OPENCL_DUMP_Q8")) {
+            const char * filter = getenv("GGML_OPENCL_DUMP_Q8");
+            bool match = filter && tensor->name && strstr(tensor->name, filter);
+            if (match) {
+                if (const char * shapef = getenv("GGML_OPENCL_DUMP_Q8_SHAPE")) {
+                    int fk = 0, fm = 0;
+                    match = sscanf(shapef, "%dx%d", &fk, &fm) == 2 &&
+                            tensor->ne[0] == fk && tensor->ne[1] == fm;
+                }
+                static std::set<std::string> done_q8;
+                if (match && done_q8.insert(tensor->name).second) {
+                    char sn[256]; size_t si = 0;
+                    for (const char * c = tensor->name; *c && si < sizeof(sn) - 1; c++)
+                        sn[si++] = ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                                    (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') ? *c : '_';
+                    sn[si] = 0;
+                    auto dump_q8 = [&](cl_mem m, size_t bytes, const char * tag) {
+                        if (bytes == 0 || m == 0) return;
+                        std::vector<char> b(bytes);
+                        cl_int e = clEnqueueReadBuffer(backend_ctx->queue, m, CL_TRUE, 0, bytes, b.data(), 0, NULL, NULL);
+                        if (e != CL_SUCCESS) { GGML_LOG_INFO("dump_q8 %s err %d\n", tag, (int)e); return; }
+                        char fn[320];
+                        snprintf(fn, sizeof(fn), "/data/local/tmp/cbddump/Q8SOA_%s_%s.bin", sn, tag);
+                        FILE * f = fopen(fn, "wb");
+                        if (f) { fwrite(b.data(), 1, bytes, f); fclose(f); }
+                        GGML_LOG_INFO("dump_q8 %s (%zu B)\n", fn, bytes);
+                    };
+                    dump_q8(extra->q, size_q, "q");
+                    dump_q8(extra->d, size_d, "d");
+                }
+            }
+        }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
         return;
@@ -12340,9 +12550,12 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
                 size_t gws[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
                 size_t lws[] = {64, 1, 1};
+                // [dspark 2026-10-19] -54 = CL_INVALID_WORK_GROUP_SIZE on rusticl
+                // for non-uniform NDRange; NULL local when not divisible by 64.
+                size_t * lws_u = (gws[0] % 64 == 0) ? lws : NULL;
 
                 cl_event evt;
-                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws, 0, NULL, &evt));
+                CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, gws, lws_u, 0, NULL, &evt));
                 CL_CHECK(clWaitForEvents(1, &evt));
                 CL_CHECK(clReleaseMemObject(data_device));
 
@@ -12551,7 +12764,33 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
-        CL_CHECK(clWaitForEvents(1, &evt));
+        // [dspark 2026-10-20 W1 hangdump] On K40 rusticl+kgsl this wait can return
+        // -14 (EXEC_STATUS_ERROR) with KGSLWAIT errno=EDEADLK: the submit succeeded
+        // (ret=0) but the GPU never executes the 304B single-launch IB. Dump KGSL
+        // sysfs state before dying so we can tell "cmd lost" from "GPU stalled"
+        // from "faulted".
+        {
+            cl_int werr = clWaitForEvents(1, &evt);
+            if (werr != CL_SUCCESS) {
+                fprintf(stderr, "[HANGDUMP] convert wait err=%d — dumping KGSL state\n", werr);
+                const char * nodes[] = {"dispatch", "retired", "timestamp", "hang",
+                                        "gpubusy", "fault", "cmd", "ctx", "gpuclk",
+                                        "clock_mhz", "gpu_busy_percentage", "modalias"};
+                for (size_t ni = 0; ni < sizeof(nodes)/sizeof(nodes[0]); ni++) {
+                    char path[128];
+                    snprintf(path, sizeof(path), "/sys/class/kgsl/kgsl-3d0/%s", nodes[ni]);
+                    FILE * fp = fopen(path, "r");
+                    if (fp) {
+                        char buf[512];
+                        fprintf(stderr, "[HANGDUMP] %s = ", nodes[ni]);
+                        while (fgets(buf, sizeof(buf), fp)) fprintf(stderr, "%s", buf);
+                        if (buf[strlen(buf)-1] != '\n') fprintf(stderr, "\n");
+                        fclose(fp);
+                    }
+                }
+                GGML_ABORT("hangdump complete");
+            }
+        }
         CL_CHECK(clReleaseMemObject(data_device));
 
         // [verify] optional set_tensor self-check: read back the d sub-buffer and
@@ -13025,6 +13264,44 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         extra->size_d  = size_d;
 
         tensor->extra  = extra;
+
+        // [dspark 2026-10-19] dump the prepack arrays BEFORE the transpose
+        // stage, to isolate convert vs transpose corruption with nonzero
+        // tensor offsets (e2e prepack hunt). GGML_OPENCL_DUMP_Q6K_PRETRANS=1.
+        static const bool dump_pretrans = getenv("GGML_OPENCL_DUMP_Q6K_PRETRANS") != NULL;
+        if (dump_pretrans) {
+            const char * filter = getenv("GGML_OPENCL_DUMP_Q6K");
+            const char * shapef = getenv("GGML_OPENCL_DUMP_Q6K_SHAPE");
+            bool match = filter && tensor->name && strstr(tensor->name, filter);
+            if (match && shapef) {
+                int fk = 0, fm = 0;
+                match = sscanf(shapef, "%dx%d", &fk, &fm) == 2 &&
+                        tensor->ne[0] == fk && tensor->ne[1] == fm;
+            }
+            static std::set<std::string> done_pre;
+            if (match && done_pre.insert(tensor->name).second) {
+                char sn[256]; size_t si = 0;
+                for (const char * c = tensor->name; *c && si < sizeof(sn) - 1; c++)
+                    sn[si++] = ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                                (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') ? *c : '_';
+                sn[si] = 0;
+                auto dump_pre = [&](cl_mem m, size_t bytes, const char * tag) {
+                    if (bytes == 0 || m == 0) return;
+                    std::vector<char> b(bytes);
+                    cl_int e = clEnqueueReadBuffer(backend_ctx->queue, m, CL_TRUE, 0, bytes, b.data(), 0, NULL, NULL);
+                    if (e != CL_SUCCESS) { GGML_LOG_INFO("ggml_opencl: dump_pre %s err %d\n", tag, (int)e); return; }
+                    char fn[320];
+                    snprintf(fn, sizeof(fn), "/data/local/tmp/cbddump/Q6PRE_%s_%s.bin", sn, tag);
+                    FILE * f = fopen(fn, "wb");
+                    if (f) { fwrite(b.data(), 1, bytes, f); fclose(f); }
+                    GGML_LOG_INFO("ggml_opencl: dump_pre %s (%zu B)\n", fn, bytes);
+                };
+                dump_pre(extra->ql, (size_t) extra->size_ql, "ql");
+                dump_pre(extra->qh, (size_t) extra->size_qh, "qh");
+                dump_pre(extra->s,  (size_t) extra->size_s,  "s");
+                dump_pre(extra->d,  (size_t) extra->size_d,  "d");
+            }
+        }
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
         if (use_adreno_kernels(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q6_K(backend_ctx, tensor)) {
@@ -23457,11 +23734,47 @@ static void ggml_cl_mul_mat_q8_0_f32_adreno(ggml_backend_t backend, const ggml_t
         CL_CHECK(clSetKernelArg(kernel, 13, sizeof(int),      &r2));
         CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int),      &r3));
 
+        // [dspark] staged kernel diagnostics: repurpose ne12 (arg 10) as stage
+        if (const char * dbg = getenv("GGML_OPENCL_Q8_DBG_STAGE")) {
+            int st = -atoi(dbg); /* negative encoding; real ne12 >= 1 */
+            CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int), &st));
+        }
+
         size_t wavesize = backend_ctx->adreno_wave_size;
         size_t local_work_size[]  = { wavesize, 4, 1 };
         size_t global_work_size[] = { CEIL_DIV(M, wavesize)*wavesize, 4, 1 };
 
+        // [dspark 2026-10-19] dump B/dst for q8_0 GEMV NaN hunt (tbo m=128 n=1)
+        std::vector<float> dump_pre_dst;
+        bool dump_gv = getenv("GGML_OPENCL_DUMP_Q8GEMV") != nullptr;
+        if (dump_gv) {
+            static std::set<std::string> done_gv;
+            std::string key = std::string(src0->name ? src0->name : "?") + "_" +
+                              std::to_string(M) + "x" + std::to_string(K);
+            dump_gv = done_gv.insert(key).second;
+            if (dump_gv) {
+                dump_pre_dst.resize(M);
+                clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, M*sizeof(float), dump_pre_dst.data(), 0, NULL, NULL);
+                FILE * f0 = fopen("/data/local/tmp/cbddump/Q8GEMV_dst_before.bin", "wb");
+                if (f0) { fwrite(dump_pre_dst.data(), 4, M, f0); fclose(f0); }
+            }
+        }
+
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+        if (dump_gv) {
+            {
+                std::vector<float> bb(K), oo(M);
+                clEnqueueReadBuffer(backend_ctx->queue, b_sub_buf, CL_TRUE, 0, K*sizeof(float), bb.data(), 0, NULL, NULL);
+                clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, M*sizeof(float), oo.data(), 0, NULL, NULL);
+                FILE * f1 = fopen("/data/local/tmp/cbddump/Q8GEMV_b.bin", "wb");
+                FILE * f2 = fopen("/data/local/tmp/cbddump/Q8GEMV_dst.bin", "wb");
+                if (f1) { fwrite(bb.data(), 4, K, f1); fclose(f1); }
+                if (f2) { fwrite(oo.data(), 4, M, f2); fclose(f2); }
+                GGML_LOG_INFO("dump_q8gemv M=%d K=%d\n", M, K);
+            }
+        }
+
 
         CL_CHECK(clReleaseMemObject(q_img));
         CL_CHECK(clReleaseMemObject(b_img));
@@ -23865,6 +24178,12 @@ static void ggml_opencl_debug_dump_q6k_planes(ggml_backend_opencl_context * back
                                               ggml_tensor_extra_cl_q6_K * ex) {
     static const char * filter = getenv("GGML_OPENCL_DUMP_Q6K");
     if (!filter || !strstr(src0->name, filter)) return;
+    // optional shape filter "KxM", e.g. 4864x896, to pick a specific tensor
+    if (const char * shapef = getenv("GGML_OPENCL_DUMP_Q6K_SHAPE")) {
+        int fk = 0, fm = 0;
+        if (sscanf(shapef, "%dx%d", &fk, &fm) == 2 &&
+            (src0->ne[0] != fk || src0->ne[1] != fm)) return;
+    }
     static std::set<std::string> done;
     if (!done.insert(src0->name).second) return;
     const int64_t nblk = (src0->ne[0] / 32) * src0->ne[1] * src0->ne[2] * src0->ne[3];
@@ -25530,6 +25849,17 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
 
     const bool use_bin = use_q6_k_bin_kernels(backend_ctx, src0);
 
+    // [dspark 2026-10-19] trace: which q6_K kernel + offsets (e2e corruption hunt)
+    static const char * tr_name = getenv("GGML_OPENCL_Q6K_TRACE");
+    static int tr_cnt = 0;
+    if (tr_name && src0->name && strstr(src0->name, tr_name) && tr_cnt < 12) {
+        ++tr_cnt;
+        GGML_LOG_INFO("ggml_opencl: [q6k-trace] %s ne00=%d ne01=%d ne1=%d use_bin=%d tiled=%d off1=%lu offd=%lu src1buf=%p dstbuf=%p\n",
+            src0->name, ne00, ne01, ne1, (int)use_bin, (int)use_q6k_tiled(backend_ctx, src0),
+            (unsigned long)offset1, (unsigned long)offsetd,
+            (void*)extra1->data_device, (void*)extrad->data_device);
+    }
+
     // [dspark 2026-10-14] Adreno 830: the q6_K noshuffle GEMV (ne1==1, per-layer
     // shapes M%64==0) is numerically broken (probe6 M=2048/4096/8192 x K=512..4096
     // n=1 ERR 1.13-1.30, same repack-class miscompilation family as the q4_K GEMV
@@ -25558,6 +25888,7 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
     }
 
     if ((ne1 == 1 && !force_gemm_n1_q6k) || use_q6k_mc3 || use_q6k_tiled_mc) {
+        if (tr_name && tr_cnt <= 12 && strstr(src0->name, tr_name)) GGML_LOG_INFO("ggml_opencl: [q6k-trace] -> GEMV (ne1=%d force_gemm_n1=%d)\n", ne1, (int)force_gemm_n1_q6k);
         cl_mem ql_img = nullptr;
         cl_mem qh_img = nullptr;
         cl_mem b_sub_buffer = nullptr;
@@ -25721,6 +26052,7 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
                                       strncmp(src0->name, "token_embd", 10) == 0;
 
         if (q6k_dense_dp4a_on && !is_output_w_dp4a && ne1 > 8 && (ne00 % 32 == 0) && (ne01 % 64 == 0)) {
+            if (tr_name && tr_cnt <= 12 && strstr(src0->name, tr_name)) GGML_LOG_INFO("ggml_opencl: [q6k-trace] -> dp4a GEMM\n");
             const int M = ne01, N = ne1, K = ne00;
             const size_t n_blocks = (size_t)N * (K / 32);
             backend_ctx->prealloc_moe_qa.allocate(context, (size_t)N * K * sizeof(cl_char));
@@ -25823,6 +26155,7 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
         const bool use_q6k_cok = q6k_gemm_cok && (ne1 <= 8);
         kernel = use_q6k_cok ? backend_ctx->kernel_gemm_noshuffle_q6_K_f32_cok
                              : backend_ctx->kernel_gemm_noshuffle_q6_K_f32;
+        if (tr_name && tr_cnt <= 12 && strstr(src0->name, tr_name)) GGML_LOG_INFO("ggml_opencl: [q6k-trace] -> image GEMM padded_N=%d\n", ne1 + (ne1 % 8 ? 8 - ne1 % 8 : 0));
         int padded_N = ne1 + padding;
 
         cl_ushort mask_f000 = 0xF000;
@@ -27047,26 +27380,35 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         }
     }
 
-    if (ne01 && ne1 && use_adreno_kernels(backend_ctx, src0)) {
+    // A/B knob: skip all adreno trans-weight/prepack MUL_MAT paths
+    static const bool no_adreno_mm = getenv("GGML_OPENCL_NO_ADRENO_MM") != NULL;
+    // [dspark 2026-10-19] per-type adreno mul_mat block for decode-GEMV bisection:
+    // GGML_OPENCL_NO_ADRENO_MM_TYPES=q6_K,q4_K,... (substring match per type)
+    static const char * no_mm_types = getenv("GGML_OPENCL_NO_ADRENO_MM_TYPES");
+    auto mm_type_blocked = [&](const char * tn) -> bool {
+        return no_mm_types && strstr(no_mm_types, tn) != nullptr;
+    };
+    if (!no_adreno_mm && ne01 && ne1 && use_adreno_kernels(backend_ctx, src0)) {
         // NOTE: Kernels using image1d_buffer_t (e.g., src0_q) would normally require
         // a limit check, but q4_0 / q4_1 tensors are very unlikely to exceed that
         // limit, so the check is omitted.
 
         // q1_0 x fp32
         if (src0t == GGML_TYPE_Q1_0 && src1t == GGML_TYPE_F32 &&
+            !mm_type_blocked("q1_0") &&
             enable_adreno_trans_weight(backend_ctx, src0)) {
                 ggml_cl_mul_mat_q1_0_f32_adreno(backend, src0, src1, dst);
                 return;
         }
 
         // q4_0 x fp32
-        if(src0t == GGML_TYPE_Q4_0 && src1t == GGML_TYPE_F32) {
+        if(src0t == GGML_TYPE_Q4_0 && src1t == GGML_TYPE_F32 && !mm_type_blocked("q4_0")) {
             ggml_cl_mul_mat_q4_0_f32_adreno(backend, src0, src1, dst);
             return;
         }
 
         // q4_1 x fp32
-        if (src0t == GGML_TYPE_Q4_1 && src1t == GGML_TYPE_F32) {
+        if (src0t == GGML_TYPE_Q4_1 && src1t == GGML_TYPE_F32 && !mm_type_blocked("q4_1")) {
             ggml_cl_mul_mat_q4_1_f32_adreno(backend, src0, src1, dst);
             return;
         }
@@ -27084,13 +27426,14 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         }
 
         // iq4_nl x fp32
-        if (src0t == GGML_TYPE_IQ4_NL && src1t == GGML_TYPE_F32) {
+        if (src0t == GGML_TYPE_IQ4_NL && src1t == GGML_TYPE_F32 && !mm_type_blocked("iq4_nl")) {
             ggml_cl_mul_mat_iq4_nl_f32_adreno(backend, src0, src1, dst);
             return;
         }
 
         // q8_0 x fp32
         if (src0t == GGML_TYPE_Q8_0 && src1t == GGML_TYPE_F32 &&
+            !mm_type_blocked("q8_0") &&
             enable_adreno_trans_weight(backend_ctx, src0)) {
                 ggml_cl_mul_mat_q8_0_f32_adreno(backend, src0, src1, dst);
                 return;
@@ -27103,19 +27446,21 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         // passes). Route n==1 to the noshuffle path below, where splitk
         // (TBO-verified on 830) takes over.
         if (src0t == GGML_TYPE_Q4_K && src1t == GGML_TYPE_F32 &&
+            !mm_type_blocked("q4_K") &&
             !use_flat_gemv_for_large_m_q4_K(backend_ctx, src0)) {
             ggml_cl_mul_mat_q4_k_f32_adreno(backend, src0, src1, dst);
             return;
         }
 
         // q6_K x fp32
-        if (src0t == GGML_TYPE_Q6_K && src1t == GGML_TYPE_F32 && !use_flat_gemv_for_large_m_q6_K(backend_ctx, src0)) {
+        if (src0t == GGML_TYPE_Q6_K && src1t == GGML_TYPE_F32 && !mm_type_blocked("q6_K") && !use_flat_gemv_for_large_m_q6_K(backend_ctx, src0)) {
             ggml_cl_mul_mat_q6_K_f32_adreno(backend, src0, src1, dst);
             return;
         }
 
         // q5_K x fp32
         if (src0t == GGML_TYPE_Q5_K && src1t == GGML_TYPE_F32 &&
+            !mm_type_blocked("q5_K") &&
             enable_adreno_trans_weight_q5_K(backend_ctx, src0)) {
             ggml_cl_mul_mat_q5_K_f32_adreno(backend, src0, src1, dst);
             return;
