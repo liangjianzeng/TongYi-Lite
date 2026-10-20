@@ -1,0 +1,5 @@
+tool=notrace
+git=ef5489ca
+cc=/home/jianzengliang/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-aarch64/bin/clang
+flags=-O3 -DNDEBUG -shared
+built=2026-10-20T16:31:42+08:00
