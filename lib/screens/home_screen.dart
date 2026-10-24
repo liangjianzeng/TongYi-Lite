@@ -720,37 +720,42 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // harness 布局：左栏（能力/配置入口）+ 主区（AppBar + 消息 + composer）。
     // 面板从左滑入、只盖主区（含 AppBar），rail 恒可见。
     return Scaffold(
-      body: RailPanelHost(
-        controller: _railPanel,
-        pages: _railPages(),
-        rail: _buildRail(slots),
-        child: Scaffold(
-          appBar: AppBar(
-            // 紧凑标题栏：44px（默认 56）。导航全部在左栏（设计稿无 leading），
-            // 顶栏只承担状态呈现（模型状态 chip）。
-            toolbarHeight: 44,
-            title: const Text(
-              'TongYi-Lite',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            actions: [
-              _buildModelStatusChip(modelState, isGenerating),
-            ],
-          ),
-          body: Column(
-            children: [
-              // ---- Inline model status (only shows loading/unloading/error progress) ----
-              _buildInlineProgress(modelState, isGenerating),
-
-              Expanded(
-                child: _initiallyLoaded
-                    ? _buildMessagesList()
-                    : const Center(child: CircularProgressIndicator()),
+      // 设计稿结构：状态栏条带 = 应用底色，左栏/画布从状态栏下开始——
+      // 左栏背景不许捅进状态栏（此前 SafeArea 放在栏内部只挪了内容）。
+      body: SafeArea(
+        bottom: false,
+        child: RailPanelHost(
+          controller: _railPanel,
+          pages: _railPages(),
+          rail: _buildRail(slots),
+          child: Scaffold(
+            appBar: AppBar(
+              // 紧凑标题栏：44px（默认 56）。导航全部在左栏（设计稿无 leading），
+              // 顶栏只承担状态呈现（模型状态 chip）。
+              toolbarHeight: 44,
+              title: const Text(
+                'TongYi-Lite',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
               ),
+              actions: [
+                _buildModelStatusChip(modelState, isGenerating),
+              ],
+            ),
+            body: Column(
+              children: [
+                // ---- Inline model status (only shows loading/unloading/error progress) ----
+                _buildInlineProgress(modelState, isGenerating),
 
-              // 附件预览已并入 composer 卡片（chips 行，可单个删除）。
-              _buildInputBar(isGenerating, modelState),
-            ],
+                Expanded(
+                  child: _initiallyLoaded
+                      ? _buildMessagesList()
+                      : const Center(child: CircularProgressIndicator()),
+                ),
+
+                // 附件预览已并入 composer 卡片（chips 行，可单个删除）。
+                _buildInputBar(isGenerating, modelState),
+              ],
+            ),
           ),
         ),
       ),
@@ -2027,7 +2032,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // 生成中状态细条：执行进度一眼可见 + 停止兜底入口。
         _buildTurnStatusStrip(isGenerating),
         Container(
-          margin: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+          margin: EdgeInsets.fromLTRB(
+              8, 4, 8, 8 + MediaQuery.of(context).padding.bottom),
           padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           decoration: BoxDecoration(
             // 设计稿形态：白底 + 细描边（不是灰底实心卡），发消息区要“轻”。

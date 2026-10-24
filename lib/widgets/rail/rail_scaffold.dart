@@ -341,7 +341,8 @@ class _RailPanelHostState extends State<RailPanelHost> {
       {required bool open}) {
     final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(builder: (context, constraints) {
-      final width = (constraints.maxWidth - 8).clamp(240.0, 320.0);
+      // 设计稿：面板宽 ≈ 88% 主区宽（296/336），右侧留出对话画布一线。
+      final width = (constraints.maxWidth * 0.88).clamp(240.0, 300.0);
       return Material(
         color: scheme.surface,
         elevation: 10,
@@ -352,11 +353,8 @@ class _RailPanelHostState extends State<RailPanelHost> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 系统安全区：外层无 AppBar，body 顶到屏幕上沿——不补
-              // padding.top 面板标题会顶进状态栏；bottom 是手势条。
-              SizedBox(height: MediaQuery.of(context).padding.top),
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 8, 6),
+                padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
                 child: Row(
                   children: [
                     Expanded(
@@ -380,7 +378,6 @@ class _RailPanelHostState extends State<RailPanelHost> {
               ),
               Divider(height: 1, color: scheme.outlineVariant),
               Expanded(child: Builder(builder: spec.build)),
-              SizedBox(height: MediaQuery.of(context).padding.bottom),
             ],
           ),
         ),
