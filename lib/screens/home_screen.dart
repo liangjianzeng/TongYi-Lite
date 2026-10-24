@@ -3208,12 +3208,14 @@ class _ModelStatusSheet extends StatelessWidget {
                     onTap: onGoToSettings),
                 const SizedBox(height: 8),
               ],
-              _sheetButton(context,
-                  label: '关闭',
-                  icon: null,
-                  color: null,
-                  onTap: () => Navigator.pop(context),
-                  isDefault: true),
+              // 内嵌左栏面板时无「关闭」：面板头部自带 ×（避免双关闭入口）。
+              if (!embedded)
+                _sheetButton(context,
+                    label: '关闭',
+                    icon: null,
+                    color: null,
+                    onTap: () => Navigator.pop(context),
+                    isDefault: true),
             ],
           ),
         ),
@@ -3461,8 +3463,11 @@ class _MemoryPanelState extends State<_MemoryPanel> {
             ],
           ),
           const SizedBox(height: 6),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          // Wrap 而非 Row+spaceBetween：左栏面板约 300dp 宽，两段文字
+          // 同行放不下会 RenderFlex overflow（真机 4.7px 实锤）。
+          Wrap(
+            spacing: 12,
+            runSpacing: 2,
             children: [
               Text(
                 'llama.cpp 合计: ${_gb(modelMB + kvCache)} GB',

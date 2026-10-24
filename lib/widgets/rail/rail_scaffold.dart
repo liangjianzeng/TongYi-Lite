@@ -341,8 +341,11 @@ class _RailPanelHostState extends State<RailPanelHost> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // 系统安全区：外层无 AppBar，body 顶到屏幕上沿——不补
+              // padding.top 面板标题会顶进状态栏；bottom 是手势条。
+              SizedBox(height: MediaQuery.of(context).padding.top),
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 10, 8, 6),
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 6),
                 child: Row(
                   children: [
                     Expanded(
@@ -360,6 +363,7 @@ class _RailPanelHostState extends State<RailPanelHost> {
               ),
               Divider(height: 1, color: scheme.outlineVariant),
               Expanded(child: Builder(builder: spec.build)),
+              SizedBox(height: MediaQuery.of(context).padding.bottom),
             ],
           ),
         ),
