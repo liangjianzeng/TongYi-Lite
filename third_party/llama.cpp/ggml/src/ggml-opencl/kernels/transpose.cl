@@ -1,4 +1,7 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
+// image3d_t writes need this enabled; the Adreno 650 (K40) vendor compiler rejects them
+// otherwise and the model fails to load. Same fix as flash_attn_repack.cl.
+#pragma OPENCL EXTENSION cl_khr_3d_image_writes : enable
 
 // 16-bit transpose, loading/storing a 4x4 tile of elements
 kernel void kernel_transpose_16(

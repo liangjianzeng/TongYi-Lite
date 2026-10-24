@@ -668,7 +668,17 @@ int main(int argc, char ** argv) {
     }
 
     auto cparams = llama_context_default_params();
-    cparams.n_ctx = 4096;
+    // n_ctx was hardcoded at 4096, which makes the KV cache a single ~1 GiB OpenCL
+    // buffer on wide MoE models (Ling 3.0 Tiny Q4_0: 1044893696 B). The vendor Adreno
+    // 650 driver returns CL_OUT_OF_RESOURCES (err=-5) for that single allocation even
+    // with 4.5 GiB MemAvailable, so the model never loads and the MoE gate can never
+    // be observed. E2E_NCTX sizes it down; E2E_KVQ=1 uses q8_0 KV (halves it again).
+    // Decode throughput is unaffected by n_ctx, so the tok/s comparison stays valid.
+    { const char * e = getenv("E2E_NCTX"); cparams.n_ctx = e ? atoi(e) : 4096; }
+    if (getenv("E2E_KVQ") && getenv("E2E_KVQ")[0] == '1') {
+        cparams.type_k = GGML_TYPE_Q8_0;
+        cparams.type_v = GGML_TYPE_Q8_0;
+    }
     cparams.cb_eval = e2e_cb_eval;
     int ubatch = 1;
     if (const char * u = getenv("GGML_E2E_UBATCH")) ubatch = atoi(u);
