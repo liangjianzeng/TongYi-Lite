@@ -732,6 +732,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             appBar: AppBar(
               // 紧凑标题栏：44px（默认 56）。导航全部在左栏（设计稿无 leading），
               // 顶栏只承担状态呈现（模型状态 chip）。
+              // 常驻底部分界线（设计稿 border-bottom）：状态栏条带/顶栏/消息区
+              // 同底色，没这条线三者融成一片。
+              shape: Border(
+                bottom: BorderSide(
+                    color: Theme.of(context).colorScheme.outlineVariant),
+              ),
               toolbarHeight: 44,
               title: const Text(
                 'TongYi-Lite',
