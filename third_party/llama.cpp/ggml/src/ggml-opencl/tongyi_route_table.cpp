@@ -94,7 +94,8 @@ bool moe_admission_gate(const RouteQuery & q, const RouteContext & ctx, const ch
 }
 
 // 镜像 moe_use_dense_loop（:9728）：env 折算在 ctx。
-static bool legacy_dense_loop_type(RType t, const RouteContext & ctx) {
+bool dense_loop_type(RType t, const RouteContext & ctx) {
+// [R2 2026-10-25] 公有导出：ggml-opencl 侧 moe_use_dense_loop 薄包装委托到这里。
     if (ctx.dense_off)   return false;
     if (ctx.dense_force) return true;
     if (ctx.vendor_diag) return false;
@@ -179,7 +180,7 @@ static RouteResult make_cpu(const RouteSpec * attempted, const char * gate, cons
 
 RouteResult resolve_admission(const RouteQuery & q, const RouteContext & ctx) {
     // 1) dense 分支：moe_use_dense_loop(type) && type∈{Q4_0,Q4_K}（:10354-10355）
-    if ((q.type == RTYPE_Q4_0 || q.type == RTYPE_Q4_K) && legacy_dense_loop_type(q.type, ctx)) {
+    if ((q.type == RTYPE_Q4_0 || q.type == RTYPE_Q4_K) && dense_loop_type(q.type, ctx)) {
         const RouteSpec * s = find_spec(q.type, DENSE_LOOP);
         const char * why = nullptr;
         if (dense_static_ok(q.type, q, &why)) {
@@ -189,15 +190,21 @@ RouteResult resolve_admission(const RouteQuery & q, const RouteContext & ctx) {
         // legacy：dense 分支 shape 失败直接 return false，不落 vendor（:10383）
         return make_cpu(s, why, "dense branch refused -> supports_op false");
     }
-    // 2) q3_K batched 分支（:10396-10405）：BATCHED_MOE env + E>1 + 名字/代际 + K%256/M%128
+    // 2) q3_K batched 分支（:10396-10405）——准入门集与 legacy 逐字对齐：
+    //    srcs + contig + E>1 + 名字/代际 + K%256/M%128。**不含 view/cols**（那是派发
+    //    侧 gate 6/8 的检查；准入放行 view 未对齐张量时派发侧再拒 ⇒ q3_K 无 dense
+    //    兜底 = GGML_ABORT 契约风险，由测试族 A 的 hazard pin 显式记录）。
     if (q.type == RTYPE_Q3_K && !ctx.batched_off) {
         const RouteSpec * s = find_spec(RTYPE_Q3_K, BATCHED_MOE);
         const char * why = nullptr;
-        if (q.E > 1 && batched_static_ok(RTYPE_Q3_K, q, ctx, &why)) {
+        const bool ok = q.src1_f32 && q.src2_i32 && q.contiguous0 && q.contiguous1 &&
+                        q.E > 1 && moe_admission_gate(q, ctx, &why) &&
+                        q.K % 256 == 0 && q.M % 128 == 0;
+        if (ok) {
             RouteResult r; r.spec = s; r.attempted = s; r.refuse_gate = nullptr; r.refuse_detail = nullptr;
             return r;
         }
-        return make_cpu(s, why ? why : "e_le_1", "q3_K branch refused");
+        return make_cpu(s, why ? why : (q.E <= 1 ? "e_le_1" : "shape/srcs"), "q3_K branch refused");
     }
     // 3) vendor 诊断分支（:10409-10421）：仅 GGML_OPENCL_MUL_MAT_ID=1
     if (ctx.vendor_diag &&
@@ -215,7 +222,7 @@ RouteResult resolve(const RouteQuery & q, const RouteContext & ctx) {
         return make_cpu(nullptr, "op", "R1 只接管 MUL_MAT_ID");
     }
     if (q.type == RTYPE_Q4_0 || q.type == RTYPE_Q4_K) {
-        if (legacy_dense_loop_type(q.type, ctx)) {
+        if (dense_loop_type(q.type, ctx)) {
             // 派发器序：batched 先试（BATCHED_MOE env 门），静态拒 → dense-loop（:29685-29690）
             const RouteSpec * bs = find_spec(q.type, BATCHED_MOE);
             if (!ctx.batched_off && bs) {

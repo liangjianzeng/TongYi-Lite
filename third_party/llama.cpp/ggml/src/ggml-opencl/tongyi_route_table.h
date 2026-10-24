@@ -154,6 +154,9 @@ void dense_slice_sizes(RType t, int K, int M, size_t *s_q, size_t *s_d, size_t *
 // legacy use_adreno_moe_kernels 的表内等价（名字+代际+E17 三合一门）
 bool moe_admission_gate(const RouteQuery &q, const RouteContext &ctx, const char **why);
 
+// legacy moe_use_dense_loop 的表内等价（env 折算进 ctx；R2 起是唯一实现）
+bool dense_loop_type(RType t, const RouteContext &ctx);
+
 const RouteSpec *     specs();
 int                   spec_count();
 const KnownBadKernel *known_bad();

@@ -193,7 +193,11 @@ static void family_a() {
         q.n_used = 8; q.n_tok = 1; q.name = names[ni];
         q.src1_f32 = true; q.src2_i32 = true;
         q.contiguous0 = true; q.contiguous1 = true;
-        q.is_view = false; q.view_slot_aligned = false;
+        // [R2] view 维度入采样：准入语义不看 view（legacy supports_op 无此检查），
+        // 派发语义看（gate 6）。三态轮转。
+        const int vw = (int)((ti + ki + mi + gi + ei) % 3);
+        q.is_view = vw != 0;
+        q.view_slot_aligned = vw != 2;
         q.align_bytes = 128;
         RouteContext ctx = {};
         ctx.gen = gens[gi]; ctx.compiler = comps[ci];
@@ -222,10 +226,17 @@ static void family_a() {
         }
         ++disp_ok;
 
-        // G-725 契约：q3_K 的 supports_op 准入 == 派发 batched 静态门（漂移即 ABORT 风险）
+        // G-725 契约：q3_K 的 supports_op 准入 == 派发 batched 静态门（漂移即 ABORT 风险）。
+        // [R2] 契约仅在 view 对齐/无 view 时成立；准入放行未对齐 view 而派发拒 = 已知
+        // GGML_ABORT 契约风险（hazard pin，生产中 slot view 恒对齐）。
         if (q.type == RTYPE_Q3_K) {
-            const bool eq = legacy_adm == ((!ctx.batched_off) && legacy_batched_static(q, ctx));
-            CHECK(eq, "A-q3-contract K=%d M=%d adm=%d", q.K, q.M, legacy_adm);
+            if (!q.is_view || q.view_slot_aligned) {
+                const bool eq = legacy_adm == ((!ctx.batched_off) && legacy_batched_static(q, ctx));
+                CHECK(eq, "A-q3-contract K=%d M=%d adm=%d", q.K, q.M, legacy_adm);
+            } else if (legacy_adm && !ctx.batched_off) {
+                CHECK(!legacy_batched_static(q, ctx),
+                      "A-q3-hazard 未对齐 view 派发应拒（否则无 hazard）");
+            }
             ++q3_contract;
         }
         ++cases;
@@ -339,8 +350,10 @@ static void family_c() {
         CHECK(resolve_admission(q, c).admitted(), "C3b K=256 q4_K 准入");
         q.type = RTYPE_Q3_K; q.E = 1;
         CHECK(!resolve_admission(q, c).admitted(), "C3c q3_K E=1 拒（supports_op:10398）");
+        // [R2 精化] cols 是派发门（gate 8）不是准入门：准入放行、派发拒
         q.E = 8; q.n_used = (1 << 20); q.n_tok = 2;
-        CHECK(!resolve_admission(q, c).admitted(), "C3d n_cols>2^20 拒");
+        CHECK(resolve_admission(q, c).admitted(), "C3d 准入无 cols 检查（legacy 语义）");
+        CHECK(!resolve(q, c).admitted(), "C3d' 派发拒 n_cols>2^20");
         q.n_used = 8; q.n_tok = 1;
 
         q.type = RTYPE_Q4_K; q.is_view = true; q.view_slot_aligned = true;

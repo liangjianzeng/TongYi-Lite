@@ -9667,6 +9667,29 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
     return threashold_ok;
 }
 
+// [tongyi R1 2026-10-25] 路由表上下文（env 一次性快照，逐字对应旧门读法）。
+static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_context * backend_ctx) {
+    static const int  a7x_mode   = [] { const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");     return e ? ((e[0] == '0') ? 0 : 1) : -1; }();
+    static const bool e17_off    = [] { const char * e = getenv("GGML_OPENCL_ADRENO_E17_QUIRKS"); return e && e[0] == '0'; }();
+    static const bool vdiag      = [] { const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");        return e && e[0] == '1'; }();
+    static const bool dense_off  = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '0'; }();
+    static const bool dense_on   = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '1'; }();
+    static const bool batched_off= [] { const char * e = getenv("GGML_OPENCL_BATCHED_MOE");       return e && e[0] == '0'; }();
+    tongyi::RouteContext c = {};
+    c.gen = backend_ctx ? (tongyi::RGen)backend_ctx->adreno_gen : tongyi::RGEN_UNKNOWN;
+    c.compiler = (backend_ctx && backend_ctx->gpu_family == GPU_FAMILY::ADRENO)
+                     ? (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type
+                     : tongyi::RCOMP_UNKNOWN;
+    c.is_mesa = false;
+    c.moe_a7x_mode = a7x_mode;
+    c.e17_quirks_off = e17_off;
+    c.vendor_diag = vdiag;
+    c.dense_off = dense_off;
+    c.dense_force = dense_on;
+    c.batched_off = batched_off;
+    return c;
+}
+
 static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backend_ctx) {
     if (!backend_ctx || backend_ctx->gpu_family != GPU_FAMILY::ADRENO ||
         backend_ctx->adreno_cl_compiler_version.type != ADRENO_CL_COMPILER_TYPE::E17) {
@@ -9677,35 +9700,15 @@ static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backen
 }
 
 inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
-    // A7X is in by default: the batched-MoE set_tensor path packs weights itself and never
-    // reaches the vendor *_trans4_ns repack (Adreno 740 measured 1.4 -> 2.9 tok/s on Ling).
-    // GGML_OPENCL_MOE_FORCE_A7X=0 restores the old exclusion; =1 also lets A6x in (probe),
-    // unset keeps A6x out until a K40 leg validates it.
-    static const int a7x_moe_mode = [] {
-        const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");
-        return e ? ((e[0] == '0') ? 0 : 1) : -1;
-    }();
-    // The *_trans4_ns repack aliases a private ushort8 through a uchar* and some A6x/A7x
-    // compilers miscompile it, but that kernel is not on the batched-MoE path (see above).
-    if (backend_ctx) {
-        const auto gen = backend_ctx->adreno_gen;
-        if (gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN) {
-            return false;
-        }
-        if (gen == ADRENO_GPU_GEN::A7X && a7x_moe_mode == 0) {
-            return false;
-        }
-        if (gen == ADRENO_GPU_GEN::A6X && a7x_moe_mode != 1) {
-            return false;
-        }
-    }
-
-    if (adreno_e17_compiler_quirks(backend_ctx)) {
-        return false;
-    }
-
-    int ne01 = tensor->ne[1];
-    return (((strstr(tensor->name, "ffn") != NULL) && (strstr(tensor->name, "exps") != NULL)) || (strstr(tensor->name, "as") != NULL)) && (ne01 % 32 == 0);
+    // [tongyi R2 2026-10-25] 薄包装：判定逻辑唯一实现 = 路由表 moe_admission_gate
+    //（名字+代际三态+E17+ne01%32；等价性由 tongyi_route_table_test 18.9 万 case 对拍
+    // 钉死。本函数保留原签名，set_tensor/batched/准入各调用点零改动翻转到表）。
+    const char * why = nullptr;
+    tongyi::RouteQuery q = {};
+    q.op = tongyi::ROUTE_MUL_MAT_ID;
+    q.M = (int)tensor->ne[1];
+    q.name = tensor->name;
+    return tongyi::moe_admission_gate(q, tongyi_route_context(backend_ctx), &why);
 }
 
 // [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
@@ -9721,13 +9724,7 @@ inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ct
 // q/d(/dm/s) are created lazily at first use and cached on the parent extra.
 // Default ON. GGML_OPENCL_DENSE_MOE=0 falls back to CPU-only MUL_MAT_ID
 // (weights land in the CPU buffer).
-inline bool dense_moe_loop_enabled() {
-    static const bool v = [] {
-        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
-        return !e || e[0] != '0';
-    }();
-    return v;
-}
+// [tongyi R2 2026-10-25] dense_moe_loop_enabled() 已并入 moe_use_dense_loop 的表委托（唯一实现 = 路由表）。
 
 // [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
 // kernels (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830
@@ -9743,18 +9740,18 @@ inline bool dense_moe_loop_enabled() {
 //   GGML_OPENCL_DENSE_MOE=0  -> dense-loop fully disabled (MoE -> CPU)
 //   GGML_OPENCL_MUL_MAT_ID=1 -> force vendor MoE kernels (diagnostics)
 inline bool moe_use_dense_loop(ggml_type type) {
-    if (!dense_moe_loop_enabled()) return false;
-    static const bool force = [] {
-        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
-        return e && e[0] == '1';
+    // [tongyi R2 2026-10-25] 薄包装：唯一实现 = 路由表 dense_loop_type（env 折算进 ctx；
+    // dense_off/dense_force/vendor_diag 三态语义与 legacy 逐字等价，测试对拍钉死）。
+    static const tongyi::RouteContext c = [] {
+        const char * e   = getenv("GGML_OPENCL_DENSE_MOE");
+        const char * v   = getenv("GGML_OPENCL_MUL_MAT_ID");
+        tongyi::RouteContext x = {};
+        x.dense_off   = e && e[0] == '0';
+        x.dense_force = e && e[0] == '1';
+        x.vendor_diag = v && v[0] == '1';
+        return x;
     }();
-    if (force) return true;
-    static const bool vendor_diag = [] {
-        const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
-        return e && e[0] == '1';
-    }();
-    if (vendor_diag) return false; // diagnostics: let vendor kernels run
-    return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q4_0;
+    return tongyi::dense_loop_type((tongyi::RType)type, c);
 }
 
 // MoE expert weight tensors are the only 3D MUL_MAT weights (ne02 = n_expert).
@@ -10352,92 +10349,32 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                 return op->src[1]->type == GGML_TYPE_F32;
             }
             return false;
-        case GGML_OP_MUL_MAT_ID:
-            // [dspark 2026-10-13] The vendor Adreno MoE kernels are numerically
-            // broken on Adreno 830 (SM8750, OpenCL 0800.71 / E031.47.18.49):
-            // llama.cpp's own test-backend-ops fails for q4_0 (ERR ~0.4),
-            // q4_K (ERR ~0.9 + NaN on large shapes) and mxfp4 (GGML_ABORT
-            // crash), on BOTH our vendored b11267 and upstream master
-            // 9d7d504. Real-model symptom: decode emits one fixed broken
-            // token (id 127) -> empty output.
-            //
-            // Instead, the dense-loop path runs one VALIDATED dense GEMV per
-            // selected expert (weights stored per-layer in the dense 2D
-            // noshuffle layout by set_tensor; accumulation via kernel_add_row).
-            // Admit it only when the per-expert slice sizes respect the
-            // sub-buffer alignment and the accumulatioin constraints hold;
-            // otherwise fall back to CPU (same proven GPU-dense + CPU-expert
-            // split as before).
-            if (moe_use_dense_loop(op->src[0]->type) &&
-                (op->src[0]->type == GGML_TYPE_Q4_0 || op->src[0]->type == GGML_TYPE_Q4_K) &&
-                op->src[1]->type == GGML_TYPE_F32 &&
-                op->src[2]->type == GGML_TYPE_I32 &&
-                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
-                const int N = (int)op->src[0]->ne[1];
-                const int K = (int)op->src[0]->ne[0];
-                const size_t align = backend_ctx->alignment;
-                size_t s_q = 0, s_d = 0, s_dm = 0, s_s = 0;
-                bool shape_ok = false;
-                if (op->src[0]->type == GGML_TYPE_Q4_0) {
-                    shape_ok = (K % 32 == 0);
-                    s_q = (size_t)N * (K/4)  * 2;
-                    s_d = (size_t)N * (K/32) * 2;
-                } else {
-                    shape_ok = (K % 256 == 0);
-                    s_q  = (size_t)N * (K/4)   * 2;
-                    s_d  = (size_t)N * (K/256) * 2;
-                    s_dm = (size_t)N * (K/256) * 2;
-                    s_s  = (size_t)N * (K/256) * 12;
-                }
-                // N%4: kernel_add_row works on float4; slice sizes must be
-                // sub-buffer-creatable at expert boundaries.
-                if (shape_ok && N % 4 == 0 &&
-                    s_q % align == 0 && s_d % align == 0 &&
-                    (s_dm == 0 || s_dm % align == 0) &&
-                    (s_s == 0 || s_s % align == 0)) {
-                    return true;
-                }
+        case GGML_OP_MUL_MAT_ID: {
+            // [tongyi R2 2026-10-25] 准入判定唯一实现 = 路由表 resolve_admission
+            //（dense 分支/q3_K batched 分支/vendor 诊断分支全部并入表行；语义与 legacy
+            // 逐字等价，tongyi_route_table_test 族 A 18.9 万 case 对拍钉死。准入门集
+            // 不含 view/cols —— 与 legacy supports_op 一致，那是派发侧 gate 6/8）。
+            if (!op->src[0] || !op->src[1]) {
                 return false;
             }
-            // [dspark 2026-10-14] q3_K batched-MoE (#28): batched-only GPU path
-            // (no dense q3_K GEMV). Gates mirror set_tensor's Q3_K branch and
-            // ggml_cl_mul_mat_id_batched exactly — a tensor admitted here is
-            // guaranteed to dispatch. The se planes are standalone cl_buffers
-            // (not subbuffers), so only the shape gates apply.
-            // GGML_OPENCL_BATCHED_MOE=0 must reject q3_K here (CPU fallback):
-            // the compute path has no dense q3_K route and would abort.
-            static const bool q3k_batched_moe_enabled = [] {
-                const char * e = getenv("GGML_OPENCL_BATCHED_MOE");
-                return !e || e[0] != '0';
-            }();
-            if (q3k_batched_moe_enabled &&
-                op->src[0]->type == GGML_TYPE_Q3_K &&
-                op->src[0]->ne[2] > 1 &&   // E==1: set_tensor skips packing -> must stay off-GPU
-                op->src[1]->type == GGML_TYPE_F32 &&
-                op->src[2]->type == GGML_TYPE_I32 &&
-                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
-                use_adreno_moe_kernels(backend_ctx, op->src[0]) &&
-                (op->src[0]->ne[0] % 256 == 0) && (op->src[0]->ne[1] % 128 == 0)) {
-                return true;
-            }
-            // Vendor single-dispatch MoE kernels (q4_0/q8_0/mxfp4): broken on
-            // Adreno 830 (see moe_use_dense_loop notes) — diagnostics only via
-            // GGML_OPENCL_MUL_MAT_ID=1.
-            {
-                static const bool mul_mat_id_ocl_enabled = [] {
-                    const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
-                    return e && e[0] == '1';
-                }();
-                if (mul_mat_id_ocl_enabled &&
-                    (op->src[0]->type == GGML_TYPE_Q4_0 ||
-                     op->src[0]->type == GGML_TYPE_Q8_0 ||
-                     op->src[0]->type == GGML_TYPE_MXFP4) &&
-                    op->src[1]->type == GGML_TYPE_F32 &&
-                    ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
-                    return true;
-                }
-            }
-            return false;
+            tongyi::RouteQuery rq = {};
+            rq.op = tongyi::ROUTE_MUL_MAT_ID;
+            rq.type = (tongyi::RType)op->src[0]->type;
+            rq.K = (int)op->src[0]->ne[0];
+            rq.M = (int)op->src[0]->ne[1];
+            rq.E = (int)op->src[0]->ne[2];
+            rq.n_used = op->src[2] ? (int)op->src[2]->ne[0] : 0;
+            rq.n_tok  = op->src[2] ? (int)op->src[2]->ne[1] : 0;
+            rq.name = op->src[0]->name;
+            rq.src1_f32 = op->src[1]->type == GGML_TYPE_F32;
+            rq.src2_i32 = op->src[2] && op->src[2]->type == GGML_TYPE_I32;
+            rq.contiguous0 = ggml_is_contiguous(op->src[0]);
+            rq.contiguous1 = ggml_is_contiguous(op->src[1]);
+            rq.is_view = false;   // 准入语义不看 view（legacy 同）
+            rq.view_slot_aligned = false;
+            rq.align_bytes = backend_ctx ? backend_ctx->alignment : 0;
+            return tongyi::resolve_admission(rq, tongyi_route_context(backend_ctx)).admitted();
+        }
         case GGML_OP_RESHAPE:
         case GGML_OP_VIEW:
         case GGML_OP_PERMUTE:
@@ -25059,28 +24996,6 @@ static void ggml_cl_mmid_gate_fail(int gate_id, const char * gate,
     }
 }
 
-// [tongyi R1 2026-10-25] 路由表上下文（env 一次性快照，逐字对应旧门读法）。
-static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_context * backend_ctx) {
-    static const int  a7x_mode   = [] { const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");     return e ? ((e[0] == '0') ? 0 : 1) : -1; }();
-    static const bool e17_off    = [] { const char * e = getenv("GGML_OPENCL_ADRENO_E17_QUIRKS"); return e && e[0] == '0'; }();
-    static const bool vdiag      = [] { const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");        return e && e[0] == '1'; }();
-    static const bool dense_off  = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '0'; }();
-    static const bool dense_on   = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '1'; }();
-    static const bool batched_off= [] { const char * e = getenv("GGML_OPENCL_BATCHED_MOE");       return e && e[0] == '0'; }();
-    tongyi::RouteContext c = {};
-    c.gen = backend_ctx ? (tongyi::RGen)backend_ctx->adreno_gen : tongyi::RGEN_UNKNOWN;
-    c.compiler = (backend_ctx && backend_ctx->gpu_family == GPU_FAMILY::ADRENO)
-                     ? (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type
-                     : tongyi::RCOMP_UNKNOWN;
-    c.is_mesa = false;
-    c.moe_a7x_mode = a7x_mode;
-    c.e17_quirks_off = e17_off;
-    c.vendor_diag = vdiag;
-    c.dense_off = dense_off;
-    c.dense_force = dense_on;
-    c.batched_off = batched_off;
-    return c;
-}
 
 // [tongyi R1 2026-10-25] 表驱动路由记账（行为零变化）：查表一次、限流打一行决策日志；
 // 控制流完全不变——下面的旧门仍是权威，R2 才翻转（等价性由 tongyi_route_table_test
