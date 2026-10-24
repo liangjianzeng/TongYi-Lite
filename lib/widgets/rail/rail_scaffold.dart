@@ -142,16 +142,27 @@ class _RailLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 设计稿 logo：紫→蓝对角渐变（纯色太闷）。
     final logo = Material(
-      color: Colors.indigo,
+      color: Colors.transparent,
       borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: const SizedBox(
-          width: 34,
-          height: 34,
-          child: Icon(Icons.auto_awesome, size: 18, color: Colors.white),
+      child: Ink(
+        decoration: const BoxDecoration(
+          borderRadius: BorderRadius.all(Radius.circular(12)),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF7C5CFC), Color(0xFF5B8DEF)],
+          ),
+        ),
+        child: InkWell(
+          borderRadius: const BorderRadius.all(Radius.circular(12)),
+          onTap: onTap,
+          child: const SizedBox(
+            width: 34,
+            height: 34,
+            child: Icon(Icons.auto_awesome, size: 18, color: Colors.white),
+          ),
         ),
       ),
     );
@@ -353,10 +364,16 @@ class _RailPanelHostState extends State<RailPanelHost> {
                           style: const TextStyle(
                               fontSize: 16, fontWeight: FontWeight.w600)),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.close, size: 20),
-                      tooltip: '关闭',
-                      onPressed: widget.controller.close,
+                    SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: IconButton(
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.close, size: 19),
+                        tooltip: '关闭',
+                        onPressed: widget.controller.close,
+                      ),
                     ),
                   ],
                 ),

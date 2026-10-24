@@ -2030,8 +2030,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           margin: const EdgeInsets.fromLTRB(8, 4, 8, 8),
           padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(20),
+            // 设计稿形态：白底 + 细描边（不是灰底实心卡），发消息区要“轻”。
+            color: Theme.of(context).colorScheme.surface,
+            borderRadius: BorderRadius.circular(22),
+            border:
+                Border.all(color: Theme.of(context).colorScheme.outlineVariant),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,

@@ -115,10 +115,17 @@ class ChatBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // 用户气泡定值（设计稿）：不随 M3 明暗档漂移——浅色饱和紫+白字，
+    // 暗色亮紫+深字（primary 在暗色档是浅淡紫，和设计稿差一截）。
+    final bool dark = theme.brightness == Brightness.dark;
+    final Color userBubbleColor =
+        dark ? const Color(0xFF9B8CFF) : const Color(0xFF6D4FE0);
+    final Color userBubbleFg = dark ? Colors.black87 : Colors.white;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
-        mainAxisAlignment: _isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment:
+            _isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!showAvatar && !_isUser) const SizedBox(width: 40),
@@ -126,13 +133,15 @@ class ChatBubble extends StatelessWidget {
             CircleAvatar(
               radius: 16,
               backgroundColor: theme.colorScheme.primaryContainer,
-              child: Icon(Icons.auto_awesome, size: 16, color: theme.colorScheme.onPrimaryContainer),
+              child: Icon(Icons.auto_awesome,
+                  size: 16, color: theme.colorScheme.onPrimaryContainer),
             ),
             const SizedBox(width: 8),
           ],
           Flexible(
             child: Column(
-              crossAxisAlignment: _isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  _isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 Container(
                   constraints: const BoxConstraints(maxWidth: 600),
@@ -143,9 +152,10 @@ class ChatBubble extends StatelessWidget {
                   margin: const EdgeInsets.symmetric(vertical: 4),
                   decoration: BoxDecoration(
                     color: _isUser
-                        ? theme.colorScheme.primary
+                        ? userBubbleColor
                         : (_isToolActivity
-                            ? theme.colorScheme.tertiaryContainer.withValues(alpha: 0.5)
+                            ? theme.colorScheme.tertiaryContainer
+                                .withValues(alpha: 0.5)
                             : theme.colorScheme.surfaceContainerHighest),
                     borderRadius: BorderRadius.circular(16),
                   ),
@@ -160,14 +170,14 @@ class ChatBubble extends StatelessWidget {
                             Icon(Icons.mic,
                                 size: 14,
                                 color: _isUser
-                                    ? theme.colorScheme.onPrimary
+                                    ? userBubbleFg
                                     : theme.colorScheme.onSurfaceVariant),
                             const SizedBox(width: 4),
                             Text(
                               '语音',
                               style: TextStyle(
                                 color: _isUser
-                                    ? theme.colorScheme.onPrimary
+                                    ? userBubbleFg
                                     : theme.colorScheme.onSurfaceVariant,
                                 fontSize: 12,
                               ),
@@ -182,15 +192,17 @@ class ChatBubble extends StatelessWidget {
                         GestureDetector(
                           onTap: () => showImagePreview(
                             context,
-                            imagePaths: imagePaths != null && imagePaths!.isNotEmpty
-                                ? imagePaths!
-                                : [imagePath!],
+                            imagePaths:
+                                imagePaths != null && imagePaths!.isNotEmpty
+                                    ? imagePaths!
+                                    : [imagePath!],
                             initialIndex: 0,
                           ),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(8),
                             child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 300, maxHeight: 300),
+                              constraints: const BoxConstraints(
+                                  maxWidth: 300, maxHeight: 300),
                               child: Image.file(
                                 File(imagePath!),
                                 fit: BoxFit.cover,
@@ -304,7 +316,7 @@ class ChatBubble extends StatelessWidget {
                             Text(
                               content,
                               style: TextStyle(
-                                color: theme.colorScheme.onPrimary,
+                                color: userBubbleFg,
                                 fontSize: 15,
                                 height: 1.5,
                               ),
@@ -355,7 +367,8 @@ class ChatBubble extends StatelessWidget {
                                 h3: theme.textTheme.titleSmall
                                     ?.copyWith(fontWeight: FontWeight.w700),
                                 codeblockDecoration: BoxDecoration(
-                                  color: theme.colorScheme.surfaceContainerHighest
+                                  color: theme
+                                      .colorScheme.surfaceContainerHighest
                                       .withValues(alpha: 0.7),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
@@ -379,7 +392,9 @@ class ChatBubble extends StatelessWidget {
                             height: 16,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: _isUser ? Colors.white : theme.colorScheme.primary,
+                              color: _isUser
+                                  ? userBubbleFg
+                                  : theme.colorScheme.primary,
                             ),
                           ),
                         ],
@@ -387,114 +402,119 @@ class ChatBubble extends StatelessWidget {
                     ],
                   ),
                 ),
-                         Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _formatTime(timestamp),
-                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                    ),
-                    if (!_isUser && inferenceStats != null) ...[
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          _formatStats(inferenceStats!),
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.grey.shade500,
-                            fontFeatures: const [FontFeature.tabularFigures()],
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _formatTime(timestamp),
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.grey.shade500),
+                      ),
+                      if (!_isUser && inferenceStats != null) ...[
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            _formatStats(inferenceStats!),
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey.shade500,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures()
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                    ],
-                    // 用户消息同样可复制：长文/提示词常需复用，与回复复制同款式。
-                    if (_isUser && content.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: () async {
-                          await Clipboard.setData(ClipboardData(text: content));
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('已复制消息内容'),
-                                duration: Duration(seconds: 1),
-                              ),
-                            );
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.all(2),
-                          child: Icon(
-                            Icons.content_copy,
-                            size: 15,
-                            color: Colors.grey.shade400,
-                          ),
-                        ),
-                      ),
-                    ],
-                    if (!_isUser && content.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: () async {
-                          await Clipboard.setData(ClipboardData(text: content));
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('已复制回复内容'),
-                                duration: Duration(seconds: 1),
-                              ),
-                            );
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.all(2),
-                          child: Icon(
-                            Icons.content_copy,
-                            size: 15,
-                            color: Colors.grey.shade400,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      // 转发/分享：经系统分享面板（微信/QQ/邮件等均可选）。
-                      InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: () async {
-                          final ok = await ShareService.instance
-                              .shareText(content, title: '分享回复');
-                          if (context.mounted && !ok) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('未找到可用的分享入口'),
-                                duration: Duration(seconds: 1),
-                              ),
-                            );
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.all(2),
-                          child: Icon(
-                            Icons.share,
-                            size: 15,
-                            color: Colors.grey.shade400,
-                          ),
-                        ),
-                      ),
-                      // TTS 播报：普通回答才有（工具活动/思考存档/卡片不显示）。
-                      // 按钮自取设置与播放状态；播报中变停止键（点按即停）。
-                      if (_canSpeak) ...[
+                      ],
+                      // 用户消息同样可复制：长文/提示词常需复用，与回复复制同款式。
+                      if (_isUser && content.isNotEmpty) ...[
                         const SizedBox(width: 6),
-                        _buildSpeakButton(context, theme),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () async {
+                            await Clipboard.setData(
+                                ClipboardData(text: content));
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('已复制消息内容'),
+                                  duration: Duration(seconds: 1),
+                                ),
+                              );
+                            }
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: Icon(
+                              Icons.content_copy,
+                              size: 15,
+                              color: Colors.grey.shade400,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (!_isUser && content.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () async {
+                            await Clipboard.setData(
+                                ClipboardData(text: content));
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('已复制回复内容'),
+                                  duration: Duration(seconds: 1),
+                                ),
+                              );
+                            }
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: Icon(
+                              Icons.content_copy,
+                              size: 15,
+                              color: Colors.grey.shade400,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        // 转发/分享：经系统分享面板（微信/QQ/邮件等均可选）。
+                        InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () async {
+                            final ok = await ShareService.instance
+                                .shareText(content, title: '分享回复');
+                            if (context.mounted && !ok) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('未找到可用的分享入口'),
+                                  duration: Duration(seconds: 1),
+                                ),
+                              );
+                            }
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: Icon(
+                              Icons.share,
+                              size: 15,
+                              color: Colors.grey.shade400,
+                            ),
+                          ),
+                        ),
+                        // TTS 播报：普通回答才有（工具活动/思考存档/卡片不显示）。
+                        // 按钮自取设置与播放状态；播报中变停止键（点按即停）。
+                        if (_canSpeak) ...[
+                          const SizedBox(width: 6),
+                          _buildSpeakButton(context, theme),
+                        ],
                       ],
                     ],
-                  ],
+                  ),
                 ),
-              ),
               ],
             ),
           ),
@@ -503,7 +523,8 @@ class ChatBubble extends StatelessWidget {
             CircleAvatar(
               radius: 16,
               backgroundColor: theme.colorScheme.secondaryContainer,
-              child: Icon(Icons.person, size: 16, color: theme.colorScheme.onSecondaryContainer),
+              child: Icon(Icons.person,
+                  size: 16, color: theme.colorScheme.onSecondaryContainer),
             ),
           ],
         ],

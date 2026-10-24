@@ -145,12 +145,12 @@ class TongYiLiteApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       navigatorKey: appNavigatorKey,
       theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
+        colorSchemeSeed: Colors.deepPurple,
         useMaterial3: true,
         brightness: Brightness.light,
       ),
       darkTheme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
+        colorSchemeSeed: Colors.deepPurple,
         useMaterial3: true,
         brightness: Brightness.dark,
       ),
