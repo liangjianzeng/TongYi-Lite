@@ -971,7 +971,33 @@ struct InferenceEngine {
                 // (weights + headroom): Qwen3.5-4B was refused with a NEGATIVE
                 // kv_budget although it fits a 12 GB phone comfortably.
                 // True pre-load protection is the pre-load check above.
-                const int64_t kv_budget = budget;
+                // [dspark 2026-10-24] Reserve for graph compute buffers too:
+                // measured 322 MB (OpenCL) + 46 MB (CPU island) on Ling
+                // Q4_K_M; the reserve scales with n_ubatch, not n_ctx, so one
+                // flat number is honest. Without it the n_ctx clamp below
+                // granted contexts whose KV ALONE filled MemAvailable — the
+                // 16K Ling run died at free=13 MB (Android kill, WINDOW DIED,
+                // no tombstone). Override: TONGYILITE_OOM_COMPUTE_MB=<n>.
+                const int64_t compute_reserve = oom_headroom_bytes("TONGYILITE_OOM_COMPUTE_MB", 512);
+                const int64_t kv_budget = budget - compute_reserve;
+
+                if (oom_guard_disabled()) {
+                    // Bypass must not be silent: "guard off + these numbers"
+                    // is exactly the free=13 MB fingerprint. Keep it visible
+                    // in logcat AND the loading log.
+                    char bmsg[384];
+                    snprintf(bmsg, sizeof(bmsg),
+                             "OOM 守卫已被旁路（TONGYILITE_NO_OOM_GUARD=1）：可用 %.1f GB，"
+                             "每 token KV 约 %.1f KB，KV 预算（扣 compute 预留 %.0f MB）%.1f GB ——"
+                             "超限将不拦截，内存耗尽可能整机重启",
+                             mem_avail / (1024.0 * 1024.0 * 1024.0),
+                             kv_per_pos / 1024.0,
+                             compute_reserve / (1024.0 * 1024.0),
+                             kv_budget / (1024.0 * 1024.0 * 1024.0));
+                    LOGW("[oom-guard] BYPASS: avail=%lld kv_per_pos=%lld kv_budget=%lld",
+                         (long long)mem_avail, (long long)kv_per_pos, (long long)kv_budget);
+                    reportLoadingLog(bmsg);
+                }
 
                 if (!oom_guard_disabled() && kv_budget < (int64_t)512 * kv_per_pos) {
                     char gmsg[420];
@@ -1183,6 +1209,8 @@ struct InferenceEngine {
         }
 
         llama_context * new_ctx = future_ctx.get();
+        const ggml_type orig_type_k = ctx_params.type_k;
+        const ggml_type orig_type_v = ctx_params.type_v;
         if (!new_ctx && ctx_params.type_k != GGML_TYPE_F16) {
             // Rejected by the arch (e.g. MLA models require type_k == type_v):
             // one automatic retry with an F16 KV cache.
@@ -1202,6 +1230,44 @@ struct InferenceEngine {
                 return false;
             }
             new_ctx = future_ctx.get();
+        }
+        // [dspark 2026-10-24 G-781] n_ctx ladder: some GPU drivers refuse
+        // single allocations above a hard cap (Adreno 650 vendor OpenCL:
+        // ~996 MiB, err=-5 with 9+ GiB free — grid G-781), and context
+        // creation dies on the ONE KV cache buffer of wide models (Ling
+        // Q4_0 @ n_ctx 4096 = 1044893696 B > cap). Halving n_ctx halves the
+        // KV allocation and decode throughput is unaffected (the e2e probe
+        // already relies on that invariance via E2E_NCTX). Ladder 4096 ->
+        // 2048 -> 1024 -> 512 (64-aligned), every step reported to the UI;
+        // the guard's kv_budget math above keeps the halved context honest.
+        // Scope note: this only helps allocation-size failures — a genuine
+        // OOM is refused by the guard earlier, and the F16 retry above
+        // already handled the arch-rejection failure mode.
+        if (!new_ctx && effective_gpu_layers > 0 && ctx_params.n_ctx > 512) {
+            // the F16 retry may have swapped in a 4x-larger KV — restore the
+            // user's setting first, the ladder has better odds quantized
+            ctx_params.type_k = orig_type_k;
+            ctx_params.type_v = orig_type_v;
+            const uint32_t requested_ctx = ctx_params.n_ctx;
+            while (!new_ctx && ctx_params.n_ctx > 512) {
+                const uint32_t next = std::max<uint32_t>(512, (ctx_params.n_ctx / 2u / 64u) * 64u);
+                if (next == ctx_params.n_ctx) break;
+                ctx_params.n_ctx = next;
+                LOGW("ctx init failed at n_ctx=%u (driver single-alloc cap?) - retrying with n_ctx=%u (G-781 ladder)",
+                     (unsigned)requested_ctx, (unsigned)next);
+                char lmsg[192];
+                snprintf(lmsg, sizeof(lmsg),
+                         "GPU 创建上下文失败（驱动单块分配上限），上下文降至 %u 重试（decode 速度不受影响）",
+                         (unsigned)next);
+                reportLoadingLog(lmsg);
+                future_ctx = spawn_ctx();
+                if (future_ctx.wait_for(std::chrono::seconds(60)) == std::future_status::timeout) {
+                    LOGE("Context ladder retry timed out at n_ctx=%u", (unsigned)next);
+                    reportLoadingLog("上下文重试超时（内存不足或设备性能不够）");
+                    break;
+                }
+                new_ctx = future_ctx.get();
+            }
         }
         {
             std::lock_guard<std::mutex> ctx_lock(mtx);
