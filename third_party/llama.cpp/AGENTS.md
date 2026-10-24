@@ -249,3 +249,19 @@ Chat template and parser:
 
 Testing:
 - [Slice model](skills/slice-model/SKILL.md) - build a small slice (few layers/experts) of a big HF model without downloading the full weights, to test conversion and inference
+
+## 2026-10-25 07:0x：M2-2（iq4_xs 平面化）侦查收档 + M2-1 落树
+
+- **M2-1 已落树**（c400eac6）：M1 的 b 激活图像接入族 moe_b_cache（160 槽），
+  NMSE 三形状保持 0.000000；probe 微基准无可见差（小图建图便宜，真实收益在
+  e2e decode churn 场景，留 iq4_xs 模型窗口判）。
+- **M2-2 侦查三件（续作者从这里接）**：① 平面布局有两条不同真源——
+  `kernel_convert_block_q4_0_trans4_ns`（cvt.cl:299，d 平面 [kb][row] 转置 +
+  q 四分量按 ne01 步进写）与 batched 内核的实际读址（rp + k*4M + (M/2)*l，
+  LINE_STRIDE=M/2）**不对齐** ⇒ batched 的 q 平面来自 set_tensor q4_0 MoE 分支的
+  `transpose_2d_as_16b`（16 位粒度二维转置，见 12360 区）——宿主打包必须镜像
+  这条，不是 convert 内核；② iq4_xs 的 qs 与 q4_0 的 qs 同为 4-bit/16B 每 32 块
+  （仅解释不同：kvalues vs nibble−8）⇒ 打包字节序可整套复用，只换 d_eff=
+  d·(ls−32) 折算；③ 推荐路线：宿主打包器镜像 transpose_2d_as_16b 语义 →
+  batched 内核克隆 q4_0 骨架换 kvalues dequant → raw 路径留作回退（planes
+  缺失时走 raw，gate 2 风格）。
