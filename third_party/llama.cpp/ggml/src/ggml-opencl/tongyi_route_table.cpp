@@ -37,6 +37,13 @@ static const RouteSpec kSpecs[] = {
         "cpu",  // supports_op 同门拒 → 不该被派发进来（派发器 GGML_ABORT 契约）
         "dspark",
     },
+    {   // [tongyi M1 2026-10-25] iq4_xs batched-only（G-733 路线① 首个 sub-3bpw 行）：
+        // 直读原始块布局（无平面）；view 禁入（无偏移处理）；门集镜像 q3_K
+        "mmid_iq4_xs_batched", BATCHED_MOE, RTYPE_IQ4_XS,
+        { 256, 128, 0, true, NAME_FFN_EXPS_OR_AS, true, true, true, false, 1LL << 20 },
+        "cpu",
+        "tongyi-m1",
+    },
     {   // q4_0 dense-loop：supports_op dense 分支原公式（名字/代际不查 —— G-740 漂移点，
         // 由测试族 C 显式 pin，R2 决定是否收紧）
         "mmid_q4_0_dense", DENSE_LOOP, RTYPE_Q4_0,
@@ -138,7 +145,7 @@ static bool dense_static_ok(RType t, const RouteQuery & q, const char ** why) {
 // 镜像 batched 静态门（gate 0/1/4/5/6/7/8；gate 2/3/9 是运行时门）。
 static bool batched_static_ok(RType t, const RouteQuery & q, const RouteContext & ctx, const char ** why) {
     if (!q.src1_f32 || !q.src2_i32) { if (why) *why = "src_types"; return false; }
-    if (t != RTYPE_Q4_0 && t != RTYPE_Q4_K && t != RTYPE_Q3_K) { if (why) *why = "quant_type"; return false; }
+    if (t != RTYPE_Q4_0 && t != RTYPE_Q4_K && t != RTYPE_Q3_K && t != RTYPE_IQ4_XS) { if (why) *why = "quant_type"; return false; }
     const char * gwhy = nullptr;
     if (!moe_admission_gate(q, ctx, &gwhy)) { if (why) *why = gwhy; return false; }
     if (!q.contiguous0 || !q.contiguous1) { if (why) *why = "contiguity"; return false; }
@@ -152,8 +159,8 @@ static bool batched_static_ok(RType t, const RouteQuery & q, const RouteContext 
         }
     }
     if (q.K % 32 != 0 || q.M % 128 != 0) { if (why) *why = "shape_align K%32/M%128"; return false; }
-    if ((t == RTYPE_Q4_K || t == RTYPE_Q3_K) && q.K % 256 != 0) { if (why) *why = "shape_align K%256"; return false; }
-    if (t == RTYPE_Q3_K && q.E <= 1) { if (why) *why = "e_le_1 (supports_op:10398)"; return false; }
+    if ((t == RTYPE_Q4_K || t == RTYPE_Q3_K || t == RTYPE_IQ4_XS) && q.K % 256 != 0) { if (why) *why = "shape_align K%256"; return false; }
+    if ((t == RTYPE_Q3_K || t == RTYPE_IQ4_XS) && q.E <= 1) { if (why) *why = "e_le_1 (batched-only 家族)"; return false; }
     const long long n_cols = (long long)q.n_used * (long long)q.n_tok;
     if (q.n_used < 1 || q.n_tok < 1 || n_cols > (1LL << 20)) { if (why) *why = "cols_range"; return false; }
     if (why) *why = nullptr;
@@ -194,6 +201,19 @@ RouteResult resolve_admission(const RouteQuery & q, const RouteContext & ctx) {
     //    srcs + contig + E>1 + 名字/代际 + K%256/M%128。**不含 view/cols**（那是派发
     //    侧 gate 6/8 的检查；准入放行 view 未对齐张量时派发侧再拒 ⇒ q3_K 无 dense
     //    兜底 = GGML_ABORT 契约风险，由测试族 A 的 hazard pin 显式记录）。
+    if (q.type == RTYPE_IQ4_XS && !ctx.batched_off) {
+        // [tongyi M1] iq4_xs 准入：镜像 q3_K（batched-only 家族）
+        const RouteSpec * s = find_spec(RTYPE_IQ4_XS, BATCHED_MOE);
+        const char * why = nullptr;
+        const bool ok = q.src1_f32 && q.src2_i32 && q.contiguous0 && q.contiguous1 &&
+                        q.E > 1 && moe_admission_gate(q, ctx, &why) &&
+                        q.K % 256 == 0 && q.M % 128 == 0;
+        if (ok) {
+            RouteResult r; r.spec = s; r.attempted = s; r.refuse_gate = nullptr; r.refuse_detail = nullptr;
+            return r;
+        }
+        return make_cpu(s, why ? why : (q.E <= 1 ? "e_le_1" : "shape/srcs"), "iq4_xs branch refused");
+    }
     if (q.type == RTYPE_Q3_K && !ctx.batched_off) {
         const RouteSpec * s = find_spec(RTYPE_Q3_K, BATCHED_MOE);
         const char * why = nullptr;
@@ -255,6 +275,18 @@ RouteResult resolve(const RouteQuery & q, const RouteContext & ctx) {
             return r;
         }
         return make_cpu(nullptr, "dense_loop_disabled", "dense_off 且非 vendor 诊断");
+    }
+    if (q.type == RTYPE_IQ4_XS) {
+        const RouteSpec * s = find_spec(RTYPE_IQ4_XS, BATCHED_MOE);
+        if (!ctx.batched_off && s) {
+            const char * why = nullptr;
+            if (batched_static_ok(RTYPE_IQ4_XS, q, ctx, &why)) {
+                RouteResult r; r.spec = s; r.attempted = s; r.refuse_gate = nullptr; r.refuse_detail = nullptr;
+                return r;
+            }
+            return make_cpu(s, why, "iq4_xs batched refused");
+        }
+        return make_cpu(s, "batched_off", "iq4_xs 无 dense 路线");
     }
     if (q.type == RTYPE_Q3_K) {
         const RouteSpec * s = find_spec(RTYPE_Q3_K, BATCHED_MOE);

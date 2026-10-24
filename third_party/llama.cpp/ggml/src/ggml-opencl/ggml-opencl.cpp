@@ -171,6 +171,7 @@ static_assert((int) tongyi::RTYPE_Q4_K  == (int) GGML_TYPE_Q4_K,  "route type mi
 static_assert((int) tongyi::RTYPE_Q3_K  == (int) GGML_TYPE_Q3_K,  "route type mirror");
 static_assert((int) tongyi::RTYPE_Q8_0  == (int) GGML_TYPE_Q8_0,  "route type mirror");
 static_assert((int) tongyi::RTYPE_MXFP4 == (int) GGML_TYPE_MXFP4, "route type mirror");
+static_assert((int) tongyi::RTYPE_IQ4_XS == (int) GGML_TYPE_IQ4_XS, "route type mirror");
 
 static size_t align_to(size_t value, size_t to_alignment) {
     GGML_ASSERT(to_alignment && "Invalid alignment (must be non-zero)");
@@ -1372,6 +1373,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
     cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
     cl_kernel kernel_mul_mat_id_q3_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q3_K, #28)
+    cl_kernel kernel_mul_mat_id_iq4_xs_f32_batched;  // [tongyi M1 2026-10-25] batched MoE gather (iq4_xs, G-733 M1)
 
     // [dspark 2026-10-14] P4: batched MoE activation image cache. The dense-loop
     // fixed q_img is cached on the weight tensor's extra, but the activation
@@ -4130,6 +4132,21 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_noshuffle_q1_0_f32
+    {
+        // [tongyi M1 2026-10-25] iq4_xs batched MoE (G-733 route-1 first sub-3bpw kernel)
+        std::string m1_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable";
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src_CL_iq4xs_m1 {
+            #include "gemv_noshuffle_iq4_xs_f32.cl.h"
+        };
+#else
+        const std::string kernel_src_CL_iq4xs_m1 = read_file("gemv_noshuffle_iq4_xs_f32.cl");
+#endif
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_iq4xs_m1.c_str(), m1_opts.c_str());
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_iq4_xs_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
     {
         std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
                                        " -cl-mad-enable "
@@ -25107,8 +25124,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // (se0/se1) + re-packed uint q plane — the q4_K dodge recipe applied to
     // q3_K's hmask/qs/scales layout. Gates: K%256 (superblock scales), M%128.
     const bool is_q3_k = src0->type == GGML_TYPE_Q3_K;
-    if (!is_q4_0 && !is_q4_k && !is_q3_k) {
-        ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K only");
+    // [tongyi M1 2026-10-25] iq4_xs 入表（batched-only 家族，派发在族内核选择前的 M1 分支）
+    const bool is_iq4xs = src0->type == GGML_TYPE_IQ4_XS;
+    if (!is_q4_0 && !is_q4_k && !is_q3_k && !is_iq4xs) {
+        ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K/iq4_xs only");
         return false;
     }
     // [tongyi R1 2026-10-25] 查表记账（零行为变化）：一行 route 决策日志，控制流交给下面的旧门。
@@ -25174,12 +25193,81 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         ggml_cl_mmid_gate_fail(3, "extras", src0, src1, src2, "src1/src2/dst extra missing");
         return false;
     }
-    cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : pextra3k->q);
+
+    // [tongyi M1 2026-10-25] iq4_xs batched（G-733 路线①）：直读原始块布局
+    // （[E][M][K/256*136B]），无平面无 q_img——必须在族平面解引用（wq/wq_img_slot）
+    // 之前分流。b 激活图像每调用自建（无缓存，正确性优先；M2 再入 moe_b_cache）。
+    if (is_iq4xs) {
+        const int    m1_K    = (int)src0->ne[0];
+        const int    m1_M    = (int)src0->ne[1];
+        const int    m1_E    = (int)src0->ne[2];
+        const int    m1_used = (int)src2->ne[0];
+        const int    m1_tok  = (int)src2->ne[1];
+        const int    m1_ne11 = (int)src1->ne[1];
+        const int    m1_ids_row = (int)(src2->nb[1] / sizeof(int));
+        const long long m1_cols = (long long)m1_used * m1_tok;
+        cl_int       err;
+        if (m1_K % 256 != 0) {
+            ggml_cl_mmid_gate_fail(7, "shape_align", src0, src1, src2, "iq4_xs K%256 (block_iq4_xs)");
+            return false;
+        }
+        ggml_tensor_extra_cl * raw0 = (ggml_tensor_extra_cl *)soa0->extra;
+        if (!raw0 || !raw0->data_device) {
+            ggml_cl_mmid_gate_fail(2, "planes_iq4xs", src0, src1, src2, "raw tensor buffer missing");
+            return false;
+        }
+        const cl_ulong b_org = (cl_ulong)(extra1->offset + src1->view_offs);
+        const size_t   b_sz  = (size_t)src1->ne[2] * (size_t)m1_ne11 * (size_t)m1_K * sizeof(float);
+        cl_buffer_region breg = { (size_t)b_org, b_sz };
+        cl_mem bsub = nullptr;
+        CL_CHECK((bsub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &breg, &err), err));
+        cl_image_format bfmt = { CL_RGBA, CL_FLOAT };
+        cl_image_desc bdesc;
+        memset(&bdesc, 0, sizeof(bdesc));
+        bdesc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+        bdesc.image_width = b_sz / 16;   // float4 像素（同族 b_img）
+        bdesc.buffer      = bsub;
+        cl_mem m1_bimg = nullptr;
+        CL_CHECK((m1_bimg = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &bfmt, &bdesc, NULL, &err), err));
+
+        cl_mem   src0_raw = raw0->data_device;
+        cl_ulong src0_off = (cl_ulong)(raw0->offset + soa0->view_offs);
+        int      m1_ids_off = (int)((extra2->offset + src2->view_offs) / sizeof(int));
+        cl_ulong m1_dst_base = (cl_ulong)(extrad->offset + dst->view_offs);
+        cl_kernel km1 = backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched;
+        cl_uint ka = 0;
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &src0_raw));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong), &src0_off));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &m1_bimg));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &extra2->data_device));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ids_off));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &extrad->data_device));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),&m1_dst_base));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_K));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_M));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_used));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_tok));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ne11));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_E));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ids_row));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[1]));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[2]));
+        // 显式 local（Adreno 对 2D 网格 + NULL local 有挂死前科）
+        size_t m1_gws[2] = { (size_t)m1_cols, (size_t)m1_M };
+        size_t m1_lws[2] = { (m1_cols < 8) ? (size_t)m1_cols : 8, 4 };
+        backend_ctx->enqueue_ndrange_kernel(km1, 2, m1_gws, m1_lws, dst);
+        CL_CHECK(clReleaseMemObject(m1_bimg));
+        CL_CHECK(clReleaseMemObject(bsub));
+        return true;
+    }
+    // [tongyi M1 2026-10-25] iq4_xs 走下方 M1 原始布局分支，不消费族平面——
+    // 这里必须给 nullptr，否则三元链落到 pextra3k（NULL）解引用 SEGV（真机实锤）
+    cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : (is_iq4xs ? nullptr : pextra3k->q));
     // q4_0: one d plane; q4_K: two precomputed effective-scale planes;
     // q3_K: two host-decoded dl planes (row-even/row-odd)
-    cl_mem wd = is_q4_0 ? pextra40->d : (is_q4_k ? pextra4k->seff : pextra3k->se0);
-    cl_mem we = is_q4_0 ? nullptr     : (is_q4_k ? pextra4k->meff : pextra3k->se1);
-    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : &pextra3k->q_img);
+    cl_mem wd = is_q4_0 ? pextra40->d : (is_q4_k ? pextra4k->seff : (is_iq4xs ? nullptr : pextra3k->se0));
+    cl_mem we = is_q4_0 ? nullptr     : (is_q4_k ? pextra4k->meff : (is_iq4xs ? nullptr : pextra3k->se1));
+    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : (is_iq4xs ? nullptr : &pextra3k->q_img));
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
     if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
@@ -29751,6 +29839,13 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
             return;
         }
         GGML_ABORT("q3_K batched MoE: precondition failed (set_tensor/support gate mismatch)");
+    }
+    // [tongyi M1 2026-10-25] iq4_xs: batched-only (same contract as q3_K)
+    if (src0->type == GGML_TYPE_IQ4_XS) {
+        if (batched_moe_enabled && ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
+            return;
+        }
+        GGML_ABORT("iq4_xs batched MoE: precondition failed (set_tensor/support gate mismatch)");
     }
 
     int sgs   = 32; // subgroup size

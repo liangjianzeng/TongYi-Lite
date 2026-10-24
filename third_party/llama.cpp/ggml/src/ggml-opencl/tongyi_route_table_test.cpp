@@ -98,7 +98,7 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
             (s_dm && s_dm % q.align_bytes) || (s_s && s_s % q.align_bytes))) return false;
         return true;
     }
-    if (q.type == RTYPE_Q3_K && !ctx.batched_off) {
+    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && !ctx.batched_off) {
         return q.E > 1 && srcs &&
                legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off) &&
                (q.K % 256 == 0) && (q.M % 128 == 0);
@@ -113,7 +113,7 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
 // 镜像 batched 静态门（:25046 gate 0/1/4/5/6/7/8）
 static bool legacy_batched_static(const RouteQuery & q, const RouteContext & ctx) {
     if (!q.src1_f32 || !q.src2_i32) return false;
-    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K) return false;
+    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K && q.type != RTYPE_IQ4_XS) return false;
     if (!legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off)) return false;
     if (!q.contiguous0 || !q.contiguous1) return false;
     if (q.is_view) {
@@ -121,8 +121,8 @@ static bool legacy_batched_static(const RouteQuery & q, const RouteContext & ctx
         else return false;
     }
     if (q.K % 32 != 0 || q.M % 128 != 0) return false;
-    if ((q.type == RTYPE_Q4_K || q.type == RTYPE_Q3_K) && q.K % 256 != 0) return false;
-    if (q.type == RTYPE_Q3_K && q.E <= 1) return false;
+    if ((q.type == RTYPE_Q4_K || q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && q.K % 256 != 0) return false;
+    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && q.E <= 1) return false;
     const long long n_cols = (long long)q.n_used * q.n_tok;
     if (q.n_used < 1 || q.n_tok < 1 || n_cols > (1LL << 20)) return false;
     return true;
@@ -141,7 +141,7 @@ static int legacy_dispatch_kind(const RouteQuery & q, const RouteContext & ctx) 
         if (ctx.vendor_diag && q.type == RTYPE_Q4_0 && q.src1_f32 && q.contiguous0 && q.contiguous1) return 3;
         return 0;
     }
-    if (q.type == RTYPE_Q3_K) {
+    if (q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) {
         if (!ctx.batched_off && legacy_batched_static(q, ctx)) return 1;
         return 0;   // 静态拒 = supports_op 同门拒（GGML_ABORT 契约路径不会发生）
     }
@@ -165,7 +165,7 @@ static int resolve_kind_id(const RouteResult & r) {
 // ============================================================================
 
 static void family_a() {
-    const RType types[]  = { RTYPE_Q4_0, RTYPE_Q4_K, RTYPE_Q3_K, RTYPE_Q8_0, RTYPE_MXFP4, RTYPE_Q4_1 };
+    const RType types[]  = { RTYPE_Q4_0, RTYPE_Q4_K, RTYPE_Q3_K, RTYPE_Q8_0, RTYPE_MXFP4, RTYPE_Q4_1, RTYPE_IQ4_XS };
     const int   Ks[]     = { 31, 32, 64, 128, 255, 256, 512, 1536, 2048, 5120 };
     const int   Ms[]     = { 4, 8, 32, 64, 127, 128, 129, 512, 1536 };
     const char * names[] = { "blk.3.ffn_gate_exps", "ffn_as", "w_exps", "output.weight", "" };
@@ -296,7 +296,7 @@ static void family_b() {
     CHECK(known_bad_lookup(RCOMP_E031, "gemm_moe_mxfp4_f32_ns"), "B4b gemm 族可查");
     CHECK(!known_bad_lookup(RCOMP_E031, "rms_norm"), "B4c 无关族不可查");
     CHECK(!known_bad_lookup(RCOMP_E17, "gemv_moe_q4_k_f32_ns"), "B4d E17 不在 E031 坏账");
-    CHECK(known_bad_count() == 3 && spec_count() == 8, "B4e 表规模 pin（8 行 + 3 坏账）");
+    CHECK(known_bad_count() == 3 && spec_count() == 9, "B4e 表规模 pin（9 行 + 3 坏账）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 

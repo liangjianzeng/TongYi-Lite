@@ -46,6 +46,7 @@ enum RType { // 镜像 ggml_type（仅路由关心的成员）
     RTYPE_Q4_K = 12,
     RTYPE_Q5_K = 13,
     RTYPE_Q6_K = 14,
+    RTYPE_IQ4_XS = 23,
     RTYPE_MXFP4 = 39,
 };
 
