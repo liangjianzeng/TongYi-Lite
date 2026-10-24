@@ -88,15 +88,21 @@ __kernel void kernel_mul_mat_id_iq4_xs_f32_batched(
                 uchar b2 = q[4 * px + 2];
                 uchar b3 = q[4 * px + 3];
                 if (px < 4) {
+                    // 元素 4px+c ∈ [0,16)：q[4px+c] 低 nibble
                     sum += dl * kvalues_iq4xs[b0 & 0xF] * yv.s0;
                     sum += dl * kvalues_iq4xs[b1 & 0xF] * yv.s1;
                     sum += dl * kvalues_iq4xs[b2 & 0xF] * yv.s2;
                     sum += dl * kvalues_iq4xs[b3 & 0xF] * yv.s3;
                 } else {
-                    sum += dl * kvalues_iq4xs[b0 >> 4] * yv.s0;
-                    sum += dl * kvalues_iq4xs[b1 >> 4] * yv.s1;
-                    sum += dl * kvalues_iq4xs[b2 >> 4] * yv.s2;
-                    sum += dl * kvalues_iq4xs[b3 >> 4] * yv.s3;
+                    // 元素 4px+c ∈ [16,32)：q[4px+c-16] 高 nibble（首版错读 q[4px+c]）
+                    uchar h0 = q[4 * (px - 4) + 0];
+                    uchar h1 = q[4 * (px - 4) + 1];
+                    uchar h2 = q[4 * (px - 4) + 2];
+                    uchar h3 = q[4 * (px - 4) + 3];
+                    sum += dl * kvalues_iq4xs[h0 >> 4] * yv.s0;
+                    sum += dl * kvalues_iq4xs[h1 >> 4] * yv.s1;
+                    sum += dl * kvalues_iq4xs[h2 >> 4] * yv.s2;
+                    sum += dl * kvalues_iq4xs[h3 >> 4] * yv.s3;
                 }
             }
         }
