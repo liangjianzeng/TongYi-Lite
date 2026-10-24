@@ -25338,17 +25338,54 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         }
         const cl_ulong b_org = (cl_ulong)(extra1->offset + src1->view_offs);
         const size_t   b_sz  = (size_t)src1->ne[2] * (size_t)m1_ne11 * (size_t)m1_K * sizeof(float);
-        cl_buffer_region breg = { (size_t)b_org, b_sz };
-        cl_mem bsub = nullptr;
-        CL_CHECK((bsub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &breg, &err), err));
-        cl_image_format bfmt = { CL_RGBA, CL_FLOAT };
-        cl_image_desc bdesc;
-        memset(&bdesc, 0, sizeof(bdesc));
-        bdesc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        bdesc.image_width = b_sz / 16;   // float4 像素（同族 b_img）
-        bdesc.buffer      = bsub;
-        cl_mem m1_bimg = nullptr;
-        CL_CHECK((m1_bimg = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &bfmt, &bdesc, NULL, &err), err));
+        // [tongyi M2 2026-10-25] b 激活图像接入族 moe_b_cache（此前每 op 自建：
+        // 族注释实锤建图开销可大于内核本体；160 槽覆盖整周期跨 token 复用）
+        static const bool m1_bcache = [] { const char * e = getenv("GGML_OPENCL_MOE_BCACHE"); return !e || e[0] != '0'; }();
+        cl_mem bsub = nullptr, m1_bimg = nullptr;
+        bool   m1_b_owned = false;   // 未入缓存（cache off）→ 用后释放
+        int    m1_slot = -1;
+        if (m1_bcache) {
+            for (int ci = 0; ci < 160; ++ci) {
+                auto & ce = backend_ctx->moe_b_cache[ci];
+                if (ce.sub && ce.src == extra1->data_device && ce.origin == (size_t)b_org && ce.size == b_sz) {
+                    bsub = ce.sub;
+                    m1_bimg = ce.img;
+                    break;
+                }
+            }
+        }
+        if (m1_bimg == nullptr) {
+            cl_buffer_region breg = { (size_t)b_org, b_sz };
+            CL_CHECK((bsub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &breg, &err), err));
+            if (m1_bcache) {
+                m1_slot = backend_ctx->moe_b_cache_next;
+                backend_ctx->moe_b_cache_next = (backend_ctx->moe_b_cache_next + 1) % 160;
+                auto & slot = backend_ctx->moe_b_cache[m1_slot];
+                if (slot.sub) {
+                    CL_CHECK(clReleaseMemObject(slot.img));
+                    CL_CHECK(clReleaseMemObject(slot.sub));
+                    slot.sub = nullptr; slot.img = nullptr; slot.src = nullptr;
+                    slot.origin = 0; slot.size = 0;
+                }
+                slot.sub = bsub;
+            } else {
+                m1_b_owned = true;
+            }
+            cl_image_format bfmt = { CL_RGBA, CL_FLOAT };
+            cl_image_desc bdesc;
+            memset(&bdesc, 0, sizeof(bdesc));
+            bdesc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+            bdesc.image_width = b_sz / 16;   // float4 像素（同族 b_img）
+            bdesc.buffer      = bsub;
+            CL_CHECK((m1_bimg = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &bfmt, &bdesc, NULL, &err), err));
+            if (m1_slot >= 0) {
+                auto & slot = backend_ctx->moe_b_cache[m1_slot];
+                slot.src = extra1->data_device;
+                slot.origin = (size_t)b_org;
+                slot.size = b_sz;
+                slot.img = m1_bimg;
+            }
+        }
 
         cl_mem   src0_raw = raw0->data_device;
         cl_ulong src0_off = (cl_ulong)(raw0->offset + soa0->view_offs);
@@ -25376,8 +25413,10 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         size_t m1_gws[2] = { (size_t)m1_cols, (size_t)m1_M };
         size_t m1_lws[2] = { (m1_cols < 8) ? (size_t)m1_cols : 8, 4 };
         backend_ctx->enqueue_ndrange_kernel(km1, 2, m1_gws, m1_lws, dst);
-        CL_CHECK(clReleaseMemObject(m1_bimg));
-        CL_CHECK(clReleaseMemObject(bsub));
+        if (m1_b_owned) {
+            CL_CHECK(clReleaseMemObject(m1_bimg));
+            CL_CHECK(clReleaseMemObject(bsub));
+        }
         return true;
     }
     // [tongyi M1 2026-10-25] iq4_xs 走下方 M1 原始布局分支，不消费族平面——
