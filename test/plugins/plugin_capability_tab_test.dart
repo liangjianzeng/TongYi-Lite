@@ -38,8 +38,14 @@ void main() {
         src.indexOf('class CapabilitySettingsBody'),
         src.indexOf('class DevSettingsBody'),
       );
-      expect(capRegion, contains('loadUserSkills'), reason: '技能不在这个 Tab 里 = 能力面又裂成两处');
-      expect(capRegion, contains('loadBuiltinSkills'));
+      // 2026-10-25 harness 第八轮：技能管理抽成共享 SkillsManagementBody
+      // （智能体面板/能力面板/左栏技能面板三处共用），能力面板以**内嵌**
+      // 方式接入——管理动作就地完成，不再跳智能体面板。
+      expect(capRegion, contains('SkillsManagementBody()'),
+          reason: '能力面板没内嵌技能 Body = 用户又得跨面板找管理入口');
+      expect('await loadUserSkills()'.allMatches(src).length, 1,
+          reason: 'loadUserSkills 只许在共享 Body 里调用一次（两处 = 两个真相）');
+      expect(src, contains('loadBuiltinSkills'));
       expect(capRegion, contains('PluginsEntryTile('));
     });
 

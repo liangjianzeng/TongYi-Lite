@@ -45,7 +45,7 @@ import '../plugins/panel/plugins_screen.dart';
 import 'package:uuid/uuid.dart';
 import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
-import '../models/chat_message.dart' show ChatMessage;
+import '../models/chat_message.dart' show ChatMessage, MessageRole;
 import 'settings_screen.dart';
 // 插件平台（P2）：宿主在这里只"挖洞"，不认识任何具体插件。
 import '../plugins/plugin_host.dart';
@@ -1269,6 +1269,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// 技能面板：说明 + 管理入口（技能卡全量在「智能体」面板内）。
   Widget _buildSkillsRailPage() {
+    // harness 第八轮（2026-10-25 用户定案）：技能面板**就地全量管理**——
+    // 新增/编辑/删除/重扫/内置查看全部内联，不再跳「智能体」面板
+    // （此前这里是占位跳转，被用户点名批评）。
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
       child: Column(
@@ -1279,11 +1282,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             '模型经 load_skill 启用，技能卡在对话里展示执行过程。',
             style: TextStyle(fontSize: 12, height: 1.5),
           )),
-          _railRow(
-              icon: Icons.auto_awesome_outlined,
-              title: '管理技能（内置 / 我的技能）',
-              subtitle: '在「智能体」面板内',
-              onTap: () => _railPanel.open('agent')),
+          const SizedBox(height: 8),
+          _railCard(const SkillsManagementBody()),
         ],
       ),
     );
@@ -2005,23 +2005,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // 生成中状态细条：执行进度一眼可见 + 停止兜底入口。
         _buildTurnStatusStrip(isGenerating),
         Container(
-          margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-          padding: EdgeInsets.fromLTRB(10, 6, 10,
-              4 + math.max(MediaQuery.of(context).padding.bottom, 16)),
+          margin: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           decoration: BoxDecoration(
             // 设计稿形态：白底 + 细描边（不是灰底实心卡），发消息区要“轻”。
             color: Theme.of(context).colorScheme.surface,
-            // 卡片铺到屏幕底（底部不留背景黑边）：仅顶部圆角、描边无底边，
-            // 手势条由内容内边距避开。
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
-            border: Border(
-              top: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant),
-              left: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant),
-              right: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant),
-            ),
+            // DSH 参考形态（2026-10-25）：全圆角浮动卡；卡片之下是会话数据
+            // 统计条——原「底部黑边」区域被统计条占满（手势条避让移到条上）。
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2095,12 +2088,78 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ],
           ),
         ),
+        // 会话数据统计条（DSH 参考形态，2026-10-25）：原「底部黑边」位置
+        // 改为常驻读数——轮/步 · token 估算 · 上下文占用，手势条避让在此收口。
+        Builder(builder: (_) {
+          final msgs = ref.watch(messagesProvider(_currentConversationId))
+                  .valueOrNull ??
+              const <ChatMessage>[];
+          return _buildConversationStatsStrip(msgs);
+        }),
       ],
     );
     return PluginDispatcherScope(
       dispatcher: ref.watch(pluginDispatcherProvider),
       child: SlotRegistryScope(registry: slots, child: inputBar),
     );
+  }
+
+  /// 会话数据统计条：对齐 DSH-Phone 底部读数形态。
+  ///
+  /// 三段：`N 轮 · M 步`（轮 = 用户消息数；步 = 🔧 工具活动消息数，与对话内
+  /// 工作流同一判定）、`≈X tok`（[estimateTokens] 全量估算，含用户+答案，
+  /// 不含 🔧/💭 轨迹——它们不入模型上下文）、`上下文 y%`（与 KV 环同源，
+  /// 无数据不显示）。数字为本地估算口径，标题带「约」的语义用 ≈ 表达。
+  Widget _buildConversationStatsStrip(List<ChatMessage> messages) {
+    var rounds = 0;
+    var steps = 0;
+    var tokens = 0;
+    for (final m in messages) {
+      final c = m.content;
+      if (c.startsWith('🔧')) {
+        steps++;
+        continue;
+      }
+      if (c.startsWith('💭')) continue;
+      if (m.role == MessageRole.user) rounds++;
+      tokens += estimateTokens(c);
+    }
+    final fraction =
+        ref.watch(contextUsageProvider)[_currentConversationId]?.fraction;
+    final ctx = fraction == null ? null : (fraction * 100).round();
+    final segStyle = TextStyle(
+        fontSize: 11,
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+        fontFeatures: const [FontFeature.tabularFigures()]);
+    final sep = Text(' · ',
+        style: TextStyle(
+            fontSize: 11,
+            color: Theme.of(context).colorScheme.outlineVariant));
+    return Padding(
+      // 手势条避让收口（原 composer 卡内容 padding 承担，现移到本条）。
+      padding: EdgeInsets.fromLTRB(14, 0, 14, math.max(
+              MediaQuery.of(context).padding.bottom, 16) +
+          2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Flexible(child: Text('$rounds 轮 · $steps 步', style: segStyle)),
+          sep,
+          Flexible(child: Text('≈${_fmtTokCompact(tokens)} tok', style: segStyle)),
+          if (ctx != null) ...[
+            sep,
+            Flexible(child: Text('上下文 $ctx%', style: segStyle)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// token 读数缩写：<1000 原值；<10000 x.xk；否则 x.x万（中文语境）。
+  String _fmtTokCompact(int n) {
+    if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
+    return '$n';
   }
 
   /// 输入框左侧的圆形上下文占用圈（传统进度环形态）：

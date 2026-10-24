@@ -1889,17 +1889,414 @@ class AgentSettingsBody extends ConsumerStatefulWidget {
   ConsumerState<AgentSettingsBody> createState() => AgentSettingsBodyState();
 }
 
-class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
+
+/// 技能管理 Body（harness 第八轮抽取）：技能库完整管理 = 汇总行 + 展开浏览
+/// + 内置查看/另存 + 用户新增（整段粘贴）/编辑/删除/重新扫描。
+/// 智能体面板与「能力与实验」面板**共用本 Body**——管理动作就地完成，
+/// 不再有「去智能体 Tab 管理技能」的跨面板跳（2026-10-25 用户定案）。
+/// 抽取时六处非连续切割，方法块原样搬运（ModelManagementBody 同款纪律）。
+class SkillsManagementBody extends StatefulWidget {
+  const SkillsManagementBody({super.key});
+
+  @override
+  State<SkillsManagementBody> createState() => _SkillsManagementBodyState();
+}
+
+class _SkillsManagementBodyState extends State<SkillsManagementBody> {
   /// 用户自定义 skills（null = 扫描中）。
   List<Skill>? _userSkills;
 
-  /// 内置技能清单（常量，取一次避免每次 build 重建 17 个对象）。
+  /// 内置技能清单（常量，取一次避免每次 build 重建）。
   final List<Skill> _builtinSkills = loadBuiltinSkills();
 
-  /// 技能列表展开态：技能会越来越多，默认收起成一行汇总，
-  /// 展开后也只在限高滚动区里浏览——技能卡不再把设置页拉成 2 米长。
+  /// 技能列表展开态：默认收起成一行汇总，展开后限高滚动浏览。
   bool _skillsExpanded = false;
-  Future<bool>? _asrModelReady;
+
+  @override
+  void initState() {
+    super.initState();
+    _rescanSkills();
+  }
+
+  Future<void> _rescanSkills() async {
+    final skills = await loadUserSkills();
+    if (!mounted) return;
+    setState(() => _userSkills = skills);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          leading: const Icon(Icons.extension, size: 20),
+          title: Text(
+            '技能库（内置 ${_builtinSkills.length}'
+            ' · 我的 ${_userSkills?.length ?? '?'}）',
+            style: const TextStyle(fontSize: 14),
+          ),
+          subtitle: const Text(
+            '点开浏览/管理；整段粘贴 SKILL.md 即可新增',
+            style: TextStyle(fontSize: 12),
+          ),
+          trailing: Icon(
+            _skillsExpanded ? Icons.expand_less : Icons.expand_more,
+            size: 20,
+            color: Colors.grey,
+          ),
+          onTap: () => setState(() => _skillsExpanded = !_skillsExpanded),
+        ),
+        if (_skillsExpanded)
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final s in _builtinSkills)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      visualDensity: VisualDensity.compact,
+                      leading: const Icon(Icons.extension, size: 20),
+                      title: Text('内置 · ${s.name}',
+                          style: const TextStyle(fontSize: 14)),
+                      subtitle: Text(s.description,
+                          style: const TextStyle(fontSize: 12)),
+                      trailing: const Icon(Icons.chevron_right,
+                          size: 18, color: Colors.grey),
+                      onTap: () => _showBuiltinSkillView(s),
+                    ),
+                  const SizedBox(height: 6),
+                  if (_userSkills == null)
+                    const Text('正在扫描用户技能…',
+                        style: TextStyle(fontSize: 12, color: Colors.grey))
+                  else if (_userSkills!.isEmpty)
+                    const Text('暂无用户技能',
+                        style: TextStyle(fontSize: 12, color: Colors.grey))
+                  else
+                    for (final s in _userSkills!)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        visualDensity: VisualDensity.compact,
+                        leading: const Icon(Icons.extension_outlined, size: 20),
+                        title: Text('用户 · ${s.name}',
+                            style: const TextStyle(fontSize: 14)),
+                        subtitle: Text(s.description,
+                            style: const TextStyle(fontSize: 12)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          tooltip: '删除技能',
+                          onPressed: () => _confirmDeleteUserSkill(s),
+                        ),
+                        onTap: () => _showUserSkillDialog(existing: s),
+                      ),
+                ],
+              ),
+            ),
+          ),
+        Row(
+          children: [
+            TextButton.icon(
+              onPressed: _rescanSkills,
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('重新扫描'),
+            ),
+            const SizedBox(width: 4),
+            TextButton.icon(
+              onPressed: () => _showUserSkillDialog(),
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('新增技能'),
+            ),
+          ],
+        ),
+        Text(
+          '整段粘贴 SKILL.md 即可新增；同名覆盖内置。',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showBuiltinSkillView(Skill s) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('内置技能：${s.name}'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('触发：${s.whenToUse}',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 10),
+                SelectableText(s.body,
+                    style: const TextStyle(fontSize: 13, height: 1.4)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+          TextButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _showUserSkillDialog(
+                  prefillText: buildSkillMarkdown(
+                description: s.description,
+                whenToUse: s.whenToUse,
+                invocation: s.invocation,
+                body: s.body,
+              ));
+            },
+            icon: const Icon(Icons.save_as_outlined, size: 16),
+            label: const Text('另存为我的技能'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 新增技能 = **整段粘贴一站式**：一个文本框贴完整 SKILL.md（meta 行 +
+  /// `---` + 正文），技能名自动取 `name:` 行、缺省从描述派生——不再逐字段
+  /// 手填。[prefillText] 用于"从内置技能另存"。编辑已有技能走字段表单。
+  Future<void> _showUserSkillDialog(
+      {Skill? existing, String? prefillText}) async {
+    if (existing != null) {
+      return _showEditSkillDialog(existing);
+    }
+    final rawCtrl = TextEditingController(text: prefillText ?? '');
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新增技能（整段粘贴）'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: TextFormField(
+              controller: rawCtrl,
+              autofocus: true,
+              minLines: 8,
+              maxLines: 16,
+              decoration: const InputDecoration(
+                labelText: '粘贴完整技能文本',
+                hintText: 'name: 可选（技能名，缺省从描述取）\n'
+                    'description: 一句话描述\n'
+                    'whenToUse: 何时触发\n'
+                    '---\n'
+                    '正文执行指引（步骤/格式/注意）',
+                border: OutlineInputBorder(),
+                alignLabelWithHint: true,
+              ),
+              validator: (v) =>
+                  (v == null || v.trim().isEmpty) ? '请粘贴技能文本' : null,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final raw = rawCtrl.text;
+    // 技能名：`name:` 行优先；缺省从描述派生（去尾标点取前 12 字再 sanitize）。
+    final nameMatch =
+        RegExp(r'^\s*name\s*:\s*(.+)$', multiLine: true).firstMatch(raw);
+    String? name = nameMatch?.group(1)?.trim();
+    final Skill parsed;
+    try {
+      parsed = Skill.parse(raw, name: name ?? '');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('解析失败（格式见输入框提示）：$e')));
+      return;
+    }
+    if (parsed.description.trim().isEmpty || parsed.whenToUse.trim().isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('缺少 description / whenToUse 行——'
+              '格式：meta 行在前，`---` 分隔正文')));
+      return;
+    }
+    if (name == null || name.isEmpty) {
+      final base =
+          parsed.description.trim().replaceAll(RegExp(r'[。！？!?.、，,；;：:]'), '');
+      final sanitized = sanitizeSkillDirName(base);
+      name = (sanitized == null || sanitized.isEmpty)
+          ? null
+          : (sanitized.length > 12 ? sanitized.substring(0, 12) : sanitized);
+    }
+    if (name == null || name.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法确定技能名：请在文本首行加 `name: 技能名`')));
+      return;
+    }
+    try {
+      await writeUserSkill(
+        name: name,
+        description: parsed.description,
+        whenToUse: parsed.whenToUse,
+        invocation: parsed.invocation,
+        body: parsed.body,
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
+      return;
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
+    await _rescanSkills();
+  }
+
+  /// 编辑已有技能（字段表单；技能名锁定）。
+  Future<void> _showEditSkillDialog(Skill existing) async {
+    final descCtrl = TextEditingController(text: existing.description);
+    final whenCtrl = TextEditingController(text: existing.whenToUse);
+    final bodyCtrl = TextEditingController(text: existing.body);
+    final formKey = GlobalKey<FormState>();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('编辑技能：${existing.name}'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: descCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '一句话描述',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写描述' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: whenCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '何时触发（whenToUse）',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写触发条件' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: bodyCtrl,
+                    minLines: 5,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      labelText: '技能正文（执行指引）',
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
+                    ),
+                    validator: (v) =>
+                        (v == null || v.trim().isEmpty) ? '请填写正文' : null,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    try {
+      await writeUserSkill(
+        name: existing.name,
+        previousName: existing.name,
+        description: descCtrl.text,
+        whenToUse: whenCtrl.text,
+        body: bodyCtrl.text,
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
+      return;
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      return;
+    }
+    await _rescanSkills();
+  }
+
+  Future<void> _confirmDeleteUserSkill(Skill skill) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除技能：${skill.name}'),
+        content: const Text('将从技能目录删除该技能（含其目录下的全部文件），'
+            '删除后无法恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await deleteUserSkill(skill.name);
+    await _rescanSkills();
+  }
+}
+
+class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
 
   /// 全局记忆条目（null = 加载中；记忆管理卡用）。
   List<MapEntry<String, String>>? _memoryEntries;
@@ -1912,16 +2309,12 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
   /// 必须监听 ChangeNotifier 才能实时刷新（否则"测试连接成功但页面显示未连接"）。
   VoidCallback? _devStateListener;
 
-  /// Edge TTS 音色列表（null = 拉取中；失败回退内置常用清单）。
-  List<TtsVoiceInfo>? _ttsVoices;
 
   @override
   void initState() {
     super.initState();
-    _rescanSkills();
     _loadAgentsMdInfo();
     _loadMemoryEntries();
-    _loadTtsVoices();
     final listener = () {
       if (mounted) setState(() {});
     };
@@ -1938,206 +2331,6 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
       DevSessionController.instance.removeListener(listener);
     }
     super.dispose();
-  }
-
-  Future<void> _rescanSkills() async {
-    final skills = await loadUserSkills();
-    if (!mounted) return;
-    setState(() => _userSkills = skills);
-  }
-
-  Future<void> _loadTtsVoices() async {
-    final voices = await EdgeTtsService.instance.listVoices();
-    if (!mounted) return;
-    setState(() => _ttsVoices = voices);
-  }
-
-  // ================= 语音播报（Edge TTS）设置卡 =================
-
-  Widget _buildTtsCard(InferenceSettings settings, SettingsNotifier notifier) {
-    final voices = _ttsVoices;
-    final groups = groupTtsVoices(voices ?? kFallbackVoices);
-    final tts = EdgeTtsService.instance;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildToggleTitle(
-              '🔊 语音播报（Edge TTS）',
-              settings.edgeTtsEnabled,
-              notifier.setEdgeTtsEnabled,
-              subtitle: '开 = 回答气泡出现 🔊 播报按钮；需联网（免费在线接口，'
-                  '微软侧随时可能调整，失败会静默降级不打断聊天）',
-            ),
-            const SizedBox(height: 8),
-            // 子设置：总开关关闭时置灰。
-            Opacity(
-              opacity: settings.edgeTtsEnabled ? 1.0 : 0.45,
-              child: IgnorePointer(
-                ignoring: !settings.edgeTtsEnabled,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildToggleTitle(
-                      '回复后自动播报',
-                      settings.edgeTtsAutoSpeak,
-                      notifier.setEdgeTtsAutoSpeak,
-                    ),
-                    const SizedBox(height: 8),
-                    // 音色下拉（拉取失败回退内置清单）。
-                    // isExpanded=true：选中项占满行宽——方言音色全名很长
-                    // （zh-CN-shaanxi-XiaoniNeural），不放开会把 suffixIcon
-                    // 挤出界 → RenderFlex RIGHT OVERFLOWED 溢出条遮挡 UI
-                    //（真机实锤 87px）。
-                    DropdownButtonFormField<String>(
-                      value: _ttsVoiceInList(voices, settings.edgeTtsVoice),
-                      isExpanded: true,
-                      decoration: InputDecoration(
-                        labelText: '音色',
-                        border: const OutlineInputBorder(),
-                        isDense: true,
-                        suffixIcon: voices == null
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: Padding(
-                                  padding: EdgeInsets.all(8),
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              )
-                            : IconButton(
-                                icon: const Icon(Icons.refresh, size: 18),
-                                onPressed: () {
-                                  setState(() => _ttsVoices = null);
-                                  _loadTtsVoices();
-                                },
-                              ),
-                      ),
-                      items: [
-                        // 分组头（不可点，value 用哨兵防与真实音色冲突）。
-                        for (var i = 0; i < groups.length; i++) ...[
-                          DropdownMenuItem<String>(
-                            enabled: false,
-                            value: '◆group$i',
-                            child: Text(
-                              '── ${groups[i].title} ──',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                            ),
-                          ),
-                          for (final v in groups[i].voices)
-                            DropdownMenuItem(
-                              value: v.shortName,
-                              child: Text('${v.localName} · ${v.shortName}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(fontSize: 13)),
-                            ),
-                        ],
-                      ],
-                      onChanged: (v) {
-                        if (v != null) notifier.setEdgeTtsVoice(v);
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    _buildSliderRow(
-                      label: '语速',
-                      value: settings.edgeTtsRate,
-                      min: -50,
-                      max: 100,
-                      divisions: 30,
-                      display: _signedPct(settings.edgeTtsRate),
-                      onChanged: notifier.setEdgeTtsRate,
-                    ),
-                    _buildSliderRow(
-                      label: '音调',
-                      value: settings.edgeTtsPitch,
-                      min: -50,
-                      max: 50,
-                      divisions: 20,
-                      display: _signedHz(settings.edgeTtsPitch),
-                      onChanged: notifier.setEdgeTtsPitch,
-                    ),
-                    _buildSliderRow(
-                      label: '音量',
-                      value: settings.edgeTtsVolume,
-                      min: -50,
-                      max: 50,
-                      divisions: 20,
-                      display: _signedPct(settings.edgeTtsVolume),
-                      onChanged: notifier.setEdgeTtsVolume,
-                    ),
-                    const SizedBox(height: 4),
-                    // 试听：播报中显示停止。
-                    ValueListenableBuilder<String?>(
-                      valueListenable: tts.playingKey,
-                      builder: (context, playing, _) {
-                        final isPreview = playing == 'preview';
-                        return OutlinedButton.icon(
-                          icon: Icon(
-                            isPreview ? Icons.stop : Icons.volume_up,
-                            size: 18,
-                          ),
-                          label: Text(isPreview ? '停止' : '试听'),
-                          onPressed: () async {
-                            if (isPreview) {
-                              await tts.stop();
-                              return;
-                            }
-                            final ok = await tts.speak(
-                              // 英文音色读不出中文（服务端返回空音频），
-                              // 试听文本按音色语言选择。
-                              settings.edgeTtsVoice.startsWith('en-')
-                                  ? 'Hello, this is the TongYi-Lite voice '
-                                      'preview. Rate ${_signedPct(settings.edgeTtsRate)}.'
-                                  : '你好，这是 TongYi-Lite 的语音播报效果。'
-                                      '当前语速${_signedPct(settings.edgeTtsRate)}，'
-                                      '音色${settings.edgeTtsVoice}。',
-                              key: 'preview',
-                              voice: settings.edgeTtsVoice,
-                              rate: settings.edgeTtsRate,
-                              pitch: settings.edgeTtsPitch,
-                              volume: settings.edgeTtsVolume,
-                            );
-                            if (ok || !mounted) return;
-                            final err = tts.lastError;
-                            if (err == null) return;
-                            ScaffoldMessenger.of(context)
-                              ..hideCurrentSnackBar()
-                              ..showSnackBar(SnackBar(
-                                content: Text('🔊 试听失败：$err'),
-                                duration: const Duration(seconds: 4),
-                              ));
-                          },
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 音色列表里不存在当前设置值（拉取失败/下架）→ 返回 null 让下拉显示空，
-  /// 但保存值不动，列表恢复后自动回显。
-  String? _ttsVoiceInList(List<TtsVoiceInfo>? voices, String current) {
-    if (voices == null) return current;
-    for (final v in voices) {
-      if (v.shortName == current) return current;
-    }
-    return null;
   }
 
   static String _signedPct(int v) => '${v >= 0 ? '+' : ''}$v%';
@@ -2441,142 +2634,7 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
   // ================= ⑤ 用户技能管理（直接落盘 SKILL.md） =================
 
   /// 查看内置技能内容（只读），可「另存为我的技能」 customized 后覆盖内置。
-  Future<void> _showBuiltinSkillView(Skill s) async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('内置技能：${s.name}'),
-        content: SizedBox(
-          width: 420,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('触发：${s.whenToUse}',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                const SizedBox(height: 10),
-                SelectableText(s.body,
-                    style: const TextStyle(fontSize: 13, height: 1.4)),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('关闭'),
-          ),
-          TextButton.icon(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _showUserSkillDialog(
-                  prefillText: buildSkillMarkdown(
-                description: s.description,
-                whenToUse: s.whenToUse,
-                invocation: s.invocation,
-                body: s.body,
-              ));
-            },
-            icon: const Icon(Icons.save_as_outlined, size: 16),
-            label: const Text('另存为我的技能'),
-          ),
-        ],
-      ),
-    );
-  }
-
   /// 编辑自定义热词（多行文本，每行一个；随设置持久化）。
-  Future<void> _editAsrHotwords(SettingsNotifier notifier) async {
-    final ctrl = TextEditingController(text: settings0HotwordCustom(notifier));
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('自定义热词'),
-        content: TextField(
-          controller: ctrl,
-          maxLines: 8,
-          minLines: 4,
-          decoration: const InputDecoration(
-            hintText: '每行一个词，例如：\n彤 Yi\nTongYi-Lite\nsherpa',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('保存')),
-        ],
-      ),
-    );
-    if (ok == true) {
-      await notifier.setAsrHotwordCustom(ctrl.text);
-      if (mounted) setState(() {});
-    }
-  }
-
-  String settings0HotwordCustom(SettingsNotifier notifier) =>
-      notifier.state.asrHotwordCustom;
-
-  /// 编辑某个热词分类的词表：预填生效词（默认 + 增 − 删），保存时算差量
-  /// （增词 = 新表 − 默认表；删词 = 默认表 − 新表）持久化；「恢复默认」
-  /// 清空该分类差量。
-  Future<void> _editAsrCategoryWords(
-      HotwordCategory cat, SettingsNotifier notifier) async {
-    final defaults = defaultCategoryWords(cat.id);
-    final effective = effectiveCategoryWords(cat.id,
-        notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
-    final ctrl = TextEditingController(text: effective.join('\n'));
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('热词：${cat.name}'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                  '内置 ${defaults.length} 个词，当前生效 '
-                  '${effective.length} 个。一行一个词：新增行 = 加词，'
-                  '删掉行 = 从该分类移除。',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              const SizedBox(height: 8),
-              TextField(
-                controller: ctrl,
-                maxLines: 12,
-                minLines: 8,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => ctrl.text = defaults.join('\n'),
-            child: const Text('恢复默认'),
-          ),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('保存')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    final d = diffCategoryWords(cat.id, ctrl.text.split('\n'));
-    await notifier.setAsrHotwordCategoryEdit(cat.id, d.added, d.removed);
-    if (mounted) setState(() {});
-  }
-
   /// P2-B：添加 MCP server（名称 + 端点 URL）。
   Future<void> _showAddMcpServerDialog(SettingsNotifier notifier) async {
     final nameCtrl = TextEditingController();
@@ -2620,234 +2678,6 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
       name: name,
       url: url,
     ));
-  }
-
-  /// 新增技能 = **整段粘贴一站式**：一个文本框贴完整 SKILL.md（meta 行 +
-  /// `---` + 正文），技能名自动取 `name:` 行、缺省从描述派生——不再逐字段
-  /// 手填。[prefillText] 用于"从内置技能另存"。编辑已有技能走字段表单。
-  Future<void> _showUserSkillDialog(
-      {Skill? existing, String? prefillText}) async {
-    if (existing != null) {
-      return _showEditSkillDialog(existing);
-    }
-    final rawCtrl = TextEditingController(text: prefillText ?? '');
-    final formKey = GlobalKey<FormState>();
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('新增技能（整段粘贴）'),
-        content: Form(
-          key: formKey,
-          child: SizedBox(
-            width: 420,
-            child: TextFormField(
-              controller: rawCtrl,
-              autofocus: true,
-              minLines: 8,
-              maxLines: 16,
-              decoration: const InputDecoration(
-                labelText: '粘贴完整技能文本',
-                hintText: 'name: 可选（技能名，缺省从描述取）\n'
-                    'description: 一句话描述\n'
-                    'whenToUse: 何时触发\n'
-                    '---\n'
-                    '正文执行指引（步骤/格式/注意）',
-                border: OutlineInputBorder(),
-                alignLabelWithHint: true,
-              ),
-              validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? '请粘贴技能文本' : null,
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                Navigator.pop(ctx, true);
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (saved != true) return;
-    final raw = rawCtrl.text;
-    // 技能名：`name:` 行优先；缺省从描述派生（去尾标点取前 12 字再 sanitize）。
-    final nameMatch =
-        RegExp(r'^\s*name\s*:\s*(.+)$', multiLine: true).firstMatch(raw);
-    String? name = nameMatch?.group(1)?.trim();
-    final Skill parsed;
-    try {
-      parsed = Skill.parse(raw, name: name ?? '');
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('解析失败（格式见输入框提示）：$e')));
-      return;
-    }
-    if (parsed.description.trim().isEmpty || parsed.whenToUse.trim().isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('缺少 description / whenToUse 行——'
-              '格式：meta 行在前，`---` 分隔正文')));
-      return;
-    }
-    if (name == null || name.isEmpty) {
-      final base =
-          parsed.description.trim().replaceAll(RegExp(r'[。！？!?.、，,；;：:]'), '');
-      final sanitized = sanitizeSkillDirName(base);
-      name = (sanitized == null || sanitized.isEmpty)
-          ? null
-          : (sanitized.length > 12 ? sanitized.substring(0, 12) : sanitized);
-    }
-    if (name == null || name.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('无法确定技能名：请在文本首行加 `name: 技能名`')));
-      return;
-    }
-    try {
-      await writeUserSkill(
-        name: name,
-        description: parsed.description,
-        whenToUse: parsed.whenToUse,
-        invocation: parsed.invocation,
-        body: parsed.body,
-      );
-    } on ArgumentError catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
-      return;
-    } on Exception catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
-      return;
-    }
-    await _rescanSkills();
-  }
-
-  /// 编辑已有技能（字段表单；技能名锁定）。
-  Future<void> _showEditSkillDialog(Skill existing) async {
-    final descCtrl = TextEditingController(text: existing.description);
-    final whenCtrl = TextEditingController(text: existing.whenToUse);
-    final bodyCtrl = TextEditingController(text: existing.body);
-    final formKey = GlobalKey<FormState>();
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('编辑技能：${existing.name}'),
-        content: Form(
-          key: formKey,
-          child: SizedBox(
-            width: 420,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: descCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '一句话描述',
-                      border: OutlineInputBorder(),
-                    ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? '请填写描述' : null,
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: whenCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '何时触发（whenToUse）',
-                      border: OutlineInputBorder(),
-                    ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? '请填写触发条件' : null,
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: bodyCtrl,
-                    minLines: 5,
-                    maxLines: 12,
-                    decoration: const InputDecoration(
-                      labelText: '技能正文（执行指引）',
-                      border: OutlineInputBorder(),
-                      alignLabelWithHint: true,
-                    ),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? '请填写正文' : null,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                Navigator.pop(ctx, true);
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (saved != true) return;
-    try {
-      await writeUserSkill(
-        name: existing.name,
-        previousName: existing.name,
-        description: descCtrl.text,
-        whenToUse: whenCtrl.text,
-        body: bodyCtrl.text,
-      );
-    } on ArgumentError catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
-      return;
-    } on Exception catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('保存失败：$e')));
-      return;
-    }
-    await _rescanSkills();
-  }
-
-  Future<void> _confirmDeleteUserSkill(Skill skill) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('删除技能：${skill.name}'),
-        content: const Text('将从技能目录删除该技能（含其目录下的全部文件），'
-            '删除后无法恢复。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    await deleteUserSkill(skill.name);
-    await _rescanSkills();
   }
 
   @override
@@ -3424,281 +3254,9 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           _buildSectionHeader('📚 Skills 与指令文件', context),
-                          // 汇总行：默认收起，点开展开限高滚动列表。
-                          ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            leading: const Icon(Icons.extension, size: 20),
-                            title: Text(
-                              '技能库（内置 ${_builtinSkills.length}'
-                              ' · 我的 ${_userSkills?.length ?? '?'}）',
-                              style: const TextStyle(fontSize: 14),
-                            ),
-                            subtitle: const Text(
-                              '点开浏览/管理；整段粘贴 SKILL.md 即可新增',
-                              style: TextStyle(fontSize: 12),
-                            ),
-                            trailing: Icon(
-                              _skillsExpanded
-                                  ? Icons.expand_less
-                                  : Icons.expand_more,
-                              size: 20,
-                              color: Colors.grey,
-                            ),
-                            onTap: () => setState(
-                                () => _skillsExpanded = !_skillsExpanded),
-                          ),
-                          if (_skillsExpanded)
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxHeight: 320),
-                              child: SingleChildScrollView(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    for (final s in _builtinSkills)
-                                      ListTile(
-                                        contentPadding: EdgeInsets.zero,
-                                        dense: true,
-                                        visualDensity: VisualDensity.compact,
-                                        leading: const Icon(Icons.extension,
-                                            size: 20),
-                                        title: Text('内置 · ${s.name}',
-                                            style:
-                                                const TextStyle(fontSize: 14)),
-                                        subtitle: Text(s.description,
-                                            style:
-                                                const TextStyle(fontSize: 12)),
-                                        trailing: const Icon(
-                                            Icons.chevron_right,
-                                            size: 18,
-                                            color: Colors.grey),
-                                        onTap: () => _showBuiltinSkillView(s),
-                                      ),
-                                    const SizedBox(height: 6),
-                                    if (_userSkills == null)
-                                      const Text('正在扫描用户技能…',
-                                          style: TextStyle(
-                                              fontSize: 12, color: Colors.grey))
-                                    else if (_userSkills!.isEmpty)
-                                      const Text('暂无用户技能',
-                                          style: TextStyle(
-                                              fontSize: 12, color: Colors.grey))
-                                    else
-                                      for (final s in _userSkills!)
-                                        ListTile(
-                                          contentPadding: EdgeInsets.zero,
-                                          dense: true,
-                                          visualDensity: VisualDensity.compact,
-                                          leading: const Icon(
-                                              Icons.extension_outlined,
-                                              size: 20),
-                                          title: Text('用户 · ${s.name}',
-                                              style: const TextStyle(
-                                                  fontSize: 14)),
-                                          subtitle: Text(s.description,
-                                              style: const TextStyle(
-                                                  fontSize: 12)),
-                                          trailing: IconButton(
-                                            icon: const Icon(
-                                                Icons.delete_outline,
-                                                size: 18),
-                                            tooltip: '删除技能',
-                                            onPressed: () =>
-                                                _confirmDeleteUserSkill(s),
-                                          ),
-                                          onTap: () =>
-                                              _showUserSkillDialog(existing: s),
-                                        ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          Row(
-                            children: [
-                              TextButton.icon(
-                                onPressed: _rescanSkills,
-                                icon: const Icon(Icons.refresh, size: 16),
-                                label: const Text('重新扫描'),
-                              ),
-                              const SizedBox(width: 4),
-                              TextButton.icon(
-                                onPressed: () => _showUserSkillDialog(),
-                                icon: const Icon(Icons.add, size: 16),
-                                label: const Text('新增技能'),
-                              ),
-                            ],
-                          ),
-                          Text(
-                            '整段粘贴 SKILL.md 即可新增；同名覆盖内置。',
-                            style: TextStyle(
-                                fontSize: 11, color: Colors.grey.shade500),
-                          ),
+                          const SkillsManagementBody(),
 
                           const Divider(height: 20),
-
-                          // ---- 端侧语音输入（sherpa-onnx ASR）设置 ----
-                          _buildSectionHeader('🎙️ 语音输入（端侧识别）', context),
-                          _buildToggleTitle(
-                            '增强识别模式',
-                            settings.asrEnhancedMode,
-                            notifier.setAsrEnhancedMode,
-                            subtitle: 'beam search + 热词偏置：识别更准，首字延迟略增'
-                                '（默认标准档 = greedy 流式）',
-                          ),
-                          const SizedBox(height: 4),
-                          Text('热词分类（未选 = 全部启用；提升术语识别准确率）',
-                              style: TextStyle(
-                                  fontSize: 12, color: Colors.grey.shade600)),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 2,
-                            children: [
-                              for (final cat in hotwordCategories)
-                                FilterChip(
-                                  label: Text(cat.name,
-                                      style: const TextStyle(fontSize: 11)),
-                                  selected:
-                                      settings.asrHotwordCategories.isEmpty ||
-                                          settings.asrHotwordCategories
-                                              .contains(cat.id),
-                                  onSelected: (sel) {
-                                    final current =
-                                        settings.asrHotwordCategories;
-                                    // 空 = 全部启用语义：首次取消某个分类时，
-                                    // 先把其他全部分类写进启用集。
-                                    List<String> next;
-                                    if (current.isEmpty) {
-                                      next = sel
-                                          ? current
-                                          : [
-                                              for (final c in hotwordCategories)
-                                                if (c.id != cat.id) c.id
-                                            ];
-                                    } else {
-                                      next = sel
-                                          ? [...current, cat.id]
-                                          : current
-                                              .where((e) => e != cat.id)
-                                              .toList();
-                                    }
-                                    notifier.setAsrHotwordCategories(next);
-                                  },
-                                ),
-                            ],
-                          ),
-                          // 词表查看/编辑：逐分类展开看实际热词内容，
-                          // 点进编辑框可增删词（差量持久化）。
-                          ExpansionTile(
-                            tilePadding: EdgeInsets.zero,
-                            childrenPadding: const EdgeInsets.only(bottom: 4),
-                            title: Text('热词词表（查看 / 编辑）',
-                                style: const TextStyle(fontSize: 14)),
-                            subtitle: Text(
-                                '${hotwordCategories.length} 个分类，共 '
-                                '${hotwordCategories.fold<int>(0, (n, c) => n + effectiveCategoryWords(c.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length)} 个生效词；点分类可增删词',
-                                style: const TextStyle(fontSize: 12)),
-                            children: [
-                              for (final cat in hotwordCategories)
-                                ListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  title: Text(cat.name,
-                                      style: const TextStyle(fontSize: 13)),
-                                  subtitle: Text(
-                                      '${effectiveCategoryWords(cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length} 个词',
-                                      style: const TextStyle(fontSize: 11)),
-                                  trailing:
-                                      const Icon(Icons.edit_outlined, size: 16),
-                                  onTap: () =>
-                                      _editAsrCategoryWords(cat, notifier),
-                                ),
-                            ],
-                          ),
-                          ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            leading: const Icon(Icons.edit_note, size: 20),
-                            title: const Text('自定义热词',
-                                style: TextStyle(fontSize: 14)),
-                            subtitle: Text(
-                                settings.asrHotwordCustom.trim().isEmpty
-                                    ? '每行一个词（人名/产品名等，同音自动校正）'
-                                    : settings.asrHotwordCustom
-                                            .trim()
-                                            .split('\n')
-                                            .length
-                                            .toString() +
-                                        ' 个词',
-                                style: const TextStyle(fontSize: 12)),
-                            trailing: const Icon(Icons.edit_outlined, size: 18),
-                            onTap: () => _editAsrHotwords(notifier),
-                          ),
-                          // 模型管理：状态 + 下载/删除
-                          FutureBuilder<bool>(
-                            future: _asrModelReady ??=
-                                AsrModelManager.isReady(),
-                            builder: (ctx, snap) {
-                              final ready = snap.data ?? false;
-                              return ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                dense: true,
-                                leading: Icon(
-                                  ready
-                                      ? Icons.check_circle
-                                      : Icons.download_outlined,
-                                  size: 20,
-                                  color: ready ? Colors.green : Colors.orange,
-                                ),
-                                title: Text(ready ? '识别模型：已就绪' : '识别模型：未下载',
-                                    style: const TextStyle(fontSize: 14)),
-                                subtitle: const Text(
-                                    'sherpa-onnx 流式中文模型（约 160MB，'
-                                    '首次语音时自动下载，支持断点续传）',
-                                    style: TextStyle(fontSize: 12)),
-                                trailing: TextButton(
-                                  onPressed: () async {
-                                    if (ready) {
-                                      final ok = await showDialog<bool>(
-                                        context: context,
-                                        builder: (ctx) => AlertDialog(
-                                          title: const Text('删除识别模型？'),
-                                          content: const Text('删除后语音输入不可用，'
-                                              '再次长按说话会重新下载。'),
-                                          actions: [
-                                            TextButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(ctx, false),
-                                                child: const Text('取消')),
-                                            FilledButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(ctx, true),
-                                                child: const Text('删除')),
-                                          ],
-                                        ),
-                                      );
-                                      if (ok == true) {
-                                        await AsrModelManager.deleteModel();
-                                        if (context.mounted) {
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(const SnackBar(
-                                                  content: Text('识别模型已删除')));
-                                        }
-                                      }
-                                    } else {
-                                      await AsrModelGate.ensureModelReady(
-                                          context);
-                                    }
-                                    if (context.mounted) {
-                                      setState(() => _asrModelReady = null);
-                                    }
-                                  },
-                                  child: Text(ready ? '删除' : '下载',
-                                      style: const TextStyle(fontSize: 12)),
-                                ),
-                              );
-                            },
-                          ),
 
                           const Divider(height: 20),
 
@@ -3831,8 +3389,6 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
 
                   const SizedBox(height: 10),
 
-                  // ================= ⑧ 语音播报（Edge TTS） =================
-                  _buildTtsCard(settings, notifier),
 
                   const SizedBox(height: 24),
                 ],
@@ -4658,7 +4214,7 @@ Future<void> unloadModelAndNotify(
 class CapabilitySettingsBody extends ConsumerStatefulWidget {
   const CapabilitySettingsBody({this.controller});
 
-  /// 跳回「智能体」Tab 细调时用（人格、技能增删的表单在那边）。
+  /// 跳回「智能体」Tab 细调时用（人格表单在那边；技能管理已内联本面板）。
   final TabController? controller;
 
   @override
@@ -4668,21 +4224,304 @@ class CapabilitySettingsBody extends ConsumerStatefulWidget {
 
 class CapabilitySettingsBodyState
     extends ConsumerState<CapabilitySettingsBody> {
-  List<Skill>? _userSkills;
-  final List<Skill> _builtinSkills = loadBuiltinSkills();
+  void _gotoAgentTab() => widget.controller?.animateTo(3);
+  // ================= 语音（Edge TTS 播报 + 端侧 ASR 输入）=================
+
+  /// Edge TTS 音色列表（null = 拉取中；失败回退内置常用清单）。
+  List<TtsVoiceInfo>? _ttsVoices;
+  Future<bool>? _asrModelReady;
+
+  Future<void> _loadTtsVoices() async {
+    final voices = await EdgeTtsService.instance.listVoices();
+    if (!mounted) return;
+    setState(() => _ttsVoices = voices);
+  }
+
+  static String _signedPct(int v) => '${v >= 0 ? '+' : ''}$v%';
+  static String _signedHz(int v) => '${v >= 0 ? '+' : ''}$v Hz';
 
   @override
   void initState() {
     super.initState();
-    _rescan();
+    _loadTtsVoices();
   }
 
-  Future<void> _rescan() async {
-    final skills = await loadUserSkills();
-    if (mounted) setState(() => _userSkills = skills);
+  Widget _buildTtsCard(InferenceSettings settings, SettingsNotifier notifier) {
+    final voices = _ttsVoices;
+    final groups = groupTtsVoices(voices ?? kFallbackVoices);
+    final tts = EdgeTtsService.instance;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildToggleTitle(
+              '🔊 语音播报（Edge TTS）',
+              settings.edgeTtsEnabled,
+              notifier.setEdgeTtsEnabled,
+              subtitle: '开 = 回答气泡出现 🔊 播报按钮；需联网（免费在线接口，'
+                  '微软侧随时可能调整，失败会静默降级不打断聊天）',
+            ),
+            const SizedBox(height: 8),
+            // 子设置：总开关关闭时置灰。
+            Opacity(
+              opacity: settings.edgeTtsEnabled ? 1.0 : 0.45,
+              child: IgnorePointer(
+                ignoring: !settings.edgeTtsEnabled,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildToggleTitle(
+                      '回复后自动播报',
+                      settings.edgeTtsAutoSpeak,
+                      notifier.setEdgeTtsAutoSpeak,
+                    ),
+                    const SizedBox(height: 8),
+                    // 音色下拉（拉取失败回退内置清单）。
+                    // isExpanded=true：选中项占满行宽——方言音色全名很长
+                    // （zh-CN-shaanxi-XiaoniNeural），不放开会把 suffixIcon
+                    // 挤出界 → RenderFlex RIGHT OVERFLOWED 溢出条遮挡 UI
+                    //（真机实锤 87px）。
+                    DropdownButtonFormField<String>(
+                      value: _ttsVoiceInList(voices, settings.edgeTtsVoice),
+                      isExpanded: true,
+                      decoration: InputDecoration(
+                        labelText: '音色',
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        suffixIcon: voices == null
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: Padding(
+                                  padding: EdgeInsets.all(8),
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.refresh, size: 18),
+                                onPressed: () {
+                                  setState(() => _ttsVoices = null);
+                                  _loadTtsVoices();
+                                },
+                              ),
+                      ),
+                      items: [
+                        // 分组头（不可点，value 用哨兵防与真实音色冲突）。
+                        for (var i = 0; i < groups.length; i++) ...[
+                          DropdownMenuItem<String>(
+                            enabled: false,
+                            value: '◆group$i',
+                            child: Text(
+                              '── ${groups[i].title} ──',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
+                          ),
+                          for (final v in groups[i].voices)
+                            DropdownMenuItem(
+                              value: v.shortName,
+                              child: Text('${v.localName} · ${v.shortName}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13)),
+                            ),
+                        ],
+                      ],
+                      onChanged: (v) {
+                        if (v != null) notifier.setEdgeTtsVoice(v);
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    _buildSliderRow(
+                      label: '语速',
+                      value: settings.edgeTtsRate,
+                      min: -50,
+                      max: 100,
+                      divisions: 30,
+                      display: _signedPct(settings.edgeTtsRate),
+                      onChanged: notifier.setEdgeTtsRate,
+                    ),
+                    _buildSliderRow(
+                      label: '音调',
+                      value: settings.edgeTtsPitch,
+                      min: -50,
+                      max: 50,
+                      divisions: 20,
+                      display: _signedHz(settings.edgeTtsPitch),
+                      onChanged: notifier.setEdgeTtsPitch,
+                    ),
+                    _buildSliderRow(
+                      label: '音量',
+                      value: settings.edgeTtsVolume,
+                      min: -50,
+                      max: 50,
+                      divisions: 20,
+                      display: _signedPct(settings.edgeTtsVolume),
+                      onChanged: notifier.setEdgeTtsVolume,
+                    ),
+                    const SizedBox(height: 4),
+                    // 试听：播报中显示停止。
+                    ValueListenableBuilder<String?>(
+                      valueListenable: tts.playingKey,
+                      builder: (context, playing, _) {
+                        final isPreview = playing == 'preview';
+                        return OutlinedButton.icon(
+                          icon: Icon(
+                            isPreview ? Icons.stop : Icons.volume_up,
+                            size: 18,
+                          ),
+                          label: Text(isPreview ? '停止' : '试听'),
+                          onPressed: () async {
+                            if (isPreview) {
+                              await tts.stop();
+                              return;
+                            }
+                            final ok = await tts.speak(
+                              // 英文音色读不出中文（服务端返回空音频），
+                              // 试听文本按音色语言选择。
+                              settings.edgeTtsVoice.startsWith('en-')
+                                  ? 'Hello, this is the TongYi-Lite voice '
+                                      'preview. Rate ${_signedPct(settings.edgeTtsRate)}.'
+                                  : '你好，这是 TongYi-Lite 的语音播报效果。'
+                                      '当前语速${_signedPct(settings.edgeTtsRate)}，'
+                                      '音色${settings.edgeTtsVoice}。',
+                              key: 'preview',
+                              voice: settings.edgeTtsVoice,
+                              rate: settings.edgeTtsRate,
+                              pitch: settings.edgeTtsPitch,
+                              volume: settings.edgeTtsVolume,
+                            );
+                            if (ok || !mounted) return;
+                            final err = tts.lastError;
+                            if (err == null) return;
+                            ScaffoldMessenger.of(context)
+                              ..hideCurrentSnackBar()
+                              ..showSnackBar(SnackBar(
+                                content: Text('🔊 试听失败：$err'),
+                                duration: const Duration(seconds: 4),
+                              ));
+                          },
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  void _gotoAgentTab() => widget.controller?.animateTo(3);
+  /// 音色列表里不存在当前设置值（拉取失败/下架）→ 返回 null 让下拉显示空，
+  /// 但保存值不动，列表恢复后自动回显。
+  String? _ttsVoiceInList(List<TtsVoiceInfo>? voices, String current) {
+    if (voices == null) return current;
+    for (final v in voices) {
+      if (v.shortName == current) return current;
+    }
+    return null;
+  }
+
+  Future<void> _editAsrHotwords(SettingsNotifier notifier) async {
+    final ctrl = TextEditingController(text: settings0HotwordCustom(notifier));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义热词'),
+        content: TextField(
+          controller: ctrl,
+          maxLines: 8,
+          minLines: 4,
+          decoration: const InputDecoration(
+            hintText: '每行一个词，例如：\n彤 Yi\nTongYi-Lite\nsherpa',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await notifier.setAsrHotwordCustom(ctrl.text);
+      if (mounted) setState(() {});
+    }
+  }
+
+  String settings0HotwordCustom(SettingsNotifier notifier) =>
+      notifier.state.asrHotwordCustom;
+
+  /// 编辑某个热词分类的词表：预填生效词（默认 + 增 − 删），保存时算差量
+  /// （增词 = 新表 − 默认表；删词 = 默认表 − 新表）持久化；「恢复默认」
+  /// 清空该分类差量。
+  Future<void> _editAsrCategoryWords(
+      HotwordCategory cat, SettingsNotifier notifier) async {
+    final defaults = defaultCategoryWords(cat.id);
+    final effective = effectiveCategoryWords(cat.id,
+        notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
+    final ctrl = TextEditingController(text: effective.join('\n'));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('热词：${cat.name}'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  '内置 ${defaults.length} 个词，当前生效 '
+                  '${effective.length} 个。一行一个词：新增行 = 加词，'
+                  '删掉行 = 从该分类移除。',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctrl,
+                maxLines: 12,
+                minLines: 8,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => ctrl.text = defaults.join('\n'),
+            child: const Text('恢复默认'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final d = diffCategoryWords(cat.id, ctrl.text.split('\n'));
+    await notifier.setAsrHotwordCategoryEdit(cat.id, d.added, d.removed);
+    if (mounted) setState(() {});
+  }
+
 
   Widget _header(String title, String subtitle) {
     return Padding(
@@ -4743,7 +4582,6 @@ class CapabilitySettingsBodyState
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
-    final mine = _userSkills;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -4760,47 +4598,195 @@ class CapabilitySettingsBodyState
             _infoRow('人格（Persona）', '标准 + 自定义', '标准人格开箱即用；增删自定义人格在「智能体」Tab',
                 _gotoAgentTab),
           ]),
+          _header('🔊 语音播报（Edge TTS）',
+              '回答气泡出现 🔊 播报按钮；联网免费接口，失败静默降级'),
+          _buildTtsCard(settings, notifier),
+          const SizedBox(height: 14),
+          _header('🎙️ 语音输入（端侧识别）',
+              'sherpa-onnx 流式 ASR；热词偏置提升术语识别'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                              // ---- 端侧语音输入（sherpa-onnx ASR）设置 ----
+                              _buildSectionHeader('🎙️ 语音输入（端侧识别）', context),
+                              _buildToggleTitle(
+                                '增强识别模式',
+                                settings.asrEnhancedMode,
+                                notifier.setAsrEnhancedMode,
+                                subtitle: 'beam search + 热词偏置：识别更准，首字延迟略增'
+                                    '（默认标准档 = greedy 流式）',
+                              ),
+                              const SizedBox(height: 4),
+                              Text('热词分类（未选 = 全部启用；提升术语识别准确率）',
+                                  style: TextStyle(
+                                      fontSize: 12, color: Colors.grey.shade600)),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 2,
+                                children: [
+                                  for (final cat in hotwordCategories)
+                                    FilterChip(
+                                      label: Text(cat.name,
+                                          style: const TextStyle(fontSize: 11)),
+                                      selected:
+                                          settings.asrHotwordCategories.isEmpty ||
+                                              settings.asrHotwordCategories
+                                                  .contains(cat.id),
+                                      onSelected: (sel) {
+                                        final current =
+                                            settings.asrHotwordCategories;
+                                        // 空 = 全部启用语义：首次取消某个分类时，
+                                        // 先把其他全部分类写进启用集。
+                                        List<String> next;
+                                        if (current.isEmpty) {
+                                          next = sel
+                                              ? current
+                                              : [
+                                                  for (final c in hotwordCategories)
+                                                    if (c.id != cat.id) c.id
+                                                ];
+                                        } else {
+                                          next = sel
+                                              ? [...current, cat.id]
+                                              : current
+                                                  .where((e) => e != cat.id)
+                                                  .toList();
+                                        }
+                                        notifier.setAsrHotwordCategories(next);
+                                      },
+                                    ),
+                                ],
+                              ),
+                              // 词表查看/编辑：逐分类展开看实际热词内容，
+                              // 点进编辑框可增删词（差量持久化）。
+                              ExpansionTile(
+                                tilePadding: EdgeInsets.zero,
+                                childrenPadding: const EdgeInsets.only(bottom: 4),
+                                title: Text('热词词表（查看 / 编辑）',
+                                    style: const TextStyle(fontSize: 14)),
+                                subtitle: Text(
+                                    '${hotwordCategories.length} 个分类，共 '
+                                    '${hotwordCategories.fold<int>(0, (n, c) => n + effectiveCategoryWords(c.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length)} 个生效词；点分类可增删词',
+                                    style: const TextStyle(fontSize: 12)),
+                                children: [
+                                  for (final cat in hotwordCategories)
+                                    ListTile(
+                                      dense: true,
+                                      contentPadding: EdgeInsets.zero,
+                                      title: Text(cat.name,
+                                          style: const TextStyle(fontSize: 13)),
+                                      subtitle: Text(
+                                          '${effectiveCategoryWords(cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length} 个词',
+                                          style: const TextStyle(fontSize: 11)),
+                                      trailing:
+                                          const Icon(Icons.edit_outlined, size: 16),
+                                      onTap: () =>
+                                          _editAsrCategoryWords(cat, notifier),
+                                    ),
+                                ],
+                              ),
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                leading: const Icon(Icons.edit_note, size: 20),
+                                title: const Text('自定义热词',
+                                    style: TextStyle(fontSize: 14)),
+                                subtitle: Text(
+                                    settings.asrHotwordCustom.trim().isEmpty
+                                        ? '每行一个词（人名/产品名等，同音自动校正）'
+                                        : settings.asrHotwordCustom
+                                                .trim()
+                                                .split('\n')
+                                                .length
+                                                .toString() +
+                                            ' 个词',
+                                    style: const TextStyle(fontSize: 12)),
+                                trailing: const Icon(Icons.edit_outlined, size: 18),
+                                onTap: () => _editAsrHotwords(notifier),
+                              ),
+                              // 模型管理：状态 + 下载/删除
+                              FutureBuilder<bool>(
+                                future: _asrModelReady ??=
+                                    AsrModelManager.isReady(),
+                                builder: (ctx, snap) {
+                                  final ready = snap.data ?? false;
+                                  return ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    dense: true,
+                                    leading: Icon(
+                                      ready
+                                          ? Icons.check_circle
+                                          : Icons.download_outlined,
+                                      size: 20,
+                                      color: ready ? Colors.green : Colors.orange,
+                                    ),
+                                    title: Text(ready ? '识别模型：已就绪' : '识别模型：未下载',
+                                        style: const TextStyle(fontSize: 14)),
+                                    subtitle: const Text(
+                                        'sherpa-onnx 流式中文模型（约 160MB，'
+                                        '首次语音时自动下载，支持断点续传）',
+                                        style: TextStyle(fontSize: 12)),
+                                    trailing: TextButton(
+                                      onPressed: () async {
+                                        if (ready) {
+                                          final ok = await showDialog<bool>(
+                                            context: context,
+                                            builder: (ctx) => AlertDialog(
+                                              title: const Text('删除识别模型？'),
+                                              content: const Text('删除后语音输入不可用，'
+                                                  '再次长按说话会重新下载。'),
+                                              actions: [
+                                                TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(ctx, false),
+                                                    child: const Text('取消')),
+                                                FilledButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(ctx, true),
+                                                    child: const Text('删除')),
+                                              ],
+                                            ),
+                                          );
+                                          if (ok == true) {
+                                            await AsrModelManager.deleteModel();
+                                            if (context.mounted) {
+                                              ScaffoldMessenger.of(context)
+                                                  .showSnackBar(const SnackBar(
+                                                      content: Text('识别模型已删除')));
+                                            }
+                                          }
+                                        } else {
+                                          await AsrModelGate.ensureModelReady(
+                                              context);
+                                        }
+                                        if (context.mounted) {
+                                          setState(() => _asrModelReady = null);
+                                        }
+                                      },
+                                      child: Text(ready ? '删除' : '下载',
+                                          style: const TextStyle(fontSize: 12)),
+                                    ),
+                                  );
+                                },
+                              ),
+    
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 14),
           _header('🧩 插件（能力扩展）', '启用后图标出现在聊天输入框那一行；参数、方案档、诊断都进这个面板'),
           _card(children: const [
             PluginsEntryTile(pluginsDirHint: '文档/plugins/<插件名>/plugin.json'),
           ]),
           const SizedBox(height: 14),
-          _header('⚡ 技能（Skills）', '提示词模板；智能体按「何时触发」自己取用，也可以让它替你起草一份'),
-          _card(children: [
-            ListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-              title: Text(
-                  '内置技能 ${_builtinSkills.length} 个 · 我的技能 ${mine?.length ?? '…'} 个',
-                  style: const TextStyle(fontSize: 13)),
-              subtitle: Text(
-                mine == null
-                    ? '正在读技能目录…'
-                    : (mine.isEmpty
-                        ? '还没有自己的技能。可以让智能体把常用做法写成一份 SKILL.md 复用'
-                        : '我的技能：${mine.map((s) => s.name).join('、')}'),
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            ListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-              title: const Text('去「智能体」Tab 管理技能（新增 / 编辑 / 删除）',
-                  style: TextStyle(fontSize: 13)),
-              trailing: const Icon(Icons.chevron_right, size: 18),
-              onTap: _gotoAgentTab,
-            ),
-            ListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-              title: const Text('重新扫描技能目录', style: TextStyle(fontSize: 13)),
-              leading: const Icon(Icons.refresh, size: 18),
-              onTap: _rescan,
-            ),
-          ]),
+          _header('⚡ 技能（Skills）',
+              '提示词模板；管理动作就地完成，不再跳智能体面板'),
+          _card(children: const [SkillsManagementBody()]),
           const SizedBox(height: 16),
         ],
       ),
