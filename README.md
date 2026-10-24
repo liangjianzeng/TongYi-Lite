@@ -501,6 +501,20 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
   构建配方与补丁集入库
   `third_party/mesa-kgsl/`；详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §11-§12。  
   batched MoE 的全 GPU 收益主战场在 **prefill 大分块 GEMM**（830 实测 149 t/s）。
+- **📊 Mesa 线测量接管与首次裁决级 A/B（2026-10-20~21）**：10-19 的"Mesa 只有 1.2 t/s、整线重估"
+  被证明是三重测量污染（`830env.sh` 写死逐 op clFlush、逐提交 printf 调试版 Mesa、CPU 对照腿漂移
+  2.2×），24 份旧 e2e 日志全部作废。接管后重建测量纪律（BUILD_INFO + env 指纹强制前置、trace-off
+  构建、交错 A/B + 90s 冷却 + ≥3 轮中位），K40 出第一组裁决级数据：**Mesa 全 GPU decode ≈ CPU bank
+  的 17.5–20%**（CPU 3.14 / Mesa async 0.55 / flush1 0.63 t/s，临时裁决附五条可推翻条件）。
+  **提交层封死**（12× 提交量只差 14.5% ⇒ P5 整图单提交永久降级）；**专家 I/O 排除出关键路径**
+  （读量 ÷5.6 只 +6%；采纳 `DECODE_WINDOW=64+ROUTE_KEEP=1`，+5.9%）；**头号嫌疑换人**：真实 decode
+  图 207 形状中 87 个（42%）每 token 落 CPU，其中 80 个是 fork 自己的 `MAP_CUSTOM1 ffn_moe_slots`
+  （ggml-opencl 无实现）⇒ 每 token 数十次 GPU↔CPU 往返，成本未量化（需 third_party 插桩）。
+  P3 根因钉死（rusticl 藏 `cl_khr_subgroups`，IFP 写死 false，补丁入库）；gen7 async 病灶收敛到
+  Mesa BO/ring 复用唯一候选。App 侧同批定案：G-769 SSM 判 CPU 修复（图 30→138 段是 2.6–3× 慢的
+  真因，修复后 Ling 6.72→19.90 t/s，2.96×）、A7X batched MoE 默认放行（+46%）、a6xx 可写 3D 图像
+  pragma 补齐（K40 e2e blocker 定案）、opencl_stub 自证防"假 GPU 腿"。
+  当前状态与解锁即动手清单见 `docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`。
 - **多模态**：mtmd 视觉投影器编码（跟随主后端）。
 - **投机解码**：MTP（NextN head 多 token 预测）+ dspark（整块投机），按模型独立开启。
 - **多轮 KV checkpoint/restore**：长对话边界 checkpoint，恢复后仅对增量 token prefill  
@@ -711,6 +725,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"
 
 | 版本                                   | 日期               | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.3.4+**（Mesa 裁决链 · 思考治理 · 同 versionName 复用） | 2026-10-20~24 | **三条线并行收口**：① **Mesa 全 GPU 卸载测量接管 + L3 裁决**——10-19 整线重估结论作废（三重测量污染），重建纪律后 K40 首组裁决级 A/B：**Mesa 全 GPU decode ≈ CPU bank 的 17.5–20%**，提交层封死（P5 永久降级）、专家 I/O 排除出关键路径、头号嫌疑换人（207 形状中 87 个/42% 落 CPU，80 个是自家 `ffn_moe_slots` 无 OpenCL 实现）；P3 根因钉死（rusticl 藏 `cl_khr_subgroups`，补丁入库）；App 侧 G-769 SSM 修复 **2.96×**（6.72→19.90 t/s）、A7X batched MoE 默认放行 +46%、a6xx 3D 图像 pragma 定案 K40 e2e blocker。状态快照：`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`。② **智能体思考失控根治**：守卫改累计口径（跨块累计 + `producedAnything` 门槛），止损先抢救再判死（重试一次带 forceNoThinking），工具决策步默认不思考；机检 `tool/measure_thinking_guard.dart`。③ **API「思考强度」档位 + token 读数 + 停止按钮三洞**：每条 API 配置独立档位（一族一字段，`lib/agent/llm/thinking_effort.dart` 唯一真源，被拒自动去字段重发）；状态条实时 token 计量（含工具参数，`⚠️只想不写`告警）；停止按钮修复取消重发/步间隙/幂等三洞。验收 `flutter test test/agent test/providers test/services` = 714 passed + 2 skip。另：调试机型分级定案（740 主力 / 830 参考 / 650 冒烟，跨档结论不许互抄） |
 | **v0.3.4+**（当前 · 🔊 TTS 修复 · 同 versionName 复用） | 2026-10-20 | **Edge TTS 恢复播报（两层故障）**：① 微软 2026-10-10 起强制 **Sec-MS-GEC v2**，v1 token 全音色握手 403 → vendored `edge_tts` 移植 v2（魔改 SHA-256 + CS64，`<16hex>-<64hex>`；14 组 golden 与上游抓包逐字节一致；`Sec-MS-GEC-Version` 前缀必须**成对**翻 `2-`）② 真机第二层：手机 IPv6 到端点 TLS 被 RST 而 dart:io 在 TLS 阶段失败不换地址 → TTS 连接改 **IPv4 优先 / IPv6 兜底**。失败不再静默：`classifyTtsError` 四类（鉴权/网络/空音频/播放）+ 手动点按上 SnackBar（自动播报仍静默不打断聊天）。新增 5 个 `tool/tts_*` 排障探针；`test/tts` 29 项全绿（含本地 WS 服务端钉死 `connectionFactory` 的 TLS/端口契约）。versionCode 22 |
 | **v0.3.4** | 2026-10-18 | **llama.cpp 0.5.0 → 0.7.0 主线升级（四道门全过）**：47 冲突 hunk 全解（opencl OOB clamp × nsg_rt 组合、hadamard 双系统、backend copy_input 迁移）；KleidiAI v1.31.0 vendored（**SME2 内核族入包**，per-family march + 运行时派发）；**REGC 宏守卫错位修复**（17 个 moe `_ns` 内核 Adreno 首爆，fork 潜伏 bug）；mtmd/clip MiniCPM-V 4.7 去重、common_batch C++ 化 JNI 包装。真机基准（小米13 Adreno 740 · bonsai-8b-q1_0 · OpenCL）：decode **1.3→1.6 tok/s（+27%）**、首 Tok **10.3s→5.3s（-49%）**。详见 `docs/fork升级v0.7.0主线方案_2026-10-18.md` |
 | **v0.3.3+**（Mesa 全 GPU · 主干）          | 2026-10-17       | **FD740 rusticl 正确性战役（M1 第一阶段）**：FD740 subgroup 三大铁律实锤（查询恒报 128 撒谎 / 真实 subgroup=min(128,WG) 跨行 / reqd_sub_group_size 被无视）→ 20+ 内核修复（EFF_SGS 步长、q4_K/q6_K flat shmem 树归约、10 个 moe 内核 slid 语义、F16_MROW 默认关）；**rusticl 原生实现 qcom shuffle builtin**（再翻案），编译链注入协议钉死三条禁令；op 级全绿（MUL_MAT 1001/1009、SOFT_MAX 214/214、GET_ROWS 21/21）；e2e 全 0 破案两根因实锤（**FUSE mmap 权重垃圾页**——外置存储禁 mmap、**GPU offload ≥3 层即坏**——RS state 首坏，CL API 层三探针洗清）+ 新诊断工具链（E2E_LOGITDUMP / E2E_CBD / E2E_NOMMAP / clprobe1-3）。详见 `docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md` §12 |

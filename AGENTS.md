@@ -45,6 +45,20 @@ adb install -r app-debug.apk    # -r = replace/update，不清数据
 - 只在需要彻底清数据（换模型/出问题时）才考虑卸载，且要先告知用户模型会被清除。
 - 安装被 `INSTALL_FAILED_USER_RESTRICTED` 拒绝时，加 `-t` 并请用户在设备上点允许：`adb install -r -t app-debug.apk`。
 
+## 设备清单（调试机型分级 — 用户 2026-10-22 定案）
+
+> **任何真机结论都必须标明机型档位**；跨档结论不许互抄（GPU 单价、tok/s、内核编译行为都随 Adreno 代际变）。
+
+| 档位 | 机型 | SoC / GPU | adb | 用途 |
+|---|---|---|---|---|
+| **主力 + 底线** | 小米13（2211133C） | Snapdragon 8 Gen 2（kalama）/ **Adreno 740** | `100.109.138.2:5555` | **调试主力机型、标准支持底线**：优化/修复必须先在 740 上通过才算数，740 跑不通的一律不算修好 |
+| **高端参考** | K90（俗称 830，Xiaomi M332BF） | SM8750 / **Adreno 830**，Android 16 | `100.75.247.55:5555`（Tailscale，IP 会变） | 高端参考机型：性能上限、新驱动（E031.47）、vendor OpenCL 行为基准 |
+| **最低档** | K40 | Snapdragon 870 / **Adreno 650** | `100.67.150.120:5555` | 最低调试用：只验"能不能跑"，不用来出性能结论 |
+
+- **推论规则**：以 740 为门槛（支持底线），以 830 为上限参考，650 只做可用性冒烟。
+- 早前记录里的小米13 IP `100.70.7.18:5555`（"Dev Agent"一节）已过期，**以本表为准**。
+- 装包一律 `adb -s <ip:5555> install -r -t`，**绝不 uninstall**（会清掉已下载模型缓存）。
+
 ## 构建环境备忘
 
 - **默认打包策略（2026-08-08 起）**：每次构建默认 **debug + release 一起打**，
@@ -2874,3 +2888,67 @@ TTS「不出声」一律先跑 `dart run tool/tts_diag_probe.dart`，别猜。
 → `run_kgsl_probe.sh`（FD_* 变体矩阵，查提交层 kernel 丢失）。
 **口径**：只看单一 t/s 就下结论 = 没做分解 = 无效。必须同时给 GPU 执行、提交税、专家 IO（`total[decode] pread`，
 `IO_THREADS=1` 时即串行墙上时间）、同步四项归属；缺哪项就在结论里写明"该项未量"。
+
+## 2026-10-23 智能体「思考失控」（思考动辄几万字不收口）根治
+
+> 用户报："智能体模式思考时非常容易输出超长失控，超过 32k"。真源记录见
+> `thinking_runaway_notes.md`（根因表 + 可重跑机检表 + 验收数据），本节只留结论。
+
+**头号根因是守卫口径本身有洞**：三个 adapter 都用 `processor.thinking.length > 阈值`
+判失控，而思考块一闭合 `thinking.clear()` → **只量当前块**。模型 think…response 反复
+横跳时每块归零，累计无上限（机检 S2：20 段交替共 40250 字畅通无阻、一次不触发，
+正好对上"超 32k"）。次因：thinkingOverflow 被当确定性失败**整轮判死**（不抢救不重试）；
+工具决策步（最该少说话的那一步）也照常开思考，而原生早已存在的不思考注入从未被启用。
+
+**修的是什么（口径唯一真源，别再各自量块长）**：
+- `AgentStreamProcessor.thinkingRunaway(maxChars)` = `(当前块 || 跨块累计 totalThinkingChars)
+  > max && !producedAnything`；三个 adapter 一律调它。
+- `producedAnything` = 有工具调用 **或** 可见文本 ≥ `kMinUsefulChars`(80)。**门槛不能省**：
+  机检 S1 实测"开头两句寒暄"即可让 4 万字独白畅通无阻。
+- 止损后**先抢救再判死**：已产出工具调用/够长答案照常交付；`LlmRetry` 允许 thinkingOverflow
+  重试**一次**且该次 `forceNoThinking=true`（同模型同配置原样重发必然再次失控）。
+- `AgentConfig.thinkingOnToolSteps` 默认 false：工具决策步下发 forceNoThinking，本地路线
+  落为原生 `setEnableThinking(false)`（finally 按 `settings.enableThinking` 恢复）。
+  设置 → 智能体 → 执行参数「工具步也允许思考」可回退旧行为。
+
+**机检优先**：`~/flutter/bin/dart run tool/measure_thinking_guard.dart`（8 场景，输出
+漏网/误杀/白烧字数三列）。改守卫口径必先跑它；新增失控形态就加一个 Scenario。
+**已知盲区 S3**：无 opener 的独白是正文不是思考块，状态机看不见——兜它的是每步 token
+预算 + 工具步不思考 + 有界重试，不是本守卫；别拿"守卫没触发"当没修好。
+
+**没做的（有意不做）**：原生 thinking token 硬预算与采样反重复（DRY/min_p）属 JNI 改动，
+按本仓四道门必须真机验收，拿不准的 native 改动比不改更危险。真机若仍见原生空转再补。
+
+**验收**：`flutter test test/agent test/providers test/services` → 687 通过 + 2 skip；
+新增 `test/agent/thinking_runaway_test.dart` 12 项（累计口径/寒暄不豁免/工具调用不误杀/
+失控重试带 forceNoThinking/只重试一次/工具步不思考可回退）。`dart analyze lib` 0 error。
+
+## 2026-10-24 API「思考强度」档位 + 状态条 token 读数 + 停止按钮三个洞
+
+> 用户两要：① API 接入模型给"思考强度"选择（先统计主流做法再实现）；② 输入框上方那行
+> 「生成中 + 停止」没用，改成实时 token 读数，看得出在干什么/是不是白烧。**细节与统计表见
+> `thinking_effort_token_meter_notes.md`**（各家思考参数字段对照表在那文件里，别再重查）。
+
+- **档位挂每条 `ApiModelConfig`**（`thinkingEffort`/`thinkingFamily`，null=不干预），**不做
+  全局 bool**（MTP 老坑）。默认 null = 请求体与改动前逐字节相同。
+- 一族一字段，唯一真源 `lib/agent/llm/thinking_effort.dart`：OpenAI/grok/MiniMax 顶层
+  `reasoning_effort`；Claude `thinking.budget_tokens`（**必须 < max_tokens**）；Gemini
+  `thinking_config.thinking_budget`（0=关，缺省是自适应必须显式发）；DeepSeek/Kimi
+  `thinking.type`；GLM `thinking.enabled`；Qwen 云端顶层 `enable_thinking`；vLLM/SGLang
+  `chat_template_kwargs.enable_thinking`（顶层再带一份 bool）。**族不明什么都不发**。
+  探测先模型名后端点地址，厂商族优先于 vLLM（自托管上跑 deepseek 仍发 thinking.type）。
+- **可用性铁律**：思考字段被严格端点拒 → `OpenAiService.bodyWithoutRejectedFields` 去掉重发
+  （点名 stream_options 只去掉它；点名/泛化拒绝思考字段则整组去掉）。丢档位可以，丢请求不行。
+- token 读数在 `lib/agent/observability/turn_meter.dart`（纯函数）：中日韩按字、其余 4 字符
+  折 1，产出**含工具调用参数**；`looksWasteful`（思考 ≥600 tok 且产出 <5%）→ 细条显
+  `⚠️只想不写`。判据别放宽到"可见产出非空"，早先实测会让纯寒暄+长独白漏网。
+- **停止按钮"没反应"的三个洞**（回归 `test/agent/stop_generation_test.dart`，改动前先跑它）：
+  ① 取消以 `transport` 形态到达而 transport 可重试 → 停止后循环自己再发一次（catch 里
+  `_cancelCompleted` 直接 interrupted）；② `cancel()` 旧版仅在正在 generate 时置位 → 步间隙
+  按停止无效（现无条件先置位）；③ `chat_provider.stopGeneration` 用 `agent.isRunning` 当门槛
+  → 工具执行相位落到普通聊天分支只停一次（现 `agent != null` 即 cancel，幂等）。
+  取消是**回合级**：`kick()` 会清位，上一回合的停止不得憋死下一回合。
+- 验收：`flutter test test/agent test/providers test/services` **714 passed + 2 skip**；
+  `dart analyze lib` 0 error（44 条既有告警未变）。真机看 logcat `[AgentLlm] 思考档位 …
+  族=… → {…}` 确认实际发出字段；按停止后应见 `已取消…不进重试 → interrupted` 且不再出现
+  新的 `request (events=…)`。
