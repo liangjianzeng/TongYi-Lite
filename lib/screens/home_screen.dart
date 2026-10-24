@@ -896,148 +896,224 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 智能体面板：大开关置顶（原 composer chip 升级），下接工具组开关与
-  /// 授权/记忆/子代理/Dev 入口；深度管理进完整设置。
+  // —— 左栏面板紧凑件（对齐设计稿密度：行高 ~40、字号 13/11、图标 18）——
+
+  /// 小节标题（11px 灰、紧凑上下距）。
+  Widget _railSection(String label) => Padding(
+        padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
+        child: Text(label,
+            style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade600)),
+      );
+
+  /// 通用紧凑行：图标 18 + 标题 13/副题 11 + 尾部（无尾部且可点 = chevron）。
+  Widget _railRow({
+    IconData? icon,
+    required String title,
+    String? subtitle,
+    VoidCallback? onTap,
+    Widget? trailing,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        child: Row(children: [
+          if (icon != null) ...[
+            Icon(icon, size: 18, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w500)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 11, color: scheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          if (trailing != null)
+            trailing
+          else if (onTap != null)
+            Icon(Icons.chevron_right, size: 16, color: scheme.outline),
+        ]),
+      ),
+    );
+  }
+
+  /// 紧凑小开关（30dp 高，shrinkWrap——默认 Switch 触点 48dp 太占行高）。
+  Widget _railSwitch(bool value, ValueChanged<bool> onChanged) {
+    return SizedBox(
+      height: 30,
+      child: Switch(
+        value: value,
+        onChanged: onChanged,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+
+  /// 面板内容卡（surfaceContainerHigh 圆角 12、内距 10——设计稿 p-card）。
+  Widget _railCard(Widget child) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: child,
+    );
+  }
+
+  /// 工具组小胶囊 chip（设计稿形态：选中 = 主色底 + ✓，未选 = 灰底）。
+  Widget _railToolChip(String label, bool on, Future<void> Function(bool) set) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: () => set(!on),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: on ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (on) ...[
+            Icon(Icons.check, size: 12, color: scheme.onPrimaryContainer),
+            const SizedBox(width: 3),
+          ],
+          Text(label,
+              style: TextStyle(
+                  fontSize: 11.5,
+                  color: on
+                      ? scheme.onPrimaryContainer
+                      : scheme.onSurfaceVariant)),
+        ]),
+      ),
+    );
+  }
+
+  /// 智能体面板：紧凑卡片 + 小节化（原 Material 默认尺寸太松，对齐设计稿）。
   Widget _buildAgentRailPage() {
     return Consumer(builder: (context, ref, __) {
       final settings = ref.watch(settingsProvider);
       final notifier = ref.read(settingsProvider.notifier);
-      Widget toolChip(String label, bool on, Future<void> Function(bool) set) {
-        return FilterChip(
-          label: Text(label, style: const TextStyle(fontSize: 12)),
-          selected: on,
-          showCheckmark: false,
-          onSelected: (v) => set(v),
-        );
-      }
-
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-        children: [
-          Card(
-            elevation: 0,
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            child: SwitchListTile(
-              secondary: const Icon(Icons.smart_toy_outlined),
-              title: const Text('智能体模式',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-              subtitle: const Text('关闭 = 简单聊天（本地小模型友好）',
-                  style: TextStyle(fontSize: 11)),
-              value: settings.agentEnabled,
-              onChanged: (v) => notifier.setAgentEnabled(v),
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _railCard(Row(children: [
+              Icon(Icons.smart_toy_outlined,
+                  size: 20, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('智能体模式',
+                        style: TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    Text('关闭 = 简单聊天（本地小模型友好）',
+                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  ],
+                ),
+              ),
+              _railSwitch(
+                  settings.agentEnabled, (v) => notifier.setAgentEnabled(v)),
+            ])),
+            _railSection('工具组'),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _railToolChip('网页搜索', settings.webSearchEnabled,
+                    (v) => notifier.setWebSearchEnabled(v)),
+                _railToolChip('Shell', settings.agentShellEnabled,
+                    (v) => notifier.setAgentShellEnabled(v)),
+                _railToolChip('Python', settings.agentPythonEnabled,
+                    (v) => notifier.setAgentPythonEnabled(v)),
+                _railToolChip('记忆', settings.agentMemoryEnabled,
+                    (v) => notifier.setAgentMemoryEnabled(v)),
+              ],
             ),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 12, 4, 6),
-            child: Text('工具组',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey)),
-          ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            children: [
-              toolChip('网页搜索', settings.webSearchEnabled,
-                  (v) => notifier.setWebSearchEnabled(v)),
-              toolChip('Shell', settings.agentShellEnabled,
-                  (v) => notifier.setAgentShellEnabled(v)),
-              toolChip('Python', settings.agentPythonEnabled,
-                  (v) => notifier.setAgentPythonEnabled(v)),
-              toolChip('记忆', settings.agentMemoryEnabled,
-                  (v) => notifier.setAgentMemoryEnabled(v)),
-            ],
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 14, 4, 6),
-            child: Text('执行与授权',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey)),
-          ),
-          SwitchListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            secondary: const Icon(Icons.group_outlined, size: 20),
-            title: const Text('子代理', style: TextStyle(fontSize: 13)),
-            subtitle: const Text('spawn / fork / 后台化',
-                style: TextStyle(fontSize: 11)),
-            value: settings.agentSubagentEnabled,
-            onChanged: (v) => notifier.setAgentSubagentEnabled(v),
-          ),
-          ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.developer_mode, size: 20),
-            title: const Text('Dev Agent 开发模式', style: TextStyle(fontSize: 13)),
-            subtitle:
-                const Text('工作区 · 任务规划 · 双向同步', style: TextStyle(fontSize: 11)),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: _pushFullSettings,
-          ),
-          ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.tune, size: 20),
-            title: const Text('完整智能体设置', style: TextStyle(fontSize: 13)),
-            subtitle: const Text('审批策略 · 预算 · 思考 · MCP',
-                style: TextStyle(fontSize: 11)),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: _pushFullSettings,
-          ),
-        ],
+            _railSection('执行与授权'),
+            _railRow(
+              icon: Icons.group_outlined,
+              title: '子代理',
+              subtitle: 'spawn / fork / 后台化',
+              trailing: _railSwitch(settings.agentSubagentEnabled,
+                  (v) => notifier.setAgentSubagentEnabled(v)),
+            ),
+            _railRow(
+              icon: Icons.developer_mode,
+              title: 'Dev Agent 开发模式',
+              subtitle: '工作区 · 任务规划 · 双向同步',
+              onTap: _pushFullSettings,
+            ),
+            _railRow(
+              icon: Icons.tune,
+              title: '完整智能体设置',
+              subtitle: '审批策略 · 预算 · 思考 · MCP',
+              onTap: _pushFullSettings,
+            ),
+          ],
+        ),
       );
     });
   }
 
-  /// 人格面板：标准 + 自定义人格快速切换（原 composer 人格 chip 升级）。
+  /// 人格面板：紧凑行 + ✓ 选中态（替代大号 RadioListTile）。
   Widget _buildPersonaRailPage() {
     return Consumer(builder: (context, ref, __) {
       final settings = ref.watch(settingsProvider);
       final notifier = ref.read(settingsProvider.notifier);
       final activeId = settings.activePersonaId;
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
-        children: [
-          RadioListTile<String>(
-            dense: true,
-            secondary: const Icon(Icons.person_outline, size: 20),
-            title: const Text('标准', style: TextStyle(fontSize: 13)),
-            value: kStandardPersonaId,
-            groupValue: activeId,
-            onChanged: (_) => notifier.setActivePersona(kStandardPersonaId),
-          ),
-          for (final p in settings.agentPersonas)
-            RadioListTile<String>(
-              dense: true,
-              secondary: const Icon(Icons.theater_comedy, size: 20),
-              title: Text(p.name, style: const TextStyle(fontSize: 13)),
-              subtitle: p.prompt.isEmpty
-                  ? null
-                  : Text(p.prompt,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11)),
-              value: p.id,
-              groupValue: activeId,
-              onChanged: (_) => notifier.setActivePersona(p.id),
+      final check = Icon(Icons.check,
+          size: 16, color: Theme.of(context).colorScheme.primary);
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _railRow(
+              icon: Icons.person_outline,
+              title: '标准',
+              onTap: () => notifier.setActivePersona(kStandardPersonaId),
+              trailing: activeId == kStandardPersonaId ? check : null,
             ),
-          const Divider(),
-          ListTile(
-            dense: true,
-            leading: const Icon(Icons.add, size: 20),
-            title: const Text('管理人格 / 新建', style: TextStyle(fontSize: 13)),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: _pushFullSettings,
-          ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Text('切换人格会重置 KV 缓存，下一轮重新理解上下文',
-                style: TextStyle(fontSize: 11, color: Colors.grey)),
-          ),
-        ],
+            for (final p in settings.agentPersonas)
+              _railRow(
+                icon: Icons.theater_comedy,
+                title: p.name,
+                subtitle: p.prompt.isEmpty ? null : p.prompt,
+                onTap: () => notifier.setActivePersona(p.id),
+                trailing: activeId == p.id ? check : null,
+              ),
+            const Divider(height: 20),
+            _railRow(
+                icon: Icons.add, title: '管理人格 / 新建', onTap: _pushFullSettings),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(4, 8, 4, 0),
+              child: Text('切换人格会重置 KV 缓存，下一轮重新理解上下文',
+                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+            ),
+          ],
+        ),
       );
     });
   }
@@ -1075,7 +1151,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       final isGenerating = ref.watch(runningTurnsProvider).isNotEmpty;
       final modelName = ms.modelName ?? (ms.modelId ?? '未知模型');
       return SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
         child: Column(
           children: [
             _ModelStatusSheet(
@@ -1118,207 +1194,204 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     });
   }
 
-  /// 技能面板：入口 + 说明（管理 UI 在完整设置的智能体 Tab，逐步迁移）。
+  /// 技能面板：说明卡 + 管理入口（管理 UI 在完整设置，逐步迁移）。
   Widget _buildSkillsRailPage() {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-      children: [
-        Card(
-          elevation: 0,
-          color: Theme.of(context).colorScheme.surfaceContainerHigh,
-          child: const Padding(
-            padding: EdgeInsets.all(12),
-            child: Text(
-              '技能 = 智能体按需加载的能力包（内置 17 个 + 用户自定义）。'
-              '模型经 load_skill 启用，技能卡在对话里展示执行过程。',
-              style: TextStyle(fontSize: 12, height: 1.5),
-            ),
-          ),
-        ),
-        ListTile(
-          dense: true,
-          leading: const Icon(Icons.auto_awesome_outlined, size: 20),
-          title: const Text('管理技能（内置 / 我的技能）', style: TextStyle(fontSize: 13)),
-          trailing: const Icon(Icons.chevron_right, size: 18),
-          onTap: _pushFullSettings,
-        ),
-      ],
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _railCard(const Text(
+            '技能 = 智能体按需加载的能力包（内置 17 个 + 用户自定义）。'
+            '模型经 load_skill 启用，技能卡在对话里展示执行过程。',
+            style: TextStyle(fontSize: 12, height: 1.5),
+          )),
+          _railRow(
+              icon: Icons.auto_awesome_outlined,
+              title: '管理技能（内置 / 我的技能）',
+              onTap: _pushFullSettings),
+        ],
+      ),
     );
   }
 
-  /// 插件面板：概览 + 打开插件管理（PluginsScreen 全屏，含方案档）。
+  /// 插件面板：说明卡 + 打开插件管理（PluginsScreen 全屏，含方案档）。
   Widget _buildPluginsRailPage() {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-      children: [
-        Card(
-          elevation: 0,
-          color: Theme.of(context).colorScheme.surfaceContainerHigh,
-          child: const Padding(
-            padding: EdgeInsets.all(12),
-            child: Text(
-              '插件可向输入区（附件/停靠区/接管）与左栏（app.rail 槽位）'
-              '贡献入口；方案档可一键切换插件集。',
-              style: TextStyle(fontSize: 12, height: 1.5),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _railCard(const Text(
+            '插件可向输入区（附件/停靠区/接管）与左栏（app.rail 槽位）'
+            '贡献入口；方案档可一键切换插件集。',
+            style: TextStyle(fontSize: 12, height: 1.5),
+          )),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: () {
+                _railPanel.close();
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const PluginsScreen()));
+              },
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+              icon: const Icon(Icons.extension, size: 16),
+              label: const Text('打开插件管理', style: TextStyle(fontSize: 13)),
             ),
           ),
-        ),
-        const SizedBox(height: 4),
-        FilledButton.icon(
-          onPressed: () {
-            _railPanel.close();
-            Navigator.push(context,
-                MaterialPageRoute(builder: (_) => const PluginsScreen()));
-          },
-          icon: const Icon(Icons.extension, size: 18),
-          label: const Text('打开插件管理'),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  /// API 接入面板：当前端点/路由概览；深度配置进完整设置。
+  /// API 接入面板：端点卡 + 紧凑路由行。
   Widget _buildApiRailPage() {
     return Consumer(builder: (context, ref, __) {
       final settings = ref.watch(settingsProvider);
       final api = settings.activeApiModel();
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-        children: [
-          Card(
-            elevation: 0,
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      const Icon(Icons.api, size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          api?.name ?? '未激活 API 模型',
-                          style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.w600),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ]),
-                    const SizedBox(height: 6),
-                    Text(
-                      api == null ? '尚未配置 OpenAI 兼容端点' : '端点 ${api.baseUrl}',
-                      style: const TextStyle(fontSize: 11, color: Colors.grey),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ]),
-            ),
-          ),
-          ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.route, size: 20),
-            title: const Text('调度模式', style: TextStyle(fontSize: 13)),
-            subtitle: Text(
-              settings.agentModelSource == 'api'
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _railCard(Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Icon(Icons.api,
+                      size: 16, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(api?.name ?? '未激活 API 模型',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+                const SizedBox(height: 4),
+                Text(
+                  api == null ? '尚未配置 OpenAI 兼容端点' : '端点 ${api.baseUrl}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            )),
+            _railSection('路由'),
+            _railRow(
+              icon: Icons.route,
+              title: '调度模式',
+              subtitle: settings.agentModelSource == 'api'
                   ? '智能体指定 API 驱动'
                   : '本地优先 · API 后备',
-              style: const TextStyle(fontSize: 11),
+              onTap: _pushFullSettings,
             ),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: _pushFullSettings,
-          ),
-          ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.dns_outlined, size: 20),
-            title: const Text('端点与模型管理', style: TextStyle(fontSize: 13)),
-            subtitle: const Text('baseUrl · 密钥 · 模型列表',
-                style: TextStyle(fontSize: 11)),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: _pushFullSettings,
-          ),
-        ],
+            _railRow(
+              icon: Icons.dns_outlined,
+              title: '端点与模型管理',
+              subtitle: 'baseUrl · 密钥 · 模型列表',
+              onTap: _pushFullSettings,
+            ),
+          ],
+        ),
       );
     });
   }
 
-  /// 更多面板：UI 缩放 + 低频入口收纳（齿轮已从顶栏移除，这里兜底）。
+  /// 更多面板：UI 缩放 + 紧凑入口列表（齿轮已从顶栏移除，这里兜底）。
   Widget _buildMoreRailPage() {
     return Consumer(builder: (context, ref, __) {
       final settings = ref.watch(settingsProvider);
       final notifier = ref.read(settingsProvider.notifier);
-      Widget entry(IconData icon, String title, String subtitle) {
-        return ListTile(
-          dense: true,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-          leading: Icon(icon, size: 20),
-          title: Text(title, style: const TextStyle(fontSize: 13)),
-          subtitle: Text(subtitle, style: const TextStyle(fontSize: 11)),
-          trailing: const Icon(Icons.chevron_right, size: 18),
-          onTap: _pushFullSettings,
-        );
-      }
-
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 4, 4, 0),
-            child: Text('界面',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey)),
-          ),
-          // 全局 UI 缩放：devicePixelRatio 乘数（0.85–1.30），全 App 等比缩放。
-          ListTile(
-            dense: true,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-            leading: const Icon(Icons.format_size, size: 20),
-            title: Text('UI 缩放 ${(settings.uiScale * 100).toStringAsFixed(0)}%',
-                style: const TextStyle(fontSize: 13)),
-            subtitle: Slider(
-              value: settings.uiScale,
-              min: 0.85,
-              max: 1.30,
-              divisions: 9,
-              label: '${(settings.uiScale * 100).toStringAsFixed(0)}%',
-              onChanged: (v) => notifier.setUiScale(v),
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _railSection('界面'),
+            Row(
+              children: [
+                Expanded(
+                  child: Slider(
+                    value: settings.uiScale.clamp(0.85, 1.30),
+                    min: 0.85,
+                    max: 1.30,
+                    divisions: 9,
+                    label: '${(settings.uiScale * 100).toStringAsFixed(0)}%',
+                    onChanged: (v) => notifier.setUiScale(v),
+                  ),
+                ),
+                Text(
+                  '${(settings.uiScale * 100).toStringAsFixed(0)}%',
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ],
             ),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 10, 4, 6),
-            child: Text('设置',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey)),
-          ),
-          entry(Icons.tune, 'Agent 基础设置', '思考 · 审批 · 回合 · 温度'),
-          entry(Icons.folder_outlined, '文件', '附件 · 导出产物'),
-          entry(Icons.search, '搜索', '六引擎 · SearXNG'),
-          entry(Icons.mic_none, '语音', 'ASR · TTS · 热词'),
-          entry(Icons.description_outlined, '推理日志', '加载与运行日志'),
-          entry(Icons.info_outline, '关于', '版本 · 许可'),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: _pushFullSettings,
-            icon: const Icon(Icons.settings, size: 18),
-            label: const Text('完整设置'),
-          ),
-        ],
+            const Text('整体缩放全部 UI（85%–130%）',
+                style: TextStyle(fontSize: 11, color: Colors.grey)),
+            _railSection('设置'),
+            _railRow(
+                icon: Icons.tune,
+                title: 'Agent 基础设置',
+                subtitle: '思考 · 审批 · 回合 · 温度',
+                onTap: _pushFullSettings),
+            _railRow(
+                icon: Icons.folder_outlined,
+                title: '文件',
+                subtitle: '附件 · 导出产物',
+                onTap: _pushFullSettings),
+            _railRow(
+                icon: Icons.search,
+                title: '搜索',
+                subtitle: '六引擎 · SearXNG',
+                onTap: _pushFullSettings),
+            _railRow(
+                icon: Icons.mic_none,
+                title: '语音',
+                subtitle: 'ASR · TTS · 热词',
+                onTap: _pushFullSettings),
+            _railRow(
+                icon: Icons.description_outlined,
+                title: '推理日志',
+                subtitle: '加载与运行日志',
+                onTap: _pushFullSettings),
+            _railRow(
+                icon: Icons.info_outline,
+                title: '关于',
+                subtitle: '版本 · 许可',
+                onTap: _pushFullSettings),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _pushFullSettings,
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                ),
+                icon: const Icon(Icons.settings, size: 16),
+                label: const Text('完整设置', style: TextStyle(fontSize: 13)),
+              ),
+            ),
+          ],
+        ),
       );
     });
   }
 
+  // =========================================================================
   String _fileNameOf(String path) {
     final i = path.lastIndexOf('/');
     return i == -1 ? path : path.substring(i + 1);
   }
 
-  // =========================================================================
   // Model status chip — compact indicator in AppBar leading area (left of title)
   // Tapping opens a bottom sheet with model name, unload / reload actions
   // =========================================================================
