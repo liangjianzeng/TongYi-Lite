@@ -10770,6 +10770,68 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
+    // [dspark] qwen2.5-0.5b e2e shapes (K40 a650 rusticl ffn corruption hunt):
+    // exact prefill/decode shapes from the model graph.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 896,  9, 4864, {1, 1}, {1, 1})); // ffn_down prefill
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 896,  1, 4864, {1, 1}, {1, 1})); // ffn_down decode
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0, GGML_TYPE_F32, 4864, 9, 896,  {1, 1}, {1, 1})); // ffn gate/up prefill
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0, GGML_TYPE_F32, 896,  9, 896,  {1, 1}, {1, 1})); // attn_q control (known good)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128,  9, 896,  {1, 1}, {1, 1})); // attn_v prefill
+    // [dspark] q8_0 GEMV M-dependence probe: e2e attn_v decode is M=128 n=1 and
+    // produces garbage on K40 a650 rusticl+kgsl; generic sweep only has m=16 n=1.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128,  1, 896,  {1, 1}, {1, 1})); // attn_v decode (e2e poison)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 64,   1, 512,  {1, 1}, {1, 1})); // small-M GEMV
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 256,  1, 896,  {1, 1}, {1, 1})); // larger-M GEMV
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128,  1, 4096, {1, 1}, {1, 1})); // long-K GEMV
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0, GGML_TYPE_F32, 128,  1, 896,  {1, 1}, {1, 1})); // q5_0 GEMV control (e2e K proj is fine)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, 896,  9, 4864, {1, 1}, {1, 1}));
+    // [dspark 2026-10-20] e2e prefill V poison repro: attn_v Q8_0 ne=[896,128], n=21 -> corr 0.87
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 21, 896,  {1, 1}, {1, 1})); // exact e2e shape
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 2,  896,  {1, 1}, {1, 1})); // n sweep
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 3,  896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 4,  896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8,  896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 16, 896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 17, 896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 32, 896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 64, 896,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 21, 512,  {1, 1}, {1, 1})); // k sweep
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 21, 2048, {1, 1}, {1, 1}));
+
+    // [dspark 2026-10-20 W2] GEMV family sgs=128 vulnerability sweep (n=1, M spanning 1/2/4 WGs).
+    // q8_0 root cause: rusticl may assign sgs=128 to the noshuffle GEMV protocol (broadcast +
+    // local-reduce indexed by slid<64) -> cross-y-group k-split collapse at >=2 WGs.
+    // Other noshuffle GEMVs currently pass only at m=16 n=1 (tbo coverage gap) - likely luck
+    // (sgs=64 assignment). Sweep every quant family at decode shapes to find all carriers.
+    for (int64_t m : {64, 128, 256, 512}) {
+        for (auto t : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
+                        GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,
+                        GGML_TYPE_Q3_K, GGML_TYPE_IQ4_NL, GGML_TYPE_Q1_0}) {
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, m, 1, 1024, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, m, 1, 4096, {1, 1}, {1, 1}));
+        }
+    }
+
+    // [dspark 2026-10-20 W2] mc3 (spec-verify multi-column GEMV) sgs vulnerability probes.
+    // mc3 kernels (kernel_gemv_noshuffle_q4_0_f32_mc3 etc.) share the base noshuffle broadcast
+    // protocol, so they are theoretically vulnerable to the same rusticl sgs>64 collapse.
+    // Gate: opt-in via GGML_OPENCL_Q40_MC3/Q41_MC3/Q4K_MC3 AND ne1 in [2,4] (q4_K: ne1==3).
+    // Run once with env unset (mc3 off, regression) and once with env=1 (mc3 on, target).
+    for (auto t : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K}) {
+        for (int64_t n : {2, 3, 4}) {
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 128, n, 1024, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, 256, n, 1024, {1, 1}, {1, 1}));
+        }
+    }
+
+    // [dspark 2026-10-20 W2] MUL_MAT twins of the failing MUL_MAT_ID shapes, to bisect
+    // whether the MUL_MAT_ID failures (dense-loop + SoA prep) come from the base GEMV
+    // kernel itself or from the MoE SoA layout/dense-loop plumbing.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 64,  1, 96,  {1, 1}, {1, 1}));   // twin of mmid m=64 k=96 FAIL
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, 64,  1, 768, {1, 1}, {1, 1}));   // twin of mmid m=64 k=768 FAIL
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, 512, 1, 256, {1, 1}, {1, 1}));   // twin of mmid m=512 k=256 FAIL
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 256, 1, 128, {1, 1}, {1, 1}));   // twin of mmid m=256 k=128 FAIL
+
     // m == 1, with n on both sides of MMVF_MAX_BATCH_SIZE (8): mmvf below, operand swap above
     for (int64_t n : {1, 7, 8, 9, 16, 127, 128, 511, 512}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 1, n, 2048, {1, 1}, {1, 1}));

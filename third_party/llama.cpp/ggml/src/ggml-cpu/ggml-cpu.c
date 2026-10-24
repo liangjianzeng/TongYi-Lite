@@ -3159,6 +3159,30 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             ggml_compute_forward(&params, node);
         }
 
+        // [dspark] GGML_CPU_NODEDUMP=1: per-node rms/max/f4, dumped by thread 0
+        // right after compute (before the barrier) — golden reference for the
+        // OpenCL [nd] dumps. Dumps the LAST node of a fused chain.
+        if (state->ith == 0 && getenv("GGML_CPU_NODEDUMP")) {
+            static int nd_cnt = 0;
+            struct ggml_tensor * dn = cgraph->nodes[node_n];
+            if (dn->type == GGML_TYPE_F32 && ggml_is_contiguous(dn) && dn->data && nd_cnt < 4000) {
+                ++nd_cnt;
+                const float * host = (const float *) dn->data;
+                const size_t n = ggml_nbytes(dn) / sizeof(float);
+                double ss = 0; float mx = 0; size_t nz = 0;
+                for (size_t j = 0; j < n; j++) {
+                    ss += (double)host[j]*host[j];
+                    if (fabsf(host[j]) > mx) mx = fabsf(host[j]);
+                    if (host[j] == 0) ++nz;
+                }
+                fprintf(stderr, "[nd-cpu] %s op=%s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu f4=%.6g,%.6g,%.6g,%.6g\n",
+                        dn->name, ggml_op_name(dn->op), (long long)dn->ne[0], (long long)dn->ne[1],
+                        sqrt(ss/(double)n), mx, nz, n,
+                        n >= 4 ? host[0] : 0.f, n >= 4 ? host[1] : 0.f,
+                        n >= 4 ? host[2] : 0.f, n >= 4 ? host[3] : 0.f);
+            }
+        }
+
         if (state->ith == 0 && cplan->abort_callback &&
                 cplan->abort_callback(cplan->abort_callback_data)) {
             atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);

@@ -1494,3 +1494,21 @@ void quantize_row_iq4_xs(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, 
     assert(k % QK_K == 0);
     quantize_iq4_xs(x, y, 1, k, NULL);
 }
+
+// TEMP: golden-baseline link shim -- x86 golden-baseline build only.
+// On ARM the _generic names are defined by the taken arch branch; on x86 the
+// arch-fallback macro renames them, so provide literal _generic wrappers.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#pragma push_macro("ggml_vec_dot_pq2_0_q8_K_generic")
+#undef ggml_vec_dot_pq2_0_q8_K_generic
+void ggml_vec_dot_pq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_pq2_0_q8_K(n, s, bs, vx, bx, vy, by, nrc);
+}
+#pragma pop_macro("ggml_vec_dot_pq2_0_q8_K_generic")
+#pragma push_macro("ggml_vec_dot_ptq1_0_q8_0_generic")
+#undef ggml_vec_dot_ptq1_0_q8_0_generic
+void ggml_vec_dot_ptq1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_ptq1_0_q8_0(n, s, bs, vx, bx, vy, by, nrc);
+}
+#pragma pop_macro("ggml_vec_dot_ptq1_0_q8_0_generic")
+#endif
