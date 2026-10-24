@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -2005,8 +2006,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         _buildTurnStatusStrip(isGenerating),
         Container(
           margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-          padding: EdgeInsets.fromLTRB(
-              10, 6, 10, 14 + MediaQuery.of(context).padding.bottom),
+          padding: EdgeInsets.fromLTRB(10, 6, 10,
+              4 + math.max(MediaQuery.of(context).padding.bottom, 16)),
           decoration: BoxDecoration(
             // 设计稿形态：白底 + 细描边（不是灰底实心卡），发消息区要“轻”。
             color: Theme.of(context).colorScheme.surface,
@@ -2062,8 +2063,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(height: 2),
               Row(
                 children: [
-                  // 插件图标位（app.input.left）。
-                  SlotOutlet(slotId: 'app.input.left', registry: slots),
                   // 统一附件入口：徽标 = 已选总数（明细在上面的 chips 行）。
                   // 三个样式数值走 `PluginInputIcon` 的常量（**单真源**）：插件图标与功能图标
                   // 必须一个模子，数值抄两份迟早分叉（2026-10-24 用户实测就是分叉后被发现）。
@@ -2088,10 +2087,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // 模式 chips 已整体迁入左栏（智能体/人格/计划/模型，
                   // 2026-10-24 harness 改造）：composer 只留 KV 占用环。
                   _buildContextUsageRing(),
-                  const SizedBox(width: 4),
-                  // 插件图标位（app.input.right）：插件的主入口就长在这。
-                  SlotOutlet(slotId: 'app.input.right', registry: slots),
-                  _buildComposerKey(isGenerating),
+                  const Spacer(),
+                  if (!isGenerating) _buildMicKey(),
+                  _buildSendKey(isGenerating),
                 ],
               ),
             ],
@@ -2457,12 +2455,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// - 生成中 + 空输入：⏹ 停止；
   /// - 生成中 + 有文字：➤ 插话（steer，不打断执行；附件不随插话发送）。
   /// 停止另有生成中状态细条右侧「停止」文字按钮兜底（永远两处可达）。
-  Widget _buildComposerKey(bool isGenerating) {
+  /// 发送键（固定最右）：有文字 = 发送；生成中 = 插话/停止；空闲隐藏
+  ///（麦克风独立常驻，见 [_buildMicKey]——设计稿形态：发送钮恒在最右）。
+  Widget _buildSendKey(bool isGenerating) {
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: _textController,
       builder: (_, value, __) {
         final hasText = value.text.trim().isNotEmpty;
-        // 生成中：空输入 = 停止；有文字 = 插话发送。
         if (isGenerating) {
           return _roundKey(
             icon: hasText ? Icons.arrow_upward : Icons.stop,
@@ -2473,7 +2472,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onTap: hasText ? _steerMessage : _stopGeneration,
           );
         }
-        // 空闲：有文字 = 发送；空输入 = 麦克风（长按说话，保留原手势语义）。
         if (hasText) {
           return _roundKey(
             icon: Icons.arrow_upward,
@@ -2482,35 +2480,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onTap: _sendMessage,
           );
         }
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) =>
-              _onVoiceLongPressStart(context, d.globalPosition),
-          onLongPressMoveUpdate: (d) =>
-              _onVoiceLongPressMoveUpdate(d.globalPosition),
-          onLongPressEnd: (_) => _onVoiceLongPressEnd(),
-          onLongPressCancel: () => _onVoiceLongPressEnd(),
-          // 设计稿形态：空输入的麦克风是裸图标（非实心大圆）；Tooltip 只包
-          // 图标本体不包 GestureDetector 外层（长按手势不能被 Tooltip 抢）。
-          child: Tooltip(
-            message: '按住说话，松手即发送（上滑取消）',
-            child: SizedBox(
-              width: 34,
-              height: 34,
-              child: Icon(
-                Icons.mic,
-                size: 22,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-          ),
-        );
+        return const SizedBox.shrink();
       },
     );
   }
 
-  /// 40px 圆形实心主键（composer 卡片内嵌，替代 FAB 的悬浮阴影）。
-  /// [tooltip] 传 null = 不包 Tooltip——Tooltip 默认带长按手势识别器，
+  /// 麦克风键（常驻，独立于发送键）：长按说话，松手即发送，上滑取消。
+  /// Tooltip 只包图标本体，不包手势层（Tooltip 的长按识别器会抢手势）。
+  Widget _buildMicKey() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPressStart: (d) =>
+          _onVoiceLongPressStart(context, d.globalPosition),
+      onLongPressMoveUpdate: (d) =>
+          _onVoiceLongPressMoveUpdate(d.globalPosition),
+      onLongPressEnd: (_) => _onVoiceLongPressEnd(),
+      onLongPressCancel: () => _onVoiceLongPressEnd(),
+      child: Tooltip(
+        message: '按住说话，松手即发送（上滑取消）',
+        child: SizedBox(
+          width: 34,
+          height: 34,
+          child: Icon(
+            Icons.mic,
+            size: 22,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 会赢过外层 GestureDetector 的长按（麦克风长按说话被它抢走的实锤，07:1x）。
   Widget _roundKey({
     required IconData icon,
