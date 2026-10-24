@@ -114,7 +114,20 @@ final class LlmRetry {
   /// 空响应是否计入可重试档（API 路线开：思考型模型推理耗尽 max_tokens
   /// 时 content 为空，属设计文档 §5.4 的 EMPTY_RESPONSE 可重试码）。
   final bool retryEmptyResponse;
+
+  /// 思考失控是否允许「换条件重试」一次（默认开）。
+  ///
+  /// 旧行为：thinkingOverflow 永不重试 → 整轮判死，用户只看到"本轮执行失败"。
+  /// 新行为：允许重试**一次**，且该次请求强制关思考（见 [takeForceNoThinking]）——
+  /// 同一模型同一配置原样重发必然再次失控，只有换条件重采样才有救。
+  final bool retryThinkingOverflow;
+
+  /// 每步思考失控重试上限（默认 1；防"失控→关思考重试→又失控"循环烧 token）。
+  final int maxThinkingRetries;
+
   int _retries;
+  int _thinkingRetries = 0;
+  bool _forceNoThinkingNext = false;
 
   LlmRetry({
     this.maxRetries = 3,
@@ -122,11 +135,25 @@ final class LlmRetry {
     this.maxDelay = const Duration(seconds: 10),
     this.backoffFactor = 2.0,
     this.retryEmptyResponse = false,
+    this.retryThinkingOverflow = true,
+    this.maxThinkingRetries = 1,
   }) :
     _retries = 0;
 
-  void reset() => _retries = 0;
+  void reset() {
+    _retries = 0;
+    _thinkingRetries = 0;
+    _forceNoThinkingNext = false;
+  }
+
   int get retries => _retries;
+
+  /// 取走「下一次请求请强制不思考」标志（读后即清）。
+  bool takeForceNoThinking() {
+    final v = _forceNoThinkingNext;
+    _forceNoThinkingNext = false;
+    return v;
+  }
 
   /// 该失败是否允许 llm-retry（compaction 不在此判定，由瀑布分开处理）。
   bool isRetryable(LlmFailure f) {
@@ -141,8 +168,10 @@ final class LlmRetry {
     if (f.code == LlmFailureCode.emptyResponse && !retryEmptyResponse) {
       return false;
     }
-    // 思考失控：模型行为（同一模型同一配置重试还会同样失控），只浪费 token。
-    if (f.code == LlmFailureCode.thinkingOverflow) return false;
+    // 思考失控：只许一次，且那次必须关思考重试（见 maybeBackoff）；用尽即止损。
+    if (f.code == LlmFailureCode.thinkingOverflow) {
+      return retryThinkingOverflow && _thinkingRetries < maxThinkingRetries;
+    }
     // 其余失败（含 toolCallTruncated：采样可能产出更短的完整调用）走
     // 统一的 maxRetries 预算——连续截断说明 token 预算真不够，及时止损。
     return _retries < maxRetries;
@@ -152,6 +181,12 @@ final class LlmRetry {
   /// 返回 null 表示不应重试（超出 maxRetries）。
   Future<Duration?> maybeBackoff(LlmFailure f) async {
     if (!isRetryable(f)) return null;
+    if (f.code == LlmFailureCode.thinkingOverflow) {
+      _thinkingRetries++;
+      // 关键：重试必须换条件（关思考），否则同一模型同一配置必然再次失控。
+      _forceNoThinkingNext = true;
+      return const Duration(milliseconds: 0);
+    }
     _retries++;
     if (_retries == 1) return const Duration(milliseconds: 0);
     final rawMs = (initialDelay.inMilliseconds *

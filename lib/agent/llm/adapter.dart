@@ -21,10 +21,15 @@ final class AgentCancelledException {
   const AgentCancelledException();
 }
 
-/// 思考流失控守卫阈值（字符数）：思考块超长未闭合（实测 agents-a1-4b
-/// enableThinking 下 `<think>` 一开就写数千字独白不闭合，正文永不来）→
-/// adapter 主动停流并按 [LlmFailureCode.thinkingOverflow] 失败，
-/// 避免把整轮 token 预算烧光后用户干等数分钟。
+/// 思考流失控守卫阈值（**累计**字符数）：
+///
+/// 口径（唯一真源是 [AgentStreamProcessor.thinkingRunaway]，adapter 不许自量块长）：
+/// 累计思考超过该字数、且本步还没产出有用内容 → 主动停流止损，
+/// 按 [LlmFailureCode.thinkingOverflow] 处理（可抢救 + 关思考重试一次）。
+///
+/// 为什么必须是累计：端侧小模型爱 `think…response…think…response` 反复横跳，
+/// 只量「当前块」会每块归零 → 总量无上限（实测 4 万字独白畅通无阻，
+/// 把每轮 token 预算与上下文吃光，就是用户报的"思考超 32k"）。
 const int kMaxThinkingChars = 6000;
 
 /// 模型 provider 类型（本地引擎 / 远程 API）。
@@ -99,6 +104,15 @@ final class GenerateOptions {
   /// `toolgen|<chars>|<preview>`（工具调用块生成中）/ `toolgen|0|`（结束）。
   final StreamController<String>? onStatus;
 
+  /// 本步强制不思考（端侧思考失控治理，默认 false）。
+  ///
+  /// 两个来源：① 主循环对"工具决策步"强制关思考（工具步只需产出调用，
+  /// 长思考纯烧端侧预算且是失控高发区）；② 上一步因思考失控被止损后的
+  /// 那次重试——同一模型同一配置原样重发必然再次失控，必须换条件重采样。
+  /// 本地路线落实为原生 enableThinking 临时关闭；API 路线服务端自决
+  /// （不同服务端关思考的私有参数不一，盲传会 400），仅重采样。
+  final bool forceNoThinking;
+
   const GenerateOptions({
     required this.provider,
     required this.messages,
@@ -110,6 +124,7 @@ final class GenerateOptions {
     this.audioPath,
     this.imagePaths,
     this.onStatus,
+    this.forceNoThinking = false,
   });
 }
 

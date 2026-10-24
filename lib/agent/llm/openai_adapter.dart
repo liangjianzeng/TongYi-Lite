@@ -16,6 +16,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../models/api_model.dart';
 import '../../providers/agent_stream_processor.dart';
@@ -23,6 +24,7 @@ import '../../services/openai_service.dart';
 import 'adapter.dart';
 import 'base_engine_adapter.dart';
 import '../capability.dart';
+import 'thinking_effort.dart';
 import '../protocol/tool_protocol.dart';
 import '../tool_definition.dart';
 
@@ -373,8 +375,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
     }
 
     try {
-      // 思考失控守卫（local/API 同规）：思考超长未闭合 → 主动停 SSE 止损。
+      // 思考失控守卫（local/API 同规）：累计思考超预算且尚无产出 → 停 SSE 止损。
       var _thinkingOverflow = false;
+      var _thinkingCharsAtTrigger = 0;
       // WP5：API 路线工具调用以原生 tool_calls 分片到达（reasoning 内容在
       // assembler 思考通道），工具参数生长期 assembler 文本为空——
       // 用思考通道+分片累计长度合成提示，避免 UI 干转圈。
@@ -385,6 +388,7 @@ class OpenAiAdapter extends BaseEngineAdapter {
         tools: tools,
         temperature: options.temperature,
         maxTokens: options.maxTokens ?? 512,
+        extraBody: _thinkingFields(options.maxTokens ?? 512),
       ).listen(
         (event) {
           assembler.addEvent(event);
@@ -395,8 +399,12 @@ class OpenAiAdapter extends BaseEngineAdapter {
             onThinking.add(assembler.thinkingSoFar);
           }
           if (!_thinkingOverflow &&
-              assembler.thinkingSoFar.length > _maxThinkingChars) {
+              assembler.thinkingSoFar.length > _maxThinkingChars &&
+              assembler.textSoFar.trim().length <
+                  AgentStreamProcessor.kMinUsefulChars &&
+              assembler.pendingToolCallChars == 0) {
             _thinkingOverflow = true;
+            _thinkingCharsAtTrigger = assembler.thinkingSoFar.length;
             openAi.stop();
           }
           if (options.onStatus != null) {
@@ -424,10 +432,23 @@ class OpenAiAdapter extends BaseEngineAdapter {
       // 思考失控先于错误判定：stop() 会以 cancel 错误收场，若先走 error
       // 分支会归为 transport（可重试）→ 失控思考被重试 5 遍。
       if (_thinkingOverflow) {
+        // 先抢救再判死：止损前已产出的正文/工具调用照样交付。
+        final salvaged = assembler.finalize();
+        if (salvaged.text.trim().isNotEmpty || salvaged.calls.isNotEmpty) {
+          debugPrint('[AgentLlm] API 原生路线思考失控已止损'
+              '（累计 $_thinkingCharsAtTrigger 字），已有产出 → 照常返回');
+          return LlmResult(
+            text: salvaged.text,
+            toolCalls: salvaged.calls,
+            usage: assembler.usage,
+          );
+        }
         throw LlmFailure(
           code: LlmFailureCode.thinkingOverflow,
-          message: '思考超长未闭合（>$_maxThinkingChars 字），已中止生成：'
-              '该模型思考失控。可在 设置→智能体 调大「思考失控守卫阈值」后重试',
+          message: '思考失控：已累计思考 $_thinkingCharsAtTrigger 字仍无任何产出，'
+              '已主动中止（阈值 $_maxThinkingChars 字）。'
+              '本次自动改用「不思考」重试一次；若频繁出现，'
+              '请在 设置→智能体 调大「思考失控守卫阈值」',
         );
       }
       final error = await outcome.future;
@@ -491,8 +512,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
     }
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
-    // 思考失控守卫标志（同原生路线）。
+    // 思考失控守卫标志（同原生路线；口径用 thinkingRunaway = 跨块累计 + 无产出）。
     var _thinkingOverflow = false;
+    var _thinkingCharsAtTrigger = 0;
     // 流终态（null=干净完成，非 null=错误）。
     final outcome = Completer<Object?>();
     StreamSubscription<String>? sub;
@@ -509,6 +531,7 @@ class OpenAiAdapter extends BaseEngineAdapter {
         messages: apiMessages,
         temperature: options.temperature,
         maxTokens: options.maxTokens ?? 512,
+        extraBody: _thinkingFields(options.maxTokens ?? 512),
       ).listen(
         (token) {
           if (token.isEmpty) return;
@@ -521,8 +544,9 @@ class OpenAiAdapter extends BaseEngineAdapter {
             onThinking!.add(processor.thinkingText);
           }
           if (!_thinkingOverflow &&
-              processor.thinking.length > _maxThinkingChars) {
+              processor.thinkingRunaway(_maxThinkingChars)) {
             _thinkingOverflow = true;
+            _thinkingCharsAtTrigger = processor.thinkingCharsSoFar;
             openAi.stop();
           }
         },
@@ -539,10 +563,20 @@ class OpenAiAdapter extends BaseEngineAdapter {
       }
       // 思考失控先于错误判定（stop() 以 cancel 收场，别让它进可重试档）。
       if (_thinkingOverflow) {
+        // 先抢救再判死：止损前已产出的工具调用/答案照样有效。
+        if (processor.hasToolCalls ||
+            processor.visibleText.trim().length >=
+                AgentStreamProcessor.kMinUsefulChars) {
+          debugPrint('[AgentLlm] API 文本路线思考失控已止损'
+              '（累计 $_thinkingCharsAtTrigger 字），已有产出 → 照常返回');
+          return parseAndReturn(rawBuffer, processor);
+        }
         throw LlmFailure(
           code: LlmFailureCode.thinkingOverflow,
-          message: '思考超长未闭合（>$_maxThinkingChars 字），已中止生成：'
-              '该模型思考失控。可在 设置→智能体 调大「思考失控守卫阈值」后重试',
+          message: '思考失控：已累计思考 $_thinkingCharsAtTrigger 字仍无任何产出，'
+              '已主动中止（阈值 $_maxThinkingChars 字）。'
+              '本次自动改用「不思考」重试一次；若频繁出现，'
+              '请在 设置→智能体 调大「思考失控守卫阈值」',
         );
       }
       final error = await outcome.future;
@@ -565,6 +599,31 @@ class OpenAiAdapter extends BaseEngineAdapter {
         currentSub = null;
       }
     }
+  }
+
+  /// 该端点的思考强度请求字段（档位=不干预时返回空 → 一个字段都不发）。
+  ///
+  /// 族优先取用户在设置里钉死的覆盖值，其次按模型名/端点自动探测；映射表是
+  /// [thinkingWireFields] 这个纯函数（一族一字段，越界字段由测试当场拦）。
+  /// 严格端点不认时由 [OpenAiService.bodyWithoutRejectedFields] 去掉重发——
+  /// 丢档位可以，整条请求不能失败。
+  Map<String, dynamic> _thinkingFields(int? maxTokens) {
+    final cfg = _apiModel;
+    if (cfg == null) return const {};
+    final effort = thinkingEffortFromKey(cfg.thinkingEffort);
+    if (effort == ThinkingEffort.passthrough) return const {};
+    final family = thinkingFamilyFromKey(cfg.thinkingFamily) ??
+        detectThinkingFamily(cfg.model, baseUrl: cfg.baseUrl);
+    final fields = thinkingWireFields(
+      effort: effort,
+      family: family,
+      maxTokens: maxTokens ?? cfg.effectiveMaxTokens,
+    );
+    if (fields.isNotEmpty) {
+      debugPrint('[AgentLlm] 思考档位 ${cfg.model} '
+          '族=${family.name} ${thinkingEffortLabel(effort)} → $fields');
+    }
+    return fields;
   }
 
   /// 流错误 → [LlmFailure]：[OpenAiHttpException]（携带状态码）按状态分档，

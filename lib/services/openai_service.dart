@@ -112,12 +112,14 @@ class OpenAiService {
     required List<Map<String, dynamic>> messages,
     double? temperature,
     int? maxTokens,
+    Map<String, dynamic>? extraBody,
   }) async* {
     await for (final payload in _sseDataPayloads(
       config: config,
       messages: messages,
       temperature: temperature,
       maxTokens: maxTokens,
+      extraBody: extraBody,
     )) {
       if (payload == '[DONE]') break;
       try {
@@ -156,6 +158,7 @@ class OpenAiService {
     List<Map<String, dynamic>>? tools,
     double? temperature,
     int? maxTokens,
+    Map<String, dynamic>? extraBody,
   }) async* {
     await for (final payload in _sseDataPayloads(
       config: config,
@@ -163,6 +166,7 @@ class OpenAiService {
       tools: tools,
       temperature: temperature,
       maxTokens: maxTokens,
+      extraBody: extraBody,
     )) {
       if (payload == '[DONE]') break;
       Map<String, dynamic> json;
@@ -228,12 +232,64 @@ class OpenAiService {
   /// 共享 SSE 通道：发起请求并产出 `data:` 载荷行（不含 `data:` 前缀）。
   ///
   /// HTTP/网络错误抛 [OpenAiHttpException]（携带状态码，供 adapter 分档）。
+  /// 严格端点 400 兜底：报错点名某个**可选**字段时，去掉它给一份可重发的 body；
+  /// 无可去掉的东西返回 null（调用方按原样抛错）。
+  ///
+  /// 为什么值得单独抽出来：思考强度字段（reasoning_effort / thinking /
+  /// thinking_config / enable_thinking / chat_template_kwargs）是**按族发**的，
+  /// 族判错时不能让整条 API 智能体不可用——丢档位可以，丢请求不行。
+  static Map<String, dynamic>? bodyWithoutRejectedFields(
+      Map<String, dynamic> body, String detail) {
+    final msg = detail.toLowerCase();
+    final drop = <String>[];
+    if (body.containsKey('stream_options') &&
+        (msg.contains('stream_options') || msg.contains('include_usage'))) {
+      drop.add('stream_options');
+    }
+    const thinkingKeys = [
+      'reasoning_effort',
+      'thinking',
+      'thinking_config',
+      'thinking_budget',
+      'enable_thinking',
+      'chat_template_kwargs',
+    ];
+    // 点名任一思考字段，或只说 unknown parameter / extra fields not permitted
+    // 这类不点名的报错：把**整组**思考字段去掉。理由：它们出自同一次族映射，
+    // 端点拒了一个就说明它不讲这一族方言，留半个只会再撞一次 400。
+    // （stream_options 更基础，不因泛化报错被顺带丢掉。）
+    bool namedThinking = false;
+    for (final k in thinkingKeys) {
+      if (body.containsKey(k) && msg.contains(k)) {
+        namedThinking = true;
+        break;
+      }
+    }
+    final generic = msg.contains('unknown parameter') ||
+        msg.contains('unrecognized') ||
+        msg.contains('extra fields') ||
+        msg.contains('not permitted') ||
+        msg.contains('unexpected parameter') ||
+        msg.contains('invalid parameter');
+    if (namedThinking) {
+      drop.addAll(thinkingKeys.where((k) => body.containsKey(k)));
+    } else if (drop.isEmpty && generic) {
+      // 已点名 stream_options 时不做这步：先只去掉被点名的那个，最小改动优先
+      // （同时去掉思考档位会白丢用户配的档位，且只有一次重试机会）。
+      drop.addAll(thinkingKeys.where((k) => body.containsKey(k)));
+    }
+    if (drop.isEmpty) return null;
+    return Map<String, dynamic>.from(body)
+      ..removeWhere((k, _) => drop.contains(k));
+  }
+
   Stream<String> _sseDataPayloads({
     required ApiModelConfig config,
     required List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     double? temperature,
     int? maxTokens,
+    Map<String, dynamic>? extraBody,
   }) async* {
     // 中断上一轮（若存在），并为本轮创建新令牌。
     _cancelToken?.cancel();
@@ -252,47 +308,44 @@ class OpenAiService {
       'temperature': temperature ?? config.effectiveTemperature,
       'max_tokens': maxTokens ?? config.effectiveMaxTokens,
       if (tools != null && tools.isNotEmpty) 'tools': tools,
+      // 思考强度档位等端点专属字段（一族一字段，见 thinking_effort.dart）；
+      // 族判错时由下方 400 兜底整组去掉重发。
+      if (extraBody != null) ...extraBody,
     };
+
+    Future<Response<ResponseBody>> post(Map<String, dynamic> b) =>
+        _dio.post<ResponseBody>(
+          url,
+          data: b,
+          options: Options(
+            responseType: ResponseType.stream,
+            headers: _headers(config.apiKey),
+          ),
+          cancelToken: _cancelToken,
+        );
 
     Response<ResponseBody> response;
     try {
-      response = await _dio.post<ResponseBody>(
-        url,
-        data: body,
-        options: Options(
-          responseType: ResponseType.stream,
-          headers: _headers(config.apiKey),
-        ),
-        cancelToken: _cancelToken,
-      );
+      response = await post(body);
     } on DioException catch (e) {
       final status = e.response?.statusCode;
-      if (body.containsKey('stream_options') &&
-          (status == 400 || status == 404 || status == 422)) {
-        // 端点不认 stream_options → 去掉该字段重试一次（牺牲 usage 换可用）。
-        final detail = await _describeApiError(e);
-        if (detail.contains('stream_options') || detail.contains('include_usage')) {
-          final retryBody = Map<String, dynamic>.from(body)
-            ..remove('stream_options');
-          try {
-            response = await _dio.post<ResponseBody>(
-              url,
-              data: retryBody,
-              options: Options(
-                responseType: ResponseType.stream,
-                headers: _headers(config.apiKey),
-              ),
-              cancelToken: _cancelToken,
-            );
-          } on DioException catch (e2) {
-            throw OpenAiHttpException(
-              statusCode: e2.response?.statusCode,
-              message: await _describeApiError(e2),
-            );
-          }
-        } else {
-          throw OpenAiHttpException(statusCode: status, message: detail);
+      final optionalFieldStatus = status == 400 || status == 404 || status == 422;
+      final detail = optionalFieldStatus ? await _describeApiError(e) : '';
+      // 端点不认可选字段（stream_options / 思考参数）→ 去掉再试一次：
+      // 宁可丢 usage、丢思考档位，也不能让整个请求失败。
+      final retryBody =
+          optionalFieldStatus ? bodyWithoutRejectedFields(body, detail) : null;
+      if (retryBody != null) {
+        try {
+          response = await post(retryBody);
+        } on DioException catch (e2) {
+          throw OpenAiHttpException(
+            statusCode: e2.response?.statusCode,
+            message: await _describeApiError(e2),
+          );
         }
+      } else if (optionalFieldStatus) {
+        throw OpenAiHttpException(statusCode: status, message: detail);
       } else {
         throw OpenAiHttpException(
           statusCode: e.response?.statusCode,

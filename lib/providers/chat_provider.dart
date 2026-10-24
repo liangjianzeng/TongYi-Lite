@@ -227,7 +227,12 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
   }
 }
 
-final currentConversationProvider = StateProvider<Conversation?>((ref) => null);
+/// 当前打开的会话 id（没有就是 null）。
+///
+/// 以前这里挂的是 `StateProvider<Conversation?>` 且**全仓没人写过它** —— 一个永远为 null 的死状态。
+/// 插件平台的 `agent_handoff` 需要知道「交接进哪一串对话」，于是把它换成 id 并由 home_screen 唯一入口写：
+/// 判「哪一串是对话页正在看的」只能有一个真源，别让每个接缝各自猜。
+final currentConversationIdProvider = StateProvider<String?>((ref) => null);
 
 final messagesProvider = StreamProvider.autoDispose
     .family<List<ChatMessage>, String>((ref, convId) async* {
@@ -1468,6 +1473,8 @@ class ChatNotifier extends StateNotifier<bool> {
           ? _apiContextTokenBudget(settings, activeApi)
           : (settings.agentNctx * 3) ~/ 4,
       maxTokensFinalRound: useApi ? null : 2048,
+      // 思考失控治理：工具决策步默认不思考（端侧思考独白几乎都发生在那一步）。
+      thinkingOnToolSteps: settings.agentThinkingOnToolSteps,
     );
     // 按路由选 adapter（local/API），各自冻结能力快照。
     // 思考失控守卫阈值共用一份设置（WP4：可调，默认 6000 字）。
@@ -1484,6 +1491,8 @@ class ChatNotifier extends StateNotifier<bool> {
             protocol: protocol,
             capabilities: caps,
             maxThinkingChars: settings.agentThinkingMaxChars,
+            // 强制不思考后要知道该恢复成什么（用户的全局思考开关）。
+            thinkingEnabled: settings.enableThinking,
           );
 
     // [NewAgent] 新 seam 活跃标记（验证 Phase 3 代码路径；验证后可删）
@@ -2382,8 +2391,12 @@ class ChatNotifier extends StateNotifier<bool> {
       // 挂死到超时，停止按钮看起来没反应。
       answerPendingQuestion(id, null);
       // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
+      // 注意**不能**用 isRunning 当门槛：相位在工具执行/步间隙时 isRunning 为
+      // false，旧写法会漏到这里以下的"普通聊天"分支——只停一次当前生成，主循环
+      // 随后自己接着发起下一步（用户反馈"停止没反应"的根因之一）。
+      // agent.cancel() 幂等，未开跑时调用也安全。
       final agent = turn.agent;
-      if (agent != null && agent.isRunning) {
+      if (agent != null) {
         debugPrint('[ChatNotifier] stopGeneration: cancel agent turn conv=$id');
         await agent.cancel();
         continue;
