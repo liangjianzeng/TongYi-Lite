@@ -432,7 +432,7 @@ static void family_d() {
     const int64_t small[4] = { 128, 1, 1, 1 };
     const int64_t big_ne0[4] = { 1000000, 1, 1, 1 };
     const int64_t kv_like[4] = { 576, 64, 1, 1 };   // KV SET_ROWS：ne[1]>1
-    CHECK(small_op_to_cpu(SOP_ARGSORT, small, false), "D1a ARGSORT 小数组落 CPU");
+    CHECK(small_op_to_cpu(SOP_ARGSORT, small, false) == false, "D1a 表默认关时不搬");
     CHECK(small_op_to_cpu(SOP_SET_ROWS, small, true) == false, "D1b 预分配豁免（buffered 不搬）");
     CHECK(small_op_to_cpu(SOP_SET_ROWS, kv_like, false) == false, "D1c KV 形状 ne[1]>1 不搬");
     CHECK(small_op_to_cpu(SOP_FILL, big_ne0, false) == false, "D1d ne[0]>256 不搬");
@@ -440,7 +440,8 @@ static void family_d() {
     int n = 0;
     const SmallOpPolicy * p = small_op_policies(&n);
     CHECK(n == 6, "D2 表规模 6 行");
-    for (int i = 0; i < n; ++i) CHECK(p[i].enabled && p[i].max_ne0 == 256, "D2b 行内容 pin");
+    // [判伪后定档] 默认全关（真机 -62%）；D1 的判定语义验证走带门直接调用
+    for (int i = 0; i < n; ++i) CHECK(!p[i].enabled && p[i].max_ne0 == 256, "D2b 默认关 pin");
     printf("D 小算子策略：通过\n");
 }
 

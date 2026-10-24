@@ -299,13 +299,18 @@ bool known_bad_lookup(RCompiler c, const char * kernel_name) {
 }
 
 // ---- G-782 尺寸开关：小算子 CPU 路由策略表（改判定 = 改表行，不改逻辑） ----
+// [2026-10-25 02:2x 真机判伪定案（740/Ling/贪心短腿）] enabled 全部改 false：
+// 政策真开启时 splits 31->215（每 split 边界一次 GPU 排空/同步），tok_s 7.5->2.84
+//（-62%）——边界同步税 >> 发射税节省。与 G-769（SSM 判 CPU 138 splits 2.96x 慢）
+// 同向实证：本架构下 CPU 岛是毒药；740 launch-bound 出路 = 融合/megakernel 减少
+// GPU 算子数，不是搬 CPU。行数据保留（换设备代际/架构后可重开）。
 static const SmallOpPolicy kSmallOps[] = {
-    { 256, SOP_ARGSORT,  true },
-    { 256, SOP_TOP_K,    true },
-    { 256, SOP_SET_ROWS, true },
-    { 256, SOP_FILL,     true },
-    { 256, SOP_SUM_ROWS, true },
-    { 256, SOP_SIGMOID,  true },
+    { 256, SOP_ARGSORT,  false },
+    { 256, SOP_TOP_K,    false },
+    { 256, SOP_SET_ROWS, false },
+    { 256, SOP_FILL,     false },
+    { 256, SOP_SUM_ROWS, false },
+    { 256, SOP_SIGMOID,  false },
 };
 
 const SmallOpPolicy * small_op_policies(int * count) {
