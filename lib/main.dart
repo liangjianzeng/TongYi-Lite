@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'providers/agent_approval.dart'
@@ -34,6 +35,16 @@ Future<void> main() async {
   // 从未请求——前台推理进度通知对用户不可见）。fire-and-forget：拒绝不阻塞
   // 启动，推理保活通知只是不可见，功能不受影响。
   unawaited(_requestNotificationPermission());
+
+  // Edge-to-edge：应用绘制延伸到状态栏/手势条之下，系统栏透明。
+  // 不开这个，窗口底到手势条之间永远是系统画的黑条——composer「铺满底部」
+  // 在窗口层面就不可能成立（2026-10-25 底部黑边根因）。
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarContrastEnforced: false,
+  ));
 
   // 端侧 ASR 预热（sherpa-onnx，DSH-Phone 方案）：后台 isolate 预读模型文件
   // 到页缓存，首次按住说话时加载更快；模型未下载时静默跳过。fire-and-forget。
