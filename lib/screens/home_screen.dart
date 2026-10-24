@@ -726,17 +726,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         rail: _buildRail(slots),
         child: Scaffold(
           appBar: AppBar(
-            // 紧凑标题栏：44px（默认 56），给主屏幕更多呈现空间。
+            // 紧凑标题栏：44px（默认 56）。导航全部在左栏（设计稿无 leading），
+            // 顶栏只承担状态呈现（模型状态 chip）。
             toolbarHeight: 44,
             title: const Text(
               'TongYi-Lite',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-            ),
-            centerTitle: true,
-            leading: IconButton(
-              icon: const Icon(Icons.forum_outlined),
-              tooltip: '会话',
-              onPressed: () => _openRail('chats'),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             actions: [
               _buildModelStatusChip(modelState, isGenerating),
@@ -1963,7 +1958,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: BorderRadius.circular(20),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2069,17 +2064,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         customBorder: const CircleBorder(),
         onTap: _showContextUsageSheet,
         child: SizedBox(
-          width: 36,
-          height: 36,
+          width: 30,
+          height: 30,
           child: Stack(
             alignment: Alignment.center,
             children: [
               SizedBox(
-                width: 26,
-                height: 26,
+                width: 22,
+                height: 22,
                 child: CircularProgressIndicator(
                   value: hasData ? fraction.clamp(0.02, 1.0) : 0.0,
-                  strokeWidth: 2.6,
+                  strokeWidth: 2.4,
                   strokeCap: StrokeCap.round,
                   color: color,
                   backgroundColor: color.withValues(alpha: 0.18),
@@ -2433,14 +2428,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               _onVoiceLongPressMoveUpdate(d.globalPosition),
           onLongPressEnd: (_) => _onVoiceLongPressEnd(),
           onLongPressCancel: () => _onVoiceLongPressEnd(),
-          child: _roundKey(
-            icon: Icons.mic,
-            color: Theme.of(context).colorScheme.primary,
-            tooltip: null,
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('按住 🎤 说话，松手即发送（上滑取消）')));
-            },
+          // 设计稿形态：空输入的麦克风是裸图标（非实心大圆）；Tooltip 只包
+          // 图标本体不包 GestureDetector 外层（长按手势不能被 Tooltip 抢）。
+          child: Tooltip(
+            message: '按住说话，松手即发送（上滑取消）',
+            child: SizedBox(
+              width: 34,
+              height: 34,
+              child: Icon(
+                Icons.mic,
+                size: 22,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
           ),
         );
       },
@@ -2458,14 +2458,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }) {
     final key = Material(
       color: color,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(17),
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(17),
         onTap: onTap,
         child: SizedBox(
-          width: 40,
-          height: 40,
-          child: Icon(icon, size: 22, color: Colors.white),
+          width: 34,
+          height: 34,
+          child: Icon(icon, size: 19, color: Colors.white),
         ),
       ),
     );

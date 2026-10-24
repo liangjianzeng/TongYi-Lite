@@ -98,23 +98,34 @@ class AppRail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 设计稿形态：左栏是明确的“容器”——着色底 + 右缘描边，图标紧凑成组。
     return Material(
-      color: scheme.surfaceContainerLow,
-      child: SizedBox(
+      color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+      child: Container(
         width: 56,
+        decoration: BoxDecoration(
+          border: Border(
+            right: BorderSide(color: scheme.outlineVariant, width: 1),
+          ),
+        ),
         child: SafeArea(
           right: false,
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: _RailLogo(onTap: onLogoTap, tooltip: logoTooltip),
-              ),
+              const SizedBox(height: 6),
+              _RailLogo(onTap: onLogoTap, tooltip: logoTooltip),
               const _RailDivider(),
-              ...children,
+              // 条目间 2px 呼吸缝：紧凑但不粘连（设计稿 gap:2）。
+              for (var i = 0; i < children.length; i++) ...[
+                if (i > 0) const SizedBox(height: 2),
+                children[i],
+              ],
               const Spacer(),
-              ...bottomChildren,
-              const SizedBox(height: 8),
+              for (var i = 0; i < bottomChildren.length; i++) ...[
+                if (i > 0) const SizedBox(height: 2),
+                bottomChildren[i],
+              ],
+              const SizedBox(height: 6),
             ],
           ),
         ),
@@ -205,18 +216,18 @@ class _RailIconButtonState extends State<RailIconButton> {
     final active = widget.item.panelKey != null &&
         _subscribed?.activeKey == widget.item.panelKey;
     Widget btn = InkWell(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(11),
       onTap: widget.item.onTap,
       child: Container(
-        width: 40,
-        height: 40,
+        width: 38,
+        height: 38,
         decoration: BoxDecoration(
           color: active ? scheme.primaryContainer : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(11),
         ),
         child: Icon(
           widget.item.icon,
-          size: 21,
+          size: 20,
           color: active ? scheme.onPrimaryContainer : scheme.onSurfaceVariant,
         ),
       ),
