@@ -25,8 +25,7 @@ import '../services/attachment_service.dart'
     show kMaxAttachments, kSupportedExtensions;
 import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
-import '../providers/context_usage_provider.dart'
-    show contextUsageProvider;
+import '../providers/context_usage_provider.dart' show contextUsageProvider;
 import '../models/agent_persona.dart' show kStandardPersonaId;
 import '../agent/observability/turn_meter.dart';
 import '../agent/goal/goal_store.dart'
@@ -40,6 +39,8 @@ import '../services/storage_permission_service.dart';
 import '../widgets/agent_workflow.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/image_preview.dart';
+import '../widgets/rail/rail_scaffold.dart';
+import '../plugins/panel/plugins_screen.dart';
 import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
 import '../models/chat_message.dart' show ChatMessage;
@@ -48,6 +49,7 @@ import 'settings_screen.dart';
 import '../plugins/plugin_host.dart';
 import '../plugins/plugin_input_icon.dart';
 import '../plugins/slot_outlet.dart';
+import 'package:plugin_kernel/plugin_kernel.dart' show SlotRegistry;
 
 /// App-lifetime guard: 启动自动加载默认模型只执行一次。
 /// 放在库作用域，避免首页路由重建时重复触发（与设置页 `_appLaunchScanDone` 同风格）。
@@ -64,6 +66,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _scrollController = ScrollController();
   final _textController = TextEditingController();
 
+  /// 左栏面板开合（2026-10-24 harness 改造）：会话/智能体/人格/计划/模型/
+  /// 技能/插件/API/更多 全部从左栏进。
+  final RailPanelController _railPanel = RailPanelController();
+
   /// ask_user_question 自由回答输入框（随提问卡片创建/销毁复用）。
   final _questionController = TextEditingController();
   String _currentConversationId = '';
@@ -72,8 +78,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 让插件平台的 `agent_handoff` 知道该交接进哪一串（以前没人写这个 provider，交接只能报"没有对话"）。
   void _setCurrentConversation(String id) {
     _currentConversationId = id;
-    ref.read(currentConversationIdProvider.notifier).state = id.isEmpty ? null : id;
+    ref.read(currentConversationIdProvider.notifier).state =
+        id.isEmpty ? null : id;
   }
+
   bool _initiallyLoaded = false;
   // When true, the view auto-scrolls to the newest message (bottom of the
   // list). Disabled once the user scrolls up to read history.
@@ -121,6 +129,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _textController.dispose();
     _conversationSearchCtrl.dispose();
     _questionController.dispose();
+    _railPanel.dispose();
 
     super.dispose();
   }
@@ -475,16 +484,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         _voiceSession = null;
         debugPrint('[Voice] session start failed');
         if (mounted) {
-          ScaffoldMessenger.of(this.context).showSnackBar(
-              const SnackBar(content: Text('语音引擎启动失败，请重试')));
+          ScaffoldMessenger.of(this.context)
+              .showSnackBar(const SnackBar(content: Text('语音引擎启动失败，请重试')));
         }
       }
     } catch (e) {
       _voiceSession = null;
       debugPrint('[Voice] long-press start error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(this.context).showSnackBar(
-            SnackBar(content: Text('语音启动异常：$e')));
+        ScaffoldMessenger.of(this.context)
+            .showSnackBar(SnackBar(content: Text('语音启动异常：$e')));
       }
     }
   }
@@ -493,7 +502,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final session = _voiceSession;
     final start = _voiceLongPressPos;
     if (session == null || start == null) return;
-    session.cancelMode.value = (pos.dy - start.dy) < -HoldToTalkSession.cancelSlop;
+    session.cancelMode.value =
+        (pos.dy - start.dy) < -HoldToTalkSession.cancelSlop;
   }
 
   Future<void> _onVoiceLongPressEnd() async {
@@ -527,16 +537,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } catch (e) {
       debugPrint('[Voice] session end error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(this.context).showSnackBar(
-            SnackBar(content: Text('语音收尾异常：$e')));
+        ScaffoldMessenger.of(this.context)
+            .showSnackBar(SnackBar(content: Text('语音收尾异常：$e')));
       }
       return;
     }
     if (!mounted) return;
     if (text.isEmpty) {
       if (!cancelled) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('未识别到内容，请重试')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('未识别到内容，请重试')));
       }
       return;
     }
@@ -705,64 +715,613 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final isGenerating =
         ref.watch(runningTurnsProvider).containsKey(_currentConversationId);
     final modelState = ref.watch(modelManagerProvider);
+    final slots = ref.watch(slotRegistryProvider);
 
+    // harness 布局：左栏（能力/配置入口）+ 主区（AppBar + 消息 + composer）。
+    // 面板从左滑入、只盖主区（含 AppBar），rail 恒可见。
     return Scaffold(
-      drawer: _buildConversationDrawer(),
-      appBar: AppBar(
-        // 紧凑标题栏：44px（默认 56），给主屏幕更多呈现空间。
-        toolbarHeight: 44,
-        title: const Text(
-          'TongYi-Lite',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-        ),
-        centerTitle: true,
-        leading: Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.forum_outlined),
-            tooltip: '会话',
-            onPressed: () {
-              _invalidateSnippets();
-              Scaffold.of(ctx).openDrawer();
-            },
+      body: RailPanelHost(
+        controller: _railPanel,
+        pages: _railPages(),
+        rail: _buildRail(slots),
+        child: Scaffold(
+          appBar: AppBar(
+            // 紧凑标题栏：44px（默认 56），给主屏幕更多呈现空间。
+            toolbarHeight: 44,
+            title: const Text(
+              'TongYi-Lite',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            ),
+            centerTitle: true,
+            leading: IconButton(
+              icon: const Icon(Icons.forum_outlined),
+              tooltip: '会话',
+              onPressed: () => _openRail('chats'),
+            ),
+            actions: [
+              _buildModelStatusChip(modelState, isGenerating),
+            ],
           ),
-        ),
-        actions: [
-          _buildModelStatusChip(modelState, isGenerating),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: '设置',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // ---- Inline model status (only shows loading/unloading/error progress) ----
-          _buildInlineProgress(modelState, isGenerating),
+          body: Column(
+            children: [
+              // ---- Inline model status (only shows loading/unloading/error progress) ----
+              _buildInlineProgress(modelState, isGenerating),
 
-          Expanded(
-            child: _initiallyLoaded
-                ? _buildMessagesList()
-                : const Center(child: CircularProgressIndicator()),
-          ),
+              Expanded(
+                child: _initiallyLoaded
+                    ? _buildMessagesList()
+                    : const Center(child: CircularProgressIndicator()),
+              ),
 
-          // 附件预览已并入 composer 卡片（chips 行，可单个删除）。
-          _buildInputBar(isGenerating, modelState),
-        ],
+              // 附件预览已并入 composer 卡片（chips 行，可单个删除）。
+              _buildInputBar(isGenerating, modelState),
+            ],
+          ),
+        ),
       ),
     );
+  }
+
+  // =========================================================================
+  // 左栏 harness（2026-10-24）：rail 条目 + 面板页注册
+  // =========================================================================
+
+  /// 打开/收起某面板（再点同图标 = 收起）。打开会话页时失效摘要缓存并
+  /// 刷新计划徽标。
+  void _openRail(String key) {
+    if (key == 'chats') {
+      _invalidateSnippets();
+      _refreshActivePlanFlag();
+    }
+    _railPanel.toggle(key);
+  }
+
+  /// 关闭所有会话类浮层（面板 + 兼容旧 Drawer 入口）：切换/新建会话后调用。
+  void _closeRailSurface() {
+    _railPanel.close();
+    final scaffold = Scaffold.maybeOf(context);
+    if (scaffold != null && scaffold.isDrawerOpen) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Widget _buildRail(SlotRegistry registry) {
+    final anyRunning = ref.watch(runningTurnsProvider).isNotEmpty;
+    return AppRail(
+      onLogoTap: () => _openRail('model'),
+      logoTooltip: '应用总览 / 模型状态',
+      children: [
+        RailIconButton(
+          item: RailItem(
+              icon: Icons.add,
+              tooltip: '新建会话',
+              onTap: _newConversationFromRail),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'chats',
+              icon: Icons.forum_outlined,
+              tooltip: '会话',
+              onTap: () => _openRail('chats'),
+              badge: anyRunning),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'agent',
+              icon: Icons.smart_toy_outlined,
+              tooltip: '智能体',
+              onTap: () => _openRail('agent')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'persona',
+              icon: Icons.theater_comedy,
+              tooltip: '人格',
+              onTap: () => _openRail('persona')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'plan',
+              icon: Icons.checklist,
+              tooltip: '计划',
+              onTap: () => _openRail('plan'),
+              badge: _hasActivePlan),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'model',
+              icon: Icons.memory_outlined,
+              tooltip: '模型',
+              onTap: () => _openRail('model')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'skills',
+              icon: Icons.auto_awesome_outlined,
+              tooltip: '技能',
+              onTap: () => _openRail('skills')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'plugins',
+              icon: Icons.extension_outlined,
+              tooltip: '插件',
+              onTap: () => _openRail('plugins')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'api',
+              icon: Icons.api_outlined,
+              tooltip: 'API 接入',
+              onTap: () => _openRail('api')),
+        ),
+        // 插件槽位：插件可向左栏贡献入口图标（无插件时零渲染）。
+        SlotOutlet(slotId: 'app.rail', registry: registry),
+      ],
+      bottomChildren: [
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'more',
+              icon: Icons.more_horiz,
+              tooltip: '更多',
+              onTap: () => _openRail('more')),
+        ),
+      ],
+    );
+  }
+
+  /// 新建会话（左栏入口，无 Drawer 可 pop）：直接复用 [_newConversation]。
+  Future<void> _newConversationFromRail() async {
+    await _newConversation();
+  }
+
+  Map<String, RailPageSpec> _railPages() => {
+        'chats': RailPageSpec(
+            title: '会话', build: (_) => _buildConversationDrawerBody()),
+        'agent':
+            RailPageSpec(title: '智能体', build: (_) => _buildAgentRailPage()),
+        'persona':
+            RailPageSpec(title: '人格', build: (_) => _buildPersonaRailPage()),
+        'plan': RailPageSpec(title: '计划', build: (_) => _buildPlanRailPage()),
+        'model': RailPageSpec(title: '模型', build: (_) => _buildModelRailPage()),
+        'skills':
+            RailPageSpec(title: '技能', build: (_) => _buildSkillsRailPage()),
+        'plugins':
+            RailPageSpec(title: '插件', build: (_) => _buildPluginsRailPage()),
+        'api': RailPageSpec(title: 'API 接入', build: (_) => _buildApiRailPage()),
+        'more': RailPageSpec(title: '更多', build: (_) => _buildMoreRailPage()),
+      };
+
+  /// 打开完整设置页（面板里各"深度管理"入口的统一去向；先收面板防叠层）。
+  void _pushFullSettings() {
+    _railPanel.close();
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+  }
+
+  /// 智能体面板：大开关置顶（原 composer chip 升级），下接工具组开关与
+  /// 授权/记忆/子代理/Dev 入口；深度管理进完整设置。
+  Widget _buildAgentRailPage() {
+    return Consumer(builder: (context, ref, __) {
+      final settings = ref.watch(settingsProvider);
+      final notifier = ref.read(settingsProvider.notifier);
+      Widget toolChip(String label, bool on, Future<void> Function(bool) set) {
+        return FilterChip(
+          label: Text(label, style: const TextStyle(fontSize: 12)),
+          selected: on,
+          showCheckmark: false,
+          onSelected: (v) => set(v),
+        );
+      }
+
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+        children: [
+          Card(
+            elevation: 0,
+            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            child: SwitchListTile(
+              secondary: const Icon(Icons.smart_toy_outlined),
+              title: const Text('智能体模式',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              subtitle: const Text('关闭 = 简单聊天（本地小模型友好）',
+                  style: TextStyle(fontSize: 11)),
+              value: settings.agentEnabled,
+              onChanged: (v) => notifier.setAgentEnabled(v),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 12, 4, 6),
+            child: Text('工具组',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey)),
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              toolChip('网页搜索', settings.webSearchEnabled,
+                  (v) => notifier.setWebSearchEnabled(v)),
+              toolChip('Shell', settings.agentShellEnabled,
+                  (v) => notifier.setAgentShellEnabled(v)),
+              toolChip('Python', settings.agentPythonEnabled,
+                  (v) => notifier.setAgentPythonEnabled(v)),
+              toolChip('记忆', settings.agentMemoryEnabled,
+                  (v) => notifier.setAgentMemoryEnabled(v)),
+            ],
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 14, 4, 6),
+            child: Text('执行与授权',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey)),
+          ),
+          SwitchListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.group_outlined, size: 20),
+            title: const Text('子代理', style: TextStyle(fontSize: 13)),
+            subtitle: const Text('spawn / fork / 后台化',
+                style: TextStyle(fontSize: 11)),
+            value: settings.agentSubagentEnabled,
+            onChanged: (v) => notifier.setAgentSubagentEnabled(v),
+          ),
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.developer_mode, size: 20),
+            title: const Text('Dev Agent 开发模式', style: TextStyle(fontSize: 13)),
+            subtitle:
+                const Text('工作区 · 任务规划 · 双向同步', style: TextStyle(fontSize: 11)),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: _pushFullSettings,
+          ),
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.tune, size: 20),
+            title: const Text('完整智能体设置', style: TextStyle(fontSize: 13)),
+            subtitle: const Text('审批策略 · 预算 · 思考 · MCP',
+                style: TextStyle(fontSize: 11)),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: _pushFullSettings,
+          ),
+        ],
+      );
+    });
+  }
+
+  /// 人格面板：标准 + 自定义人格快速切换（原 composer 人格 chip 升级）。
+  Widget _buildPersonaRailPage() {
+    return Consumer(builder: (context, ref, __) {
+      final settings = ref.watch(settingsProvider);
+      final notifier = ref.read(settingsProvider.notifier);
+      final activeId = settings.activePersonaId;
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
+        children: [
+          RadioListTile<String>(
+            dense: true,
+            secondary: const Icon(Icons.person_outline, size: 20),
+            title: const Text('标准', style: TextStyle(fontSize: 13)),
+            value: kStandardPersonaId,
+            groupValue: activeId,
+            onChanged: (_) => notifier.setActivePersona(kStandardPersonaId),
+          ),
+          for (final p in settings.agentPersonas)
+            RadioListTile<String>(
+              dense: true,
+              secondary: const Icon(Icons.theater_comedy, size: 20),
+              title: Text(p.name, style: const TextStyle(fontSize: 13)),
+              subtitle: p.prompt.isEmpty
+                  ? null
+                  : Text(p.prompt,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11)),
+              value: p.id,
+              groupValue: activeId,
+              onChanged: (_) => notifier.setActivePersona(p.id),
+            ),
+          const Divider(),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.add, size: 20),
+            title: const Text('管理人格 / 新建', style: TextStyle(fontSize: 13)),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: _pushFullSettings,
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: Text('切换人格会重置 KV 缓存，下一轮重新理解上下文',
+                style: TextStyle(fontSize: 11, color: Colors.grey)),
+          ),
+        ],
+      );
+    });
+  }
+
+  /// 计划面板：复用 _PlanPanelSheet（原 bottom sheet 内容原样内嵌）。
+  Widget _buildPlanRailPage() {
+    return FutureBuilder<GoalStore>(
+      future: _planStore(),
+      builder: (context, snap) {
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return _PlanPanelSheet(
+          store: snap.data!,
+          conversationId: _currentConversationId,
+          onRegenerate: () {
+            final text = _textController.text;
+            if (!text.startsWith(_planPrefix)) {
+              _textController.text = '$_planPrefix${text.trimLeft()}';
+              _textController.selection = TextSelection.fromPosition(
+                  TextPosition(offset: _textController.text.length));
+            }
+            FocusScope.of(context).requestFocus(FocusNode());
+          },
+          onChanged: _refreshActivePlanFlag,
+        );
+      },
+    );
+  }
+
+  /// 模型面板：_ModelStatusSheet 内嵌形态（状态/内存/日志/卸载重载）。
+  Widget _buildModelRailPage() {
+    return Consumer(builder: (context, ref, __) {
+      final ms = ref.watch(modelManagerProvider);
+      final isGenerating = ref.watch(runningTurnsProvider).isNotEmpty;
+      final modelName = ms.modelName ?? (ms.modelId ?? '未知模型');
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+        child: Column(
+          children: [
+            _ModelStatusSheet(
+              phase: ms.phase,
+              modelName: modelName,
+              errorMessage: ms.errorMessage,
+              logs: ms.loadingLogs,
+              isGenerating: isGenerating,
+              embedded: true,
+              ref: ref,
+              onUnload: () async {
+                final ok =
+                    await ref.read(modelManagerProvider.notifier).unloadModel();
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(ok ? '✅ 已卸载模型，已释放内存' : '❌ 卸载失败，请重试'),
+                    backgroundColor: ok ? Colors.green : Colors.red,
+                    duration: const Duration(seconds: 2)));
+              },
+              onLoad: () async {
+                final id = ms.modelId;
+                if (id == null) return;
+                // 若正在推理，先停止生成（模型即将重载），避免卸载/重载时
+                // 原生引擎崩溃（红屏）——与状态弹层同语义。
+                if (ref.read(runningTurnsProvider).isNotEmpty) {
+                  try {
+                    await ref
+                        .read(chatNotifierProvider.notifier)
+                        .stopGeneration();
+                  } catch (_) {}
+                  await Future.delayed(const Duration(milliseconds: 300));
+                }
+                await ref.read(modelManagerProvider.notifier).loadModel(id);
+              },
+              onGoToSettings: _pushFullSettings,
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  /// 技能面板：入口 + 说明（管理 UI 在完整设置的智能体 Tab，逐步迁移）。
+  Widget _buildSkillsRailPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+      children: [
+        Card(
+          elevation: 0,
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          child: const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text(
+              '技能 = 智能体按需加载的能力包（内置 17 个 + 用户自定义）。'
+              '模型经 load_skill 启用，技能卡在对话里展示执行过程。',
+              style: TextStyle(fontSize: 12, height: 1.5),
+            ),
+          ),
+        ),
+        ListTile(
+          dense: true,
+          leading: const Icon(Icons.auto_awesome_outlined, size: 20),
+          title: const Text('管理技能（内置 / 我的技能）', style: TextStyle(fontSize: 13)),
+          trailing: const Icon(Icons.chevron_right, size: 18),
+          onTap: _pushFullSettings,
+        ),
+      ],
+    );
+  }
+
+  /// 插件面板：概览 + 打开插件管理（PluginsScreen 全屏，含方案档）。
+  Widget _buildPluginsRailPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+      children: [
+        Card(
+          elevation: 0,
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          child: const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text(
+              '插件可向输入区（附件/停靠区/接管）与左栏（app.rail 槽位）'
+              '贡献入口；方案档可一键切换插件集。',
+              style: TextStyle(fontSize: 12, height: 1.5),
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        FilledButton.icon(
+          onPressed: () {
+            _railPanel.close();
+            Navigator.push(context,
+                MaterialPageRoute(builder: (_) => const PluginsScreen()));
+          },
+          icon: const Icon(Icons.extension, size: 18),
+          label: const Text('打开插件管理'),
+        ),
+      ],
+    );
+  }
+
+  /// API 接入面板：当前端点/路由概览；深度配置进完整设置。
+  Widget _buildApiRailPage() {
+    return Consumer(builder: (context, ref, __) {
+      final settings = ref.watch(settingsProvider);
+      final api = settings.activeApiModel();
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+        children: [
+          Card(
+            elevation: 0,
+            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      const Icon(Icons.api, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          api?.name ?? '未激活 API 模型',
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ]),
+                    const SizedBox(height: 6),
+                    Text(
+                      api == null ? '尚未配置 OpenAI 兼容端点' : '端点 ${api.baseUrl}',
+                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ]),
+            ),
+          ),
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.route, size: 20),
+            title: const Text('调度模式', style: TextStyle(fontSize: 13)),
+            subtitle: Text(
+              settings.agentModelSource == 'api'
+                  ? '智能体指定 API 驱动'
+                  : '本地优先 · API 后备',
+              style: const TextStyle(fontSize: 11),
+            ),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: _pushFullSettings,
+          ),
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.dns_outlined, size: 20),
+            title: const Text('端点与模型管理', style: TextStyle(fontSize: 13)),
+            subtitle: const Text('baseUrl · 密钥 · 模型列表',
+                style: TextStyle(fontSize: 11)),
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: _pushFullSettings,
+          ),
+        ],
+      );
+    });
+  }
+
+  /// 更多面板：UI 缩放 + 低频入口收纳（齿轮已从顶栏移除，这里兜底）。
+  Widget _buildMoreRailPage() {
+    return Consumer(builder: (context, ref, __) {
+      final settings = ref.watch(settingsProvider);
+      final notifier = ref.read(settingsProvider.notifier);
+      Widget entry(IconData icon, String title, String subtitle) {
+        return ListTile(
+          dense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+          leading: Icon(icon, size: 20),
+          title: Text(title, style: const TextStyle(fontSize: 13)),
+          subtitle: Text(subtitle, style: const TextStyle(fontSize: 11)),
+          trailing: const Icon(Icons.chevron_right, size: 18),
+          onTap: _pushFullSettings,
+        );
+      }
+
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 4, 4, 0),
+            child: Text('界面',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey)),
+          ),
+          // 全局 UI 缩放：devicePixelRatio 乘数（0.85–1.30），全 App 等比缩放。
+          ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+            leading: const Icon(Icons.format_size, size: 20),
+            title: Text('UI 缩放 ${(settings.uiScale * 100).toStringAsFixed(0)}%',
+                style: const TextStyle(fontSize: 13)),
+            subtitle: Slider(
+              value: settings.uiScale,
+              min: 0.85,
+              max: 1.30,
+              divisions: 9,
+              label: '${(settings.uiScale * 100).toStringAsFixed(0)}%',
+              onChanged: (v) => notifier.setUiScale(v),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 10, 4, 6),
+            child: Text('设置',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey)),
+          ),
+          entry(Icons.tune, 'Agent 基础设置', '思考 · 审批 · 回合 · 温度'),
+          entry(Icons.folder_outlined, '文件', '附件 · 导出产物'),
+          entry(Icons.search, '搜索', '六引擎 · SearXNG'),
+          entry(Icons.mic_none, '语音', 'ASR · TTS · 热词'),
+          entry(Icons.description_outlined, '推理日志', '加载与运行日志'),
+          entry(Icons.info_outline, '关于', '版本 · 许可'),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _pushFullSettings,
+            icon: const Icon(Icons.settings, size: 18),
+            label: const Text('完整设置'),
+          ),
+        ],
+      );
+    });
   }
 
   String _fileNameOf(String path) {
     final i = path.lastIndexOf('/');
     return i == -1 ? path : path.substring(i + 1);
   }
-
 
   // =========================================================================
   // Model status chip — compact indicator in AppBar leading area (left of title)
@@ -1112,8 +1671,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       height: 8,
                       child: LinearProgressIndicator(
                         value: fraction,
-                        backgroundColor:
-                            barColor.withValues(alpha: 0.15),
+                        backgroundColor: barColor.withValues(alpha: 0.15),
                         valueColor: AlwaysStoppedAnimation(barColor),
                       ),
                     ),
@@ -1149,8 +1707,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
                 if (others.isNotEmpty) ...[
                   const SizedBox(height: 12),
-                  Text('其它会话快照',
-                      style: theme.textTheme.titleSmall),
+                  Text('其它会话快照', style: theme.textTheme.titleSmall),
                   const SizedBox(height: 4),
                   for (final e in others)
                     Padding(
@@ -1366,8 +1923,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   GoalStore? _planStoreCache;
   Future<GoalStore> _planStore() async {
     _planStoreCache ??= GoalStore(
-        baseDir:
-            '${(await getApplicationSupportDirectory()).path}/goals');
+        baseDir: '${(await getApplicationSupportDirectory()).path}/goals');
     return _planStoreCache!;
   }
 
@@ -1384,7 +1940,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 空闲空输入=🎤（长按说话）/ 空闲有文字=➤ / 生成中空输入=⏹停止 /
   /// 生成中有文字=➤（插话，不打断）。停止另有状态细条右侧文字按钮兜底。
   Widget _buildInputBar(bool isGenerating, ModelState ms) {
-    final settings = ref.watch(settingsProvider);
     // 插件平台（P2）：整条输入区包在两个 Scope 里（槽注册表 + 动作入口）。
     // 没插件时每个洞都渲染 SizedBox.shrink()，界面一个像素都不变。
     //
@@ -1397,7 +1952,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       children: [
         // 插件活动条 / 整块停靠区（single：最低 priority 的那个渲染）。
         SlotOutlet(slotId: 'app.input.activity', registry: slots),
-        SlotOutlet(slotId: 'app.input.dock', axis: Axis.vertical, registry: slots),
+        SlotOutlet(
+            slotId: 'app.input.dock', axis: Axis.vertical, registry: slots),
         // ask_user_question 待回答卡片（P2-B2）：智能体提问挂起等待时显示。
         _buildPendingQuestionCard(),
         // 生成中状态细条：执行进度一眼可见 + 停止兜底入口。
@@ -1416,7 +1972,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               _buildAttachmentChips(),
               // 插件附件徽章（app.input.attachments）/ 停靠区（app.composer.dock，听写的词卡队列放这）。
               SlotOutlet(slotId: 'app.input.attachments', registry: slots),
-              SlotOutlet(slotId: 'app.composer.dock', axis: Axis.vertical, registry: slots),
+              SlotOutlet(
+                  slotId: 'app.composer.dock',
+                  axis: Axis.vertical,
+                  registry: slots),
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: _textController,
                 builder: (_, value, __) => TextField(
@@ -1458,7 +2017,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           _selectedFilePaths.isNotEmpty,
                       label: Text(
                           '${_selectedImagePaths.length + _selectedFilePaths.length}'),
-                      child: const Icon(Icons.add, size: PluginInputIcon.kIconSize),
+                      child: const Icon(Icons.add,
+                          size: PluginInputIcon.kIconSize),
                     ),
                     tooltip: '添加图片 / 文件',
                     constraints: const BoxConstraints(
@@ -1468,21 +2028,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     onPressed: _showAttachSheet,
                   ),
                   const SizedBox(width: 2),
-                  // 模式 chips 行：智能体 / 人格 / 计划 / 模型（可横滚）。
-                  Expanded(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _buildContextUsageRing(),
-                          _buildAgentToggleChip(settings),
-                          _buildPersonaChip(settings),
-                          _buildPlanModeChip(),
-                          _buildModelChip(ms, isGenerating),
-                        ],
-                      ),
-                    ),
-                  ),
+                  // 模式 chips 已整体迁入左栏（智能体/人格/计划/模型，
+                  // 2026-10-24 harness 改造）：composer 只留 KV 占用环。
+                  _buildContextUsageRing(),
                   const SizedBox(width: 4),
                   // 插件图标位（app.input.right）：插件的主入口就长在这。
                   SlotOutlet(slotId: 'app.input.right', registry: slots),
@@ -1554,7 +2102,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 输入 hint 随状态：计划模式 / 生成中插话 / 普通输入。
-  String _inputHintFor(bool isGenerating, String text) {    if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
+  String _inputHintFor(bool isGenerating, String text) {
+    if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
     if (isGenerating) return '插话给执行中的智能体…（不打断）';
     return '输入消息…';
   }
@@ -1707,7 +2256,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 可删除 chip 容器：右上角小 ×（44px 基座内 16px 触点扩展到 20）。
-  Widget _removableChip({required Widget child, required VoidCallback onRemove}) {
+  Widget _removableChip(
+      {required Widget child, required VoidCallback onRemove}) {
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: Stack(
@@ -1736,146 +2286,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  // ---- P3 模式 chips（composer 底部动作行，轻量 11px 字号）----
-
-  /// 纯图标模式键（用户定案：图标即可，去文字防拥挤）。32px 圆角方，
-  /// active 高亮；语义靠 Tooltip。低视力/新用户长按即见说明。
-  Widget _composerChip({
-    required IconData icon,
-    required VoidCallback onTap,
-    bool active = false,
-    required String tooltip,
-    Color? iconColor,
-  }) {
-    final tint = active
-        ? Theme.of(context).colorScheme.primary
-        : (iconColor ?? Theme.of(context).colorScheme.outline);
-    return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: Tooltip(
-        message: tooltip,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: onTap,
-          child: Container(
-            width: 32,
-            height: 30,
-            decoration: BoxDecoration(
-              color: active
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: active
-                    ? Theme.of(context).colorScheme.primary
-                    : Theme.of(context)
-                        .colorScheme
-                        .outline
-                        .withValues(alpha: 0.35),
-              ),
-            ),
-            child: Icon(icon, size: 17, color: tint),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 智能体总开关 chip（开 = 高亮；点按切换，设置同步持久化）。
-  Widget _buildAgentToggleChip(InferenceSettings settings) {
-    final on = settings.agentEnabled;
-    return _composerChip(
-      active: on,
-      tooltip: on ? '智能体模式：开（点按关闭）' : '智能体模式：关（点按开启）',
-      onTap: () => ref
-          .read(settingsProvider.notifier)
-          .setAgentEnabled(!on),
-      icon: Icons.smart_toy_outlined,
-    );
-  }
-
-  /// 人格 chip：显示当前人格（标准/自定义名），点按弹底部选择。
-  Widget _buildPersonaChip(InferenceSettings settings) {
-    final persona = settings.activePersona();
-    return _composerChip(
-      tooltip: '切换人格',
-      onTap: () => _showPersonaPicker(settings),
-      icon: Icons.theater_comedy,
-      active: persona != null,
-      iconColor: persona != null ? Colors.deepPurple : null,
-    );
-  }
-
-  /// 人格快速选择（底部弹层：标准 + 自定义），选择即持久化。
-  void _showPersonaPicker(InferenceSettings settings) {
-    final notifier = ref.read(settingsProvider.notifier);
-    final activeId = settings.activePersonaId;
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text('切换人格',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-            ),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.person_outline, size: 20),
-              title: const Text('标准', style: TextStyle(fontSize: 14)),
-              trailing: activeId == kStandardPersonaId
-                  ? const Icon(Icons.check, size: 18)
-                  : null,
-              onTap: () {
-                notifier.setActivePersona(kStandardPersonaId);
-                Navigator.pop(ctx);
-              },
-            ),
-            for (final p in settings.agentPersonas)
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.theater_comedy, size: 20),
-                title: Text(p.name, style: const TextStyle(fontSize: 14)),
-                subtitle: p.prompt.isEmpty
-                    ? null
-                    : Text(p.prompt,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11)),
-                trailing: activeId == p.id
-                    ? const Icon(Icons.check, size: 18)
-                    : null,
-                onTap: () {
-                  notifier.setActivePersona(p.id);
-                  Navigator.pop(ctx);
-                },
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 计划 chip：点按打开**计划面板**（查看/更新步骤状态/放弃/重新规划），
-  /// 激活 = 输入框带 /plan 前缀或存在活跃计划（存在活跃计划时恒高亮）。
-  Widget _buildPlanModeChip() {
-    return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: _textController,
-      builder: (_, value, __) {
-        final active = value.text.startsWith(_planPrefix) || _hasActivePlan;
-        return _composerChip(
-          active: active,
-          tooltip: '计划：查看进度 / 手动更新状态 / 重新规划',
-          onTap: _showPlanPanel,
-          icon: Icons.checklist,
-        );
-      },
-    );
-  }
-
   /// 是否存在活跃计划（打开面板/切会话时刷新；驱动 chip 高亮）。
   bool _hasActivePlan = false;
 
@@ -1884,46 +2294,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (mounted && _hasActivePlan != (plan != null)) {
       setState(() => _hasActivePlan = plan != null);
     }
-  }
-
-  /// 计划面板（bottom sheet）：无计划 = 说明 + 一键生成入口；
-  /// 有计划 = 目标 + 步骤状态列表（点按改状态）+ 放弃/重新规划。
-  Future<void> _showPlanPanel() async {
-    final store = await _planStore();
-    if (!mounted) return;
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => _PlanPanelSheet(
-        store: store,
-        conversationId: _currentConversationId,
-        onRegenerate: () {
-          final text = _textController.text;
-          if (!text.startsWith(_planPrefix)) {
-            _textController.text = '$_planPrefix${text.trimLeft()}';
-            _textController.selection = TextSelection.fromPosition(
-                TextPosition(offset: _textController.text.length));
-          }
-          FocusScope.of(this.context).requestFocus(FocusNode());
-        },
-        onChanged: () => _refreshActivePlanFlag(),
-      ),
-    );
-    _refreshActivePlanFlag();
-  }
-
-  /// 模型 chip：API 档显示 API 配置名，本地档显示当前模型；点按开模型状态弹层。
-  Widget _buildModelChip(ModelState ms, bool isGenerating) {
-    final settings = ref.watch(settingsProvider);
-    final label = settings.agentEnabled && settings.agentModelSource == 'api'
-        ? (settings.activeApiModel()?.name ?? 'API')
-        : (ms.modelName ?? ms.modelId ?? '本地模型');
-    return _composerChip(
-      onTap: () => _showModelStatusPopup(ms, isGenerating),
-      icon: Icons.memory,
-      iconColor: Colors.teal,
-      tooltip: '当前驱动模型：$label',
-    );
   }
 
   /// ask_user_question 待回答卡片：问题 + 候选项 + 自由回答 + 跳过。
@@ -1939,7 +2309,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4)),
+            color:
+                Theme.of(context).colorScheme.primary.withValues(alpha: 0.4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2067,8 +2438,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             color: Theme.of(context).colorScheme.primary,
             tooltip: null,
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text('按住 🎤 说话，松手即发送（上滑取消）')));
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('按住 🎤 说话，松手即发送（上滑取消）')));
             },
           ),
         );
@@ -2138,8 +2509,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   // ---- P2 会话抽屉重构：搜索 / 分组 / 摘要 / 状态徽标 / 行内操作 ----
 
-  final TextEditingController _conversationSearchCtrl =
-      TextEditingController();
+  final TextEditingController _conversationSearchCtrl = TextEditingController();
   String _conversationSearchQuery = '';
 
   /// 各会话最后一条消息摘要（一次批量 SQL；打开抽屉时失效重取）。
@@ -2147,106 +2517,99 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _invalidateSnippets() => _snippetsFuture = null;
 
-  Widget _buildConversationDrawer() {
+  /// 会话面板主体（原 Drawer 内容，2026-10-24 起由左栏「会话」面板承载）。
+  Widget _buildConversationDrawerBody() {
     final conversations = ref.watch(conversationsProvider);
     final settings = ref.watch(settingsProvider);
     final pinned = settings.pinnedConversationIds.toSet();
-    return Drawer(
-      child: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-              child: Row(children: [
-                // 最常用操作给最大触点：新建 = 主按钮。
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _newConversation,
-                    icon: const Icon(Icons.add, size: 18),
-                    label: const Text('新对话'),
+    return SafeArea(
+      right: false,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+            child: Row(children: [
+              // 最常用操作给最大触点：新建 = 主按钮。
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _newConversation,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新对话'),
+                ),
+              ),
+              // 批量选择开关：进入多选模式后，点按会话变为勾选而非切换。
+              IconButton(
+                icon: Icon(
+                    _conversationSelectionMode ? Icons.close : Icons.checklist),
+                tooltip: _conversationSelectionMode ? '退出批量选择' : '批量选择',
+                color: _conversationSelectionMode
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+                onPressed: () {
+                  setState(() {
+                    _conversationSelectionMode = !_conversationSelectionMode;
+                    if (!_conversationSelectionMode) {
+                      _selectedConversations.clear();
+                    }
+                  });
+                },
+              ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: TextField(
+              controller: _conversationSearchCtrl,
+              onChanged: (v) => setState(() => _conversationSearchQuery = v),
+              decoration: InputDecoration(
+                hintText: '搜索会话…',
+                isDense: true,
+                prefixIcon: const Icon(Icons.search, size: 18),
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              ),
+            ),
+          ),
+          Expanded(
+            child: conversations.isEmpty
+                ? const Center(
+                    child: Text('暂无会话', style: TextStyle(color: Colors.grey)))
+                : FutureBuilder<Map<String, String>>(
+                    future: _snippetsFuture ??=
+                        ref.read(storageServiceProvider).lastMessageSnippets(),
+                    builder: (ctx, snap) {
+                      final snippets = snap.data ?? const {};
+                      return _buildConversationList(
+                          conversations, pinned, snippets);
+                    },
                   ),
-                ),
-                // 批量选择开关：进入多选模式后，点按会话变为勾选而非切换。
-                IconButton(
-                  icon: Icon(_conversationSelectionMode
-                      ? Icons.close
-                      : Icons.checklist),
-                  tooltip:
-                      _conversationSelectionMode ? '退出批量选择' : '批量选择',
-                  color: _conversationSelectionMode
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                  onPressed: () {
-                    setState(() {
-                      _conversationSelectionMode =
-                          !_conversationSelectionMode;
-                      if (!_conversationSelectionMode) {
-                        _selectedConversations.clear();
-                      }
-                    });
-                  },
-                ),
-              ]),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-              child: TextField(
-                controller: _conversationSearchCtrl,
-                onChanged: (v) => setState(() => _conversationSearchQuery = v),
-                decoration: InputDecoration(
-                  hintText: '搜索会话…',
-                  isDense: true,
-                  prefixIcon: const Icon(Icons.search, size: 18),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                ),
+          ),
+          // 批量选择底部操作栏
+          if (_conversationSelectionMode) ...[
+            const Divider(height: 1),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(children: [
+                  Text('已选 ${_selectedConversations.length} 个'),
+                  const Spacer(),
+                  OutlinedButton.icon(
+                    onPressed: _selectedConversations.isEmpty
+                        ? null
+                        : _confirmBulkDelete,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: Text('删除选中(${_selectedConversations.length})'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red.shade700,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                  ),
+                ]),
               ),
             ),
-            Expanded(
-              child: conversations.isEmpty
-                  ? const Center(
-                      child: Text('暂无会话',
-                          style: TextStyle(color: Colors.grey)))
-                  : FutureBuilder<Map<String, String>>(
-                      future: _snippetsFuture ??=
-                          ref.read(storageServiceProvider)
-                              .lastMessageSnippets(),
-                      builder: (ctx, snap) {
-                        final snippets = snap.data ?? const {};
-                        return _buildConversationList(
-                            conversations, pinned, snippets);
-                      },
-                    ),
-            ),
-            // 批量选择底部操作栏
-            if (_conversationSelectionMode) ...[
-              const Divider(height: 1),
-              SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(children: [
-                    Text('已选 ${_selectedConversations.length} 个'),
-                    const Spacer(),
-                    OutlinedButton.icon(
-                      onPressed: _selectedConversations.isEmpty
-                          ? null
-                          : _confirmBulkDelete,
-                      icon: const Icon(Icons.delete_outline, size: 18),
-                      label:
-                          Text('删除选中(${_selectedConversations.length})'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.red.shade700,
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 12),
-                      ),
-                    ),
-                  ]),
-                ),
-              ),
-            ],
           ],
-        ),
+        ],
       ),
     );
   }
@@ -2340,8 +2703,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   : Colors.grey.shade400,
             )
           : running
-              ? const Icon(Icons.autorenew,
-                  size: 20, color: Colors.orange)
+              ? const Icon(Icons.autorenew, size: 20, color: Colors.orange)
               : Icon(
                   isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
                   size: 20,
@@ -2415,14 +2777,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               },
               itemBuilder: (_) => [
                 PopupMenuItem(
-                    value: 'pin',
-                    child: Text(isPinned ? '取消置顶' : '置顶')),
-                const PopupMenuItem(
-                    value: 'rename', child: Text('重命名')),
+                    value: 'pin', child: Text(isPinned ? '取消置顶' : '置顶')),
+                const PopupMenuItem(value: 'rename', child: Text('重命名')),
                 const PopupMenuItem(
                     value: 'delete',
-                    child: Text('删除',
-                        style: TextStyle(color: Colors.red))),
+                    child: Text('删除', style: TextStyle(color: Colors.red))),
               ],
             ),
     );
@@ -2438,8 +2797,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         content: TextField(
           controller: ctrl,
           autofocus: true,
-          decoration:
-              const InputDecoration(border: OutlineInputBorder()),
+          decoration: const InputDecoration(border: OutlineInputBorder()),
         ),
         actions: [
           TextButton(
@@ -2483,7 +2841,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       });
       _restoreDraft();
     }
-    if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+    _closeRailSurface();
   }
 
   /// 会话草稿（P3）：保存当前未发送文字；发送/清空时删除对应草稿。
@@ -2516,11 +2874,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       });
       _restoreDraft();
       // 切会话：该会话无快照（如重启后首次切入）→ 估算回填。
-      unawaited(ref
-          .read(chatNotifierProvider.notifier)
-          .refreshUsageEstimate(id));
+      unawaited(
+          ref.read(chatNotifierProvider.notifier).refreshUsageEstimate(id));
     }
-    Navigator.of(context).pop();
+    _closeRailSurface();
   }
 
   Future<void> _confirmDelete(Conversation c) async {
@@ -2702,12 +3059,15 @@ class _AttachOption extends StatelessWidget {
 // =========================================================================
 
 /// Reusable bottom-sheet widget for model status details.
+/// [embedded] = true 时作为左栏「模型」面板的内嵌页渲染：去掉底部弹层的
+/// 外边距/顶部圆角/拖拽把手，其余内容（状态/内存/日志/操作）完全一致。
 class _ModelStatusSheet extends StatelessWidget {
   final ModelLifecyclePhase phase;
   final String modelName;
   final String? errorMessage;
   final List<String> logs;
   final bool isGenerating;
+  final bool embedded;
   final VoidCallback onUnload;
   final VoidCallback onLoad;
   final VoidCallback onGoToSettings;
@@ -2719,6 +3079,7 @@ class _ModelStatusSheet extends StatelessWidget {
     this.errorMessage,
     this.logs = const [],
     required this.isGenerating,
+    this.embedded = false,
     required this.onUnload,
     required this.onLoad,
     required this.onGoToSettings,
@@ -2729,10 +3090,12 @@ class _ModelStatusSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = _sheetColorFor(phase);
     return Container(
-      margin: const EdgeInsets.only(top: 8),
+      margin: embedded ? EdgeInsets.zero : const EdgeInsets.only(top: 8),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: embedded
+            ? BorderRadius.zero
+            : const BorderRadius.vertical(top: Radius.circular(16)),
       ),
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height * 0.85,
@@ -2743,15 +3106,16 @@ class _ModelStatusSheet extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Handle bar
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                    color: Colors.grey.shade400,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
+              // Handle bar（内嵌面板形态无弹层把手）
+              if (!embedded)
+                Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade400,
+                      borderRadius: BorderRadius.circular(2)),
+                ),
               // Title + icon
               Row(
                 children: [
@@ -3227,8 +3591,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
   }
 
   Future<void> _setStep(int index, PlanStepStatus status) async {
-    final err = await widget.store.updateStep(widget.conversationId,
-        stepIndex: index, status: status);
+    final err = await widget.store
+        .updateStep(widget.conversationId, stepIndex: index, status: status);
     if (err == null) {
       widget.onChanged();
       await _reload();
@@ -3264,8 +3628,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
     final plan = _plan;
     return SafeArea(
       child: Container(
-        constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.7),
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
         padding: const EdgeInsets.all(16),
         child: !_loaded
             ? const Center(child: CircularProgressIndicator())

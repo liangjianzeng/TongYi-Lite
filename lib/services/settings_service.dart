@@ -17,7 +17,12 @@ import '../models/api_model.dart';
 /// 上下文大小默??4096，最??65536??
 /// 端侧直连搜索引擎 id（与 lib/websearch 引擎实现一一对应）。
 const List<String> kDirectEngineIds = [
-  'bing_cn', 'so360', 'chinaso', 'sogou', 'baidu', 'quark',
+  'bing_cn',
+  'so360',
+  'chinaso',
+  'sogou',
+  'baidu',
+  'quark',
 ];
 
 /// 高风险引擎（风控激进，默认小预算细水长流）。
@@ -214,6 +219,10 @@ class InferenceSettings {
   /// 对话区文字整体缩放（0.7~1.3，默认 1.0 = 当前字号）。
   /// 以 TextScaler 作用于消息列表（气泡/思考/工具卡/时间戳整体缩放）。
   final double chatTextScale;
+
+  /// 全局 UI 缩放（2026-10-24 harness 改造）：devicePixelRatio 乘数，
+  /// 0.85–1.30。1.0 = 跟随系统；整体等比放大/缩小全部 UI（图标/文字/间距）。
+  final double uiScale;
 
   /// 子代理工具（subagent，spawn/fork）注册开关。默认开??
   /// 不变量固定（深度 ??2 / 子代理审批恒 never / 每层独立预算）??
@@ -492,6 +501,7 @@ class InferenceSettings {
     this.agentThinkingMaxChars = 6000,
     this.agentThinkingOnToolSteps = false,
     this.chatTextScale = 1.0,
+    this.uiScale = 1.0,
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
     this.agentCompressionApiModelId = '',
@@ -628,98 +638,99 @@ class InferenceSettings {
           maxParallel: agentMaxParallel,
         );
 
-  InferenceSettings copyWith(
-      {bool? enableGpu,
-      int? gpuLayers,
-      int? contextSize,
-      bool? enableThinking,
-      String? gpuBackend,
-      Map<String, bool>? mtpEnabledByModel,
-      bool? enableMtpFeature,
-      Map<String, bool>? dsparkEnabledByModel,
-      Map<String, int>? moeBankOverrideByModel,
-      Map<String, bool>? visionEnabledByModel,
-      bool? enableDsparkFeature,
-      String? defaultModelId,
-      // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
-      // 故增加显式清空标记，供取消默认模型时使用??
-      bool clearDefaultModel = false,
-      List<ApiModelConfig>? apiModels,
-      String? activeApiModelId,
-      // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
-      bool clearActiveApiModel = false,
-      // ---- 智能体（Agent??---
-      bool? agentEnabled,
-      bool? useNewAgentMode,
-      String? agentModelSource,
-      String? agentModelId,
-      // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
-      bool clearAgentModel = false,
-      int? agentNctx,
-      int? agentMaxRounds,
-      int? agentMaxSearchesPerTurn,
-      int? agentGoalMaxRounds,
-      List<McpServerConfig>? mcpServers,
-      List<String>? pinnedConversationIds,
-      bool? asrEnhancedMode,
-      List<String>? asrHotwordCategories,
-      String? asrHotwordCustom,
-      Map<String, List<String>>? asrHotwordAdded,
-      Map<String, List<String>>? asrHotwordRemoved,
-      int? agentMaxConcurrentTurns,
-      int? agentApiContextBudget,
-      int? agentTokensPerRound,
-      int? agentToolTimeoutMs,
-      bool? agentAllowParallelTools,
-      int? agentMaxParallel,
-      double? agentTemperature,
-      int? agentApiMaxRounds,
-      int? agentApiTokensPerRound,
-      double? agentApiTemperature,
-      int? agentApiToolTimeoutMs,
-      bool? agentApiAllowParallelTools,
-      int? agentApiMaxParallel,
-      int? agentThinkingMaxChars,
-      bool? agentThinkingOnToolSteps,
-      double? chatTextScale,
-      bool? agentSubagentEnabled,
-      String? agentSubagentApiModelId,
-      String? agentCompressionApiModelId,
-      bool? agentCompactEnabled,
-      bool? agentSpillEnabled,
-      bool? edgeTtsEnabled,
-      bool? edgeTtsAutoSpeak,
-      String? edgeTtsVoice,
-      int? edgeTtsRate,
-      int? edgeTtsPitch,
-      int? edgeTtsVolume,
-      bool? agentTraceExportEnabled,
-      bool? webSearchEnabled,
-      String? webSearchSearXngBaseUrl,
-      String? webSearchSearXngApiKey,
-      int? webSearchSearXngMaxResults,
-      int? webSearchSearXngTimeoutMs,
-      String? webSearchSearXngLanguage,
-      String? webSearchSearXngCategories,
-      String? webSearchSearXngEngines,
-      List<String>? webSearchDirectEngines,
-      bool? webSearchDirectEnabled,
-      int? webSearchDirectLowRiskPerWindow,
-      int? webSearchDirectHighRiskPerWindow,
-      bool? agentShellEnabled,
-      bool? agentPythonEnabled,
-      bool? agentFullFileAccess,
-      bool? agentMemoryEnabled,
-      // ---- 推理引擎 ----
-      bool? autoLoadMmproj,
-      bool? showResourceMonitor,
-      int? resourceSampleIntervalSec,
-      bool? oomGuardEnabled,
-      bool? inferenceLimitRefreshRate,
-      int? oomPreHeadroomMb,
-      int? oomPostHeadroomMb,
-      String? kvCacheType,
-      bool? flashAttn,
+  InferenceSettings copyWith({
+    bool? enableGpu,
+    int? gpuLayers,
+    int? contextSize,
+    bool? enableThinking,
+    String? gpuBackend,
+    Map<String, bool>? mtpEnabledByModel,
+    bool? enableMtpFeature,
+    Map<String, bool>? dsparkEnabledByModel,
+    Map<String, int>? moeBankOverrideByModel,
+    Map<String, bool>? visionEnabledByModel,
+    bool? enableDsparkFeature,
+    String? defaultModelId,
+    // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
+    // 故增加显式清空标记，供取消默认模型时使用??
+    bool clearDefaultModel = false,
+    List<ApiModelConfig>? apiModels,
+    String? activeApiModelId,
+    // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
+    bool clearActiveApiModel = false,
+    // ---- 智能体（Agent??---
+    bool? agentEnabled,
+    bool? useNewAgentMode,
+    String? agentModelSource,
+    String? agentModelId,
+    // agentModelSource/agentModelId 均可空，需显式标记区分「未传」与「清空」??
+    bool clearAgentModel = false,
+    int? agentNctx,
+    int? agentMaxRounds,
+    int? agentMaxSearchesPerTurn,
+    int? agentGoalMaxRounds,
+    List<McpServerConfig>? mcpServers,
+    List<String>? pinnedConversationIds,
+    bool? asrEnhancedMode,
+    List<String>? asrHotwordCategories,
+    String? asrHotwordCustom,
+    Map<String, List<String>>? asrHotwordAdded,
+    Map<String, List<String>>? asrHotwordRemoved,
+    int? agentMaxConcurrentTurns,
+    int? agentApiContextBudget,
+    int? agentTokensPerRound,
+    int? agentToolTimeoutMs,
+    bool? agentAllowParallelTools,
+    int? agentMaxParallel,
+    double? agentTemperature,
+    int? agentApiMaxRounds,
+    int? agentApiTokensPerRound,
+    double? agentApiTemperature,
+    int? agentApiToolTimeoutMs,
+    bool? agentApiAllowParallelTools,
+    int? agentApiMaxParallel,
+    int? agentThinkingMaxChars,
+    bool? agentThinkingOnToolSteps,
+    double? chatTextScale,
+    double? uiScale,
+    bool? agentSubagentEnabled,
+    String? agentSubagentApiModelId,
+    String? agentCompressionApiModelId,
+    bool? agentCompactEnabled,
+    bool? agentSpillEnabled,
+    bool? edgeTtsEnabled,
+    bool? edgeTtsAutoSpeak,
+    String? edgeTtsVoice,
+    int? edgeTtsRate,
+    int? edgeTtsPitch,
+    int? edgeTtsVolume,
+    bool? agentTraceExportEnabled,
+    bool? webSearchEnabled,
+    String? webSearchSearXngBaseUrl,
+    String? webSearchSearXngApiKey,
+    int? webSearchSearXngMaxResults,
+    int? webSearchSearXngTimeoutMs,
+    String? webSearchSearXngLanguage,
+    String? webSearchSearXngCategories,
+    String? webSearchSearXngEngines,
+    List<String>? webSearchDirectEngines,
+    bool? webSearchDirectEnabled,
+    int? webSearchDirectLowRiskPerWindow,
+    int? webSearchDirectHighRiskPerWindow,
+    bool? agentShellEnabled,
+    bool? agentPythonEnabled,
+    bool? agentFullFileAccess,
+    bool? agentMemoryEnabled,
+    // ---- 推理引擎 ----
+    bool? autoLoadMmproj,
+    bool? showResourceMonitor,
+    int? resourceSampleIntervalSec,
+    bool? oomGuardEnabled,
+    bool? inferenceLimitRefreshRate,
+    int? oomPreHeadroomMb,
+    int? oomPostHeadroomMb,
+    String? kvCacheType,
+    bool? flashAttn,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
     bool? smartMoeEnabled,
@@ -731,8 +742,8 @@ class InferenceSettings {
     bool? devModeEnabled,
     String? devWorkspaceId,
     List<SshConfig>? sshConfigs,
-      String? dangerousCommandPolicy,
-      Map<String, bool>? devToolToggles,
+    String? dangerousCommandPolicy,
+    Map<String, bool>? devToolToggles,
     bool clearSshConfig = false,
   }) {
     return InferenceSettings(
@@ -768,8 +779,7 @@ class InferenceSettings {
       pinnedConversationIds:
           pinnedConversationIds ?? this.pinnedConversationIds,
       asrEnhancedMode: asrEnhancedMode ?? this.asrEnhancedMode,
-      asrHotwordCategories:
-          asrHotwordCategories ?? this.asrHotwordCategories,
+      asrHotwordCategories: asrHotwordCategories ?? this.asrHotwordCategories,
       asrHotwordCustom: asrHotwordCustom ?? this.asrHotwordCustom,
       asrHotwordAdded: asrHotwordAdded ?? this.asrHotwordAdded,
       asrHotwordRemoved: asrHotwordRemoved ?? this.asrHotwordRemoved,
@@ -797,6 +807,7 @@ class InferenceSettings {
       agentThinkingOnToolSteps:
           agentThinkingOnToolSteps ?? this.agentThinkingOnToolSteps,
       chatTextScale: chatTextScale ?? this.chatTextScale,
+      uiScale: uiScale ?? this.uiScale,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentSubagentApiModelId:
           agentSubagentApiModelId ?? this.agentSubagentApiModelId,
@@ -831,8 +842,8 @@ class InferenceSettings {
           webSearchDirectEngines ?? this.webSearchDirectEngines,
       webSearchDirectEnabled:
           webSearchDirectEnabled ?? this.webSearchDirectEnabled,
-      webSearchDirectLowRiskPerWindow:
-          webSearchDirectLowRiskPerWindow ?? this.webSearchDirectLowRiskPerWindow,
+      webSearchDirectLowRiskPerWindow: webSearchDirectLowRiskPerWindow ??
+          this.webSearchDirectLowRiskPerWindow,
       webSearchDirectHighRiskPerWindow: webSearchDirectHighRiskPerWindow ??
           this.webSearchDirectHighRiskPerWindow,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
@@ -844,7 +855,8 @@ class InferenceSettings {
       resourceSampleIntervalSec:
           resourceSampleIntervalSec ?? this.resourceSampleIntervalSec,
       oomGuardEnabled: oomGuardEnabled ?? this.oomGuardEnabled,
-      inferenceLimitRefreshRate: inferenceLimitRefreshRate ?? this.inferenceLimitRefreshRate,
+      inferenceLimitRefreshRate:
+          inferenceLimitRefreshRate ?? this.inferenceLimitRefreshRate,
       gpuNUbatch: gpuNUbatch ?? this.gpuNUbatch,
       vkNoSubgroup: vkNoSubgroup ?? this.vkNoSubgroup,
       smartMoeEnabled: smartMoeEnabled ?? this.smartMoeEnabled,
@@ -915,6 +927,7 @@ class InferenceSettings {
         'agentThinkingMaxChars': agentThinkingMaxChars,
         'agentThinkingOnToolSteps': agentThinkingOnToolSteps,
         'chatTextScale': chatTextScale,
+        'uiScale': uiScale,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
         'agentCompressionApiModelId': agentCompressionApiModelId,
@@ -1007,25 +1020,22 @@ class InferenceSettings {
           newDefault: 12),
       agentMaxSearchesPerTurn:
           (json['agentMaxSearchesPerTurn'] as num?)?.toInt() ?? 5,
-      agentGoalMaxRounds:
-          (json['agentGoalMaxRounds'] as num?)?.toInt() ?? 8,
+      agentGoalMaxRounds: (json['agentGoalMaxRounds'] as num?)?.toInt() ?? 8,
       mcpServers: (json['mcpServers'] as List<dynamic>?)
               ?.map((e) =>
                   McpServerConfig.fromJson((e as Map).cast<String, dynamic>()))
               .where((c) => c.id.isNotEmpty && c.url.isNotEmpty)
               .toList() ??
           const [],
-      pinnedConversationIds:
-          (json['pinnedConversationIds'] as List<dynamic>?)
-                  ?.map((e) => '$e')
-                  .toList() ??
-              const [],
+      pinnedConversationIds: (json['pinnedConversationIds'] as List<dynamic>?)
+              ?.map((e) => '$e')
+              .toList() ??
+          const [],
       asrEnhancedMode: json['asrEnhancedMode'] as bool? ?? false,
-      asrHotwordCategories:
-          (json['asrHotwordCategories'] as List<dynamic>?)
-                  ?.map((e) => '$e')
-                  .toList() ??
-              const [],
+      asrHotwordCategories: (json['asrHotwordCategories'] as List<dynamic>?)
+              ?.map((e) => '$e')
+              .toList() ??
+          const [],
       asrHotwordCustom: json['asrHotwordCustom'] as String? ?? '',
       asrHotwordAdded: _parseStringListMap(json['asrHotwordAdded']),
       asrHotwordRemoved: _parseStringListMap(json['asrHotwordRemoved']),
@@ -1060,9 +1070,9 @@ class InferenceSettings {
           json['agentThinkingOnToolSteps'] as bool? ?? false,
       chatTextScale:
           ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0).clamp(0.7, 1.3),
+      uiScale: ((json['uiScale'] as num?)?.toDouble() ?? 1.0).clamp(0.85, 1.30),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
-      agentSubagentApiModelId:
-          json['agentSubagentApiModelId'] as String? ?? '',
+      agentSubagentApiModelId: json['agentSubagentApiModelId'] as String? ?? '',
       agentCompressionApiModelId:
           json['agentCompressionApiModelId'] as String? ?? '',
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
@@ -1071,8 +1081,10 @@ class InferenceSettings {
       edgeTtsAutoSpeak: json['edgeTtsAutoSpeak'] as bool? ?? false,
       edgeTtsVoice: json['edgeTtsVoice'] as String? ?? 'zh-CN-XiaoxiaoNeural',
       edgeTtsRate: ((json['edgeTtsRate'] as num?) ?? 0).clamp(-50, 100).toInt(),
-      edgeTtsPitch: ((json['edgeTtsPitch'] as num?) ?? 0).clamp(-50, 50).toInt(),
-      edgeTtsVolume: ((json['edgeTtsVolume'] as num?) ?? 0).clamp(-50, 50).toInt(),
+      edgeTtsPitch:
+          ((json['edgeTtsPitch'] as num?) ?? 0).clamp(-50, 50).toInt(),
+      edgeTtsVolume:
+          ((json['edgeTtsVolume'] as num?) ?? 0).clamp(-50, 50).toInt(),
       agentTraceExportEnabled:
           json['agentTraceExportEnabled'] as bool? ?? false,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
@@ -1090,9 +1102,9 @@ class InferenceSettings {
       webSearchSearXngCategories: json['webSearchSearXngCategories'] as String?,
       webSearchSearXngEngines:
           json['webSearchSearXngEngines'] as String? ?? kDefaultSearXngEngines,
-      webSearchDirectEngines: _parseDirectEngines(json['webSearchDirectEngines']),
-      webSearchDirectEnabled:
-          json['webSearchDirectEnabled'] as bool? ?? true,
+      webSearchDirectEngines:
+          _parseDirectEngines(json['webSearchDirectEngines']),
+      webSearchDirectEnabled: json['webSearchDirectEnabled'] as bool? ?? true,
       webSearchDirectLowRiskPerWindow:
           _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 20, 10),
       webSearchDirectHighRiskPerWindow:
@@ -1109,7 +1121,8 @@ class InferenceSettings {
           (json['resourceSampleIntervalSec'] as num?)?.toInt() ?? 1,
       // OOM 内存守卫：旧配置缺字段时默认开??+ 原生层默认余量（向后兼容）??
       oomGuardEnabled: json['oomGuardEnabled'] as bool? ?? true,
-      inferenceLimitRefreshRate: json['inferenceLimitRefreshRate'] as bool? ?? true,
+      inferenceLimitRefreshRate:
+          json['inferenceLimitRefreshRate'] as bool? ?? true,
       gpuNUbatch: (json['gpuNUbatch'] as num?)?.toInt() ?? 0,
       vkNoSubgroup: json['vkNoSubgroup'] as bool? ?? false,
       smartMoeEnabled: json['smartMoeEnabled'] as bool? ?? true,
@@ -1128,10 +1141,9 @@ class InferenceSettings {
       sshConfigs: _parseSshConfigs(json['sshConfigs'], json['sshConfig']),
       dangerousCommandPolicy:
           json['dangerousCommandPolicy'] as String? ?? 'deny',
-      devToolToggles:
-          (json['devToolToggles'] as Map<String, dynamic>?)
-                  ?.map((k, v) => MapEntry(k, v as bool? ?? true)) ??
-              const {},
+      devToolToggles: (json['devToolToggles'] as Map<String, dynamic>?)
+              ?.map((k, v) => MapEntry(k, v as bool? ?? true)) ??
+          const {},
     );
   }
 
@@ -1284,8 +1296,7 @@ class InferenceSettings {
     if (raw is! Map) return const {};
     final out = <String, List<String>>{};
     raw.forEach((k, v) {
-      out['$k'] =
-          v is List<dynamic> ? v.map((e) => '$e').toList() : <String>[];
+      out['$k'] = v is List<dynamic> ? v.map((e) => '$e').toList() : <String>[];
     });
     return out;
   }

@@ -87,7 +87,8 @@ Future<void> main() async {
             if (navigator == null) return false;
             var argsText = '';
             try {
-              argsText = jsonEncode(call.arguments ?? const <String, dynamic>{});
+              argsText =
+                  jsonEncode(call.arguments ?? const <String, dynamic>{});
             } catch (_) {
               argsText = call.arguments?.toString() ?? '';
             }
@@ -129,7 +130,17 @@ class TongYiLiteApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // 全局 UI 缩放（设置「更多 → UI 缩放」）：devicePixelRatio 乘数，
+    // 与系统"显示大小"同机制，图标/文字/间距整体等比缩放。
+    final uiScale = ref.watch(settingsProvider).uiScale;
     return MaterialApp(
+      builder: (context, child) {
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          data: mq.copyWith(devicePixelRatio: mq.devicePixelRatio * uiScale),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       title: 'TongYi-Lite',
       debugShowCheckedModeBanner: false,
       navigatorKey: appNavigatorKey,
@@ -171,7 +182,8 @@ class _AppStartupGateState extends ConsumerState<AppStartupGate> {
     try {
       await ModelManager().init();
     } catch (e) {
-      debugPrint('[Main] Failed to load model catalog, continuing with empty list: $e');
+      debugPrint(
+          '[Main] Failed to load model catalog, continuing with empty list: $e');
     }
 
     // 初始化原生推理引擎 — 必须在首次使用 llama.cpp API 前调用。

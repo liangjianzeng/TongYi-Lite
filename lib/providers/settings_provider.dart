@@ -31,6 +31,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     if (mounted) state = finalSettings;
   }
 
+  /// 全局 UI 缩放（0.85–1.30）：main.dart 以 devicePixelRatio 乘数应用。
+  Future<void> setUiScale(double value) async {
+    final clamped = value.clamp(0.85, 1.30);
+    state = state.copyWith(uiScale: clamped);
+    await _persist();
+  }
+
   Future<void> setEnableGpu(bool value) async {
     state = state.copyWith(enableGpu: value);
     await _persist();
@@ -482,8 +489,7 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   /// 删除 MCP server。
   Future<void> removeMcpServer(String id) async {
-    final list =
-        state.mcpServers.where((s) => s.id != id).toList();
+    final list = state.mcpServers.where((s) => s.id != id).toList();
     if (list.length == state.mcpServers.length) return;
     state = state.copyWith(mcpServers: list);
     await _persist();
@@ -536,8 +542,8 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   /// Dev 工具逐组开关（P2-D1）。
   Future<void> setDevToolGroupEnabled(String group, bool value) async {
-    state = state.copyWith(
-        devToolToggles: {...state.devToolToggles, group: value});
+    state =
+        state.copyWith(devToolToggles: {...state.devToolToggles, group: value});
     await _persist();
   }
 
@@ -640,7 +646,8 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   }
 
   /// 直连引擎开关（SearXNG 地址为空时生效）。
-  Future<void> setWebSearchDirectEngineEnabled(String engineId, bool enabled) async {
+  Future<void> setWebSearchDirectEngineEnabled(
+      String engineId, bool enabled) async {
     final current = List<String>.of(state.webSearchDirectEngines);
     if (enabled) {
       if (!current.contains(engineId)) current.add(engineId);
@@ -654,16 +661,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
 
   /// 低风险引擎每 10 分钟窗口请求预算（1~20）。
   Future<void> setWebSearchDirectLowRiskPerWindow(int value) async {
-    state = state.copyWith(
-        webSearchDirectLowRiskPerWindow: value.clamp(1, 20));
+    state = state.copyWith(webSearchDirectLowRiskPerWindow: value.clamp(1, 20));
     await _persist();
     _reapplyWebSearchProvider();
   }
 
   /// 高风险引擎每 10 分钟窗口请求预算（1~6）。
   Future<void> setWebSearchDirectHighRiskPerWindow(int value) async {
-    state = state.copyWith(
-        webSearchDirectHighRiskPerWindow: value.clamp(1, 6));
+    state = state.copyWith(webSearchDirectHighRiskPerWindow: value.clamp(1, 6));
     await _persist();
     _reapplyWebSearchProvider();
   }
