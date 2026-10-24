@@ -102,7 +102,7 @@ class AppRail extends StatelessWidget {
     return Material(
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
       child: Container(
-        width: 56,
+        width: 48,
         decoration: BoxDecoration(
           border: Border(
             right: BorderSide(color: scheme.outlineVariant, width: 1),
@@ -145,10 +145,10 @@ class _RailLogo extends StatelessWidget {
     // 设计稿 logo：紫→蓝对角渐变（纯色太闷）。
     final logo = Material(
       color: Colors.transparent,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: Ink(
         decoration: const BoxDecoration(
-          borderRadius: BorderRadius.all(Radius.circular(12)),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
@@ -156,12 +156,12 @@ class _RailLogo extends StatelessWidget {
           ),
         ),
         child: InkWell(
-          borderRadius: const BorderRadius.all(Radius.circular(12)),
+          borderRadius: const BorderRadius.all(Radius.circular(10)),
           onTap: onTap,
           child: const SizedBox(
-            width: 34,
-            height: 34,
-            child: Icon(Icons.auto_awesome, size: 18, color: Colors.white),
+            width: 30,
+            height: 30,
+            child: Icon(Icons.auto_awesome, size: 16, color: Colors.white),
           ),
         ),
       ),
@@ -177,7 +177,7 @@ class _RailDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 26,
+      width: 22,
       height: 1,
       margin: const EdgeInsets.symmetric(vertical: 4),
       color: Theme.of(context).colorScheme.outlineVariant,
@@ -227,18 +227,18 @@ class _RailIconButtonState extends State<RailIconButton> {
     final active = widget.item.panelKey != null &&
         _subscribed?.activeKey == widget.item.panelKey;
     Widget btn = InkWell(
-      borderRadius: BorderRadius.circular(11),
+      borderRadius: BorderRadius.circular(10),
       onTap: widget.item.onTap,
       child: Container(
-        width: 38,
-        height: 38,
+        width: 34,
+        height: 34,
         decoration: BoxDecoration(
           color: active ? scheme.primaryContainer : Colors.transparent,
-          borderRadius: BorderRadius.circular(11),
+          borderRadius: BorderRadius.circular(10),
         ),
         child: Icon(
           widget.item.icon,
-          size: 20,
+          size: 18,
           color: active ? scheme.onPrimaryContainer : scheme.onSurfaceVariant,
         ),
       ),
