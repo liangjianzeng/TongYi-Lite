@@ -40,6 +40,7 @@ typedef const void * (*get_adreno_bin_kernel_func_t)(
 #include <cstdint>
 #include <fstream>
 #include <vector>
+#include <atomic>
 #include <string>
 #include <cmath>
 #include <map>
@@ -12655,6 +12656,28 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                         }
                     }
                     CL_CHECK(clEnqueueWriteBuffer(queue, extra->meff, CL_TRUE, 0, pk.size()*sizeof(ggml_fp16_t), pk.data(), 0, NULL, NULL));
+                    // [dspark 2026-10-24 G-725] one-time per-process confirmation:
+                    // "seff/meff built" is the load-time proof that batched q4_K
+                    // CAN run; its absence (next else) is the Ling-regression
+                    // fingerprint. Keep this pair of logs together.
+                    {
+                        static std::atomic<int> seff_built_logs = {0};
+                        if (seff_built_logs.fetch_add(1) < 4) {
+                            GGML_LOG_INFO("ggml_opencl: q4_K MoE seff/meff BUILT @load Kc=%d Mc=%d Ec=%d (%.1f KiB/layer) [%s]\n",
+                                    (int)Kc, (int)Mc, (int)Ec, (double)se_layer / 1024.0, tensor->name);
+                        }
+                    }
+                } else if (!extra->seff) {
+                    // [dspark 2026-10-24 G-725] alignment gate refused: seff/meff
+                    // will never exist for this tensor, so every MUL_MAT_ID call
+                    // falls back to dense-loop forever, silently. G-725 makes the
+                    // fallback visible at load time instead of five days later.
+                    static std::atomic<int> seff_skip_logs = {0};
+                    if (seff_skip_logs.fetch_add(1) < 4) {
+                        GGML_LOG_INFO(
+                            "ggml_opencl: q4_K MoE seff/meff NOT BUILT (Kc=%d Mc=%d Kc%%256=%d Mc%%2=%d) -> batched unavailable for [%s]\n",
+                            (int)Kc, (int)Mc, (int)(Kc % 256), (int)(Mc % 2), tensor->name);
+                    }
                 }
                 return;
             }
@@ -24992,11 +25015,39 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
 // index stays inside the expert layer) and 16B-aligned activations for the float4
 // pixel image. Returns false when any precondition fails; caller falls back to the
 // dense-loop.
+// [dspark 2026-10-24 G-725] The batched-MoE path used to fall back to
+// dense-loop through ~a dozen silent "return false" gates (Ling Q4_K_M ran
+// dense-loop at -58% for five days unnoticed — see
+// docs/Ling3.0Tiny_OpenCL性能回归定位_2026-10-20.md §2: "batched MoE dump: 0
+// 条，七道静默门"). Every gate now reports why it refused, rate-limited: the
+// first MMID_FAIL_LOG_MAX hits per gate carry full shape detail, later hits
+// only bump a silent tally. A silent dense-loop regression is no longer
+// expressible: either you see GATE-FAIL lines at load, or batched is running.
+#define MMID_FAIL_LOG_MAX 8
+static void ggml_cl_mmid_gate_fail(int gate_id, const char * gate,
+        const ggml_tensor * src0, const ggml_tensor * src1,
+        const ggml_tensor * src2, const char * detail) {
+    static std::atomic<int> hits[16] = {};
+    if (gate_id < 0 || (size_t)gate_id >= sizeof(hits)/sizeof(hits[0])) {
+        return;
+    }
+    const int n = hits[gate_id].fetch_add(1);
+    if (n < MMID_FAIL_LOG_MAX) {
+        GGML_LOG_INFO(
+            "ggml_opencl: MUL_MAT_ID batched GATE-FAIL[%s] #%d type=%s K=%d M=%d E=%d n_used=%d n_tok=%d %s\n",
+            gate, n + 1, ggml_type_name(src0->type),
+            (int)src0->ne[0], (int)src0->ne[1], (int)src0->ne[2],
+            src2 ? (int)src2->ne[0] : -1, src2 ? (int)src2->ne[1] : -1,
+            detail ? detail : "");
+    }
+}
+
 static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         const ggml_tensor * src0, const ggml_tensor * src1,
         const ggml_tensor * src2, ggml_tensor * dst) {
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
     if (src1->type != GGML_TYPE_F32 || src2->type != GGML_TYPE_I32) {
+        ggml_cl_mmid_gate_fail(0, "src_types", src0, src1, src2, "need src1=F32 src2=I32");
         return false;
     }
     // [dspark 2026-10-14] extended to q4_K: same batched-gather structure, the
@@ -25010,6 +25061,7 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // q3_K's hmask/qs/scales layout. Gates: K%256 (superblock scales), M%128.
     const bool is_q3_k = src0->type == GGML_TYPE_Q3_K;
     if (!is_q4_0 && !is_q4_k && !is_q3_k) {
+        ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K only");
         return false;
     }
     // [dspark 2026-10-14] HISTORICAL (superseded by the v2 note below): q4_K
@@ -25048,11 +25100,26 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extra2 = (ggml_tensor_extra_cl *)src2->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
-    if (is_q4_0 && (!pextra40 || !pextra40->q || !pextra40->d)) return false;
-    if (is_q4_k && (!pextra4k || !pextra4k->q || !pextra4k->d || !pextra4k->dm || !pextra4k->s)) return false;
-    if (is_q4_k && (!pextra4k->seff || !pextra4k->meff)) return false;
-    if (is_q3_k && (!pextra3k || !pextra3k->q || !pextra3k->se0 || !pextra3k->se1)) return false;
+    if (is_q4_0 && (!pextra40 || !pextra40->q || !pextra40->d)) {
+        ggml_cl_mmid_gate_fail(2, "planes_q4_0", src0, src1, src2, "extra q/d missing");
+        return false;
+    }
+    if (is_q4_k && (!pextra4k || !pextra4k->q || !pextra4k->d || !pextra4k->dm || !pextra4k->s)) {
+        ggml_cl_mmid_gate_fail(2, "planes_q4_k", src0, src1, src2, "extra q/d/dm/s missing");
+        return false;
+    }
+    if (is_q4_k && (!pextra4k->seff || !pextra4k->meff)) {
+        // head suspect for the Ling regression: set_tensor skipped or lost the
+        // host-precomputed effective-scale planes (e.g. sched-copied tensor)
+        ggml_cl_mmid_gate_fail(2, "planes_q4_k_seff", src0, src1, src2, "seff/meff missing (set_tensor gate)");
+        return false;
+    }
+    if (is_q3_k && (!pextra3k || !pextra3k->q || !pextra3k->se0 || !pextra3k->se1)) {
+        ggml_cl_mmid_gate_fail(2, "planes_q3_k", src0, src1, src2, "extra q/se0/se1 missing");
+        return false;
+    }
     if (!extra1 || !extra2 || !extrad) {
+        ggml_cl_mmid_gate_fail(3, "extras", src0, src1, src2, "src1/src2/dst extra missing");
         return false;
     }
     cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : pextra3k->q);
@@ -25064,9 +25131,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
     if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
+        ggml_cl_mmid_gate_fail(4, "adreno_moe_gate", src0, src1, src2, "use_adreno_moe_kernels refused (gen/shape)");
         return false;
     }
     if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
+        ggml_cl_mmid_gate_fail(5, "contiguity", src0, src1, src2, nullptr);
         return false;
     }
 
@@ -25085,17 +25154,32 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (is_q3_k && src0->view_src != nullptr) {
         const size_t slot_bpe = ggml_nbytes(src0) / (size_t)src0->ne[2];
         if (slot_bpe == 0 || (src0->view_offs % slot_bpe) != 0) {
+            ggml_cl_mmid_gate_fail(6, "view_slot_q3k", src0, src1, src2, "view_offs not slot-aligned");
             return false;
         }
         es_base = (int)(src0->view_offs / slot_bpe);
     } else if (src0->view_src != nullptr) {
         // q4_0/q4_K batched path has no view-slot offset handling: reading the
         // parent planes from slot 0 would silently produce wrong results
+        ggml_cl_mmid_gate_fail(6, "view_slot", src0, src1, src2, "q4_0/q4_K lack es_base view handling (grid G-740)");
         return false;
     }
-    if (K % 32 != 0 || M % 128 != 0) return false;   // M%128: no row-pair padding
-    if ((is_q4_k || is_q3_k) && K % 256 != 0) return false;   // superblock scale indexing
-    if (n_used < 1 || n_tok < 1 || n_cols > (1LL << 20)) return false;
+    if (K % 32 != 0 || M % 128 != 0) {
+        char det[64];
+        snprintf(det, sizeof(det), "K%%32=%d M%%128=%d", K % 32, M % 128);
+        ggml_cl_mmid_gate_fail(7, "shape_align", src0, src1, src2, det);
+        return false;   // M%128: no row-pair padding
+    }
+    if ((is_q4_k || is_q3_k) && K % 256 != 0) {
+        char det[32];
+        snprintf(det, sizeof(det), "K%%256=%d (superblock scales)", K % 256);
+        ggml_cl_mmid_gate_fail(7, "shape_align", src0, src1, src2, det);
+        return false;   // superblock scale indexing
+    }
+    if (n_used < 1 || n_tok < 1 || n_cols > (1LL << 20)) {
+        ggml_cl_mmid_gate_fail(8, "cols_range", src0, src1, src2, "n_used/n_tok<1 or n_cols>2^20");
+        return false;
+    }
     {
         static const bool moe_trace = [] {
             const char * e = getenv("GGML_MOE_TRACE");
@@ -25113,10 +25197,16 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     cl_ulong b_base   = extra1->offset + src1->view_offs;
     cl_ulong ids_base = extra2->offset + src2->view_offs;
     cl_ulong dst_base = extrad->offset + dst->view_offs;
-    if (b_base % 16 != 0)  return false;   // float4-pixel image origin
-    if (ids_base % 4 != 0) return false;
-    if (dst_base % 4 != 0 || dst->nb[1] % 4 != 0 || dst->nb[2] % 4 != 0) return false;
-    if ((cl_ulong)src1->ne[2] * ne11 * K * 4 > (cl_ulong)1 << 31) return false;
+    if (b_base % 16 != 0)  { ggml_cl_mmid_gate_fail(9, "img_align", src0, src1, src2, "src1 base %16 != 0 (float4 image origin)"); return false; }
+    if (ids_base % 4 != 0) { ggml_cl_mmid_gate_fail(9, "img_align", src0, src1, src2, "ids base %4 != 0"); return false; }
+    if (dst_base % 4 != 0 || dst->nb[1] % 4 != 0 || dst->nb[2] % 4 != 0) {
+        ggml_cl_mmid_gate_fail(9, "img_align", src0, src1, src2, "dst base/stride %4 != 0");
+        return false;
+    }
+    if ((cl_ulong)src1->ne[2] * ne11 * K * 4 > (cl_ulong)1 << 31) {
+        ggml_cl_mmid_gate_fail(10, "size_limit", src0, src1, src2, "src1 image > 2GiB");
+        return false;
+    }
 
     // per-expert strides
     // q4_0/q4_K: 8 uints per (rp, k); q3_K: 6 uints per (rp, k) with M/2 row
