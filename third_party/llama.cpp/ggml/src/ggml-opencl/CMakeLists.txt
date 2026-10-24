@@ -5,11 +5,20 @@ set(TARGET_NAME ggml-opencl)
 
 ggml_add_backend_library(${TARGET_NAME}
                          ggml-opencl.cpp
+                         tongyi_route_table.cpp
+                         tongyi_route_table.h
                          cl-program-cache.cpp
                          cl-program-cache.h
                          ../../include/ggml-opencl.h)
 target_link_libraries(${TARGET_NAME} PRIVATE ${OpenCL_LIBRARIES})
 target_include_directories(${TARGET_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
+
+# [tongyi R1 2026-10-25] 路由表单测（设计稿 §4）：cmake -DTONGYI_ROUTE_TEST=ON && ctest
+# 纯 host 逻辑（不碰 CL/ggml 内部头），交叉构建后推设备跑同样成立。
+if (TONGYI_ROUTE_TEST)
+    add_executable(tongyi-route-test tongyi_route_table_test.cpp tongyi_route_table.cpp tongyi_route_table.h)
+    add_test(NAME tongyi-route-test COMMAND tongyi-route-test)
+endif()
 
 if (GGML_OPENCL_PROFILING)
     message(STATUS "OpenCL profiling enabled (increases CPU overhead)")

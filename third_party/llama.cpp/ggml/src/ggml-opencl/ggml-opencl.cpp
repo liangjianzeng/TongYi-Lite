@@ -12,6 +12,7 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 #include "ggml.h"
+#include "tongyi_route_table.h"
 
 #include "cl-program-cache.h"
 
@@ -154,6 +155,22 @@ struct ggml_cl_compiler_version {
         return same(t, x, y, z) || newer_than(t, x, y, z);
     }
 };
+
+// [tongyi R1 2026-10-25] 路由表镜像枚举数值对齐（编译期把守；漂移即编不过）
+static_assert((int) tongyi::RGEN_UNKNOWN == (int) ADRENO_UNKNOWN, "route gen mirror");
+static_assert((int) tongyi::RGEN_A6X    == (int) A6X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_A7X    == (int) A7X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_A8X    == (int) A8X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_X1E    == (int) X1E,    "route gen mirror");
+static_assert((int) tongyi::RGEN_X2E    == (int) X2E,    "route gen mirror");
+static_assert((int) tongyi::RCOMP_E031  == (int) E031,   "route compiler mirror");
+static_assert((int) tongyi::RCOMP_E17   == (int) E17,    "route compiler mirror");
+static_assert((int) tongyi::RCOMP_DX    == (int) DX,     "route compiler mirror");
+static_assert((int) tongyi::RTYPE_Q4_0  == (int) GGML_TYPE_Q4_0,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q4_K  == (int) GGML_TYPE_Q4_K,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q3_K  == (int) GGML_TYPE_Q3_K,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q8_0  == (int) GGML_TYPE_Q8_0,  "route type mirror");
+static_assert((int) tongyi::RTYPE_MXFP4 == (int) GGML_TYPE_MXFP4, "route type mirror");
 
 static size_t align_to(size_t value, size_t to_alignment) {
     GGML_ASSERT(to_alignment && "Invalid alignment (must be non-zero)");
@@ -25042,6 +25059,68 @@ static void ggml_cl_mmid_gate_fail(int gate_id, const char * gate,
     }
 }
 
+// [tongyi R1 2026-10-25] 路由表上下文（env 一次性快照，逐字对应旧门读法）。
+static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_context * backend_ctx) {
+    static const int  a7x_mode   = [] { const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");     return e ? ((e[0] == '0') ? 0 : 1) : -1; }();
+    static const bool e17_off    = [] { const char * e = getenv("GGML_OPENCL_ADRENO_E17_QUIRKS"); return e && e[0] == '0'; }();
+    static const bool vdiag      = [] { const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");        return e && e[0] == '1'; }();
+    static const bool dense_off  = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '0'; }();
+    static const bool dense_on   = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '1'; }();
+    static const bool batched_off= [] { const char * e = getenv("GGML_OPENCL_BATCHED_MOE");       return e && e[0] == '0'; }();
+    tongyi::RouteContext c = {};
+    c.gen = backend_ctx ? (tongyi::RGen)backend_ctx->adreno_gen : tongyi::RGEN_UNKNOWN;
+    c.compiler = (backend_ctx && backend_ctx->gpu_family == GPU_FAMILY::ADRENO)
+                     ? (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type
+                     : tongyi::RCOMP_UNKNOWN;
+    c.is_mesa = false;
+    c.moe_a7x_mode = a7x_mode;
+    c.e17_quirks_off = e17_off;
+    c.vendor_diag = vdiag;
+    c.dense_off = dense_off;
+    c.dense_force = dense_on;
+    c.batched_off = batched_off;
+    return c;
+}
+
+// [tongyi R1 2026-10-25] 表驱动路由记账（行为零变化）：查表一次、限流打一行决策日志；
+// 控制流完全不变——下面的旧门仍是权威，R2 才翻转（等价性由 tongyi_route_table_test
+// 的 legacy 参照对拍钉死）。放在 gate 0/1 之后（src1/src2 已验型）。
+static void tongyi_route_bookkeeping(const ggml_backend_opencl_context * backend_ctx,
+        const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2) {
+    static std::atomic<int> route_logs = {0};
+    if (route_logs.fetch_add(1) >= 12) return;   // 每 (类型,形状) 首见各占一条，12 条封顶
+    const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
+    tongyi::RouteQuery rq = {};
+    rq.op = tongyi::ROUTE_MUL_MAT_ID;
+    rq.type = (tongyi::RType)src0->type;
+    rq.K = (int)src0->ne[0];
+    rq.M = (int)src0->ne[1];
+    rq.E = (int)src0->ne[2];
+    rq.n_used = src2 ? (int)src2->ne[0] : 0;
+    rq.n_tok  = src2 ? (int)src2->ne[1] : 0;
+    rq.name = soa0->name;
+    rq.src1_f32 = src1 && src1->type == GGML_TYPE_F32;
+    rq.src2_i32 = src2 && src2->type == GGML_TYPE_I32;
+    rq.contiguous0 = ggml_is_contiguous(src0);
+    rq.contiguous1 = src1 ? ggml_is_contiguous(src1) : false;
+    rq.is_view = src0->view_src != nullptr;
+    rq.view_slot_aligned = true;   // 槽位对齐是运行时门（gate 6 会精查），记账侧不拦
+    rq.align_bytes = 0;            // dense 对齐门记账侧跳过（supports_op 侧才生效）
+    const tongyi::RouteResult rr = tongyi::resolve(rq, tongyi_route_context(backend_ctx));
+    if (rr.admitted()) {
+        GGML_LOG_INFO("ggml_opencl: route[%s] type=%s K=%d M=%d E=%d -> %s (%s)%s\n",
+                      soa0->name, ggml_type_name(src0->type), rq.K, rq.M, rq.E,
+                      tongyi::route_kind_name(rr.spec->kind), rr.spec->name,
+                      rr.refuse_detail ? rr.refuse_detail : "");
+    } else {
+        GGML_LOG_INFO("ggml_opencl: route[%s] type=%s K=%d M=%d E=%d -> REFUSED gate=%s%s (%s)\n",
+                      soa0->name, ggml_type_name(src0->type), rq.K, rq.M, rq.E,
+                      rr.refuse_gate ? rr.refuse_gate : "?",
+                      rr.attempted ? " fallback=" : "",
+                      rr.attempted && rr.attempted->fallback ? rr.attempted->fallback : "");
+    }
+}
+
 static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         const ggml_tensor * src0, const ggml_tensor * src1,
         const ggml_tensor * src2, ggml_tensor * dst) {
@@ -25063,6 +25142,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (!is_q4_0 && !is_q4_k && !is_q3_k) {
         ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K only");
         return false;
+    }
+    // [tongyi R1 2026-10-25] 查表记账（零行为变化）：一行 route 决策日志，控制流交给下面的旧门。
+    {
+        ggml_backend_opencl_context * bk_ctx = (ggml_backend_opencl_context *)backend->context;
+        tongyi_route_bookkeeping(bk_ctx, src0, src1, src2);
     }
     // [dspark 2026-10-14] HISTORICAL (superseded by the v2 note below): q4_K
     // batched MoE DISABLED — Adreno 830 (E031.47.18.49)

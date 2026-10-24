@@ -42,16 +42,39 @@ if [ -z "${ANDROID_NDK_HOME:-}" ]; then
 fi
 [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_NDK_HOME" ] || {
   echo "找不到 NDK：设 ANDROID_NDK_HOME 或装 ~/android-sdk/ndk/27.0.12077973" >&2; exit 1; }
-# aarch64 宿主用 linux-aarch64 prebuilt；x86-64 宿主用 linux-x86_64
-HOSTDIR=$(ls -d "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/* 2>/dev/null | grep -m1 "$(uname -m | sed 's/aarch64/linux-aarch64/;s/x86_64/linux-x86_64/')" || true)
-[ -n "$HOSTDIR" ] || { echo "NDK 缺本机 host prebuilt（$(uname -m)）" >&2; exit 1; }
-CC="$HOSTDIR/bin/clang"
+# aarch64 宿主用 linux-aarch64 prebuilt；x86-64 Linux 用 linux-x86_64；
+# Windows（Git Bash/MinGW）用 windows-x86_64（2026-10-25 补：裸 bash 里 uname 是 x86_64 但
+# prebuilt 目录叫 windows-x86_64，旧 grep 匹配 linux-x86_64 必空 ⇒ HOSTDIR 直接判死）
+case "$(uname -m | sed 's/aarch64/linux-aarch64/;s/x86_64/linux-x86_64/');$(uname -s)" in
+  *MINGW*|*MSYS*|*CYGWIN*) HOST_TAG_GUESS="windows-x86_64" ;;
+  *) HOST_TAG_GUESS="$(uname -m | sed 's/aarch64/linux-aarch64/;s/x86_64/linux-x86_64/')" ;;
+esac
+HOSTDIR=$(ls -d "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/* 2>/dev/null | grep -m1 "$HOST_TAG_GUESS" || true)
+[ -n "$HOSTDIR" ] || { echo "NDK 缺本机 host prebuilt（tag=$HOST_TAG_GUESS）" >&2; exit 1; }
+# Windows 下 clang 是 .cmd 包装（不能直接 exec）：统一走 cmd 包装名
+if [ -x "$HOSTDIR/bin/clang" ]; then
+  CC="$HOSTDIR/bin/clang"
+elif [ -f "$HOSTDIR/bin/clang.cmd" ]; then
+  CC="$HOSTDIR/bin/clang.cmd"
+else
+  echo "NDK 缺 clang（$HOSTDIR/bin）" >&2; exit 1
+fi
 SYSROOT="$HOSTDIR/sysroot"   # 裸 clang 不会自动挂 sysroot，漏了会去吃宿主 /usr/include（glibc）
 
 echo "== Mesa 线测量体构建 =="
 echo "   仓库根 : $REPO_ROOT"
 echo "   NDK    : $ANDROID_NDK_HOME ($(basename "$HOSTDIR"))"
 echo "   ABI    : $ANDROID_ABI / android-$ANDROID_PLATFORM / -j$JOBS"
+
+# [2026-10-25 Windows 宿主补] ninja/cmake/python3 都可能不在 PATH：
+#   - Git Bash 宿主：Android SDK 自带 cmake+ninja（拼 PATH）；python3 用 python.exe 别名兜底
+SDK_CMAKE_GUESS="${ANDROID_SDK_HOME:-$HOME/AppData/Local/Android/Sdk}/cmake"
+if ! command -v ninja >/dev/null 2>&1; then
+  for d in "$SDK_CMAKE_GUESS"/*/bin; do [ -x "$d/ninja" ] && export PATH="$d:$PATH" && break; done
+fi
+if ! command -v python3 >/dev/null 2>&1 && command -v python >/dev/null 2>&1; then
+  python3() { python "$@"; }   # 仅本脚本内别名（compile-gate 机检用）
+fi
 
 # ---------- opencl stub（ggml-opencl 链接用的 ICD 转发壳） ----------
 mkdir -p "$STUB_DIR"

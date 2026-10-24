@@ -54,6 +54,7 @@ tyl_add_probe(moe_probe7)
 tyl_add_probe(moe_probe8)
 tyl_add_probe(moe_probe9)
 tyl_add_probe(svm_probe ${OpenCL_LIBRARY})
+tyl_add_probe(ssm_probe)
 tyl_add_probe(graph_ops_export llama ggml)
 
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
