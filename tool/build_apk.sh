@@ -27,7 +27,7 @@ set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODES=(debug release)
 TARGET_PLATFORM=android-arm64
-RUN_ANALYZE=0; RUN_CHECK_ONLY=0; FIX_ARTIFACTS=0; RUN_INSTALL=0; CLEAN_NATIVE=0
+RUN_ANALYZE=0; RUN_CHECK_ONLY=0; FIX_ARTIFACTS=0; RUN_INSTALL=0; CLEAN_NATIVE=0; RUN_VERIFY_ONLY=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -36,6 +36,7 @@ for arg in "$@"; do
     --all-abi) TARGET_PLATFORM= ;;
     --analyze) RUN_ANALYZE=1 ;;
     --check)   RUN_CHECK_ONLY=1 ;;
+    --verify-only) RUN_VERIFY_ONLY=1 ;;   # 只验收现有产物（签名/体积/原生库），不重编
     --fix-artifacts) FIX_ARTIFACTS=1 ;;
     --clean-native) CLEAN_NATIVE=1 ;;
     --install) RUN_INSTALL=1 ;;
@@ -172,7 +173,7 @@ else
 fi
 
 # 签名（AGENTS 铁律：必须 CN=TongYiLite 正式证书，指纹见 EXPECTED_FP）
-EXPECTED_FP="fbbe1b6cf879ab941a65cdd7a7a8dd6f5a6bb640412de38c43cb894f08886992"
+# 签名指纹与验收逻辑都在 tool/verify_apk.sh（那儿是唯一真源，别再抄一份）
 if [[ -f "$PROJ_ROOT/android/key.properties" && -f "$PROJ_ROOT/android/key.jks" ]]; then
   ok "release 签名文件就位"
 else
@@ -231,6 +232,10 @@ fi
 echo "== flutter pub get"; "$FLUTTER" pub get
 
 APKS=()
+if [[ "$RUN_VERIFY_ONLY" == 1 ]]; then
+  # 只验收现有产物：不重编，各档产物直接交给 tool/verify_apk.sh（验收逻辑唯一真源在那儿）
+  for m in "${MODES[@]}"; do APKS+=("build/app/outputs/flutter-apk/app-$m.apk"); done
+else
 for MODE in "${MODES[@]}"; do
   args=(build apk "--$MODE")
   [[ -n "$TARGET_PLATFORM" && "$MODE" != debug ]] && args+=(--target-platform="$TARGET_PLATFORM")
@@ -240,29 +245,14 @@ for MODE in "${MODES[@]}"; do
   [[ -f "$APK" ]] || { echo "构建结束但没找到 $APK" >&2; exit 1; }
   APKS+=("$APK")
 done
+fi
 
 # ---------------------------------------------------------------- 产物验收
-APKSIGNER="$(ls "$ANDROID_SDK"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)"
+# 验收（签名 CN=TongYiLite / 体积 / 原生库）**唯一真源是 tool/verify_apk.sh**：
+# 抽出去是为了能单独证红 —— 内嵌在这儿时，想证一次红得整套重编（30 分钟起），实际上没人证过，
+# 于是它就退化成一条信仰门禁（§11-C：门禁承诺的检查其实不存在）。
 for APK in "${APKS[@]}"; do
-  echo
-  echo "产物：$PROJ_ROOT/$APK"
-  printf '体积：%s   sha256：%s…\n' "$(du -h "$APK" | cut -f1)" "$(sha256sum "$APK" | cut -c1-16)"
-  if command -v unzip >/dev/null 2>&1; then
-    n_so=$(unzip -l "$APK" | grep -c 'lib/arm64-v8a/.*\.so')
-    echo "原生库：$n_so 个 .so（arm64）；关键后端："
-    unzip -l "$APK" | grep -oE 'lib/arm64-v8a/lib(ggml[^ ]*|llama[^ ]*|mtmd|app|flutter|turnip[^ ]*|opencl_stub)\.so' | sed 's/^/    /' | sort -u
-  fi
-  # 签名验收（release 必须是正式证书；debug 允许同证书——本项目 build.gradle 已统一）
-  if [[ -n "$APKSIGNER" && "$MODE" == "release" || -n "$APKSIGNER" ]]; then
-    dn=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | sed -n 's/.*certificate DN: //p' | head -1)
-    fp=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | sed -n 's/.*SHA-256 digest: //p' | head -1 | tr -d ':')
-    if [[ "$fp" == "$EXPECTED_FP" ]]; then
-      ok "签名验收通过：$dn"
-    else
-      bad "签名不符！$dn ($fp) ≠ CN=TongYiLite/$EXPECTED_FP（AGENTS 铁律：检查 android/key.jks）"
-      exit 1
-    fi
-  fi
+  bash "$PROJ_ROOT/tool/verify_apk.sh" "$PROJ_ROOT/$APK"
 done
 
 # native 新鲜度提示（AGENTS：.so 陈旧坑）
