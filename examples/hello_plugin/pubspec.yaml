@@ -1,0 +1,14 @@
+name: hello_plugin
+description: 插件作者参考实现 —— 跑通它 = 平台契约可用；也是 tool/plugin_scaffold.dart 的模板源。
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+
+dependencies:
+  plugin_sdk:
+    path: ../../packages/plugin_sdk
+
+dev_dependencies:
+  test: ^1.25.0

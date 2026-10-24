@@ -15,11 +15,21 @@ class DeviceFilesService {
 
   /// 导出文件到下载目录，成功返回 content:// URI。
   Future<String> exportFile({required String src, String? name}) async {
-    return await _channel.invokeMethod<String>(
-          'exportFile',
-          {'src': src, if (name != null && name.isNotEmpty) 'name': name},
-        ) ??
-        '';
+    final uri = await _channel.invokeMethod<String>(
+      'exportFile',
+      {'src': src, if (name != null && name.isNotEmpty) 'name': name},
+    );
+    // Kotlin 侧 `insert` 失败时返回 null（存储权限被拒、下载提供程序异常、ROM 抽风）。
+    // 以前这里 `?? ''` 把"没成功"折算成"成功，只是位置是空串"，两个调用方都把空串当 URI 用了出去：
+    // 插件流程报"导出完成"、智能体回一句"已导出："后面什么都没有。
+    // **空串不是 URI** —— 交付与否只能由"拿得到位置"来证明，宁可抛给调用方去报错。
+    if (uri == null || uri.trim().isEmpty) {
+      throw PlatformException(
+        code: 'export_no_uri',
+        message: '下载目录没有给回文件位置（${name ?? src}）—— 文件没交到用户手上',
+      );
+    }
+    return uri;
   }
 
   /// 用系统应用打开（html/png/pdf/md 等）。失败抛 PlatformException。

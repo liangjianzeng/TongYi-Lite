@@ -1,0 +1,101 @@
+{
+  "manifestVersion": 1,
+  "id": "en-zh-cards",
+  "name": "中英默写卡",
+  "description": "把课文或词表变成中英对照默写卡，可导出练习单",
+  "whenToUse": "用户想把课文/词表变成中英对照的默写卡、或要一份可打印练习单时",
+  "icon": "icons.collections_outlined",
+  "source": "user",
+  "trust": "declarative",
+  "enabledByDefault": false,
+  "inject": [
+    "llm.complete",
+    "app.interact",
+    "app.store"
+  ],
+  "permissions": [
+    "llm:chat",
+    "network",
+    "storage:plugin",
+    "file_export"
+  ],
+  "requiresSdk": "v1",
+  "params": [
+    {
+      "name": "count",
+      "label": "要几张卡",
+      "type": "number",
+      "default": 10,
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "description": "一次生成多少张中英对照卡",
+      "askAtStart": true
+    }
+  ],
+  "config": {
+    "count": 10
+  },
+  "flow": {
+    "name": "中英默写卡",
+    "description": "读用户给的课文/词表→生成中英对照卡→导出练习单",
+    "whenToUse": "用户想把课文/词表变成中英对照的默写卡、或要一份可打印练习单时",
+    "phases": [
+      {
+        "id": "ask",
+        "title": "要几张"
+      },
+      {
+        "id": "gen",
+        "title": "生成卡片"
+      },
+      {
+        "id": "out",
+        "title": "校对并导出"
+      }
+    ],
+    "steps": [
+      {
+        "id": "ask",
+        "op": "ask_params",
+        "phase": "ask",
+        "params": {
+          "names": [
+            "count"
+          ]
+        }
+      },
+      {
+        "id": "gen",
+        "op": "llm_extract",
+        "phase": "gen",
+        "params": {
+          "promptFile": "prompt.md",
+          "maxTokens": 1600
+        }
+      },
+      {
+        "id": "confirm",
+        "op": "review",
+        "phase": "out"
+      },
+      {
+        "id": "sheet",
+        "op": "export",
+        "phase": "out",
+        "params": {
+          "filename": "中英默写卡.txt"
+        }
+      },
+      {
+        "id": "keep",
+        "op": "store",
+        "phase": "out",
+        "params": {
+          "key": "lastCards"
+        }
+      }
+    ]
+  },
+  "promptFile": "prompt.md"
+}

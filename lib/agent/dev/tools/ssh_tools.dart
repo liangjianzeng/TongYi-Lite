@@ -61,6 +61,12 @@ String toRemotePath(String root, String rawPath) {
   return '$root/${trimmed.replaceAll(RegExp(r'^\./'), '')}';
 }
 
+/// bash 单引号转义：所有插入远端 shell 的模型可控值都必须过这里。
+///
+/// 可用性评估 P1-8：`cd $root`、`git push $remote$branch`、`cd $root/$cwd`
+/// 全是裸插值，模型给个 `branch: "x && touch pwned"` 即逃逸，带空格路径也直接炸。
+String sq(String s) => "'${s.replaceAll("'", r"'\''")}'";
+
 /// 确保 SSH 连接（按工作区绑定的配置自动连接/切换）。
 ///
 /// 返回错误信息（null = 已连接可用）。
@@ -190,13 +196,17 @@ Future<ToolResult?> _termuxWrite(
 /// 共享：在远端工作区执行命令（git/verify/ssh 工具共用）。
 ///
 /// [buildCommand]：接收远端根目录，返回要执行的完整命令。
-/// 内部做：工作区解析 → 自动连接 → 危险命令黑名单 → 执行 → 断连重连重试 → 截断。
+/// [dangerText]：**只送黑名单的文本**（模型原始命令段）。不传时回落 [buildCommand]
+/// 的结果 —— 但 `cd <remoteRoot> && ` 前缀含工作区名，旧版据此会把
+/// "工作区叫 mount-app" 的所有命令误杀，故调用方应尽量只传模型命令。
+/// 内部做：工作区解析 → intent 优先（Termux 免 SSH）→ 自动连接 → 断连重连重试 → 截断。
 Future<ToolResult> sshRunInWorkspace(
   Map<String, dynamic> args,
   String Function(String root) buildCommand, {
   List<SshConfig> sshConfigs = const [],
   Duration timeout = const Duration(seconds: 30),
   int outputLimit = kShellOutputLimit,
+  String? dangerText,
 }) async {
   String fullCommand;
   DevWorkspace ws;
@@ -208,7 +218,7 @@ Future<ToolResult> sshRunInWorkspace(
   } on StateError catch (e) {
     return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
   }
-  final danger = checkDangerousCommand(fullCommand);
+  final danger = checkDangerousCommand(dangerText ?? fullCommand);
   if (danger != null) {
     return ToolResult.error('危险命令被拒绝：$danger');
   }
@@ -265,30 +275,35 @@ ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
       final command = (args['command'] as String?)?.trim() ?? '';
       if (command.isEmpty) return ToolResult.error('缺少 command 参数');
       final cwd = (args['cwd'] as String?)?.trim() ?? '';
+      if (cwd.replaceAll('\\', '/').split('/').contains('..')) {
+        return ToolResult.error('cwd 必须是工作区内的相对子目录（不允许 ..）');
+      }
+      // 危险命令只看模型传入的 command 段（不把 `cd <root> && ` 前缀喂进黑名单）。
+      final danger = checkDangerousCommand(command);
+      if (danger != null) {
+        return ToolResult.error('危险命令被拒绝：$danger');
+      }
       // 工作区 → 远端根目录映射。
       String fullCommand;
       try {
         final wsId = effectiveWorkspaceOf(args);
         final remote = await resolveRemoteRoot(wsId);
-        fullCommand = cwd.isEmpty
-            ? 'cd ${remote.root} && $command'
-            : 'cd ${toRemotePath(remote.root, cwd)} && $command';
+        fullCommand = 'cd ${sq(toRemotePath(remote.root, cwd))} && $command';
         final ssh = SshEnvironmentService.instance;
+        // termux 后端：intent 优先（免 SSH）。
+        //
+        // 可用性评估 P1-15：旧版**先连 SSH 再试 intent**，连接失败即 return，
+        // 于是"没配 sshd 的 Termux"主打工具 ssh_exec 直接报连接失败 ——
+        // 号称的免 SSH 通道对 ssh_exec 完全失效（而 sshRunInWorkspace 是 intent
+        // 优先，造成"有的工具能用有的不能"）。现与共享执行器统一：intent 先行。
+        final intentResult = await _tryTermuxIntent(
+            remote.workspace, fullCommand, const Duration(seconds: 30));
+        if (intentResult != null) return intentResult;
         final connError =
             await ensureSshConnectionFor(ssh, remote.workspace, sshConfigs);
         if (connError != null) {
           return ToolResult.error('[SSH] $connError');
         }
-        // 危险命令黑名单（连接后执行前检查）。
-        final danger = checkDangerousCommand(fullCommand);
-        if (danger != null) {
-          return ToolResult.error('危险命令被拒绝：$danger。'
-              '请改用安全的等价操作，或向用户说明需求');
-        }
-        // termux 后端：intent 优先（免 SSH）。
-        final intentResult = await _tryTermuxIntent(
-            remote.workspace, fullCommand, const Duration(seconds: 30));
-        if (intentResult != null) return intentResult;
         for (var attempt = 0; attempt < 2; attempt++) {
           try {
             final output = await ssh.run(fullCommand,

@@ -1,0 +1,108 @@
+{
+  "manifestVersion": 1,
+  "id": "zh-dictation",
+  "name": "中文生字听写",
+  "description": "拍语文课本生字表，按间隔朗读生字和拼音",
+  "whenToUse": "用户要听写语文生字、需要拍课本生字表并按间隔朗读时",
+  "icon": "icons.auto_stories_outlined",
+  "source": "user",
+  "trust": "declarative",
+  "enabledByDefault": true,
+  "inject": [
+    "app.capture",
+    "llm.vision",
+    "app.interact",
+    "app.speak",
+    "app.store"
+  ],
+  "permissions": [
+    "camera",
+    "photo_library",
+    "llm:vision",
+    "tts",
+    "storage:plugin",
+    "network"
+  ],
+  "requiresSdk": "v1",
+  "params": [
+    {
+      "name": "gapSeconds",
+      "label": "间隔秒数",
+      "type": "number",
+      "default": 5,
+      "min": 1.0,
+      "max": 60.0,
+      "step": 1.0,
+      "description": "念完一个生字之后等多久再念下一个",
+      "askAtStart": true
+    },
+    {
+      "name": "readChinese",
+      "label": "念拼音",
+      "type": "boolean",
+      "default": true,
+      "description": "念完生字再念一遍拼音，帮助确认没听错"
+    }
+  ],
+  "config": {
+    "gapSeconds": 5
+  },
+  "flow": {
+    "name": "生字听写",
+    "description": "拍生字表→认生字→按间隔念生字和拼音",
+    "whenToUse": "用户要听写语文生字、需要拍课本生字表并按间隔朗读时",
+    "phases": [
+      {
+        "id": "pick",
+        "title": "取材"
+      },
+      {
+        "id": "extract",
+        "title": "抽取"
+      },
+      {
+        "id": "run",
+        "title": "逐条朗读"
+      }
+    ],
+    "steps": [
+      {
+        "id": "capture",
+        "op": "capture",
+        "phase": "pick"
+      },
+      {
+        "id": "extract",
+        "op": "llm_extract",
+        "phase": "extract",
+        "params": {
+          "promptFile": "prompt.md"
+        }
+      },
+      {
+        "id": "review",
+        "op": "review",
+        "phase": "extract"
+      },
+      {
+        "id": "ask",
+        "op": "ask_params",
+        "phase": "run"
+      },
+      {
+        "id": "speak",
+        "op": "speak_sequence",
+        "phase": "run"
+      },
+      {
+        "id": "keep",
+        "op": "store",
+        "phase": "run",
+        "params": {
+          "key": "lastList"
+        }
+      }
+    ]
+  },
+  "promptFile": "prompt.md"
+}
