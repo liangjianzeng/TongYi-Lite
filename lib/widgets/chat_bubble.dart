@@ -157,7 +157,15 @@ class ChatBubble extends StatelessWidget {
                             ? theme.colorScheme.tertiaryContainer
                                 .withValues(alpha: 0.5)
                             : theme.colorScheme.surfaceContainerHighest),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.only(
+                      topLeft: const Radius.circular(14),
+                      topRight: const Radius.circular(14),
+                      bottomRight: const Radius.circular(14),
+                      bottomLeft: Radius.circular(_isUser ? 14 : 4),
+                    ),
+                    border: _isUser
+                        ? null
+                        : Border.all(color: theme.colorScheme.outlineVariant),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,

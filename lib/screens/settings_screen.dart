@@ -44,7 +44,12 @@ import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../asr/asr_model_manager.dart' show AsrModelManager;
 import '../asr/hold_to_talk.dart' show AsrModelGate;
 import '../asr/default_hotwords.dart'
-    show HotwordCategory, hotwordCategories, effectiveCategoryWords, diffCategoryWords, defaultCategoryWords;
+    show
+        HotwordCategory,
+        hotwordCategories,
+        effectiveCategoryWords,
+        diffCategoryWords,
+        defaultCategoryWords;
 
 import '../agent/skills/provider.dart'
     show
@@ -94,7 +99,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   late TabController _tabController;
   late final Future<List<ModelConfig>> _catalogFuture;
 
-  /// 存储占用信息的重建 tick：任一模型下载完成后自增，迫使 _StorageInfoWidget
+  /// 存储占用信息的重建 tick：任一模型下载完成后自增，迫使 StorageInfoWidget
   /// 重新拉取磁盘占用（它用 FutureBuilder 只拉一次）。
   int _storageTick = 0;
 
@@ -191,11 +196,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         controller: _tabController,
         children: [
           _buildModelManagementTab(),
-          const _ApiTab(),
-          const _InferenceEngineTab(),
-          const _AgentTab(),
-          _CapabilityTab(controller: _tabController),
-          const _DevTab(),
+          const ApiSettingsBody(),
+          const InferenceEngineSettingsBody(),
+          const AgentSettingsBody(),
+          CapabilitySettingsBody(controller: _tabController),
+          const DevSettingsBody(),
           const _buildAboutTab(),
         ],
       ),
@@ -277,7 +282,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           // ---- 存储信息 ----
           _buildSectionHeader('💾 存储空间', context),
           // 用 tick 作为 key，下载完成时强制重建以重新读取磁盘占用。
-          _StorageInfoWidget(key: ValueKey(_storageTick)),
+          StorageInfoWidget(key: ValueKey(_storageTick)),
         ],
       ),
     );
@@ -983,8 +988,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 // Tab 2: 推理引擎
 // =========================================================================
 
-class _InferenceEngineTab extends ConsumerWidget {
-  const _InferenceEngineTab();
+class InferenceEngineSettingsBody extends ConsumerWidget {
+  const InferenceEngineSettingsBody();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1197,8 +1202,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                           max: 65536,
                           divisions: 63,
                           // k 级显示（1k 步进恒整 k），不再显示裸数值。
-                          label:
-                              '${gpuSettings.contextSize ~/ 1024}k',
+                          label: '${gpuSettings.contextSize ~/ 1024}k',
                           onChanged: (v) =>
                               gpuNotifier.setContextSize(v.round()),
                         ),
@@ -1273,7 +1277,8 @@ class _InferenceEngineTab extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('⚙️ GPU 稳定性调优（防 GPU fault）',
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 14)),
                   const SizedBox(height: 4),
                   Text(
                     'Adreno 持续满血计算可能触发 GPU 挂死'
@@ -1329,8 +1334,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                       max: 64,
                       divisions: 14,
                       display: '${gpuSettings.moeBankOverrideByModel['*']}',
-                      onChanged: (v) =>
-                          gpuNotifier.setMoeBankOverride('*', v),
+                      onChanged: (v) => gpuNotifier.setMoeBankOverride('*', v),
                       hint: '槽数 × 单专家体积 = 常驻内存；过大挤占 KV/视觉，'
                           '过小换入频繁。参考自动值（推理日志「智能 MoE 加载」行）',
                     ),
@@ -1403,8 +1407,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                 children: [
                   Text(
                     '🧮 KV 缓存精度',
-                    style: TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   SegmentedButton<String>(
@@ -1459,8 +1462,7 @@ class _InferenceEngineTab extends ConsumerWidget {
                 children: [
                   Text(
                     '⚡ Flash Attention（实验性）',
-                    style: TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
                   SegmentedButton<bool>(
@@ -1639,7 +1641,7 @@ class _InferenceEngineTab extends ConsumerWidget {
           ),
           const SizedBox(height: 4),
 
-          _RecentLogsWidget(),
+          RecentLogsWidget(),
         ],
       ),
     );
@@ -1859,14 +1861,14 @@ Widget _buildToggleTitle(
 /// 1. **能力驱动展示**：特性块查询驱动模型的能力快照，不支持则置灰说明；
 /// 2. **只保留新引擎真实消费的旋钮**：每项设置都映射到引擎消费点；
 /// 3. 旧键不动，新键安全默认，旧配置无损迁移。
-class _AgentTab extends ConsumerStatefulWidget {
-  const _AgentTab();
+class AgentSettingsBody extends ConsumerStatefulWidget {
+  const AgentSettingsBody();
 
   @override
-  ConsumerState<_AgentTab> createState() => _AgentTabState();
+  ConsumerState<AgentSettingsBody> createState() => AgentSettingsBodyState();
 }
 
-class _AgentTabState extends ConsumerState<_AgentTab> {
+class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
   /// 用户自定义 skills（null = 扫描中）。
   List<Skill>? _userSkills;
 
@@ -1969,8 +1971,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                     // 挤出界 → RenderFlex RIGHT OVERFLOWED 溢出条遮挡 UI
                     //（真机实锤 87px）。
                     DropdownButtonFormField<String>(
-                      value: _ttsVoiceInList(
-                          voices, settings.edgeTtsVoice),
+                      value: _ttsVoiceInList(voices, settings.edgeTtsVoice),
                       isExpanded: true,
                       decoration: InputDecoration(
                         labelText: '音色',
@@ -1982,8 +1983,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 height: 18,
                                 child: Padding(
                                   padding: EdgeInsets.all(8),
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 2),
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
                                 ),
                               )
                             : IconButton(
@@ -2124,8 +2125,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   // ================= 记忆管理（查看/删除，与 memory.json 同存储） =================
 
   Future<void> _loadMemoryEntries() async {
-    final entries = await readGlobalMemorySnapshot(
-        maxEntries: 100, maxValueChars: 200);
+    final entries =
+        await readGlobalMemorySnapshot(maxEntries: 100, maxValueChars: 200);
     if (!mounted) return;
     setState(() => _memoryEntries = entries);
   }
@@ -2215,8 +2216,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                   ),
                   InkWell(
                     onTap: () => _confirmDeleteMemoryEntry(e.key),
-                    child: const Icon(Icons.close,
-                        size: 16, color: Colors.grey),
+                    child:
+                        const Icon(Icons.close, size: 16, color: Colors.grey),
                   ),
                 ],
               ),
@@ -2448,7 +2449,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
           TextButton.icon(
             onPressed: () {
               Navigator.pop(ctx);
-              _showUserSkillDialog(prefillText: buildSkillMarkdown(
+              _showUserSkillDialog(
+                  prefillText: buildSkillMarkdown(
                 description: s.description,
                 whenToUse: s.whenToUse,
                 invocation: s.invocation,
@@ -2504,8 +2506,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   Future<void> _editAsrCategoryWords(
       HotwordCategory cat, SettingsNotifier notifier) async {
     final defaults = defaultCategoryWords(cat.id);
-    final effective = effectiveCategoryWords(
-        cat.id, notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
+    final effective = effectiveCategoryWords(cat.id,
+        notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
     final ctrl = TextEditingController(text: effective.join('\n'));
     final ok = await showDialog<bool>(
       context: context,
@@ -2517,7 +2519,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('内置 ${defaults.length} 个词，当前生效 '
+              Text(
+                  '内置 ${defaults.length} 个词，当前生效 '
                   '${effective.length} 个。一行一个词：新增行 = 加词，'
                   '删掉行 = 从该分类移除。',
                   style: const TextStyle(fontSize: 12, color: Colors.grey)),
@@ -2566,8 +2569,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
           children: [
             TextField(
               controller: nameCtrl,
-              decoration: const InputDecoration(
-                  labelText: '名称（工具前缀 mcp_<名称>_）'),
+              decoration:
+                  const InputDecoration(labelText: '名称（工具前缀 mcp_<名称>_）'),
             ),
             const SizedBox(height: 8),
             TextField(
@@ -2601,7 +2604,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
   /// 新增技能 = **整段粘贴一站式**：一个文本框贴完整 SKILL.md（meta 行 +
   /// `---` + 正文），技能名自动取 `name:` 行、缺省从描述派生——不再逐字段
   /// 手填。[prefillText] 用于"从内置技能另存"。编辑已有技能走字段表单。
-  Future<void> _showUserSkillDialog({Skill? existing, String? prefillText}) async {
+  Future<void> _showUserSkillDialog(
+      {Skill? existing, String? prefillText}) async {
     if (existing != null) {
       return _showEditSkillDialog(existing);
     }
@@ -2661,8 +2665,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
       parsed = Skill.parse(raw, name: name ?? '');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('解析失败（格式见输入框提示）：$e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('解析失败（格式见输入框提示）：$e')));
       return;
     }
     if (parsed.description.trim().isEmpty || parsed.whenToUse.trim().isEmpty) {
@@ -2673,8 +2677,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
       return;
     }
     if (name == null || name.isEmpty) {
-      final base = parsed.description.trim().replaceAll(
-          RegExp(r'[。！？!?.、，,；;：:]'), '');
+      final base =
+          parsed.description.trim().replaceAll(RegExp(r'[。！？!?.、，,；;：:]'), '');
       final sanitized = sanitizeSkillDirName(base);
       name = (sanitized == null || sanitized.isEmpty)
           ? null
@@ -2682,8 +2686,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
     }
     if (name == null || name.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('无法确定技能名：请在文本首行加 `name: 技能名`')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法确定技能名：请在文本首行加 `name: 技能名`')));
       return;
     }
     try {
@@ -3189,8 +3193,9 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             const Divider(height: 20),
                             _buildSectionHeader('🔌 MCP 远程工具', context),
                             if (settings.mcpServers.isEmpty)
-                              Text('暂未配置。可接入任意 MCP server（Streamable HTTP）'
-                                      '扩展工具生态。',
+                              Text(
+                                  '暂未配置。可接入任意 MCP server（Streamable HTTP）'
+                                  '扩展工具生态。',
                                   style: TextStyle(
                                       fontSize: 12,
                                       color: Colors.grey.shade600))
@@ -3213,8 +3218,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                     children: [
                                       Switch(
                                         value: s.enabled,
-                                        onChanged: (v) => notifier
-                                            .upsertMcpServer(
+                                        onChanged: (v) =>
+                                            notifier.upsertMcpServer(
                                                 s.copyWith(enabled: v)),
                                       ),
                                       IconButton(
@@ -3266,8 +3271,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                               min: 1024,
                               max: 65536,
                               divisions: 63,
-                              display: _formatKValue(
-                                  settings.agentNctx, 'token'),
+                              display:
+                                  _formatKValue(settings.agentNctx, 'token'),
                               onChanged: (v) => notifier.setAgentNctx(v),
                               hint: '本地引擎 n_ctx，独立于普通聊天；工具历史越多'
                                   '所需越大（默认 8192）。修改后需重载模型生效',
@@ -3309,7 +3314,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                             '回合轨迹落盘（排障/评估）',
                             settings.agentTraceExportEnabled,
                             notifier.setAgentTraceExportEnabled,
-                            subtitle: '每回合把完整事件流写 ApplicationSupport/traces/*.jsonl，'
+                            subtitle:
+                                '每回合把完整事件流写 ApplicationSupport/traces/*.jsonl，'
                                 '供离线回放与质量评估；默认关',
                           ),
                         ],
@@ -3418,8 +3424,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                               size: 20,
                               color: Colors.grey,
                             ),
-                            onTap: () =>
-                                setState(() => _skillsExpanded = !_skillsExpanded),
+                            onTap: () => setState(
+                                () => _skillsExpanded = !_skillsExpanded),
                           ),
                           if (_skillsExpanded)
                             ConstrainedBox(
@@ -3436,11 +3442,15 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                         leading: const Icon(Icons.extension,
                                             size: 20),
                                         title: Text('内置 · ${s.name}',
-                                            style: const TextStyle(fontSize: 14)),
+                                            style:
+                                                const TextStyle(fontSize: 14)),
                                         subtitle: Text(s.description,
-                                            style: const TextStyle(fontSize: 12)),
-                                        trailing: const Icon(Icons.chevron_right,
-                                            size: 18, color: Colors.grey),
+                                            style:
+                                                const TextStyle(fontSize: 12)),
+                                        trailing: const Icon(
+                                            Icons.chevron_right,
+                                            size: 18,
+                                            color: Colors.grey),
                                         onTap: () => _showBuiltinSkillView(s),
                                       ),
                                     const SizedBox(height: 6),
@@ -3448,7 +3458,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                       const Text('正在扫描用户技能…',
                                           style: TextStyle(
                                               fontSize: 12, color: Colors.grey))
-                                  else if (_userSkills!.isEmpty)
+                                    else if (_userSkills!.isEmpty)
                                       const Text('暂无用户技能',
                                           style: TextStyle(
                                               fontSize: 12, color: Colors.grey))
@@ -3462,20 +3472,21 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                               Icons.extension_outlined,
                                               size: 20),
                                           title: Text('用户 · ${s.name}',
-                                              style:
-                                                  const TextStyle(fontSize: 14)),
+                                              style: const TextStyle(
+                                                  fontSize: 14)),
                                           subtitle: Text(s.description,
-                                              style:
-                                                  const TextStyle(fontSize: 12)),
+                                              style: const TextStyle(
+                                                  fontSize: 12)),
                                           trailing: IconButton(
-                                            icon: const Icon(Icons.delete_outline,
+                                            icon: const Icon(
+                                                Icons.delete_outline,
                                                 size: 18),
                                             tooltip: '删除技能',
                                             onPressed: () =>
                                                 _confirmDeleteUserSkill(s),
                                           ),
-                                          onTap: () => _showUserSkillDialog(
-                                              existing: s),
+                                          onTap: () =>
+                                              _showUserSkillDialog(existing: s),
                                         ),
                                   ],
                                 ),
@@ -3516,8 +3527,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                           const SizedBox(height: 4),
                           Text('热词分类（未选 = 全部启用；提升术语识别准确率）',
                               style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey.shade600)),
+                                  fontSize: 12, color: Colors.grey.shade600)),
                           const SizedBox(height: 4),
                           Wrap(
                             spacing: 6,
@@ -3576,10 +3586,9 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                       style: const TextStyle(fontSize: 13)),
                                   subtitle: Text(
                                       '${effectiveCategoryWords(cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length} 个词',
-                                      style:
-                                          const TextStyle(fontSize: 11)),
-                                  trailing: const Icon(Icons.edit_outlined,
-                                      size: 16),
+                                      style: const TextStyle(fontSize: 11)),
+                                  trailing:
+                                      const Icon(Icons.edit_outlined, size: 16),
                                   onTap: () =>
                                       _editAsrCategoryWords(cat, notifier),
                                 ),
@@ -3606,7 +3615,8 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                           ),
                           // 模型管理：状态 + 下载/删除
                           FutureBuilder<bool>(
-                            future: _asrModelReady ??= AsrModelManager.isReady(),
+                            future: _asrModelReady ??=
+                                AsrModelManager.isReady(),
                             builder: (ctx, snap) {
                               final ready = snap.data ?? false;
                               return ListTile(
@@ -3619,8 +3629,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                   size: 20,
                                   color: ready ? Colors.green : Colors.orange,
                                 ),
-                                title: Text(
-                                    ready ? '识别模型：已就绪' : '识别模型：未下载',
+                                title: Text(ready ? '识别模型：已就绪' : '识别模型：未下载',
                                     style: const TextStyle(fontSize: 14)),
                                 subtitle: const Text(
                                     'sherpa-onnx 流式中文模型（约 160MB，'
@@ -3633,8 +3642,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                         context: context,
                                         builder: (ctx) => AlertDialog(
                                           title: const Text('删除识别模型？'),
-                                          content: const Text(
-                                              '删除后语音输入不可用，'
+                                          content: const Text('删除后语音输入不可用，'
                                               '再次长按说话会重新下载。'),
                                           actions: [
                                             TextButton(
@@ -3653,8 +3661,7 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                         if (context.mounted) {
                                           ScaffoldMessenger.of(context)
                                               .showSnackBar(const SnackBar(
-                                                  content:
-                                                      Text('识别模型已删除')));
+                                                  content: Text('识别模型已删除')));
                                         }
                                       }
                                     } else {
@@ -4183,7 +4190,7 @@ class _buildAboutTab extends StatelessWidget {
       padding: EdgeInsets.all(12),
       child: Column(
         children: [
-          _AboutCard(),
+          AboutSettingsCard(),
           SizedBox(height: 10),
           _LicenseCard(),
         ],
@@ -4211,8 +4218,8 @@ Future<void> _openGithub(BuildContext context) async {
   }
 }
 
-class _AboutCard extends StatelessWidget {
-  const _AboutCard();
+class AboutSettingsCard extends StatelessWidget {
+  const AboutSettingsCard();
 
   @override
   Widget build(BuildContext context) {
@@ -4319,8 +4326,8 @@ class _AboutRow extends StatelessWidget {
 // 存储信息组件
 // =========================================================================
 
-class _StorageInfoWidget extends ConsumerWidget {
-  const _StorageInfoWidget({super.key});
+class StorageInfoWidget extends ConsumerWidget {
+  const StorageInfoWidget({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -4451,8 +4458,8 @@ class _StorageInfoWidget extends ConsumerWidget {
 // 最近日志组件（在推理引擎 Tab 显示）
 // =========================================================================
 
-class _RecentLogsWidget extends ConsumerWidget {
-  const _RecentLogsWidget();
+class RecentLogsWidget extends ConsumerWidget {
+  const RecentLogsWidget();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -4627,17 +4634,19 @@ Future<void> unloadModelAndNotify(
 //   ② 插件：启用 / 参数 / 方案档 / 诊断（启用后图标出现在聊天输入框那一行）；
 //   ③ 技能（Skills）：提示词模板，智能体按「何时触发」自己取用。
 // =========================================================================
-class _CapabilityTab extends ConsumerStatefulWidget {
-  const _CapabilityTab({this.controller});
+class CapabilitySettingsBody extends ConsumerStatefulWidget {
+  const CapabilitySettingsBody({this.controller});
 
   /// 跳回「智能体」Tab 细调时用（人格、技能增删的表单在那边）。
   final TabController? controller;
 
   @override
-  ConsumerState<_CapabilityTab> createState() => _CapabilityTabState();
+  ConsumerState<CapabilitySettingsBody> createState() =>
+      CapabilitySettingsBodyState();
 }
 
-class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
+class CapabilitySettingsBodyState
+    extends ConsumerState<CapabilitySettingsBody> {
   List<Skill>? _userSkills;
   final List<Skill> _builtinSkills = loadBuiltinSkills();
 
@@ -4661,7 +4670,8 @@ class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(title,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+              style:
+                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
           Text(subtitle,
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
         ],
@@ -4671,27 +4681,32 @@ class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
 
   Widget _card({required List<Widget> children}) => Card(
         margin: EdgeInsets.zero,
-        child: Padding(padding: const EdgeInsets.all(4), child: Column(children: children)),
+        child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Column(children: children)),
       );
 
-  Widget _switchRow(String title, bool value, Future<void> Function(bool) onChanged,
-      String subtitle) {
+  Widget _switchRow(String title, bool value,
+      Future<void> Function(bool) onChanged, String subtitle) {
     return SwitchListTile(
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 10),
       title: Text(title, style: const TextStyle(fontSize: 13)),
-      subtitle: Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+      subtitle: Text(subtitle,
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
       value: value,
       onChanged: (v) => onChanged(v),
     );
   }
 
-  Widget _infoRow(String title, String value, String subtitle, VoidCallback? onTap) {
+  Widget _infoRow(
+      String title, String value, String subtitle, VoidCallback? onTap) {
     return ListTile(
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 10),
       title: Text(title, style: const TextStyle(fontSize: 13)),
-      subtitle: Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+      subtitle: Text(subtitle,
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -4717,8 +4732,8 @@ class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
           _card(children: [
             _switchRow('智能体模式', settings.agentEnabled, notifier.setAgentEnabled,
                 '关掉就是纯聊天：没有工具、技能与人格'),
-            _switchRow('上下文压缩', settings.agentCompactEnabled, notifier.setAgentCompactEnabled,
-                '长对话自动压历史，免得一步就顶满上下文'),
+            _switchRow('上下文压缩', settings.agentCompactEnabled,
+                notifier.setAgentCompactEnabled, '长对话自动压历史，免得一步就顶满上下文'),
             _switchRow('子代理（并行拆解）', settings.agentSubagentEnabled,
                 notifier.setAgentSubagentEnabled, '把大任务拆给子代理并行跑'),
             _infoRow('人格（Persona）', '标准 + 自定义', '标准人格开箱即用；增删自定义人格在「智能体」Tab',
@@ -4735,7 +4750,8 @@ class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
             ListTile(
               dense: true,
               contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-              title: Text('内置技能 ${_builtinSkills.length} 个 · 我的技能 ${mine?.length ?? '…'} 个',
+              title: Text(
+                  '内置技能 ${_builtinSkills.length} 个 · 我的技能 ${mine?.length ?? '…'} 个',
                   style: const TextStyle(fontSize: 13)),
               subtitle: Text(
                 mine == null
@@ -4776,14 +4792,14 @@ class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
 // 设计目标（用户反馈）：能自动的绝不手填——密钥自动生成、命令一键复制、
 // 连接自动建立、Termux 项目目录自动创建。用户只做"复制粘贴一条命令"。
 // =========================================================================
-class _DevTab extends ConsumerStatefulWidget {
-  const _DevTab();
+class DevSettingsBody extends ConsumerStatefulWidget {
+  const DevSettingsBody();
 
   @override
-  ConsumerState<_DevTab> createState() => _DevTabState();
+  ConsumerState<DevSettingsBody> createState() => DevSettingsBodyState();
 }
 
-class _DevTabState extends ConsumerState<_DevTab> {
+class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
   /// SSH 连接/工作区激活是异步后台变化，监听 ChangeNotifier 实时刷新。
   VoidCallback? _devStateListener;
 
@@ -4886,8 +4902,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
             if (settings.devModeEnabled) ...[
               const Divider(height: 20),
               Text('工具组开关（默认全开）',
-                  style: TextStyle(
-                      fontSize: 12, color: Colors.grey.shade600)),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
               for (final g in const [
                 ('git', 'Git（状态/diff/log/提交/推送）'),
                 ('ssh', 'SSH（执行/读写远端文件）'),
@@ -4901,8 +4916,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
                   dense: true,
                   title: Text(g.$2, style: const TextStyle(fontSize: 13)),
                   value: settings.devToolGroupEnabled(g.$1),
-                  onChanged: (v) =>
-                      notifier.setDevToolGroupEnabled(g.$1, v),
+                  onChanged: (v) => notifier.setDevToolGroupEnabled(g.$1, v),
                 ),
             ],
           ],
@@ -5003,13 +5017,14 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           String msg;
                           var ok = false;
                           try {
-                            final installed =
-                                await AppBridge.isAppInstalled(AppBridge.termuxPackage);
+                            final installed = await AppBridge.isAppInstalled(
+                                AppBridge.termuxPackage);
                             if (!installed) {
                               msg = 'Termux 未安装：可用下方按钮自动下载';
                             } else {
                               final res = await TermuxIntentService.instance
-                                  .run('echo ok', timeout: const Duration(seconds: 10));
+                                  .run('echo ok',
+                                      timeout: const Duration(seconds: 10));
                               ok = res.output.trim() == 'ok' && res.exit == 0;
                               msg = ok
                                   ? '免 SSH 通道可用（RUN_COMMAND，echo ok 往返成功）'
@@ -5017,16 +5032,16 @@ class _DevTabState extends ConsumerState<_DevTab> {
                                       '检查 allow-external-apps 是否已开启';
                             }
                             if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text(msg)));
+                              ScaffoldMessenger.of(context)
+                                  .showSnackBar(SnackBar(content: Text(msg)));
                             }
                           } catch (e) {
                             ok = false;
                             msg = '免 SSH 通道不可用：'
                                 '${e.toString().replaceAll('StateError: ', '')}';
                             if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text(msg)));
+                              ScaffoldMessenger.of(context)
+                                  .showSnackBar(SnackBar(content: Text(msg)));
                             }
                           }
                           // 结果持久显示（SnackBar 4s 即逝，真机验收读不到）。
@@ -5043,45 +5058,55 @@ class _DevTabState extends ConsumerState<_DevTab> {
                   label: Text(_testingIntent ? '测试中…' : '免 SSH 通道测试'),
                 ),
                 TextButton.icon(
-                  onPressed: _downloadingTermux ? null : () async {
-                    setState(() => _downloadingTermux = true);
-                    try {
-                      const apkUrl =
-                          'https://github.com/termux/termux-app/releases/download/v0.118.1/termux-app_0.118.1+github-debug_arm64-v8a.apk';
-                      final err = await DevNativeEnv.downloadTermuxApk(apkUrl);
-                      if (!mounted) return;
-                      if (err != null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('下载失败：$err')));
-                        return;
-                      }
-                      // 下载入队后轮询目标文件出现，再拉安装器。
-                      const apkPath =
-                          '/storage/emulated/0/Download/TongYi-Lite/termux.apk';
-                      for (var i = 0; i < 240; i++) {
-                        await Future<void>.delayed(const Duration(seconds: 5));
-                        final f = File(apkPath);
-                        if (await f.exists() && await f.length() > 1024 * 1024) {
-                          final installErr = await DevNativeEnv.installApk(apkPath);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                content: Text(installErr == null
-                                    ? '下载完成，已拉起安装器（需允许安装未知应用）'
-                                    : '安装器拉起失败：$installErr')));
+                  onPressed: _downloadingTermux
+                      ? null
+                      : () async {
+                          setState(() => _downloadingTermux = true);
+                          try {
+                            const apkUrl =
+                                'https://github.com/termux/termux-app/releases/download/v0.118.1/termux-app_0.118.1+github-debug_arm64-v8a.apk';
+                            final err =
+                                await DevNativeEnv.downloadTermuxApk(apkUrl);
+                            if (!mounted) return;
+                            if (err != null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('下载失败：$err')));
+                              return;
+                            }
+                            // 下载入队后轮询目标文件出现，再拉安装器。
+                            const apkPath =
+                                '/storage/emulated/0/Download/TongYi-Lite/termux.apk';
+                            for (var i = 0; i < 240; i++) {
+                              await Future<void>.delayed(
+                                  const Duration(seconds: 5));
+                              final f = File(apkPath);
+                              if (await f.exists() &&
+                                  await f.length() > 1024 * 1024) {
+                                final installErr =
+                                    await DevNativeEnv.installApk(apkPath);
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                          content: Text(installErr == null
+                                              ? '下载完成，已拉起安装器（需允许安装未知应用）'
+                                              : '安装器拉起失败：$installErr')));
+                                }
+                                return;
+                              }
+                            }
+                            if (mounted) {
+                              ScaffoldMessenger.of(context)
+                                  .showSnackBar(const SnackBar(
+                                      content: Text('下载超时：请到系统通知查看进度，'
+                                          '完成后在 Download/TongYi-Lite/ 找到 APK')));
+                            }
+                          } finally {
+                            if (mounted)
+                              setState(() => _downloadingTermux = false);
                           }
-                          return;
-                        }
-                      }
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                            content: Text('下载超时：请到系统通知查看进度，'
-                                '完成后在 Download/TongYi-Lite/ 找到 APK')));
-                      }
-                    } finally {
-                      if (mounted) setState(() => _downloadingTermux = false);
-                    }
-                  },
-                  icon: Icon(_downloadingTermux ? Icons.hourglass_top : Icons.download,
+                        },
+                  icon: Icon(
+                      _downloadingTermux ? Icons.hourglass_top : Icons.download,
                       size: 16),
                   label: Text(_downloadingTermux ? '下载中…' : '下载 Termux'),
                 ),
@@ -5269,9 +5294,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
           final diagnosis = switch (probeResult) {
             _SshdProbe.listening => 'sshd 运行中——还差最后一步：安装公钥',
             _SshdProbe.refused => 'sshd 没在运行（最常见的失败原因）',
-            _SshdProbe.timeout =>
-              '端口无响应——大概率是之前多次连接失败后被 Termux 的 OpenSSH '
-                  '临时拉黑（PerSourcePenalties），越重试越连不上',
+            _SshdProbe.timeout => '端口无响应——大概率是之前多次连接失败后被 Termux 的 OpenSSH '
+                '临时拉黑（PerSourcePenalties），越重试越连不上',
           };
 
           final dialog = AlertDialog(
@@ -5307,19 +5331,17 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         FilledButton.icon(
                           onPressed: () async {
                             // 零粘贴：RUN_COMMAND 让 Termux 自己执行安装命令。
-                            final ok =
-                                await AppBridge.runInTermux(command);
+                            final ok = await AppBridge.runInTermux(command);
                             if (!ctx.mounted) return;
                             if (ok) {
-                              ScaffoldMessenger.of(this.context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          '已发送到 Termux 执行；若执行完未出现 '
+                              ScaffoldMessenger.of(this.context)
+                                  .showSnackBar(const SnackBar(
+                                      content: Text('已发送到 Termux 执行；若执行完未出现 '
                                           'ALL_DONE，检查 Termux 是否开启 '
                                           'allow-external-apps')));
                             } else {
-                              ScaffoldMessenger.of(this.context).showSnackBar(
-                                  const SnackBar(
+                              ScaffoldMessenger.of(this.context)
+                                  .showSnackBar(const SnackBar(
                                       content: Text('发送失败：Termux 未安装或'
                                           '未授权 RUN_COMMAND，请粘贴执行')));
                             }
@@ -5343,22 +5365,21 @@ class _DevTabState extends ConsumerState<_DevTab> {
                         ),
                         const SizedBox(width: 8),
                         TextButton.icon(
-                          onPressed:
-                              probing ? null : () => probeAndGen(),
+                          onPressed: probing ? null : () => probeAndGen(),
                           icon: const Icon(Icons.refresh, size: 16),
                           label: Text(probing ? '检测中…' : '重新检测'),
                         ),
                       ]),
                       const SizedBox(height: 6),
-                      const Text('自动执行需 Termux 一次性开启：'
+                      const Text(
+                          '自动执行需 Termux 一次性开启：'
                           '~/.termux/termux.properties 写 allow-external-apps=true 后重启 Termux；'
                           '未开启请用复制粘贴。',
                           style: TextStyle(fontSize: 10, color: Colors.grey)),
                       if (step == 2) ...[
                         const SizedBox(height: 12),
                         TextField(
-                          controller:
-                              TextEditingController(text: userName),
+                          controller: TextEditingController(text: userName),
                           onChanged: (v) => userName = v,
                           decoration: const InputDecoration(
                             labelText: 'Termux 用户名',
@@ -6109,22 +6130,19 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 1),
                           decoration: BoxDecoration(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .primaryContainer,
+                            color:
+                                Theme.of(context).colorScheme.primaryContainer,
                             borderRadius: BorderRadius.circular(8),
                           ),
-                          child: const Text('当前',
-                              style: TextStyle(fontSize: 10)),
+                          child:
+                              const Text('当前', style: TextStyle(fontSize: 10)),
                         ),
                       ],
                     ],
                   ),
                   subtitle: Text(
                     '${_devTaskStatusLabels[t.status] ?? t.status.name}'
-                    '${t.plan != null && t.plan!.steps.isNotEmpty
-                        ? ' · 进度 ${t.plan!.steps.where((s) => s.done).length}/${t.plan!.steps.length}'
-                        : ''}',
+                    '${t.plan != null && t.plan!.steps.isNotEmpty ? ' · 进度 ${t.plan!.steps.where((s) => s.done).length}/${t.plan!.steps.length}' : ''}',
                     style: const TextStyle(fontSize: 11),
                   ),
                   trailing: IconButton(
@@ -6136,8 +6154,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                     await DevSessionController.instance.setActiveTask(t.id);
                     if (mounted) {
                       setState(() {});
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: Text('已设为当前任务：${t.title}')));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('已设为当前任务：${t.title}')));
                     }
                   },
                 ),
@@ -6302,8 +6320,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
   }
 }
 
-class _ApiTab extends ConsumerWidget {
-  const _ApiTab();
+class ApiSettingsBody extends ConsumerWidget {
+  const ApiSettingsBody();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -6387,7 +6405,7 @@ class _ApiTab extends ConsumerWidget {
           ),
           const SizedBox(height: 20),
           // 联网搜索（SearXNG 实例地址等）：与 API 接入同属"外部服务"配置。
-          const _WebSearchCard(),
+          const WebSearchSettingsBody(),
         ],
       ),
     );
@@ -6708,7 +6726,8 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
                 underline: const SizedBox.shrink(),
                 items: [
                   const DropdownMenuItem<ThinkingFamily?>(
-                      value: null, child: Text('自动探测', style: TextStyle(fontSize: 12))),
+                      value: null,
+                      child: Text('自动探测', style: TextStyle(fontSize: 12))),
                   for (final f in ThinkingFamily.values)
                     DropdownMenuItem<ThinkingFamily?>(
                       value: f,
@@ -6774,14 +6793,15 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
 //   避免"红条指错方向"。
 // =========================================================================
 
-class _WebSearchCard extends ConsumerStatefulWidget {
-  const _WebSearchCard();
+class WebSearchSettingsBody extends ConsumerStatefulWidget {
+  const WebSearchSettingsBody();
 
   @override
-  ConsumerState<_WebSearchCard> createState() => _WebSearchCardState();
+  ConsumerState<WebSearchSettingsBody> createState() =>
+      WebSearchSettingsBodyState();
 }
 
-class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
+class WebSearchSettingsBodyState extends ConsumerState<WebSearchSettingsBody> {
   final _url = TextEditingController();
   final _apiKey = TextEditingController();
   final _engines = TextEditingController();
@@ -7011,88 +7031,88 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
             // ---- SearXNG 实例配置（直连引擎开关打开时优先级更高）----
             const SizedBox(height: 8),
             TextField(
-                controller: _url,
-                keyboardType: TextInputType.url,
-                focusNode: _urlFocus,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: 'SearXNG 地址',
-                  hintText: 'http://192.168.1.20:8080',
-                  helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
-                  helperMaxLines: 2,
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
+              controller: _url,
+              keyboardType: TextInputType.url,
+              focusNode: _urlFocus,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: 'SearXNG 地址',
+                hintText: 'http://192.168.1.20:8080',
+                helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
+                helperMaxLines: 2,
+                border: OutlineInputBorder(),
+                isDense: true,
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _apiKey,
-                focusNode: _apiKeyFocus,
-                obscureText: !_revealKey,
-                autocorrect: false,
-                decoration: InputDecoration(
-                  labelText: 'API Key（可选）',
-                  helperText: '仅私有实例需要；以 Bearer 发送',
-                  border: const OutlineInputBorder(),
-                  isDense: true,
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                        _revealKey ? Icons.visibility_off : Icons.visibility,
-                        size: 18),
-                    onPressed: () => setState(() => _revealKey = !_revealKey),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiKey,
+              focusNode: _apiKeyFocus,
+              obscureText: !_revealKey,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'API Key（可选）',
+                helperText: '仅私有实例需要；以 Bearer 发送',
+                border: const OutlineInputBorder(),
+                isDense: true,
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      _revealKey ? Icons.visibility_off : Icons.visibility,
+                      size: 18),
+                  onPressed: () => setState(() => _revealKey = !_revealKey),
+                ),
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
+            ),
+            if (insecureKey) ...[
+              const SizedBox(height: 6),
+              Text(
+                '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
+                style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _engines,
+              focusNode: _enginesFocus,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '引擎白名单（可选）',
+                hintText: '如 bing,sogou',
+                helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
+                    '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
+                helperMaxLines: 3,
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _language,
+              focusNode: _languageFocus,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '搜索语言（可选）',
+                hintText: '如 zh-CN，留空 = 不指定',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _testing ? null : _test,
+                    icon: const Icon(Icons.wifi_tethering, size: 16),
+                    label: Text(_testing ? '测试中…' : '测试连接'),
                   ),
-                ),
-                onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
-              ),
-              if (insecureKey) ...[
-                const SizedBox(height: 6),
-                Text(
-                  '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
-                  style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
                 ),
               ],
-              const SizedBox(height: 12),
-              TextField(
-                controller: _engines,
-                focusNode: _enginesFocus,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: '引擎白名单（可选）',
-                  hintText: '如 bing,sogou',
-                  helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
-                      '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
-                  helperMaxLines: 3,
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _language,
-                focusNode: _languageFocus,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: '搜索语言（可选）',
-                  hintText: '如 zh-CN，留空 = 不指定',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _testing ? null : _test,
-                      icon: const Icon(Icons.wifi_tethering, size: 16),
-                      label: Text(_testing ? '测试中…' : '测试连接'),
-                    ),
-                  ),
-                ],
-              ),
+            ),
             // ---- 条数 / 超时设置 ----
             const SizedBox(height: 12),
             Row(
@@ -7190,7 +7210,8 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                 onChanged: (v) => onChanged(v.round()),
               ),
             ),
-            Text(hint, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+            Text(hint,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
           ],
         );
     final directOn = settings.webSearchDirectEnabled;
@@ -7203,12 +7224,9 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           dense: true,
-          title: const Text('端侧直连引擎（优先级最高）',
-              style: TextStyle(fontSize: 14)),
+          title: const Text('端侧直连引擎（优先级最高）', style: TextStyle(fontSize: 14)),
           subtitle: Text(
-            directOn
-                ? '已启用：优先用端侧直连，忽略上方 SearXNG 地址'
-                : '已关闭：使用上方配置的 SearXNG 实例',
+            directOn ? '已启用：优先用端侧直连，忽略上方 SearXNG 地址' : '已关闭：使用上方配置的 SearXNG 实例',
             style: const TextStyle(fontSize: 12),
           ),
           value: directOn,
@@ -7231,42 +7249,45 @@ class _WebSearchCardState extends ConsumerState<_WebSearchCard> {
                 ),
                 const SizedBox(height: 4),
                 for (final entry in engineLabels.entries)
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            title: Text(entry.value, style: const TextStyle(fontSize: 14)),
-            value: enabled.contains(entry.key),
-            onChanged: (v) => _notifier
-                .setWebSearchDirectEngineEnabled(entry.key, v),
-          ),
-        const SizedBox(height: 4),
-        budgetSlider(
-          label: '低风险引擎每 10 分钟搜索上限'
-              '（必应/360/中国搜索，当前 ${settings.webSearchDirectLowRiskPerWindow} 次）',
-          hint: '容忍度高，可适当放宽；预算用于控制连续任务的请求节奏',
-          value: settings.webSearchDirectLowRiskPerWindow,
-          min: 1,
-          max: 20,
-          onChanged: (v) => _notifier.setWebSearchDirectLowRiskPerWindow(v),
-        ),
-        const SizedBox(height: 4),
-        budgetSlider(
-          label: '高风险引擎每 10 分钟搜索上限'
-              '（搜狗/百度/夸克，当前 ${settings.webSearchDirectHighRiskPerWindow} 次）',
-          hint: '风控激进，默认 4 次"细水长流"——偶尔贡献高质量结果，'
-              '避免连续请求被判定机器行为而封禁',
-          value: settings.webSearchDirectHighRiskPerWindow,
-          min: 1,
-          max: 6,
-          onChanged: (v) => _notifier.setWebSearchDirectHighRiskPerWindow(v),
-        ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    title:
+                        Text(entry.value, style: const TextStyle(fontSize: 14)),
+                    value: enabled.contains(entry.key),
+                    onChanged: (v) =>
+                        _notifier.setWebSearchDirectEngineEnabled(entry.key, v),
+                  ),
+                const SizedBox(height: 4),
+                budgetSlider(
+                  label: '低风险引擎每 10 分钟搜索上限'
+                      '（必应/360/中国搜索，当前 ${settings.webSearchDirectLowRiskPerWindow} 次）',
+                  hint: '容忍度高，可适当放宽；预算用于控制连续任务的请求节奏',
+                  value: settings.webSearchDirectLowRiskPerWindow,
+                  min: 1,
+                  max: 20,
+                  onChanged: (v) =>
+                      _notifier.setWebSearchDirectLowRiskPerWindow(v),
+                ),
+                const SizedBox(height: 4),
+                budgetSlider(
+                  label: '高风险引擎每 10 分钟搜索上限'
+                      '（搜狗/百度/夸克，当前 ${settings.webSearchDirectHighRiskPerWindow} 次）',
+                  hint: '风控激进，默认 4 次"细水长流"——偶尔贡献高质量结果，'
+                      '避免连续请求被判定机器行为而封禁',
+                  value: settings.webSearchDirectHighRiskPerWindow,
+                  min: 1,
+                  max: 6,
+                  onChanged: (v) =>
+                      _notifier.setWebSearchDirectHighRiskPerWindow(v),
+                ),
                 if (enabled.isEmpty) ...[
                   const SizedBox(height: 4),
                   Text(
                     '⚠️ 所有直连引擎均已关闭：端侧直连不可用。',
-                    style: TextStyle(
-                        fontSize: 12, color: Colors.orange.shade800),
+                    style:
+                        TextStyle(fontSize: 12, color: Colors.orange.shade800),
                   ),
                 ],
               ],

@@ -19,9 +19,9 @@ void main() {
     });
 
     test('插件入口在「能力」Tab 里，而且**只有这一处**', () {
-      final devAt = src.indexOf('class _DevTab');
-      final capAt = src.indexOf('class _CapabilityTab');
-      expect(devAt, greaterThan(-1), reason: '读不到 _DevTab = 文件结构变了，这条检查得跟着改');
+      final devAt = src.indexOf('class DevSettingsBody');
+      final capAt = src.indexOf('class CapabilitySettingsBody');
+      expect(devAt, greaterThan(-1), reason: '读不到 DevSettingsBody = 文件结构变了，这条检查得跟着改');
       expect(capAt, greaterThan(-1));
       expect('PluginsEntryTile'.allMatches(src).length, 1,
           reason: '整个设置页只许有**一处**插件入口（两处 = 两个真相，用户会看见两个"插件"）；'
@@ -35,8 +35,8 @@ void main() {
 
     test('「能力」Tab 同时管插件与技能（不是一半）', () {
       final capRegion = src.substring(
-        src.indexOf('class _CapabilityTab'),
-        src.indexOf('class _DevTab'),
+        src.indexOf('class CapabilitySettingsBody'),
+        src.indexOf('class DevSettingsBody'),
       );
       expect(capRegion, contains('loadUserSkills'), reason: '技能不在这个 Tab 里 = 能力面又裂成两处');
       expect(capRegion, contains('loadBuiltinSkills'));
@@ -45,8 +45,8 @@ void main() {
 
     test('原生能力那一档带真开关（不是只读展示，用户要能当场打开）', () {
       final capRegion = src.substring(
-        src.indexOf('class _CapabilityTab'),
-        src.indexOf('class _DevTab'),
+        src.indexOf('class CapabilitySettingsBody'),
+        src.indexOf('class DevSettingsBody'),
       );
       for (final s in <String>[
         'setAgentEnabled',
