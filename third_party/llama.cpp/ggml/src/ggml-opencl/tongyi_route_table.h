@@ -18,7 +18,7 @@ namespace tongyi {
 
 // ---- 输入侧镜像枚举（数值 = 被镜像枚举；ggml-opencl.cpp static_assert 对齐）----
 
-enum RouteOp { ROUTE_MUL_MAT_ID = 0 };
+enum RouteOp { ROUTE_MUL_MAT_ID = 0, ROUTE_SMALL_OP_CPU = 1 };
 
 enum RGen { // 镜像 ggml-opencl.cpp 的 ADRENO_GPU_GEN
     RGEN_UNKNOWN = 0,
@@ -156,6 +156,26 @@ bool moe_admission_gate(const RouteQuery &q, const RouteContext &ctx, const char
 
 // legacy moe_use_dense_loop 的表内等价（env 折算进 ctx；R2 起是唯一实现）
 bool dense_loop_type(RType t, const RouteContext &ctx);
+
+// ---- G-782 尺寸开关（2026-10-25）：小算子 CPU 路由策略 ----
+// 背景：A7X 档每发射 ~400µs 完成往返，decode 期 MoE 路由链的小数组算子
+// （ARGSORT/TOP_K/SET_ROWS/FILL/SUM_ROWS/SIGMOID，ne 全 1 除 ne[0]<=256）搬 CPU 更省。
+// 名字路由已判负（OPFILTER 撞 KV 预分配 buffer abort，ggml-backend.cpp:1089）；
+// 本策略按尺寸判定 + 预分配豁免：任一相关张量（src×3/dst，含 view 溯源）已绑定
+// buffer 即不搬（预分配 KV/compute 张量声明 CPU 会撞 abort）。
+enum SmallOpId {
+    SOP_NONE = 0, SOP_ARGSORT, SOP_TOP_K, SOP_SET_ROWS, SOP_FILL,
+    SOP_SUM_ROWS, SOP_SIGMOID,
+};
+struct SmallOpPolicy {
+    int  max_ne0;            // ne[0] 上限（含）
+    SmallOpId op;            // 算子（SOP_NONE 行 = 表尾）
+    bool enabled;            // 默认开关（表行数据；A/B 用双构建，不加 env）
+};
+const SmallOpPolicy * small_op_policies(int * count);
+// 查表裁决：该 (op, ne) 是否落 CPU。任一 buffered 张量 → false（豁免）。
+bool small_op_to_cpu(SmallOpId op, const int64_t * ne,
+                     bool any_buffered /*src0/src1/src2/dst(含view_src) 任一 buffer!=null*/);
 
 const RouteSpec *     specs();
 int                   spec_count();

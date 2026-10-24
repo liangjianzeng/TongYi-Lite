@@ -298,6 +298,35 @@ bool known_bad_lookup(RCompiler c, const char * kernel_name) {
     return false;
 }
 
+// ---- G-782 尺寸开关：小算子 CPU 路由策略表（改判定 = 改表行，不改逻辑） ----
+static const SmallOpPolicy kSmallOps[] = {
+    { 256, SOP_ARGSORT,  true },
+    { 256, SOP_TOP_K,    true },
+    { 256, SOP_SET_ROWS, true },
+    { 256, SOP_FILL,     true },
+    { 256, SOP_SUM_ROWS, true },
+    { 256, SOP_SIGMOID,  true },
+};
+
+const SmallOpPolicy * small_op_policies(int * count) {
+    if (count) *count = (int)(sizeof(kSmallOps) / sizeof(kSmallOps[0]));
+    return kSmallOps;
+}
+
+bool small_op_to_cpu(SmallOpId op, const int64_t * ne, bool any_buffered) {
+    if (op == SOP_NONE || ne == nullptr) return false;
+    // 豁免优先：预分配张量搬 CPU = ggml-backend.cpp:1089 abort（G-782 判负教训）
+    if (any_buffered) return false;
+    // 尺寸门：一维小数组（ne[1..3] 全 1，ne[0] <= 上限）
+    if (ne[1] != 1 || ne[2] != 1 || ne[3] != 1) return false;
+    for (int i = 0; i < (int)(sizeof(kSmallOps) / sizeof(kSmallOps[0])); ++i) {
+        if (kSmallOps[i].op == op && kSmallOps[i].enabled && ne[0] <= kSmallOps[i].max_ne0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const char * route_kind_name(RouteKind k) {
     switch (k) {
         case BATCHED_MOE:   return "BATCHED_MOE";

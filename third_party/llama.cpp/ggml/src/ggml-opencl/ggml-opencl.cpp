@@ -10039,6 +10039,59 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
 
+    // [tongyi G-782 2026-10-25] 小算子尺寸路由（表驱动，tongyi_route_table.h）：
+    // 一维小数组（ne[0]<=256）的 ARGSORT/TOP_K/SET_ROWS/FILL/SUM_ROWS/SIGMOID 落 CPU
+    //（A7X 档每发射 ~400µs 完成往返）。豁免：任一相关张量（src×3/dst 含 view 溯源）
+    // 已绑定 buffer 即不搬——预分配 KV/compute 张量声明 CPU 会撞
+    // ggml-backend.cpp:1089 abort（G-782 名字路由判负的教训，尺寸+豁免是唯一形态）。
+    {
+        // [G-782 2026-10-25 实测定档] 本挂点在当前 sched 架构下对 Ling decode 图
+        // 零调用（supports_op 整个加载+生成期未被轮询，3176 节点 0 次）——per-op
+        // 分配不经过这里。策略表与判定保留（tongyi_route_table），有效挂点待迁到
+        // sched 侧（参照 OFFLOAD_MMID 的 offload_op 钩子模式）。
+        static std::atomic<int> ask_logs = {0};
+        if (ask_logs.fetch_add(1) < 4) {
+            GGML_LOG_INFO("ggml_opencl: supports-ask [%s] (G-782: 本挂点当前非调度路径，仅加载期偶发)\n",
+                          ggml_op_desc(op));
+        }
+        tongyi::SmallOpId sop = tongyi::SOP_NONE;
+        switch (op->op) {
+            case GGML_OP_ARGSORT:  sop = tongyi::SOP_ARGSORT;  break;
+            case GGML_OP_TOP_K:    sop = tongyi::SOP_TOP_K;    break;
+            case GGML_OP_SET_ROWS: sop = tongyi::SOP_SET_ROWS; break;
+            case GGML_OP_FILL:     sop = tongyi::SOP_FILL;     break;
+            case GGML_OP_SUM_ROWS: sop = tongyi::SOP_SUM_ROWS; break;
+            case GGML_OP_UNARY:
+                // SIGMOID 在图里是 GGML_OP_UNARY + op_params 子算子号
+                if (ggml_get_op_params_i32(op, 0) == GGML_UNARY_OP_SIGMOID) {
+                    sop = tongyi::SOP_SIGMOID;
+                }
+                break;
+            default: break;
+        }
+        if (sop != tongyi::SOP_NONE) {
+            bool any_buffered = op->buffer || (op->view_src && op->view_src->buffer);
+            for (int i = 0; !any_buffered && i < 3; ++i) {
+                const ggml_tensor * t = op->src[i];
+                const ggml_tensor * base = t ? (t->view_src ? t->view_src : t) : nullptr;
+                if (base && base->buffer) any_buffered = true;
+            }
+            // [G-782 诊断] 匹配到策略算子即留痕（含门裁决），限流 12 条
+            static std::atomic<int> diag_logs = {0};
+            if (diag_logs.fetch_add(1) < 12) {
+                GGML_LOG_INFO("ggml_opencl: small-op probe [%s/%d] ne={%lld,%lld,%lld,%lld} buffered=%d -> %s\n",
+                              ggml_op_name(op->op), (int)sop,
+                              (long long)op->ne[0], (long long)op->ne[1],
+                              (long long)op->ne[2], (long long)op->ne[3],
+                              (int)any_buffered,
+                              tongyi::small_op_to_cpu(sop, op->ne, any_buffered) ? "CPU" : "GPU");
+            }
+            if (tongyi::small_op_to_cpu(sop, op->ne, any_buffered)) {
+                return false;
+            }
+        }
+    }
+
     // reject ops that match the opfilter regex
     if (dev_ctx->opfilter && std::regex_match(std::string(ggml_op_desc(op)), *dev_ctx->opfilter)) {
         return false;
