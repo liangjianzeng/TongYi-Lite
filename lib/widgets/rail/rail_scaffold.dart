@@ -235,7 +235,7 @@ class _RailIconButtonState extends State<RailIconButton> {
 
 /// 主区容器：child（AppBar + 内容）在上，背 tap 幕布与面板滑入层在上。
 /// 面板宽度 = min(320, 主区宽 - 8)；盖住 AppBar（与设计稿一致），rail 恒可见。
-class RailPanelHost extends StatelessWidget {
+class RailPanelHost extends StatefulWidget {
   final RailPanelController controller;
   final Map<String, RailPageSpec> pages;
   final Widget rail;
@@ -250,23 +250,34 @@ class RailPanelHost extends StatelessWidget {
   });
 
   @override
+  State<RailPanelHost> createState() => _RailPanelHostState();
+}
+
+class _RailPanelHostState extends State<RailPanelHost> {
+  /// 关闭后面板不卸载（保留最后一次打开的页），才能做出"滑出"关闭动画。
+  String? _lastKey;
+
+  @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return RailPanelScope(
       controller: controller,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          rail,
+          widget.rail,
           Expanded(
             child: AnimatedBuilder(
               animation: controller,
               builder: (context, _) {
                 final key = controller.activeKey;
-                final open = key != null && pages.containsKey(key);
+                final open = key != null && widget.pages.containsKey(key);
+                if (open) _lastKey = key;
+                final spec = _lastKey != null ? widget.pages[_lastKey] : null;
                 return Stack(
                   children: [
-                    child,
-                    // 幕布：开着才可点（AnimatedIgnorePointer 防穿透）。
+                    widget.child,
+                    // 幕布：开着才可点（IgnorePointer 防穿透）。
                     AnimatedIgnorePointer(
                       ignoring: !open,
                       child: AnimatedOpacity(
@@ -278,16 +289,20 @@ class RailPanelHost extends StatelessWidget {
                         ),
                       ),
                     ),
-                    // 面板：关着时整体滑出左缘（offset 按 child 宽度比例）。
+                    // 面板常驻挂载：关 = 整体滑出左缘（-1.2 倍自身宽度），
+                    // 开/关都有滑入滑出动画；滑出后不可点、不可见。
                     AnimatedSlide(
                       offset: open ? Offset.zero : const Offset(-1.2, 0),
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeOutCubic,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: open
-                            ? _buildPanel(context, pages[key]!)
-                            : const SizedBox.shrink(),
+                      child: AnimatedIgnorePointer(
+                        ignoring: !open,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: spec == null
+                              ? const SizedBox.shrink()
+                              : _buildPanel(context, spec, open: open),
+                        ),
                       ),
                     ),
                   ],
@@ -300,7 +315,8 @@ class RailPanelHost extends StatelessWidget {
     );
   }
 
-  Widget _buildPanel(BuildContext context, RailPageSpec spec) {
+  Widget _buildPanel(BuildContext context, RailPageSpec spec,
+      {required bool open}) {
     final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(builder: (context, constraints) {
       final width = (constraints.maxWidth - 8).clamp(240.0, 320.0);
@@ -326,7 +342,7 @@ class RailPanelHost extends StatelessWidget {
                     IconButton(
                       icon: const Icon(Icons.close, size: 20),
                       tooltip: '关闭',
-                      onPressed: controller.close,
+                      onPressed: widget.controller.close,
                     ),
                   ],
                 ),
