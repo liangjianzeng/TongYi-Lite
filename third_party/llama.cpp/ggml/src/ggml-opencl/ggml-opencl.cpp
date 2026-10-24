@@ -7194,6 +7194,16 @@ static void ggml_opencl_print_backend_info(ggml_backend_opencl_device_context * 
         backend_ctx->device_name.c_str());
     GGML_LOG_INFO("ggml_opencl: OpenCL driver: %s\n",
         backend_ctx->driver_version.c_str());
+    // [tongyi R3 2026-10-25] known_bad 指纹比对（driver 串已打印=解析完成）：本机编译器命中几条坏账
+    {
+        int kb_hits = 0;
+        for (int i = 0; i < tongyi::known_bad_count(); ++i) {
+            if (tongyi::known_bad()[i].compiler == (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type) {
+                ++kb_hits;
+            }
+        }
+        GGML_LOG_INFO("ggml_opencl: route-table known_bad: %d row(s) apply to this compiler fingerprint\n", kb_hits);
+    }
     GGML_LOG_INFO("ggml_opencl: vector subgroup broadcast support: %s\n",
         backend_ctx->has_vector_subgroup_broadcast ? "true" : "false");
     GGML_LOG_INFO("ggml_opencl: subgroup shuffle support: %s\n",

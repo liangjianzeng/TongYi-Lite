@@ -87,9 +87,9 @@ struct RouteSpec {
     const char *owner;   // 领地：改这行先找 owner
 };
 
-// known_bad_kernels：驱动指纹 × 内核族 → 判决。R1 先立账（测试断言可查），
-// R3 全量消费（cl_cc_probe 扫表 + 编译期验证）。版本粒度先到编译器型，.47
-// 级精度记在 compiler_pat 里，R3 细化。
+// known_bad_kernels：驱动指纹 × 内核族 → 判决（R3 2026-10-25 全量入表 6 行）。
+// 消费方：单测族 B golden + ggml-opencl init 期指纹比对诊断日志（查表即诊断）。
+// 版本粒度到编译器型，.47 级精度记在 compiler_pat，R4 成本模型时细化。
 // 匹配语义：kernel_prefix 前缀命中 && kernel_contains 子串命中（如
 // "gemv_moe_q4_k_f32_ns" 命中 prefix="gemv_moe_" contains="_f32_ns"）。
 struct KnownBadKernel {

@@ -79,9 +79,18 @@ static const KnownBadKernel kKnownBad[] = {
     { RCOMP_E031, "E031.47.* (Adreno 830 vendor, OpenCL 0800.71)",
       "gemm_moe_", "_f32_ns",
       "G-739: 同上（gemm 族）" },
+    { RCOMP_E031, "E031.47.* (Adreno 830 vendor, OpenCL 0800.71)",
+      "mul_mat_id_q4_k_", "_batched",
+      "G-759 §20.21 考古: raw 3-plane 形态 in-kernel 载荷不相干（v2 seff/meff dodge 已绕）——留档防回退" },
     { RCOMP_E031, "E031.41 (usually A7x)",
       "mul_mv_", "_K_f32_flat",
       "G-772: A7X lm_head 默认 CPU 的依据（E031.41 误编译 flat K-quant GEMV）" },
+    { RCOMP_E031, "E031.37/E031.41 (A6X/A7x vendor)",
+      "kernel_convert_", "_trans4_ns",
+      "G-773: vendor *_trans4_ns repack 在部分 A6x/A7x 误编译（batched 自打包不走它，dense 路径规避）" },
+    { RCOMP_E17,  "E17 (rare vendor builds)",
+      "gemv_moe_", "",
+      "G-747: E17 quirks 档默认拒 batched MoE（adreno_e17_compiler_quirks 门）" },
 };
 
 // ---- legacy 等价函数（表内唯一「逻辑」，其余全是数据）----

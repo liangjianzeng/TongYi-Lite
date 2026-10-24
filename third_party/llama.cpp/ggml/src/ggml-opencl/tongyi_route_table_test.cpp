@@ -295,8 +295,11 @@ static void family_b() {
     CHECK(known_bad_lookup(RCOMP_E031, "gemv_moe_q4_k_f32_ns"), "B4a f32_ns 族 E031 可查");
     CHECK(known_bad_lookup(RCOMP_E031, "gemm_moe_mxfp4_f32_ns"), "B4b gemm 族可查");
     CHECK(!known_bad_lookup(RCOMP_E031, "rms_norm"), "B4c 无关族不可查");
-    CHECK(!known_bad_lookup(RCOMP_E17, "gemv_moe_q4_k_f32_ns"), "B4d E17 不在 E031 坏账");
-    CHECK(known_bad_count() == 3 && spec_count() == 9, "B4e 表规模 pin（9 行 + 3 坏账）");
+    CHECK(known_bad_lookup(RCOMP_E17, "gemv_moe_q4_k_f32_ns"), "B4d' R3: E17 行补入（E17 quirks 档）");
+    CHECK(known_bad_lookup(RCOMP_E031, "kernel_convert_q4_0_trans4_ns"), "B4h R3 trans4_ns 族");
+    CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched_raw"), "B4i R3 raw 3-plane 留档");
+    CHECK(!known_bad_lookup(RCOMP_E17, "mul_mv_q4_k_f32_flat"), "B4j E17 flat 不在账");
+    CHECK(known_bad_count() == 6 && spec_count() == 9, "B4e 表规模 pin（9 行 + 6 坏账，R3）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 
