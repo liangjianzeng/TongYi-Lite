@@ -6,6 +6,54 @@
 
 ---
 
+## [Unreleased] — 2026-10-24
+
+### 🧠 智能体思考治理：失控根治 + API「思考强度」档位 + token 读数 + 停止按钮修复
+
+- **思考失控根治（思考动辄几万字不收口）**：旧守卫只量当前思考块，块一闭合清零 → think/response
+  反复横跳时累计无上限（机检实测 4 万字畅通无阻）。新口径唯一真源
+  `AgentStreamProcessor.thinkingRunaway`：**跨块累计** + `producedAnything` 门槛（有工具调用或
+  可见文本 ≥80 字才豁免，"开头两句寒暄"不豁免）；止损后**先抢救再判死**——已产出工具调用/够长
+  答案照常交付，`thinkingOverflow` 允许重试**一次**且强制 `forceNoThinking`；工具决策步默认不下发
+  思考（设置 → 智能体 → 执行参数可回退）。机检：`dart run tool/measure_thinking_guard.dart`。
+- **API「思考强度」档位**：每条 API 模型配置独立 `thinkingEffort`（null = 请求体与改动前逐字节
+  相同，不做全局开关）。一族一字段，唯一真源 `lib/agent/llm/thinking_effort.dart`：OpenAI/grok/
+  MiniMax 顶层 `reasoning_effort`；Claude `thinking.budget_tokens`（必须 < max_tokens）；Gemini
+  `thinking_config.thinking_budget`；DeepSeek/Kimi `thinking.type`；GLM `thinking.enabled`；Qwen
+  云端 `enable_thinking`；vLLM/SGLang `chat_template_kwargs.enable_thinking`。字段被严格端点拒绝
+  → 自动去字段重发（丢档位可以，丢请求不行）。
+- **状态条实时 token 读数**：生成中的「生成中 + 停止」行改为实时计量（中日韩按字、其余 4 字符折 1，
+  **含工具调用参数**）；思考 ≥600 tok 且产出 <5% 显 `⚠️只想不写`。
+- **停止按钮「没反应」三洞修复**：① 取消以 transport 形态到达而 transport 可重试 → 停止后循环自己
+  再发一次；② `cancel()` 旧版仅在 generate 中置位 → 步间隙按了无效；③ 停止以 `agent.isRunning` 当
+  门槛 → 工具执行相位只停一次。取消为**回合级**、幂等。
+- 验收：`flutter test test/agent test/providers test/services` = **714 passed + 2 skip**；
+  `dart analyze lib` 0 error。新增测试：`thinking_runaway_test`（12 项）、`thinking_effort_test`、
+  `turn_meter_test`、`stop_generation_test`、`openai_service_thinking_test`。
+
+### 🔬 Mesa 全 GPU 卸载线：测量接管 + L3 临时裁决（引擎侧，真机 K40）
+
+- **10-19「整线重估」作废**：三重测量污染（`830env.sh` 写死逐 op clFlush、逐提交 printf 调试版
+  Mesa、CPU 对照腿漂移 2.2×），24 份旧 e2e 日志全部不作数。重建纪律：BUILD_INFO + env 指纹强制
+  前置（`verify_mesa_bundle.sh`，缺失 exit 4 拒跑）、trace-off 构建、交错 A/B + 90s 冷却 + ≥3 轮。
+- **L3 裁决级 A/B（K40，安静态）**：Mesa 全 GPU decode ≈ CPU bank 的 **17.5–20%**（CPU 3.14 /
+  Mesa async 0.55 / flush1 0.63 t/s）；提交层封死（P5 整图单提交永久降级）；专家 I/O 排除出关键
+  路径（读量 ÷5.6 只 +6%，采纳 `DECODE_WINDOW=64+ROUTE_KEEP=1`）；**头号嫌疑 = CPU 回落往返**：
+  真实 decode 图 207 形状中 87 个（42%）每 token 落 CPU，其中 80 个是 fork 自己的
+  `MAP_CUSTOM1 ffn_moe_slots`（ggml-opencl 无 OpenCL 实现）。
+- **App/OpenCL 侧同批定案**：G-769 SSM 判 CPU 使图 30→138 段是真因（修复后 Ling 6.72→19.90 t/s，
+  2.96×）；A7X batched MoE 默认放行（+46%）；a6xx 四个内核补 `cl_khr_3d_image_writes`（K40 加载
+  失败定案）；`opencl_stub` 自证防"假 GPU 腿"；`run_mesa_matrix.sh` 证据闸改数提交证据。
+- 状态快照与解锁即动手清单：`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`。
+
+### 📱 其他
+
+- 调试机型分级定案（2026-10-22）：小米13/Adreno 740 = 调试主力与支持底线、K90(830) = 高端参考、
+  K40/Adreno 650 = 最低档冒烟；任何真机结论必须标机型档位，跨档结论不许互抄。
+- 打包验收抽出 `tool/verify_apk.sh`（唯一真源），`tool/build_apk.sh --verify-only` 只验产物不重编。
+- Dev Agent 安全面加固（`lib/agent/dev/safety.dart`）+ 插件平台契约冻结（`docs/插件平台_契约冻结清单_2026-10-23.md`）、
+  英语听写插件与离线朗读（sherpa-onnx OfflineTts，零新依赖）。
+
 ## [Unreleased] — 2026-10-20
 
 ### 🔊 TTS 播报修复：微软强制 Sec-MS-GEC v2（内置 edge_tts 已移植）+ 失败不再静默
