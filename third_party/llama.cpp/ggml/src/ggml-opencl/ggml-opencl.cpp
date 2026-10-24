@@ -1369,6 +1369,7 @@ struct ggml_backend_opencl_context {
     // Gemm and Gemv related programs, kernels, etc
     cl_kernel kernel_gemm_noshuffle_q4_0_f32;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32;
+    cl_kernel kernel_gemv_noshuffle_q4_0_f32_glu;  // [tongyi L4 2026-10-25] fused gate+up GEMV+GLU (q4_0)
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_mc3;  // multi-column (N=3) verify GEMV (spec/MTP)
     cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
     cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
@@ -4193,6 +4194,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_glu", &err), err));
         CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
         // P3 sort kernels moved to their own program (moe_sort_dspark): compiling
         // them inside the q4_0 program (with the perm param) miscompiled the
@@ -8909,8 +8911,12 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         if (gate->ne[1] != 1 || up->ne[1] != 1) {
             return false;
         }
-        // both projections must be q4_K weights, f32 activation/output
-        if (gate->src[0]->type != GGML_TYPE_Q4_K || up->src[0]->type != GGML_TYPE_Q4_K ||
+        // [tongyi L4 2026-10-25] 放开 q4_0：Ling 的 dense FFN（shared-expert/GDN）
+        // 是 q4_0/q4_1，原硬门 q4_K-only 使融合从不触发（§20.38 算子数 2052 不动实锤）。
+        // 成对同型（q4_K+q4_K 走原执行器；q4_0+q4_0 走 L4 新执行器）。
+        const ggml_type proj_t = gate->src[0]->type;
+        if ((proj_t != GGML_TYPE_Q4_K && proj_t != GGML_TYPE_Q4_0) ||
+            up->src[0]->type != proj_t ||
             gate->src[1]->type != GGML_TYPE_F32  || up->src[1]->type != GGML_TYPE_F32  ||
             gate->type != GGML_TYPE_F32 || up->type != GGML_TYPE_F32 || glu->type != GGML_TYPE_F32) {
             return false;
@@ -8935,7 +8941,8 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         }
         // the fused kernel reads the standard noshuffle image layout; the tiled
         // layout packs weights differently -> defer those to the per-op path
-        if (use_q4k_tiled(backend_ctx, gate->src[0]) || use_q4k_tiled(backend_ctx, up->src[0])) {
+        if (proj_t == GGML_TYPE_Q4_K &&
+            (use_q4k_tiled(backend_ctx, gate->src[0]) || use_q4k_tiled(backend_ctx, up->src[0]))) {
             return false;
         }
         // q4_K bin kernel requires 32b transposed layout, not compatible with the fused gemv
@@ -9190,6 +9197,105 @@ static void ggml_cl_mul_mat_q4_k_glu_fused(ggml_backend_t backend, ggml_tensor *
     if (getenv("GGML_OPENCL_FUSE_DEBUG")) {
         static int dbg = 0;
         if (dbg < 3) { fprintf(stderr, "[FUSE_MM_GLU] fired #%d K=%d M=%d glu_op=%d nsg=%zu maxwg=%zu\n", ++dbg, K, M, glu_op, nsg_y, maxwg); fflush(stderr); }
+    }
+
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    CL_CHECK(clReleaseMemObject(qg_img));
+    CL_CHECK(clReleaseMemObject(qu_img));
+    CL_CHECK(clReleaseMemObject(b_img));
+    CL_CHECK(clReleaseMemObject(b_sub_buf));
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(gate_tensor);
+    GGML_UNUSED(up_tensor);
+    GGML_UNUSED(glu_tensor);
+#endif
+}
+
+// [tongyi L4 2026-10-25] q4_0 版 GLU 融合执行器：克隆 q4_K 版（上函数），q4_0 平面
+//（q image + d half2，无 dm/s/masks）。Ling 的 dense FFN（shared-expert/GDN）是
+// q4_0 ⇒ 原融合从不触发（§20.38 实锤算子数一字不动 2052）。
+static void ggml_cl_mul_mat_q4_0_glu_fused(ggml_backend_t backend, ggml_tensor * gate_tensor, ggml_tensor * up_tensor, ggml_tensor * glu_tensor) {
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    GGML_ASSERT(gate_tensor && up_tensor && glu_tensor);
+
+    const ggml_tensor * Wg   = gate_tensor->src[0];
+    const ggml_tensor * Wu   = up_tensor->src[0];
+    const ggml_tensor * src1 = gate_tensor->src[1];
+    const ggml_tensor * dst  = glu_tensor;
+
+    GGML_ASSERT(Wg && Wg->extra);
+    GGML_ASSERT(Wu && Wu->extra);
+    GGML_ASSERT(src1 && src1->extra);
+    GGML_ASSERT(dst && dst->extra);
+
+    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    ggml_tensor_extra_cl      * extra1  = (ggml_tensor_extra_cl *)src1->extra;
+    ggml_tensor_extra_cl      * extrad  = (ggml_tensor_extra_cl *)dst->extra;
+    ggml_tensor_extra_cl_q4_0 * extra_g = (ggml_tensor_extra_cl_q4_0 *)Wg->extra;
+    ggml_tensor_extra_cl_q4_0 * extra_u = (ggml_tensor_extra_cl_q4_0 *)Wu->extra;
+
+    cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    const int K = Wg->ne[0];
+    const int M = Wg->ne[1];
+    const int N = 1;   // decode GEMV
+    const int glu_op = (int)ggml_get_glu_op(dst);
+
+    cl_context context = backend_ctx->context;
+    cl_int           err;
+    cl_image_format  img_fmt;
+    cl_image_desc    img_desc;
+    cl_buffer_region region;
+
+    // q 平面图像（标准 noshuffle，同 dense GEMV 读法）
+    img_fmt = { CL_R, CL_UNSIGNED_INT32 };
+    memset(&img_desc, 0, sizeof(img_desc));
+    img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    img_desc.image_width = (size_t)M * K / 2 / 4;
+    img_desc.buffer      = extra_g->q;
+    cl_mem qg_img = nullptr, qu_img = nullptr;
+    CL_CHECK((qg_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+    img_desc.buffer = extra_u->q;
+    CL_CHECK((qu_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+    // 激活图像（decode 单列）
+    region.origin = offset1;
+    region.size   = (size_t)K * N * sizeof(float);
+    cl_mem b_sub_buf = nullptr, b_img = nullptr;
+    CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+    img_fmt = { CL_RGBA, CL_FLOAT };
+    memset(&img_desc, 0, sizeof(img_desc));
+    img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    img_desc.image_width = (size_t)K * N / 4;
+    img_desc.buffer      = b_sub_buf;
+    CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+    cl_kernel kernel = backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu;
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &qg_img));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_mem),   &extra_g->d));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &qu_img));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_mem),   &extra_u->d));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   &b_img));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_int),   &K));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_int),   &M));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_int),   &glu_op));
+
+    // LDS 预算与 q4_K GLU 同账（float4 reduceLM）——同样硬顶 8 子组
+    size_t maxwg = backend_ctx->get_kernel_workgroup_size(kernel);
+    size_t nsg_y = gemv_ksplit_y(8);
+    while (nsg_y > 1 && 64 * nsg_y > maxwg) { nsg_y >>= 1; }
+    size_t local_work_size[3]  = { 64, nsg_y, 1 };
+    size_t global_work_size[3] = { (size_t)CEIL_DIV(M / 2, 64) * 64, nsg_y, 1 };
+
+    if (getenv("GGML_OPENCL_FUSE_DEBUG")) {
+        static int dbg = 0;
+        if (dbg < 3) { fprintf(stderr, "[FUSE_MM_GLU_Q40] fired #%d K=%d M=%d glu_op=%d nsg=%zu\n", ++dbg, K, M, glu_op, nsg_y); fflush(stderr); }
     }
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
@@ -9523,7 +9629,11 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // match so the FFN GLU subgraph stays dormant on Intel/other drivers.
         if (backend_ctx->fuse_mm_glu && !backend_ctx->disable_fusion &&
             ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU })) {
-            ggml_cl_mul_mat_q4_k_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            if (node->src[0]->type == GGML_TYPE_Q4_0) {
+                ggml_cl_mul_mat_q4_0_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            } else {
+                ggml_cl_mul_mat_q4_k_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            }
             i += 2;
             continue;
         }
