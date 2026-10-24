@@ -244,7 +244,53 @@ inline float sgb_f(float v, uint lid) {
     total_sums.s1 += (((bits4.s7 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y.s6; \
     total_sums.s1 += (((bits4.s7 & 0xF000) >> 12) - 8) * scale.s1 * shared_y.s7; \
 
-#ifdef ADRENO_GPU
+// [dspark 2026-10-20] rusticl-safe (GGML_OPENCL_RUSTICL) per-lane self-load
+// dequant: no subgroup broadcast, no local reduce. One lane owns a row pair
+// end-to-end (full K loop), reads B itself, writes dst directly. 4x redundant
+// B reads vs the broadcast protocol, but B is L1-resident. Bit semantics are
+// lifted 1:1 from dequantizeBlockAccum_ns_sgbroadcast_1_hi/lo: for each half,
+// bits4.s0/s1 (rows 0/1, nibble n) multiply activation float 4*half + n's
+// pixel group — i.e. s0/s1 -> pixel pix+0, s2/s3 -> pix+1, s4/s5 -> pix+2,
+// s6/s7 -> pix+3 (nibble n -> component n).
+#define DEQUANT_ACCUM_SELF_Q40_HLF(total_sums, bits4, scale, img, pix) \
+    { float4 sb0 = read_imagef(img, (pix)); \
+    total_sums.s0 += ((bits4.s0 & 0x000F) - 8) * scale.s0 * sb0.x; \
+    total_sums.s1 += ((bits4.s1 & 0x000F) - 8) * scale.s1 * sb0.x; \
+    total_sums.s0 += (((bits4.s0 >> 4) & 0x000F) - 8) * scale.s0 * sb0.y; \
+    total_sums.s1 += (((bits4.s1 >> 4) & 0x000F) - 8) * scale.s1 * sb0.y; \
+    total_sums.s0 += (((bits4.s0 >> 8) & 0x000F) - 8) * scale.s0 * sb0.z; \
+    total_sums.s1 += (((bits4.s1 >> 8) & 0x000F) - 8) * scale.s1 * sb0.z; \
+    total_sums.s0 += (((bits4.s0 >> 12) & 0x000F) - 8) * scale.s0 * sb0.w; \
+    total_sums.s1 += (((bits4.s1 >> 12) & 0x000F) - 8) * scale.s1 * sb0.w; \
+    float4 sb1 = read_imagef(img, (pix) + 1); \
+    total_sums.s0 += ((bits4.s2 & 0x000F) - 8) * scale.s0 * sb1.x; \
+    total_sums.s1 += ((bits4.s3 & 0x000F) - 8) * scale.s1 * sb1.x; \
+    total_sums.s0 += (((bits4.s2 >> 4) & 0x000F) - 8) * scale.s0 * sb1.y; \
+    total_sums.s1 += (((bits4.s3 >> 4) & 0x000F) - 8) * scale.s1 * sb1.y; \
+    total_sums.s0 += (((bits4.s2 >> 8) & 0x000F) - 8) * scale.s0 * sb1.z; \
+    total_sums.s1 += (((bits4.s3 >> 8) & 0x000F) - 8) * scale.s1 * sb1.z; \
+    total_sums.s0 += (((bits4.s2 >> 12) & 0x000F) - 8) * scale.s0 * sb1.w; \
+    total_sums.s1 += (((bits4.s3 >> 12) & 0x000F) - 8) * scale.s1 * sb1.w; \
+    float4 sb2 = read_imagef(img, (pix) + 2); \
+    total_sums.s0 += ((bits4.s4 & 0x000F) - 8) * scale.s0 * sb2.x; \
+    total_sums.s1 += ((bits4.s5 & 0x000F) - 8) * scale.s1 * sb2.x; \
+    total_sums.s0 += (((bits4.s4 >> 4) & 0x000F) - 8) * scale.s0 * sb2.y; \
+    total_sums.s1 += (((bits4.s5 >> 4) & 0x000F) - 8) * scale.s1 * sb2.y; \
+    total_sums.s0 += (((bits4.s4 >> 8) & 0x000F) - 8) * scale.s0 * sb2.z; \
+    total_sums.s1 += (((bits4.s5 >> 8) & 0x000F) - 8) * scale.s1 * sb2.z; \
+    total_sums.s0 += (((bits4.s4 >> 12) & 0x000F) - 8) * scale.s0 * sb2.w; \
+    total_sums.s1 += (((bits4.s5 >> 12) & 0x000F) - 8) * scale.s1 * sb2.w; \
+    float4 sb3 = read_imagef(img, (pix) + 3); \
+    total_sums.s0 += ((bits4.s6 & 0x000F) - 8) * scale.s0 * sb3.x; \
+    total_sums.s1 += ((bits4.s7 & 0x000F) - 8) * scale.s1 * sb3.x; \
+    total_sums.s0 += (((bits4.s6 >> 4) & 0x000F) - 8) * scale.s0 * sb3.y; \
+    total_sums.s1 += (((bits4.s7 >> 4) & 0x000F) - 8) * scale.s1 * sb3.y; \
+    total_sums.s0 += (((bits4.s6 >> 8) & 0x000F) - 8) * scale.s0 * sb3.z; \
+    total_sums.s1 += (((bits4.s7 >> 8) & 0x000F) - 8) * scale.s1 * sb3.z; \
+    total_sums.s0 += (((bits4.s6 >> 12) & 0x000F) - 8) * scale.s0 * sb3.w; \
+    total_sums.s1 += (((bits4.s7 >> 12) & 0x000F) - 8) * scale.s1 * sb3.w; }
+
+#if defined(ADRENO_GPU) && !defined(GGML_OPENCL_RUSTICL)
 REQD_SUBGROUP_SIZE_64
 #endif
 __kernel void kernel_gemv_noshuffle_q4_0_f32(
@@ -282,6 +328,7 @@ __kernel void kernel_gemv_noshuffle_q4_0_f32(
 
     __private float2 totalSum = (float2)(0.0f);
 
+#if defined(ADRENO_GPU) && !defined(GGML_OPENCL_RUSTICL)
     // loop along K in block granularity, skip 4 blocks every iter
     for (uint k = groupId; k < (K / QK4_0); k += N_SIMDGROUP) {
         regS = src0_d[gid_s + k * LINE_STRIDE_A]; // each fiber loads scale of two rows
@@ -333,6 +380,33 @@ __kernel void kernel_gemv_noshuffle_q4_0_f32(
         if (gid * 2 + 0 < M) dst[gid * 2 + 0] = totalSum.s0;
         if (gid * 2 + 1 < M) dst[gid * 2 + 1] = totalSum.s1;
     }
+#else
+    // [dspark 2026-10-20] rusticl-safe variant (FD650 measured): rusticl drew
+    // sgs=128 for this kernel, which spans local y-groups and breaks both the
+    // slid<4 B broadcast (y1 receives y0's B for a different k) and the
+    // slid-indexed local reduce (slot aliasing + OOB). Sync-free full-K path:
+    // one lane owns its row pair end-to-end, zero cross-thread communication.
+    for (uint k = 0; k < (K / QK4_0); k++) {
+        regS = src0_d[gid_s + k * LINE_STRIDE_A];
+        regA.s0 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        regA.s1 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        regA.s2 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        regA.s3 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+        DEQUANT_ACCUM_SELF_Q40_HLF(totalSum, as_ushort8(regA), regS, src1, k * 8);
+
+        regA.s0 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+        regA.s1 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+        regA.s2 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;
+        regA.s3 = read_imageui(src0_q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;
+        DEQUANT_ACCUM_SELF_Q40_HLF(totalSum, as_ushort8(regA), regS, src1, k * 8 + 4);
+    }
+
+    // every lane holds a complete total; write directly (row guards as above)
+    dst = (global float*)((global char*)dst + offsetd);
+    if (gid * 2 + 0 < M) dst[gid * 2 + 0] = totalSum.s0;
+    if (gid * 2 + 1 < M) dst[gid * 2 + 1] = totalSum.s1;
+    return;
+#endif
 
 }
 
