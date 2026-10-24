@@ -7,6 +7,7 @@
 // ============================================================
 
 import 'dart:io';
+import '../plugins/panel/plugins_screen.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
@@ -60,6 +61,7 @@ import '../models/model_info.dart';
 import '../models/model_catalog.dart';
 import '../models/api_model.dart';
 import '../models/agent_persona.dart';
+import '../agent/llm/thinking_effort.dart';
 import '../providers/index.dart';
 import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
@@ -101,7 +103,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     super.initState();
     // 6 个 Tab（模型管理/API 接入/推理引擎/智能体/开发者/关于）——
     // length 必须与 TabBar/TabBarView 数量一致。
-    _tabController = TabController(length: 6, vsync: this);
+    _tabController = TabController(length: 7, vsync: this);
     _catalogFuture = loadModelCatalog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
@@ -176,6 +178,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             Tab(icon: Icon(Icons.cloud, size: 18), text: 'API 接入'),
             Tab(icon: Icon(Icons.memory, size: 18), text: '推理引擎'),
             Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
+            // 「能力」独立成 Tab（2026-10-24 用户定案）：插件与技能是**智能体的能力扩展面**，
+            // 不该并进「开发者」（那是 Dev Agent/SSH 的地盘）。这里按梯队管三层：
+            // 原生能力（默认开）→ 插件 → 技能。
+            Tab(icon: Icon(Icons.bolt_outlined, size: 18), text: '能力'),
             Tab(icon: Icon(Icons.construction, size: 18), text: '开发者'),
             Tab(icon: Icon(Icons.info, size: 18), text: '关于'),
           ],
@@ -188,6 +194,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _ApiTab(),
           const _InferenceEngineTab(),
           const _AgentTab(),
+          _CapabilityTab(controller: _tabController),
           const _DevTab(),
           const _buildAboutTab(),
         ],
@@ -3048,9 +3055,25 @@ class _AgentTabState extends ConsumerState<_AgentTab> {
                                 : '${settings.agentThinkingMaxChars} 字',
                             onChanged: (v) =>
                                 notifier.setAgentThinkingMaxChars(v),
-                            hint: '思考块超长未闭合到该字数即主动止损（默认 6000）；'
-                                '常提示"思考超长未闭合导致任务失败"时调大，'
-                                '或在模型设置里关闭思考模式',
+                            hint: '按**累计**思考字数计（多段思考连写也合计，默认 6000）；'
+                                '超限且还没产出答案/工具调用即主动止损。'
+                                '确实需要长推理的模型调大此值',
+                          ),
+                          SwitchListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('工具步也允许思考',
+                                style: TextStyle(fontSize: 13)),
+                            subtitle: Text(
+                              '默认关：智能体的工具决策步不思考（只需产出一次工具调用），'
+                              '端侧思考失控（动辄几万字独白把预算吃光）几乎都发生在那一步；'
+                              '组织最终答案时仍允许思考。打开 = 每步都允许（同旧版行为）',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.grey[600]),
+                            ),
+                            value: settings.agentThinkingOnToolSteps,
+                            onChanged: (v) =>
+                                notifier.setAgentThinkingOnToolSteps(v),
                           ),
                         ],
                       ),
@@ -4595,6 +4618,160 @@ Future<void> unloadModelAndNotify(
 // =========================================================================
 
 // =========================================================================
+// 「能力」Tab（2026-10-24 用户定案）：插件与技能是**智能体的能力扩展面**，
+// 与「智能体 / 上下文压缩 / 人格」这些原生能力放在一起，按梯队管理 ——
+// 不再塞进「开发者」（那个 Tab 是 Dev Agent / SSH 的地盘，能力开关藏在那儿没人找得到）。
+//
+// 三档梯队：
+//   ① 原生能力（默认开启）：平台自带的开关，功能"突然没有了"第一个来这儿看；
+//   ② 插件：启用 / 参数 / 方案档 / 诊断（启用后图标出现在聊天输入框那一行）；
+//   ③ 技能（Skills）：提示词模板，智能体按「何时触发」自己取用。
+// =========================================================================
+class _CapabilityTab extends ConsumerStatefulWidget {
+  const _CapabilityTab({this.controller});
+
+  /// 跳回「智能体」Tab 细调时用（人格、技能增删的表单在那边）。
+  final TabController? controller;
+
+  @override
+  ConsumerState<_CapabilityTab> createState() => _CapabilityTabState();
+}
+
+class _CapabilityTabState extends ConsumerState<_CapabilityTab> {
+  List<Skill>? _userSkills;
+  final List<Skill> _builtinSkills = loadBuiltinSkills();
+
+  @override
+  void initState() {
+    super.initState();
+    _rescan();
+  }
+
+  Future<void> _rescan() async {
+    final skills = await loadUserSkills();
+    if (mounted) setState(() => _userSkills = skills);
+  }
+
+  void _gotoAgentTab() => widget.controller?.animateTo(3);
+
+  Widget _header(String title, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          Text(subtitle,
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+        ],
+      ),
+    );
+  }
+
+  Widget _card({required List<Widget> children}) => Card(
+        margin: EdgeInsets.zero,
+        child: Padding(padding: const EdgeInsets.all(4), child: Column(children: children)),
+      );
+
+  Widget _switchRow(String title, bool value, Future<void> Function(bool) onChanged,
+      String subtitle) {
+    return SwitchListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+      title: Text(title, style: const TextStyle(fontSize: 13)),
+      subtitle: Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+      value: value,
+      onChanged: (v) => onChanged(v),
+    );
+  }
+
+  Widget _infoRow(String title, String value, String subtitle, VoidCallback? onTap) {
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+      title: Text(title, style: const TextStyle(fontSize: 13)),
+      subtitle: Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(value, style: const TextStyle(fontSize: 12)),
+          if (onTap != null) const Icon(Icons.chevron_right, size: 18),
+        ],
+      ),
+      onTap: onTap,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+    final mine = _userSkills;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _header('🟢 原生能力（默认开启）', '平台自带的能力。功能"突然没有了"，第一个来这儿看是不是被谁关了'),
+          _card(children: [
+            _switchRow('智能体模式', settings.agentEnabled, notifier.setAgentEnabled,
+                '关掉就是纯聊天：没有工具、技能与人格'),
+            _switchRow('上下文压缩', settings.agentCompactEnabled, notifier.setAgentCompactEnabled,
+                '长对话自动压历史，免得一步就顶满上下文'),
+            _switchRow('子代理（并行拆解）', settings.agentSubagentEnabled,
+                notifier.setAgentSubagentEnabled, '把大任务拆给子代理并行跑'),
+            _infoRow('人格（Persona）', '标准 + 自定义', '标准人格开箱即用；增删自定义人格在「智能体」Tab',
+                _gotoAgentTab),
+          ]),
+          const SizedBox(height: 14),
+          _header('🧩 插件（能力扩展）', '启用后图标出现在聊天输入框那一行；参数、方案档、诊断都进这个面板'),
+          _card(children: const [
+            PluginsEntryTile(pluginsDirHint: '文档/plugins/<插件名>/plugin.json'),
+          ]),
+          const SizedBox(height: 14),
+          _header('⚡ 技能（Skills）', '提示词模板；智能体按「何时触发」自己取用，也可以让它替你起草一份'),
+          _card(children: [
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+              title: Text('内置技能 ${_builtinSkills.length} 个 · 我的技能 ${mine?.length ?? '…'} 个',
+                  style: const TextStyle(fontSize: 13)),
+              subtitle: Text(
+                mine == null
+                    ? '正在读技能目录…'
+                    : (mine.isEmpty
+                        ? '还没有自己的技能。可以让智能体把常用做法写成一份 SKILL.md 复用'
+                        : '我的技能：${mine.map((s) => s.name).join('、')}'),
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+              title: const Text('去「智能体」Tab 管理技能（新增 / 编辑 / 删除）',
+                  style: TextStyle(fontSize: 13)),
+              trailing: const Icon(Icons.chevron_right, size: 18),
+              onTap: _gotoAgentTab,
+            ),
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+              title: const Text('重新扫描技能目录', style: TextStyle(fontSize: 13)),
+              leading: const Icon(Icons.refresh, size: 18),
+              onTap: _rescan,
+            ),
+          ]),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+}
+
+// =========================================================================
 // 开发者 Tab：开发模式 + SSH 自动连接向导 + 工作区管理 + 危险命令策略。
 // 设计目标（用户反馈）：能自动的绝不手填——密钥自动生成、命令一键复制、
 // 连接自动建立、Termux 项目目录自动创建。用户只做"复制粘贴一条命令"。
@@ -4616,6 +4793,13 @@ class _DevTabState extends ConsumerState<_DevTab> {
 
   /// 免 SSH 通道测试结果（持久显示，SnackBar 真机上抓不到）。
   String? _intentTestResult;
+
+  /// 上次「免 SSH 通道测试」是否成功。
+  ///
+  /// 判色必须用这个状态位，**不能用文案 `contains('可用')`** ——
+  /// 「Termux 未安装：**可用**下方按钮自动下载」「免 SSH 通道不可**用**」两条失败
+  /// 文案都含"可用"，旧版把失败渲染成绿色成功（可用性评估 P1-2）。
+  bool _intentTestOk = false;
 
   /// 当前激活工作区下的任务（懒加载；新建/删除后刷新）。
   List<DevTask> _devTasks = const [];
@@ -4656,6 +4840,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 插件入口已从「开发者」搬去「能力」Tab（2026-10-24 用户定案：插件/技能是智能体的
+          // 能力扩展面，不该混在 Dev Agent/SSH 这堆里）。这里只留一句去路，别让人以为功能没了。
           _buildModeCard(settings, notifier),
           const SizedBox(height: 10),
           _buildConnectionsCard(settings, notifier),
@@ -4815,6 +5001,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
                             _intentTestResult = null;
                           });
                           String msg;
+                          var ok = false;
                           try {
                             final installed =
                                 await AppBridge.isAppInstalled(AppBridge.termuxPackage);
@@ -4823,7 +5010,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
                             } else {
                               final res = await TermuxIntentService.instance
                                   .run('echo ok', timeout: const Duration(seconds: 10));
-                              msg = res.output.trim() == 'ok'
+                              ok = res.output.trim() == 'ok' && res.exit == 0;
+                              msg = ok
                                   ? '免 SSH 通道可用（RUN_COMMAND，echo ok 往返成功）'
                                   : '通道返回异常（exit=${res.exit}，输出：${res.output.trim()}）：'
                                       '检查 allow-external-apps 是否已开启';
@@ -4833,6 +5021,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
                                   SnackBar(content: Text(msg)));
                             }
                           } catch (e) {
+                            ok = false;
                             msg = '免 SSH 通道不可用：'
                                 '${e.toString().replaceAll('StateError: ', '')}';
                             if (mounted) {
@@ -4844,6 +5033,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
                           if (mounted) {
                             setState(() {
                               _intentTestResult = msg;
+                              _intentTestOk = ok;
                               _testingIntent = false;
                             });
                           }
@@ -4904,7 +5094,7 @@ class _DevTabState extends ConsumerState<_DevTab> {
                   '上次测试：$_intentTestResult',
                   style: TextStyle(
                       fontSize: 12,
-                      color: _intentTestResult!.contains('可用')
+                      color: _intentTestOk
                           ? Colors.green.shade700
                           : Colors.red.shade700),
                 ),
@@ -5428,6 +5618,10 @@ class _DevTabState extends ConsumerState<_DevTab> {
     // v3（2026-10-04）：追加 allow-external-apps（RUN_COMMAND 免 SSH 通道的
     // 唯一前置）+ termux-setup-storage（交换目录 /sdcard/TongYiLite 需要
     // Termux 侧存储权限）；SSH 部分保留作回退通道。
+    //
+    // v4（2026-10-20 可用性评估 P1-1）：中文说明**不得塞进 echo 参数** ——
+    // 旧版输出 `ALL_DONE（免 SSH 通道已配置；…）`，而 UI 要求用户确认出现
+    // `ALL_DONE`，混排让人无法判定成功。改为：提示单独 echo，`ALL_DONE` 独占一行且最后。
     return 'pkg install -y openssh procps 2>/dev/null; '
         'pkill sshd 2>/dev/null; sleep 1; sshd 2>/dev/null; '
         'mkdir -p ~/.ssh && echo "$publicKey" > ~/.ssh/authorized_keys && '
@@ -5436,7 +5630,8 @@ class _DevTabState extends ConsumerState<_DevTab> {
         '|| echo "allow-external-apps=true" >> ~/.termux/termux.properties; '
         'termux-reload-settings 2>/dev/null; '
         'echo "USER=\$(whoami)" > /sdcard/tongyilite_ssh_user.txt 2>/dev/null || true; '
-        'echo ALL_DONE（免 SSH 通道已配置；如需读写共享存储请在 Termux 里跑一次 termux-setup-storage）';
+        'echo "[TongYi-Lite] 提示：如需 App 读写共享存储，请在 Termux 里再执行一次 termux-setup-storage"; '
+        'echo ALL_DONE';
   }
 
   /// 远程电脑添加公钥命令（追加，不覆盖已有公钥）。
@@ -6343,6 +6538,10 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
   String? _testResult;
   bool _testing = false;
   bool _visionCapable = false;
+  // 思考强度（每条 API 配置独立；不干预 = 一个思考字段都不发，与旧版一致）
+  ThinkingEffort _thinkingEffort = ThinkingEffort.passthrough;
+  // 思考参数族覆盖（null = 按模型名/端点自动探测）
+  ThinkingFamily? _thinkingFamily;
 
   @override
   void initState() {
@@ -6358,6 +6557,8 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
     _contextWindow =
         TextEditingController(text: e?.contextWindow?.toString() ?? '');
     _visionCapable = e?.visionCapable ?? false;
+    _thinkingEffort = thinkingEffortFromKey(e?.thinkingEffort);
+    _thinkingFamily = thinkingFamilyFromKey(e?.thinkingFamily);
   }
 
   @override
@@ -6387,6 +6588,8 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
       maxTokens: int.tryParse(_maxTokens.text.trim()),
       visionCapable: _visionCapable,
       contextWindow: int.tryParse(_contextWindow.text.trim()),
+      thinkingEffort: thinkingEffortToKey(_thinkingEffort),
+      thinkingFamily: thinkingFamilyToKey(_thinkingFamily),
     );
   }
 
@@ -6479,6 +6682,53 @@ class _ApiModelDialogState extends ConsumerState<_ApiModelDialog> {
             subtitle: const Text('开启后，带图消息会以 base64 图片发送给该 API'),
             value: _visionCapable,
             onChanged: (v) => setState(() => _visionCapable = v),
+          ),
+          // ── 思考强度（每条 API 配置独立，避免"全局一个开关配错某些端点"）──
+          const SizedBox(height: 4),
+          const Text('思考强度（该端点）',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          Wrap(
+            spacing: 6,
+            children: [
+              for (final e in ThinkingEffort.values)
+                ChoiceChip(
+                  label: Text(thinkingEffortLabel(e)),
+                  selected: _thinkingEffort == e,
+                  onSelected: (_) => setState(() => _thinkingEffort = e),
+                ),
+            ],
+          ),
+          Row(
+            children: [
+              const Text('参数族', style: TextStyle(fontSize: 12)),
+              const SizedBox(width: 8),
+              DropdownButton<ThinkingFamily?>(
+                value: _thinkingFamily,
+                isDense: true,
+                underline: const SizedBox.shrink(),
+                items: [
+                  const DropdownMenuItem<ThinkingFamily?>(
+                      value: null, child: Text('自动探测', style: TextStyle(fontSize: 12))),
+                  for (final f in ThinkingFamily.values)
+                    DropdownMenuItem<ThinkingFamily?>(
+                      value: f,
+                      child: Text(thinkingFamilyLabel(f),
+                          style: const TextStyle(fontSize: 12)),
+                    ),
+                ],
+                onChanged: (v) => setState(() => _thinkingFamily = v),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              '各家字段不同（reasoning_effort / thinking budget / '
+              'chat_template_kwargs…），默认按模型名与端点自动选族；判错时这里手工钉死。'
+              '端点不认该字段会自动去掉重发，不会把请求打死。'
+              '调「高」= 允许更长思考，请同步把「思考字数上限」调大，否则会被守卫按不思考重试。',
+              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+            ),
           ),
           const SizedBox(height: 12),
           if (_testResult != null)

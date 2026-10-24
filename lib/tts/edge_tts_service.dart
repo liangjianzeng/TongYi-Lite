@@ -192,6 +192,9 @@ class EdgeTtsService {
   /// 当前正在播报的任务 key（消息 id 或试听标识）；null = 空闲。
   final ValueNotifier<String?> playingKey = ValueNotifier(null);
 
+  /// 正在等 onPlayerComplete 的等待者（stop 时必须当场放掉，见 [stop]）。
+  Completer<void>? _playWaiter;
+
   bool get isPlaying => playingKey.value != null;
 
   /// 最近一次播报的失败原因（成功/被用户停止 = null）。
@@ -344,12 +347,70 @@ class EdgeTtsService {
   }
 
   /// 停止当前播报（若有）：代次递增让后台循环退出 + 停掉播放器。
+  ///
+  /// 必须**同时释放正在等播放结束的等待者**：audioplayers 被 stop 后不一定再发
+  /// onPlayerComplete，`_playFile` 就会一直等到 10 分钟超时——用户按了停止，
+  /// 插件那一侧还挂着（听写场景表现为"停了但下一条马上又冒出来"）。
   Future<void> stop() async {
     _seq++;
     if (playingKey.value != null) playingKey.value = null;
+    final waiter = _playWaiter;
+    _playWaiter = null;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
     try {
       await _player.stop();
     } catch (_) {}
+  }
+
+  // ---- 通用播放原语（插件平台按条播用；聊天侧的 speak() 仍走上面那条路）----
+
+  /// 开始一场外部驱动的逐条播报，返回本场代次。
+  ///
+  /// 与 [speak] 的区别：调用方**自己掌握节奏**（逐条合成→播→等间隔），
+  /// 但代次、唯一播报位、失败留痕仍然由本服务统一管，界面上因此依然
+  /// "同时最多一个 spinner"。
+  Future<int> beginPlayback(String key) async {
+    await stop();
+    _lastFailure = null;
+    final seq = ++_seq;
+    playingKey.value = key;
+    return seq;
+  }
+
+  /// 本场是否仍是当前播报（被新的播报或 stop() 顶掉 → false，调用方应立即收工）。
+  bool isCurrentPlayback(int seq) => seq == _seq;
+
+  /// 结束一场播报（幂等；代次不符时什么都不做，避免误清新的播报位）。
+  void endPlayback(int seq) {
+    if (seq == _seq) playingKey.value = null;
+  }
+
+  /// 合成一段文本，**先查缓存**：命中就直接给文件，不再联网。
+  ///
+  /// `_synthesize` 过去只写不读，同一批词被反复听写就反复打微软接口——
+  /// 慢（1s+/词）且撞 403 限流，"听写第 3 遍特别慢"是这么来的。
+  Future<File?> synthesizeCached(
+    String text, {
+    required String voice,
+    required int rate,
+    required int pitch,
+    required int volume,
+  }) async {
+    if (text.trim().isEmpty) return null;
+    final dir = await _cacheDir();
+    final cached = File(p.join(
+        dir.path, '${_cacheKey(text, voice, rate, pitch, volume)}.mp3'));
+    try {
+      if (cached.existsSync() && cached.lengthSync() > 0) return cached;
+    } catch (_) {}
+    return _synthesize(text, voice: voice, rate: rate, pitch: pitch, volume: volume);
+  }
+
+  /// 播一个已合成好的文件直到结束；被顶掉/停止 → false（不当作失败）。
+  Future<bool> playCached(int seq, File file) async {
+    if (seq != _seq) return false;
+    await _playFile(file, seq);
+    return seq == _seq;
   }
 
   /// 播放一个本地文件直到结束（代次不符 → 立即返回不播）。
@@ -357,6 +418,7 @@ class EdgeTtsService {
   /// audioplayers 6.x 的播放错误直接从 play() 抛出（await 捕获即可）。
   Future<void> _playFile(File file, int seq) async {
     final completer = Completer<void>();
+    _playWaiter = completer; // stop() 靠它把等待中的循环当场放掉
     late final StreamSubscription<void> sub;
     sub = _player.onPlayerComplete.listen((_) {
       sub.cancel();

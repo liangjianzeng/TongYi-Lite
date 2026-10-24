@@ -198,10 +198,18 @@ class InferenceSettings {
   /// API 档：并行执行上限（默认 4）。
   final int agentApiMaxParallel;
 
-  /// 思考失控守卫阈值：思考块超长未闭合到该字符数即主动停流止损
-  ///（thinkingOverflow，确定性失败）。默认 6000；小模型易思考独白
-  /// 不停时会被掐断报"思考超长未闭合"——按模型调大（上限 65536）。
+  /// 思考失控守卫阈值：按**累计**思考字数计（跨块合计，口径见
+  /// [AgentStreamProcessor.thinkingRunaway]）；超限且本步还没有产出即主动停流
+  /// 止损（thinkingOverflow → 抢救已产出内容 + 关思考重试一次）。默认 6000；
+  /// 确实需要长推理的模型按机型调大（上限 65536）。
   final int agentThinkingMaxChars;
+
+  /// 智能体「工具决策步」是否允许思考（默认 false = 思考失控治理）。
+  ///
+  /// 端侧小模型思考失控（独白不收口、动辄几万字把预算与上下文吃光）几乎
+  /// 都发生在工具决策步——那一步只需产出一个工具调用，长思考纯属烧 token。
+  /// 默认只在组织最终答案时允许思考；打开 = 每步都允许（行为同旧版）。
+  final bool agentThinkingOnToolSteps;
 
   /// 对话区文字整体缩放（0.7~1.3，默认 1.0 = 当前字号）。
   /// 以 TextScaler 作用于消息列表（气泡/思考/工具卡/时间戳整体缩放）。
@@ -482,6 +490,7 @@ class InferenceSettings {
     this.agentApiAllowParallelTools = true,
     this.agentApiMaxParallel = 4,
     this.agentThinkingMaxChars = 6000,
+    this.agentThinkingOnToolSteps = false,
     this.chatTextScale = 1.0,
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
@@ -671,6 +680,7 @@ class InferenceSettings {
       bool? agentApiAllowParallelTools,
       int? agentApiMaxParallel,
       int? agentThinkingMaxChars,
+      bool? agentThinkingOnToolSteps,
       double? chatTextScale,
       bool? agentSubagentEnabled,
       String? agentSubagentApiModelId,
@@ -784,6 +794,8 @@ class InferenceSettings {
       agentApiMaxParallel: agentApiMaxParallel ?? this.agentApiMaxParallel,
       agentThinkingMaxChars:
           agentThinkingMaxChars ?? this.agentThinkingMaxChars,
+      agentThinkingOnToolSteps:
+          agentThinkingOnToolSteps ?? this.agentThinkingOnToolSteps,
       chatTextScale: chatTextScale ?? this.chatTextScale,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentSubagentApiModelId:
@@ -901,6 +913,7 @@ class InferenceSettings {
         'agentApiAllowParallelTools': agentApiAllowParallelTools,
         'agentApiMaxParallel': agentApiMaxParallel,
         'agentThinkingMaxChars': agentThinkingMaxChars,
+        'agentThinkingOnToolSteps': agentThinkingOnToolSteps,
         'chatTextScale': chatTextScale,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
@@ -1043,6 +1056,8 @@ class InferenceSettings {
       agentApiMaxParallel: (json['agentApiMaxParallel'] as num?)?.toInt() ?? 4,
       agentThinkingMaxChars:
           (json['agentThinkingMaxChars'] as num?)?.toInt() ?? 6000,
+      agentThinkingOnToolSteps:
+          json['agentThinkingOnToolSteps'] as bool? ?? false,
       chatTextScale:
           ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0).clamp(0.7, 1.3),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,

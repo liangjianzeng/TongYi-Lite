@@ -16,6 +16,7 @@ import '../providers/index.dart'
         agentPendingQuestionProvider,
         messagesProvider,
         conversationsProvider,
+        currentConversationIdProvider,
         currentModelIdProvider,
         kLocalVisionSupported;
 import '../providers/model_provider.dart';
@@ -27,6 +28,7 @@ import '../providers/shared_providers.dart';
 import '../providers/context_usage_provider.dart'
     show contextUsageProvider;
 import '../models/agent_persona.dart' show kStandardPersonaId;
+import '../agent/observability/turn_meter.dart';
 import '../agent/goal/goal_store.dart'
     show GoalStore, GoalState, GoalStatus, PlanStepStatus;
 import '../agent/builtin_tools/todo_tool.dart'
@@ -42,6 +44,10 @@ import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
 import '../models/chat_message.dart' show ChatMessage;
 import 'settings_screen.dart';
+// 插件平台（P2）：宿主在这里只"挖洞"，不认识任何具体插件。
+import '../plugins/plugin_host.dart';
+import '../plugins/plugin_input_icon.dart';
+import '../plugins/slot_outlet.dart';
 
 /// App-lifetime guard: 启动自动加载默认模型只执行一次。
 /// 放在库作用域，避免首页路由重建时重复触发（与设置页 `_appLaunchScanDone` 同风格）。
@@ -61,6 +67,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// ask_user_question 自由回答输入框（随提问卡片创建/销毁复用）。
   final _questionController = TextEditingController();
   String _currentConversationId = '';
+
+  /// 切换"当前打开的会话"的**唯一入口**：除了本地状态，还镜像进 [currentConversationIdProvider]，
+  /// 让插件平台的 `agent_handoff` 知道该交接进哪一串（以前没人写这个 provider，交接只能报"没有对话"）。
+  void _setCurrentConversation(String id) {
+    _currentConversationId = id;
+    ref.read(currentConversationIdProvider.notifier).state = id.isEmpty ? null : id;
+  }
   bool _initiallyLoaded = false;
   // When true, the view auto-scrolls to the newest message (bottom of the
   // list). Disabled once the user scrolls up to read history.
@@ -150,7 +163,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       conversations = ref.read(conversationsProvider);
     }
     setState(() {
-      _currentConversationId = conversations.first.id;
+      _setCurrentConversation(conversations.first.id);
       _initiallyLoaded = true;
     });
     // 占用快照是内存态（重启即丢）：启动时按本地历史估算回填，圈圈立即可见。
@@ -587,6 +600,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final imagePaths = List<String>.from(_selectedImagePaths);
     final attachmentPaths = List<String>.from(_selectedFilePaths);
     if (text.isEmpty && imagePaths.isEmpty) return;
+
+    // 插件接管（chain 槽 `app.composer.takeover`）：先问一圈"这段输入你接不接"。
+    // 没有插件填这个槽时 resolveTakeover 返回 null —— 行为与今天逐字一致。
+    final takeover = resolveTakeover(
+      ref.read(slotRegistryProvider),
+      'app.composer.takeover',
+      {'text': text, 'imagePaths': imagePaths},
+    );
+    if (takeover != null) {
+      final handler = takeover.value;
+      if (handler is ComposerTakeover) {
+        final handled = await handler(text, imagePaths);
+        if (handled) {
+          _textController.clear();
+          _selectedImagePaths.clear();
+          _selectedFilePaths.clear();
+          if (mounted) setState(() {});
+          return;
+        }
+      }
+    }
 
     // Collapse the keyboard immediately when sending so the chat area expands
     // to full screen while the reply streams in (don't wait for the reply).
@@ -1351,9 +1385,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 生成中有文字=➤（插话，不打断）。停止另有状态细条右侧文字按钮兜底。
   Widget _buildInputBar(bool isGenerating, ModelState ms) {
     final settings = ref.watch(settingsProvider);
-    return Column(
+    // 插件平台（P2）：整条输入区包在两个 Scope 里（槽注册表 + 动作入口）。
+    // 没插件时每个洞都渲染 SizedBox.shrink()，界面一个像素都不变。
+    //
+    // 宿主服务的启动不用在这里显式 watch：下面 `pluginDispatcherProvider` 里就 watch 了
+    // `pluginHostProvider`（同一个 FutureProvider，全 isolate 只起一次），
+    // 输入区一构建就把服务带起来，贡献才会落进 `slotRegistryProvider` 这个注册表。
+    final slots = ref.watch(slotRegistryProvider);
+    final Widget inputBar = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // 插件活动条 / 整块停靠区（single：最低 priority 的那个渲染）。
+        SlotOutlet(slotId: 'app.input.activity', registry: slots),
+        SlotOutlet(slotId: 'app.input.dock', axis: Axis.vertical, registry: slots),
         // ask_user_question 待回答卡片（P2-B2）：智能体提问挂起等待时显示。
         _buildPendingQuestionCard(),
         // 生成中状态细条：执行进度一眼可见 + 停止兜底入口。
@@ -1370,6 +1414,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             children: [
               // 附件 chips 行（选中才出现，单个可删）。
               _buildAttachmentChips(),
+              // 插件附件徽章（app.input.attachments）/ 停靠区（app.composer.dock，听写的词卡队列放这）。
+              SlotOutlet(slotId: 'app.input.attachments', registry: slots),
+              SlotOutlet(slotId: 'app.composer.dock', axis: Axis.vertical, registry: slots),
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: _textController,
                 builder: (_, value, __) => TextField(
@@ -1399,19 +1446,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(height: 2),
               Row(
                 children: [
+                  // 插件图标位（app.input.left）。
+                  SlotOutlet(slotId: 'app.input.left', registry: slots),
                   // 统一附件入口：徽标 = 已选总数（明细在上面的 chips 行）。
+                  // 三个样式数值走 `PluginInputIcon` 的常量（**单真源**）：插件图标与功能图标
+                  // 必须一个模子，数值抄两份迟早分叉（2026-10-24 用户实测就是分叉后被发现）。
                   IconButton(
-                    visualDensity: VisualDensity.compact,
+                    visualDensity: PluginInputIcon.kDensity,
                     icon: Badge(
                       isLabelVisible: _selectedImagePaths.isNotEmpty ||
                           _selectedFilePaths.isNotEmpty,
                       label: Text(
                           '${_selectedImagePaths.length + _selectedFilePaths.length}'),
-                      child: const Icon(Icons.add, size: 22),
+                      child: const Icon(Icons.add, size: PluginInputIcon.kIconSize),
                     ),
                     tooltip: '添加图片 / 文件',
-                    constraints:
-                        const BoxConstraints(minWidth: 36, minHeight: 36),
+                    constraints: const BoxConstraints(
+                        minWidth: PluginInputIcon.kBoxSize,
+                        minHeight: PluginInputIcon.kBoxSize),
                     padding: EdgeInsets.zero,
                     onPressed: _showAttachSheet,
                   ),
@@ -1432,6 +1484,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     ),
                   ),
                   const SizedBox(width: 4),
+                  // 插件图标位（app.input.right）：插件的主入口就长在这。
+                  SlotOutlet(slotId: 'app.input.right', registry: slots),
                   _buildComposerKey(isGenerating),
                 ],
               ),
@@ -1439,6 +1493,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ),
       ],
+    );
+    return PluginDispatcherScope(
+      dispatcher: ref.watch(pluginDispatcherProvider),
+      child: SlotRegistryScope(registry: slots, child: inputBar),
     );
   }
 
@@ -1501,22 +1559,64 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return '输入消息…';
   }
 
-  /// 生成中状态细条：「● 执行中 · N 个工具 · 当前工具」+ 右侧停止文字按钮。
-  /// 普通聊天生成中只显示「生成中」。停止 = 兜底入口（主键位在空输入时也是停止）。
+  /// 生成中状态细条：**实时产出读数** + 停止兜底入口。
+  ///
+  /// 用户反馈（2026-10-23）：这行原本只有「生成中」+ 停止键，"一点卵用都没有"
+  /// ——看不出模型在产出还是在空转、这一回合烧了多少 token。现在读数：
+  /// 「第 N 步 · 约 X/Y tok · 思考 Z 字 · 工具 K」，思考狂涨而零产出时追加
+  /// ⚠️只想不写（无用功信号；判据与估算口径都在 [TurnMeter]，有单测钉住）。
+  ///
+  /// token 是**估算**（流式期间本地无逐 token 出口、API usage 只在末块），
+  /// 故带「约」；判据刻意保守（思考 ≥600 tok 且产出 <5%）免得开局乱闪。
   Widget _buildTurnStatusStrip(bool isGenerating) {
     if (!isGenerating) return const SizedBox.shrink();
     final ui = ref.watch(agentUiStateProvider)[_currentConversationId] ??
         const AgentUiState();
+    final settings = ref.watch(settingsProvider);
+    // 本步可见产出 = 当前会话里那条正在流式的 assistant 消息（智能体答案步与
+    // 普通聊天共用同一占位消息；工具活动消息 isStreaming 恒 false，不会掺和）。
+    var answerSoFar = '';
+    for (final m
+        in (ref.watch(messagesProvider(_currentConversationId)).valueOrNull ??
+                const <ChatMessage>[])
+            .reversed) {
+      if (m.isStreaming) {
+        answerSoFar = m.content;
+        break;
+      }
+    }
+    final activeApi = settings.activeApiModel();
+    final useApi = activeApi != null &&
+        !ref.watch(modelManagerProvider).isLoaded &&
+        settings.defaultModelId == null;
+    final meter = TurnMeter(
+      step: ui.step,
+      // 预算 = 本档每步 token 档位（与 _buildRequest 用的同一设置项）。
+      // 普通聊天（step=0）**不显示**预算：那用的是聊天档 max_tokens，不是
+      // 智能体每步预算，挂上去是假数字。
+      stepBudget: ui.step > 0
+          ? (useApi
+              ? settings.agentApiTokensPerRound
+              : settings.agentTokensPerRound)
+          : null,
+      answer: answerSoFar,
+      liveThinking: ui.thinking,
+      archivedThinking: ui.thinkingHistory,
+      // 工具调用参数也是模型生成的 token，不计进来会低估智能体回合的消耗
+      toolArgumentJson: [for (final t in ui.tools) t.arguments.toString()],
+      toolGenChars: ui.toolGen?.chars ?? 0,
+      toolCount: ui.tools.length,
+      retryAttempt: ui.retryAttempt,
+    );
     final executing = ui.tools
         .where((t) => t.status == ToolUiStatus.executing)
         .toList()
         .lastOrNull
         ?.name;
-    final label = ui.tools.isEmpty
-        ? '生成中…'
-        : (executing != null
-            ? '执行中 · ${ui.tools.length} 个工具 · $executing'
-            : '执行中 · ${ui.tools.length} 个工具');
+    final label = meter.label + (executing != null ? ' · $executing' : '');
+    final color = meter.looksWasteful
+        ? Theme.of(context).colorScheme.tertiary
+        : Theme.of(context).colorScheme.primary;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 8, 0),
       child: Row(
@@ -1527,8 +1627,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Text(label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: 12, color: Theme.of(context).colorScheme.primary)),
+                style: TextStyle(fontSize: 12, color: color)),
           ),
           TextButton(
             style: TextButton.styleFrom(
@@ -2377,7 +2476,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (convs.isNotEmpty) {
       _saveDraft();
       setState(() {
-        _currentConversationId = convs.first.id;
+        _setCurrentConversation(convs.first.id);
         _followStream = true;
         _selectedImagePaths.clear();
         _selectedFilePaths.clear();
@@ -2410,7 +2509,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (id != _currentConversationId) {
       _saveDraft();
       setState(() {
-        _currentConversationId = id;
+        _setCurrentConversation(id);
         _followStream = true;
         _selectedImagePaths.clear();
         _selectedFilePaths.clear();
@@ -2478,7 +2577,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
       final list = ref.read(conversationsProvider);
       setState(() {
-        _currentConversationId = list.isEmpty ? '' : list.first.id;
+        _setCurrentConversation(list.isEmpty ? '' : list.first.id);
         _followStream = true;
         _selectedImagePaths.clear();
         _selectedFilePaths.clear();
@@ -2503,7 +2602,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
       _saveDraft();
       setState(() {
-        _currentConversationId = convs.isEmpty ? '' : convs.first.id;
+        _setCurrentConversation(convs.isEmpty ? '' : convs.first.id);
         _followStream = true;
         _selectedImagePaths.clear();
         _selectedFilePaths.clear();

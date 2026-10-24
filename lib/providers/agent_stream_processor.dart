@@ -20,6 +20,40 @@ class AgentStreamProcessor {
   /// 思考块缓冲（丢弃用）。
   final StringBuffer thinking = StringBuffer();
 
+  /// **跨块累计**的思考字数。
+  ///
+  /// [thinking] 每遇一个闭合记号就 clear（单块口径），小模型爱
+  /// `think…response…think…response` 反复横跳 → 单块口径下总量无上限，
+  /// 思考失控守卫（agentThinkingMaxChars）形同虚设。失控判定必须用本字段。
+  int _totalThinkingChars = 0;
+  int get totalThinkingChars => _totalThinkingChars;
+
+  /// 「算已产出」的最小可见字数。
+  ///
+  /// 门槛存在的理由：模型常在思考前先吐一句引导语（「好的」「我来看看」），
+  /// 若把任何非空可见文本都当产出，思考失控守卫就永远不触发（实测：
+  /// 开头两句寒暄即可让 4 万字独白畅通无阻）。低于此字数视为寒暄，不算产出。
+  static const int kMinUsefulChars = 80;
+
+  /// 本步是否已产出任何有用内容（够长的可见文本，或工具调用）。
+  /// 思考预算只在「还没产出」时用来止损，避免误杀长思考后正常作答。
+  bool get producedAnything =>
+      hasToolCalls || visible.toString().trim().length >= kMinUsefulChars;
+
+  /// 思考失控判定（**守卫的唯一口径**，adapter 侧必须用它，不许自己量块长）。
+  ///
+  /// 两个条件同时成立才算失控：
+  /// 1. 累计思考超过预算 —— 同时看「当前块长」与「跨块累计」：
+  ///    只量当前块会被 think…response 反复横跳绕过（每块归零，总量无上限）；
+  /// 2. 本步还没有任何产出 —— 已经吐出答案或工具调用的，不算失控，
+  ///    避免把「思考长但已能交付」的正常回合误杀。
+  bool thinkingRunaway(int maxChars) =>
+      (thinking.length > maxChars || _totalThinkingChars > maxChars) &&
+      !producedAnything;
+
+  /// 已累计思考字数（失控判定的分子，暴露给诊断/测试）。
+  int get thinkingCharsSoFar => _totalThinkingChars;
+
   /// 原始流去掉思考块（保留工具调用 XML/JSON），供最终协议解析。
   /// 保证思考内容不渗入最终文本（LlmResult.text），
   /// 从而历史 assistant 内容不会携带原始思考块。
@@ -122,6 +156,7 @@ class AgentStreamProcessor {
     // ---- 思考块内：只收集，检测闭合 ----
     if (_thinkKind != null) {
       thinking.write(ch);
+      _totalThinkingChars++;
       final t = thinking.toString();
       if (_thinkKind == _ThinkKind.html &&
           (t.endsWith('</thinking>') ||

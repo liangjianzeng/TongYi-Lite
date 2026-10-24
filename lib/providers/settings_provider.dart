@@ -431,6 +431,12 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 智能体工具决策步是否允许思考（默认关：端侧思考失控治理）。
+  Future<void> setAgentThinkingOnToolSteps(bool value) async {
+    state = state.copyWith(agentThinkingOnToolSteps: value);
+    await _persist();
+  }
+
   /// 对话区文字整体缩放（0.7~1.3，1.0 = 默认字号）。
   Future<void> setChatTextScale(double value) async {
     state = state.copyWith(chatTextScale: value.clamp(0.7, 1.3));

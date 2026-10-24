@@ -30,6 +30,20 @@ class ApiModelConfig {
   final bool visionCapable;
   final int? contextWindow;
 
+  /// 思考强度档位：null(=不干预) / off / low / medium / high。
+  ///
+  /// 为什么挂在**每条 API 配置**上而不是做成全局一个开关：不同端点对思考的
+  /// 支持度差别极大（有的只有开关、有的是预算、有的根本不认），一个全局值
+  /// 必然把某些端点配错（本仓 MTP 全局 bool 的老坑，AGENTS.md 已记）。
+  /// 一条配置 = 一个模型 = 一个档位，天然按模型覆盖。
+  /// null 时**一个思考字段都不发**，行为与旧版逐字节一致（安全默认）。
+  final String? thinkingEffort;
+
+  /// 思考参数族覆盖（高级）：null = 按模型名/端点自动探测。
+  /// 取值见 thinking_effort.dart 的 thinkingFamilyFromKey（如 vllm / qwen /
+  /// thinking_type / reasoning_effort…）。自动探测判错时用户可手工钉死。
+  final String? thinkingFamily;
+
   const ApiModelConfig({
     required this.id,
     required this.name,
@@ -40,6 +54,8 @@ class ApiModelConfig {
     this.maxTokens,
     this.visionCapable = false,
     this.contextWindow,
+    this.thinkingEffort,
+    this.thinkingFamily,
   });
 
   /// 生效温度：配置值 ?? 0.7。
@@ -60,6 +76,10 @@ class ApiModelConfig {
     bool clearTemperature = false,
     bool clearMaxTokens = false,
     bool clearContextWindow = false,
+    String? thinkingEffort,
+    String? thinkingFamily,
+    bool clearThinkingEffort = false,
+    bool clearThinkingFamily = false,
   }) {
     return ApiModelConfig(
       id: id,
@@ -72,6 +92,10 @@ class ApiModelConfig {
       visionCapable: visionCapable ?? this.visionCapable,
       contextWindow:
           clearContextWindow ? null : contextWindow ?? this.contextWindow,
+      thinkingEffort:
+          clearThinkingEffort ? null : thinkingEffort ?? this.thinkingEffort,
+      thinkingFamily:
+          clearThinkingFamily ? null : thinkingFamily ?? this.thinkingFamily,
     );
   }
 
@@ -85,6 +109,8 @@ class ApiModelConfig {
         'maxTokens': maxTokens,
         'visionCapable': visionCapable,
         'contextWindow': contextWindow,
+        'thinkingEffort': thinkingEffort,
+        'thinkingFamily': thinkingFamily,
       };
 
   factory ApiModelConfig.fromJson(Map<String, dynamic> json) {
@@ -98,6 +124,8 @@ class ApiModelConfig {
       maxTokens: (json['maxTokens'] as num?)?.toInt(),
       visionCapable: json['visionCapable'] as bool? ?? false,
       contextWindow: (json['contextWindow'] as num?)?.toInt(),
+      thinkingEffort: json['thinkingEffort'] as String?,
+      thinkingFamily: json['thinkingFamily'] as String?,
     );
   }
 }

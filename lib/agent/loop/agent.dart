@@ -128,6 +128,10 @@ class ReactLoopAgent {
   /// 每 step 开始重置，工具执行后置真）。
   bool _lastStepHadToolResults = false;
 
+  /// 下一次请求强制不思考（思考失控后的那次重试专用，一次性，构建请求时消费）。
+  /// 由失败瀑布在授予 thinkingOverflow 重试时置真。
+  bool _forceNoThinkingNext = false;
+
   String get lastTurnAnswer => _turnAnswer;
   String? get lastTurnError => _turnError;
 
@@ -421,6 +425,18 @@ class ReactLoopAgent {
             retryStep = false;
             break;
           } on LlmFailure catch (f) {
+            // 用户已按停止：被中止的请求常以 LlmFailure 形态到达（API 侧
+            // request cancelled / 本地 stopGeneration 打断流）。这**不是瞬态错误**，
+            // 绝不能进重试瀑布——否则按下停止后循环自己又发起一次生成，用户看到的
+            // 就是"停止按钮一点卵用都没有"（2026-10-24 定案，回归见
+            // test/agent/stop_generation_test.dart）。
+            if (_cancelCompleted) {
+              debugPrint('[AgentStep] t$turn s$step 已取消，failure '
+                  '${f.code.name} 不进重试 → interrupted');
+              reason = TurnEndReasonKind.interrupted;
+              turnDone = true;
+              break;
+            }
             // 失败 → 落 assistant/attempt（log-only，模型不可见）→ 跑瀑布。
             debugPrint('[AgentStep] t$turn s$step failure '
                 '${f.code.name}: ${f.message}');
@@ -463,11 +479,13 @@ class ReactLoopAgent {
   /// 取消当前 turn/step（DSH Part 14.6）。
   /// 完成取消 completer（adapter 内与流竞跑）并通知 adapter 停生成。
   Future<void> cancel([String? reason]) async {
+    // **无条件**先置位：步与步之间（工具执行中、状态回调里、还没发起下一次
+    // generate）取消时 _cancelCompleter 为 null，旧实现那时什么都不做，
+    // _cancelCompleted 仍是 false → 下一步的取消检查放行 → 用户按了停止，
+    // 循环自己接着往下跑（"停止按钮一点卵用都没有"的根因之一）。
+    _cancelCompleted = true;
     final c = _cancelCompleter;
-    if (c != null && !_cancelCompleted) {
-      _cancelCompleted = true;
-      c.complete();
-    }
+    if (c != null && !c.isCompleted) c.complete();
     _adapter.cancel();
   }
 
@@ -490,6 +508,13 @@ class ReactLoopAgent {
         (_lastStepHadToolResults && _config.maxTokensFinalRound != null)
             ? _config.maxTokensFinalRound!
             : _config.maxTokensPerRound;
+    // 思考失控治理（两条来源，任一命中本步就不思考）：
+    // ① 工具决策步默认关思考——那一步只需产出一个工具调用，长思考纯属烧端侧
+    //    预算，且实测是思考独白失控的高发区（[_config.thinkingOnToolSteps] 可放开）；
+    // ② 上一步因思考失控被止损后的那次重试——同一模型同一配置原样重发必然再次失控。
+    final forceNoThinking =
+        _forceNoThinkingNext || (!_config.thinkingOnToolSteps && !_lastStepHadToolResults);
+    _forceNoThinkingNext = false;
     final options = GenerateOptions(
       provider: _providerKind,
       messages: messages,
@@ -501,6 +526,7 @@ class ReactLoopAgent {
       audioPath: audioPath,
       imagePaths: imagePaths,
       onStatus: onStatus,
+      forceNoThinking: forceNoThinking,
     );
     // G12 不变量（开发期 assert）：独立重建比对，请求必须能纯投影自 log。
     assert(
@@ -600,6 +626,12 @@ class ReactLoopAgent {
     int step,
     LlmFailure f,
   ) async {
+    // 0. 已取消：任何失败都不再重试，也不再走压缩（压缩会改写会话并再发一次
+    //    请求 = 用户喊停后仍在烧 token）。
+    if (_cancelCompleted) {
+      return const FailureDecision(FailureDecisionKind.giveUp,
+          detail: '用户已停止');
+    }
     // 1. compaction（CONTEXT_WINDOW_EXCEEDED）：仅当已推进 generation 才 retry。
     //    压缩事件（compaction/summary）由 [DeterministicCompaction.decide]
     //    内部以 [SessionLog.replace] 追加（shadow 旧区 + 摘要），此处不再重复。
@@ -640,6 +672,8 @@ class ReactLoopAgent {
         return const FailureDecision(FailureDecisionKind.giveUp,
             detail: 'llm-retry exhausted');
       }
+      // 思考失控的重试必须换条件：本次请求强制不思考（见 _buildRequest）。
+      if (_retry.takeForceNoThinking()) _forceNoThinkingNext = true;
       debugPrint('[AgentStep] t$turn s$step retry ${_retry.retries}/'
           '${_retry.maxRetries} in ${delay.inMilliseconds}ms');
       return const FailureDecision(FailureDecisionKind.retry);

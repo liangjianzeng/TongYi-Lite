@@ -8,7 +8,7 @@ export 'chat_provider.dart' show
     currentModelIdProvider,
     conversationsProvider,
     ConversationsNotifier,
-    currentConversationProvider,
+    currentConversationIdProvider,
     messagesProvider,
     isGeneratingProvider,
     runningTurnsProvider,

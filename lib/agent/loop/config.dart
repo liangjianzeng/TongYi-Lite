@@ -52,6 +52,14 @@ final class AgentConfig {
   /// 每个收尾轮追加的步数。
   final int wrapupSteps;
 
+  /// 工具决策步是否允许思考（默认 false = 思考失控治理）。
+  ///
+  /// 端侧小模型思考失控（独白不收口、动辄几万字）几乎都发生在**工具决策步**：
+  /// 那一步只需要产出一个工具调用，长思考纯属烧 token 且高发自说自话循环。
+  /// 默认只在「上一步有工具结果、本步组织最终答案」时才允许思考。
+  /// 开启（true）= 每步都允许思考，行为与旧版一致（供确实需要长推理的场景）。
+  final bool thinkingOnToolSteps;
+
   const AgentConfig({
     this.maxStepsPerTurn = 12,
     this.maxTokensPerRound = 512,
@@ -64,6 +72,7 @@ final class AgentConfig {
     this.maxTokensFinalRound,
     this.maxWrapups = 2,
     this.wrapupSteps = 2,
+    this.thinkingOnToolSteps = false,
   }) :
     assert(maxStepsPerTurn >= 1 && maxStepsPerTurn <= 100,
         'maxStepsPerTurn must be in [1, 100]'),
