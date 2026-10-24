@@ -1153,7 +1153,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ]),
             ),
           ),
-          Expanded(child: InferenceEngineSettingsBody()),
+          Expanded(child: const _ModelPanelSwitch()),
         ],
       );
     });
@@ -3092,6 +3092,61 @@ class _AttachOption extends StatelessWidget {
 /// Reusable bottom-sheet widget for model status details.
 /// [embedded] = true 时作为左栏「模型」面板的内嵌页渲染：去掉底部弹层的
 /// 外边距/顶部圆角/拖拽把手，其余内容（状态/内存/日志/操作）完全一致。
+/// 模型面板子页切换：模型列表（下载/加载/默认）与引擎设置同面板承载，
+/// 模型列表为默认——用户下载和使用本地模型的主路径不许被藏起来。
+class _ModelPanelSwitch extends StatefulWidget {
+  const _ModelPanelSwitch();
+
+  @override
+  State<_ModelPanelSwitch> createState() => _ModelPanelSwitchState();
+}
+
+class _ModelPanelSwitchState extends State<_ModelPanelSwitch> {
+  bool _engine = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+          child: Row(children: [
+            _seg('模型', !_engine, () => setState(() => _engine = false)),
+            const SizedBox(width: 6),
+            _seg('引擎', _engine, () => setState(() => _engine = true)),
+          ]),
+        ),
+        Expanded(
+            child: _engine
+                ? const InferenceEngineSettingsBody()
+                : const ModelManagementBody()),
+      ],
+    );
+  }
+
+  Widget _seg(String label, bool on, VoidCallback onTap) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+        decoration: BoxDecoration(
+          color: on ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color:
+                    on ? scheme.onPrimaryContainer : scheme.onSurfaceVariant)),
+      ),
+    );
+  }
+}
+
 class _ModelStatusSheet extends StatelessWidget {
   final ModelLifecyclePhase phase;
   final String modelName;

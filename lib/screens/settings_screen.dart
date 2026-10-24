@@ -87,16 +87,18 @@ bool _appLaunchScanDone = false;
 /// Termux sshd 探测结论（`_probeSshd`）。
 enum _SshdProbe { listening, refused, timeout }
 
-class SettingsScreen extends ConsumerStatefulWidget {
-  const SettingsScreen({super.key});
+/// 模型管理面板 Body（2026-10-25 自 _SettingsScreenState 原样抽出：
+/// 模型列表/下载/续传/加载/删除/默认开关），供左栏「模型」面板直嵌；
+/// 老设置页 Tab1 也复用同一 Body，行为不变。
+class ModelManagementBody extends ConsumerStatefulWidget {
+  const ModelManagementBody();
 
   @override
-  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+  ConsumerState<ModelManagementBody> createState() =>
+      _ModelManagementBodyState();
 }
 
-class _SettingsScreenState extends ConsumerState<SettingsScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
   late final Future<List<ModelConfig>> _catalogFuture;
 
   /// 存储占用信息的重建 tick：任一模型下载完成后自增，迫使 StorageInfoWidget
@@ -106,14 +108,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   void initState() {
     super.initState();
-    // 6 个 Tab（模型管理/API 接入/推理引擎/智能体/开发者/关于）——
-    // length 必须与 TabBar/TabBarView 数量一致。
-    _tabController = TabController(length: 7, vsync: this);
     _catalogFuture = loadModelCatalog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // APP 启动后首次进入「模型管理」做一次全盘扫描；之后进出 tab 只做
-      // 轻量校验（对已知 id 做 File.exists，无目录遍历、无提示），
-      // 既不打扰用户，又能正确显示「已缓存」。
+      // 轻量校验（对已知 id 做 File.exists，无目录遍历、无提示）。
       if (_appLaunchScanDone) {
         _refreshCacheStatus();
       } else {
@@ -137,12 +135,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   }
 
   @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     // 全局监听下载状态：任一模型下载完成 → 立即整体重扫模型列表 + 刷新存储
     // 占用，而不是只更新刚完成的那个模型卡片（否则列表排序/存储统计会滞后）。
@@ -161,50 +153,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         _scanModels(silent: true);
       }
     });
-
-    return Scaffold(
-      appBar: AppBar(
-        // 标题字号收敛（默认 20 偏大），标题栏整体压扁，给正文留更多空间。
-        title: const Text('设置', style: TextStyle(fontSize: 18)),
-        centerTitle: true,
-        toolbarHeight: 46,
-        bottom: TabBar(
-          controller: _tabController,
-          // 窄屏可横向滑动，避免「TAB 字未能露出」被裁切。
-          isScrollable: true,
-          tabAlignment: TabAlignment.start,
-          // 小图标 + 小字号，减少标题栏占用的纵向空间。
-          indicatorWeight: 2,
-          labelStyle:
-              const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-          unselectedLabelStyle: const TextStyle(fontSize: 12),
-          tabs: const [
-            Tab(icon: Icon(Icons.storage, size: 18), text: '模型管理'),
-            Tab(icon: Icon(Icons.cloud, size: 18), text: 'API 接入'),
-            Tab(icon: Icon(Icons.memory, size: 18), text: '推理引擎'),
-            Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
-            // 「能力」独立成 Tab（2026-10-24 用户定案）：插件与技能是**智能体的能力扩展面**，
-            // 不该并进「开发者」（那是 Dev Agent/SSH 的地盘）。这里按梯队管三层：
-            // 原生能力（默认开）→ 插件 → 技能。
-            Tab(icon: Icon(Icons.bolt_outlined, size: 18), text: '能力'),
-            Tab(icon: Icon(Icons.construction, size: 18), text: '开发者'),
-            Tab(icon: Icon(Icons.info, size: 18), text: '关于'),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildModelManagementTab(),
-          const ApiSettingsBody(),
-          const InferenceEngineSettingsBody(),
-          const AgentSettingsBody(),
-          CapabilitySettingsBody(controller: _tabController),
-          const DevSettingsBody(),
-          const _buildAboutTab(),
-        ],
-      ),
-    );
+    return _buildModelManagementTab();
   }
 
   // =========================================================================
@@ -981,6 +930,78 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             backgroundColor: Colors.red),
       );
     }
+  }
+}
+
+class SettingsScreen extends ConsumerStatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    // 6 个 Tab（模型管理/API 接入/推理引擎/智能体/开发者/关于）——
+    // length 必须与 TabBar/TabBarView 数量一致。
+    _tabController = TabController(length: 7, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        // 标题字号收敛（默认 20 偏大），标题栏整体压扁，给正文留更多空间。
+        title: const Text('设置', style: TextStyle(fontSize: 18)),
+        centerTitle: true,
+        toolbarHeight: 46,
+        bottom: TabBar(
+          controller: _tabController,
+          // 窄屏可横向滑动，避免「TAB 字未能露出」被裁切。
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          // 小图标 + 小字号，减少标题栏占用的纵向空间。
+          indicatorWeight: 2,
+          labelStyle:
+              const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 12),
+          tabs: const [
+            Tab(icon: Icon(Icons.storage, size: 18), text: '模型管理'),
+            Tab(icon: Icon(Icons.cloud, size: 18), text: 'API 接入'),
+            Tab(icon: Icon(Icons.memory, size: 18), text: '推理引擎'),
+            Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
+            // 「能力」独立成 Tab（2026-10-24 用户定案）：插件与技能是**智能体的能力扩展面**，
+            // 不该并进「开发者」（那是 Dev Agent/SSH 的地盘）。这里按梯队管三层：
+            // 原生能力（默认开）→ 插件 → 技能。
+            Tab(icon: Icon(Icons.bolt_outlined, size: 18), text: '能力'),
+            Tab(icon: Icon(Icons.construction, size: 18), text: '开发者'),
+            Tab(icon: Icon(Icons.info, size: 18), text: '关于'),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          const ApiSettingsBody(),
+          const InferenceEngineSettingsBody(),
+          const AgentSettingsBody(),
+          CapabilitySettingsBody(controller: _tabController),
+          const DevSettingsBody(),
+          const _buildAboutTab(),
+        ],
+      ),
+    );
   }
 }
 
