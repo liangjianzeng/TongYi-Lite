@@ -14,6 +14,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # ── 插件平台（P0–P2）：契约包 + 内核，纯 Dart（能离线 dart test）───────────────
+  # 方向纪律由 packages/plugin_kernel/test/architecture_test.dart 机器钉住：
+  # 内核不碰 Flutter / dart:io；app 侧 lib/plugins/** 才碰 Flutter；插件绝不反向 import 宿主内部。
+  plugin_sdk:
+    path: packages/plugin_sdk
+  plugin_kernel:
+    path: packages/plugin_kernel
   # State management
   flutter_riverpod: ^2.6.1
   # Storage

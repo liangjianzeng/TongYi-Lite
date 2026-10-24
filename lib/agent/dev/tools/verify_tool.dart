@@ -14,6 +14,39 @@ import '../workspace_store.dart';
 import 'embedded_tools.dart' show devShellRoot, executeDevShell;
 import 'ssh_tools.dart' show sshRunInWorkspace;
 
+/// bash 单引号转义（cwd 安全入 `cd '…' && …`）。
+String _singleQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
+
+/// 组装实际执行的命令（纯函数，可测）。
+///
+/// [root] 为空 = 本地内嵌沙箱（执行器已经在 `projects/<id>` 下起 sh，只需 `cd <cwd>`）；
+/// 非空 = 远端，需要 `cd <root>/<cwd>`。
+///
+/// **回归锚点（可用性评估 P0-8）**：旧版本地分支写成 `'$cwd && $command'`，
+/// 漏了 `cd `，于是 shell 把目录名当命令执行 → 带 cwd 的本地 `run_tests` 100% 失败。
+String buildRunTestsCommand(
+    {required String command, String cwd = '', String? root}) {
+  String? dir;
+  if (root != null && root.isNotEmpty) {
+    final base = root.endsWith('/') ? root.substring(0, root.length - 1) : root;
+    dir = cwd.isEmpty ? base : '$base/${cwd.replaceAll('\\', '/')}';
+  } else if (cwd.isNotEmpty) {
+    dir = cwd.replaceAll('\\', '/');
+  }
+  if (dir == null) return command;
+  return 'cd ${_singleQuote(dir)} && $command';
+}
+
+/// cwd 必须是工作区内相对子目录（与 git 工具的 path jail 一致）。
+String? cwdJailError(String cwd) {
+  if (cwd.isEmpty) return null;
+  final rel = cwd.replaceAll('\\', '/');
+  if (rel.startsWith('/') || rel.split('/').contains('..')) {
+    return 'cwd 必须是工作区内的相对子目录（不允许 .. 与绝对路径）';
+  }
+  return null;
+}
+
 /// run_tests：执行测试/构建命令。
 ToolDefinition createRunTestsTool({List<SshConfig> sshConfigs = const []}) {
   return ToolDefinition(
@@ -41,24 +74,33 @@ ToolDefinition createRunTestsTool({List<SshConfig> sshConfigs = const []}) {
             'Flutter 项目 "flutter test"。请补全命令后重试');
       }
       final cwd = (args['cwd'] as String?)?.trim() ?? '';
-      final full = cwd.isEmpty ? command : '$cwd && $command';
-      // 本地工作区：内嵌沙箱执行（危险命令黑名单同通道）。
+      final cwdError = cwdJailError(cwd);
+      if (cwdError != null) return ToolResult.error(cwdError);
+      // 危险命令只看模型传入的 command 段：`cd <root> && ` 前缀（含工作区名）
+      // 不参与扫描，否则工作区叫 mount-app 会让该工作区所有命令被误杀。
+      final danger = checkDangerousCommand(command);
+      if (danger != null) {
+        return ToolResult.error('危险命令被拒绝：$danger');
+      }
+      // 本地工作区：内嵌沙箱执行（dev_shell 同款执行器）。
+      // 注意 cwd 必须补 `cd ` 并单引号转义 —— 旧版拼成 `'$cwd && $command'`
+      // 把目录名当命令执行，带 cwd 的本地测试 100% 失败（可用性评估 P0-8）。
       final wsId = effectiveWorkspaceOf(args);
       final remote = wsId != null && wsId != DevWorkspace.kDefaultId
           ? await _isRemoteWorkspace(wsId)
           : false;
       if (!remote) {
-        final danger = checkDangerousCommand(full);
-        if (danger != null) {
-          return ToolResult.error('危险命令被拒绝：$danger');
-        }
         final root = await devShellRoot(wsId);
-        return executeDevShell(full,
+        return executeDevShell(buildRunTestsCommand(command: command, cwd: cwd),
             root: root, timeout: const Duration(seconds: 60));
       }
-      return sshRunInWorkspace(args, (root) {
-        return cwd.isEmpty ? 'cd $root && $command' : 'cd $root/$cwd && $command';
-      }, timeout: const Duration(seconds: 60), sshConfigs: sshConfigs);
+      return sshRunInWorkspace(
+        args,
+        (root) => buildRunTestsCommand(command: command, cwd: cwd, root: root),
+        timeout: const Duration(seconds: 60),
+        sshConfigs: sshConfigs,
+        dangerText: command,
+      );
     },
   );
 }

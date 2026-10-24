@@ -1,0 +1,111 @@
+{
+  "manifestVersion": 1,
+  "id": "poem-recite",
+  "name": "古诗抽查",
+  "description": "拍课本上的古诗，抽出来后按间隔逐句朗读，给孩子背默用",
+  "whenToUse": "家长说「抽查古诗」或「背一下今天学的诗」时",
+  "trust": "declarative",
+  "enabledByDefault": false,
+  "inject": [
+    "app.capture",
+    "llm.vision",
+    "app.interact",
+    "app.speak"
+  ],
+  "permissions": [
+    "camera",
+    "photo_library",
+    "llm:vision",
+    "tts",
+    "network",
+    "storage:plugin"
+  ],
+  "params": [
+    {
+      "name": "gapSeconds",
+      "label": "句间隔秒数",
+      "type": "number",
+      "default": 6,
+      "min": 1,
+      "max": 30,
+      "askAtStart": true
+    },
+    {
+      "name": "repeatTimes",
+      "label": "每句念几遍",
+      "type": "number",
+      "default": 1,
+      "min": 1,
+      "max": 3
+    }
+  ],
+  "flow": {
+    "name": "抽查一首",
+    "description": "拍照 → 抽诗句 → 家长确认 → 按间隔朗读",
+    "whenToUse": "古诗背诵抽查",
+    "phases": [
+      {
+        "id": "shoot",
+        "title": "拍课本"
+      },
+      {
+        "id": "extract",
+        "title": "识别诗句"
+      },
+      {
+        "id": "recite",
+        "title": "逐句朗读"
+      }
+    ],
+    "steps": [
+      {
+        "id": "shoot",
+        "op": "capture",
+        "phase": "shoot",
+        "params": {
+          "maxCount": 1,
+          "preferCamera": true
+        }
+      },
+      {
+        "id": "extract",
+        "op": "llm_extract",
+        "phase": "extract",
+        "params": {
+          "promptFile": "prompt.md",
+          "maxTokens": 512
+        },
+        "onFailure": "abort"
+      },
+      {
+        "id": "confirm",
+        "op": "review",
+        "phase": "extract",
+        "params": {
+          "title": "先看一眼有没有认错的；整批都不对就选「算了」"
+        }
+      },
+      {
+        "id": "ask",
+        "op": "ask_params",
+        "phase": "recite",
+        "params": {
+          "names": [
+            "gapSeconds",
+            "repeatTimes"
+          ]
+        }
+      },
+      {
+        "id": "recite",
+        "op": "speak_sequence",
+        "phase": "recite",
+        "params": {
+          "items": "{{steps.confirm.lines}}",
+          "repeatPerItem": "{{config.repeatTimes}}"
+        },
+        "timeoutSeconds": 180
+      }
+    ]
+  }
+}
