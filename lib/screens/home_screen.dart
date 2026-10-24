@@ -26,7 +26,7 @@ import '../services/attachment_service.dart'
 import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
 import '../providers/context_usage_provider.dart' show contextUsageProvider;
-import '../models/agent_persona.dart' show kStandardPersonaId;
+import '../models/agent_persona.dart' show AgentPersona, kStandardPersonaId;
 import '../agent/observability/turn_meter.dart';
 import '../agent/goal/goal_store.dart'
     show GoalStore, GoalState, GoalStatus, PlanStepStatus;
@@ -41,6 +41,7 @@ import '../widgets/chat_bubble.dart';
 import '../widgets/image_preview.dart';
 import '../widgets/rail/rail_scaffold.dart';
 import '../plugins/panel/plugins_screen.dart';
+import 'package:uuid/uuid.dart';
 import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
 import '../models/chat_message.dart' show ChatMessage;
@@ -1059,9 +1060,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             const Divider(height: 20),
             _railRow(
                 icon: Icons.add,
-                title: '管理人格 / 新建',
-                subtitle: '在「智能体」面板内',
-                onTap: () => _railPanel.open('agent')),
+                title: '新建人格',
+                onTap: () => _showPersonaEditor()),
+            if (settings.activePersona() != null)
+              _railRow(
+                  icon: Icons.edit_outlined,
+                  title: '编辑当前人格',
+                  subtitle: settings.activePersona()!.name,
+                  onTap: () =>
+                      _showPersonaEditor(existing: settings.activePersona())),
             const Padding(
               padding: EdgeInsets.fromLTRB(4, 8, 4, 0),
               child: Text('切换人格会重置 KV 缓存，下一轮重新理解上下文',
@@ -1071,6 +1078,61 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ),
       );
     });
+  }
+
+  /// 人格新建/编辑对话框（含删除）：管理能力内联在人格面板完成。
+  Future<void> _showPersonaEditor({AgentPersona? existing}) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final promptCtrl = TextEditingController(text: existing?.prompt ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(existing == null ? '新建人格' : '编辑人格'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(
+                  hintText: '人格名称', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: promptCtrl,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                  hintText: '人设提示词（注入智能体系统提示词）', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          if (existing != null && existing.id != kStandardPersonaId)
+            TextButton(
+              onPressed: () async {
+                await ref
+                    .read(settingsProvider.notifier)
+                    .deletePersona(existing.id);
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('删除', style: TextStyle(color: Colors.red)),
+            ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    await ref.read(settingsProvider.notifier).upsertPersona(AgentPersona(
+          id: existing?.id ?? const Uuid().v4(),
+          name: name,
+          prompt: promptCtrl.text.trim(),
+        ));
   }
 
   /// 计划面板：复用 _PlanPanelSheet（原 bottom sheet 内容原样内嵌）。
@@ -1226,39 +1288,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 插件面板：说明 + 打开插件管理（PluginsScreen 全屏，含方案档）。
-  Widget _buildPluginsRailPage() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _railCard(const Text(
-            '插件可向输入区（附件/停靠区/接管）与左栏（app.rail 槽位）'
-            '贡献入口；方案档可一键切换插件集。',
-            style: TextStyle(fontSize: 12, height: 1.5),
-          )),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: () {
-                _railPanel.close();
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const PluginsScreen()));
-              },
-              style: FilledButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(vertical: 10),
-              ),
-              icon: const Icon(Icons.extension, size: 16),
-              label: const Text('打开插件管理', style: TextStyle(fontSize: 13)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  /// 插件面板：插件管理（内嵌形态）直接在面板里完成，不再整屏跳转。
+  Widget _buildPluginsRailPage() => const PluginsScreen(embedded: true);
 
   /// API 面板：设置页「API」Tab 全量（端点/密钥/模型列表/路由）。
   Widget _buildApiRailPage() => ApiSettingsBody();

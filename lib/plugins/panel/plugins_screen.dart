@@ -20,7 +20,10 @@ import '../plugin_host.dart';
 
 /// 面板入口（设置页跳转用）。
 class PluginsScreen extends ConsumerStatefulWidget {
-  const PluginsScreen({super.key, this.pluginsDirHint});
+  const PluginsScreen({super.key, this.pluginsDirHint, this.embedded = false});
+
+  /// true = 无 Scaffold/AppBar 的内嵌形态（供左栏「插件」面板直陈承载）。
+  final bool embedded;
 
   /// 用户插件该放哪儿（宿主给的话术，内核不知道路径规则）。
   final String? pluginsDirHint;
@@ -38,7 +41,9 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     if (service == null || profiles == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('方案档现在用不了：插件平台还没就绪'), duration: Duration(seconds: 2)),
+          const SnackBar(
+              content: Text('方案档现在用不了：插件平台还没就绪'),
+              duration: Duration(seconds: 2)),
         );
       }
       return;
@@ -46,7 +51,8 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     setState(() => _busy = true);
     String message;
     try {
-      final r = await profiles.switchTo(service, name, sink: SettingsProfileSink.fromWidgetRef(ref));
+      final r = await profiles.switchTo(service, name,
+          sink: SettingsProfileSink.fromWidgetRef(ref));
       final notes = r.notes.isEmpty ? '' : '；${r.notes.first}';
       final kv = r.resetKv ? '；下一轮会重新理解上下文' : '';
       message = name == null
@@ -58,8 +64,8 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
       if (mounted) setState(() => _busy = false);
     }
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message), duration: const Duration(seconds: 3)));
       setState(() {});
     }
   }
@@ -74,7 +80,9 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     if (service == null || profiles == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('方案档现在用不了：插件平台还没就绪'), duration: Duration(seconds: 2)),
+          const SnackBar(
+              content: Text('方案档现在用不了：插件平台还没就绪'),
+              duration: Duration(seconds: 2)),
         );
       }
       return;
@@ -92,10 +100,13 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     setState(() => _busy = true);
     String message;
     try {
-      final r = await profiles.create(draft.name, draft.enabled, note: draft.note);
+      final r =
+          await profiles.create(draft.name, draft.enabled, note: draft.note);
       message = switch (r) {
-        Ok<void>() => '建好了「${draft.name.trim()}」：里面开着 ${draft.enabled.length} 个插件（还没切过去，点它的卡片才生效）',
-        Err(:final failure) => '${failure.message}${failure.hint == null ? '' : '：${failure.hint}'}',
+        Ok<void>() =>
+          '建好了「${draft.name.trim()}」：里面开着 ${draft.enabled.length} 个插件（还没切过去，点它的卡片才生效）',
+        Err(:final failure) =>
+          '${failure.message}${failure.hint == null ? '' : '：${failure.hint}'}',
       };
     } catch (e) {
       // 面板不许因为宿主 IO 异常而红屏。
@@ -104,8 +115,8 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
       if (mounted) setState(() => _busy = false);
     }
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message), duration: const Duration(seconds: 3)));
       setState(() {});
     }
   }
@@ -121,7 +132,9 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     if (service == null || profiles == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('方案档现在用不了：插件平台还没就绪'), duration: Duration(seconds: 2)),
+          const SnackBar(
+              content: Text('方案档现在用不了：插件平台还没就绪'),
+              duration: Duration(seconds: 2)),
         );
       }
       return;
@@ -143,17 +156,20 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
             else
               Text('这个档开着 $count 个插件${wasActive ? '，而且正在用它' : '，现在没在用'}。'),
             const SizedBox(height: 6),
-            if (wasActive)
-              const Text('删完会回到「不用档（逐个开关）」：插件开关恢复成你自己一个个设的样子。'),
+            if (wasActive) const Text('删完会回到「不用档（逐个开关）」：插件开关恢复成你自己一个个设的样子。'),
             Text('删的是 ${profiles.dirPath}/$name.json。'
                 '插件本身、以及它们各自存的参数都不动 —— 想再用就重新建一个同名档。'),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消')),
           FilledButton(
             key: const Key('profile-delete-confirm'),
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(dialogContext).colorScheme.errorContainer),
+            style: FilledButton.styleFrom(
+                backgroundColor:
+                    Theme.of(dialogContext).colorScheme.errorContainer),
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('删掉'),
           ),
@@ -179,19 +195,21 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
       if (mounted) setState(() => _busy = false);
     }
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message), duration: const Duration(seconds: 3)));
       setState(() {});
     }
   }
 
-  Future<void> _run(Future<Object?> Function(PluginService service) action, {String? okMessage}) async {
+  Future<void> _run(Future<Object?> Function(PluginService service) action,
+      {String? okMessage}) async {
     final service = ref.read(pluginHostProvider).valueOrNull;
     if (service == null) {
       // 别静默吞掉：面板上的按钮点了没反应，比报错更难查。
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('插件平台还没就绪，稍后再试'), duration: Duration(seconds: 2)),
+          const SnackBar(
+              content: Text('插件平台还没就绪，稍后再试'), duration: Duration(seconds: 2)),
         );
       }
       return;
@@ -208,7 +226,8 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
       if (mounted) setState(() => _busy = false);
     }
     if (message != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message), duration: const Duration(seconds: 3)));
     }
     if (mounted) setState(() {});
   }
@@ -218,47 +237,62 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
     final async = ref.watch(pluginHostProvider);
     final service = async.valueOrNull;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('插件'),
-        actions: [
-          IconButton(
-            tooltip: '重新扫描插件目录',
-            icon: _busy
-                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.refresh),
-            onPressed: service == null || _busy
-                ? null
-                : () => _run((s) => s.reload(), okMessage: '已重新扫描'),
-          ),
-        ],
-      ),
-      body: service == null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  async.isLoading ? '正在装载插件平台…' : '插件平台没能启动，聊天不受影响。',
-                  textAlign: TextAlign.center,
-                ),
+    final refreshButton = IconButton(
+      tooltip: '重新扫描插件目录',
+      icon: _busy
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2))
+          : const Icon(Icons.refresh),
+      onPressed: service == null || _busy
+          ? null
+          : () => _run((s) => s.reload(), okMessage: '已重新扫描'),
+    );
+    final body = service == null
+        ? Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                async.isLoading ? '正在装载插件平台…' : '插件平台没能启动，聊天不受影响。',
+                textAlign: TextAlign.center,
               ),
-            )
-          : _PluginList(
-              service: service,
-              busy: _busy,
-              profiles: ref.watch(hostProfilesProvider).valueOrNull,
-              onSwitchProfile: _switchProfile,
-              onCreateProfile: _createProfile,
-              onDeleteProfile: _deleteProfile,
-              pluginsDirHint: widget.pluginsDirHint,
-              onToggle: (id, on) => _run((s) => s.setEnabled(id, on)),
-              onRetry: (id) => _run((s) => s.retry(id), okMessage: '已重试'),
-              onSaveParams: (id, patch) => _run((s) => s.setConfig(id: id, patch: patch), okMessage: '已保存设置'),
-              onResetParams: (id) => _run((s) => s.resetConfig(id: id),
-                  okMessage: '已恢复默认（清掉你的改动与本次临时试的值）'),
-              onTrialParams: (id, patch) => _run((s) => s.trialConfig(id: id, patch: patch),
-                  okMessage: '只在这次会话生效（不落盘；重启就回到原值）'),
             ),
+          )
+        : _PluginList(
+            service: service,
+            busy: _busy,
+            profiles: ref.watch(hostProfilesProvider).valueOrNull,
+            onSwitchProfile: _switchProfile,
+            onCreateProfile: _createProfile,
+            onDeleteProfile: _deleteProfile,
+            pluginsDirHint: widget.pluginsDirHint,
+            onToggle: (id, on) => _run((s) => s.setEnabled(id, on)),
+            onRetry: (id) => _run((s) => s.retry(id), okMessage: '已重试'),
+            onSaveParams: (id, patch) => _run(
+                (s) => s.setConfig(id: id, patch: patch),
+                okMessage: '已保存设置'),
+            onResetParams: (id) => _run((s) => s.resetConfig(id: id),
+                okMessage: '已恢复默认（清掉你的改动与本次临时试的值）'),
+            onTrialParams: (id, patch) => _run(
+                (s) => s.trialConfig(id: id, patch: patch),
+                okMessage: '只在这次会话生效（不落盘；重启就回到原值）'),
+          );
+    if (widget.embedded) {
+      return Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+            child:
+                Align(alignment: Alignment.centerRight, child: refreshButton),
+          ),
+          Expanded(child: body),
+        ],
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('插件'), actions: [refreshButton]),
+      body: body,
     );
   }
 }
@@ -316,6 +350,7 @@ class _PluginList extends StatelessWidget {
 
   /// 「恢复默认」：清掉的只是**用户层**，方案档与插件声明的默认值都留着（判据在内核 `resetConfig`）。
   final void Function(String id) onResetParams;
+
   /// 「先试试这组值」：只写进**会话层**（不落盘，重启就没）。判据与保存同一条 —— 试试也会真的念给用户听。
   final void Function(String id, Map<String, Object?> patch) onTrialParams;
   final String? pluginsDirHint;
@@ -324,13 +359,16 @@ class _PluginList extends StatelessWidget {
   Widget build(BuildContext context) {
     final views = service.view();
     final on = views.where((v) => v.running).length;
-    final gated = views.where((v) => v.loaded.status == PluginLoadStatus.gated).length;
-    final rejected = views.where((v) => v.loaded.status == PluginLoadStatus.rejected).length;
+    final gated =
+        views.where((v) => v.loaded.status == PluginLoadStatus.gated).length;
+    final rejected =
+        views.where((v) => v.loaded.status == PluginLoadStatus.rejected).length;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
       children: [
-        Text('已启用 $on/${views.length}', style: Theme.of(context).textTheme.titleMedium),
+        Text('已启用 $on/${views.length}',
+            style: Theme.of(context).textTheme.titleMedium),
         if (views.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 16),
@@ -366,7 +404,8 @@ class _PluginList extends StatelessWidget {
         for (final group in _groupBySource(views)) ...[
           Padding(
             padding: const EdgeInsets.only(top: 12, bottom: 4),
-            child: Text(group.$1, style: Theme.of(context).textTheme.labelLarge),
+            child:
+                Text(group.$1, style: Theme.of(context).textTheme.labelLarge),
           ),
           for (final v in group.$2)
             _PluginTile(
@@ -385,8 +424,12 @@ class _PluginList extends StatelessWidget {
   }
 
   List<(String, List<PluginView>)> _groupBySource(List<PluginView> views) {
-    final builtin = views.where((v) => v.loaded.descriptor.source == PluginSource.builtin).toList();
-    final user = views.where((v) => v.loaded.descriptor.source != PluginSource.builtin).toList();
+    final builtin = views
+        .where((v) => v.loaded.descriptor.source == PluginSource.builtin)
+        .toList();
+    final user = views
+        .where((v) => v.loaded.descriptor.source != PluginSource.builtin)
+        .toList();
     return [
       if (builtin.isNotEmpty) ('内置', builtin),
       if (user.isNotEmpty) ('你装的', user),
@@ -415,6 +458,7 @@ class _PluginTile extends StatelessWidget {
 
   /// 「恢复默认」：清掉的只是**用户层**，方案档与插件声明的默认值都留着（判据在内核 `resetConfig`）。
   final void Function(String id) onResetParams;
+
   /// 「先试试这组值」：只写进**会话层**（不落盘，重启就没）。判据与保存同一条 —— 试试也会真的念给用户听。
   final void Function(String id, Map<String, Object?> patch) onTrialParams;
 
@@ -435,25 +479,31 @@ class _PluginTile extends StatelessWidget {
             Wrap(spacing: 6, runSpacing: 4, children: [
               status,
               if (view.slotCount > 0)
-                _chip(context, '${view.slotCount} 处界面', Icons.dashboard_customize_outlined, null),
+                _chip(context, '${view.slotCount} 处界面',
+                    Icons.dashboard_customize_outlined, null),
               if (view.loaded.gatedHint != null)
-                _chip(context, view.loaded.gatedHint!, Icons.help_outline, Colors.amber.shade700)
+                _chip(context, view.loaded.gatedHint!, Icons.help_outline,
+                    Colors.amber.shade700)
               else if (view.loaded.gatedOn.isNotEmpty)
-                _chip(context, '缺：${view.loaded.gatedOn.join('、')}', Icons.help_outline, Colors.amber.shade700),
-              if (_softWarnings(view.loaded).isNotEmpty && view.loaded.gatedHint == null)
+                _chip(context, '缺：${view.loaded.gatedOn.join('、')}',
+                    Icons.help_outline, Colors.amber.shade700),
+              if (_softWarnings(view.loaded).isNotEmpty &&
+                  view.loaded.gatedHint == null)
                 // **弃用黄条**：还能跑，但作者该改（对齐 §7"警告不许静默"）。
                 // 已经用 gatedHint 说过的不重复刷，否则一条 env 提醒变成两个黄条。
                 _chip(context, '声明提醒 ${_softWarnings(view.loaded).length} 条',
                     Icons.warning_amber_rounded, Colors.orange.shade800),
               if (view.lastFailure != null)
-                _chip(context, view.lastFailure!.message, Icons.error_outline, Colors.red.shade700),
+                _chip(context, view.lastFailure!.message, Icons.error_outline,
+                    Colors.red.shade700),
             ]),
           ],
         ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (view.state == FiberState.failed || view.state == FiberState.disposed)
+            if (view.state == FiberState.failed ||
+                view.state == FiberState.disposed)
               IconButton(
                 tooltip: '重试',
                 icon: const Icon(Icons.replay),
@@ -535,6 +585,7 @@ class _PluginDetailSheet extends ConsumerStatefulWidget {
 
   /// 「恢复默认」：清掉的只是**用户层**，方案档与插件声明的默认值都留着（判据在内核 `resetConfig`）。
   final void Function(String id) onResetParams;
+
   /// 「先试试这组值」：只写进**会话层**（不落盘，重启就没）。判据与保存同一条 —— 试试也会真的念给用户听。
   final void Function(String id, Map<String, Object?> patch) onTrialParams;
 
@@ -549,7 +600,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
   };
 
   String _initialOf(PluginParam p) {
-    final v = widget.service.configStore.stackFor(widget.view.manifest).value(p.name);
+    final v =
+        widget.service.configStore.stackFor(widget.view.manifest).value(p.name);
     if (v == null) return p.defaultValue?.toString() ?? '';
     return '$v';
   }
@@ -557,7 +609,9 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
   /// 这个值**从哪一层来** —— 面板必须说出来：四层配置（默认 / 方案档 / 用户 / 本次会话）里，
   /// "我改的到底生效没、是不是被方案档盖住了"是最常见也最难自查的问题。
   /// 平台早就有 `ConfigStack.layerOf`，以前只是没人调用 —— 有 API 没界面等于没有。
-  String _layerTag(String name) => switch (widget.service.configStore.stackFor(widget.view.manifest).layerOf(name)) {
+  String _layerTag(String name) => switch (widget.service.configStore
+          .stackFor(widget.view.manifest)
+          .layerOf(name)) {
         ConfigLayer.user => '你的改动',
         ConfigLayer.profile => '方案档给的',
         ConfigLayer.session => '本次会话临时',
@@ -578,11 +632,15 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
     final m = v.manifest;
     final d = widget.service.diagnostics(v.id);
     final logs = (d['logs'] as List? ?? const []).cast<Map<String, Object?>>();
-    final effects = (d['effectTree'] as List? ?? const []).cast<Map<String, Object?>>();
-    final slots = (d['slots'] as List? ?? const []).cast<Map<String, Object?>>();
+    final effects =
+        (d['effectTree'] as List? ?? const []).cast<Map<String, Object?>>();
+    final slots =
+        (d['slots'] as List? ?? const []).cast<Map<String, Object?>>();
     final disposeFailures = d['disposeFailures'];
-    final logFailures = (d['logFailures'] as List? ?? const []).cast<Map<String, Object?>>();
-    final runLog = (d['runLog'] as List? ?? const []).cast<Map<String, Object?>>();
+    final logFailures =
+        (d['logFailures'] as List? ?? const []).cast<Map<String, Object?>>();
+    final runLog =
+        (d['runLog'] as List? ?? const []).cast<Map<String, Object?>>();
 
     return SafeArea(
       child: DraggableScrollableSheet(
@@ -597,7 +655,9 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                 width: 36,
                 height: 4,
                 margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(2)),
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade400,
+                    borderRadius: BorderRadius.circular(2)),
               ),
             ),
             Text(m.name, style: Theme.of(context).textTheme.titleLarge),
@@ -605,13 +665,15 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                 style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(height: 12),
             _section(context, '为什么跑不起来', [
-              Text(_whyNotRunning(v), style: Theme.of(context).textTheme.bodyMedium),
+              Text(_whyNotRunning(v),
+                  style: Theme.of(context).textTheme.bodyMedium),
               if (v.lastFailure != null) ...[
                 const SizedBox(height: 6),
                 Text('上次的错：${v.lastFailure!.message}',
                     style: TextStyle(color: Colors.red.shade700)),
                 if (v.lastFailure!.hint != null)
-                  Text('怎么办：${v.lastFailure!.hint}', style: Theme.of(context).textTheme.bodySmall),
+                  Text('怎么办：${v.lastFailure!.hint}',
+                      style: Theme.of(context).textTheme.bodySmall),
               ],
             ]),
             if (_softWarnings(v.loaded).isNotEmpty)
@@ -621,7 +683,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Text(
                       '${i.path}：${i.message}${i.hint == null ? '' : '（${i.hint}）'}',
-                      style: TextStyle(fontSize: 13, color: Colors.orange.shade900),
+                      style: TextStyle(
+                          fontSize: 13, color: Colors.orange.shade900),
                     ),
                   ),
               ]),
@@ -631,7 +694,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                 runSpacing: 4,
                 children: [
                   for (final c in m.inject) _chip(context, c, Icons.link, null),
-                  for (final p in m.permissions) _chip(context, p.wireName, Icons.shield_outlined, null),
+                  for (final p in m.permissions)
+                    _chip(context, p.wireName, Icons.shield_outlined, null),
                 ],
               ),
             ]),
@@ -646,21 +710,28 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                           dense: true,
                           title: Text(p.label),
                           subtitle: Text(
-                            [p.description, _layerTag(p.name)].where((e) => e != null).join(' · '),
+                            [p.description, _layerTag(p.name)]
+                                .where((e) => e != null)
+                                .join(' · '),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                           value: _editors[p.name]!.text == 'true',
-                          onChanged: (on) => setState(() => _editors[p.name]!.text = '$on'),
+                          onChanged: (on) =>
+                              setState(() => _editors[p.name]!.text = '$on'),
                         ),
                       _ => TextField(
                           controller: _editors[p.name],
-                          keyboardType: p.type == PluginParamType.number ? TextInputType.number : null,
+                          keyboardType: p.type == PluginParamType.number
+                              ? TextInputType.number
+                              : null,
                           decoration: InputDecoration(
                             isDense: true,
                             labelText: p.label,
                             helperText: [
                               p.description ??
-                                  (p.min != null || p.max != null ? '${p.min ?? ''} ~ ${p.max ?? ''}' : null),
+                                  (p.min != null || p.max != null
+                                      ? '${p.min ?? ''} ~ ${p.max ?? ''}'
+                                      : null),
                               _layerTag(p.name),
                             ].where((e) => e != null).join(' · '),
                           ),
@@ -686,7 +757,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                         // 也让四层里那条 session 层真的有人能写 —— 面板上「本次会话临时」才是实话。
                         onPressed: () {
                           widget.onTrialParams(v.id, {
-                            for (final e in _editors.entries) e.key: _parseParam(e.key, e.value.text),
+                            for (final e in _editors.entries)
+                              e.key: _parseParam(e.key, e.value.text),
                           });
                           Navigator.of(context).pop();
                         },
@@ -696,7 +768,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                       FilledButton(
                         onPressed: () {
                           widget.onSaveParams(v.id, {
-                            for (final e in _editors.entries) e.key: _parseParam(e.key, e.value.text),
+                            for (final e in _editors.entries)
+                              e.key: _parseParam(e.key, e.value.text),
                           });
                           Navigator.of(context).pop();
                         },
@@ -706,16 +779,21 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                   ),
                 ),
               ]),
-            _section(context, '本次运行（${runLog.length} 条 · traceId ${d['traceId'] ?? '-'}）', [
+            _section(context,
+                '本次运行（${runLog.length} 条 · traceId ${d['traceId'] ?? '-'}）', [
               // 每次重载换一个新 traceId：这一节只含**当前这个实例**干过的事，
               // 下面的"最近日志"是历次混在一起的，别把旧实例的失败当成现在的问题。
               if (runLog.isEmpty)
-                Text('这个实例还没留下日志（刚启用或刚重载过）。', style: Theme.of(context).textTheme.bodySmall),
+                Text('这个实例还没留下日志（刚启用或刚重载过）。',
+                    style: Theme.of(context).textTheme.bodySmall),
               for (final r in runLog.take(12))
-                Text('${r['message']}', style: Theme.of(context).textTheme.bodySmall),
+                Text('${r['message']}',
+                    style: Theme.of(context).textTheme.bodySmall),
             ]),
             _section(context, '它占了哪些位置（${slots.length}）', [
-              if (slots.isEmpty) Text('没占界面，只在背后干活。', style: Theme.of(context).textTheme.bodySmall),
+              if (slots.isEmpty)
+                Text('没占界面，只在背后干活。',
+                    style: Theme.of(context).textTheme.bodySmall),
               for (final s in slots)
                 // 让位（出过错后主动退场）的条目**已经不在界面上了**：还说"它占了这个位置"就是骗人。
                 Text(
@@ -725,12 +803,15 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                 ),
             ]),
             _section(context, '启动了的资源（${effects.length}）', [
-              if (effects.isEmpty) Text('没有登记资源。', style: Theme.of(context).textTheme.bodySmall),
+              if (effects.isEmpty)
+                Text('没有登记资源。', style: Theme.of(context).textTheme.bodySmall),
               for (final e in effects)
-                Text('${e['kind'] ?? e['label'] ?? '资源'} ${e['released'] == true ? '（已释放）' : ''}',
+                Text(
+                    '${e['kind'] ?? e['label'] ?? '资源'} ${e['released'] == true ? '（已释放）' : ''}',
                     style: Theme.of(context).textTheme.bodySmall),
               if (disposeFailures is List && disposeFailures.isNotEmpty)
-                Text('释放时出过错：$disposeFailures', style: TextStyle(color: Colors.orange.shade800)),
+                Text('释放时出过错：$disposeFailures',
+                    style: TextStyle(color: Colors.orange.shade800)),
             ]),
             _section(context, '最近日志（${logs.length}）', [
               // 环形缓冲 + 只显最近 30 条 = 插件一刷屏，真正的失败就看不见 —— 最该看见的恰恰最先看不见。
@@ -739,19 +820,25 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
                     style: TextStyle(fontSize: 12, color: Colors.red.shade700)),
                 for (final r in logFailures.reversed.take(10))
                   Text('[${r['level']}] ${r['message']}',
-                      style: TextStyle(fontSize: 12, color: Colors.red.shade800)),
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.red.shade800)),
                 const SizedBox(height: 4),
               ],
-              if (logs.isEmpty) Text('还没有日志。', style: Theme.of(context).textTheme.bodySmall),
+              if (logs.isEmpty)
+                Text('还没有日志。', style: Theme.of(context).textTheme.bodySmall),
               for (final r in logs.reversed.take(30))
-                Text('[${r['level']}] ${r['message']}', style: Theme.of(context).textTheme.bodySmall),
+                Text('[${r['level']}] ${r['message']}',
+                    style: Theme.of(context).textTheme.bodySmall),
             ]),
             // 平台自己吃狗粮：详情里的附加操作走冻结的契约槽（作者可以往里放诊断按钮）。
             ..._authorActions(context),
             _section(context, '声明原文（审计用）', [
               SelectableText(
                 v.loaded.descriptor.rawJson ?? '（内置插件没有 JSON 原文）',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(fontFamily: 'monospace'),
               ),
             ]),
           ],
@@ -761,7 +848,8 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
   }
 
   List<Widget> _authorActions(BuildContext context) {
-    final entries = widget.service.slots.entries('app.plugins.detail.action', ownerData: {'pluginId': widget.view.id});
+    final entries = widget.service.slots.entries('app.plugins.detail.action',
+        ownerData: {'pluginId': widget.view.id});
     if (entries.isEmpty) return const [];
     return [
       _section(context, '插件自带的诊断动作', [
@@ -770,10 +858,13 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
             dense: true,
             contentPadding: EdgeInsets.zero,
             title: Text(e.contribution.label),
-            subtitle: Text('${e.pluginId} · priority ${e.priority}', style: Theme.of(context).textTheme.bodySmall),
+            subtitle: Text('${e.pluginId} · priority ${e.priority}',
+                style: Theme.of(context).textTheme.bodySmall),
             onTap: () {
               // 条目渲染/执行出错就让它让位（DSH 的 abdicate 语义），面板不许跟着崩。
-              widget.service.slots.reportEntryError('app.plugins.detail.action', e.id, pluginId: e.pluginId);
+              widget.service.slots.reportEntryError(
+                  'app.plugins.detail.action', e.id,
+                  pluginId: e.pluginId);
             },
           ),
       ]),
@@ -793,17 +884,22 @@ class _PluginDetailSheetState extends ConsumerState<_PluginDetailSheet> {
     }
   }
 
-    static String _whyNotRunning(PluginView v) {
+  static String _whyNotRunning(PluginView v) {
     switch (v.loaded.status) {
       case PluginLoadStatus.active:
-        return v.running ? '运行中，资源都挂在 effect 树上。' : '还没启动完成（状态 ${v.state?.name ?? 'idle'}）。';
+        return v.running
+            ? '运行中，资源都挂在 effect 树上。'
+            : '还没启动完成（状态 ${v.state?.name ?? 'idle'}）。';
       case PluginLoadStatus.gated:
         if (v.loaded.gatedHint != null) return v.loaded.gatedHint!;
         return '缺能力：${v.loaded.gatedOn.join('、')}。等宿主把那项能力接上就能用；'
             '如果是相机/相册/网络这类系统权限，去系统设置里允许本应用。';
       case PluginLoadStatus.rejected:
         final first = v.loaded.descriptor.issues.firstWhere((i) => i.isError,
-            orElse: () => const ValidationIssue(path: '?', code: ValidationIssueCode.badType, message: '声明有问题'));
+            orElse: () => const ValidationIssue(
+                path: '?',
+                code: ValidationIssueCode.badType,
+                message: '声明有问题'));
         return '声明有问题：${first.path} — ${first.message}${first.hint == null ? '' : '（${first.hint}）'}';
       case PluginLoadStatus.disabled:
         return v.loaded.disabledReason ?? '被你关掉了，打开开关即可。';
@@ -880,7 +976,9 @@ class _ProfileSection extends StatelessWidget {
           padding: const EdgeInsets.only(top: 8, bottom: 4),
           child: Row(
             children: [
-              Expanded(child: Text('方案档', style: Theme.of(context).textTheme.labelLarge)),
+              Expanded(
+                  child: Text('方案档',
+                      style: Theme.of(context).textTheme.labelLarge)),
               Text(active == null ? '不用档（逐个开关）' : '当前：$active',
                   style: Theme.of(context).textTheme.bodySmall),
               if (onCreate != null)
@@ -888,7 +986,8 @@ class _ProfileSection extends StatelessWidget {
                   onPressed: busy ? null : onCreate,
                   icon: const Icon(Icons.add, size: 16),
                   label: const Text('新建', style: TextStyle(fontSize: 12)),
-                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+                  style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 6)),
                 ),
             ],
           ),
@@ -913,7 +1012,11 @@ class _ProfileSection extends StatelessWidget {
                     label: Text(broken.contains(n)
                         ? '$n（读不动）'
                         : '$n · ${service.previewProfile(n).enabled.length} 件'),
-                    avatar: Icon(broken.contains(n) ? Icons.error_outline : Icons.style_outlined, size: 16),
+                    avatar: Icon(
+                        broken.contains(n)
+                            ? Icons.error_outline
+                            : Icons.style_outlined,
+                        size: 16),
                     selected: active == n,
                     onSelected: busy ? null : (_) => onSwitch(n),
                   ),
@@ -928,7 +1031,8 @@ class _ProfileSection extends StatelessWidget {
                 ],
               ),
             if (names.isEmpty)
-              Text('还没有档文件：${profiles.dirPath}/<档名>.json', style: Theme.of(context).textTheme.bodySmall),
+              Text('还没有档文件：${profiles.dirPath}/<档名>.json',
+                  style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
         if (active != null)
@@ -944,7 +1048,9 @@ class _ProfileSection extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 for (final w in preview.warnings)
-                  Text('提醒：$w', style: TextStyle(fontSize: 12, color: Colors.orange.shade800)),
+                  Text('提醒：$w',
+                      style: TextStyle(
+                          fontSize: 12, color: Colors.orange.shade800)),
               ],
             ),
           ),
@@ -958,7 +1064,9 @@ class _ProfileSection extends StatelessWidget {
 /// 面板必须把它们显式说出来 —— 静默的警告等于没有警告，等它升级成 error 时作者已经找不着北了。
 /// 写成顶层函数：列表与详情两处共用同一条过滤条件，免得两个 widget 各写一遍、慢慢漂移。
 List<ValidationIssue> _softWarnings(LoadedPlugin loaded) =>
-    loaded.descriptor.issues.where((i) => i.severity == IssueSeverity.warning).toList();
+    loaded.descriptor.issues
+        .where((i) => i.severity == IssueSeverity.warning)
+        .toList();
 
 /// 本机能力清单（含**被遮蔽的那份**）。
 ///
@@ -984,15 +1092,16 @@ class _CapabilitySectionState extends State<_CapabilitySection> {
     String msg;
     try {
       final r = await widget.service.capabilities.probe(id);
-      msg = r.isOk ? '$id 试过了：能用' : '$id 试过了：${(r as Err<void>).failure.message}';
+      msg =
+          r.isOk ? '$id 试过了：能用' : '$id 试过了：${(r as Err<void>).failure.message}';
     } catch (e) {
       msg = '$id 试的时候出了意外：$e'; // 能力的 probe 可以带 IO，任何异常都不许把面板带崩
     } finally {
       if (mounted) setState(() => _probing = false);
     }
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
     }
   }
 
@@ -1004,7 +1113,8 @@ class _CapabilitySectionState extends State<_CapabilitySection> {
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.only(bottom: 8),
-      title: Text('本机能力（${ids.length}）', style: Theme.of(context).textTheme.labelLarge),
+      title: Text('本机能力（${ids.length}）',
+          style: Theme.of(context).textTheme.labelLarge),
       subtitle: Text('插件能拿到什么，全看这张表；被遮蔽的实现也列出来',
           style: Theme.of(context).textTheme.bodySmall),
       children: [
@@ -1022,7 +1132,9 @@ class _CapabilitySectionState extends State<_CapabilitySection> {
                 Row(
                   children: [
                     Expanded(
-                      child: Text(id, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+                      child: Text(id,
+                          style: const TextStyle(
+                              fontFamily: 'monospace', fontSize: 13)),
                     ),
                     IconButton(
                       tooltip: '试一下',
@@ -1039,9 +1151,13 @@ class _CapabilitySectionState extends State<_CapabilitySection> {
                     child: Row(
                       children: [
                         Icon(
-                          e.impl.available ? Icons.check_circle_outline : Icons.radio_button_unchecked,
+                          e.impl.available
+                              ? Icons.check_circle_outline
+                              : Icons.radio_button_unchecked,
                           size: 15,
-                          color: e.impl.available ? Colors.green.shade700 : Colors.grey,
+                          color: e.impl.available
+                              ? Colors.green.shade700
+                              : Colors.grey,
                         ),
                         const SizedBox(width: 6),
                         Expanded(
@@ -1150,7 +1266,9 @@ class _NewProfileDialogState extends State<_NewProfileDialog> {
               const SizedBox(height: 10),
               Text('这个档里开着哪些插件（取消勾选 = 在这个档里关掉它）',
                   style: Theme.of(context).textTheme.bodySmall),
-              if (views.isEmpty) const Padding(padding: EdgeInsets.all(8), child: Text('还没有插件可放进来')),
+              if (views.isEmpty)
+                const Padding(
+                    padding: EdgeInsets.all(8), child: Text('还没有插件可放进来')),
               for (final v in views)
                 CheckboxListTile(
                   key: Key('profile-pick-${v.loaded.descriptor.manifest.id}'),
@@ -1159,7 +1277,8 @@ class _NewProfileDialogState extends State<_NewProfileDialog> {
                   contentPadding: EdgeInsets.zero,
                   value: _picked.contains(v.loaded.descriptor.manifest.id),
                   title: Text(v.loaded.descriptor.manifest.name),
-                  subtitle: Text(v.loaded.descriptor.manifest.id, style: Theme.of(context).textTheme.bodySmall),
+                  subtitle: Text(v.loaded.descriptor.manifest.id,
+                      style: Theme.of(context).textTheme.bodySmall),
                   onChanged: (on) => setState(() {
                     final id = v.loaded.descriptor.manifest.id;
                     if (on ?? false) {
@@ -1170,13 +1289,16 @@ class _NewProfileDialogState extends State<_NewProfileDialog> {
                   }),
                 ),
               const SizedBox(height: 4),
-              Text('建好不会自动切过去 —— 点它的卡片才生效。', style: Theme.of(context).textTheme.bodySmall),
+              Text('建好不会自动切过去 —— 点它的卡片才生效。',
+                  style: Theme.of(context).textTheme.bodySmall),
             ],
           ),
         ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消')),
         FilledButton(
           key: const Key('profile-create-ok'),
           onPressed: _submit,
