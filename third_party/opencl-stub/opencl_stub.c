@@ -13,6 +13,12 @@
 #include <CL/cl.h>
 
 #include <dlfcn.h>
+#include <link.h>
+#include <stdio.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef void *(*pfn_clGetPlatformIDs)(void);
 typedef void *(*pfn_clGetPlatformInfo)(void);
@@ -70,9 +76,54 @@ static void *cl_load(void) {
     // The device's OpenCL loader; visible because the manifest declares
     // <uses-native-library android:name="libOpenCL.so" android:required="false"/>.
     const char *paths[] = {"libOpenCL.so", "/vendor/lib64/libOpenCL.so", "/system/lib64/libOpenCL.so"};
-    for (size_t i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {
-        void *h = dlopen(paths[i], RTLD_NOW | RTLD_GLOBAL);
-        if (h) { g_opencl_lib = h; return h; }
+    // On Android 16 a /data executable may not link /vendor/lib64/libOpenCL.so, so this
+    // shim sometimes gets installed under the DT_NEEDED name libOpenCL.so itself. Then
+    // the bare candidate above resolves back to us and every CL_FORWARD would recurse
+    // forever. TONGYILITE_LIBOPENCL names the real library explicitly; in any case a
+    // candidate that turns out to be our own file is skipped.
+    const char *forced = getenv("TONGYILITE_LIBOPENCL");
+    Dl_info self_info;
+    char self_path[PATH_MAX] = "";
+    if (dladdr((void *) &cl_load, &self_info) && self_info.dli_fname) {
+        if (realpath(self_info.dli_fname, self_path) == NULL) self_path[0] = 0;
+    }
+    size_t n = forced ? 1 : sizeof(paths)/sizeof(paths[0]);
+    for (size_t i = 0; i < n; i++) {
+        const char *p = forced ? forced : paths[i];
+        void *h = dlopen(p, RTLD_NOW | RTLD_GLOBAL);
+        // Self-attestation: which candidate actually became the backend. Without this,
+        // "OpenCL backend present but CPU-fast" and "backend never initialised" look
+        // identical in the log, and a CPU leg can be mistaken for a GPU leg.
+        if (getenv("TONGYILITE_STUB_VERBOSE")) {
+            fprintf(stderr, "[opencl-stub] try '%s' -> %s%s\n", p, h ? "OK" : "NULL",
+                    h ? "" : strerror(errno));
+        }
+        if (!h) continue;
+        void *sym = dlsym(h, "clGetPlatformIDs");
+        Dl_info ci;
+        if (self_path[0] && sym && dladdr(sym, &ci) && ci.dli_fname &&
+            strcmp(ci.dli_fname, self_path) == 0) {
+            dlclose(h);        // that is us; not a real backend
+            continue;
+        }
+        // Accepting a handle merely because dlopen succeeded is not enough: the Android
+        // system proxy libOpenCL.so loads fine yet returns no platforms for a /data
+        // process, and we used to settle on it. Accept only a library that actually
+        // enumerates at least one platform.
+        typedef int (*gpi_t)(unsigned int, void *, unsigned int *);
+        gpi_t gpi = (gpi_t) dlsym(h, "clGetPlatformIDs");
+        unsigned int nplat = 0;
+        int rc = gpi ? gpi(0, NULL, &nplat) : -9999;
+        if (getenv("TONGYILITE_STUB_VERBOSE")) {
+            fprintf(stderr, "[opencl-stub] probe '%s' rc=%d nplat=%u\n", p, rc, nplat);
+        }
+        if (!gpi || rc != 0 || nplat == 0) {
+            dlclose(h);
+            continue;
+        }
+        if (getenv("TONGYILITE_STUB_VERBOSE")) fprintf(stderr, "[opencl-stub] backend = %s\n", p);
+        g_opencl_lib = h;
+        return h;
     }
     return NULL;
 }

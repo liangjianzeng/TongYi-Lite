@@ -1,6 +1,9 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_qcom_subgroup_uniform_load : enable
 #pragma OPENCL EXTENSION cl_qcom_subgroup_constant_load : enable
+// image3d_t writes need this enabled; the Adreno 650 (K40) vendor compiler rejects them
+// otherwise and the model fails to load. Same fix as flash_attn_repack.cl.
+#pragma OPENCL EXTENSION cl_khr_3d_image_writes : enable
 
 __constant sampler_t smp_zero = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
 

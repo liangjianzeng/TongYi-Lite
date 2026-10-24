@@ -1,0 +1,1046 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Mesa与Vulkan线_架构问题网格_2026-10-21</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#666;--line:#d8d8d8;--card:#f6f7f9;--acc:#0b62c4;--code:#f2f4f7}
+@media (prefers-color-scheme:dark){:root{--bg:#111417;--fg:#e8eaed;--mut:#9aa0a6;--line:#33383d;--card:#181c20;--acc:#7cb3ff;--code:#1d2228}}
+*{box-sizing:border-box;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+ font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+ word-break:break-word;overflow-wrap:anywhere}
+header{position:sticky;top:0;z-index:9;background:var(--card);border-bottom:1px solid var(--line);
+ padding:10px 12px;display:flex;gap:10px;align-items:center}
+header b{font-size:15px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+header a{font-size:13px;color:var(--acc);text-decoration:none;border:1px solid var(--line);
+ padding:4px 9px;border-radius:14px;background:var(--bg)}
+main{max-width:960px;margin:0 auto;padding:14px 12px 90px}
+h1{font-size:22px;line-height:1.4;margin:6px 0 14px}
+h2{font-size:19px;margin:30px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--acc)}
+h3{font-size:17px;margin:22px 0 8px}
+h4{font-size:15px;margin:16px 0 6px;color:var(--mut)}
+a{color:var(--acc)}
+p,li{font-size:15.5px}
+/* 命门 1：宽表横向滚，绝不压行 */
+table{border-collapse:collapse;display:block;overflow-x:auto;max-width:100%;margin:10px 0;
+ font-size:13.5px;line-height:1.5;white-space:nowrap}
+th,td{border:1px solid var(--line);padding:7px 9px;vertical-align:top;text-align:left}
+th{background:var(--card);position:sticky;top:0}
+td br{white-space:normal}
+/* 命门 2：ASCII 子图等宽 + 不折行 + 横向滚 */
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+ overflow-x:auto;white-space:pre;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,"Noto Sans Mono CJK SC",monospace}
+code{background:var(--code);padding:1px 4px;border-radius:4px;font:.88em ui-monospace,Menlo,Consolas,monospace}
+pre code{background:none;padding:0}
+blockquote{margin:10px 0;padding:8px 12px;border-left:4px solid var(--acc);background:var(--card);border-radius:0 8px 8px 0}
+hr{border:0;border-top:1px solid var(--line);margin:26px 0}
+#toc{display:none;position:fixed;inset:52px 0 auto 0;max-height:72vh;overflow:auto;background:var(--card);
+ border-bottom:1px solid var(--line);padding:10px 14px;z-index:8}
+#toc.on{display:block}
+#toc a{display:block;padding:5px 0;text-decoration:none;color:var(--fg);border-bottom:1px dashed var(--line);font-size:14px}
+#toc a.t3{padding-left:18px;color:var(--mut);font-size:13px}
+.top{position:fixed;right:14px;bottom:18px;z-index:9;background:var(--acc);color:#fff;border-radius:20px;
+ padding:8px 13px;font-size:13px;text-decoration:none;opacity:.9}
+.hint{font-size:12px;color:var(--mut);margin:2px 0 12px}
+.legend span{display:inline-block;padding:1px 7px;border-radius:10px;border:1px solid var(--line);margin:2px 3px 2px 0;font-size:13px}
+@media print{header,.top,#toc{display:none} pre,table{white-space:pre-wrap}}
+</style></head><body>
+<header><b>Mesa与Vulkan线_架构问题网格_2026-10-21</b><a href="#" onclick="document.getElementById('toc').classList.toggle('on');return false">目录</a><a href="#legend">图例</a></header>
+<nav id="toc"><a class="t2" href="#0.-先说清楚-顾头不顾腚-是什么病-不是-太复杂">0. 先说清楚&quot;顾头不顾腚&quot;是什么病，不是&quot;太复杂&quot;</a><a class="t2" href="#1.-架构剖析的第一步-把两条线画成同一张栈">1. 架构剖析的第一步：把两条线画成同一张栈</a><a class="t2" href="#2.-第二步-定失效模式轴-稳定-跨层可用">2. 第二步：定失效模式轴（稳定、跨层可用）</a><a class="t2" href="#3.-第三步-定可改性轴-决定这格-可打-只能绕-只能认">3. 第三步：定可改性轴（决定这格&quot;可打 / 只能绕 / 只能认&quot;）</a><a class="t2" href="#4.-网格本体-已按今天的档案挂号-每格七字段">4. 网格本体（已按今天的档案挂号；每格七字段）</a><a class="t3" href="#4.1-l2-l1-kgsl-提交层-两线共用的那块地">4.1 L2/L1 · KGSL 提交层（两线共用的那块地）</a><a class="t3" href="#4.2-l5-l4-rusticl-前端与-pipe-层">4.2 L5/L4 · Rusticl 前端与 pipe 层</a><a class="t3" href="#4.3-l3-代码生成与能力宣称">4.3 L3 · 代码生成与能力宣称</a><a class="t3" href="#4.4-l6-l7-后端策略与计算图-今天真正的账在这里">4.4 L6/L7 · 后端策略与计算图（今天真正的账在这里）</a><a class="t3" href="#4.6-m9-m10-观测与供应链-把-方法-当成一条线来记账">4.6 M9/M10 · 观测与供应链（把&quot;方法&quot;当成一条线来记账）</a><a class="t3" href="#4.7-从上位文档继承来的格-总档-3-4.1-9-13-备忘清单-a-b-c-f-今天首次挂号">4.7 从上位文档继承来的格（总档 §3/§4.1/§9/§13 + 备忘清单 A/B/C/F）—— 今天首次挂号</a><a class="t3" href="#4.8-未在网格挂号-但已在纸上的第三条线">4.8 未在网格挂号、但已在纸上的第三条线</a><a class="t2" href="#5.-网格打出来后立刻浮现的六件事-这才是-架构层剖析-的产出">5. 网格打出来后立刻浮现的六件事（这才是&quot;架构层剖析&quot;的产出）</a><a class="t2" href="#6.-三条架构动作-每条都比再修一个-bug-值钱">6. 三条架构动作（每条都比再修一个 bug 值钱）</a><a class="t2" href="#7.-网格纪律-六条-必须机检化-不靠自觉">7. 网格纪律（六条，必须机检化，不靠自觉）</a><a class="t2" href="#8.-本周就能做的五步-每步自带回报-可独立停">8. 本周就能做的五步（每步自带回报，可独立停）</a></nav>
+<main>
+<div class="legend" id="legend"><span>🟦 不归我们搞</span><span>🟩 已做且验过</span><span>🟨 在做还有问题</span><span>🟥 该做还没做</span><span>⬜ 未核</span></div>
+<div class="hint">导出 2026-10-24 00:57 ｜ 源 Mesa与Vulkan线_架构问题网格_2026-10-21.md（163 KB，396 行）｜ 表格与 ASCII 图可左右滑动（横向滚动条在块内）</div>
+<h1 id="mesa-opencl-线-与-vulkan-线-架构层问题网格">Mesa(OpenCL) 线 与 Vulkan 线 · 架构层问题网格</h1>
+<p>日期：2026-10-21 00:0x　范围：自研 Mesa 栈（rusticl + freedreno/ir3 + 我们的 kgsl winsys）与 Vulkan 线（内置 turnip）
+性质：<strong>方法论 + 可执行网格</strong>。本文件是"问题"的唯一登记处；其它文档只许引用格号，不许新增问题条目。
+上游文档：<a href="./全GPU卸载_Mesa线接管复评与重规划_2026-10-20.md">Mesa线接管复评与重规划</a>、
+<a href="./全GPU卸载_Mesa线_L3裁决_2026-10-20.md">L3 裁决</a>、
+<a href="./全GPU卸载_Mesa自研路线总档_2026-10-16.md">Mesa 自研路线总档（上位）</a>、
+<a href="./主线遗留备忘清单_2026-10-18.md">主线遗留备忘清单</a>、
+<a href="./Vulkan数值修复专项方案_2026-10-20.md">Vulkan 数值修复专项</a>、
+<a href="./Vulkan线立项与隔离约定_2026-10-20.md">Vulkan 线立项与隔离约定</a>、
+<a href="./端侧推理自研架构方向评估_2026-10-20.md">端侧推理自研架构方向评估</a></p>
+<hr />
+<h2 id="0.-先说清楚-顾头不顾腚-是什么病-不是-太复杂">0. 先说清楚"顾头不顾腚"是什么病，不是"太复杂"</h2>
+<p>复杂度不是病根（Vulkan 线今天一天拿下 subgroup 族，栈一样深）。病根是<strong>问题的表示法是一维的</strong>：
+P0…P8 + §8…§19 是<strong>按发生时间排的一维清单</strong>，没有"位置"这一维。四个必然后果，全部已在今天的档案里发生：</p>
+<table>
+<thead>
+<tr>
+<th>病</th>
+<th>形态</th>
+<th>档案实据</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>B1 假设跨层漂移</strong></td>
+<td>一个条目不带"它在哪一层"的强制字段，于是假设可以搬家而无人重算</td>
+<td>P2 病灶六次搬家：rusticl 队列 → kgsl winsys → libdrm 2013 ringbuffer → <strong>17:35 勘误收回</strong> → sp/ringpool → 我们自己的融合内核 → BO/ring 复用</td>
+<td>每次搬家都重付一遍学费；"已排除"其实是"排除了当时那一格"</td>
+</tr>
+<tr>
+<td><strong>B2 无作用域的清白</strong></td>
+<td>仪器没接通时的"无差别"被记成"已排除"</td>
+<td><code>FD_MESA_DEBUG=inorder/nogrow</code> 观测量逐位相同（<strong>串在≠通路在</strong>）；<code>FD_RD_DUMP*</code> 目录恒空；<code>ALLOW_NO_SUBGROUP=0</code> 整条退 CPU 后"token 全等"（同义反复的 PASS）</td>
+<td>假清白堆积 → 后期只能反复重测，感觉永远在原地</td>
+</tr>
+<tr>
+<td><strong>B3 证据无主键</strong></td>
+<td>数字不带"哪颗 lib / 哪套 env / 哪台机 + 是否安静"</td>
+<td>8.07 t/s 反复复活；"上午 3.7 tok/s 是 07:48 那版 APK，与设备上 13:54 版不是同一二进制"；CPU 腿同批漂 1.5–2.2×</td>
+<td>污染数被反复引用 → 裁决作废 → 重做（今天已因此作废一整版结论）</td>
+</tr>
+<tr>
+<td><strong>B4 单实验多变量</strong></td>
+<td>一次实验同时动两层的变量，却给单格判清白</td>
+<td>K40 不复现同时改变了<strong>世代</strong>(gen6/gen7) 与<strong>模型量化</strong>(mix_q3gud_im vs 830 那颗) ⇒ "gen6 不复现"<strong>不能</strong>给 gen7 提交层清白</td>
+<td>排除法失效，六条"已排除"里有几条其实没排除</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>一句话</strong>：<code>问题清单</code> 缺"位置"维，所以谁都得用人脑记住"哪些格子已经排除了"。人脑一溢出，就是顾头不顾腚。
+对策不是"更努力排查"，是<strong>把问题变成二维（栈位置 × 失效模式）+ 一列可改性，并且把排除的权限交给机器</strong>。</p>
+</blockquote>
+<hr />
+<h2 id="1.-架构剖析的第一步-把两条线画成同一张栈">1. 架构剖析的第一步：把两条线画成<strong>同一张栈</strong></h2>
+<p>今天两线各有一份文档、各有一套判具、各有一张设备目录 —— 这就是"两份复杂度"的来源。
+按<strong>谁写的代码</strong>切层（这一维同时决定"能不能改"和"结论能不能跨线借用"）：</p>
+<pre><code>            L  层名                        OpenCL(Mesa) 线的实现                Vulkan 线的实现            归属
+        ─────────────────────────────────────────────────────────────────────────────────────────────────────
+           L8  产品/编排                   JNI loadVkFlagsConf、830env.sh、       同左(Vulkan 分支)          自研
+                                           vk_flags.conf、OOM 守卫、专家 loader
+           L7  计算图与算子                llama.cpp graph：207 形状/42% 落 CPU；  同左（同一张图）            自研
+                                           ffn_moe_slots(MAP_CUSTOM1) 无 CL 实现
+           L6  后端策略（我们的代码）       ggml-opencl 33.5k 行/136 env/122 手改   ggml-vulkan 16.8k/49 env/0   自研
+           L5  ICD/API 前端                Rusticl api/core/queue/event、          Vulkan loader + ICD 枚举 +   上游为主
+                                           should_defer / OPFLUSH 语义             turnip dlopen/HAL stub
+           L4  gallium pipe 层             pipe_context/fence/query/resource、     ——（turnip 不经此层）        上游
+                                           sp submit 模型、ringpool
+           L3  代码生成                     ir3 + SPIR-V(clc spv) + E031.xx 厂商    着色器族 + subgroup 宽度表    上游
+                                           编译器                                  (driver×device 数据表)
+        ★ L2  KMD 接口 / 提交层             我们的 kgsl winsys：                   turnip tu_knl_kgsl.cc         自研(L2-CL)
+                                           kgsl_pipe_*/fd_batch/fd_submit+FD_*                                   /上游(L2-VK)
+           L1  KGSL 内核驱动 + 固件          /dev/kgsl-3d0、gen5/6/7 的 CP/IB/fence  同左（同一物理对象）          闭源，不可改
+                                              语义、SMMU、tsync、EAGAIN
+</code></pre>
+<p>读这张图得到三条<strong>架构级结论</strong>，比任何单个 bug 都重要：</p>
+<ol>
+<li><strong>L1 是同一个洞，L2 是两份代码、两套判具、两套结论。</strong> 这就是"太复杂"的真正来源：底层同一个物理问题
+   （提交是否完整、IB/BO 生命周期、fence 语义、EAGAIN 处置），上面互不相通。
+   OpenCL 线在 L2/L1 学到的每一件事，对 Vulkan 线的 L2 <strong>零传递</strong>。
+   ⇒ 先做的不是选边，是建<strong>一份《KGSL 提交层契约表》+ 一套两线共用压测断言</strong>（见 §6-A）。</li>
+<li><strong>L2 是我们唯一"自研但源码不在手"的层。</strong> P0-1 卡住的从来不是"整个 Mesa 树"，恰恰就是 L2
+   （<code>kgsl/*.{c,h}</code> + <code>fd_batch/fd_submit</code> 的 FD_<em> 改动 + <code>fix_fd_device.py</code> 打的洞）。
+   而 P2 今天唯一剩下的候选（BO/ring 复用）也落在 L2。
+   ⇒ </em><em>整条线有一个单点故障，形状是"资产失控"，不是"技术难题"。</em>* 网格化的第一个产出的就是把这件事从待办清单里拎出来。</li>
+<li><strong>L3 已经给出过一次"架构做法赢"的样板。</strong> Vulkan 线用 <code>driver×device_class</code> 数据表 + <code>vk_gate.sh</code>
+   + 反向对照（<code>FORCE_SUBGROUP_ARITH=1</code> 能把 FAIL 打回来 ⇒ 证明门禁有牙），一天拿下三个坏 op；
+   同一类"能力宣称"问题在 OpenCL 侧（藏 <code>cl_khr_subgroups</code>、缺可写 3D 图像）今天还散在 env 与注释里。
+   ⇒ <strong>把这三件套上升为两线共同的架构约束</strong>，而不是 Vulkan 线的独占成果。</li>
+</ol>
+<hr />
+<h2 id="2.-第二步-定失效模式轴-稳定-跨层可用">2. 第二步：定失效模式轴（稳定、跨层可用）</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>失效模式</th>
+<th>这格的"判定问题"（必须能用一句话回答）</th>
+<th>本项目已知典型</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>M1</strong></td>
+<td>身份</td>
+<td>我测的是不是我以为的那个东西？</td>
+<td>strip 的在机 lib vs chroot 未 strip；调试版 Mesa 当性能体；07:48 APK vs 13:54 APK</td>
+</tr>
+<tr>
+<td><strong>M2</strong></td>
+<td>能力宣称</td>
+<td>它 advertise 的与真能用的是同一件事吗？</td>
+<td>藏 <code>cl_khr_subgroups</code>；IFP 写死 false；无 <code>cl_khr_3d_image_writes</code>；<code>int dot:0</code>/<code>matrix cores:none</code>；turnip 自报 warp 128 vs stock 64</td>
+</tr>
+<tr>
+<td><strong>M3</strong></td>
+<td>准入与静默降级</td>
+<td>声称上了 GPU 的真的在 GPU 上跑吗？</td>
+<td>207 形状/42% 每 token 落 CPU；batched→dense-loop 无日志；Vulkan→CPU 只说"不可用"；catalog 标"GPU 加速"</td>
+</tr>
+<tr>
+<td><strong>M4</strong></td>
+<td>执行完整性</td>
+<td>提交出去的每个内核都执行了吗？顺序对吗？</td>
+<td>gen7 <code>OPFLUSH=0</code> token 1 崩；enqueued 271390 vs submitted 118586；<code>FDFINAL nr_cmds=0</code></td>
+</tr>
+<tr>
+<td><strong>M5</strong></td>
+<td>数值正确性</td>
+<td>是编译期损坏、运行期竞态，还是算法/量化语义？</td>
+<td>E031.47 q4_K codegen；厂商 <code>gemv_moe</code> "正确×错误常量"；Vulkan SSM_SCAN 12/12</td>
+</tr>
+<tr>
+<td><strong>M6</strong></td>
+<td>资源与容量</td>
+<td>环/BO/内存/地址空间够不够、谁分配谁释放？</td>
+<td>每提交建拆 32KiB BO（<code>use_heap=false</code>）；UMA vs FGSVM；11GB 机跑 ≥6GB 权重</td>
+</tr>
+<tr>
+<td><strong>M7</strong></td>
+<td>时序与并发</td>
+<td>积压深度、fence、EAGAIN、跨队列次序？</td>
+<td>OPFLUSH≤4 正确 / 深队列必崩；<code>KGSLSUBMIT ret=0 errno=EAGAIN</code>；kgsl 后端 assert 无 fence</td>
+</tr>
+<tr>
+<td><strong>M8</strong></td>
+<td>成本归因</td>
+<td>时间花在哪一段？这一段值不值？</td>
+<td>提交层 ≤15%（实测封死）；专家 IO 不在关键路径；<strong>GPU 执行时间至今未量到</strong></td>
+</tr>
+<tr>
+<td><strong>M9</strong></td>
+<td>观测系统自身</td>
+<td>判据能区分两个竞争解释吗？仪器接通了吗？</td>
+<td><code>MOE_TIME</code> 死路；<code>FD_RD_DUMP</code> 恒空；合成 <code>tbo</code> 普查误导优先级（<code>TOP_K</code> 真图里没有）</td>
+</tr>
+<tr>
+<td><strong>M10</strong></td>
+<td>供应链与可复现</td>
+<td>换台机器还出得来吗？</td>
+<td>FD_* fork 源码在 root chroot；<code>_probe/mesa_m0</code> 不在本机；bionic 无构建配方</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3.-第三步-定可改性轴-决定这格-可打-只能绕-只能认">3. 第三步：定可改性轴（决定这格"可打 / 只能绕 / 只能认"）</h2>
+<table>
+<thead>
+<tr>
+<th>标记</th>
+<th>含义</th>
+<th>网格规则</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OWN</code></td>
+<td>我们自己的代码（L6/L7/L8 + 我们的 kgsl winsys）</td>
+<td>可打。默认优先级最高</td>
+</tr>
+<tr>
+<td><code>OWN-BLOCKED</code></td>
+<td>我们的代码但资产不在手</td>
+<td><strong>算阻塞，不算待办</strong>；阻塞解除前该格不许占用排查预算</td>
+</tr>
+<tr>
+<td><code>UP</code></td>
+<td>上游 Mesa/ggml 语义</td>
+<td>只能读 + 打 patch；任何修复必须是"可重放补丁 + 上游可提"</td>
+</tr>
+<tr>
+<td><code>BLACKBOX</code></td>
+<td>闭源 KGSL 驱动/固件、厂商 CL 编译器</td>
+<td><strong>必须自带"不依赖修改的观测判据"，否则不是待办，是死账</strong> → 标 <code>UNREACHABLE</code>，转"跟踪上游/上报"</td>
+</tr>
+<tr>
+<td><code>HW</code></td>
+<td>硬件/世代能力缺失</td>
+<td>分两种：能力缺失→绕；性能上限→<strong>认</strong>（写进预算表，不再投人）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4.-网格本体-已按今天的档案挂号-每格七字段">4. 网格本体（已按今天的档案挂号；每格七字段）</h2>
+<p>状态词表：<code>关闭</code>（有证据+判具接通+日期）· <code>开放</code>（有判真/判伪预测与下一发实验）· <code>未观测</code>（仪器没接通，<strong>禁止当排除用</strong>）· <code>阻塞</code>（缺 X，写明缺什么）· <code>不可达</code>（不可改且无可观测判据）</p>
+<h3 id="4.1-l2-l1-kgsl-提交层-两线共用的那块地">4.1 L2/L1 · KGSL 提交层（两线共用的那块地）</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题（可判真伪）</th>
+<th>层×模式</th>
+<th>可改性</th>
+<th>判具（状态）</th>
+<th>状态</th>
+<th>下一发判定实验</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-201</strong></td>
+<td>深异步积压超过 ~4 op 后，一个环里的 CS 被静默丢弃/覆盖，ioctl 仍返回 0</td>
+<td>L2×M4/M7</td>
+<td><code>OWN-BLOCKED</code>（要 L2 源码）</td>
+<td><code>FD_IBTRACE</code>（<strong>从没试过</strong>）、<code>FDBATCH flush size=</code> 取峰值</td>
+<td>开放</td>
+<td>830/740 上线第一腿：取 <code>max(FDBATCH size)</code> 与环容量比；🟪 <strong>15:3x 按 R9 修正作用域</strong>：830 vendor <strong>有</strong> <code>cl_khr_integer_dot_product</code>（还有 <code>cl_khr_subgroups</code>/<code>subgroup_shuffle</code>）⇒ "dp4a 快路死掉"只成立于 K40/A6X 档，<strong>不得当架构结论</strong>；在役 830 上快路是活的。<strong>判真</strong>=async 腿 size 钉上限且提交数骤降；<strong>判伪</strong>=两腿都远低于上限</td>
+</tr>
+<tr>
+<td><strong>G-202</strong></td>
+<td>sp 模型 ringpool 取环/还环与 GPU 读取竞态（环被复用而 GPU 未读完）</td>
+<td>L2×M4/M7</td>
+<td><code>OWN</code>（DWARF+局部符号可反汇编）</td>
+<td><code>objdump</code> 调用图法（已记录）</td>
+<td>开放</td>
+<td>反汇编 <code>fd_submit_sp_flush/_execute/_cleanup</code> + <code>kgsl_pipe_safe_ioctl</code> 调用图；<strong>判真</strong>=存在不等待 GPU 读完即还环的路径</td>
+</tr>
+<tr>
+<td><strong>G-203</strong></td>
+<td>每提交建/拆 32KiB BO（<code>use_heap=false</code>）与提交同生，是 churn 源</td>
+<td>L2×M6</td>
+<td><code>OWN</code>（ring_heap 禁用是已知决策，勿改回）</td>
+<td><code>BORERELEASE</code> 计数（接通）</td>
+<td>未观测</td>
+<td><code>FD_NO_BOCACHE</code> 的 <strong>token 级</strong> <code>token_diff</code>（今天只到方向级，不算裁决）</td>
+</tr>
+<tr>
+<td><strong>G-204</strong></td>
+<td>gen7 每 dispatch 的 CS 比 gen6 大 ⇒ 更容易顶破固定环（解释 gen6/gen7 分裂）</td>
+<td>L1/L2×M4/M7</td>
+<td><code>BLACKBOX</code>（CP/IB 语义）</td>
+<td>需两线共用压测（见 §6-A）</td>
+<td>开放</td>
+<td><strong>单变量</strong>：同一 gguf 同一 env 只在 gen6/gen7 各跑（现在世代与量化混淆 = B4 病）；<strong>判真</strong>：同一 gguf + 同一二进制在 gen6/gen7 各跑 <code>kgsl_contract_probe.sh</code> Phase 2，gen7 每 token 的 <code>max(sizedwords)</code>/IB 字节 ≥ gen6 的 1.5× ⇒ CP/IB 语义差异成立。<strong>判伪</strong>：两者相差 &lt;20% ⇒ 世代差异与提交层无关，退回 G-201 固定环那一格。<strong>卡 G-803（需 gen5/gen7 任一台）</strong>；<strong>出口</strong>：结论一律进 <code>known_bad_kernels</code> 式数据表（<code>driver×device_class</code> 键）并带 trace 向 Freedreno 上游上报，不留树内 <code>if(device==…)</code></td>
+</tr>
+<tr>
+<td><strong>G-205</strong></td>
+<td><code>KGSLSUBMIT ret=0 errno=EAGAIN</code> 时内核静默丢提交</td>
+<td>L1×M7</td>
+<td><code>BLACKBOX</code></td>
+<td>trace（接通，但那是调试版）</td>
+<td>未观测</td>
+<td>干净构建上统计 EAGAIN 次数与丢失 op 数的相关性；<strong>无相关即判伪</strong></td>
+</tr>
+<tr>
+<td><strong>G-206</strong></td>
+<td>上游 <code>should_defer()</code> 合并丢内核</td>
+<td>L5×M4</td>
+<td><code>UP</code></td>
+<td><code>FD_NODEFER</code>（接通）</td>
+<td><strong>关闭（无罪）</strong></td>
+<td>merged 6040→0 而正确性纹丝不动；<strong>作用域：只排除"合并"这一格，不排除 L2</strong>（关闭于 2026-10-20 L3 §6） （判具：<code>run_p2_fddebug.sh</code> 的 <code>FD_NODEFER</code> 腿 + <code>merged 6040→0</code> 计数 + 49 token 逐位全等 PASS，830/2026-10-20）</td>
+</tr>
+<tr>
+<td><strong>G-207</strong></td>
+<td>ring grow / inorder 路径参与</td>
+<td>L2×M4</td>
+<td><code>UP</code></td>
+<td><code>FD_MESA_DEBUG=inorder/nogrow</code>（<strong>未接通</strong>）</td>
+<td><strong>未观测（不是排除）</strong></td>
+<td>串在≠通路在：先在 lib 里证明该串被读，否则永久 <code>未观测</code></td>
+</tr>
+<tr>
+<td><strong>G-208</strong></td>
+<td><strong>两线共用</strong>：CL 前端与 VK 前端在同一台机上跑同一提交压测，是否出现同类丢失</td>
+<td>L2/L1×M4</td>
+<td>混合</td>
+<td><strong>不存在</strong>（要新建，§6-A）</td>
+<td>开放（0 实验）</td>
+<td>新判具首跑；这是今天网格化暴露的最大空洞</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4.2-l5-l4-rusticl-前端与-pipe-层">4.2 L5/L4 · Rusticl 前端与 pipe 层</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题</th>
+<th>层×模式</th>
+<th>可改性</th>
+<th>状态</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-501</strong></td>
+<td><code>OPFLUSH=1</code> 是 gen7 唯一正确性安全阀，gen6 上它反而更快（+14.5%）</td>
+<td>L5×M4/M8</td>
+<td><code>UP</code></td>
+<td>关闭（实测）</td>
+<td>两机默认 <code>OPFLUSH=1</code>；<strong>注意</strong>这是配置不是修复（关闭于 2026-10-20 §2.5 实测）</td>
+</tr>
+<tr>
+<td><strong>G-502</strong></td>
+<td>单颗内核抛异常能打死整进程（rusticl 无隔离）</td>
+<td>L5×M4</td>
+<td><code>UP</code></td>
+<td>开放</td>
+<td>影响压测设计：一次只能测一颗内核，否则证据被连带；<strong>判真</strong>：按内核分腿、一内核一进程压测，某腿 rc≠0 时其余腿数据完整 ⇒ rusticl 的进程级耦合可用进程边界绕开。<strong>判伪</strong>：一崩全崩 ⇒ 压测成本 ×N，须写进 §7 预算再决定测几颗。设备回来即可做（<code>vk_gate.sh</code> 已是这个形状）</td>
+</tr>
+<tr>
+<td><strong>G-503</strong></td>
+<td><code>core/kernel.rs:2047</code> <code>buf[0..length-4]</code> 无下界减法 ⇒ gen7 <code>tbo -o MUL_MAT_ID</code> abort 根因</td>
+<td>L5×M5</td>
+<td><code>UP</code></td>
+<td>开放（需自建构验证）</td>
+<td>PROVENANCE §2 已定位；一行守卫；<strong>判真</strong>：自建构加 <code>length&gt;=4</code> 下界守卫后，gen7 <code>tbo -o MUL_MAT_ID</code> 从 abort 变正常报错或 PASS ⇒ 根因确认。<strong>判伪</strong>：加了守卫仍 abort ⇒ 根因在 G-504/IFP 那一侧。<strong>卡 G-901（源码取回）</strong></td>
+</tr>
+<tr>
+<td><strong>G-504</strong></td>
+<td><code>api/device.rs:314</code>+<code>core/device.rs:770</code> IFP 写死 false 且 <code>cl_khr_subgroups</code> 被注释 ⇒ ggml 准入丢设备</td>
+<td>L5×M2/M3</td>
+<td><code>UP</code>（补丁已入库 0001）</td>
+<td>开放</td>
+<td>卡 P0-2 自建构；<strong>判真</strong>：打 <code>0001</code> 补丁后设备侧可见 <code>cl_khr_subgroups</code>/IFP 位，ggml 准入设备数 +1，且腿里可摘掉 <code>ALLOW_NO_SUBGROUP=1</code>。<strong>判伪</strong>：摘掉后仍走降级内核 ⇒ rusticl 里还有第二处写死，需再定位</td>
+</tr>
+<tr>
+<td><strong>G-505</strong></td>
+<td>Rusticl 提交层是否把每次提交做成一次 kgsl ioctl（无二次合批）</td>
+<td>L5×M8</td>
+<td><code>UP</code></td>
+<td>未观测</td>
+<td>async ~330 IB/token 与 flush1 ~4100 IB/token 已给强上界；不必再投人 <strong>未接通的仪器</strong>：KGSL 侧 ioctl 计数（<code>kgsl_contract_probe.sh</code> Phase 1 的 debugfs/ftrace 通路，非 root 下不存在）⇒ 只能说『没测到二次合批』，不能说『没有二次合批』。设备 root 或自建构加计数器后补判</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4.3-l3-代码生成与能力宣称">4.3 L3 · 代码生成与能力宣称</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题</th>
+<th>层×模式</th>
+<th>可改性</th>
+<th>状态</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-301</strong></td>
+<td>freedreno 无可写 3D 图像（缺 <code>cl_khr_3d_image_writes</code>/<code>write_imageh</code>）⇒ gen6 <code>MUL_MAT*</code> 门根本起不来</td>
+<td>L3×M2</td>
+<td><code>HW</code>+<code>UP</code></td>
+<td>开放</td>
+<td>靶子 = "去 3D 可写图像改造"，与 <code>clCreateImage</code> -40 合并为<strong>同一格</strong>（此前是三条散账）</td>
+</tr>
+<tr>
+<td><strong>G-302</strong></td>
+<td>降级内核配置（<code>ALLOW_NO_SUBGROUP=1</code>/<code>XMEM=0</code>/<code>FAKE_QCOM_REQD=1</code>）⇒ ir3 真实代码质量从未被测过</td>
+<td>L3×M8</td>
+<td><code>OWN</code>(配置)</td>
+<td>开放</td>
+<td>与 G-504 是一对：先解能力，再评质量；<strong>判真</strong>：摘掉 <code>ALLOW_NO_SUBGROUP</code>/<code>XMEM=0</code>/<code>FAKE_QCOM_REQD</code> 三个降级开关后内核能起，则 G-903 的分 op 账里 matmul 类内核耗时显著下降 ⇒ 之前测的是被阉版本。<strong>判伪</strong>：摘掉直接起不来 ⇒ 本格转 <code>阻塞</code>，先做 G-504</td>
+</tr>
+<tr>
+<td><strong>G-303</strong></td>
+<td>算子支持面缺口（gen6 54.2% / gen7 54.5%，世代无关）</td>
+<td>L6×M3</td>
+<td><code>OWN</code></td>
+<td>关闭（已定性）</td>
+<td>是我们后端实现空白，不需改 Mesa（关闭于 2026-10-20 真图普查） （判具：<code>graph_ops_export</code> 真图 op 普查，L3 §18 的 207 形状表，2026-10-21）</td>
+</tr>
+<tr>
+<td><strong>G-304</strong></td>
+<td>Vulkan：subgroup 归约代码路径在 a8xx 损坏，靠 <code>driver×device_class</code> 表门控解决</td>
+<td>L3×M5</td>
+<td><code>UP</code></td>
+<td><strong>关闭</strong>（<code>vk_gate.sh</code> GATE PASS + 反向对照有牙）</td>
+<td>本项目的<strong>做法样板</strong>，不是本项目的问题（关闭于 2026-10-20 <code>vk_gate.sh</code>）</td>
+</tr>
+<tr>
+<td><strong>G-305</strong></td>
+<td>turnip 那颗是谁编的、能否换版本（H3 轴能不能测）</td>
+<td>L3×M1/M10</td>
+<td><code>OWN</code>（可换，不可自编）</td>
+<td><strong>关闭（2026-10-21 00:2x 查档定案）</strong></td>
+<td>见 <a href="../android/app/src/main/jniLibs/arm64-v8a/README.md">jniLibs README</a> 与 commit <code>211df599</code>：驱动 = <strong>Mesa Turnip <code>v26.3.0-20260918-r6-A8xx</code></strong>，来自 <strong>The412Banner 的 whitebelyash turnip/gen8 A8xx stack</strong>（KGSL build，Vulkan 1.4.363），SHA256 <code>7446A292…3D7C</code>，因根 <code>.gitignore</code> 全局忽略 <code>*.so</code> 而白名单入 git。⇒ <strong>H3 可测</strong>：换版本 = 替换该 .so + 改 README 的 SHA256 + 真机回归（README 自己规定的流程）。 （判具：<code>git show 211df599</code> + jniLibs README 的 SHA256 <code>7446A292…3D7C</code> 与在机 .so 比对）</td>
+</tr>
+<tr>
+<td><strong>G-307</strong></td>
+<td><strong>两条线跑在两个不同的 Mesa 版本上</strong>：OpenCL 线 = 自编 <strong>26.2.4</strong>（glibc chroot + FD_<em> 探针），Vulkan 线 = 外部预编 </em><em>turnip 26.3.0-20260918-r6</em>*</td>
+<td>L3/L2×M1/M10</td>
+<td>混合</td>
+<td><strong>开放（新增）</strong></td>
+<td>后果三条：① §6-A 那份《KGSL 提交层契约表》必须在<strong>两个 Mesa 版本</strong>上各自验一遍，不能假定同一版本；② "上游已修"类结论跨线<strong>不成立</strong>（26.2.4 有的坑 26.3.0 未必有，反之亦然）；③ turnip 是<strong>社区 fork 预编二进制</strong>、非官方发行、非我们自编 ⇒ 供应链上比 OpenCL 线更脆（出问题只能换版本或自己接手编）。总档 §9 风险 6 那句"社区 fork 可参考但别报 bug 上游"在这里是<strong>在役依赖</strong>，不是参考资料。；<strong>判真</strong>：同一份 KGSL 契约表在 26.2.4(CL) 与 26.3.0(turnip) 各跑一遍，C1/C3 结果不一致 ⇒ 跨线借证不安全，§6-A 须双版本各一份。<strong>判伪</strong>：两侧一致 ⇒ 允许跨线借用，但必须留这一发为证</td>
+</tr>
+<tr>
+<td><strong>G-306</strong></td>
+<td><code>MUL_MAT</code> 连 f32 都错（247 例含 f32 76）是否指向比 subgroup 更基础的 shmem/split-k</td>
+<td>L3×M5</td>
+<td><code>UP</code></td>
+<td>未观测</td>
+<td>M3 后 1132/0 ⇒ 需复跑确认是否随族归零 <strong>未接通的仪器</strong>：<code>vk_gate.sh</code> 的 <code>MUL_MAT</code> f32 子集在 M3 门之后<strong>从未复跑</strong> ⇒ 1132/0 是全集数，不等于那 76 例 f32 已归零。<strong>判真</strong>=随族归零(与 subgroup 同源)；<strong>判伪</strong>=仍有红 ⇒ 存在比 subgroup 更基础的 shmem/split-k 缺陷，单开一格</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4.4-l6-l7-后端策略与计算图-今天真正的账在这里">4.4 L6/L7 · 后端策略与计算图（今天真正的账在这里）</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题</th>
+<th>层×模式</th>
+<th>可改性</th>
+<th>状态</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-701</strong></td>
+<td><code>ffn_moe_slots</code>(MAP_CUSTOM1) 80 形状无 OpenCL 实现 ⇒ 每层每 token 一次 CPU 岛 + GPU↔CPU 往返</td>
+<td>L7/L6×M3/M8</td>
+<td><strong><code>OWN</code></strong></td>
+<td><strong>开放（改判待定，见 §5-5）</strong></td>
+<td>判具已就绪（<code>graph_ops_export</code> + <code>tbo --test-file</code>）；不依赖 Mesa 源码。<strong>两代判决互斥</strong>：10-16"by design 便宜" vs 10-20"真凶候选"，两次都没成本数 ⇒ 先跑一发 <code>SPLIT</code> A/B 再决定投不投</td>
+</tr>
+<tr>
+<td><strong>G-702</strong></td>
+<td>路由 <code>MUL_MAT_ID</code> gate/down 4 形状 + <code>GET_ROWS</code> + LM head prefill 落 CPU</td>
+<td>L7/L6×M3/M8</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td>次高于 G-701，同批；<strong>判真</strong>：真图普查里这 4 个形状与 80×<code>ffn_moe_slots</code> 同属<strong>每 decode token</strong> 热点，插桩账里应看到与 CPU 岛同级的边界成本。<strong>判伪</strong>：它们只在 prefill 出现、decode 每 token 命中 0 次 ⇒ 撤资，优先级让给 G-707</td>
+</tr>
+<tr>
+<td><strong>G-703</strong></td>
+<td><code>supports_op</code> / <code>set_tensor</code> / 派发 三门漂移 ⇒ 崩·错·慢三种后果随机分配</td>
+<td>L6×M3</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td>架构评估 §1；修法是一张路由表，不是一个 if</td>
+</tr>
+<tr>
+<td><strong>G-704</strong></td>
+<td>静默降级无反馈回路 ⇒ "降级了却报告成功"</td>
+<td>L6/L8×M3/M9</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td><code>[engine-report]</code> + <code>unexpected_fallback != 0</code> 即红；<strong>判真</strong>：把 <code>unexpected_fallback != 0</code> 设成机检项，<strong>现在一跑就红</strong>（G-603 context wiring 空转、G-302 三个降级开关都在静默降级）。<strong>判伪</strong>：全 0 ⇒ §0 病 B1 的这条证据要撤。不需设备，今天可机检</td>
+</tr>
+<tr>
+<td><strong>G-705</strong></td>
+<td>136 env / 122 手改标记 / 56 个按量化分支 ⇒ fork 补丁面不收敛，升级即回归</td>
+<td>L6×M10</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td>env 数作为<strong>网格自身指标</strong>跟踪（见 §7）；<strong>判真</strong>：§7 指标里 env 计数与按量化分支数随时间单调不降 ⇒ 补丁面确实不收敛，升级必回归。<strong>判伪</strong>：计数下降 ⇒ 已在收敛，撤资。不需设备，<code>grid_lint.py</code> 顺手统计</td>
+</tr>
+<tr>
+<td><strong>G-706</strong></td>
+<td>合成形状普查误导优先级（真图里没有 <code>TOP_K</code>）</td>
+<td>L6×M9</td>
+<td><code>OWN</code></td>
+<td>关闭（已定性）</td>
+<td>规则：<strong>一切支持率以真实图普查为准</strong>，合成普查只作内核单测（关闭于 2026-10-20 §18） （判具：同一真图 op 普查 —— <code>TOP_K</code> 合成普查有、真图 0 命中）</td>
+</tr>
+<tr>
+<td><strong>G-707</strong></td>
+<td>OpenCL 相对 <code>ae8ba172</code>（同机 decode 14–22 t/s）的 2–3× 回退</td>
+<td>L6/L3×M8</td>
+<td><code>OWN</code></td>
+<td>开放（有可 bisect 锚点）</td>
+<td>与 G-701 同级；<strong>先做 G-701 再看是否残余</strong>；<strong>判真</strong>：<code>git bisect</code> 落在某个 Mesa/ggml-opencl commit，两侧 tok/s 有 ≥30% 台阶 ⇒ 回退在代码里。<strong>判伪</strong>：bisect 到 fork 起点仍无台阶 ⇒ 回退是环境性的，<strong>必须先关 G-920 再谈这格</strong></td>
+</tr>
+</tbody>
+</table>
+<p>| <strong>G-711</strong> | 常驻侧 41 个 <code>IQ2_XXS</code> 张量（含 <strong>LM head <code>output.weight</code></strong>、20×<code>attn_qkv</code>、<code>attn_v</code>、20×<code>ffn_down_shexp</code>）在 OpenCL <strong>零内核</strong>（<code>grep -c IQ2_XXS ggml-opencl.cpp</code>=0，IQ 家族仅 <code>iq4_nl</code>），CPU 侧 KleidiAI 与 repack <strong>也都不含</strong> ⇒ 结构性强制落 CPU 且走最慢通用 <code>vec_dot</code> | L6/L7×M3 | <code>OWN</code> | <strong>开放（2026-10-21 11:4x 新开）</strong> | <strong>判真</strong>：真图 op 普查（<code>graph_ops_export</code>）里这 41 个对应的 <code>MUL_MAT</code> 落 CPU buffer ⇒ 结构性落 CPU 成立，"CPU ops 432"须按"量化配方所致"与"门控保守所致"分账。<strong>判伪</strong>：它们其实被上游某条通用路径接管并在 GPU 上执行 ⇒ 撤资。<strong>与 G-701 同批做，共用一次跑测</strong>。补内核不是首选——首选是问清<strong>配方为什么给 attention/head 选 IQ2_XXS</strong>（同 §13 Q3_K 之问） |
+| <strong>G-712</strong> | "全 GPU 卸载"名不副实：256 专家的 <code>MUL_MAT_ID</code> <strong>实际在 CPU 算</strong>（App 从不设 <code>LLAMA_MOE_BANK_GPU</code>；<code>qwen35moe.cpp:55-58</code> 默认 false；真 GPU 腿 34 MB stderr 内 <code>moe_q3k_pack</code>/<code>batched</code>/<code>plane</code> 各 <strong>0 次</strong>提交） | L7×M9 | <code>OWN</code> | <strong>关闭（已定性，2026-10-21 11:4x）</strong> | <strong>判具=三个 grep 即可重跑</strong>：① <code>grep -rn LLAMA_MOE_BANK_GPU android/ lib/</code> 应为空；② <code>sed -n "55,58p" third_party/llama.cpp/src/models/qwen35moe.cpp</code> 应为 <code>e &amp;&amp; e[0]=='1'</code>；③ 任一 GPU 腿的 <code>.err</code> 里 <code>grep -ac "moe_q3k_pack\|batched\|plane"</code> 应为 0。三条同时成立即定性。<strong>连带后果必须一起记住</strong>：Mesa 0.62 t/s 与 CPU bank 2.72 t/s <strong>两侧都含 CPU 专家计算</strong>，此前把这条对比读成"GPU 全栈 vs CPU 全栈"是过度解读。后续"能否真上卡"另开 G-713/G-714，不在本格 🟪 <strong>13:5x 新增机检判具</strong>：<code>GGML_OPENCL_MOE_GATE_STATS=1</code> 下 <code>mul_mat_id_arrived_opencl=0</code> ⇒ 直接坐实本格（专家 MUL_MAT_ID 从未进入 OpenCL 后端）；<code>&gt;0</code> 而 <code>DISPATCHED_batched=0</code> 则与 @29315 的 <code>GGML_ABORT</code> 契约矛盾 ⇒ 回来重读代码 |
+| <strong>G-713</strong> | <code>LLAMA_MOE_BANK_GPU=1</code> <strong>至今从未真正跑过</strong>：<code>run_mesa_matrix.sh:38</code> 硬 <code>export LLAMA_MOE_BANK_GPU=0 LLAMA_MOE_UPLOAD=0</code>，外层 export 被覆盖（<code>env "$@"</code> 不清环境）⇒ 我 11:19 那次"BANK_GPU=1"实验<strong>作废</strong> | L8×M9 | <code>OWN</code> | <strong>开放（2026-10-21 11:4x）</strong> | 仪器级缺陷，与 G-908 同族（<strong>工装把自己的被测配置钉死了</strong>）。<strong>判真</strong>：绕开脚本直接 <code>env &lt;完整 MESA_ENV&gt; LLAMA_MOE_BANK_GPU=1 …</code> 起进程，stderr 出现 <code>split-moe slot bank on GPU FGSVM</code> 或对应 WARN ⇒ 配置首次真正生效。<strong>判伪</strong>：两条日志都不出现 ⇒ env 另有通路被吃，须先修工装再谈任何 <code>LLAMA_MOE_*</code> 结论（<strong>B3.6 那 12 个开关的归因同样受此污染，须复核是否也有硬 export</strong>）。修法：脚本改 <code>: "${LLAMA_MOE_BANK_GPU:=0}"</code> |
+| <strong>G-714</strong> | <code>offloaded 41/41 layers to GPU</code> 被当作"全卸载已达成"的证据 ⇒ <strong>层计数冒充张量计数</strong>（同一条 stderr 里专家内核 0 提交、41 个 IQ2_XXS 无内核，与 41/41 并存） | L8×M9 | <code>OWN</code> | <strong>关闭（已定性，2026-10-21 11:4x）</strong> | 判具纪律新增一条并入 F 泳道：<strong>卸载程度按张量 buffer 归属统计</strong>，层计数只允许证明"没有整层掉回 CPU"。同族错误：<code>load_ms 18.1s</code> 曾被误读为 GPU bank 代价，实为常驻权重上传（见地图 §14.5-1） |
+| <strong>G-715</strong> | <strong>统一超大 MoE 承载层目标未达成</strong>：有 <code>ffn_gate_exps</code> 的 MoE 模型类 <strong>60+</strong> 个，只有 <code>qwen35moe.cpp</code> / <code>lfm2moe.cpp</code> 两个做了专家合成 ⇒ split-moe 接入率 <strong>2/60+</strong>；<code>moe_slot_bank_enabled()</code> 判据是 <code>moe_experts != nullptr</code>（<strong>不看 arch 名</strong>），所以缺口是"没人给那个 arch 写那 30 行"，不是设计排除 | L7×M9 | <code>OWN</code> | <strong>开放（2026-10-21 11:5x 新开，用户点破）</strong> | <strong>判真</strong>：<code>grep -ln "moe_slot_buft" third_party/llama.cpp/src/models/*.cpp</code> 计数长期停在 2 ⇒ 通用性确实没做。<strong>判伪</strong>：计数随路线图增长到 ≥5 且每个都过真图普查 ⇒ 收口。行动：按 §15.6 给 Qwen3.6 的 arch 类补合成（<strong>先由用户定它落 <code>qwen3moe</code>/<code>qwen3next</code>/<code>qwen4exp</code> 哪一类</strong>） |
+| <strong>G-716</strong> | 资产管线不可复现：仓库只有 <code>scripts/strip_experts.py</code> 一份打包器且面向 MiniCPM 张量命名；LFM2.5 那份 <code>pack_lfm25_split.py</code> <strong>不在仓库</strong>（设备日志证明它存在过：<code>experts=64 stride0=5308416</code>）⇒ <strong>没有 manifest 则 <code>moe_experts==nullptr</code>，split-moe 整个不启动</strong>——这才是"换模型即作废"的真实机制 | L1×M9 | <code>OWN</code> | <strong>开放</strong> | 半天（文档已估）。<strong>判真</strong>：把打包器参数化（族名/<code>bytes_per_expert</code>/<code>expert_stride</code> 全部从 manifest schema 读）后，第 3 个模型能在不改编排代码的情况下出包 ⇒ 管线成立。<strong>判伪</strong>：仍需为每个模型改脚本 ⇒ 抽象没做对，回 §15.2-U2 重设计 |
+| <strong>G-717</strong> | <strong>通用性天花板被漏画</strong>：<code>lfm25-…-eval:158</code> 记 <strong>Mali（天玑）各机首轮不支持——"OpenCL 定制内核全按 Adreno"</strong> ⇒ 我们的定制内核按 vendor 分叉，非 Adreno 整条不可用。上一版地图（§1–§14）<strong>完全没有这一层</strong> | L6×M9 | <code>OWN</code> | <strong>开放（2026-10-21 11:5x 新开）</strong> | 优先级高于任何 Mesa 细节：<strong>它比 Q3_K 大一个量级</strong>（Q3_K 只影响一个模型的两种张量，这条影响整个 vendor）。<strong>判真</strong>：读码列出"Adreno 专属内核清单"（按 <code>ADRENO_*</code> env / <code>qcom</code> 字面量 / reqd_subgroup 假设分类）后，Mali 缺失面 = 清单全量 ⇒ 天花板成立，须单独立项。<strong>判伪</strong>：缺失面为空或仅少量可开关项 ⇒ 撤资。<strong>纯读码，可立刻做，不需设备</strong> |
+| <strong>G-718</strong> | 换模型头号死因是<strong>配置继承</strong>而非架构：全局覆写 <code>moeBankOverrideByModel{"*":48}</code>（MiniCPM 时代留下）被新模型继承 → LFM2.5 上 48×192.4 MiB≈<strong>9 G 必死</strong>；清除要靠 force-stop + run-as 手改 <code>inference_settings.json</code>（引擎 tab 的覆写开关因 overflow 裁切在部分分辨率点不到，是<strong>另一个</strong>独立 bug） | L8×M1/M9 | <code>OWN</code> | <strong>开放</strong> | App 侧。<strong>判真</strong>：去掉 <code>"*"</code> 兜底语义（缺 id 即不覆写）后，新模型首装首跑不再出现 OOM 级 bank ⇒ 收口。<strong>判伪</strong>：改完仍能复现继承 ⇒ 兜底在别处（Dart 默认或 JNI setenv），继续查。顺带修开关的 overflow 裁切 |
+| <strong>G-719</strong> | LFM2.5 上 split-moe <strong>已真机跑通</strong>却只有 <strong>0.9 t/s</strong>：<code>decode window OFF</code> + <code>n_ubatch=3</code>（bank/4 生效）把 prefill 打成 3 token/步（126 s）⇒ 我们在 MiniCPM 上做的全部调优（<code>DECODE_WINDOW</code>/<code>ROUTE_KEEP</code>/暖态）<strong>一个都没在第二个模型上重放</strong>；同时它复现了 <code>bankgpu=cpu</code>，证明 §14.2 是<strong>默认值问题</strong>不是单模型特例 | L7/L8×M8 | <code>OWN</code> | <strong>开放</strong> | <strong>判真</strong>：把 MiniCPM 已验证档（<code>DECODE_WINDOW=64 ROUTE_KEEP=1</code> + 暖态 + <code>n_ubatch</code> 与 bank/k 解耦）在 LFM2.5 重放，tok/s 提升 ≥2× ⇒ 差距是配置债务，不是架构。<strong>判伪</strong>：重放后仍 ≤1.2 t/s ⇒ 存在第二个模型特有的真瓶颈，须单独定位（那时才允许怀疑内核/Mesa）。<strong>需设备 + 安静窗口</strong> |
+| <strong>G-720</strong> | <strong>门禁失效</strong>：<code>施工计划:138</code> 写着"<strong>两族模型（MiniCPM-V4.7 + Qwen3.6-35B 拆分包）同一代码路径跑通</strong>"，但第二族从未跑过 ⇒ 这是一道<strong>永远不会失败的闸</strong>（R8 同族）；而本次架构全景地图 §1–§14 的全部颜色都只对 MiniCPM 一个 workload 成立，却按"架构节点"呈现 ⇒ <strong>单 workload 冒充架构结论</strong> | L8×M9 | <code>OWN</code> | <strong>关闭（已立规，2026-10-21 11:5x）</strong> | 判具=地图新增 <strong>§15 三 workload 对照表</strong> + 新规则 <strong>R9</strong>：任何上色必须标 workload 作用域 <code>[MiniCPM]/[LFM2.5]/[通用]</code>，<strong>只有 ≥2 个 workload 复现才允许标 <code>[通用]</code></strong>，跨模型引用未标 <code>[通用]</code> 的节点视为无效引用。重跑法：<code>grep -c "\[通用\]" docs/全GPU卸载_架构全景地图_2026-10-21.md</code> 应随第二/第三 workload 接入而增长 |
+| <strong>G-721</strong> | <strong>Qwen3.6-35B-A3B 的 arch 归属未知</strong>，而它一处决定 U1 是 🟩 还是 🟥：候选 <code>qwen35moe</code>（复用现成合成）/<code>qwen3next</code>/<code>qwen4exp</code>（都要第三份副本）/<code>qwen3moe</code>（ssm=0，不像）。四者除 <code>qwen3moe</code> 外都已在 <code>llama-arch.cpp:1266-1282</code> 的 hybrid 能力名单内（同名单含 <code>lfm2moe</code>/<code>qwen35moe</code>） | L1/L7×M9 | <code>OWN</code>/外部 | <strong>开放（2026-10-21 12:0x 新开）</strong> | <strong>最便宜的解锁：只要一条 KV</strong>——<code>general.architecture</code> 的值（设备上有文件则一次 8 字节读；没有则你一句话）。<strong>判真</strong>：读出后若为 <code>qwen35moe</code> ⇒ U1 直接 🟩，Qwen3.6 只差打包器；若是其余三者 ⇒ U1 立为独立工项并按 G-722 抽取公共层。<strong>判伪</strong>：读出的 arch 名在本 fork 未注册 ⇒ 连加载都过不去，优先级立刻升到最前（先补 arch 注册再谈一切） |
+| <strong>G-722</strong> | <strong>split-moe 是复制式接入而非通用层</strong>：<code>qwen35moe.cpp:44-75</code>(32 行) 与 <code>lfm2moe.cpp:30-60</code>(30 行) 是两份平行副本（同序列 <code>moe_slot_bank_enabled → svm_buft → create_tensor_expert_alloc → virtualize_expert_tensor</code>），window/grouping 命中 <strong>11 vs 9</strong> 处 ⇒ <strong>已经在漂移</strong>；第 3 个模型=第 3 份副本 | L7×M9/M10 | <code>OWN</code>（需授权进 <code>third_party/llama.cpp</code>） | <strong>开放</strong> | 与 B2 hadamard 写入、B5 边界税插桩<strong>同一批授权</strong>。<strong>判真</strong>：抽公共层后第 3 个 arch 接入的 diff 行数 &lt; 10 行 ⇒ 抽象成立；<strong>判伪</strong>：仍需整段复制 ⇒ 抽象没做对（多半是家族命名/窗口布局没进参数），回 §16.5 重设计。<strong>这一格收口之前，"通用 MoE 承载层"的初衷不成立</strong> |
+| <strong>G-723</strong> | <strong>单 workload 把 C3.7 判错了性质</strong>：LFM2.5 <strong>38 层里只有 10 层有 attention ⇒ 28 层是 conv</strong>，线性注意力是它的<strong>主体算力</strong>；而同一份 <code>ssm_conv/ssm_scan/gated_delta_net</code> 代码我们在 MiniCPM 上按"旁支"处理且被 A8X 门控<strong>关死</strong>（<code>SSM_A8X</code> 默认 off）⇒ 对 LFM2.5 等于<strong>把主要算力关在 CPU</strong> | L6/L7×M3 | <code>OWN</code> | <strong>开放（优先级上调）</strong> | <strong>判真</strong>：LFM2.5 上开 <code>GGML_OPENCL_SSM_A8X=1</code> 后 CPU ops 显著下降（MiniCPM 侧 docs 记 432→42）且 decode tok/s 提升 ≥20% ⇒ 这一格是通用收益，不是 MiniCPM 特例。<strong>判伪</strong>：开启后 tok/s 不动 ⇒ 真瓶颈在别处（回到 G-719 的 <code>n_ubatch</code>/window）。<strong>注意 R9：这条结论必须由 LFM2.5 自己出数，不得引用 MiniCPM 的 432→42</strong> |
+| <strong>G-724</strong> | <strong>调优参数不可跨模型照抄</strong>：LFM2.5 是 <strong>top-4/64 + expert_bias</strong> 路由（比 MiniCPM 的 top-8/256 集中得多），8 GiB 缓存覆盖 66%；bank 实测 15 vs MiniCPM 512、<code>bytes_per_expert</code> 1,769,472 vs 450,560 ⇒ 命中率结构完全不同，<code>DECODE_WINDOW</code>/<code>ROUTE_KEEP</code>/预取档<strong>必须各自标定</strong> | L7×M9 | <code>OWN</code> | <strong>开放</strong> | <strong>判真</strong>：对 LFM2.5 单独扫一轮窗口档（<code>DECODE_WINDOW</code> × <code>ROUTE_KEEP</code>）出现 ≥2× 提升 ⇒ 参数确实是按模型标的，须建<strong>每模型默认档表</strong>（Dart 侧 bank 公式已有雏形）。<strong>判伪</strong>：最优档与 MiniCPM 一致 ⇒ 可共用一套默认值，撤资。<strong>需独占 K40 时段</strong> |
+| <strong>G-725</strong> | 🔴 <strong>四 workload 公共头号问题：自研 batched MoE 内核在 App 里从未被派发</strong>。Ling 3.0 Tiny（arch <code>bailingmoe3</code>，Adreno 830）用 <strong>Q4_K_M 与 Q4_0（内核本来就在）也一律静默回落 dense-loop</strong>：每 token ≈ <strong>550 次逐专家 GEMV + 550 次 add_row</strong>、<strong>227 ms 用户态 CPU/token 单线程</strong>、实测 <strong>2.8–3.9 t/s</strong>；<strong>10-15 前同机 batched 在跑时是 8+ t/s</strong>。拦截点 = <code>ggml-opencl.cpp:24733-24736</code> 的"预打包平面必须存在"检查（<code>seff/meff</code>/<code>q</code>/<code>d</code>），<strong>该路径一行日志都不打</strong> | L6/L7×M3/M9 | <code>OWN</code> | <strong>开放（2026-10-21 12:1x 新开，优先级置顶）</strong> | 来源：<code>Ling3.0Tiny_OpenCL性能回归定位_2026-10-20.md</code>（该文档此前在我的"未读"清单里，<strong>是我的疏漏</strong>——它早已写明机制）。<strong>判真</strong>：按该档 §6.1 做一次 <strong>3 行插桩构建（不动数值路径）</strong>，打印 <code>:24733-24736</code> 各分支命中数；若 <code>plane-missing → decline</code> 计数 ≈ 每 token 每 MoE 层命中 ⇒ 静默回落成立，Q3_K/Q4_K/Q4_0 三案合并为一案。<strong>判伪</strong>：插桩显示 batched 分支有命中 ⇒ 回落另有原因（回到 G-707 bisect 与 G-719 配置债务）。<strong>同时给 R9 补一条证据</strong>：本格结论由 <strong>Ling 自己</strong>的数支撑，不得引用 MiniCPM 的 0 提交记录 🟪 <strong>13:5x 机制层定案（§20.6）</strong>：闸前面还有闸——<code>ggml_cl_mul_mat_id</code>@29199 先过第 0 道闸 <code>moe_use_dense_loop(type)</code>（只放行 Q4_K/Q4_0），<strong>Q3_K 走 @29305 独立分支且失败即 <code>GGML_ABORT</code></strong>（batched-only，无 dense q3_K GEMV）⇒ 本发既没崩也没派发 ⇒ 真命题是"<strong>MUL_MAT_ID 到底有没有进 OpenCL</strong>"，即撞 <strong>G-712</strong>。仪器已补 3 个到达槽（<code>mul_mat_id_arrived_opencl</code>/<code>q3k_reached_batched_attempt</code>/<code>dense_loop_taken</code>）并改构造期自证；实证腿因 <code>loadavg=3.83</code> 被自家安静门 REFUSE，挂后台等窗口，<strong>出数前本节只算代码层定案</strong> |
+| <strong>G-726</strong> | <strong>GPU MoE 的两条"正路"都是死的</strong>：① <code>ggml_backend_opencl_device_offload_op</code>（:15265）默认 OFF，<strong>打开即 SIGSEGV</strong>；② <code>LLAMA_MOE_BANK_GPU=1</code>（FGSVM 零拷贝 bank）作者自评"<strong>能跑但没调优</strong>（740 上 pmgmt <strong>290 ms/tok</strong>，prefill 2×）"。⇒ 该专档原话："<strong>35B-A3B 这类 <code>.experts</code> 分片模型目前没有可用的 GPU MoE 路线</strong>" | L6/L7×M3 | <code>OWN</code> | <strong>开放</strong> | 与 G-713 合并取证（那格记的是工装把 <code>BANK_GPU</code> 钉死 0，本格记的是<strong>即使打开也不可用</strong>）。<strong>判真</strong>：绕开工装真开 <code>BANK_GPU=1</code> 后仍出现 pmgmt 级别劣化（≥2× 或 prefill 2×）⇒ "无可用 GPU MoE 路线"成立，Mesa 线的止损判断必须以<strong>CPU 专家</strong>为前提重算。<strong>判伪</strong>：开起来且 tok/s 优于 CPU bank ⇒ 该结论过期，立刻把三模型专家搬上卡。SIGSEGV 那条单独记：开 <code>OFFLOAD_MMID</code> 必崩，先判是不是同一根因 |
+| <strong>G-727</strong> | <strong>Qwen3.6-35B-A3B 的 arch 归属已由实测判定</strong>：盘上 <code>Qwen3.6-35B-A3B-UD-Q4_K_M.gguf</code> 的 <code>general.architecture</code> = <strong><code>qwen35moe</code></strong>（<code>general.name</code> = <code>Qwen3.6-35B-A3B</code>，753/753 张量解析自洽）⇒ <strong>U1 复用现成合成，不需要第三份副本</strong>；且专家三族名与 MiniCPM <strong>完全同名</strong>（<code>ffn_gate_exps/up/down</code>）⇒ <code>strip_experts.py</code> + manifest 近乎直接可用 | L1/L7×M9 | <code>OWN</code> | <strong>开放（U1 一条已定性；路线选择待用户，见 G-728）</strong> | <strong>判具（可重跑）</strong>：<code>dd if=&lt;gguf&gt; bs=1M count=56</code> 后在 <code>general.architecture</code> 之后按 <strong>u64 类型码</strong>读字符串（本仓库两份大 GGUF 的 KV 都用 u64 类型码，<strong>这正是今天 MiniCPM KV 解析跑偏的真因</strong>）。附带收获：常驻 <strong>2.42 GiB</strong> / 专家 <strong>18.68 GiB</strong> / 每专家 <strong>1.91 MiB</strong> / top-8×40 ⇒ <strong>611 MiB/token</strong>。<strong>判真</strong>：重取头部按 u64 类型码解出 <code>general.architecture=qwen35moe</code> ⇒ U1 复用现成合成成立，Qwen3.6 只差打包器与磁盘。<strong>判伪</strong>：若官方/我们最终采用的那份 GGUF 声明的是 <code>qwen3next</code>/<code>qwen4exp</code>/<code>qwen3moe</code> 之类 ⇒ U1 立刻改按"第三份副本"计工，并回到 §16.5 先抽公共层再接入 |
+| <strong>G-728</strong> | <strong>"Q4 太大"需要精确化，否则会误杀架构</strong>：整包 <strong>21.11 GiB 判死</strong>（GSQ-hybrid 11.368 GiB 在 16 GB 机也顶满）——但 split-moe 从不需整包常驻，实测<strong>常驻仅 2.42 GiB</strong>。三条路线都卡在 G-725：R-A 用盘上 Q5_K/Q6_K 出拆分包（内核齐但<strong>齐≠派发</strong>）；R-B 走 <strong>GSQ T42 2.25bpw</strong>（省一半磁盘，但 <code>grep -rain "T42\|GSQ" ggml.h/ggml-opencl.cpp/ggml-cpu</code> <strong>= 0 命中，fork 里零支持</strong> ⇒ 要双端新写反量化内核）；R-C 自造中间档（Q4_0/Q4_K） | L1/L6×M9 | <code>OWN</code>/外部 | <strong>开放（等用户选路线）</strong> | <strong>判真</strong>：G-725 打通后先跑 R-A（改动最小：arch 已接、族名同 MiniCPM、内核齐），若 tok/s 达 MiniCPM 同档（±30%）⇒ 不需要 GSQ，省掉一整块双端内核工作。<strong>判伪</strong>：R-A 因体积/IO 明显不达标（611 MiB/token 是 MiniCPM 的 1.48×，页缓存冷热按 G-920 会是主变量）⇒ 才立 GSQ 反量化内核工项。<strong>顺序错了会白写一套内核</strong> |
+| <strong>G-729</strong> | <strong>第四 workload 的 U1 缺口</strong>：Ling 3.0 Tiny 的 arch <strong><code>bailingmoe3</code> 没有 split-moe 接入</strong>（<code>grep -ac "moe_slot_buft\|virtualize_expert_tensor" bailingmoe3.cpp</code> = 0），而它同时带 <strong>MLA（层3+）+ 每层 KDA 线性注意力（<code>ssm_conv1d_q/k/v</code>、<code>ssm_a/beta/f_a/g_a/norm/dt</code>）+ 128 专家 top-8</strong> ⇒ 是四个模型里分支最复杂的一个，也是验证"统一承载层"最狠的试金石 | L7×M9 | <code>OWN</code> | <strong>开放</strong> | <strong>判真</strong>：按 G-722 抽出公共层后，<code>bailingmoe3</code> 的接入 diff &lt; 10 行 ⇒ 抽象经受住第 4 个 arch；<strong>判伪</strong>：需要整段复制并另加 MLA/KDA 特例 ⇒ "统一承载层"仍名不副实，回 §16.5 重设计。注意它的 MLA+KDA 会让 C3.7 泳道（今天仍是 🟥 未观测）变成必答题 |
+| <strong>G-730</strong> | 🔴 <strong>方向裁决格：手机物理只放过 sub-3bpw，而 sub-3bpw 的内核在我们唯一自研的 OpenCL 线上恰好是 0</strong>。实测 <code>grep</code> 全树：<code>IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ1_S/IQ1_M/IQ4_XS</code> 在 <code>ggml-opencl.cpp</code> <strong>全为 0</strong>；而 CPU 侧有（<code>ggml-cpu/quants.c</code>、<code>arch/arm/quants.c</code>、<code>ggml-quants.c</code>，含 ARM 特化）、<strong>Vulkan 侧也有</strong>（<code>ggml-vulkan.cpp</code> 每个 IQ 类型都有分支，靠 turnip 白拿）；<code>repack</code>/<code>KleidiAI</code> 两列全空 | L6×M3/M9 | <code>OWN</code>/<code>UP</code> | <strong>开放（2026-10-21 12:2x 新开，与 G-725 并列置顶）</strong> | <strong>这是裁决不是工程量</strong>：①自研补 <code>gemv_moe</code>/<code>gemm_moe</code> 的 sub-3bpw 内核族（5 类型×2，且要过 Adreno 编译门——<code>half</code> 当变量名那种坑就在这道门上）；②承认手机 sub-3bpw 走 <strong>Vulkan/turnip</strong>（内核白拿，代价=驱动 🟦 不可改 + 无上报通道 E3/G-104）；③接受专家永久留 CPU（能算但无 repack/KleidiAI ⇒ generic 慢路）。<strong>判真</strong>：选①后任取一型（建议 <code>IQ4_XS</code> 或 <code>MXFP4</code>，离现有内核最近）跑通并比 CPU 快 ≥2× ⇒ 自研内核路线成立。<strong>判伪</strong>：编得过但打不过 CPU，或 Adreno 编译门反复不过 ⇒ 转②，Mesa 线只保留非 MoE 算子。<strong>注意：在此之前所有"Mesa 该不该止损"的争论都没有意义</strong> |
+| <strong>G-731</strong> | <strong>tok/s 的硬上限由算术决定，不由内核质量决定</strong>（K40 实测 <code>dd bs=1M count=128</code> 同区两遍：<strong>冷读 UFS 645 MB/s ｜ 暖读页缓存 2.8 GB/s</strong>）。恒等式 <code>tok/s ≤ min(645, 2800×命中率)/ (bytes/token)</code> 一代入：MiniCPM Q3_K 412 MiB ⇒ 冷上限 <strong>1.57 t/s</strong>；Qwen3.6 Q5_K 611 MiB ⇒ <strong>1.06 t/s</strong>；LFM2.5 Q4_0 769 MiB ⇒ <strong>0.84 t/s</strong>（<strong>实测 0.9 t/s，差 7%，机制命中</strong>）。⇒ <strong>今天所有 tok/s 目标先过这道算术再立项</strong> | L8×M9 | <code>OWN</code>/<code>HW</code> | <strong>开放（上限已坐实，数值待量）</strong> | <strong>判真</strong>：把 <code>dd bs=1M</code> 换成 <strong><code>preadv</code> 按 <code>bytes_per_expert</code> 随机粒度</strong>复测（今天这 645 MB/s 是顺序读，真值应更低——<strong>这是全表最保守的一环</strong>），若随机带宽 &lt;450 MB/s ⇒ 现表所有"边缘可行"档一律改判不可行，<code>bytes/token</code> 预算须再砍半。<strong>判伪</strong>：随机粒度实测仍 ≥600 MB/s ⇒ 表可直接用于路线裁决，撤掉这格的保守性折扣。<strong>需安静窗口（loadavg&lt;2）</strong>。<br>2026-10-21 12:3x 实况：v1 作废（见 G-735）；v2 就绪 <code>third_party/mesa-kgsl/scripts/g731_rwprobe_v2.sh</code>；首跑被自家安静闸拒绝 <code>REFUSE: loadavg(1min)=2.62 &gt;= 2</code> ⇒ <strong>至今无裁决数</strong> |
+| <strong>G-732</strong> | <strong>Adreno UMA 下"全 GPU 卸载"与"专家命中率"是零和</strong>：常驻权重上卡是<strong>必 resident 拷贝</strong>（与 CPU 共享同一份 11.5 GB），它与专家页缓存抢同一池水。Qwen3.6 Q5_K 在 K40 的账：常驻拷贝 2.42 + KV 1–2 + bank 1.32 ≈ <strong>5 GiB</strong> ⇒ 专家池 18.68 GiB 只剩 ~4 GiB 缓存 ⇒ <strong>命中率天花板 ≈21%</strong> ⇒ 5 t/s 所需 2.01 GiB/s 里 79% 压在 UFS(645 MB/s) ⇒ <strong>判死</strong> | L8×M1/M9 | <code>HW</code>/<code>OWN</code> | <strong>开放</strong> | <strong>判真</strong>：跑测中同时采 <code>/proc/meminfo</code> 与 bank 实际驻留，若可用页缓存确实 ≤4 GiB 且命中率实测 ≤25% ⇒ "Q5_K 整包路线"在本项目正式放弃，资源全部转向 sub-3bpw（G-730）。<strong>判伪</strong>：可用缓存 &gt;7 GiB（说明常驻/bank 可压缩）⇒ Q5_K 路线仍有救，G-728 的 R-A 保留。<strong>这一格是 §18 那张表里唯一能单独改变项目路线的一格</strong> |
+| <strong>G-733</strong> | <strong>路线① 的里程碑 M1（用户 12:28 回 <code>1</code> 选定"自研 sub-3bpw MoE 内核族"）</strong>：§18 判定 K40 处在<strong>带宽受限区</strong> ⇒ 首批内核<strong>不需要快，只需要算得对且不比 CPU 慢</strong>。M1 刻意收到一件：<code>kernels/gemv_moe_iq4_xs_f32_ns.cl</code>（克隆 <code>gemv_moe_q5_k_f32_ns.cl</code> 的族形）＋ <strong>8 处后端注册</strong>（照 <code>GGML_TYPE_Q5_K</code> 出现点：<code>:9520</code>/<code>:10166</code>/<code>:10176</code>/<code>:10190</code>/<code>:12622</code>/<code>:14126</code>/<code>:27118</code>/<code>:27705</code>）＋ <strong>IQ 型预打包平面</strong> | L6/L7×M3 | <code>OWN</code>（需授权进 <code>third_party/llama.cpp</code>） | <strong>开放</strong> | 前置先走：<strong>G-725</strong>（<code>:24733-24736</code> 静默闸不打通，<strong>新内核照样不派发</strong>）与 <strong>G-734</strong>（Adreno 编译门）。<strong>判真</strong>：M1 落地后同模型同数据 <code>tok/s ≥ CPU 专家路径 1.0×</code> <strong>且</strong> <code>GGML_MOE_TRACE=1</code> 里 batched 分支有命中 ⇒ 自研内核路线成立，随即排 M2（<code>gemm_moe</code>+dp4a）/M3（IQ3_XXS→IQ2_<em> 逐型下探）。</em><em>判伪</em><em>：编得过、派发也对，但 tok/s 低于 CPU ⇒ 该型在 Adreno 上不值得 GPU 化，转 §18.5 路线②（Vulkan/turnip 白拿内核） 🟪 </em><em>13:5x 验收判据加硬（§20.6）</em><em>：</em><em>不许拿 <code>test-backend-ops</code> 全绿当数</em><em>——它张量无名 ⇒ <code>use_adreno_moe_kernels()</code> 返回 false ⇒ 跑的是通用内核，抓不到 MoE 数值腐蚀（既有实锤：vendor <code>gemv_moe/gemm_moe *_f32_ns</code> 真 Ling 形状 </em><em>NMSE 0.4–2.4</em><em>，dense-loop </em><em>NMSE 0</em><em>）。M1 必须用 <code>moe_probe4</code> 式</em><em>真模型名+真形状</em><em>出 NMSE，目标对齐 bit-exact；派发证据仍要 <code>DISPATCHED_batched&gt;0</code> |
+| </em><em>G-734</em><em> | </em><em>Adreno 编译门是路线① 的第一道杀手，必须先探再写</em><em>：AGENTS 既有铁律——<code>.cl</code> 里 <code>half</code> 当变量名即 <code>clBuildProgram</code> 失败（err=-11 cannot combine with previous 'int' declaration specifier）、init abort；</em><em>NDK 交叉编译过 / 桌面 NEO 过，都不代表 Adreno 过</em><em>。同类风险面：<code>reqd_subgroup</code> 假设、<code>dp4a</code>（gen6 K40 是否可用——现有 6 个 <code>*_q8_1_dp4a</code> 内核是证据但非结论） | L6×M3/M10 | <code>OWN</code>/<code>HW</code> | </em><em>关闭（2026-10-21 13:3x 实测：编译门已让路，见 §20.2）</em><em> | 最便宜探法：</em><em>写一个"只 dequant、不做任何优化"的最小 <code>.cl</code></em><em>，按铁律用 </em><em>qwen3.5-4b 开 OpenCL 加载一次</em><em>触发全量编译，<code>logcat -c</code> 后实时抓 <code>kernel compile error</code>。</em><em>判真</em><em>：最小内核过编 ⇒ 编译门不是瓶颈，M1 直接开工。</em><em>判伪（未触发）</em><em>：若某型内核编不过 ⇒ 先解编译门再写。⚠ 本次发现 </em><em><code>half</code> 保留字两栈都拒</em><em>（不是 Adreno 专属）⇒ 见 G-737。🟪 </em><em><code>dp4a</code> 已机检定案：vendor </em><em>无</em><em> <code>cl_khr_integer_dot_product</code>、我们 Mesa </em><em>有</em><em> ⇒ 见 G-736</em><em> |
+| </em><em>G-736</em><em> | 🟪 </em><em><code>dp4a</code> 两栈非对称（本轮机检，此前只有间接证据）</em><em>：vendor Adreno 650 扩展表里 </em><em>没有 <code>cl_khr_integer_dot_product</code></em><em>，我们自带 Mesa 26.2.4 </em><em>有</em><em> ⇒ <code>gemm_moe_{mxfp4,q4_0,q4_k,q6_k,q8_1}_*_dp4a.cl</code> 等 </em><em>6 个内核的 dp4a 快路在 vendor 上是静默死路</em><em>（内核用 <code>#ifdef cl_khr_integer_dot_product</code> 守卫 ⇒ </em><em>编译照过、快路不存在</em><em>，R8 型永不过的闸）。同表另一侧：Mesa </em><em>没有 <code>cl_khr_subgroups</code></em><em>、vendor 有；<code>cl_khr_subgroup_shuffle</code> 反过来只有 Mesa 有（vendor 只有 <code>cl_qcom_subgroup_shuffle</code> 私有版） | L6×M3/M10 | <code>OWN</code>/<code>UP</code>/<code>HW</code> | </em><em>开放（2026-10-21 13:3x 新开）</em><em> | </em><em>判具（可重跑）</em><em>：<code>PROBE_OCL=&lt;lib&gt; /data/local/tmp/cl_cc_probe</code> 的扩展位表（<code>scripts/run_cl_cc_probe.sh</code> 一次出两栈）。</em><em>判真</em><em>：在 vendor 腿用 <code>GGML_OPENCL_MOE_TIME=1</code> 抓到 dp4a 内核派发后耗时与 f32 版无差 ⇒ 证实"编译过但走的不是 dp4a"。</em><em>判伪</em><em>：vendor 上 dp4a 版确实更快 ⇒ 我们的扩展位读数或选卡有问题（回来重测）。</em><em>这是"Mesa 线该不该继续投"目前唯一的具体正面论据：dp4a 只有我们的 Mesa 给得起</em><em> |
+| </em><em>G-737</em><em> | 🟪 </em><em>祖传记忆被证伪</em><em>：AGENTS 记「Adreno OpenCL 编译器把 <code>half</code> 当类型关键字，NDK/桌面 NEO 能编过」——本轮同一份 <code>probe_ctrl_half.cl</code> 在</em><em>我们自研 Mesa 栈上也以 <code>clBuildProgram=-11</code> 失败</em><em>。真因是 <code>half</code> 为 </em><em>OpenCL C 保留数据类型名</em><em>（开 <code>cl_khr_fp16</code> 后是类型），合规编译器一律拒 ⇒ </em><em>归因错了</em><em>（语言规则 ≠ 驱动怪癖），连带"NEO 能编过"那句站不住；</em><em>仍然成立的部分</em><em>是"错误只在真机 build log 里看得见"，所以铁律要留、理由要换 | L6×M9 | <code>OWN</code> | </em><em>开放（订正类，成本≈0）</em><em> | </em><em>判具</em><em>：<code>bash third_party/mesa-kgsl/scripts/run_cl_cc_probe.sh</code> 两条对照腿（vendor <code>-11</code> + mesa <code>-11</code>）。</em><em>判真</em><em>：AGENTS 该条改写为"OpenCL C 保留字 + 真机 build log 才可见"，并删掉"Adreno 专属/NEO 能过"的措辞 ⇒ 防下次有人拿它去解释别的编译失败。</em><em>判伪</em><em>：若能在 NEO 上复现"编得过" ⇒ 我这条证伪不成立，恢复原记忆并补上复现条件。</em><em>顺手把 §4/§D 里引用这条的措辞一起订正</em><em> |
+| </em><em>G-738</em><em> | 🟪 </em><em>Mesa 侧无 <code>cl_khr_subgroups</code>，靠两个开关硬绕，真实性价比未测</em><em>：家族内核普遍 <code>#pragma OPENCL EXTENSION cl_khr_subgroups : enable</code> + 依赖 <code>reqd_sub_group_size</code>；我们的 Mesa 26.2.4 扩展表</em><em>没有</em><em> <code>cl_khr_subgroups</code>（只有 <code>cl_khr_subgroup_shuffle</code> 系）⇒ <code>run_mesa_matrix.sh:45</code> 长期挂着 <code>GGML_OPENCL_ALLOW_NO_SUBGROUP=1</code> 与 <code>GGML_OPENCL_FAKE_QCOM_REQD=1</code> 才能跑起来 | L6×M3 | <code>OWN</code> | </em><em>开放</em><em> | </em><em>判真/判伪</em><em>：同模型同数据跑 <code>GGML_OPENCL_ALLOW_NO_SUBGROUP=0</code> vs <code>1</code> 对照（其余 env 逐字相同，含 <code>FAKE_QCOM_REQD</code>），tok/s 差 ≥5% 同号两轮 ⇒ 这两个开关不是无害兜底，</em><em>内核的 subgroup 假设在我们线上是打折实现的</em><em>，须按内核逐个复核；差 &lt;5% ⇒ 记为"已验证不影响"，从此不再纠缠。</em><em>需安静窗口</em><em> |
+| </em><em>G-739</em><em> | 🟪 </em><em>MoE 内核的验收仪器缺口：<code>test-backend-ops</code> 是盲区</em><em>（既有定案被本轮翻出并纳入网格）：vendor <code>gemv_moe/gemm_moe *_f32_ns</code> 在 </em><em>Adreno 830 上对全部支持类型数值损坏</em><em>——真 Ling 形状 <code>E=128 K=1536/512</code>（乃至退化 <code>E=8 K=256</code>）</em><em>每专家 NMSE≈0.4–2.4</em><em>，同形状 dense-loop </em><em>bit-exact NMSE 0.000000</em><em>；而 <code>test-backend-ops</code> 的张量</em><em>无名</em><em> ⇒ <code>use_adreno_moe_kernels()</code> 返回 false ⇒ 实际跑被 <code>trans4_ns</code> 修好的通用内核 ⇒ </em><em>全绿也不能证明 MoE 内核对</em><em>，vendor MoE 因此被降级为仅诊断（<code>GGML_OPENCL_MUL_MAT_ID=1</code>） | L6×M9/M3 | <code>OWN</code>/<code>HW</code> | </em><em>开放（2026-10-21 13:5x 新开）</em><em> | </em><em>判具（可重跑）</em><em>：<code>_probe/moe_probe</code> 的 <code>moe_probe4</code>（真模型名 <code>ffn...exps</code> + 真形状）出 NMSE。</em><em>判真</em><em>：任何新 MoE 内核（含 G-733 M1 的 IQ4_XS）验收必须同时给 ①<code>moe_probe4</code> NMSE（目标 0）②<code>DISPATCHED_batched&gt;0</code>；<code>test-backend-ops</code> 通过</em><em>不得</em><em>写进验收结论。</em><em>判伪</em><em>：若某次 backend-ops 全绿且 <code>moe_probe4</code> 也 NMSE=0 ⇒ 盲区论对该内核不成立，降级为参考项。</em><em>这条是"存在≠执行"第三次翻车之后立的验收规矩</em><em> |
+| </em><em>G-740</em><em> | 🟪 </em><em>batched MoE 的两侧门不等价，而注释声称等价</em><em>（<code>:24801</code> 白纸黑字 "same name/shape gate, both sides stay consistent"）：派发侧 <code>use_adreno_moe_kernels</code>@9565 要 <code>("ffn"&amp;&amp;"exps")\|\|"as"</code> </em><em>+ <code>ne01%32==0</code> + 代际非 A6X/A7X/UNKNOWN</em><em>；建平面侧 <code>is_moe_expert_weight</code>@9623 只要 <code>ne[2]&gt;1 &amp;&amp; name~"exps"</code> ⇒ 存在"</em><em>平面建好了但派发静默拒</em><em>"的结构窗口，零日志 | L6×M9/M3 | <code>OWN</code> | </em><em>开放（2026-10-21 14:1x 新开）</em><em> | </em><em>判真</em><em>：给三种拒绝各加一次性日志后，任一 workload 出现 <code>planes_gate=1 &amp; dispatch_gate=0</code> ⇒ 坐实漂移，修复=两闸合一（F2）。</em><em>判伪</em><em>：全部样本两侧同起同落 ⇒ 注释成立，本格降级为文档订正。</em><em>这是 lfm2moe 9-vs-11 之后第二例"复制式实现导致的闸漂移"</em><em> |
+| </em><em>G-741</em><em> | 🟪 </em><em>测试台覆盖缺口：K40（Adreno 650 = A6X）结构上跑不了 batched MoE</em><em>——q4_0 的 MoE 布局生成本身被派发闸把守（<code>set_tensor</code>@11247 <code>if (use_adreno_moe_kernels(...)) { noshuffle+2D transpose }</code>），而该闸对 A6X/A7X/UNKNOWN 一律 false ⇒ 在 K40 上</em><em>连布局都不生成</em><em>，batched 无从谈起；须 <code>GGML_OPENCL_MOE_FORCE_A7X=1</code>（逃生口注释点名 "2026-10-14 Ling q4_0 garbling bisect"）才看得见真闸，</em><em>而 A6X 的 <code>trans4_ns</code> repack 本就误编译 ⇒ 数值不可信，只能做闸诊断</em><em> | L6×M7/M10 | <code>OWN</code>/<code>HW</code> | </em><em>开放</em><em> | </em><em>判真</em><em>：凡"batched 能跑/不能跑"的历史结论，若其构建/设备是 A6X/A7X 且未开 FORCE_A7X ⇒ 一律标 <code>不可信</code> 重审。</em><em>判伪</em><em>：某条 K40 结论其实走的是非 MoE 路径（与 batched 无关）⇒ 保留并改标作用域。</em><em>同时暴露一个更大问题：Ling 的在役机是 8 Elite/Adreno 830，当前未连接——真复现必须把 830 接回来</em><em> |
+| </em><em>G-742</em><em> | 🟪 </em><em>Ling 3.0 Tiny 回落的回归边界已精确到提交</em><em>：<code>ae8ba172</code>(2026-10-14 v0.3.0「q4_K 禁用定案」——引入 <code>moe_use_dense_loop</code> + <code>Q4_K\|\|Q4_0</code> 白名单，此前 MUL_MAT_ID </em><em>直通</em><em> batched，即"10-15 之前 8+ tok/s"时代的中止点) 与 <code>aae62ae0</code>(2026-10-14 v0.3.1「host 预计算 scale dodge」——新增 <code>seff/meff</code> 闸)。Ling 专档记录的 Q4_K_M 与 Q4_0 </em><em>双双</em><em>静默回落 dense-loop（227 ms 用户态 CPU/token、2.8–3.9 tok/s）与该日吻合 | L6×M3 | <code>OWN</code> | </em><em>开放（实证腿排队中）</em><em> | </em><em>判具（可重跑）</em><em>：<code>bash /tmp/run_ling_gate.sh</code>（vendor 栈 + <code>FORCE_A7X=1</code> + <code>GGML_OPENCL_MOE_GATE_STATS=1</code>，含"首见身份打印"）。</em><em>判真</em><em>：<code>seen</code> 行给出真实 <code>name/type/ne[]</code> 与两侧闸裁决 ⇒ 直接指到 F1–F4 中的某一条。</em><em>判伪</em><em>：若 <code>DISPATCHED_batched&gt;0</code> 而 tok/s 仍低 ⇒ 回落不是原因，回来重定罪名。</em><em>当前阻塞</em><em>：同机有他人的 Vulkan 腿（PID 16203，96.7% CPU）在跑，安静门两次 REFUSE——</em><em>不动别人的实验</em><em> 🟪 </em><em>14:5x 嫌疑面收窄</em><em>：加载日志证实 Ling 的路由专家名是 <code>blk.N.ffn_{down,up,gate}_exps</code>（</em><em>含 <code>ffn</code> 且含 <code>exps</code></em><em> ⇒ 名字条件成立），共享专家是 <code>_shexp</code>（不含 <code>exps</code>，被正确排除）⇒ 真凶收窄到 </em><em><code>ne01%32</code> / <code>seff+meff</code> 平面 / NGL 是否真把 MoE 层放上 GPU</em><em> 三项。两次全零读数</em><em>都是假零</em><em>（第一次 FA 编译崩、第二次 OOM <code>996.49 MiB err=-5</code>，NGL=99 且他人 Vulkan 腿占 4.5GB RSS） |
+| </em><em>G-743</em><em> | 🟪 </em><em><code>flash_attn_repack.cl</code> 在 Adreno 650 vendor 编译器上从未编过</em><em>：3 处 <code>write_imageh</code> 写 <code>__write_only image3d_t</code>，而 </em><em><code>cl_khr_3d_image_writes</code> 的 pragma 数量=0</em><em> ⇒ <code>error: Writable 3d images require the cl_khr_3d_image_writes extension enabled</code> + <code>OpenCL requires a write_only image parameter to write_imageh</code> ⇒ </em><em>权重上传期失败、模型加载不起来</em><em>。而该扩展</em><em>两栈都已广播</em><em>（§20.3 实测 all_exts 均含），只是没 enable。一直没暴露的原因：</em><em>App 在役是 <code>flash_attn=DISABLED</code></em><em> ⇒ A6X 这一档（中低端在役主力）从未真正编过这条路径 | L6×M3/M9 | <code>OWN</code> | </em><em>关闭（2026-10-21 14:5x，修一行 pragma，两栈验过）</em><em> | </em><em>判具（可重跑）</em><em>：<code>PROBE_OCL=/vendor/lib64/libOpenCL.so /data/local/tmp/cl_cc_probe /data/local/tmp/fa_repack.cl</code> ⇒ 修前 <code>COMPILE_FAIL</code>（4 条 error 与运行期日志逐字一致）、修后 vendor 与 Mesa 双 <code>COMPILE_OK</code>；重编后运行期 151 个内核全过。</em><em>顺带定案：今后任何 <code>.cl</code> 改动先过 <code>cl_cc_probe</code> 再过 e2e</em><em>（同一故障 e2e 要 4 分钟+1531 行日志才在尾部露脸，探针 2 秒） |
+| </em><em>G-744</em><em> | 🟪 </em><em>假零风险（R10 推论）：死在推理之前的进程也打全零计数</em><em>，本轮连着两次（FA 编译崩、OOM <code>996.49 MiB err=-5</code>）都把"全零"摆到了台前。若没有构造期自证打出的 <code>consults=0</code>，这两发都会被误读成"专家 MUL_MAT_ID 从未进入 OpenCL"并据此把 G-712 收口定案 —— </em><em>那是个错误定案</em><em> | L8×M9 | <code>OWN</code> | </em><em>开放</em><em> | </em><em>判真</em><em>：任何以计数为据的结论，取证前必须同时满足 ①<code>RC=0</code> ②"到达类"计数非零（或明确解释为何可为零），否则记 <code>假零-无效</code>。</em><em>判伪</em><em>：某次全零在 RC=0 且到达计数非零下仍然成立 ⇒ 才是有效证据。</em><em>同时暴露工装缺口：e2e 在 NGL=99 全载失败时只在末尾留一行 FATAL，应把"到哪一步死的"打进日志头</em><em> |
+| </em><em>G-745</em><em> | 🟪 </em><em>Ling 在 K40 上加载不起来，死因是一块 <code>996.49 MiB == 1044893696 B</code> 的 <code>clCreateBuffer</code> 返回 <code>err=-5</code></em><em>，且该字节数对 <code>E2E_NBATCH</code>（512-&gt;128）与 <code>E2E_NCTX</code>（4096-&gt;512，工装原</em><em>硬编码</em><em> 4096）</em><em>双双不敏感</em><em> ⇒ </em><em>既不是 compute buffer 也不是 KV</em><em>（我先前按 <code>2*n_ctx*n_layer*dim*4B</code> 反算"就是 KV"，已公开纠正）。</em><em>15:1x A/B 已定案：邻居假设被证伪</em><em> —— 停掉 CPU 腿后 <code>MemAvailable</code> 4.5 GB -&gt; </em><em>9.28 GB</em><em>，同一块 <code>1044893696 B</code> 仍然 <code>err=-5</code> ⇒ </em><em>vendor Adreno 650 驱动存在单块 ~1 GB 硬上限</em><em>，与空闲内存无关。连带定案：</em><em>K40 不能承载 Ling 的 OpenCL 复现</em><em>（A6X 代际排除 + repack 误编译 + 本条上限，三障碍叠加）⇒ 真复现必须上 830 | L6×M10 | <code>OWN</code>/<code>HW</code> | </em><em>开放</em><em> | </em><em>判真（已执行）</em><em>：同参重跑 + 唯一变量=邻居 ⇒ 分配仍失败 ⇒ 上限坐实。</em><em>下一步判具</em><em>：用 NGL 扫描（99/32/16/8/4）反推"单块不超过 X"的可加载档位，并把该上限值写进 §18 硬件算术层；<code>cl_alloc_probe</code> 修好（G-746）后换成直接量 <code>CL_DEVICE_MAX_MEM_ALLOC_SIZE</code>。</em><em>判伪</em><em>：换 n_ctx/n_batch 之后字节数若发生变化 ⇒ 前述两个排除作废，回到 owner 归属分析 |
+| </em><em>G-746</em><em> | 🟪 </em><em>自写仪器不可信登记：<code>tools/cl_alloc_probe.c</code> 在 vendor ICD loader 上 <code>clGetDeviceIDs</code> 返回 <code>-31 CL_PLATFORM_NOT_FOUND_KHR</code></em><em>，而</em><em>同环境</em><em>的 <code>cl_cc_probe</code> 能正常拿到 Adreno 设备；差异在未定（怀疑函数指针解析路径不同：<code>cl_cc_probe</code> 走 <code>sym()</code> 的 dlsym -&gt; <code>clGetExtensionFunctionAddressForPlatform</code> -&gt; <code>clGetExtensionFunctionAddress</code> 三级兜底，本探针只 dlsym 直取）。另：<code>/sys/class/kgsl/kgsl-3d0/</code> 对 shell 是 Permission denied、<code>adb root</code> 不提权 ⇒ </em><em>Adreno GPU 内存上限无权威读数</em><em> | L8×M9 | <code>OWN</code> | </em><em>开放（结论一律不采信）</em><em> | </em><em>判真</em><em>：若补齐三级函数解析后能枚举到设备并给出 <code>CL_DEVICE_MAX_MEM_ALLOC_SIZE</code> ⇒ 升级为 G-745 的判具。</em><em>判伪</em><em>：仍 <code>-31</code> ⇒ 删除该探针，改用 <code>dumpsys meminfo</code> + 驱动日志取上限，并把"自写探针必须先复用 <code>sym()</code> 三级兜底"写成仪器规范 |
+| </em><em>G-747</em><em> | 🟪 </em><em>Ling 在役回落的头号嫌疑人 = <code>adreno_e17_compiler_quirks()</code>@9530：默认判 true 且原先零日志</em><em>。条件是编译器被解析成 <code>ADRENO_CL_COMPILER_TYPE::E17</code>，此时除非 <code>GGML_OPENCL_ADRENO_E17_QUIRKS=0</code> 否则</em><em>默认认定"有 quirks"</em><em>，直接把 batched MoE 拒掉 -&gt; 回落 dense-loop。实测对照：</em><em>K40 编译器 <code>E031.37.12.07</code> 非 E17 ⇒ 该闸 false ⇒ batched 100% 命中</em><em>；</em><em>830 实测：<code>driver = OpenCL 3.0 QUALCOMM build: 0800.71 Compiler E031.47.18.49</code> ⇒ 前缀 E031 解析为 E03，非 E17</em><em> | L6×M3 | <code>OWN</code>/<code>HW</code> | </em><em>关闭（2026-10-21 15:3x 判伪：830 编译器 E031 非 E17）</em><em> | </em><em>判具</em><em>：① <code>PROBE_OCL=/vendor/lib64/libOpenCL.so /data/local/tmp/cl_cc_probe &lt;任意.cl&gt;</code> 打印 830 的 compiler 串（今天已为 K40 打印过）；② 若判 E17，同命令加 <code>GGML_OPENCL_ADRENO_E17_QUIRKS=0</code> 复跑，F1 会打 <code>DECLINE: E17-quirks name=...</code>。</em><em>判真</em><em>：关掉该 env 后 <code>DISPATCHED_batched&gt;0</code> 且 tok/s 回到 8+ ⇒ 坐实，修法是把"默认 true"改成"按版本区间判定 + 必须打日志"。</em><em>判伪</em><em>：830 compiler 非 E17 ⇒ 排除，回到 <code>seff/meff</code> 与代际实测两条 |
+| </em><em>G-748</em><em> | 🟪 </em><em>K40 侧定案：闸不是 Ling 的瓶颈</em><em>——<code>NGL=16</code>（16/25 层，K40 唯一可加载档，NGL=32 仍撞 1 GB 单块上限）下，Ling 真实专家张量 <code>ffn_{gate,up}_exps ne=[1536,512,128]</code> / <code>ffn_down_exps ne=[512,1536,128]</code> </em><em>三闸全过</em><em>，<code>mul_mat_id_arrived_opencl=1665 -&gt; DISPATCHED_batched=1665</code>，<code>dense_loop_taken=0</code>，<code>q4_0_planes_missing=0</code>。⇒ §20.7/§20.8 抬高的名字/<code>ne01%32</code>/<code>seff+meff</code>/整除守卫嫌疑</em><em>在 Ling 上全部无罪</em><em>（该档 <code>tok_s=1.32</code> 不可与 8+ 对比：只挂 16/25 层 + 起跑 loadavg 4.65 + 650 代际受限） | L6×M3 | <code>OWN</code> | </em><em>关闭（2026-10-21 15:2x 实测）</em><em> | </em><em>判具（可重跑）</em><em>：<code>bash /tmp/ngl_sweep.sh</code>（NGL 99/32/16/8/4 扫到能加载为止，含 F1 拒因与闸计数打印）。</em><em>判真</em><em>：若在</em><em>同一档 NGL</em><em> 下出现任一两闸 =0 ⇒ 本格作废、嫌疑回归。</em><em>判伪</em><em>：换 830 后若仍 <code>DISPATCHED_batched=0</code> ⇒ 说明 K40 与 830 的闸行为不同，须另立格 |
+| </em><em>G-749</em><em> | 🟪 </em><em>曾判为"Android 16 上 <code>/data</code> 可执行文件拿不到 vendor <code>libOpenCL.so</code>"（链接期 <code>cannot locate symbol "clEnqueueSVMMemcpy"</code>）——该结论判伪</em><em>。真因全部在我方仪器：① </em><em>漏推 <code>libopencl_stub.so</code> 到 830</em><em>（<code>DT_NEEDED</code> 就是它，缺库即缺符号）；② 我又推了一份</em><em>改名成 <code>libOpenCL.so</code> 的 stub</em><em> 污染裸名查找；③ <code>OCL_ICD_FILENAMES=</code> 空赋值杀死平台枚举（见 G-753）。三者修好后同一命令 <code>RC=0</code> 并打出 <code>selected platform QUALCOMM Snapdragon</code> + <code>25/25</code> 全载 | L8×M10 | <code>OWN</code> | </em><em>关闭（2026-10-21 16:4x 判伪）</em><em> | </em><em>判具（复核可重跑）</em><em>：<code>adb -s &lt;830&gt; push _probe/moe_probe/build-android/libopencl_stub.so /data/local/tmp/</code> 后 <code>bash /tmp/ling830_v2.sh</code> ⇒ 看到 <code>[opencl-stub] probe ... rc=0 nplat=1</code> + <code>selected platform</code> 即证该墙不存在；反向复核：<code>rm</code> 掉那个 stub 立刻重现 <code>cannot locate symbol</code>。</em><em>判真（当时的错判为何看似成立）</em><em>：<code>nm -D</code> 显示我们 stub 确实导出该符号，而系统 <code>/system/lib64/libOpenCL.so</code> 不导出 ⇒ 容易误读成"名字被抢"；缺 <code>DT_NEEDED</code> 缺库时 linker 报的正是"某个符号找不到" |
+| </em><em>G-750</em><em> | 🟪 </em><em>我们自己的 <code>opencl_stub</code> 缺两项能力</em><em>（本轮补）：① 无显式指定真库的入口，只能 <code>{"libOpenCL.so","/vendor/lib64/…","/system/lib64/…"}</code> 三级碰运气；② </em><em>把自己命名成 <code>libOpenCL.so</code> 时 <code>dlopen("libOpenCL.so")</code> 会回到自己身上 ⇒ 每个 <code>CL_FORWARD</code> 无限递归</em><em>（本想用 <code>dlinfo</code>，Android 头里没有，改 <code>dladdr</code>） | L8×M9 | <code>OWN</code> | </em><em>关闭（2026-10-21 15:4x）</em><em> | </em><em>判具</em><em>：<code>clang --target=aarch64-linux-android29 -shared -fPIC -Wl,-soname,libOpenCL.so third_party/opencl-stub/opencl_stub.c -ldl</code>（<code>build rc=0</code>，产出 25736 B，<code>nm -D</code> 可见 <code>clEnqueueSVMMemcpy</code>）；配 <code>TONGYILITE_LIBOPENCL=/vendor/lib64/libOpenCL.so</code> 使用。</em><em>判真（待验）</em><em>：在 830 上若改用 APK 式装载（或 dlopen 化）能跑通 ⇒ 本加固有效。</em><em>判伪</em><em>：仍递归/仍失败 ⇒ 回退并改为"stub 只提供链接期符号 + 全量 dlopen" |
+| </em><em>G-751</em><em> | 🟪 </em><em>我们自己的 rusticl 在 A8X 上跑大权重 MoE 必崩</em><em>：<code>src/gallium/frontends/rusticl/core/kernel.rs:2047</code> <code>range end index 460128256 out of range for slice of length 1048572</code> —— 内核实参偏移 ≈439 MB 去索引 1 MB 切片；随后 <code>core/event.rs:101</code> 连锁 panic、destructor 内二次 panic ⇒ <code>abort()</code>（RC=134）。复现条件：Ling 3.0 Tiny Q4_0（4.6 GB 权重、128 专家）在 830/M332BF 上 </em><em><code>offloaded 25/25</code> 全载通过之后</em><em>、批次提交时（日志见 <code>BORERELEASE/FDBATCH/KGSLSUBMIT</code>） | L6×M7/M3 | <code>OWN</code> | </em><em>开放（P 级）</em><em> | </em><em>判具</em><em>：<code>bash /tmp/ling830mesa.sh</code>（前人已验证的 <code>$B/lib</code> 配方，含 <code>GGML_OPENCL_MOE_GATE_STATS=1</code>），日志 <code>/data/local/tmp/ling830mesa_*.log</code>。</em><em>判真</em><em>：把 <code>kernel.rs</code> 的实参基址/长度改为按 BO 实际映射范围计算（或越界前返回 <code>CL_INVALID_*</code>）后同一命令不再 abort ⇒ 修好，随后 A8X 上的 MoE 才第一次可测。</em><em>判伪</em><em>：若换成非 MoE 大模型也崩 ⇒ 与 MoE 无关，是"大 buffer 实参"通用缺陷，应上移到 G-745/§18 重立 |
+| </em><em>G-752</em><em> | 🟪 </em><em>仪器缺陷 #8：闸计数只挂 <code>atexit</code>，而 <code>abort()</code>/SIGABRT 不跑 atexit ⇒ 崩溃型失败永远看不到闸状态</em><em>（本轮 830 Mesa 腿实测：RC=134，<code>atexit</code> 一行未打，只剩崩溃前那条 <code>DECLINE</code>） | L8×M9 | <code>OWN</code> | </em><em>开放</em><em> | </em><em>判真</em><em>：加 SIGABRT/SIGSEGV 处理器里也落一份计数（<code>moe_gate_dump()</code> 需 async-signal-safe，用 <code>write()</code> 而非 <code>fprintf</code>）后，同一崩溃腿仍能看到 <code>atexit</code>/<code>onsignal</code> 计数表 ⇒ 有效。</em><em>判伪</em><em>：信号处理里打印导致二次崩溃 ⇒ 退回"只在正常退出打印 + 日志头标注崩溃"并明确该盲区 |
+| </em><em>G-753</em><em> | 🟪 </em><em><code>OCL_ICD_FILENAMES=</code>（空赋值）会让高通 vendor <code>libOpenCL.so</code> 返回 <code>-1001 CL_PLATFORM_NOT_FOUND_KHR</code> ⇒ ggml 打印 <code>platform IDs not available</code> 后静默回落 CPU</em><em>（<code>RC=0</code>、照常出字，只有闸计数全零能看出破绽）。830 上所有"GPU 腿"曾因此全是 CPU 腿。逐发隔离：只留该变量 ⇒ <code>rc=-1001 nplat=0</code>；只留 <code>OCL_ICD_VENDORS=</code> 或 <code>HOME/XDG</code> ⇒ <code>rc=0 nplat=1</code> | L6×M3/M10 | <code>EXT</code>/<code>OWN</code> | </em><em>关闭（2026-10-21 16:4x，判具可复跑）</em><em> | </em><em>判具</em><em>：<code>third_party/mesa-kgsl/tools/ocl_linktest.c</code>（同进程三态：vendor 绝对路径/主线程、工作线程、stub 转发，逐发打印 <code>rc/nplat</code>），配 <code>TONGYILITE_STUB_VERBOSE=1</code>。</em><em>规约</em><em>：清理"另一条栈专属"的开关一律 <code>env -u VAR</code>，</em><em>禁止 <code>VAR=</code></em><em>；任何 GPU 腿必须先看到 <code>selected platform</code> 才算数，否则当场判废 |
+| </em><em>G-754</em><em> | 🟪 </em><em>Ling 案真正的病灶：OpenCL 路由对它是负优化</em><em>（830 / vendor / NGL=99 / <code>n_batch=512</code> / Q4_0）。第一条真 GPU 腿（<code>selected platform QUALCOMM Snapdragon</code> + <code>25/25</code> 全载）打出 <code>mul_mat_id_arrived_opencl=3015 → DISPATCHED_batched=3015</code>、<code>dense_loop_taken=0</code>、<code>q4_0_planes_missing=0</code> —— </em><em>batched 100% 命中，"回落 dense-loop"不存在，§20.7/§20.8 整条调查线作废</em><em>；可 <code>tok_s=4.74</code>，而同机同模型</em><em>纯 CPU 是 15.9–22.3 tok/s</em><em>（慢 3–4 倍）。每 token 约 94 次 MUL_MAT_ID ⇒ 高度怀疑</em><em>每内核派发/同步开销吃掉全部收益</em><em> | L6×M3/M9 | <code>OWN</code>/<code>HW</code> | </em><em>开放（新主线）</em><em> | </em><em>判具</em><em>：<code>bash /tmp/ling830_sweep.sh</code>（NGL 0/8/16/25 同口径扫，看 <code>tok_s</code> 与 <code>DISPATCHED_batched</code> 同步变化，找路由拐点）。</em><em>判真</em><em>：若拐点显示"少载层/全 CPU 更快" ⇒ 定案为</em><em>路由策略缺陷</em><em>，修法是在 App 侧对该类模型（大专家数 + 小 hidden）默认走 CPU 或 Vulkan，并把拐点写进 §18 与路由表。</em><em>判伪</em><em>：若在役参数（<code>n_batch=512</code> 且挂 dspark 草稿头、<code>flash_attn</code> 等）下 GPU 追平/超过 CPU ⇒ 是口径差异，须改 e2e 工装对齐 App 参数后重测，本格的"负优化"结论作废 | 🟪 </em><em>17:1x 定性更正（§20.17 六格 A/B）</em><em>：本格的"负优化"</em><em>只是 vendor 路径回归的症状，不是 Ling 的固有属性</em><em> —— 同一台 830、同一个 Q4_0 文件，</em><em>v0.3.0 在 vendor 上是 21.41 tok/s（比纯 CPU 14.45 快 1.48×）</em><em>，到 v0.3.1 才塌到 8.85。⇒ 本格优先级</em><em>降到 G-758 之下</em><em>，"把 Ling 默认改回 CPU/Vulkan"从结论降为</em><em>权宜缓解</em><em>；判伪分支（口径差异）也相应收窄：口径没问题，是代码回归 |
+| </em><em>G-755</em><em> | 🟪 </em><em>祖传断言"Ling 3.0 Tiny 曾经 OpenCL 8+ tok/s"是跨模型跨设备的错配</em><em>。8.77 出自 <code>docs/archive/backend_benchmark_2026-08-04.md</code>：第 15 行设备 </em><em>Xiaomi 25053RT47C / Adreno 825</em><em>、第 17 行模型 </em><em>qwen3.5-4b-q4_k_m（稠密 2.5 GB）</em><em>、第 16 行 App V0.1.3/b10173 + <code>n_ubatch=16</code>、第 64 行 OpenCL 8.77；而同文档第 7–8 行自己声明"机型与模型都不同""Adreno 830 自 2026-10-20 起停用不再作测量设备"。<code>Ling3.0Tiny_OpenCL性能回归定位_2026-10-20.md:33</code> 却拿 Ling 的 2.8–3.9 去比它（该档第 190 行已自认基线是稠密模型） | L6×M3/M10 | <code>OWN</code>/<code>DOC</code> | </em><em>关闭（2026-10-21 17:0x 判伪）</em><em> | </em><em>判具（可复跑）</em><em>：<code>sed -n '15,17p;64p' docs/archive/backend_benchmark_2026-08-04.md</code> 与 <code>sed -n '33p;190p' docs/Ling3.0Tiny_OpenCL性能回归定位_2026-10-20.md</code> 对读。</em><em>后果</em><em>：一切"−56%~−69% 超基准门"的结论作废；Ling 的历史成绩按 R10 降为 ⬜ 待证，要立基线必须用 Ling 自己在役口径重测 |
+| </em><em>G-756</em><em> | 🟪 </em><em>用户给的真实回归边界：快 = v0.3.0(<code>ae8ba172</code>「OpenCL batched MoE(q4_0)」) + Q4_0；慢 = v0.3.1(<code>aae62ae0</code>「q4_K host 预计算 scale dodge」) + Q4_K</em><em> —— </em><em>版本与量化两个变量同时变化</em><em>，此前所有"是版本导致的"推断都缺单变量拆解。且 </em><em>Ling 的 Q4_K_M 文件在 host 与两台机上均不存在</em><em>（只有 <code>Ling-3.0-tiny-Q4_0.gguf</code>）⇒ Q4_K 那半不可复测。另排除一条省事假设：</em><em>Ling 没有 dspark 草稿头</em><em>（机上只有 MiniCPM 的 <code>.dspark.gguf</code>）⇒ 当年不可能靠投机解码翻倍 | L6×M3 | <code>OWN</code>/<code>DOC</code> | </em><em>开放</em><em> | </em><em>判具（可复跑）</em><em>：<code>bash /tmp/ab6_830.sh</code>（{v0.3.0,v0.3.1,HEAD}×{vendor,mesa} 同模型同口径六格），工作树 <code>/tmp/wt030</code>、<code>/tmp/wt031</code>，每格打印 <code>selected platform</code>/<code>offloaded</code>/闸计数/METRIC。</em><em>判真</em><em>：若 v0.3.0 明显快于 HEAD（同栈同模型）⇒ 回归为真，沿 <code>git diff ae8ba172..HEAD -- ggml/src/ggml-opencl/</code>（67 文件 +6686/−1839，<code>gemv_noshuffle_q4_0_f32.cl</code> 动 255 行）二分。</em><em>判伪</em><em>：三版同栈同速 ⇒ "当年快"无凭据，病灶回到 G-754 路由与口径 | 🟪 </em><em>17:1x 双变量已拆开（§20.17）</em><em>：三格全部用同一个 <code>Ling-3.0-tiny-Q4_0.gguf</code>，</em><em>量化不是变量</em><em>；掉速发生在 </em><em>Q4_0 路径</em><em>上，断崖 = 单个提交 <code>aae62ae0</code>（v0.3.1）vendor </em><em>21.41→8.85（−59%）</em><em>，而我们的 Mesa 线同提交 </em><em>21.69→23.25（免疫且更快）</em><em>。⇒ 本格"Q4_K 文件缺失"只挡住 q4_K 案，</em><em>不挡本回归</em><em>；本回归已转 G-758 |
+| </em><em>G-757</em><em> | 🟪 </em><em>历史版本复现的工装连踩五雷</em><em>（考古 v0.3.x 全程，逐条都有实锤）：① 把 HEAD 的 <code>build-android/</code> 整目录拷进工作树 ⇒ "v0.3.0 二进制"其实是 HEAD 拷贝；② 该提交 <code>.gitignore</code> 让树里没有 <code>ggml/tests</code>，老 <code>ggml/CMakeLists.txt:312</code> 直接炸；③ 当年 <code>_probe/moe_probe/CMakeLists.txt</code> 写死另一台机的 <code>E:/DTXY/TongYi-Lite</code> 三处；④ 当年 CMake 无 <code>minicpm_e2e</code> 目标且</em><em>当年根本没有 <code>minicpm_e2e.cpp</code></em><em>（我的 <code>git checkout --</code> 是空操作）；⑤ API 漂移 3 处（<code>moe_experts_path</code>/<code>moe_slot_bank</code>/<code>llama_model_n_expert_used</code>/<code>common_batch_get_one</code> 签名），补丁全标 <code>lite-ab</code> | L8×M10 | <code>OWN</code> | </em><em>关闭（2026-10-21 17:0x 立规）</em><em> | </em><em>规约（并入 R8）</em><em>：历史版本复现必须交</em><em>身份自证三件套</em><em> —— <code>sha256</code> 前缀 + 体积 + </em><em>只存在于某一棵树的字符串指纹</em><em>（本例 <code>moe-gate] DECLINE</code>：HEAD=1、v0.3.0/v0.3.1=0；实测 HEAD=11,102,528 B、v0.3.0=10,130,752 B、v0.3.1=10,135,448 B）。</em><em>判伪</em><em>：若某次复现拿不出这三件套 ⇒ 该轮数据一律作废重跑 |
+| </em><em>G-758</em><em> | 🟪 </em><em>判伪：曾判"v0.3.1(<code>aae62ae0</code>「q4_K batched MoE 修复上线」)让 vendor q4_0 decode 掉 59%（21.41→8.85）"，是假回归</em><em>。三重证据推翻：① </em><em>同一份 v0.3.1 二进制</em><em>先后测出 8.85 / 21.37 / 22.51 tok/s，对照组 wt031a 从 21.25 掉到 17.15 ⇒ 单次计时不具因果效力；② 交替顺序 + 每版三次重测：</em><em>v0.3.0 中位 16.62、v0.3.1 中位 16.51（差 0.7%，噪声内）</em><em>；③ 我承认流程违规——为赶进度</em><em>自己豁免了安静门 <code>loadavg(1min)&lt;2</code></em><em> 且未在表中标注。（§20.18 的文件级二分"必须两个文件一起改"与 §20.19 的 E031 形状假设一并作废） | L6×M3/M10 | <code>OWN</code> | </em><em>关闭（2026-10-21 19:0x 判伪，见 §20.20）</em><em> | </em><em>判具（可复跑）</em><em>：<code>bash /tmp/rep3.sh</code>（三版 × 三次、顺序轮换、每腿打印 loadavg 与 METRIC），构建 <code>/tmp/wt030</code>（v0.3.0）、<code>/tmp/wt031</code>（v0.3.1）；反向复核旧结论：<code>bash /tmp/hcache2.sh</code> 能看到同一份 wt031 从 8.85 跳到 21.37 |
+| </em><em>G-759</em><em> | 🟪🟪 </em><em>真回归（P 级）：HEAD 相对 v0.3.x 在 830/vendor 上稳定慢 2.6×</em><em>——三版×三次交替重测，v0.3.0 中位 </em><em>16.62</em><em>、v0.3.1 中位 </em><em>16.51</em><em>、HEAD </em><em>6.08/6.41/6.46 ⇒ 6.41</em><em>，三次同号、档位完全分开。</em><em>位置不在 <code>aae62ae0</code></em><em>，而在其后的 </em><em>17 个 <code>ggml/src/ggml-opencl/</code> 提交</em><em>里：头号嫌疑是上游大同步 <code>f34edafe</code>「llama.cpp tree → master@848bbda，47 个冲突 hunk 重贴」（项目记忆里同类画像："升级后 CPU/GPU 全后端慢一倍，升级类回归几乎都是静默的"），次嫌疑 <code>c583988c</code>（native 子组 128）、<code>2b8843d2</code>（融合 rms_norm 越界修复）、<code>ee87dda0</code>（OPFLUSH）。</em><em>病灶已排除 MoE 内核</em><em>：<code>moe_probe4</code> 真名真形状 bench 显示 HEAD 的 batched </em><em>290.7 µs/op，比 v0.3.x 快档 544.5 µs/op 还快 1.9×</em><em>；每 token ≈94 次 ⇒ MoE 仅占 27 ms，而 HEAD 整 token 156 ms ⇒ </em><em>约 129 ms/token 在非 MoE 的节点/派发/同步层</em><em> | L6×M3/M9 | <code>OWN</code> | </em><em>关闭（根因定案 + 修复已落主树并探针级验收，2026-10-22 16:5x；余留项另立 G-770/G-771。作用域：本格的"已排除"只指本行列过的 MoE batched 内核/派发、SILU 内核本身、宿主派发耗时、分配器 footprint 这几处，其余按 §20.32 为准）</em><em> | </em><em>判具（进行中）</em><em>：大同步边界对拍 —— <code>/tmp/wt_f34edafe^</code> vs <code>/tmp/wt_f34edafe</code> 两份构建同机同口径（工装沿用 wt031 已验证的 <code>_probe</code> 覆盖 + <code>ggml/tests</code> 桩）。</em><em>判真</em><em>：pre 快档 / post 慢档 ⇒ 回归 = 上游大同步（按 AGENTS 四道门逐门查：编译门 <code>-O3 -DNDEBUG</code>、内核门、参数门、基准门，重点怀疑重贴时丢了某个 fork 性能资产）。</em><em>判伪</em><em>：两份都慢 ⇒ 边界在大同步之后，改用 <code>git bisect run</code> 脚本化（编→跑一腿→按 <code>tok_s≥12</code> 判好坏）跑完那 17 个提交；若单内核 µs/op 在慢档不变慢（已证），二分期间同时上 <code>GGML_OPENCL_OPSYNC/OPFLUSH/OPBATCH</code> 三开关做派发层对拍；</em><em>🟪 2026-10-22 16:5x 根因定案（§20.32）：<code>[dspark 2026-10-14]</code> 的 A8X SSM-&gt;CPU 门控把图从 30 段切成 138 段</em><em>，一份二进制 env 反转交替 = 19.90 vs 6.72 tok/s（<code>splits</code> 30 vs 138，零重叠，2.96×），修复已落主树（默认 GPU，<code>GGML_OPENCL_SSM_A8X=0</code> 作关断阀）。§20.31 的"空闲唤醒税"降级为仅解释强制 <code>clFinish</code> 测量姿态；保活补丁、分配器 footprint、桩 census 全部判伪 | 🟪🟪 </em><em>19:1x 嫌疑收窄（§20.21）</em><em>：</em><em>头号嫌疑 A = 上游大同步把 CPU 矩阵库整版换掉——<code>KLEIDIAI_COMMIT_TAG</code> v1.24.0 → v1.31.0</em><em>（vendored <code>third_party/kleidiai</code> 文件数 743 → 1887；decode 的非 MoE 节点走 CPU 回退，正是 KleidiAI 供内核，与"GPU 内核更快 1.9× 而整 token 慢 2.6×"自洽）。次嫌疑 B = 新增一批按形状/代际烧死的预编译内核（<code>kernel_gemv_noshuffle_q4_0_f32_4096_1_11008</code>、<code>..._q8_1_dp4a_ila_a8_bin</code> 等），若 <code>_bin</code> 是别家芯片烧的 ⇒ vendor 驱动拿到不匹配二进制。</em><em>已排除四项且有机检</em><em>：MoE 内核（290.7 vs 544.5 µs/op，HEAD 更快）、<code>-O3</code> 编译门（HEAD 138 个 TU 全带 <code>-O3 -DNDEBUG</code>）、FGSVM 新路径（<code>has_fgsvm</code> 从无读者 = 死代码）、驱动内核缓存（换干净 HOME 反而更快且不落缓存文件）。另记一条硬事实：</em><em><code>f34edafe</code> 带着未解冲突标记提交（<code>ggml-backend.cpp</code> 有 <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code>，编不过）⇒ 真正边界是首个能编的 <code>d4c0b056</code></em><em> | L6×M3/M9 | <code>OWN</code> | </em><em>开放（当前 P 级头号）</em><em> | </em><em>判具（下一步，按序）</em><em>：① CPU 归因（同一 HEAD 二进制改 CPU 线程数，<code>tok_s</code> 随线程动 ⇒ CPU 侧）；② </em><em>判决构建</em><em>：HEAD + <code>third_party/kleidiai</code> 换回 v1.24.0（<code>KLEIDIAI_COMMIT_TAG</code> 同步）同机重测，回 ≈16 tok/s 即定案；③ 若 A 判伪则旁路全部 <code>_bin</code> 预编译内核选择强制走源码编译重测。验收线 </em><em><code>HEAD/vendor decode ≥ 15 tok/s</code></em><em>（对齐本次 v0.3.x 中位 16.5，不用被噪声吹起的 21）| 🟪🟪🟪 </em><em>19:1x 嫌疑清单清空（§20.22），只剩二分一条路</em><em>：</em><em>嫌疑 A 也判伪</em><em>——纯 CPU 腿（NGL=0，两两交替）HEAD </em><em>26.6</em><em> vs v0.3.0 </em><em>23.55</em><em> ⇒ HEAD 的 CPU 路径反而快 13%，KleidiAI v1.24→v1.31 无罪；现成开关对拍（同一 HEAD 二进制）<code>GGML_OPENCL_DISABLE_FUSION=1</code> </em><em>6.27</em><em> / <code>GGML_OPENCL_ALLOW_NO_SUBGROUP=1</code> </em><em>6.22</em><em> / 基线 </em><em>6.40</em><em> ⇒ 融合与子组路径也不是触发器。排除项累计七项且各有证据：MoE 内核 / CPU+KleidiAI / <code>-O3</code> 门 / FGSVM 死代码 / 驱动内核缓存 / 融合 / 子组。顺带刺眼事实：</em><em>同机同模型纯 CPU 26.6 tok/s，HEAD 走 GPU 只有 6.4 ⇒ GPU 比 CPU 慢 4.2 倍</em><em>（v0.3.0 时代 GPU 16.6 也不如 CPU 23.5）⇒ "GPU 必须赢"是错的前提，路由策略（G-754）该独立立项 | L6×M3/M9 | <code>OWN</code> | </em><em>开放（当前 P 级头号）</em><em> | </em><em>唯一剩余判具</em><em>：对 <code>git log aae62ae0..HEAD -- third_party/llama.cpp/ggml/src/ggml-opencl/</code> 的 17 个提交跑 </em><em><code>git bisect run</code></em><em>（脚本化：编→跑一腿→按 <code>tok_s≥12</code> 判好坏，边界处补 3 次重复），构建沿用已验证的 <code>_probe</code> 覆盖 + <code>ggml/tests</code> 桩配方；</em><em>两个坑</em><em>：<code>f34edafe</code> 带未解冲突标记编不过 ⇒ 必须 <code>git bisect skip</code>；老提交配今天的探针要沿用 <code>lite-ab</code> 补丁 | 🟪🟪🟪 </em><em>20:3x 重新定谳为判真（§20.23）</em><em>：同一批次内顺序轮换交替——HEAD </em><em>14.63 / 12.82</em><em>、v0.3.0 </em><em>27.28 / 26.28</em><em>，三批 HEAD:v0.3.x 比值 </em><em>0.34 / 0.39 / 0.51</em><em> 同号 ⇒ </em><em>回归真实，幅度 ≈1.9–3×</em><em>。同时钉死两件事：</em><em>绝对值跨批不可比</em><em>（同一份 v0.3.0 二进制 16.62 → 27.28，1.6× 漂移），只有同批交替的比值能下结论；</em><em>热/限频解释不了版本差</em><em>（这批 53–59 °C 反而比 44 °C 那批更快），且 830 上 <code>/sys/class/kgsl/kgsl-3d0/gpuclk|gpubusy|throttle_min_clock</code> shell 不可读 ⇒ GPU 频率是</em><em>仪器缺口</em><em>，别再指望它。NGL 阶梯（HEAD 同批）：1→28.13、2→28.61、4→22.79、8→18.30、16→13.81、25→14.82，<code>OPBATCH=0</code>→14.28 无差别，<code>OPSYNC=1</code>→</em><em>4.44</em><em>（证明同步成本确实可观）。另判伪两条：<code>4df19400</code>"删 q4_0 六行"只是清冲突标记；<code>get_native_subgroup_size()</code> 一次推理只打 4 条日志（有缓存，非热路径）。</em><em>当前最便宜的判决</em><em>：HEAD 树上单独把 <code>kernels/rms_norm.cl</code> 换回 <code>aae62ae0</code> 版编一版，同批与 HEAD 交替对照（<code>get_max_sub_group_size()</code>→<code>get_sub_group_size()</code> 是每层都跑的热点语义改动） | L6×M3/M9 | <code>OWN</code> | </em><em>开放（当前 P 级头号）</em><em> | </em><em>判具（进行中）</em><em>：路径限定二分 <code>git bisect start HEAD aae62ae0 -- third_party/llama.cpp/ggml/src/ggml-opencl/</code>（16 个候选，判据 <code>tok_s&gt;=19</code>，工装每步"先还原工作树再从 <code>/tmp/harness</code> 覆盖"，编不过/无 METRIC/无 <code>selected platform</code> 一律 <code>exit 125</code> skip——<code>f34edafe</code> 带冲突标记、<code>944c46e5</code> 的 17 个 <code>_ns</code> 内核真机编不过都会跳）；同时并行做上面那条 <code>rms_norm.cl</code> 单文件回退对照 | 🟪 </em><em>20:5x 二分障碍定形（§20.24）</em><em>：不可跑窗口 [6]<code>22e0e984</code>、[7]<code>944c46e5</code>（真机内核编不过，无 METRIC）+ [8]<code>f34edafe</code>（带未解冲突标记，编不过）⇒ <code>git bisect</code> 会把它误判成"全是 skip"而骗停；两条工装定论：</em><em><code>git archive</code> 不可用</em><em>（<code>third_party/mesa-kgsl</code> 是嵌套仓 gitlink，archive 不含其内容 ⇒ CMake 丢 Android 工具链，全线误 skip）、</em><em><code>git bisect run</code> 与覆盖式工装冲突</em><em>（checkout 被"本地修改将被覆盖"挡死）；可行配方 = <code>git clean -fdxq &lt;工装路径&gt;</code> → <code>git checkout --force &lt;sha&gt;</code> → 重贴工装 → <code>rm -rf build-android</code> → 编 → 一腿，驱动 <code>tool/g759_firstbad.py</code>（判据 <code>tok_s&gt;=19</code>，skip 原因落 <code>/tmp/g759_bisect.jsonl</code>） | L6×M3/M9 | <code>OWN</code> | </em><em>开放（当前 P 级头号）</em><em> | </em><em>判具（正在跑）</em><em>：定点扫描 <code>python3 tool/g759_firstbad.py scan 3 5 9 10 11 12 13 14</code>。</em><em>判真方向 A</em><em>：升级前索引（3/5）落快档而 [12]<code>40d1b314</code> 落慢档 ⇒ 窗口夹进上游大同步那一坨 [4..12]，内部大面积不可跑 ⇒ 只能合成提交或转功能面夹。</em><em>判真方向 B（更便宜，已备工装 <code>/tmp/wtnorm</code>）</em><em>：HEAD 树上只把 <code>kernels/rms_norm.cl</code> 换回 <code>aae62ae0</code> 版，同批与 HEAD 交替对照，回到 ~26 tok/s 即定案。</em><em>判伪</em><em>：扫描点全部落在同一档 ⇒ "版本回归"重新存疑，回到 §20.23 的同批交替再测一轮再定 🟪🟪🟪🟪 </em><em>21:0x 定案：第一发破坏版本 = <code>41566183</code>「feat(moe) v0.3.2: 智能MoE拆分加载 + q3_K batched GPU slot bank」（§20.25）</em><em>——同批交替 A/B/A/B（合 R8 (a)–(e) 全部条件，每腿打印 loadavg+热区、两份二进制 sha <code>9dfe0f571f</code>/<code>e345062ccc</code> 各自自证、每腿见 <code>selected platform</code>）：<code>aae62ae0</code> </em><em>27.72 / 26.81</em><em> vs <code>41566183</code> </em><em>13.54 / 12.76</em><em>，比值 </em><em>0.48</em><em>，两档不重叠。</em><em>它是 v0.3.1 之后的第一个提交，是我们自己写的</em><em> ⇒ 上游大同步（[8]<code>f34edafe</code>）不是触发器（[3] 在大同步之前已慢），KleidiAI v1.24→v1.31 与 <code>_bin</code> 预编译内核都不是首发引入者；<code>rms_norm.cl</code> 单文件回退实验（<code>/tmp/wtnorm</code>）降级为卫生实验（那两改在 [13]/[14]，晚于首发）。十六点扫描表（<code>tool/g759_firstbad.py</code>，判据 <code>tok_s&gt;=19</code>）：[0]8.25 [1]13.1 [2]14.01 [3]14.76 全 bad，[5][6][7][11] 真机内核编不过 skip，[8][9][10] 编不过 skip，[12]13.7 [13]6.87 [14]8.51 | L6×M3/M9 | <code>OWN</code> | </em><em>开放（进入第二层：夹这一发内部）</em><em> | </em><em>下一发判具</em><em>：e2e 走 <code>experts="-"</code>（不拆文件），故嫌疑集中在"不拆文件也生效"的三块——① <code>is_moe_expert_weight()</code>/plane 创建策略（权重放置变了 ⇒ 内核读带宽差而单次 µs/op 不变，正合 §20.20 微基准）；② q3_K batched GPU slot bank 的常驻初始化（新 buft/新分配路径是否被普通张量选中）；③ 拆分加载探测在加载期改了 buffer 类型/对齐（<code>load_ms</code> 好坏档同步变化是旁证）。</em><em>做法</em><em>：对 <code>git show 41566183 -- ggml/src/ggml-opencl/</code> 逐块回退，每次一块、编一版、</em><em>同批与 <code>aae62ae0</code> 交替对照</em><em>，命中即定案 | 验收线不变：</em><em>同批 HEAD ≥ 0.9×<code>aae62ae0</code></em><em>（今天口径 ≈ 25 tok/s 以上）| 🟪 </em><em>21:2x 首发内部开夹（§20.25 ⑥⑦）</em><em>：</em><em>SGB shim 假设判伪</em><em>——<code>41566183</code> 新增 <code>patch_sgb_shim.py</code>/<code>reset_sgb_shim.py</code> 并把 ~20 个 dense <code>gemv_noshuffle_*.cl</code> 各改写 +119 行（<code>sub_group_broadcast</code> 全改走 <code>SGB_BC</code>，宿主侧 canary 决定 <code>-DSGB_SCALAR_BROKEN</code>，<code>ggml-opencl.cpp:678/1581-1633/1779</code>），形状上最像"非 MoE 段慢"；但 <code>/tmp/wtsgb</code> 加纯增量诊断（打印 canary 判定 + <code>GGML_OPENCL_FORCE_SGB_OK=1</code> 强制直连 builtin，sha <code>ba767f57</code>）后</em><em>同一份二进制单变量 A/B/A/B</em><em>：<code>force_ok=1</code> </em><em>14.09 / 14.26</em><em> vs canary 默认 </em><em>14.57 / 13.10</em><em>，且 830 自报 <code>sgb_float_broken=0</code>（本来就走直连）⇒ </em><em>判伪</em><em>；该诊断行建议回贴主树。</em><em>下一刀</em><em>：<code>/tmp/g759_split.sh</code> 把首发劈成 A=只回退 <code>kernels/gemv_noshuffle_*.cl</code> / B=只回退 <code>ggml-opencl.cpp</code> 两版，同批 A/B/A/B 对照（HEAD≈13-15、<code>aae62ae0</code>≈27）：回到 ~26 档的那一半即病灶；两半都 ~14 档 ⇒ 病灶在两半耦合（宿主侧改 plane/对齐而内核形状未变），回到 §20.25 ④ 三块逐个夹 | L6×M3/M9 | <code>OWN</code> | </em><em>开放（首发已定，正在夹首发内部）</em><em> | </em><em>工具沉淀</em><em>：<code>tool/g759_firstbad.py</code>（archive 不可用/bisect run 与工装冲突两条已证；配方 = <code>git clean -fdxq &lt;工装路径&gt;</code> → <code>git checkout --force &lt;sha&gt;</code> → 重贴工装 → <code>rm -rf build-android</code> → 编 → 一腿，判据 <code>tok_s&gt;=19</code>，skip 原因落 <code>/tmp/g759_bisect.jsonl</code>）、<code>tool/g759_alt_pair.py</code>（两份二进制同批交替 A/B/A/B）| 🟪 </em><em>21:3x 半区实验失败＝新结论（§20.25 ⑧）</em><em>：A=HEAD+只回退 <code>kernels/gemv_noshuffle_*.cl</code>（sha <code>04f9bc18</code>）</em><em>运行即崩</em><em>（栈回溯、无 METRIC）；B=HEAD+只回退 <code>ggml-opencl.cpp</code> </em><em>编不过</em><em>（<code>ggml-opencl.cpp:13457</code> buft 表签名不匹配，新树 <code>alloc_buffer</code> 已加参数）⇒ </em><em><code>41566183</code> 是内核↔宿主耦合提交，"按文件半区二分"不成立</em><em>；改按</em><em>功能组</em><em>在 HEAD 签名上就地加 <code>getenv</code> 开关（① <code>is_moe_expert_weight()</code>/plane 创建策略 ② slot bank 常驻初始化/新 buft 是否被普通张量选中 ③ 拆分加载探测改的 buffer 类型与对齐），每组一版、同批与 <code>aae62ae0</code> 交替对照。本批锚点重测：HEAD </em><em>9.02 / 9.26</em><em>（loadavg 16.7–17.2，比上批更挤）。</em><em>纪律</em><em>：回退一半式二分只对解耦提交有效；先 <code>git show &lt;首发&gt; --stat</code> 看有没有生成/改写脚本（本次 <code>patch_sgb_shim.py</code> 即由此露出），再决定夹法，省一轮无效构建 🟪🟪🟪🟪 </em><em>21:5x 逐算子计时把病灶钉死（§20.26）</em><em>：自研仪器 <code>tool/lite_noder_patch.py</code>（往 <code>graph_compute</code> 节点循环插 <code>clFinish</code>+<code>clock_gettime</code> 直方图，<code>GGML_OPENCL_NODER_STATS=1</code> 生效，纯增量 ASCII）贴到快慢两版各编一版（GOOD <code>75f9cb29</code> / BAD <code>e5fcf432</code>，同机同模同 prompt）。</em><em>读表法：每算子有 ≈130 µs 同步地板价，高出地板的才是真成本。</em><em> 结果：</em><em>SILU 129.64→233.69 µs（快版贴地板＝不花钱，HEAD 贵 104 µs/+80%）＝头号病灶</em><em>；</em><em>MUL_MAT 182.27→202.41 µs（+11%，次数最多 ⇒ 累计 +215 ms）＝二号病灶</em><em>；<code>MUL_MAT_ID</code> 195→201 </em><em>基本没变</em><em>（MoE 内核第三次判清白）；<code>ADD/GET_ROWS/CPY/CONCAT/SCALE/SUM_ROWS/MUL/SIGMOID</code> 全贴地板＝八个一起排除；<code>SSM_CONV</code> 在 HEAD 掉出前 14 待查。而 <code>git show --stat 41566183 | grep -i silu</code> = </em><em>空</em><em> ⇒ SILU 内核文件没被改，</em><em>是喂给它的数据形状/融合边界变了</em><em>，不是内核写坏 | L6×M3/M9 | <code>OWN</code> | </em><em>开放（已有可机检判据）</em><em> | </em><em>判据（新，可机检）</em><em>：<code>SILU ≤ 140 µs</code> 且 <code>MUL_MAT ≤ 185 µs</code>（用 <code>GGML_OPENCL_NODER_STATS=1</code> 读 <code>[noder]</code> 表）| </em><em>判具（正在跑）</em><em>：<code>/tmp/g759_knob.sh</code> 六腿扫 <code>base / GGML_OPENCL_FUSE_MM_GLU=0 / DISABLE_FUSION=1 / ADRENO_XMEM_GEMM=0 / VEC_B1=0 / OPFLUSH=1</code>，只记 SILU 与 MUL_MAT 平均 µs——</em><em>哪个把 SILU 压回 ~130 µs 地板哪个就是病灶</em><em>；首选第一刀 <code>ggml-opencl.cpp:683 fuse_mm_glu</code>（gate+up GEMV+GLU 融合，配套 <code>kernel_gemv_noshuffle_q4_k_f32_glu@1413</code>，正好横跨 SILU）| 🟪🟪🟪🟪 </em><em>22:2x 收口为可机检结论（§20.27）</em><em>：同批 GOOD/BAD </em><em>交替 4:4</em><em> 定案——</em><em>SILU 144(128.8/143.1/145.5/147.8) vs 359(300.0/378.8/358.0/360.3)，两组完全不重叠＝2.5×</em><em>；MUL_MAT 211 vs 231(+9.5%) 次要；MUL_MAT_ID 235 vs 242 重叠（MoE 第四次清白）。</em><em>三条解释当场测死</em><em>：① 形状打印两版逐字相同（<code>n=2048</code>，GOOD <code>node_46/53/60</code> vs BAD <code>node_49/56/63</code>）⇒ 不是多算专家；② <code>git show --stat 41566183 | grep -i silu</code> 空、向量化条件 <code>n%4==0→kernel_silu_4</code> 未变 ⇒ 不是内核改坏；③ 六腿开关扫描 SILU 219→455 单调漂、与 tok_s 反向 ⇒ </em><em>顺序单测作废</em><em>（R8(d) 形态），且 <code>xmem_off/vecb1_off/opflush1</code> 使 tok_s 掉到 2.7/2.1/2.4 ⇒ 那三个开关关掉有害 | L6×M3/M9 | <code>OWN</code> | </em><em>开放（病灶已点名，机制待最后一验）</em><em> | </em><em>唯一剩余解释</em><em>：纯访存算子贵 2.5× 而算力型只贵 9.5% ⇒ </em><em>内存位置变慢</em><em>；<code>41566183</code> 正是引入 <code>clSVMAlloc(CL_MEM_SVM_FINE_GRAIN_BUFFER)</code> 那一发（<code>ggml-opencl.cpp:600/656/687/742</code>），且 </em><em>v0.3.1 树里连 <code>ggml_backend_opencl_svm_buft</code> 符号都没有</em><em>（编译报 undeclared ⇒ 快版按定义无 SVM 张量）。</em><em>最后一验</em><em>：<code>tool/lite_svm_probe.py</code> 打 <code>dst_is_svm/src_is_svm</code>（插在 SILU 独有句前，现卡一行编译错）；若 =1 ⇒ </em><em>G-759 与 G-767 同根因</em><em>，修 SVM buft 一处两处好 | </em><em>验收线（新，机检）</em><em>：<code>GGML_OPENCL_NODER_STATS=1</code> 读 <code>[noder]</code> 表 —— <code>SILU ≤ 140 µs</code>、<code>MUL_MAT ≤ 185 µs</code>，同批交替各 ≥2 遍并打印 loadavg 与 <code>selected platform</code> | 🟪🟪🟪🟪 </em><em>22:2x 今夜收口：SVM 假设判伪，机制收窄到"同一条派发贵 2.5×"（§20.28）</em><em>：三份插桩同时编进 HEAD——<code>[svmprobe] dst_is_svm=0 src_is_svm=0</code>（SILU 的 src/dst 都在普通 buft <code>…76f8</code>，与 SVM buft <code>…7780</code> 是两个对象），<code>[siluprobe] n=2048</code> 与快版逐字相同，<code>[noder] SILU 414.23 µs×2424</code>。</em><em>今夜排除清单（七条，全部实测）</em><em>：修 Q4_K／上游大同步／KleidiAI／<code>_bin</code> 内核／SGB shim／"多算专家"／"SILU 内核改坏"／"SILU 读 SVM"／MoE batched 内核（第四次）。</em><em>收窄后只剩三个可测方向</em><em>：① <code>enqueue_ndrange_kernel</code> 是否把 <code>local</code> 夹到别的值（组数暴涨；打 <code>global/local/n_drift</code> + <code>CL_KERNEL_WORK_GROUP_SIZE</code> 对照）② 隐藏 enqueue 记在 SILU 头上（drain/uploads 异步化路径；数每节点实际 <code>clEnqueue*</code> 次数，快版应恒 1）③ <code>kernel_silu_4</code> 程序对象构建选项变重（打印完整 options 串两版 diff） | L6×M3/M9 | <code>OWN</code> | </em><em>开放（范围已很小：一条内核单价）</em><em> | </em><em>验收线不变</em><em>：<code>SILU ≤ 140 µs</code>、<code>MUL_MAT ≤ 185 µs</code>（<code>GGML_OPENCL_NODER_STATS=1</code>，同批交替各 ≥2 遍 + 每腿 loadavg/<code>selected platform</code>）| 🟪🟪🟪🟪 </em><em>22:5x 深夜：性质改写为"加载期布局导致的访存劣化"（§20.29）</em><em>：两个"看起来就是它"的修法被</em><em>自己的 A/B 打回</em><em>——① <code>kernel_silu_4</code> 向量化：v0.3.1 只走标量、HEAD 走向量，看似完美，但</em><em>同一份二进制只拨开关</em><em>交替 A/B 得 标量 245.9/314.5/256.3 vs 向量 265.1/328.5/287.7 ⇒ </em><em>只差 12%，不是 2.5× 来源</em><em>，注释因果不成立 ⇒ </em><em>主树 <code>git checkout --</code> 撤销，不留没根据的代码</em><em>；② 融合判定：<code>DISABLE_FUSION=1</code> 六腿交替后</em><em>关掉更慢</em><em>（SILU 221.6/278.7/417.1 vs base 186.7/254.4/393.7）⇒ 排除。</em><em>真正现象</em><em>：同一条 HEAD 二进制 SILU 在 </em><em>186→417 µs 乱跳</em><em>，v0.3.1 稳定 128–148 ⇒ </em><em>访存代价随加载期布局波动</em><em>。排除清单再加：<code>silu.cl 两版逐字节相同(30 行/897 B)</code>、<code>工作组夹逼</code>（日志零条 <code>local[0] clamped</code>）、<code>缓冲分配标志</code>（两版同为 <code>CL_MEM_READ_WRITE|CL_MEM_ALLOC_HOST_PTR</code>） | L6×M3/M9 | <code>OWN</code> | </em><em>开放（设备掉线中断，剩两条实验）</em><em> | </em><em>下一步实验 A（首选）</em><em>：给 <code>41566183</code> 的 q3_K slot bank 每层 <code>q/se0/se1</code> 三个 <code>clCreateBuffer</code>（<code>:505/507/509</code>）加 <code>GGML_OPENCL_MOE_GPU_BANK=0</code> 跳过开关，同批交替看 SILU 是否回到 ~140 且不再漂——命中即"按需分配"为修法；</em><em>实验 B（兜底）</em><em>：Ling 走 CPU 档（26.6 vs 13），但 <code>enable_gpu/gpu_layers</code> 是 <code>tongyilite_jni.cpp:534</code> 默认参数、Dart 无 <code>gpuLayers</code>、catalog 不在 <code>android/app/src/main/assets/</code> ⇒ 按 AGENTS </em><em>只能进 catalog</em><em>，先找传参通路 | 设备 22:4x 起 <code>adb: device offline</code>、<code>adb connect</code> 超时（手机休眠/断网）；</em><em>无可验设备不入树</em><em>（本轮已执行一次撤销） | 🟪🟪🟪🟪 </em><em>23:0x 自我更正：实验 A 的靶子也站不住（§20.29 ④ 作废）</em><em>——查证 q3_K slot bank 的三个 <code>clCreateBuffer</code>（现树 <code>:12181/12183/12185</code>）位于 </em><em>q3_K 专用路径</em><em>，前面有三道门：<code>tensor-&gt;view_src/contiguous</code>、<code>tensor-&gt;ne[2] &lt;= 1 || !use_adreno_moe_kernels(...)</code> 直接 return、<code>Kc % 256 != 0 || Mc % 128 != 0</code> 直接 return ⇒ </em><em>Ling 是 Q4_0，这三块根本不会分配</em><em>；<code>clSVMAlloc</code> 侧同理是</em><em>懒分配</em><em>（<code>has_fgsvm</code> 只在 <code>:7381</code> 查询能力，真正分配在 <code>ggml_backend_opencl_svm_buft</code> 的 <code>alloc_buffer</code> 里，只被 <code>qwen35moe.cpp:62</code>/<code>lfm2moe.cpp:46</code> 的 <code>moe_slot_buft</code> 触发）⇒ </em><em>"额外分配把布局推歪"对 Ling 不成立，实验 A 取消</em><em> | 设备自 22:4x 起离线（<code>adb connect 100.75.247.55:5555</code> 超时，需 USB 主机重跑 <code>scripts/adb-wifi.ps1</code> + tailscale 新 IP），剩余唯一可信路径＝</em><em>在设备回来后对同一对 GOOD/BAD 二进制做"逐算子 + 多次交替"的重复采样</em><em>（先确认 SILU 波动是否稳定复现，再决定是否值得继续挖） 🟪🟪🟪🟪 </em><em>10:4x–12:4x 今日收口＝病灶纯 GPU 侧（§20.30）</em><em>：8 腿交替重采样两组不重叠（GOOD SILU 155.7–198.4 / BAD 392.4–474.7＝2.0–2.4×，两版各自都稳）；</em><em>新仪器 <code>~host</code> 行给出决定性分叉</em><em>——宿主 GOOD 19.9/28.7 vs BAD 26.8/35.9（等价）⇒ </em><em>GPU 侧 169/181 vs 401/437 µs，差距 100% 在 GPU</em><em>。</em><em>今日再判伪九条（各有数）</em><em>：内核程序身份（名/<code>bin=4208</code>/opts 空串 两版逐字相同）、CMake 宏一致、数据身份（<code>denorm=0 zero=0 big=0</code>，<code>mean</code> 到 1e-6 相同）、非规格化慢路径、向量化 12%、工作组夹逼（零条 clamp）、<code>FUSE_MM_GLU=0</code>（436/352/339 vs 264/438/436 无因果）、SVM buft（<code>dst/src_is_svm=0</code>）、缓冲 flags（同 <code>READ_WRITE</code>）、</em><em>隐藏入队（每节点 ≈1，<code>MUL_MAT#enq</code>=1.08）</em><em>。</em><em>另发现独立异常（→ G-768）</em><em>：HEAD 的 SILU <code>src</code>/<code>dst</code> 同 <code>cl_mem</code> 同偏移（三层全在 24832）而 v0.3.1 每层 +8192 B 独立槽位，但 </em><em>dealias 因果实验否定它是 2.4× 的因</em><em>（dst 换独立缓冲 457/469/470 vs 对照 425/554/460）。</em><em>自我撤回一条</em><em>："v0.3.1 只走标量 <code>kernel_silu</code>" 是 <code>grep|head -6</code> 截断假象 ⇒ R8 追加 (g)：命中计数必须完整。</em><em>路由对照（同批，HEAD 同二进制）</em><em>：CPU ngl=0 21.14/18.45/19.85 vs GPU ngl=25 6.24/6.86/6.34（3.1×）⇒ </em><em>用户定案不接受 CPU 兜底，catalog 路由作废</em><em>。 </em><em>设备档位</em><em>：小米13/Adreno </em><em>740</em><em> <code>100.109.138.2:5555</code>＝主力+支持底线，830＝高端参考，K40/650＝最低档 ⇒ 本格复现与验收从此 </em><em>740 也要出一份</em><em>（740 上尚无我们的 Mesa/OpenCL 栈，需先部署） 🟪🟪🟪🟪🟪 </em><em>13:1x 机制定性（§20.31）：不是内核慢，是"GPU 空闲后重新叫醒"的固定 ~200 µs，HEAD 每次发射都付</em><em>。</em><em>四步实验链</em><em>：① 程序二进制 </em><em>FNV 哈希两版完全相同</em><em>（<code>bin=4208 hash=13213277574326403814</code>）⇒ 内核等价；② 同节点</em><em>连发两次</em><em>：BAD <code>first</code> 378–470 vs <code>second</code> 147–192（GOOD 两次都是 118–215）⇒ 多出的全在等待；③ 新仪器 <code>&lt;OP&gt;~drain</code>（节点开跑前的 <code>clFinish</code>）——<code>SILU~drain</code> 小到进不了前 40 ⇒ </em><em>不是节点之间等别人</em><em>；④ 拆 <code>sub</code>/<code>fin</code>：<code>sub1</code> 两边同量级 5.5–23.8 µs，<code>fin1</code> </em><em>GOOD 150–162 vs BAD 332–428</em><em>，<code>fin2</code> 两边 119–159。</em><em>判决实验（同一份二进制交替，唯一变量＝发射前打一个 1 元素小内核）</em><em>：<code>fin1</code> COLD 336.9–365.2（噪声腿最高 486）vs WARM </em><em>127.2–165.9</em><em>，</em><em>两组不重叠</em><em>（COLD 最小 318.9 &gt; WARM 最大 167）⇒ 唤醒代价说成立；</em><em>账也对上</em><em>：每 token ≈500 次发射 × 200 µs ≈ 100 ms ≈ 缺的 96 ms/token（156 vs 60）。</em><em>静态排除</em><em>：两版 <code>clCreateCommandQueue</code>=3、<code>std::thread</code>=0；首发里的 IO 线程 staged 路（<code>raw_stage</code>+<code>WriteBuffer CL_FALSE</code>，"libCB submission thread"）在 </em><em>q3_K 门之后 ⇒ Ling Q4_0 走不到</em><em>（HEAD 净多 13 处 ReadBuffer / 7 处 WriteBuffer 待查）。</em><em>正在测</em><em>：桩层计数 <code>tool/lite_stub_stats_patch.py</code>（<code>TONGYILITE_STUB_STATS=1</code>，per-symbol + 主/其它线程，生产调度下不插 clFinish）看谁在抽空队列。</em><em>修法二选一</em><em>：A 消掉每层多余同步（阻塞读改异步/不读回，让队列不空）；B 每层起点 1 元素保活发射（~10 µs 换 ~200 µs）——若 GOOD 快是因为它的队列从不空，则 </em><em>A 是唯一正解、B 只止痛</em><em>。</em><em>验收线更新（机检）</em><em>：<code>GGML_OPENCL_SILU_TWICE=1</code> 下 </em><em>COLD 态 <code>fin1 ≤ 170 µs</code></em><em> + 同批 tok_s ≥ 0.9× v0.3.x；</em><em>且必须在小米13/Adreno 740 复核</em>*（该机已装 v0.3.4，但我们的 OpenCL 栈尚未部署） |</p>
+<p>| <strong>G-760</strong> | 🟪 <strong>性能测量纪律缺陷（我自己的流程违规，被自己抓住）</strong>：为赶进度<strong>豁免了安静门 <code>loadavg(1min)&lt;2</code></strong>、且<strong>没在数据表里标注豁免</strong>、并且<strong>用单次计时支撑因果结论</strong> ⇒ 直接产出三条已撤回的错误结论（"v0.3.1 断崖 −59%"、"必须两个文件一起改"、"E031 按源码形状出快慢两档"）。暴露证据：同一份 v0.3.1 二进制 8.85 ↔ 21.37 tok/s（2.4×） | L8×M10 | <code>OWN</code> | <strong>关闭（2026-10-21 19:0x 立规）</strong> | <strong>规约（并入 R8，四条缺一即作废）</strong>：(a) 每腿打印 <code>loadavg(1min)</code> 且要求 &lt;2，豁免必须显式写 <code>gate=WAIVED</code>；(b) 同版本 ≥3 次重复，报中位数 + 极差；(c) 版本<strong>顺序轮换</strong>防时间漂移伪装成版本差；(d) 必须交叉验证一个<strong>单内核 µs/op 微基准</strong>（<code>moe_probe4</code> 式真名真形状），整体慢而单内核不变 ⇒ 立即转派/同步层，禁止继续在计时上猜。<strong>判具</strong>：<code>bash /tmp/rep3.sh</code> 即为合规模板（含 loadavg 打印、三次重复、顺序轮换） |；<strong>(e) 版本对比必须同批次 + 顺序轮换 + 交替（A/B/A/B）</strong>，跨批只比值不比分绝对值（实测同一份二进制跨批漂移 1.6×），每腿同时打印 <code>loadavg(1min)</code> 与 <code>/sys/class/thermal</code> 热区峰值 
+| <strong>G-761</strong> | 🟪 <strong>上游大同步提交把未解冲突标记提交进主干</strong>：<code>f34edafe</code>「upgrade: llama.cpp tree → master@848bbda …20 files carry 47 conflict hunks」里 <code>ggml/src/ggml-backend.cpp:1902</code> 有 <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> ⇒ <strong>该提交根本编不过</strong>（<code>version control marker in file</code> 直接报错），真正的"首个能编的上游同步提交"是 <code>d4c0b056</code>「pass NDK compile gate」——凡按 <code>f34edafe</code> 划回归边界都会得出错误结论 | L8×M10 | <code>OWN</code> | <strong>开放（工具门）</strong> | <strong>判具</strong>：<code>git show f34edafe:third_party/llama.cpp/ggml/src/ggml-backend.cpp | sed -n '1895,1910p'</code> 可见标记；<code>JOBS=4 bash third_party/mesa-kgsl/scripts/build_probes_android.sh</code> 在 <code>f34edafe</code> 上 rc=1、在 <code>d4c0b056</code> 上通过。<strong>修法</strong>：在构建脚本里加冲突标记门 —— <code>grep -rn "&lt;&lt;&lt;&lt;&lt;&lt;&lt; \|&gt;&gt;&gt;&gt;&gt;&gt;&gt; " third_party/llama.cpp/ggml third_party/llama.cpp/llama</code> 命中即 exit 1 |
+| <strong>G-762</strong> | 🟪 <strong>工具故障：<code>web_search</code> 把搜索请求发到聊天端点</strong> ⇒ <code>The web request used endpoint "https://api.deepseek.com/anthropic/v1/messages"</code> + <strong>HTTP 402 Insufficient Balance</strong>（搜索端点与聊天端点分开配置，现被指到 chat URL）。这很可能是"上一个会话做 web_search 后死掉停不了"的成因（工具层反复失败/挂住）。<strong>只有用户能改</strong>：Plugins → Built-in plugin settings → Web search，或 <code>web-search-deepseek.baseURL</code> | L8×M10 | <code>OWN</code> | <strong>开放（等用户改配置）</strong> | <strong>绕行判具（本轮已验证可用）</strong>：<code>web_fetch</code> 直取 GitHub REST 与 raw：<code>https://api.github.com/search/repositories?q=&lt;词&gt;</code>（JSON，判存在性；实测 <code>strata+opencl+llama</code> 命中 0、<code>strata+llm+inference</code> 命中 18）、<code>https://raw.githubusercontent.com/&lt;owner&gt;/&lt;repo&gt;/&lt;branch&gt;/README.md</code>。禁止在 web_search 失败后反复重试同一调用（无预算保护） | <strong>判真</strong>：用户把 Web search 的 baseURL 改到可信端点后，同一 <code>web_search</code> 调用返回结果列表 ⇒ 本故障为端点配置问题，闭环。<strong>判伪</strong>：改后仍 402 或仍打向 <code>.../anthropic/v1/messages</code> ⇒ 不是配置而是工具侧路由缺陷，转报上游并长期以 <code>web_fetch</code>+GitHub API 为准 |
+| <strong>G-763</strong> | 🟪 <strong>外部参照：Strata（<code>Niko1221/Strata</code>，MIT，用了 llama.cpp/ggml 的一部分）不是我们这条线的竞品</strong>——后端只有 CUDA/HIP/Arc/Apple Silicon，<strong>无 OpenCL、无 Android/Adreno</strong>；但它在<strong>本图 §18 带宽受限区</strong>的同一温度带：125B / <code>24,576</code> 专家 / 每 token ~10 个活跃，SSD 放约 29 GB 量化码本(GSQ)、CPU 放 experts、<strong>GPU 常驻最热 ~4,000 专家</strong>、每 token 按 id 收集，sub-3bpw 量化 + speculator（+1.6~1.8×）+ prefill 分块 8192。且它 <code>docs/QWEN36.md</code> 写的正是我们目标模型之一 <strong>Qwen3.6-35B-A3B</strong>；<code>hongfaqiu/strata-manager</code> 只是它的桌面管理器 | L3×M1/M3 | <code>EXT</code> | <strong>未观测（读它，不搬它）</strong> | <strong>判具</strong>：读 <code>docs/HOW_IT_WORKS.md</code> / <code>GYRO.md</code> / <code>QWEN36.md</code>，与我们 §18 的"权重带宽 vs 收集带宽"账逐项对齐（尤其热专家数量、码本命中率、speculator 增益三个数）。<strong>判真</strong>：若其"热专家分层 + 码本查找"在我们 K40/830 的带宽算术下也判定为带宽主导 ⇒ 支持 M1（sub-3bpw MoE 内核族）继续投入；<strong>判伪</strong>：若其增益主要来自 80 GB 磁盘 + 桌面大显存（手机 UMA 不可移植）⇒ 本格降级为"仅作数字校准"，M1 依据回到我们自己的 §18 实测 |（<strong>未接通的仪器</strong>：本机无 Strata 可跑环境——它只有 CUDA/HIP/Arc/Mac 桌面后端，手机侧无法运行，故只能做"读文档 + 数字校准"，不能做同机对拍）| 🟪🟪🟪 <strong>20:1x 源码级核查 ⇒ "有可参照的 OpenCL/Vulkan 实现"判伪关闭（§21.5）</strong>：<code>git clone</code> 被网络掐断后改用 <code>https://codeload.github.com/Niko1221/Strata/tar.gz/refs/heads/main</code>（28.9 MB，解出 86 MB / 4625 文件）实测——文件名找 <code>*opencl*|*vulkan*|*.cl|*.comp|*.spv|*spirv*|*.vk</code> <strong>命中 0</strong>；<code>third_party/</code> 只有 <code>ggml</code>、<code>ggml-tq</code>，<strong>无 <code>ggml-opencl.*</code> / <code>ggml-vulkan.*</code></strong>；构建只出现 <code>GGML_METAL/CUDA/HIP/SYCL</code>（<code>tools/vision/CMakeLists.txt:69-82</code>、<code>metal/CMakeLists.txt:82</code>），<strong>全仓无开启 <code>GGML_OPENCL</code>/<code>GGML_VULKAN</code> 之处</strong>；51 个 "opencl" 命中逐条看全是 ① <strong>撞词 "OpenClaw"</strong>（agent 工具名）② SYCL 内核注释 "aligned with OpenCL C 1.2 standard" ③ 社区 Arc 基准 CMake 缓存 <code>GGML_OPENCL:BOOL=OFF</code>；28 个 "vulkan" 命中全是 <strong>桌面 App 显卡显示标签</strong>（<code>apps/host/server/hardware.mjs:193</code>、<code>device-probes.mjs:71</code>、<code>types.ts:34</code>）<strong>+ 画图小工具 <code>tools/image/install.py:7</code> 的 <code>--backend vulkan</code></strong>，LLM 引擎侧零 | L3×M1/M3 | <code>EXT</code> | <strong>关闭（2026-10-21 20:1x 判伪，见 §21.5）</strong> | <strong>判具（可复跑）</strong>：<code>curl -sSL -o /tmp/strata.tgz https://codeload.github.com/Niko1221/Strata/tar.gz/refs/heads/main</code> 后 <code>tar xzf … --strip-components=1</code>，再 <code>find . -type f ( -iname "*opencl*" -o -iname "*vulkan*" -o -iname "*.cl" -o -iname "*.comp" -o -iname "*.spv" )</code> 为空、<code>grep -rin "GGML_OPENCL|GGML_VULKAN" --include=*.txt --include=*.cmake .</code> 无开启处。原判真条件（分层专家卸载与 §18 带宽账同温）仍成立但<strong>代码不可参照</strong>，参照价值降级为"数字校准 + 制度类"，转 G-766 |
+| <strong>G-764</strong> | 🟪 <strong>测量环境污染：已死会话的遗留循环占着设备</strong>——<code>node …/dsh web</code> 之下 <code>bash tools/vk_gate.sh → wt/vk-line/tools/vk_sweep.sh → adb -s 100.67.150.120:5555 shell … test-backend-ops -b Vulkan0 -o SSM_SCAN,MUL_MAT_ID</code> 循环存活 35 小时，反复往 K40 推包并跑 Vulkan 算子测试（用户已停止并归档该会话；本机侧四个 bash 与残留 <code>adb</code> 客户端已由我终止，复查为空）。这类共存负载是 §20.20 "同一份二进制 8.85↔21.37 tok/s" 漂移的首要嫌疑，与我自己豁免安静门（G-760）叠加 | L8×M10 | <code>OWN</code> | <strong>关闭（2026-10-21 19:5x 已清 + 立规）</strong> | <strong>规约（补 G-760 的测量前体检）</strong>：任何计时腿开跑前先 <code>ps -eo pid,etimes,args | grep -E "vk_sweep|vk_gate|test-backend-ops|adb -s |llama|moe_"</code>；命中即把本轮全部数据标 <strong><code>gate=CONTENDED</code></strong> 并作废，不得进入任何版本对比。判具：本轮的 PID 链即样本（<code>3971343 → 3971344 → 3971354 → 3985184 → 3985226</code>） |
+| <strong>G-765</strong> | 🟪🟪 <strong><code>web_search</code> 已绕开 402 云端端点，改走 docker 里的 SearXNG</strong>——DSH 只有 deepseek/exa/perplexity 三种 provider（无 searxng），且它注册的是 Anthropic 服务端 <code>web_search</code> 工具（POST <code>${baseURL}/messages</code>，响应需含 <code>text</code> + <code>server_tool_use</code> + <code>web_search_tool_result</code> 块）。新建 <code>tool/searxng_messages_bridge.py</code>（纯标准库）把该契约翻译成 <code>http://127.0.0.1:8080/search?format=json</code>（容器 <code>searxng/searxng:latest</code>），控制器 <code>tool/searxng_bridge_ctl.sh</code>（pidfile 管理） | L8×M10 | <code>OWN</code> | <strong>开放（等用户填 baseURL）</strong> | <strong>判具（已实测）</strong>：<code>bash tool/searxng_bridge_ctl.sh test</code> ⇒ 命中 10 条、首条 <code>github.com/Niko1221/Strata</code>；<code>stream:true</code> 路径同样通；插件真实请求形状滚动记录在 <code>/tmp/searxng_bridge_reqs.jsonl</code>。<strong>判真</strong>：用户在 Plugins→Built-in plugin settings→Web search 把 baseURL 填成 <code>http://127.0.0.1:8788/anthropic/v1</code> 后，<code>web_search</code> 返回摘要+URL 列表 ⇒ 本方案闭环。<strong>判伪</strong>：填对后仍报错或返回空 ⇒ 说明插件对块类型/字段有更严校验，按 <code>searxng_bridge_reqs.jsonl</code> 里的真实请求逐字段对齐桥的输出（必要时改为纯 <code>text</code> 块交付） |
+| <strong>G-766</strong> | 🟪🟪 <strong>从 Strata 源码挖出的两条制度类参照（抄思路，不搬代码）</strong>：① <strong>子组语义</strong>——它为 subgroup shuffle 手声明 SPIR-V builtin（<code>sycl/include/dpct/util.hpp:22-30</code> <code>__spirv_GroupNonUniformShuffle{,Down,Up}</code>）并在内核注释声明与 <strong>OpenCL C 1.2 语义对齐</strong>；我们正是在这上面反复栽：<code>40d1b314</code>（17 个 MoE <code>_ns</code> 内核 <code>GGML_GENERIC_SUBGROUP_SHUFFLE</code> 宏逃逸）、<code>c583988c</code>（native 子组 128 致 sum 分配不足、decode 塌缩）、Mesa 线 <code>GGML_OPENCL_ALLOW_NO_SUBGROUP</code>。② <strong>dp4a 通路配编译期契约测试</strong>——<code>cmake/ggml_tq_overlay_test.cmake:26-63</code> 用字符串断言死盯 ggml CUDA MMQ dp4a（<code>ggml_cuda_mmq_vec_dot_q8_1_dp4a</code>、<code>write_back_dp4a</code>、<code>GGML_PREC_Q8</code>、<code>GGML_TYPE_TQ2_T</code>），漂移即红；而我们的 <code>*_q4_0_q8_1_dp4a_ila_a8_bin</code> 这类预编译内核族<strong>没有任何契约测试</strong> ⇒ G-759 中 <code>_bin</code> 可悄悄劣化而无人报警 | L6×M3/M10 | <code>OWN</code> | <strong>开放（待办：给内核加契约门）</strong> | <strong>判具</strong>：仿其思路给 <code>third_party/llama.cpp/ggml/src/ggml-opencl/kernels/</code> 加构建期契约测试（对 <code>_bin</code>/专用内核断言"源码指纹 + 期望子组大小 + sum 缓冲尺寸"，漂移即 fail），由 <code>build_probes_android.sh</code> 执行，顺带接上 G-761 的冲突标记门。<strong>判真</strong>：加门后再遇 G-759 类回归能在构建期报警，而不必靠上机跑 tok/s 才发现。<strong>判伪</strong>：若 G-759 最终定位到驱动/派发层，则此门抓不到 ⇒ 降级为卫生措施 |
+| <strong>G-767</strong> | 🟪🟪 <strong>Qwen3.5-MoE / LFM2.5-MoE 服务态把 MoE slot bank 放进 fine-grain SVM 缓冲，高通驱动下这条路从未被验证过</strong>：<code>ggml_backend_opencl_svm_buft()</code> 在后端内定义（<code>ggml-opencl.cpp:14868</code>）却<strong>无内部调用者</strong>，外部调用方是 <code>third_party/llama.cpp/src/models/qwen35moe.cpp:62</code> 与 <code>src/models/lfm2moe.cpp:46</code> 的 <code>moe_slot_buft = ggml_backend_opencl_svm_buft(gpu_dev)</code>；而 <code>has_fgsvm</code> 在 HEAD <strong>从无读者</strong>（§20.22 已证 = 死代码）⇒ <strong>能力位根本没被检查就用</strong>。App 里这俩模型 tok/s 一直没上去，此路是头号嫌疑 | L6×M4/M3 | <code>OWN</code> | <strong>开放</strong> | <strong>判具</strong>：对 Qwen3.5-MoE/LFM2.5-MoE 各跑两条腿——(A) 现状（SVM buft）、(B) 把 <code>moe_slot_buft</code> 强制回退为普通 <code>ggml_backend_dev_get_buffer_type(gpu_dev)</code>（一行改动，编一版），<strong>同批交替 + 每腿打印 loadavg/热区</strong>；(B) 明显更快 ⇒ 判真，给 <code>svm_buft</code> 加能力位+性能门（读 <code>has_fgsvm</code> 并实测阈值）。<strong>判伪</strong>：两档一致 ⇒ SVM 不是这俩模型的瓶颈，回到 G-754 的路由策略继续查 |
+| <strong>G-768</strong> | 🟪 <strong>HEAD 的激活张量出现"同 <code>cl_mem</code> 同偏移"的重叠分配（v0.3.1 没有）</strong>：<code>[silumem]</code> 实测 HEAD 上 SILU 的 <code>src</code> 与 <code>dst</code> 指向同一 <code>cl_mem</code> 的同一 <code>offset=24832</code>，且三个不同层的 SILU 节点都用同一偏移；v0.3.1 是每层 <strong>+8192 B 递进</strong>的独立槽位（86144→94336→102528→6272 回绕）。<code>same_tensor=0</code> ⇒ 不是同一张量，是分配器把两块区间重叠了，疑似 <code>41566183</code>「智能 MoE 拆分加载」省内存路径的副作用。<strong>因果实验已否定它是 G-759 那 2.4× 的因</strong>（<code>tool/lite_silu_dealias_test.py</code> 把 dst 换到独立 <code>cl_mem</code>：457.4/469.0/469.5 vs 对照 425.2/554.2/460.5） | L6×M5/M3 | <code>OWN</code> | <strong>开放（独立观察项，非 G-759）</strong> | <strong>判具</strong>：① 打全图统计——有多少对张量拿到重叠偏移（在 <code>alloc_buffer</code>/<code>init_tensor</code> 侧记 <code>{buf,offset,size}</code> 表，GOOD/BAD 各一份对比）；② 若 HEAD 大面积重叠而 GOOD 无 ⇒ 查 ggml-alloc 的 buft 选择/<code>get_alloc_size</code> 是否被首发提交改掉，并确认<strong>重叠是否只发生在"死张量"上</strong>（若 src 在 dst 产出后不再被读＝合法复用，只是慢；若仍被读＝<strong>正确性 bug</strong>，优先级立刻升到 P 级）。<strong>判真（性能）</strong>：给 SILU 类逐元素算子的 dst 强制独立槽位后 <code>SILU ≤ 140 µs</code> ⇒ 采为修法；<strong>判伪（性能）</strong>：已测（dealias 无改善）⇒ 保留为内存/正确性观察项，不再作为 G-759 候选 |
+| <strong>G-735</strong> | <strong>仪器必须自证，否则又是一种"永远不会失败的闸"（R8 家族）</strong>：G-731 的 v1 探针 <code>toybox date +%s%N</code> 给出<strong>负毫秒差</strong>（cold <code>-763 ms</code>/warm <code>-1643 ms</code>）却照样打印三个"MB/s"；同次跑测 <strong>loadavg=2.33 越闸</strong>；其顺序读对照 <strong>401/425 MB/s</strong> 与 12:2x 安静态实测 <strong>645 MB/s 差 38%</strong> ⇒ 若当时没核对，§18 那张表的地基就是假的 | L8×M9/M10 | <code>OWN</code> | <strong>开放（v2 已带三道自证）</strong> | v2 改动：① 计时改 <strong><code>/proc/uptime</code></strong>（单调、无 <code>%N</code> 依赖）；② <strong>内置安静闸</strong>（<code>loadavg(1min)≥2</code> 即 <code>exit 3</code> 拒测，宁可不出数）；③ <code>NET&lt;=0</code> 自判作废。已知小瑕疵：日志尾 <code>echo "exit=$?"</code> 在 <code>tee</code> 之后取到 tee 的码（显示 0），<strong>判定看 <code>REFUSE</code> 行</strong>。<strong>判真</strong>：v2 在 loadavg&lt;2 下出数且 cold&gt;warm ⇒ 数可用，§18.2 定稿。<strong>判伪</strong>：v2 仍出负值/异常 ⇒ 改 <code>perf</code>/<code>strace</code> 级计时，数继续挂 ⬜；🟪 <strong>缺陷 #6（已修）</strong>：env 读取与 <code>atexit</code> 注册原先懒做在计数函数内 ⇒ "<strong>路径从未被咨询</strong>"与"仪器没开"<strong>日志字节同形</strong>——这是 R8 的仪器版（<strong>永远报不出 0 的闸不算闸</strong>）；已改 <code>__attribute__((constructor))</code> 装载期注册，<code>consults=0</code> 会明确打出 |
+| <strong>G-769</strong> | <strong>A8X 把 SSM 算子整体判给 CPU，<code>sched_reserve</code> 从 30 段被切成 138 段，HEAD decode 慢 2.6~3×</strong>：<code>ggml_opencl_supports_op()</code> 里 <code>[dspark 2026-10-14]</code> 的门控 <code>if (adreno_gen == A8X) return false;</code> 命中 <code>GGML_OP_SSM_CONV</code>/<code>GGML_OP_SSM_SCAN</code>，而 Ling 3.0 tiny 是 SSM 混合模型 ⇒ 每 token 多 108 次 GPU-&gt;CPU-&gt;GPU 交接 ≈ 96 ms/token，正是要找的那个缺口。原注释自陈 "the CPU fallback strands the gdn branch in a CPU island" —— 作者已看见却只留 env 没改默认 | L5×M1/M4 | <code>OWN</code> | <strong>关闭（已定案 + 已修，待 740 底线复验）</strong> | <strong>判真（同批交替，一份二进制只改 env）</strong>：FIX 默认 <strong>19.52/20.71/19.90 ⇒ 19.90 tok/s + <code>splits = 30</code></strong>；FIXOFF <code>GGML_OPENCL_SSM_A8X=0</code> <strong>6.48/7.15/6.72 ⇒ 6.72 + <code>splits = 138</code></strong>；两组零重叠（7.15 ≪ 19.52），<strong>2.96×</strong>；v0.3.1 同批中位 ~19.95、恒 <code>splits = 30</code>。<strong>修复已落主树</strong>：默认留 GPU，env 反转为关断阀（<code>=0</code> 才回落 CPU，给真会误编译的驱动留路）。830/vendor 线，<code>plat=1</code> 全腿自证，loadavg 14.2~15.1 ⇒ <code>gate=WAIVED</code> |
+| <strong>G-770</strong> | <strong>SSM 内核（<code>GGML_OP_SSM_CONV</code>/<code>GGML_OP_SSM_SCAN</code>）至今没有逐 op 数值契约</strong>——当年把 A8X 判给 CPU 的理由就是 "never been numerically validated (TBO has no SSM coverage) + E031.47 miscompiles"，而今天恢复 GPU 路线靠的只是<strong>端到端文本</strong>（贪心 128 token、两 prompt：prompt1 与 CPU 路 hash 逐字节相同<code>0993385b3d</code>，prompt2 前缀同后分叉）—— 这是弱证据，不足以支撑"内核正确"这个断言（R8(g)） | L4×M1 | <code>OWN</code> | <strong>开放</strong> | <strong>下一发判定实验（未做，先跑这条）</strong>：<code>ggml_backend_opencl</code> 上加一条离线对拍——同一 SSM_CONV/SSM_SCAN 张量分别用 <code>ggml_cl_ssm_conv</code> 与 CPU <code>ggml_ssm_conv</code> 各算一次，比逐元素最大绝对/相对误差（阈值 1e-2/1e-3 起），覆盖 d_state=4/8/16/32/128/256 与多 kernel 形状；跑在构建期或 <code>run_g725_gate.sh</code> 里。<strong>在此之前，"SSM 走 GPU 数值可信"只能记作 <code>待观测</code>，不许写成 🟩</strong> |
+| <strong>G-771</strong> | <strong>回归排查里"图被切成几段"从没被记录过，是这次绕 3 天的直接代价</strong>：<code>sched_reserve: graph: nodes = N, splits = M</code> 免费打在 stderr，纯结构计数、不受热噪与限频影响，v0.3.1 是 <code>nodes = 3138, splits = 30</code>，HEAD 是 <code>3176 / 138</code> —— 只要第一天就录这两个数，回归第 2 小时结案 | L8×M9 | <code>OWN</code> | <strong>开放（已立为 R8(h)）</strong> | <strong>立为 R8 新子条 (h)</strong>（机检化）；<strong>下一发判定实验</strong>：同一条 decode 腿里同时录 <code>selected platform</code> + <code>nodes</code>/<code>splits</code> + <code>offloaded X/Y</code>，A/B 两版对照即判"结构是否变了"。细则： <code>selected platform</code> + <code>sched_reserve</code> 的 <code>nodes</code>/<code>splits</code> + <code>offloaded X/Y</code>，缺一项该腿作废；已写进主树门控脚本的必录行。<strong>判具</strong>：门控脚本输出里出现 <code>splits=</code> 才算过；跨版本比较时 <code>splits</code> 差 &gt;20% 直接判"结构变了"，禁止先谈微架构 |
+| <strong>G-772</strong> | <strong>A7X（740 底线机）默认把 vocab 级 K-quant lm_head 整个判给 CPU，依据只是一条从未在本机复测过的编译器断言</strong>：<code>ggml_opencl_supports_op()</code> 里 <code>GGML_OPENCL_A7X_LMHEAD_CPU</code> 的默认是 <code>(env == nullptr || env[0] != "0")</code> 即 <strong>默认 CPU</strong>，命中 <code>MUL_MAT</code> 且 <code>src0 ∈ {Q4_K,Q5_K,Q6_K}</code> 且 <code>op-&gt;src[0]-&gt;ne[1] &gt;= 32768</code>（vocab 权重），判据只有 <code>adreno_gen == A7X</code>——<strong>不看驱动版本</strong>；注释理由是 "the E031.41 compiler (usually with A7x) miscompiles the flat K-quant GEMV kernels … fallback to CPU to preserve performance"。与 §20.32 同族病灶（把 GPU 大算子整段挪进 CPU 造 CPU island），只是规模小（每 token 1 个节点 vs SSM 的每层 1.5 个） | L5×M1/M4 | <code>OWN</code>；<strong>🟪 2026-10-22 18:0x 排除本门对 Ling 的命中</strong>：Ling 的 <code>output.weight</code> 经 <code>gguf</code> 库离线核出是 <strong>Q5_1</strong>（[1536×157184]、0.8203 B/权重 = 6.5625 bpw、188.88 MiB），<strong>不在本门的 {Q4_K,Q5_K,Q6_K} 命中表里</strong>；而 740 与 830 的 CPU 权重差恰好就是这 188.88 MiB ⇒ <strong>lm_head 掉 CPU 不是本门干的</strong>（它仍只影响 Q4_K_M 类模型，那条腿照旧要测） （详见地图 §20.35）；<strong>🟪 2026-10-22 18:4x 判真（740 分辨腿）</strong>：<code>GGML_OPENCL_A7X_LMHEAD_CPU=0</code> 一开，<code>CPU model buffer size</code> <strong>精确 456.96 -&gt; 268.08 MiB</strong>（差额正是 <code>output.weight</code> 188.88 MiB）、<code>splits</code> 31 -&gt; 30 ⇒ <strong>本门就是 740 上 lm_head 掉 CPU 的真凶</strong>；但<strong>速度几乎不动</strong>（1.94 -&gt; 1.99）⇒ 它是结构缺陷不是今天的瓶颈。<strong>撤回我上一轮「output.weight 是 Q5_1 所以本门不命中」的推论</strong>：0.8125~0.82 B/权重正是 Q5_K 族，本门命中表包含 Q5_K；<code>gguf</code> 库的 <code>tensor_type=14</code> 不是 ggml 枚举序号，不可对表。<strong>默认暂不翻</strong>，仍待 Q4_K_M 模型上的交替腿 + E031.41 flat GEMV 的构建期契约测试（详见 §20.36） | <strong>开放（740 实测后再定默认方向）</strong> | <strong>下一发判定实验</strong>：740（Adreno 740 / 2211133C）上取 <strong>Q4_K_M</strong> 模型（Ling Q4_0 不命中：列表无 Q4_0，已核对），交替 <code>GGML_OPENCL_A7X_LMHEAD_CPU=0</code> 与默认各 ≥3 腿，按 R8(e/f) 交替 + 不重叠才结论，<strong>每腿必录 <code>splits</code>/<code>nodes</code>（R8(h)）</strong>。预测：① 若驱动不是 E031.41 系，GPU 组 tok_s ≥ CPU 组 ⇒ <strong>默认翻成 GPU、env 留作关断阀</strong>（照 §20.32 的处理法）；② 若 CPU 组确实更快，说明误编译断言为真 ⇒ 保留默认，但必须补一条<strong>构建期内核契约测试</strong>盯 <code>kernel_mul_mv_q*_K_f32_flat</code>（不许再拿一句注释当判据）。<strong>在此之前"740 上 lm_head 该走 CPU"记作 <code>待观测</code>，不许当既成事实引用</strong> |
+| <strong>G-773</strong> | <strong>A7X/A6X 被整条禁掉自研 batched MoE 内核，快路在底线机上直接消失</strong>：<code>use_adreno_moe_kernels()</code> 里 <code>if (!force_a7x_moe &amp;&amp; (adreno_gen == A6X || A7X || ADRENO_UNKNOWN)) return false;</code>，注释自陈后果是 "the rest fallback to CPU"，而排除理由只是 vendor <code>*_trans4_ns</code> repack 在部分 A7x/A6x 误编译 —— <strong>同一条注释又承认 "our batched-MoE set_tensor packing does not use it"</strong>，等于用一个我们用不到的编译器毛病关掉了 740/K40 上整条自研 MoE 快路；<strong>🟪 2026-10-22 18:4x 修法已落主树（未提交）</strong>：<code>use_adreno_moe_kernels()</code> 的 A7X 排除翻成默认进 GPU，<code>GGML_OPENCL_MOE_FORCE_A7X=0</code> 变关断阀，A6X/UNKNOWN 仍排除（等 K40 腿）；实测新默认 3.15/3.23 tok/s 与旧 env 路径 3.32 同档 ⇒ 代码 == env。贪心两腿同 hash <code>ca0b535e04</code>（确定性过）；与 830 GPU 腿同属「。1.2.3.4. 前缀」那一族（Ling 模板病灶，非 A7X 内核乱码），但<strong>与 CPU 后端文本不一致</strong> ⇒ A7X batched-MoE 的逐 op 数值契约仍欠（同 G-770），现在不许宣称数值干净（详见 §20.36） | L5×M1/M4 | <code>OWN</code> | <strong>开放（判真已定，修法待落）</strong> | <strong>判真（740 / Adreno 740，交替、不重叠）</strong>：<code>GGML_OPENCL_MOE_FORCE_A7X=1</code> <strong>2.97 / 2.55 tok/s</strong> vs 默认 <strong>1.69 / 1.42</strong> ⇒ <strong>1.8×</strong>，<code>splits</code> 两边同为 31，<code>plat=1</code>。<strong>下一发（修法）</strong>：把 <code>adreno_gen</code> 判断从"整条 MoE 准入"下移到真正调 <code>*_trans4_ns</code> repack 的那一处，A7X/A6X 只关 repack 分支，env 留作关断阀；改完必须在 740 上交替 ≥3 腿复验（R8(e)）+ 输出文本哈希与 830 对照，防止 q4_0 garbling 复发（2026-10-14 那次） |
+| <strong>G-774</strong> | <strong>740 上还有第二个未定位缺口：打开 MoE 快路后仍只有 2.97 tok/s，830 同一份二进制 19.90（6.7×）</strong>，且 <code>load_tensors: CPU model buffer size</code> <strong>恒为 456.96 MiB</strong>（830 为 268.08 MiB，多 <strong>188.9 MiB 权重留在 CPU</strong>），与 MoE 开关无关；<code>sched_reserve: CPU compute buffer</code> 0.61 MiB vs 830 0.08 MiB（7.6×）；<code>done_getting_tensors</code> 是 "q4_0 (and <strong>39</strong> others)"（830 为 38）。<strong>当前状态是嫌疑，不是结论</strong> | L6×M4/M3 | <code>OWN</code> | <strong>关闭（已定性：launch-bound，见 §20.36）</strong> | <strong>下一发判定实验（三条，按序）</strong>：① <strong>必须用带 noder 插桩的构建</strong>跑 per-op（§20.34 记一笔教训：主树 FIX 二进制没有插桩，那条 <code>GGML_OPENCL_NODER_STATS=1</code> 腿 0 行输出、白跑）；② 两后端 <code>model buffer size</code> + <code>done_getting_tensors</code> 逐张量归属，先回答"那 188.9 MiB 是哪些张量、为什么不上 GPU"；③ 查 <code>resolve_fused_ops: Flash Attention not supported, set to disabled</code> 在 740 上是否另拽一段进 CPU。<strong>受阻登记</strong>：740 adbd 掉线（<code>adb: device not found</code>），需 USB 主机重跑 <code>scripts\adb-wifi.ps1</code>；恢复后本节全部 740 数据须重跑一遍才算底线过；<strong>🟪 2026-10-22 18:0x 定量（740 带 noder 插桩，两条腿，掉线前采集）</strong>：每算子完成等待 <strong>0.8~1.3 ms</strong>（SILU 1073、RMS_NORM 1093、SUM_ROWS 1105、SSM_CONV 1299、GATED_DELTA_NET 1322、SOFT_MAX 1175），830 同姿态 ~130~160 µs ⇒ <strong>差 8 倍</strong>；所有 <code>~host</code> 仅 100~300 µs（宿主正常）⇒ 病灶在<strong>提交后的完成等待</strong>；GPU 侧算子计数与 830 对齐（<code>MUL_MAT</code> 10643 vs 10767、<code>SILU</code> 2406 vs 2424、<code>MUL_MAT_ID</code> 2982 vs 3015）⇒ 不是漏算；<code>MOE_FORCE_A7X=1</code> 一开<strong>全体算子整齐降 ~30%</strong> ⇒ 像时钟爬升/空闲退出被摊薄。另：188.88 MiB 已核出 = <strong><code>output.weight</code>(Q5_1) 一个张量</strong>，且 MoE 开关不影响它；分辨四条腿（default / <code>A7X_LMHEAD_CPU=0</code> / <code>MOE_FORCE_A7X=1</code> / 同开）读 <code>CPU model buffer size</code>，谁让 456.96→268.08 谁是真凶。twice/WARM 探针已编好待跑 （详见地图 §20.35）；<strong>🟪 2026-10-22 18:4x 定性完成（不再是嫌疑）</strong>：740 decode 是 <strong>launch-bound</strong> —— noder 数出每 token <strong>~1250</strong> 个算子（§20.37 实测 top-18 合计 1247，<strong>先前写 500 是估的，已更正</strong>；其中 <code>MUL_MAT</code> 仅 333，其余是 <code>ARGSORT</code> 96 / <code>CONCAT</code> 92 / <code>CONT</code> 75 / <code>SILU</code> 75 / <code>SSM_CONV</code> 75 等碎小算子)，热态每算子完成等待 350~500 µs ⇒ 500×400µs≈200 ms，实测 294 ms/token；830 同式吻合（500×130µs=65 ms vs 实测 50 ms）。<code>[silutwice]</code> COLD 态 <code>fin1</code> 尖峰 <strong>3.3~4.3 ms</strong>、WARM（保活线程）尖峰全消（max 768 µs），但 <code>tok_s</code> 不升 ⇒ 唤醒税可压、非主因。<strong>同一台机纯 CPU 后端（ngl=0）跑出 12.50 tok/s，GPU 路径只有 3.4 ⇒ 差 4 倍</strong>，这是 §20.36 的定案数字（详见 §20.36） |
+| <strong>G-775</strong> | <strong>「v0.3.x 在 740 上很快」这个前提从未成立 —— v0.3.1 在 740 上内核就编不过</strong>：<code>dequantizeBlockAccum_ns_sgbroadcast_1_hi</code> 宏里 <code>sub_group_broadcast(y.s0, 0)</code> 报「candidate function not viable: no known conversion from float8 to unsigned long」，5 diagnostic(s) generated，进程无 METRIC。HEAD 同一台机 <code>error_lines=0</code>（已修好），这也解释了为什么底线机从来没进过回归基线 | L8×M9 | <code>OWN</code> | <strong>关闭（已判真，2026-10-22 17:1x）</strong> | <strong>判真（已实测）</strong>：v0.3.1 二进制在 740 两条腿均无 <code>METRIC</code>，日志尾即上述编译诊断；HEAD 构建 <code>grep -c error:</code> = 0 且能出 19.9 级 tok_s。<strong>制度推论</strong>：跨版本性能比较必须<strong>两版都能在该机跑起来</strong>（<code>plat=1</code> + <code>METRIC</code> 存在）才允许比，否则记作"该机不可比"，禁止引用记忆中的旧速度 |
+| <strong>G-776</strong> | <strong>740（Adreno 740）上 OpenCL 路径整体输给自家 CPU 后端 4 倍（GPU 3.4 vs CPU 12.50 tok/s），根因是 vendor OpenCL 每次发射 ~400 µs 的完成往返 × 每 token </strong>~1250<strong> 个算子（§20.37 实测 top-18 合计 1247，</strong>先前写 500 是估的，已更正<strong>；其中 <code>MUL_MAT</code> 仅 333，其余是 <code>ARGSORT</code> 96 / <code>CONCAT</code> 92 / <code>CONT</code> 75 / <code>SILU</code> 75 / <code>SSM_CONV</code> 75 等碎小算子) ⇒ 结构性 launch-bound；单个算子都不是瓶颈（830 同一批算子 130 µs 时 GPU 就以 19.9 tok/s 压过 CPU）</strong> | L6×M4/M3 | <code>OWN</code> | <strong>开放（底线未过）</strong> | <strong>下一发（三步，740，R8(h) 全录）</strong>：① 按 noder 的每 token 算子数排可融合项（<code>SILU</code>+<code>MUL</code>+<code>SWIGLU</code>、<code>RMS_NORM</code>+<code>MUL</code>，以及每 token 30+ 次的 <code>CONT</code>/<code>CPY</code>/<code>FILL</code>/<code>CLAMP</code>/<code>DIV</code>）；② 把 HEAD 已有融合/判定开关（<code>GGML_OPENCL_FUSE_*</code>、norm 融合、<code>GGML_OPENCL_FA_*</code>）在 740 上扫 A/B，录 <code>splits</code> + 算子数 + <code>tok_s</code>，<strong>判真条件 = tok_s 上升且算子数下降、两组不重叠（R8(e)）</strong>；③ 若算子数压不到能把 GPU 抬过 CPU 的量级，则承认「A7X 这代驱动 ~400 µs/发射，GPU 路径不可能压过 CPU 后端」，740 上的 Ling 按机型分级显式走 CPU 后端 —— <strong>这是路线取舍，须用户拍板，禁止擅自改默认</strong>。在此之前 740 的 Ling 一律记 <code>未过底线</code>，不许写「已修好」；<strong>🟪 2026-10-22 19:4x 融合普查已把靶子收窄（740，仪器腿内部横向比）</strong>：<code>DISABLE_FUSION=1</code> 使算子/token 从 <strong>2052 涨到 2572（+25%）</strong>、<code>FUSE_RMS_MUL=0</code> +12%、<code>FUSE_MOE_COMBINE=0</code> +14% ⇒ 这三条融合在干活；但 <code>FUSE_RMS_ADD=0</code> 与 <code>FUSE_MM_GLU=0</code> <strong>算子数一字不动（2052）</strong> ⇒ <strong>对 Ling 根本没触发</strong>，根因是 <code>ggml_opencl_can_fuse()</code>（<code>ggml-opencl.cpp:8798</code>）里 MM_GLU 硬要求 gate/up 权重为 <strong>Q4_K</strong>，而 Ling 的 FFN 是 Q4_1/Q4_0 ⇒ 与 SSM/MoE/lm_head 同族的"准入比必要条件更严"病灶。<strong>下一发三件</strong>：① 放开 MM_GLU 到 Q4_0/Q4_1（预期 −~50 算子/token，判真须算子数降 + tok_s 升 + 不重叠 + 贪心同 hash）；② 查 RMS_ADD 为何不触发；③ <code>ARGSORT</code> 96/token 的 MoE top-k 换实现（§20.37）（详见 §20.38）；<strong>✅ 2026-10-23 13:1x ①号靶子已从"猜"变成"算得出"</strong>：GGUF 头部（Range 256KB）读出 <code>bailingmoe3 / expert_count=128 / used=8 / group_count=8 / group_used=4 / weights_norm=1 / shared_count=1 / gating=2</code>，且 <code>head_count_kv=[0,0,0,1]×6</code> ⇒ 24 层只 6 层做 attention。按 <code>llama-graph.cpp:2396-2473</code> 逐行点算 decode 每 MoE 层的路由内核 = <strong>ARGSORT×3 + GET_ROWS×3 + SUM_ROWS×2 + FILL×1 + SET_ROWS×1 + SIGMOID + ADD/MUL ≈ 18 次</strong>，与实测 <code>ARGSORT 105 / FILL 35 / SET_ROWS 44 / SUM_ROWS 70</code>（÷25 全在预测区间）对上；<code>ggml_argsort_top_k</code> 拆开只有 <strong>1 个 ARGSORT 内核 + 免费 view</strong>（top-k 不额外发内核）。<strong>自我纠正</strong>：MoE 门控走的不是 <code>SOFT_MAX</code>（实测仅 9/token，几乎全属 6 层 attention）而是 <code>SIGMOID</code>（126/token）—— 不纠正这条，任何"优化 softmax"的靶子都打空。<strong>下一发按成本排</strong>：① 整段路由落 CPU（量上限，便宜可 A/B）② 路由 megakernel（18→1，需新内核）—— 见 <strong>G-782</strong>；与已否决的"整模型 CPU 兜底"无关，判据仍是同批不重叠 <code>ops/token</code>+<code>tok_s</code>|
+| <strong>G-778</strong> | <strong>K40（Adreno 650 = A6X）从没跑过 Ling：自研 batched MoE 在 A6X 被整条排除，收益与正确性双双未知；A6X 也从未验过我们的内核能否编译</strong> | L6×M4/M1 | <code>OWN</code> | <strong>关闭（首跑完成：能跑的条件与代价全部量化）</strong> | <strong>下一发（一条命令，含机检）</strong>：<code>third_party/mesa-kgsl/scripts/run_k40_bringup.sh</code> —— 自带上线重试、手机侧自下二进制与模型（字节+sha256 自证）、六条腿（<code>A6X_OFF</code>/<code>A6X_FORCE</code>/<code>CPUONLY</code>/<code>FUSE_ALL_OFF</code>）、R8(h) 结构必录 + <strong>内核 <code>error:</code> 计数非零即作废</strong>。放行 A6X 用 <code>GGML_OPENCL_MOE_FORCE_A7X=1</code>（本轮刚修好的三态语义：未设=A7x进/A6x排除；=0=A7x也排除；=1=A6x+A7x 都进 —— 旧 HEAD 的探针语义）。<strong>判真：<code>A6X_FORCE</code> 相对 <code>A6X_OFF</code> tok_s 上升且两组不重叠（R8(e)）+ 贪心输出与 CPU 腿同族 ⇒ 才谈默认放行；在此之前"K40 能跑 Ling"一律记未观测，不许当既成事实引用</strong>；<strong>🟪 2026-10-23 10:4x 首跑实录（设备已上线，工装自动部署+模型自下 sha256 相符）</strong>：机型 <code>M2012K11AC</code>/SM8250/<strong>Adreno 650(A6X)</strong>/Android 13，驱动 <strong>V@0502.0（2021-10-04）</strong>；<code>A6X_OFF</code>/<code>A6X_FORCE</code>/<code>A6X_OFF2</code> <strong>三条腿开局数秒内全死</strong>：有 <code>selected platform</code>(plat=1)、<strong>无 tok_s 无任何 noder 计数</strong>，<code>error:</code> 6 行全是 <strong><code>Writable 3d images require the cl_khr_3d_image_writes extension enabled</code> + <code>OpenCL requires a write_only image parameter to write_imageh</code></strong>（见 G-779）。<strong>下一发</strong>：① 拉日志末尾判定这些编译错误是否致命（<code>/tmp/k40_pull.sh</code>，已挂长重连）；② 修好编译门后重跑六条腿（A6X 放行收益 / <code>splits</code> / 算子预算 / CPU 参照 —— 目前全未观测，<strong>"K40 能跑 Ling"仍不许当既成事实引用</strong>）；③ 掉线瞬间抓 dropbox/last_kmsg（两台不同代际同形态，30 秒内 adbd 掉，疑与 GPU 侧崩溃相关）；<strong>✅ 2026-10-23 11:3x 首跑定案（同一仪器构建 + 同一模型字节级）</strong>：pragma 修复后<strong>内核 err=0（A6X 编译门过）</strong>；<code>-ngl</code> 二分 = <strong>18→1.41 / 12→1.78 / 6→2.76 tok/s，纯 CPU(ngl=0)=9.50、splits=1</strong> ⇒ <strong>K40 上 GPU 对 Ling 单调负优化，纯 CPU 快 3.4~6.7 倍</strong>；<code>splits</code>≈offloaded 层数 1:1。<strong>A6X 放行自研 batched MoE 判真：ngl=12 贪心交替 <code>OFF 2.69/2.64</code> vs <code>FORCE 3.90</code> = +46%，两组不重叠（R8(e)）</strong>，CPU 权重两侧同为 2286.38 MiB ⇒ 差别在算子落点非权重搬家。<strong>全载另有分配墙，另立 G-781；A6X 默认放行的数值契约另立 G-780</strong>|
+| <strong>G-779</strong> | <strong>image 路径内核没有能力门：<code>transpose.cl</code>/<code>gemm_xmem_f16_f32_os8.cl</code>/<code>sdpa_xmem_f32_f16_os8.cl</code>/<code>flash_attn_repack.cl</code> 用 3D image 写入与 <code>write_imageh</code>，而 <code>ggml-opencl.cpp</code> 全文</strong>从未查询 <code>cl_khr_3d_image_writes</code><strong>，init 无条件编译 ⇒ A6X（K40 驱动 V@0502.0）直接拒编、整条腿作废</strong>（与 SSM/MoE/lm_head/MM_GLU 同族：门写在"GPU 代际"上而不是"设备能力"上，且算子选择层的排除救不了 init 层的无条件编译） | L2×M1/M4 | <code>OWN</code> | <strong>开放</strong> | <strong>下一发</strong>：① 先确认可否容忍 —— 读 <code>ggml-opencl.cpp:1539/1607/1700</code> 三处 <code>clBuildProgram</code> 的失败处理（<code>opts_try[]</code> 回退是否覆盖这条）+ 抠 K40 日志末尾；② 加<strong>能力门</strong>：init 读 device extensions，缺 <code>cl_khr_3d_image_writes</code> 就不建这些 program，并让 <code>GGML_OPENCL_XMEM_SDPA</code>/xmem GEMM/flash_attn_repack 相关判定同步返回 false（<strong>禁止再加 <code>adreno_gen</code> 判断</strong>，谓词必须是扩展名）；<strong>判真：K40 上 init 走完并打出 <code>METRIC</code> + <code>offloaded</code>/<code>splits</code>/<code>selected platform</code>（R8(h) 全字段）；判伪：加了门仍编不过或仍无 METRIC ⇒ 真凶另有其人，回到 G-778 的①</strong>；<strong>🟪 2026-10-23 11:1x 根因+修复已落主树</strong>：致命性读码定案 —— 普通内核入口 <code>build_program_from_source()</code>（<code>ggml-opencl.cpp:1626</code>）编译失败即 <strong><code>exit(1)</code></strong>；<code>:1607</code> 的 <code>opts_try[]</code> 只是 <strong>subgroup canary 探针</strong>，不是通用回退（别当容错引用）。病灶定死：四个用 <code>write_imageh</code> 写 <code>image3d_t</code> 的内核里<strong>只有 <code>flash_attn_repack.cl</code> enable 了 <code>cl_khr_3d_image_writes</code></strong>，其注释早就写着 "the Adreno 650 vendor compiler rejects it otherwise and the model fails to load" —— <strong>同一条病例我们修过一次，只修了一个文件</strong>，<code>transpose.cl</code>(9)/<code>gemm_xmem_f16_f32_os8.cl</code>(9)/<code>sdpa_xmem_f32_f16_os8.cl</code>(13) 全漏。修复=三个文件照自己范本各补一条 pragma（ASCII 机检）。<strong>已踩并立规</strong>：仪器工作树半同步（只拷 .cpp 不拷 kernels/）⇒ 被测代码≠主树代码 ⇒ "修了测不出"的假阴性；今后 <code>cp -a</code> 整目录 + 二进制自检 <code>grep -ac cl_khr_3d_image_writes &lt;bin&gt;</code>（修前基线 1，修后实测 <strong>4</strong>）。<strong>判真仍是 K40 打出 <code>METRIC</code> + R8(h) 全字段，腿在跑</strong>|
+| <strong>G-781</strong> | <strong>最低档机型的"单块分配墙"会让模型直接加载失败，而 App 没有降级重试</strong>：K40 全载时 ggml-opencl 要一块 <strong>996.49 MiB</strong> 的 <code>cl_mem</code>，A650 驱动 <code>err=-5</code> 拒掉 ⇒ <code>unable to allocate OpenCL buffer</code> ⇒ 加载失败；<strong>换 mmap 无效</strong>（与宿主内存/<code>ulimit -l</code> 无关）；而 <code>tongyilite_jni.cpp:56</code> 的运行时探测只判断"<strong>有没有</strong> GPU 设备"，有就全载，<strong>没有"分配失败→按 ngl 阶梯降级重试"</strong> ⇒ 用户在底线档看到的是"加载失败"而不是"慢" | L3×M3/M4 | <code>OWN</code> | <strong>开放</strong> | <strong>下一发</strong>：① 设备上查 <code>CL_MAX_MEM_ALLOC_SIZE</code>/<code>CL_DEVICE_GLOBAL_MEM_SIZE</code>（决定是"分块分配"还是"降 ngl"）；② JNI 侧加<strong>分配失败→ngl 阶梯降级重试</strong>（100→按显存预算→0），并在推理日志里明说降到几层、为什么；<strong>判真：K40 + 这份 4.6 GB MoE 用 App 默认参数能加载成功并出 tok/s；判伪：加了阶梯仍失败 ⇒ 墙不在单块尺寸，回 §20.43 的①重查</strong> |
+| <strong>G-780</strong> | <strong>A6X 自研 batched MoE 的逐 op 数值契约</strong>：实测放行 +46%（ngl=12 贪心交替 <code>2.69/2.64</code> vs <code>3.90</code>，不重叠），但 A650 那支 2021 驱动（<code>V@0502.0</code>）从未验过这批内核的数值正确性，而它已经给过两次脸色（E031.41 miscompile 前科 + 本轮 3D image 严格性）⇒ <strong>收益判真 ≠ 可以默认放行</strong> | L2×M4/M1 | <code>OWN</code> | <strong>未观测</strong> —— <strong>缺的仪器是"CPU 后端逐算子对照"这条腿本身（K40 在线、构建在线，只是还没跑过这条腿）</strong> | <strong>下一发</strong>：K40 上同一 prompt 贪心三腿（<code>MOEOFF</code> / <code>MOEFORCE</code> / <code>CPUONLY ngl=0</code>）比对输出文本与逐 op max abs/rel（d_state 4..256 扫一遍），<strong>机检（本轮立的，差点被它骗）</strong>：空串的 sha1 前缀是 <code>da39a3ee5e</code> —— 2026-10-23 11:4x 首次 attempt <strong>adbd 在腿刚开跑就掉线，四条文本抽取全空、四个 hash "完全相等"</strong>，看着像"GPU==CPU 判真"，实为掉线假象，已作废；<code>run_k40_bringup.sh</code> + 设备内 <code>k40_battery_device.sh</code> 已把"空串指纹即作废"写成机检，并修掉我第一版的<strong>跨算法指纹 bug</strong>（脚本用 sha256 算，我却拿 sha1 空串 <code>da39a3ee5e</code> 比 ⇒ 全空文本没被作废）；<strong>采集架构一并根治：八条腿 ≈50 次 <code>adb shell</code> 往返正是 adbd 掉线主因，现整副腿在手机上跑、主机只敲三次 （push/执行/补取），日志在设备上落盘，掉线不丢已完成腿（§20.44）</strong>，并内置贪心三腿（<code>NUM_OFF</code>/<code>NUM_FORCE</code>/<code>NUM_CPU</code>，E2E_TEMP=0）。<strong>判真：<code>MOEFORCE</code> 与 CPU 后端同族文本（或与 740/830 同 hash 谱系）⇒ 才把 A6X 并入默认放行；判伪：文本漂移或 NaN/Inf ⇒ A6X 保持默认排除，只留 <code>GGML_OPENCL_MOE_FORCE_A7X=1</code> 做实验</strong> |
+| <strong>G-782</strong> | <strong>decode 每 token 为"挑专家"发约 18 次内核（128 float 的小数组），占 2052 预算的 ~1/4</strong>：128 专家选 8、8 组选 4、<code>weights_norm=1</code> ⇒ 分组掩码块与归一化链每层必跑（代码点算见 §20.46，与 740 实测算子普查逐条对上）| L4×M4/M9 | <code>OWN</code> | <strong>未观测</strong> —— <strong>仪器已接通、只差设备窗口</strong>：我原写"代码里没有落点开关、A/B 无从做起"是<strong>当场纠正</strong>—— <code>ggml-opencl.cpp:7256</code> 早就有 <strong><code>GGML_OPENCL_OPFILTER</code></strong>（<code>ggml_op_desc</code> 上的大小写不敏感全匹配正则，<code>supports_op:9906</code> 命中即不认领，调度器自然落 CPU），所以 ① 是<strong>零代码、零重编</strong>就能 A/B 的；三腿 <code>ROUTER1/ROUTER2/ROUTER1B</code> 已写进 <code>run_740_launch_budget.sh</code> 与设备内 <code>k40_battery_device.sh</code>（<code>ROUTER2</code> 多加 <code>SIGMOID</code>，会连 SSM 门的 sigmoid 一起搬走，所以必须与 <code>ROUTER1/1B</code> 交替夹逼）。；<strong>但按名字过滤有已知天花板</strong>：<code>GET_ROWS</code> 不许进过滤器（它同时是 embedding gather，按算子名分不清大小，误伤就变成一次大拷贝）⇒ <strong>最终的形态仍是按尺寸判定的专用开关</strong>（<code>ne[1]==1 &amp;&amp; ne[0]&lt;=256</code> 才落 CPU，判据用尺寸不用模型名）。；<strong>下一发</strong>：设备一上线跑 <code>BASE/ROUTER1/ROUTER2/ROUTER1B</code> 四腿；（<code>GGML_OPENCL_ROUTER_CPU=1</code>，只把 <code>ARGSORT/TOP_K/SET_ROWS/FILL/SUM_ROWS/GET_ROWS(路由的)/SIGMOID(门控)</code> 这些 <code>ne[1]==1</code> 且 <code>ne[0]&lt;=256</code> 的小算子落 CPU，判据用尺寸不用模型名），740 上用 <code>run_740_launch_budget.sh</code> 跑 <code>BASE / ROUTERCPU / BASE2</code> 不重叠三腿；<strong>判真：<code>ops/token</code> 明显下降（预测 -15~-18/层）且 <code>tok_s</code> 上升；判伪：ops 降而 tok_s 不升 ⇒ 瓶颈不在发射而在边界拷贝，②号 megakernel 路线作废，回头补 §20.39 的账</strong> |；；### 4.5 L8 · 编排、装载与设备面；
+| 格号 | 命题 | 层×模式 | 可改性 | 状态 | 备注 |
+|---|---|---|---|---|---|
+| <strong>G-801</strong> | 专家 I/O 不在关键路径（读量 ÷5.6 只 +6%） | L8×M8 | <code>OWN</code> | <strong>关闭（实测）</strong> | <code>DECODE_WINDOW=64+ROUTE_KEEP=1</code> 已采纳（+5.9%、读量 −82%）（关闭于 2026-10-20 P8 实测） ；<strong>⚠️ 2026-10-21 作用域收紧（R4）</strong>：此结论是<strong>在 GPU 线上量的</strong>（<code>DECODE_WINDOW=64+ROUTE_KEEP=1</code> 的 +5.9% 是 Mesa 腿的数）。同一 workload 的 <strong>CPU bank 腿</strong>里 pread 累计 46.8s ≈ wall 45.2s ⇒ <strong>CPU 腿的 I/O 就是关键路径</strong>。⇒ 本格状态应读作 <code>关闭（仅 GPU 线关键路径）</code>；CPU 腿那一侧另立 <strong>G-806</strong>。。<strong>【2026-10-21 09:2x 再修正：方向反了】</strong> 暖态干净腿显示 CPU 腿的 I/O 也不在关键路径（<code>io1</code> 的 IO 线程 93% 忙但 tok/s 与 <code>io4/io8</code> 只差 6%），且 <code>DECODE_WINDOW=64+ROUTE_KEEP=1</code> 在 CPU 腿上同样见效：miss 26873→<strong>9461（−65%）</strong>、读量 34641→<strong>12196 MiB（−65%）</strong>、tok/s <strong>2.95</strong>（本组最高）。⇒ G-801 恢复为<strong>两线通用</strong>的关闭结论，本行上午的"CPU 腿 I/O 是关键路径"撤销；CPU bank 的推荐对手配置改为 <code>IO=1, DECODE_WINDOW=64, ROUTE_KEEP=1, 暖态</code>。 |</p>
+<p>| <strong>G-802</strong> | <code>830env.sh</code> 写死 <code>OPFLUSH=1</code> 等把安全阀当成本 | L8×M1/M8 | <code>OWN</code> | 关闭 | 已拆两腿；列为永久纪律条目（关闭于 2026-10-20）|
+ | <strong>G-803</strong> | 设备面只剩 K40（830 停用、740 待开机）⇒ 正确性载体与裁决载体同一台 | L8×M1/M10 | 外部 | <strong>阻塞（等用户）</strong> | 网格上所有"需要 gen5/gen7"的格同时被这一格卡住。<strong>2026-10-21 00:32 再咬一口</strong>：G-920 跑到 R1/第 3 腿时 K40 整机掉出 tailnet（<code>tailscale status</code>: <code>offline, last seen 5m ago</code>，5555 端口不通）—— 与 10-20 那次"830 于 15:0x 掉线，Phase B 全部未取"是<strong>同一失效模式第二次发生</strong>，且这次是唯一的机器。⇒ 新增纪律 <strong>R7</strong>：一切跑测必须 <code>setsid</code> + <strong>结果落设备本地文件</strong> + 断线后可幂等续取（本次靠 setsid 已把 R1 前两腿的数保在机上）；重连走 <code>scripts/adb-wifi-remote.sh</code>，必要时 USB 机跑 <code>scripts\adb-wifi.ps1</code>。 |
+| <strong>G-804</strong> | 视觉塔在 Vulkan 下静默错后端（JNI 只匹配 <code>backend=="opencl"</code>） | L8×M3 | <code>OWN</code> | 开放 | Vulkan 立项 §3 已记；便宜；<strong>判真</strong>：改 JNI 匹配前，Vulkan 下跑视觉必现 <code>unexpected_fallback&gt;0</code> 或视觉塔落 CPU。<strong>判伪</strong>：视觉塔本来就该在 CPU ⇒ 撤资，但须补"CPU 上数值正确"的证据。改一行 + 一条腿|
+| <strong>G-805</strong> | <strong>跑测中途唯一裁决机整机重启（已验尸改判：不是我们打死的）</strong>：K40 在 <code>io8_r1</code> 起跑约 30s 后消失，<code>tailscale</code> 的 <code>tx/rx</code> 计数器被清零 = 节点重启 | L8×M7/M10 | 外部 | <strong>关闭（2026-10-21 07:5x 验尸定案，候选①判伪）</strong> | <strong>实测证据（07:52）</strong>：① <code>dumpsys dropbox</code> 在死亡时刻<strong>只有一条 00:33:52 <code>SYSTEM_BOOT</code>，没有 <code>PRE_WATCHDOG</code>、没有 <code>PANIC</code></strong> —— 若是 Bonsai-2 那种内存风暴→system_server 看门狗，dropbox 必留 watchdog 条目 ⇒ <strong>候选①判伪</strong>；② <code>sys.boot.reason=reboot</code>、<code>ro.boot.bootreason=reboot</code>（小米常一律报 reboot，单独不足证）；③ <strong><code>MemTotal=11507M</code>，不是初稿写的 8GB</strong> —— 「8GB 机内存回收风暴」是<strong>没查就写的假设</strong>，已就地更正；当下 <code>free</code> 4.5GB，而 <code>io4</code> 腿 4 线程都活得好好的；④ <strong>候选③ 才是正解：这是台共享机</strong> —— 验尸当时机上正跑着别人的 <code>test-backend-ops test -b Vulkan0 -o MUL_MAT_ID</code>（303% CPU、累计 CPU 时间 18 分钟），Vulkan 线正在用这台机。<br><strong>残留不确定性（诚实记录）</strong>：内核硬挂死时 system_server 没机会写 dropbox，故「非看门狗」只排除了内存风暴那条路，<strong>排除不了内核挂死</strong>；<code>/sys/fs/pstore/</code> 权限拒绝，非 root 拿不到 <code>console-ramoops</code> ⇒ 彻底封这格要 root。<br><strong>防护保留</strong>（不因判伪而撤）：<code>MemAvailable &lt; 2GB</code> 拒跑（exit 5）+ <code>OUT=&lt;旧目录&gt;</code> 断点续跑 —— 防的是下一次，与本次归因无关。<br><strong>新增纪律</strong>：共享机上跑测前必须 <code>top</code> 看有没有<strong>别人的</strong>负载，光看 <code>loadavg&lt;2</code> 不够（本次就是 <code>loadavg=4.11</code> 才暴露 Vulkan 线在占用）。 |
+| <strong>G-806</strong> | <strong>专家 pread 路径负缩放 + CPU bank 是存储吞吐基线而非算力基线</strong>：<code>IO_THREADS</code> 1→4 让同字节数的累计 pread 从 46.8s 涨到 139.9s（聚合带宽 737→259 MB/s，<strong>负缩放 2.8×</strong>）；且 270 MiB/token ÷ 737 MB/s ≈ 单线程喂数速率 ≈ 实测 2.83 t/s | L8×M8/M6 | <code>OWN</code> | <strong>开放（2026-10-21 新立，半证）</strong> | 这条动摇的是 §19 那句"Mesa 只有 CPU bank 的 20%"——<strong>分母是 UFS 随机读吞吐，不是算力</strong>，量纲不对。判真预测：把 miss 率打下来（预读窗口/常驻 bank 提升）应看到 CPU bank tok/s 随读带宽<strong>线性</strong>上升而与算力无关；或 <code>iostat</code> 显示 UFS 利用率打满。判伪预测：加大窗口后 tok/s 不动 ⇒ 瓶颈在别处（解码算力/锁），本条降级、回到 M8 重算。下一发：<code>IO_THREADS</code> 3 轮补跑 + 同一腿配 <code>iostat -x 1</code>（判 UFS 是否饱和）。<strong>与 G-801 的关系</strong>：G-801 只在 GPU 线关闭，CPU 线由本格接管 ⇒ <strong>【2026-10-21 09:2x 判伪降级为 <code>未观测</code>】</strong> 上午的"负缩放 2.8×"取自冷缓存单腿：暖态干净腿重测 <code>pread 累计</code> 为 <code>io1 43.5s / io4 60.0s / io8 60.3s</code>（1→4 只 +38%，不是 3×），而 <strong>tok/s 只差 6%</strong>（2.72/2.56/2.57）。⇒ ① 负缩放不成立；② 更要紧的是 <code>io1</code> 腿 IO 线程占用率已达 43.5s/wall≈47s（<strong>≈93% 忙</strong>）却几乎不影响 tok/s ⇒ <strong>读路径被预取窗口吸收了，CPU 腿的 I/O 同样不在关键路径</strong>。⇒ 本格的"CPU bank 是存储吞吐基线"随之撤销；CPU bank 可以当作算力基线用（在暖态、且带配置标注的前提下）。 |</p>
+<h3 id="4.6-m9-m10-观测与供应链-把-方法-当成一条线来记账">4.6 M9/M10 · 观测与供应链（<strong>把"方法"当成一条线来记账</strong>）</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题</th>
+<th>模式</th>
+<th>可改性</th>
+<th>状态</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-901</strong></td>
+<td>FD_* fork 源码不在 git（在 root chroot / Windows）⇒ P0-2/P2/P3 全部间接阻塞</td>
+<td>M10</td>
+<td><code>OWN-BLOCKED</code></td>
+<td><strong>阻塞（一句 <code>sudo tar</code>）</strong></td>
+<td><strong>整线单点故障</strong>；PROVENANCE §6 已写成验收清单</td>
+</tr>
+<tr>
+<td><strong>G-902</strong></td>
+<td>出数前强制 bundle/env 指纹（<code>verify_mesa_bundle.sh</code> exit 4）</td>
+<td>M1/M9</td>
+<td><code>OWN</code></td>
+<td>关闭（<strong>仅计时轨</strong>）</td>
+<td><strong>缺口：正确性轨与 op 普查轨未纳入同一主键</strong>（关闭于 2026-10-20（仅计时轨））</td>
+</tr>
+<tr>
+<td><strong>G-903</strong></td>
+<td><code>GGML_OPENCL_MOE_TIME</code> 是死路 ⇒ GPU 纯执行时间至今测不到</td>
+<td>M9/M8</td>
+<td><code>OWN</code></td>
+<td><strong>开放（关键路径）</strong></td>
+<td>M8 整行悬空的原因；分 op 账不出来，"优化 ir3"就是盲拳；<strong>判真</strong>：用 <code>FD_IBTRACE</code> 或自建构计时点，把 80×<code>ffn_moe_slots</code> + 4×<code>ffn_up</code> 的 GPU 侧耗时加总能占满那 1.0 s 的大头。<strong>判伪</strong>：分 op 账只占 &lt;20% ⇒ 成本在提交/等待不在执行，<strong>M8 整行改写</strong>，P5 类工作直接停</td>
+</tr>
+<tr>
+<td><strong>G-904</strong></td>
+<td><code>FD_RD_DUMP*</code> 恒空；<code>FD_IBTRACE</code> 从没试过</td>
+<td>M9</td>
+<td>混合</td>
+<td><strong>未观测</strong></td>
+<td>明文：不得把"没输出"读成"没差别"</td>
+</tr>
+<tr>
+<td><strong>G-905</strong></td>
+<td>计时裁决级证据只有 gen6/K40 一列；gen7 至今 0 组合规</td>
+<td>M1/M9</td>
+<td>外部</td>
+<td>开放</td>
+<td><strong>禁止跨列引用</strong>；830 现有数全部标污染；<strong>判真</strong>：gen5/gen7 回来后按 §5.2 同一规格补一组，与 K40 同号同量级 ⇒ 现有结论可外推。<strong>判伪</strong>：差 ≥2× ⇒ 全部裁决改为按世代双列书写，此前所有单列结论降级。<strong>卡 G-803</strong></td>
+</tr>
+<tr>
+<td><strong>G-906</strong></td>
+<td>Vulkan 原生 <code>t_gen_ms</code> 未与外部时钟对账</td>
+<td>M1/M9</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td>对账前其 tok/s 一律不得引用；<strong>判真</strong>：同一腿 Vulkan 原生 <code>t_gen_ms</code> 与外部墙钟差 &lt;5% ⇒ 其 tok/s 可引用。<strong>判伪</strong>：差 ≥10% ⇒ Vulkan 线今天所有 tok/s 全部重标。设备回来一发即可</td>
+</tr>
+<tr>
+<td><strong>G-907</strong></td>
+<td><code>test-backend-ops</code> 设备版只注册 GPUOpenCL+CPU ⇒ "内核门"从未覆盖 Vulkan；8-04 的 <code>Vulkan 8.60</code> 从未验过输出</td>
+<td>M9</td>
+<td><code>OWN</code></td>
+<td>关闭（已建 <code>vk_gate.sh</code>）</td>
+<td>8-04 基线已就地标注作废（关闭于 2026-10-20 <code>vk_gate.sh</code>）</td>
+</tr>
+<tr>
+<td><strong>G-908</strong></td>
+<td><strong>"GPU 证据硬闸"不区分两种解释</strong>：<code>run_mesa_matrix.sh</code> 用 <code>grep -ac ggml_opencl &gt; 0</code> 认定"Mesa 腿真上了 GPU"，而同款 grep 也命中<strong>关闭声明</strong> —— 2026-10-21 00:25 实测：CPU 腿（<code>GGML_OPENCL_OFF=1</code>）第一腿即命中 <code>ggml_opencl: GGML_OPENCL_OFF=1 -&gt; CPU-only mode</code> 一行，而该腿 <code>KGSLSUBMIT</code> 计数为 <strong>0</strong>（确实是纯 CPU，数是好的，<strong>闸是坏的</strong>）</td>
+<td>M9</td>
+<td><code>OWN</code></td>
+<td><strong>已修（代码），待真机复验</strong></td>
+<td>两头都漏：① 只打印不提交的 Mesa 腿能<strong>骗过</strong> <code>lines&gt;0</code> 被当成有效 GPU 数；② 真 CPU 腿被误报污染。已改：闸改数<strong>提交证据</strong> <code>KGSLSUBMIT\|clFlush\|QueueSubmit\|clEnqueue</code>，加 <strong>witness 接通性自证</strong>（串不在 lib 里 ⇒ 记 <code>unknown</code> 而不是 <code>ok</code>，trace-off 构建属此类），加 <strong>反向对照</strong>（CPU 腿要求 <code>submits==0</code>，永不为假的闸等于没闸）。落地：<code>run_mesa_matrix.sh</code>（语法已过）+ <code>run_g920_cpubank_ab.sh</code> v2。<strong>待办：设备回来后跑一条 Mesa 腿 + 一条 CPU 腿，证明新闸两向都能判对</strong>。。<strong>2026-10-21 07:5x-08:01 双向复验通过 ⇒ 关闭</strong>：同一脚本同一会话两腿 —— <code>CPU_BANK</code> 出 <code>submits=0 opencl_lines=1 drop=0 witness=yes =&gt; ok</code>（旧闸在这条上会误报污染）、<code>MESA_FLUSH1</code> 出 <code>submits=192138 opencl_lines=6117 drop=0 witness=yes =&gt; ok</code>。⇒ 新闸两向都有牙，且 <code>witness=yes</code> 自证了仪器接通（在机 lib 里 <code>KGSLSUBMIT</code>×4）。<strong>判具</strong>：<code>run_mesa_matrix.sh</code> 重写后的闸（提交计数 + witness 自证 + CPU 腿 <code>submits==0</code> 反向对照），log <code>/data/local/tmp/gate_check.log</code>。作用域：<strong>只证明闸能区分"打印过"与"提交过"</strong>；不证明 §5.2 那批历史数是真是假（那批用的是旧闸，若要用其中任何一条做裁决，须按新闸重跑）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="4.7-从上位文档继承来的格-总档-3-4.1-9-13-备忘清单-a-b-c-f-今天首次挂号">4.7 从上位文档继承来的格（总档 §3/§4.1/§9/§13 + 备忘清单 A/B/C/F）—— 今天首次挂号</h3>
+<table>
+<thead>
+<tr>
+<th>格号</th>
+<th>命题</th>
+<th>层×模式</th>
+<th>可改性</th>
+<th>状态</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G-101</strong></td>
+<td>Adreno 无 <code>cl_khr_command_buffer</code>/<code>cl_arm_command_buffer</code> ⇒ 每 op 走完整提交链</td>
+<td>L5×M8</td>
+<td><code>HW</code></td>
+<td><strong>关闭（降级为"认"）</strong></td>
+<td>总档短腿①。今天 §5.2 实测封死提交层 ≤15% ⇒ 这条先天短板<strong>不再是待办</strong>，写进预算表即可（关闭于 2026-10-20 §5.2 实测封顶）</td>
+</tr>
+<tr>
+<td><strong>G-102</strong></td>
+<td>小算子 GPU 内核慢（3941 op GPU 执行 ~150ms &gt; CPU 全图 124ms）</td>
+<td>L3×M8</td>
+<td><code>UP</code>/<code>OWN</code></td>
+<td>开放</td>
+<td>总档短腿②。<strong>但那 150ms 是 vendor 的借用值</strong> ⇒ 与 G-903 同一阻塞：没自测值之前这是假设不是事实；<strong>判真</strong>：自建构分 op 账测出 GPU 纯执行 ≥100ms（与 vendor 借用值同量级）⇒ 短腿②成立、确为待办。<strong>判伪</strong>：自测 &lt;30ms ⇒ 150ms 是 vendor 特性不是我们的，撤资。<strong>与 G-903 同一把钥匙</strong></td>
+</tr>
+<tr>
+<td><strong>G-103</strong></td>
+<td>混合图结构税：每个 split 边界一次跨后端拷贝（10-16 实测 203 splits/378 copies、拷贝税 ~60ms）</td>
+<td>L7×M8</td>
+<td><code>OWN</code></td>
+<td>开放</td>
+<td>总档短腿③。<strong>与 G-701/G-702 是同一族的因果链</strong>（CPU 岛 → split → copy），此前分属三份文档；<strong>判真</strong>：把 G-702 那 4 个形状搬上 GPU 后，split 边界数与拷贝字节按预测下降且 tok/s 升 ≥3% ⇒ 拷贝税是真的。<strong>判伪</strong>：边界少了而 tok/s 不动 ⇒ 拷贝税 &lt;5%，短腿③从 M2 尾部划掉</td>
+</tr>
+<tr>
+<td><strong>G-104</strong></td>
+<td>vendor 黑盒 CL 编译器（E031.47）会<strong>静默</strong>损坏特定代码形状；只能 dodge 不能修</td>
+<td>L3×M5</td>
+<td><code>BLACKBOX</code></td>
+<td><strong>不可达（只跟踪）</strong></td>
+<td>总档短腿④。已用 host 预计算 seff/meff 绕开。<strong>网格规则</strong>：这类格必须挂"进 <code>known_bad_kernels</code> 数据表"的出口，否则每代都会重新踩；<strong>判真</strong>：同一内核分 dodged / 未 dodged 两版跑，未 dodged 版<strong>编译不报错但输出错</strong> ⇒ "静默损坏"成立，永久进 <code>known_bad_kernels</code>（键 <code>driver_version×shape</code>）+ 上游带 IR 上报。<strong>判伪</strong>：未 dodged 版直接编译失败 ⇒ 并非静默，是普通能力缺口，改回 <code>UP</code> 走正常修</td>
+</tr>
+<tr>
+<td><strong>G-105</strong></td>
+<td>FGSVM 直写与 pread 争抢内存子系统（io 2.9→1.7GB/s）⇒ 换 UMA gpuobj mmap 直写</td>
+<td>L2/L8×M6/M8</td>
+<td><code>OWN</code></td>
+<td>开放（<strong>可能被 G-801 判为无收益</strong>）</td>
+<td>总档短腿⑤。今天实测"IO 不在关键路径（÷5.6 只 +6%）" ⇒ 先跑一发便宜实验决定是否撤资，别默认它还是 M2 的一部分</td>
+</tr>
+<tr>
+<td><strong>G-106</strong></td>
+<td>风险清单#2：rusticl 录制开销 ≥9µs/op ⇒ 跳过通用层，ir3 + 自写 kgsl runner（+2 周）</td>
+<td>L5/L2×M8</td>
+<td><code>OWN</code></td>
+<td>开放（兜底预案）</td>
+<td>今天实测 11.4µs/op 且只比 vendor 高 26% ⇒ <strong>触发条件已不成立</strong>，预案应标"暂不启动"，别留在脑子里当"还有一条路"；<strong>判真</strong>：G-903 的分 op 账显示 rusticl 录制开销 ≥ 每 op 成本的 30% ⇒ 预案重新触发。<strong>判伪</strong>：维持今天实测的 ≤26% ⇒ <strong>正式划入不启动</strong>，从待办移出，别留在脑子里当"还有一条路"</td>
+</tr>
+<tr>
+<td><strong>G-107</strong></td>
+<td>风险清单#3：a8x GMEM write fault 蔓延到 compute</td>
+<td>L3/L2×M6</td>
+<td><code>UP</code>+<code>BLACKBOX</code></td>
+<td>未观测</td>
+<td>从未在 compute 路径上验过；社区 sysmem 绕过未试 <strong>未接通的仪器</strong>：compute 路径上的 GMEM fault 计数从未接通（需 turnip <code>TU_DEBUG</code> 的 fault 位或内核 ftrace GMEM fault 事件，且需 a8x 实机）⇒ 现在说不了『蔓延/没蔓延』，只能记 未观测</td>
+</tr>
+<tr>
+<td><strong>G-108</strong></td>
+<td>风险清单#6：上游不维护 Android rusticl，坑只能自持</td>
+<td>L5×M10</td>
+<td><code>UP</code></td>
+<td>开放（战略约束）</td>
+<td>这条决定了"能不能把修好的东西交出去"。答案是不能 ⇒ <strong>自研 fork 是长期负债，必须在预算里显式计价</strong>；<strong>判真</strong>：下次 rebase 上游时与 fork 补丁冲突的文件数 ≥ 现状 ⇒ 自研 fork 是长期负债，须显式计价。<strong>判伪</strong>：上游开始接我们的补丁（如 <code>0001</code>）⇒ 负债下降，改记 <code>UP</code>。半年复核一次，不占实验预算</td>
+</tr>
+<tr>
+<td><strong>G-601</strong></td>
+<td><code>q4_K GEMV half2→float2</code> 改了 <strong>Adreno 数值路径（位不等值）</strong>，保留/回退未定</td>
+<td>L6×M5</td>
+<td><code>OWN</code></td>
+<td><strong>开放（悬案）</strong></td>
+<td>备忘 §F 明确要求 RS3 链或 bin 门复跑定夺，至今无人跑；<strong>判真</strong>：RS3 链或 bin 门复跑，两版输出<strong>逐位不同</strong>且现版接受率/PPL 更差 ⇒ 回退。<strong>判伪</strong>：逐位相同 ⇒ 该改动对本模型无影响，撤案。设备回来排一轮 + <code>token_diff</code></td>
+</tr>
+<tr>
+<td><strong>G-602</strong></td>
+<td>bank1 <code>fd_bo</code> 多线程 fill 竞态（AGENTS G1a 移交项）</td>
+<td>L2/L8×M7</td>
+<td><code>OWN</code></td>
+<td><strong>开放（无人认领）</strong></td>
+<td>与 G-203（BO churn）<strong>很可能是同一处的两个面</strong> —— 这正是"条目按时间排、不按位置排"时看不出来的东西；<strong>判真</strong>：若与 G-203 同源，则 G-203 的 BO churn 压测（多线程 fill + 高频 allocate）能顺带打出 fill 竞态 ⇒ 两格并一格。<strong>判伪</strong>：打不出 ⇒ 两条独立，须自建压测并入 §6-A。<strong>另：AGENTS.md 全文没有 <code>G1a</code> 条目</strong> ⇒ 这条的移交出处是<strong>悬空引用</strong>，认领前得先考证原始事故</td>
+</tr>
+<tr>
+<td><strong>G-603</strong></td>
+<td>hadamard 双系统并存；<strong>context 侧 wiring 确实没接线（2026-10-21 读码定案，备忘 B#9 成立且低估了）</strong></td>
+<td>L7/L6×M3/M9</td>
+<td><code>OWN</code></td>
+<td><strong>开放（已定性为双静默缺陷）</strong></td>
+<td>代码事实：<code>llama_context::hadamard_rotations/_inverses</code>（<a href="../third_party/llama.cpp/src/llama-context.h#L440-L441">llama-context.h:440-441</a>）在<strong>整个 <code>src/</code> 里没有任何写入点</strong>——全仓 grep 只有声明、校验函数形参、<code>llama-context.cpp:2735</code> 的 <code>!empty()</code> 门、<code>:2786-2787</code> 把指针交给 graph params。真正的填充点全在 <strong>model 侧</strong>（<code>llama-model.cpp:2256-2296</code>、<code>:2627</code>，以及 <code>models/dspark.cpp:87-89</code> 的 model→model 借用）。⇒ 两个后果：① <code>llama-graph.cpp:1753/1822/2885</code> 三处查表<strong>恒 miss</strong> ⇒ 图侧激活变换静默不生效；② <code>:2735</code> 的 coverage 校验以 <code>!empty()</code> 为前提 ⇒ <strong>永不调用</strong> ⇒ <code>hadamard_verified</code> 恒 false，连"此图 matmul 路径不支持 prism.hadamard 折叠"这句本该 throw 的话也永远发不出来。<strong>功能没跑 + 安全网没启动 = 双静默</strong>，正是架构评估 §3 的"降级了却报告成功"。⇒ 机检：加载带 <code>prism.hadamard.*</code> KV 的模型时打印 <code>hadamard_rotations.size()</code>，为 0 即红。修法一行：context 构造时从 model 拷两份（含 ctx_other 借用）。</td>
+</tr>
+<tr>
+<td><strong>G-910…</strong></td>
+<td><strong>升级验收覆盖缺口</strong>（备忘 A 组，全部是 M9 格）：① 8 Elite 基线机三后端回归从未做；② Vulkan/turnip 真机回归 0.7.0 树未过；③ mtmd 视觉去重后未跑过图片输入；④ PTQ1_0/bonsai2 加载路径无 ≥16GB 机验证；⑤ dspark 链（GDN 回滚/RS3 EQUAL）在 0.7.0 树未重放；⑥ SME2 无真机数据</td>
+<td>L8×M9</td>
+<td><code>OWN</code>/外部</td>
+<td><strong>开放 ×6</strong></td>
+<td>六条都是"门只覆盖了 740+OpenCL"的后果。<strong>基准矩阵按能力类别建</strong>（架构评估 §4）是收口方式；<strong>判真</strong>：按能力类别建好基准矩阵（<code>vk_gate.sh</code> + <code>run_mesa_matrix.sh</code> + CPU 轨）后，一次升级能在 30 分钟内出红/绿 ⇒ 六条缺口收口。<strong>判伪</strong>：仍需人肉逐条比对 ⇒ 矩阵没建对，回架构评估 §4 重设计</td>
+</tr>
+<tr>
+<td><strong>G-920</strong></td>
+<td>CPU bank 对手数随配置漂移：<code>IO_THREADS=1/W8/LA8=7.00</code> vs <code>IO=4 → 3.0–4.2</code>（备忘 §F），而今天同一线写成"差 2 倍未归因（候选冷热/ngl/旧库）"，<strong>候选里没有 IO_THREADS</strong></td>
+<td>L8×M1/M9</td>
+<td><code>OWN</code></td>
+<td>开放（<strong>示范格</strong>）</td>
+<td>见 §5-⑥：答案在另一份文档里，但两个数都没有三元组 ⇒ 谁都关不掉这格；<strong>判真（半证，2026-10-21 K40 R1）</strong>：<code>IO=1 → 2.83</code> vs <code>IO=4 → 1.15</code> t/s，<strong>2.46×</strong>，<code>pread_wall 85ms→431ms</code> ⇒ <code>IO_THREADS</code> 是主控变量，<strong>任何 CPU bank 数必须写成 <code>CPU bank(IO=n,W=w,LA=l,md5,loadavg,temp)</code> 才许引用</strong>。<strong>判伪</strong>：三轮中位极差 &lt;10% ⇒ 差异来自冷热而非 IO，退回 R2 安静态那一格 ；<strong>2026-10-21 07:5x 半组数 + 翻案性发现</strong>：K40 同二进制 <code>IO=1 → 2.83 t/s</code>（wall 45.2s）、<code>IO=4 → 1.15 t/s</code>（wall 110.9s）。IO 账：<code>IO=1 miss=26763 bytes=34499MiB pread=46812ms</code> vs <code>IO=4 miss=28124 bytes=36254MiB pread=139892ms</code>。⇒ ① 每次 miss 恒 <strong>1.289 MiB</strong>、<strong>209 miss/token = 270 MiB/token</strong>，<code>2.83 t/s × 270MiB ≈ 764 MB/s</code> ≈ 单线程有效带宽 <strong>737 MB/s</strong> ⇒ <strong>CPU bank 那个"对手数"根本不是算力基线，是 UFS 随机读吞吐基线</strong>，拿它当"Mesa 只有对手 20%"的分母是量纲错误；② <code>IO=4</code> 同样字节数累计 pread 从 46.8s 涨到 139.9s ⇒ <strong>pread 路径负缩放 2.8×</strong>（聚合带宽 737→259 MB/s），这才是备忘 §F「IO=1=7.00 / IO=4=3.0-4.2」的真机制。<strong>判真</strong>（已半证）：三轮中位 <code>IO=1</code> 比 <code>IO=4</code> 高 ≥20% ⇒ 任何 CPU bank 数必须写成 <code>CPU bank(IO=n,W=w,LA=l,md5,loadavg,temp)</code> 才许引用。<strong>判伪</strong>：三轮极差 &lt;10% ⇒ 差异来自冷热，退回 R2 安静态。<strong>剩余</strong>：<code>io8</code>/<code>w64</code> 两腿随 00:33 重启丢失，须补跑（<code>OUT=/data/local/tmp/g920_0025</code> 续跑，已完成两腿自动跳过）。 。<strong>【2026-10-21 09:2x 三轮补跑完成 ⇒ 上午那条"IO_THREADS 主控"判伪，本格自己也错了】</strong> 12 腿跑完，但按污染窗口（真外负载只有 <code>test-backend-ops</code>，<code>minicpm_e2e_dspark</code> 那些是<strong>自家腿被监控自我误判</strong>）剔除后，干净的暖态腿是：<code>io1_r3 2.72</code>、<code>io4_r2/r3 2.47/2.56</code>、<code>io8_r2/r3 2.50/2.57</code>、<code>io1w64_r2 2.95</code>。⇒ <strong><code>IO_THREADS</code> 各档彼此差 ≤6%，本格上午报的 2.46× 是冷缓存假象</strong>（同一配置 <code>io4</code> 冷腿 1.15 vs 暖腿 2.56，<strong>2.2×</strong>）。<strong>新主控变量 = 页缓存冷热</strong>：这才是 §F 那个 <code>7.00 vs 3.44</code> 一直没归因的最可能答案，也说明<strong>跑测必须先 warm-up 再取数</strong>。⇒ 本格状态改为 <code>开放（换假设：页缓存冷热，而非 IO_THREADS）</code>；判真预测：同一配置"冷启动首腿"与"暖态复跑"差 ≥2× 且 <code>iostat</code> 显示冷腿 UFS 打满；判伪预测：预热后首腿即达暖态速率 ⇒ 冷热也不是主因，回到 7.00 那个数自身的三元组缺失去查。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4.8-未在网格挂号-但已在纸上的第三条线">4.8 未在网格挂号、但已在纸上的<strong>第三条线</strong></h3>
+<p>总档 §13 有一条完整的 <strong>MediaTek 天玑线方案</strong>（M0' 判据探针 + 风险清单 + 地基复用矩阵，状态"未启动"）。
+架构层的处置意见：<strong>新线必须先在本网格挂号才许启动</strong>。理由同 §1-①：天玑线与两条 Adreno 线在 L1（KMD 不同但同构）、L3（编译器黑盒）是同类问题，
+不挂号的结果是第三个 <code>2×(L2+L1)</code> 重复投资，而不是"多一条腿"。</p>
+<h2 id="5.-网格打出来后立刻浮现的六件事-这才是-架构层剖析-的产出">5. 网格打出来后立刻浮现的六件事（这才是"架构层剖析"的产出）</h2>
+<ol>
+<li><strong>最贵的格子不在你一直在打的地方。</strong> G-701（<code>ffn_moe_slots</code> 无 CL 实现）是全表里唯一同时满足
+   <code>OWN</code> × 判具现成 × 不依赖任何外部解锁 × 影响面 80 形状/层 的格子，今天却排在 P4 等"人接手"；
+   而人在 <code>OWN-BLOCKED</code> 的 G-201 上烧了六次假设搬家。
+   ⇒ <strong>网格的第一个作用就是把"最便宜×最大面"顶到队头</strong>：顺序应是 G-901（一句 <code>sudo tar</code> 解锁五格）
+   → G-701 的那一发 <code>SPLIT</code> A/B（决定要不要投入实现）→ G-903（分 op 账）→ 其余，
+   而不是继续在被 <code>OWN-BLOCKED</code> 的 G-201 上烧假设搬家。</li>
+<li><strong>止损结论目前是从未量化的格子里跳出来的。</strong> L3 §19 说"不能赢，20%"，但 §11.2 预算表里
+   "CPU 回落算子 + GPU↔CPU 往返 = 未量化，头号嫌疑"、"纯 GPU 执行 = 上界"。
+   ⇒ 用网格的话说：<strong>M8 那一列没关闭，L3 就还没有裁决权。</strong> 现在这个"不能赢"应标注为
+   "在 M8 缺 G-903/G-701 的前提下，提交层已封死"，而不是整线判死。</li>
+<li><strong>两线在 L1/L2 是同一个洞的两份代码</strong>（G-208 是 0 实验的空洞）。不解决共用问题，维护成本是 <code>2×(L2+L1)</code>。</li>
+<li><strong>M2（能力宣称）在两线是同一族问题，可以并成一格做</strong>：subgroups 藏、可写 3D 图像缺、<code>int dot:0</code>、coopmat none、
+   turnip warp 自报冲突、catalog 标"GPU 加速"实则跑 CPU。
+   ⇒ 一次声明、三方消费（<code>supports_op</code> / <code>set_tensor</code> / catalog 标签），就是架构评估 §1 路由表在<strong>能力维度</strong>上的对偶。</li>
+<li><strong>同一格在两代文档里判决互斥，而且两次都没量过成本。</strong> G-701 那一格：
+   - 10-16 总档 §4.1 判 <code>ffn_moe_slots</code> "CPU <strong>by design，便宜</strong>" ⇒ 列入<strong>"明确不追的遗留"</strong>；
+   - 10-20 L3 §18 判它是<strong>"真凶候选"</strong> ⇒ 升为全表最高优先。</li>
+</ol>
+<p>两次判决相差十万八千里，<strong>共同点是都没有成本数</strong>：前者只数了形状个数（42 个 CPU op 里占 39 个），
+   后者数了每 token 命中（80 形状 × 40 层）与往返，且 §18 自己的口径声明就承认"<strong>不等于</strong>它们就是全部 1.0 s 的成本"。
+   ⇒ 这是病 B1（假设跨层漂移）在<strong>跨代文档</strong>上的形态：一格的"关闭"没有作用域与判据，下一代就能整格翻案而无人负责。
+   ⇒ 网格处置：状态记 <code>开放（改判待定）</code>。<strong>⚠️ 2026-10-21 00:2x 自我更正</strong>：本节初稿写的
+   "下一发实验 = <code>LLAMA_MOE_MATMUL_SPLIT</code>/<code>SPLIT_DYNAMIC</code> 交错 A/B" <strong>是错的</strong>。读码确认
+   （<a href="../third_party/llama.cpp/src/llama-moe-slot.cpp#L840-L870">llama-moe-slot.cpp:840-870</a>、
+   <code>matmul_split</code> 的注释在 :655-658）那两个开关是
+   <strong>把 miss 专家的读取延后到已驻留专家算完 = 读与算重叠</strong>，切点取在 <code>selected_experts</code> 的<strong>名次</strong>上
+   （动机：miss 集中在分数尾名，实测直方图 0:0.03 … 7:0.22）—— 它是 <strong>G-801 那一族</strong>的东西，
+   <strong>不能给"CPU 岛边界往返税"定价</strong>。
+   ⇒ 现成 env 只能拆 G-701 的<strong>内部成分</strong>：<code>LLAMA_MOE_SKIP_PACK</code>（pack 内核那块）、<code>LLAMA_MOE_SKIP_READ</code>（pread 那块，
+   但它改数值 ⇒ 路由乱跳 ⇒ 正踩 §2.5.1 的"因果倒置"陷阱，必须配 <code>token_diff</code> 一起读，否则得出假结论）；
+   而真正要的<strong>边界往返税无法用 env 定价，必须 <code>third_party/llama.cpp</code> 插桩</strong>（按仓库规矩需人接手）—— 与 §11.2 口径一致。
+   ⇒ <strong>这条自查是 R3 的活样本</strong>：一条没读过实现就写下的"下一发实验"比没有实验更坏，
+   它会让下一轮真机窗口去回答一个不相干的问题。
+6. <strong>一个已经答过的问题被重新写成"未归因"。</strong> G-920：接管复评 §2.5 把"同一颗二进制 CPU bank 3.44 vs 早上 7.00 t/s"记成
+   <strong>"差 2 倍未归因"</strong>，候选给了冷热节流 / <code>ngl</code> / 旧库三条 —— 而<strong>同一天更早</strong>的备忘 §F 已写明
+   CPU bank 对手数由 <code>IO_THREADS</code> 主导（<code>IO=1/W8/LA8 = 7.00</code>，<code>IO=4 → 3.0–4.2</code>），候选里偏偏没有它。
+   更麻烦的是矩阵腿确实设了 <code>IO_THREADS=1</code>，按理该复现 7.00 却测到 3.44 ⇒ 那个 7.00 <strong>自身也没有三元组</strong>（哪台机 / 哪版二进制 / 是否安静）。
+   ⇒ 两个数都关不掉这格，只能重测。<strong>答案存在 ≠ 答案可及</strong> —— 这是纪律 R2 唯一无法反驳的论证。
+   ⇒ <strong>状态更新（00:25，K40 在跑）</strong>：判具 <a href="../third_party/mesa-kgsl/scripts/run_g920_cpubank_ab.sh">scripts/run_g920_cpubank_ab.sh</a>
+   已上机开跑（CPU 腿扫 <code>IO_THREADS</code>=1/4/8 + <code>DECODE_WINDOW=64/ROUTE_KEEP=1</code>，3 轮交错、90s 冷却、loadavg&gt;2 拒跑、
+   <strong>CPU 身份硬闸</strong> <code>opencl_lines==0</code>、prompt/<code>E2E_TEMP=0.7</code> 逐字对齐 §5.2 以便与 3.14 可比）。
+   <strong>开跑前又抓到一次三元组事故</strong>：在机 <code>minicpm_e2e_dspark</code> 是 <code>git=8abfb8a2 built=22:10:14</code>，
+   而 §5.2 那组 19:02–19:48 的矩阵跑的是<strong>更早的二进制</strong> ⇒ 本次产出的 CPU 数<strong>只能与同二进制比</strong>，
+   不许直接替 3.14 用。（这正是 <code>verify_mesa_bundle.sh</code> 该管而目前没管的维度：它校 Mesa lib，不校 probe 二进制与历史基线的同一性。）</p>
+<hr />
+<h2 id="6.-三条架构动作-每条都比再修一个-bug-值钱">6. 三条架构动作（每条都比再修一个 bug 值钱）</h2>
+<p><strong>A. 《KGSL 提交层契约表》+ 两线共用压测断言（打 G-208/G-201/G-204）</strong>
+一份文档定义：一次提交携带什么（IB 列表/字节数/时间戳）、IB/BO 的分配-提交-可读-归还四态、fence 语义
+（<code>ctl_fence/ufence</code> 何时可见）、EAGAIN 的处置、环容量与 grow 策略。
+然后一段压测脚本在 <strong>CL 与 VK 两个前端各跑一次</strong>，同一判据：<code>enqueued == submitted == executed</code>、
+<code>max(size)</code> 与环容量比、丢失率对积压深度曲线。
+收益：同一份证据喂两条线；顺带成为向高通/上游报 bug 的通用语言。</p>
+<p><strong>B. 把 Vulkan 线今天的三件套上升为两线约束（打 G-304 的复制、G-302/G-301/G-305）</strong>
+① 坏内核/坏能力一律进<strong>数据表</strong>（<code>driver × device_class</code> 键），禁止树里留 <code>if (device==…)</code>；
+② 一切门禁脚本必须有<strong>反向对照腿</strong>（能把 FAIL 打回来，才证明门禁有牙）；
+③ <strong>正确性是 tok/s 的前置条件</strong>，同条记录出现。</p>
+<p><strong>C. <code>[engine-report]</code> 作为两线共用产物（打 G-703/G-704/G-804，并把 G-902 主键补全）</strong>
+加载后打印一次结构化报告：设备/编译器指纹、每个 op 形状的路由与理由、CPU 岛清单与 ops/token、
+提交数/token、<code>unexpected_fallback</code>。<strong>不为 0 即 bug。</strong>
+它同时是 M8 分 op 账的载体（把 G-903 从死路变成有载体）。</p>
+<hr />
+<h2 id="7.-网格纪律-六条-必须机检化-不靠自觉">7. 网格纪律（六条，必须机检化，不靠自觉）</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>纪律</th>
+<th>机检方式</th>
+<th>堵的是哪次事故</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R1</td>
+<td><strong>一实验一变量</strong>：只许动一层的变量。跨层的只能记 <code>联合效应</code>，<strong>不许给任何单格清白</strong></td>
+<td>脚本头部声明"本实验改变的层"；声明多于一层 → 拒绝写档</td>
+<td>B4（K40 复现失败混淆世代与量化）</td>
+</tr>
+<tr>
+<td>R2</td>
+<td><strong>证据三元组是主键</strong>：<code>(产物指纹 md5/BUILD_INFO, env 指纹, 设备+安静态)</code> 缺任一 → 不入库</td>
+<td><code>verify_mesa_bundle.sh</code> 推广到正确性轨与 op 普查轨（现只覆盖计时轨）</td>
+<td>B3（8.07 复活、APK 版本错配）</td>
+</tr>
+<tr>
+<td>R3</td>
+<td><strong>仪器未接通 = <code>未观测</code>，永远不许写成 <code>已排除</code></strong>；每格必须有"判真预测 + 判伪预测"才能进 <code>开放</code></td>
+<td>网格表列校验；写不出两个预测的条目自动降级为 <code>待观测</code>，不占排查预算</td>
+<td>B2（inorder/nogrow、RD_DUMP、假 PASS）</td>
+</tr>
+<tr>
+<td>R4</td>
+<td><strong>排除要写作用域</strong>：<code>关闭(理由, 判具, 日期, 仅排除哪一格)</code></td>
+<td>模板强制；禁止裸"已排除"</td>
+<td>B1（P2 六次搬家）</td>
+</tr>
+<tr>
+<td>R5</td>
+<td><strong>问题只在本网格新增</strong>；其它文档新增条目须先在此挂号，否则视为散文</td>
+<td><strong><code>tool/grid_lint.py</code></strong>（已落地，本文件 0 error / 0 warn 才算可当裁决输入）：查格号唯一、<code>层×模式</code> 定位、可改性标记、状态词合法、<strong>关闭必带日期+判具</strong>、<strong>开放必带判真/判伪</strong>、BLACKBOX 必带出口</td>
+<td>条目散落 → 人脑记账；以及 10-21 自查：初稿 52 格里 <strong>50 个 error</strong>（12 个无日期关闭 + 20 余个无预测的"开放"）</td>
+</tr>
+<tr>
+<td>R6</td>
+<td><strong>跨线借证一律禁止</strong>：从 OpenCL 线借到 Vulkan 线（或反之）的结论必须标注"借自哪格 + 是否同层"</td>
+<td>引用格式 <code>←G-xxx</code></td>
+<td>两线互当对方的结论用</td>
+</tr>
+<tr>
+<td>R7</td>
+<td><strong>跑测必须抗断线</strong>：<code>setsid</code> + 结果落<strong>设备本地</strong>文件 + 幂等续取；单脚本内不许依赖主机在场</td>
+<td>脚本模板强制；断线后仍能从设备端取回全部已完成腿</td>
+<td>G-803：10-20 丢 830 的 Phase B、10-21 丢 K40 的 R1 后半，同一失效模式两次</td>
+</tr>
+<tr>
+<td>R8</td>
+<td><strong>永不为假的闸等于没闸</strong>：每个判具/门禁必须带<strong>反向对照腿</strong>（已知会 FAIL 的一条），并要求判具<strong>自证接通</strong></td>
+<td><code>vk_gate.sh</code> 的 <code>FORCE_SUBGROUP_ARITH=1</code> 是范式；<code>run_mesa_matrix.sh</code> 已按此补 witness 自证 + CPU 腿 <code>submits==0</code></td>
+<td>G-908（<code>grep ggml_opencl</code> 闸两向都漏）、G-904（RD_DUMP 恒空被当无罪）</td>
+</tr>
+</tbody>
+</table>
+<p>跟踪网格自身健康度的五个数（代替"感觉复杂"）：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>现状（2026-10-21 01:1x 实测数）</th>
+<th>目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>网格格子总数</td>
+<td><strong>52</strong>（<code>grid_lint.py</code> 计数：关闭 12 / 开放 30 / 未观测 7 / 阻塞 4 / 不可达 1）</td>
+<td>只减不增：关闭才算收口</td>
+</tr>
+<tr>
+<td>无主键的证据条数</td>
+<td><strong>1 已抓到</strong>（G-920 的 CPU bank 两个数都无三元组）；<code>grid_lint</code> + <code>verify_mesa_bundle.sh</code> 推广后自动拦</td>
+<td><strong>0</strong>（机检拦截）</td>
+</tr>
+<tr>
+<td><code>未观测</code> 被误记为"已排除"</td>
+<td><strong>0</strong>（G-904 已显式标 <code>未观测</code>；G-908/G-306/G-505/G-107 均写明"哪件仪器没接通"）</td>
+<td>0，且 lint 强制</td>
+</tr>
+<tr>
+<td>M8（成本归因）已关闭格占比</td>
+<td><strong>4/14 = 29%</strong>（G-903 未解 ⇒ 其余 M8 格的"关闭"都是上界推断，不是分 op 账）</td>
+<td>≥80% 后才允许谈止损</td>
+</tr>
+<tr>
+<td>两线共用压测的实验数</td>
+<td><strong>0</strong>（判具 <code>kgsl_contract_probe.sh</code> 已写已上机，Phase 1 因 K40 掉线未跑）</td>
+<td>≥1，且每次提交层改动都跑</td>
+</tr>
+<tr>
+<td><code>OWN</code> 类格里仍 <code>开放</code> 的</td>
+<td><strong>21/31</strong>（这些才是能自己动的；其余是 UP/BLACKBOX/外部）</td>
+<td>每轮至少关掉 3 个，否则说明在躲硬骨头</td>
+</tr>
+<tr>
+<td>无 owner 的 env 开关</td>
+<td>136（OpenCL）/49（Vulkan）</td>
+<td>&lt;30，每个有 owner+默认值+基准</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8.-本周就能做的五步-每步自带回报-可独立停">8. 本周就能做的五步（每步自带回报，可独立停）</h2>
+<table>
+<thead>
+<tr>
+<th>步</th>
+<th>内容</th>
+<th>产出</th>
+<th>依赖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>补挂号</strong>：接管复评 / L3 / PROVENANCE / Vulkan 两文档 / 总档 §3·§9 / 备忘 A·B·C·F 已入表；剩下待倒进来的还有 <code>全GPU卸载_会话复盘_2026-10-18</code>、<code>Ling3.0Tiny_OpenCL性能回归定位</code>、<code>vulkan_adreno825_fix</code>、bonsai2 系列与 <code>docs/archive/</code></td>
+<td>网格成为唯一真源；<strong>填不出"层"的条目 = 问题定义本身没做好，那才是真堵点</strong></td>
+<td>无</td>
+</tr>
+<tr>
+<td>2</td>
+<td>给每个 <code>开放</code> 格补"判真+判伪预测"；写不出的降级 <code>待观测</code></td>
+<td>排查预算从"六个嫌疑"缩到"三个可判定实验"</td>
+<td>步 1</td>
+</tr>
+<tr>
+<td>3</td>
+<td>建两线共用 KGSL 提交压测（§6-A），先跑通再说</td>
+<td>G-208 从 0 实验变成有基线</td>
+<td>无</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>先花一发实验裁决 G-701 该不该打</strong>：<code>LLAMA_MOE_MATMUL_SPLIT</code>/<code>SPLIT_DYNAMIC</code> 交错 A/B（≥5% 且两轮同号）。判"贵"才启动 <code>ffn_moe_slots</code> 的 OpenCL 实现（<code>third_party/llama.cpp</code> 侧按仓库规矩需人接手）</td>
+<td>别让 10-16 的"便宜"与 10-20 的"真凶"继续靠嘴仗；一发实验决定投入方向</td>
+<td>无（实现那半需人接手）</td>
+</tr>
+<tr>
+<td>5</td>
+<td>一句 <code>sudo tar</code>（G-901）</td>
+<td>一次解锁 P0-2 / G-201 / G-503 / G-504 / G-302 五格</td>
+<td>用户</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>给决策的一句话</strong>：现在的"无解感"来自<strong>没有反馈回路的排除法</strong>——你在用记忆当数据库。
+网格化不改变任何一行代码，但它把"排除"的权限从人脑转给机器：从此没有"上次不是试过没重现吗"，
+只有"G-204 的状态是 <code>开放</code>，缺的是把世代与量化解耦的那一发实验"。</p>
+</blockquote>
+</main><a class="top" href="#" onclick="scrollTo({top:0,behavior:'smooth'});return false">↑</a></body></html>

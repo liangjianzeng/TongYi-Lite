@@ -9537,24 +9537,27 @@ static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backen
 }
 
 inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
-    // GGML_OPENCL_MOE_FORCE_A7X=1: probe-only escape hatch. The A7X exclusion
-    // targets the VENDOR trans4_ns repack miscompile; our batched-MoE set_tensor
-    // packing doesn't use it, so forcing A7X in lets a second device (740,
-    // E031.41) validate the batched kernels (2026-10-14 Ling q4_0 garbling bisect).
-    static const bool force_a7x_moe = [] {
+    // A7X is in by default: the batched-MoE set_tensor path packs weights itself and never
+    // reaches the vendor *_trans4_ns repack (Adreno 740 measured 1.4 -> 2.9 tok/s on Ling).
+    // GGML_OPENCL_MOE_FORCE_A7X=0 restores the old exclusion; =1 also lets A6x in (probe),
+    // unset keeps A6x out until a K40 leg validates it.
+    static const int a7x_moe_mode = [] {
         const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");
-        return e && e[0] == '1';
+        return e ? ((e[0] == '0') ? 0 : 1) : -1;
     }();
-    // The moe weight repack kernels *_trans4_ns alias a private ushort8 through a uchar*.
-    // Certain compilers (found with some A7x and A6x) miscompiles this, corrupting the weights.
-    // So, exclude A6x and A7x from using Adreno MoE kernels for now.
-    // The quants that have a general mul_mat_id kernel fallback to the general version; the
-    // rest fallback to CPU.
-    if (!force_a7x_moe && backend_ctx &&
-        (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A6X ||
-         backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X ||
-         backend_ctx->adreno_gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN)) {
-        return false;
+    // The *_trans4_ns repack aliases a private ushort8 through a uchar* and some A6x/A7x
+    // compilers miscompile it, but that kernel is not on the batched-MoE path (see above).
+    if (backend_ctx) {
+        const auto gen = backend_ctx->adreno_gen;
+        if (gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN) {
+            return false;
+        }
+        if (gen == ADRENO_GPU_GEN::A7X && a7x_moe_mode == 0) {
+            return false;
+        }
+        if (gen == ADRENO_GPU_GEN::A6X && a7x_moe_mode != 1) {
+            return false;
+        }
     }
 
     if (adreno_e17_compiler_quirks(backend_ctx)) {
@@ -10075,24 +10078,20 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                    (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32) ||
                    (op->src[0]->type == GGML_TYPE_F16 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
         case GGML_OP_SSM_CONV:
-            // [dspark 2026-10-14] Adreno 830: OpenCL SSM kernels have never been
-            // numerically validated (TBO has no SSM coverage) and the 830 driver
-            // E031.47 miscompiles several Adreno kernel families. Route SSM ops
-            // to CPU on A8X until validated (conv/scan are compute-trivial).
-            // [dspark 2026-10-16] GGML_OPENCL_SSM_A8X=1 opts in — the CPU fallback
-            // strands the gdn branch in a CPU island (see MUL_MAT small-weight note).
+            // Keep SSM on GPU: routing it to CPU splits the graph 4x more (138 vs 30 segments),
+            // every split is a GPU->CPU->GPU handoff, and decode drops ~2x. GGML_OPENCL_SSM_A8X=0
+            // restores the old CPU route for drivers that miscompile the SSM kernels.
             if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
                 static const char * ssm_a8x_env = getenv("GGML_OPENCL_SSM_A8X");
-                if (ssm_a8x_env && ssm_a8x_env[0] == '1') {
-                    return (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
+                if (ssm_a8x_env && ssm_a8x_env[0] == '0') {
+                    return false;
                 }
-                return false;
             }
             return (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32);
         case GGML_OP_SSM_SCAN: {
                 if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
                     static const char * ssm_a8x_env2 = getenv("GGML_OPENCL_SSM_A8X");
-                    if (!(ssm_a8x_env2 && ssm_a8x_env2[0] == '1')) {
+                    if (ssm_a8x_env2 && ssm_a8x_env2[0] == '0') {
                         return false;   // see SSM_CONV note above
                     }
                 }

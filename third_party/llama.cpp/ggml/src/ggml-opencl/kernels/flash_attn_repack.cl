@@ -1,4 +1,7 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
+// write_imageh into image3d_t needs this enabled; the Adreno 650 vendor compiler rejects it
+// otherwise and the model fails to load. Both stacks advertise the extension.
+#pragma OPENCL EXTENSION cl_khr_3d_image_writes : enable
 
 __kernel void kernel_repack_mask_for_wmm(
     const global half* mask_buf,

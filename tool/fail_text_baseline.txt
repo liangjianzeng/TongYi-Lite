@@ -1,0 +1,59 @@
+# 用户可见失败文案 —— 尚无测试引用的历史欠账（check_fail_texts.py 生成）。
+# 每行「文件:行<TAB>文案前缀」。**不要**为了消红把新文案塞进来：给它写一条测试引用才是正解。
+packages/plugin_kernel/lib/src/plugin_service.dart:552	看诊断树里的 effect 与日志
+packages/plugin_kernel/lib/src/plugin_service.dart:571	「${loaded.descriptor.manifest.name}」出了点问题
+packages/plugin_kernel/lib/src/loader.dart:197	写成 ">=0.3.4" 这种形式
+packages/plugin_kernel/lib/src/loader.dart:204	这个插件需要 app ${parsed.enginesApp}，本机是 $appVersion
+packages/plugin_kernel/lib/src/loader.dart:218	核对「插件方案」里的名字
+packages/plugin_kernel/lib/src/loader.dart:378	内置插件 $id 不允许被覆盖，用户版本被忽略
+packages/plugin_kernel/lib/src/capability_registry.dart:81	在「插件」面板查看本机能力清单，或安装提供它的插件
+packages/plugin_kernel/lib/src/config_layers.dart:302	路径不能为空
+packages/plugin_kernel/lib/src/config_layers.dart:303	至少给一个参数名
+packages/plugin_kernel/lib/src/scaffold.dart:320	${spec.name}需要朗读能力，本机还没有
+packages/plugin_kernel/lib/src/scaffold.dart:334	先选一张图或输入要念的内容
+packages/plugin_kernel/lib/src/flow_runner.dart:74	没有可执行的步骤
+packages/plugin_kernel/lib/src/flow_runner.dart:195	再试一次；网络慢就换个时间或缩短内容
+packages/plugin_kernel/lib/src/flow_runner.dart:225	拍一张课本单词表，或从相册选
+packages/plugin_kernel/lib/src/flow_runner.dart:292	用户放弃了这次流程
+packages/plugin_kernel/lib/src/flow_runner.dart:309	要问的参数「$name」没在 params 里定义
+packages/plugin_kernel/lib/src/flow_runner.dart:332	「${param.label}」的输入返回了 $got，超出插件声明的 $lo–$hi
+packages/plugin_kernel/lib/src/ctx_impl.dart:191	把槽 id 改成 "${ctx.manifest.id}.${def.id.split().skip(1).join()}"
+packages/plugin_kernel/lib/src/ctx_impl.dart:199	槽 id 必须以 "<owner>." 开头
+packages/plugin_sdk/lib/src/slot.dart:157	换命名空间，或让原 owner 提供子槽
+packages/plugin_sdk/lib/src/slot.dart:162	同名槽由首个声明者拥有
+packages/plugin_sdk/lib/src/slot.dart:182	给条目一个稳定 id，便于"为什么没显示"的定位
+packages/plugin_sdk/lib/src/outcome.dart:202	操作没有完成：$e
+packages/plugin_sdk/lib/src/outcome.dart:216	操作没有完成：$e
+packages/plugin_sdk/lib/src/ctx.dart:152	在「插件」页看它的前置条件；本机能力齐了再点重试
+packages/plugin_sdk/lib/src/ctx.dart:187	稍后重试；网络不稳时可改用离线能力
+packages/plugin_sdk/lib/src/validate.dart:127	不是合法 JSON：$e
+packages/plugin_sdk/lib/src/validate.dart:127	检查逗号与引号
+packages/plugin_sdk/lib/src/validate.dart:132	最外层必须是对象
+packages/plugin_sdk/lib/src/validate.dart:564	把示例精简到 2–3 个，规则用短句
+packages/plugin_sdk/lib/src/validate.dart:582	提示词里的占位符没人提供：${missing.join()} —— 它会原样留在提示词里送给模型，抽取质量悄悄变差，而且全程没有任何报错
+packages/plugin_sdk/lib/src/validate.dart:595	至少写清：输出格式、顺序保真、拿不准就不给（禁止编造）
+lib/plugins/plugin_host.dart:179	插件平台还没就绪
+lib/plugins/plugin_host.dart:180	稍等片刻再试，或重启 app
+lib/plugins/host/host_export.dart:56	把 export 排在能产出内容的步骤之后
+lib/plugins/host/host_export.dart:119	看看磁盘是否可写，或换个文件名（原因已记进诊断日志）
+lib/plugins/host/host_capture.dart:76	相机权限被拒绝
+lib/plugins/host/host_capture.dart:89	没能取到图片
+lib/plugins/host/host_capture.dart:90	再试一次，或先在相册里准备好照片
+lib/plugins/host/host_interact.dart:40	现在弹不出提问框
+lib/plugins/host/host_interact.dart:41	回到对话页再试一次
+lib/plugins/host/host_interact.dart:67	那个数没看懂
+lib/plugins/host/host_interact.dart:74	这个数超出范围了
+lib/plugins/host/host_interact.dart:91	现在弹不出选择框
+lib/plugins/host/host_interact.dart:92	回到对话页再试一次
+lib/plugins/host/host_interact.dart:99	至少要给一个选项
+lib/plugins/host/host_agent.dart:110	到「设置 → 智能体」打开智能体模式，再点一次
+lib/plugins/host/host_agent.dart:120	现在没有可交接的对话
+lib/plugins/host/host_agent.dart:121	回到对话页再点它（交接是接着这串聊，不是另开一个）
+lib/plugins/host/host_agent.dart:129	等它答完（或先按停止）再交接，免得两条互相打断
+lib/plugins/host/host_llm.dart:293	模型没从图里读出内容
+lib/plugins/host/host_llm.dart:294	拍清楚一些再试（对齐课本条目、别逆光）
+lib/plugins/host/host_llm.dart:319	检查模型与网络设置后再试一次
+lib/plugins/host/host_profiles.dart:200	这个档名不能用
+lib/plugins/host/host_profiles.dart:210	换个名字；要改那份就直接在 ${p.join(dirPath, )} 里改，改完点「重新扫描」
+lib/services/openai_service.dart:360	API 请求失败：HTTP ${response.statusCode}
+lib/services/device_files_service.dart:29	下载目录没有给回文件位置（${name ?? src}）—— 文件没交到用户手上

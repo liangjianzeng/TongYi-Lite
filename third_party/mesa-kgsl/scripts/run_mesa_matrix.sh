@@ -65,6 +65,15 @@ else
 fi
 [ -f "$RUN/BUILD_INFO" ] || { echo "!! $RUN 没有 BUILD_INFO：不知道是哪次构建的数，拒绝开跑" >&2; exit 4; }
 
+# 判具接通性先自证（G-908，2026-10-21）：提交 witness 不在 lib 里，整场 A/B 的 GPU 证据就无从判定。
+# 未接通只许记 unknown，**不许记成 ok** —— 教训来自 FD_MESA_DEBUG=inorder 与 FD_RD_DUMP 两次"没打印"被读成"没差别"。
+WITNESS=unknown
+if [ -f "$B/lib/libRusticlOpenCL.so" ]; then
+  if grep -qa "KGSLSUBMIT" "$B/lib/libRusticlOpenCL.so" 2>/dev/null; then WITNESS=yes; else WITNESS=no; fi
+  echo "#### 判具接通性 witness=$WITNESS（提交证据串是否在 lib 内）"
+fi
+[ "$WITNESS" = "no" ] && echo "!! 在机 lib 里没有提交 witness 串：Mesa 腿的 GPU 证据只能记 unknown（trace-off 干净构建属此类，此时别拿'没打印'当'没上 GPU'）" >&2
+
 one () {  # $1=tag  $2..=env 覆盖
   TAG=$1; shift
   R=1
@@ -78,13 +87,24 @@ one () {  # $1=tag  $2..=env 覆盖
     PF=$(grep -a 'prefill' "$L" | tail -1)
     IO=$(grep -a 'total\[decode\]' "$L" | tail -1)
     HT=$(grep -acE '上海|四大发明|造纸|印刷|指南针|火药' "$L")
-    # GPU 证据硬闸：Mesa 腿若"退回 CPU"就与 CPU 腿同速，t/s 好看也是假的（本仓库已被这类假绿骗过两次）。
-    # 只有 CPU 腿允许 drop/off；Mesa 腿必须看到 opencl 设备行且没有 drop。
+    # GPU 证据硬闸（G-908 重写 2026-10-21）：旧闸只看 `grep -ac ggml_opencl > 0`，那是"打印过"不是"跑过"——
+    # 实测纯 CPU 腿（GGML_OPENCL_OFF=1）也会命中 1 行 `ggml_opencl: ... -> CPU-only mode` 关闭声明；
+    # 反过来一条只打印不提交的 Mesa 腿能骗过它被判成有效 GPU 数。闸改数**提交证据**，并要求 witness 已接通。
     GDEV=$(grep -ac "ggml_opencl" "$LOGDIR/${TAG}_r$R.err" 2>/dev/null)
+    GSUB=$(grep -acE "KGSLSUBMIT|clFlush|QueueSubmit|clEnqueue" "$LOGDIR/${TAG}_r$R.err" 2>/dev/null)
     GDROP=$(grep -ac "drop unsupported device" "$LOGDIR/${TAG}_r$R.err" 2>/dev/null)
     VERD=ok
-    case $TAG in MESA_*) [ "$GDEV" -gt 0 ] && [ "$GDROP" -eq 0 ] || VERD="!!没在GPU上(退回CPU，此数不可用)";; esac
-    echo "--   rc=$RC | ${MET:-NO_METRIC} | ${PF:-no_prefill} | health_hits=$HT | gpu[opencl_lines=$GDEV drop=$GDROP]=$VERD"
+    case $TAG in
+      MESA_*)
+        if [ "$WITNESS" = "no" ];     then VERD="[判具未接通 lib无witness 无法判定]"
+        elif [ "$GSUB" -gt 0 ] && [ "$GDROP" -eq 0 ]; then VERD=ok
+        else VERD="!!没在GPU上(submits=$GSUB drop=$GDROP，此数不可用)"; fi ;;
+      CPU_BANK)
+        # 反向对照腿（抄 vk_gate.sh 的 FORCE_SUBGROUP_ARITH 那一招）：CPU 腿必须零提交。
+        # 它既是污染闸，也证明 witness 闸**有牙** —— 一条永不为假的闸等于没闸。
+        [ "$GSUB" -eq 0 ] || VERD="!!CPU腿出现提交($GSUB)，被污染" ;;
+    esac
+    echo "--   rc=$RC | ${MET:-NO_METRIC} | ${PF:-no_prefill} | health_hits=$HT | gpu[submits=$GSUB opencl_lines=$GDEV drop=$GDROP witness=$WITNESS]=$VERD"
     echo "--   io: ${IO:-no_decode_io_stats}"
     R=$((R+1))
     [ $R -le "$ROUNDS" ] && sleep "$COOLDOWN"
