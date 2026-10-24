@@ -1099,50 +1099,109 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 模型面板：状态/内存卡 + 推理引擎设置全量（后端/KV/量化/投机解码）。
+  /// 模型面板：一行紧凑状态条（点按弹状态详情）+ 推理引擎设置主体。
+  /// 此前嵌整张状态大卡：①吃掉面板上半的滚动手势（上翻失灵）；
+  /// ②「去加载模型」在面板里无处可去（引擎设置/模型列表就在本页下方）——都废除。
   Widget _buildModelRailPage() {
     return Consumer(builder: (context, ref, __) {
       final ms = ref.watch(modelManagerProvider);
       final isGenerating = ref.watch(runningTurnsProvider).isNotEmpty;
-      final modelName = ms.modelName ?? (ms.modelId ?? '未知模型');
+      final modelName = ms.modelName ?? (ms.modelId ?? '未加载模型');
+      final scheme = Theme.of(context).colorScheme;
+      final statusColor = _statusColorFor(ms.phase);
       return Column(
         children: [
-          _ModelStatusSheet(
-            phase: ms.phase,
-            modelName: modelName,
-            errorMessage: ms.errorMessage,
-            logs: ms.loadingLogs,
-            isGenerating: isGenerating,
-            embedded: true,
-            ref: ref,
-            onUnload: () async {
-              final ok =
-                  await ref.read(modelManagerProvider.notifier).unloadModel();
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(ok ? '✅ 已卸载模型，已释放内存' : '❌ 卸载失败，请重试'),
-                  backgroundColor: ok ? Colors.green : Colors.red,
-                  duration: const Duration(seconds: 2)));
-            },
-            onLoad: () async {
-              final id = ms.modelId;
-              if (id == null) return;
-              if (ref.read(runningTurnsProvider).isNotEmpty) {
-                try {
-                  await ref
-                      .read(chatNotifierProvider.notifier)
-                      .stopGeneration();
-                } catch (_) {}
-                await Future.delayed(const Duration(milliseconds: 300));
-              }
-              await ref.read(modelManagerProvider.notifier).loadModel(id);
-            },
-            onGoToSettings: () => _railPanel.open('model'),
+          InkWell(
+            onTap: () => _showModelStatusPopup(ms, isGenerating),
+            borderRadius:
+                const BorderRadius.vertical(bottom: Radius.circular(12)),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHigh,
+                border:
+                    Border(bottom: BorderSide(color: scheme.outlineVariant)),
+              ),
+              child: Row(children: [
+                Icon(_statusIconFor(ms.phase), size: 18, color: statusColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_statusLabelFor(ms.phase, isGenerating),
+                          style: const TextStyle(
+                              fontSize: 12.5, fontWeight: FontWeight.w600)),
+                      Text(modelName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11, color: scheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+                if (isGenerating)
+                  const SizedBox(
+                    width: 10,
+                    height: 10,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                const SizedBox(width: 6),
+                Icon(Icons.chevron_right,
+                    size: 16, color: scheme.onSurfaceVariant),
+              ]),
+            ),
           ),
           Expanded(child: InferenceEngineSettingsBody()),
         ],
       );
     });
+  }
+
+  IconData _statusIconFor(ModelLifecyclePhase phase) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle:
+        return Icons.memory_outlined;
+      case ModelLifecyclePhase.loading:
+        return Icons.sync_alt;
+      case ModelLifecyclePhase.loaded:
+        return Icons.check_circle;
+      case ModelLifecyclePhase.unloading:
+        return Icons.sync_disabled;
+      case ModelLifecyclePhase.error:
+        return Icons.error_outline;
+    }
+  }
+
+  Color _statusColorFor(ModelLifecyclePhase phase) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle:
+        return Colors.grey;
+      case ModelLifecyclePhase.loading:
+        return Colors.blue;
+      case ModelLifecyclePhase.loaded:
+        return Colors.green;
+      case ModelLifecyclePhase.unloading:
+        return Colors.orange;
+      case ModelLifecyclePhase.error:
+        return Colors.red;
+    }
+  }
+
+  String _statusLabelFor(ModelLifecyclePhase phase, bool isGenerating) {
+    switch (phase) {
+      case ModelLifecyclePhase.idle:
+        return '未加载';
+      case ModelLifecyclePhase.loading:
+        return '加载中…';
+      case ModelLifecyclePhase.loaded:
+        return isGenerating ? '推理中' : '已加载';
+      case ModelLifecyclePhase.unloading:
+        return '卸载中…';
+      case ModelLifecyclePhase.error:
+        return '加载失败';
+    }
   }
 
   /// 技能面板：说明 + 管理入口（技能卡全量在「智能体」面板内）。
@@ -1916,7 +1975,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         Container(
           margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
           padding: EdgeInsets.fromLTRB(
-              10, 6, 10, 6 + MediaQuery.of(context).padding.bottom),
+              10, 6, 10, 14 + MediaQuery.of(context).padding.bottom),
           decoration: BoxDecoration(
             // 设计稿形态：白底 + 细描边（不是灰底实心卡），发消息区要“轻”。
             color: Theme.of(context).colorScheme.surface,
@@ -3331,15 +3390,17 @@ class _MemoryPanelState extends State<_MemoryPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // 内存卡主题化（原写死浅灰，暗色下刺眼）：全部走 M3 令牌。
+    final theme = Theme.of(context);
     if (_mem == null || _mem!.isEmpty) {
       return Container(
         width: double.infinity,
         margin: const EdgeInsets.only(top: 12),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: Colors.grey.shade100,
+          color: theme.colorScheme.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.grey.shade300),
+          border: Border.all(color: theme.colorScheme.outlineVariant),
         ),
         child: Row(
           children: [
@@ -3375,9 +3436,9 @@ class _MemoryPanelState extends State<_MemoryPanel> {
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100,
+        color: theme.colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.grey.shade300),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3390,7 +3451,7 @@ class _MemoryPanelState extends State<_MemoryPanel> {
                   style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: Colors.grey.shade800)),
+                      color: theme.colorScheme.onSurface)),
               const Spacer(),
               Text('可用 ${_gb(sysAvail)} GB',
                   style: TextStyle(
@@ -3399,6 +3460,7 @@ class _MemoryPanelState extends State<_MemoryPanel> {
           ),
           const SizedBox(height: 10),
           _memBar(
+            context: context,
             label: '系统内存',
             usedMB: sysUsed,
             totalMB: sysTotal,
@@ -3407,6 +3469,7 @@ class _MemoryPanelState extends State<_MemoryPanel> {
           ),
           const SizedBox(height: 8),
           _memBar(
+            context: context,
             label: 'App (llama.cpp)',
             usedMB: procRss,
             totalMB: sysTotal,
@@ -3450,7 +3513,8 @@ class _MemoryPanelState extends State<_MemoryPanel> {
                 ),
               ),
               Text('进程 RSS: ${_gb(procRss)} GB',
-                  style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                  style: TextStyle(
+                      fontSize: 12, color: theme.colorScheme.onSurface)),
             ],
           ),
         ],
@@ -3490,6 +3554,7 @@ class _MemoryPanelState extends State<_MemoryPanel> {
   String _gb(int mb) => (mb / 1024.0).toStringAsFixed(1);
 
   Widget _memBar({
+    required BuildContext context,
     required String label,
     required int usedMB,
     required int totalMB,
@@ -3515,7 +3580,8 @@ class _MemoryPanelState extends State<_MemoryPanel> {
             value: pct.clamp(0.0, 1.0),
             minHeight: 9,
             valueColor: AlwaysStoppedAnimation(color),
-            backgroundColor: Colors.grey.shade300,
+            backgroundColor:
+                Theme.of(context).colorScheme.surfaceContainerHighest,
           ),
         ),
       ],
