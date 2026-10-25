@@ -1151,8 +1151,11 @@ struct InferenceEngine {
         // variants only accept K/V in the SAME format (f32_q4_0 / f32_q8_0), and
         // quantized V itself requires FA. With FA off, V stays F16 (quantized V
         // is unsupported without FA). Failed archs (MLA) retry at F16 below.
-        ctx_params.type_k =
-            (g_kv_cache_type.load(std::memory_order_relaxed) == 1) ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_0;
+        switch (g_kv_cache_type.load(std::memory_order_relaxed)) {
+            case 1:  ctx_params.type_k = GGML_TYPE_Q8_0; break;
+            case 2:  ctx_params.type_k = GGML_TYPE_F16;  break;
+            default: ctx_params.type_k = GGML_TYPE_Q4_0; break;
+        }
         ctx_params.type_v = (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
                                 ? ctx_params.type_k : GGML_TYPE_F16;
         LOGI("KV cache: type_k=%s type_v=%s flash_attn=%s%s",
@@ -3224,15 +3227,20 @@ JNIEXPORT void JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetKvCacheType(
     JNIEnv * env, jobject, jstring j_type
 ) {
+    // v: 0=q4_0, 1=q8_0, 2=f16 (unquantized K — GPU-offload placement on hybrid
+    // archs: quantized K forces the attention chain onto CPU islands).
     int v = 0;
     if (j_type) {
         const char * s = env->GetStringUTFChars(j_type, nullptr);
-        v = (s && std::strcmp(s, "q8_0") == 0) ? 1 : 0;
+        if (s) {
+            if (std::strcmp(s, "q8_0") == 0) v = 1;
+            else if (std::strcmp(s, "f16") == 0) v = 2;
+        }
         if (s) env->ReleaseStringUTFChars(j_type, s);
     }
     g_kv_cache_type.store(v, std::memory_order_relaxed);
     LOGI("nativeSetKvCacheType: type_k=%s (type_v stays f16, flash-attn off)",
-         v ? "q8_0" : "q4_0");
+         v == 1 ? "q8_0" : (v == 2 ? "f16" : "q4_0"));
 }
 
 // [dspark 2026-10-14] P1: flash attention opt-in from the UI. Applied at the

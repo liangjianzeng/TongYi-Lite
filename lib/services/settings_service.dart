@@ -1128,7 +1128,9 @@ class InferenceSettings {
       smartMoeEnabled: json['smartMoeEnabled'] as bool? ?? true,
       oomPreHeadroomMb: (json['oomPreHeadroomMb'] as num?)?.toInt() ?? 768,
       oomPostHeadroomMb: (json['oomPostHeadroomMb'] as num?)?.toInt() ?? 1536,
-      kvCacheType: (json['kvCacheType'] as String?) == 'q8_0' ? 'q8_0' : 'q4_0',
+      kvCacheType: (const ['q8_0', 'f16']).contains(json['kvCacheType'])
+          ? json['kvCacheType'] as String
+          : 'q4_0',
       flashAttn: (json['flashAttn'] as bool?) ?? false,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
