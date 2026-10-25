@@ -35,6 +35,8 @@ FP(cl_int, clGetProgramBuildInfo, (cl_program, cl_device_id, cl_program_build_in
 FP(cl_int, clGetProgramInfo, (cl_program, cl_program_info, size_t, void *, size_t *))
 FP(cl_int, clReleaseProgram, (cl_program))
 FP(cl_int, clReleaseContext, (cl_context))
+FP(cl_kernel, clCreateKernel, (cl_program, const char *, cl_int *))
+FP(cl_int, clReleaseKernel, (cl_kernel))
 
 /* ICD 形态的驱动（我们的 Mesa/rusticl）只把少数入口放成导出符号，其余要用 Khronos ICD
    的扩展函数查询拿。只 dlsym 会把"驱动好好的"误判成"驱动不可用"——本轮就撞过一次。 */
@@ -71,6 +73,7 @@ int main(int argc, char **argv) {
     LOAD(clGetPlatformInfo); LOAD(clGetDeviceIDs); LOAD(clGetDeviceInfo);
     LOAD(clCreateContext); LOAD(clCreateProgramWithSource); LOAD(clBuildProgram);
     LOAD(clGetProgramBuildInfo); LOAD(clGetProgramInfo); LOAD(clReleaseProgram); LOAD(clReleaseContext);
+    LOAD(clCreateKernel); LOAD(clReleaseKernel);
 
     cl_platform_id pl[8]; cl_uint npl = 0;
     if (p_clGetPlatformIDs(8, pl, &npl) != CL_SUCCESS || npl == 0) { fprintf(stderr, "FATAL: no platform\n"); return 2; }
@@ -136,8 +139,24 @@ int main(int argc, char **argv) {
     printf("-- 编译门 --\nsrc=%s (%ld B) opts='%s' clBuildProgram=%d\n", argv[1], sz, opts, be);
     if (log[0]) printf("BUILD LOG:\n%s\n", log);
     if (be != CL_SUCCESS) { printf("VERDICT=COMPILE_FAIL\n"); free(log); free(src); p_clReleaseProgram(pr); p_clReleaseContext(cx); return 1; }
-    cl_uint nk = 0; p_clGetProgramInfo(pr, CL_PROGRAM_NUM_KERNELS, sizeof(nk), &nk, NULL);
-    printf("kernels=%u\nVERDICT=COMPILE_OK\n", nk);
-    free(log); free(src); p_clReleaseProgram(pr); p_clReleaseContext(cx);
-    return 0;
+    /* [C1-P1 R-009] clBuildProgram 过 ≠ kernel 真编过：rusticl 把 LLVM->NIR->ir3
+       降低推迟到 clCreateKernel/executable 特化，v32 vector abort 就死在这一步
+       （前端只到 SPIR-V，组件上限 16 恰好绕过）。逐 kernel clCreateKernel 才是真编译门。 */
+    size_t nsz = 0;
+    p_clGetProgramInfo(pr, CL_PROGRAM_KERNEL_NAMES, 0, NULL, &nsz);
+    char * names = (char *) malloc(nsz + 2); names[0] = 0;
+    if (nsz > 1) p_clGetProgramInfo(pr, CL_PROGRAM_KERNEL_NAMES, nsz, names, NULL);
+    cl_uint ok = 0, bad = 0;
+    printf("-- kernel 门（clCreateKernel 逐个）--\n");
+    for (char * tok = strtok(names, ";,"); tok; tok = strtok(NULL, ";,")) {
+        while (*tok == ' ') tok++;
+        cl_int ke = CL_SUCCESS;
+        cl_kernel k = p_clCreateKernel(pr, tok, &ke);
+        if (k && ke == CL_SUCCESS) { printf("  CREATE_OK   %s\n", tok); ok++; p_clReleaseKernel(k); }
+        else                       { printf("  CREATE_FAIL %s err=%d\n", tok, ke); bad++; }
+    }
+    printf("kernels_ok=%u fail=%u\n", ok, bad);
+    printf("VERDICT=%s\n", bad ? "CREATE_FAIL" : (ok ? "FULL_OK" : "NOKERNEL"));
+    free(names); free(log); free(src); p_clReleaseProgram(pr); p_clReleaseContext(cx);
+    return bad ? 1 : 0;
 }
