@@ -125,21 +125,22 @@ class ConversationStatsBar extends ConsumerWidget {
 
     if (groups.isEmpty) return const SizedBox.shrink();
 
-    // DSH StatsLine 三级灰、居中、组间「|」、超长省略号；字号 11 对齐思考
-    // 输出正文（2026-10-25 用户定案：统计读数是次级信息，没必要 12px）。
+    // DSH StatsLine 三级灰、居中、组间「|」、超长省略号。字号 10 + 行高
+    // 1.3 + 底部避让降到 max(nav, 8)（2026-10-25 用户二连定案：读数是
+    // 次级信息，尽量矮——消息输入框得以贴近屏幕底）。
     final style = TextStyle(
-        fontSize: 11,
-        height: 20 / 11,
+        fontSize: 10,
+        height: 1.3,
         color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75));
     final sepStyle = TextStyle(
-        fontSize: 11,
-        height: 20 / 11,
+        fontSize: 10,
+        height: 1.3,
         color: theme.colorScheme.outlineVariant);
 
     return Padding(
-      // 手势条避让收口：常驻，与内容有无无关（composer 不贴死屏幕底）。
+      // 手势条避让收口：只保系统 inset（含 8px 保底），不再额外垫 16px。
       padding: EdgeInsets.fromLTRB(
-          16, 4, 16, math.max(MediaQuery.of(context).padding.bottom, 16) + 2),
+          16, 2, 16, math.max(MediaQuery.of(context).padding.bottom, 8)),
       child: Row(
         children: [
           Expanded(

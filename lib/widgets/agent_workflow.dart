@@ -444,17 +444,20 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
                         color: theme.colorScheme.tertiary
                             .withValues(alpha: 0.7)),
                     const SizedBox(width: 6),
-                    Text(
-                      widget.duration == null
-                          ? '思考 ${widget.index}'
-                          : '思考 ${widget.index} - 持续了${_fmtDur(widget.duration)}',
-                      style: TextStyle(
-                          fontSize: 12,
-                          color:
-                              theme.colorScheme.tertiary.withValues(alpha: 0.8)),
-                    ),
+                    // 序号「思考 1/2/3」用户定案去掉（难看）：有耗时显示
+                    // 耗时，没有就只剩图标+内容摘要（DSH ReasoningRow 同形）。
+                    if (widget.duration != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '思考 - 持续了${_fmtDur(widget.duration)}',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: theme.colorScheme.tertiary
+                                .withValues(alpha: 0.8)),
+                      ),
+                    ],
                     // 折叠态摘要 = 思考首行（DSH ReasoningRow firstLine）：
-                    // 收起时用户概知里面想了啥，不是空洞的「思考 N」。
+                    // 收起时用户概知里面想了啥。
                     if (!_expanded) ...[
                       const SizedBox(width: 6),
                       Expanded(
