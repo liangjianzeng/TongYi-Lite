@@ -71,6 +71,7 @@ endfunction()
 
 set(GGML_OPENCL_KERNELS
     add
+    moe_topk_fused
     add_id
     moe_add_id_glu
     argsort

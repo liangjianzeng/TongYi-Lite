@@ -735,6 +735,7 @@ struct ggml_backend_opencl_context {
     // argsort is loaded in supports_op because its availability depends on how
     // many workgroups are allowed, which requires kernel compilation.
     bool kernels_loaded_argsort = false;
+    bool kernels_loaded_moe_topk_fused = false;
     // rest of the kernels are currently always loaded in alloc_buffer.
     bool kernels_loaded = false;
 
@@ -984,6 +985,10 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_cpy_f16_f16, kernel_cpy_f16_f32, kernel_cpy_f32_f16, kernel_cpy_f32_f32, kernel_cpy_i32_i32;
     cl_kernel kernel_cpy_f32_f32_pack = nullptr;
     cl_kernel kernel_cpy_f32_f32_flat = nullptr;
+    cl_kernel kernel_cpy_f32_i32 = nullptr;
+    // [tongyi M-R1] fused MoE router top-k
+    cl_program program_moe_topk_fused;
+    cl_kernel kernel_moe_topk_fused;
     cl_kernel kernel_mul_mat_f32_f32;
     cl_kernel kernel_mul_mat_f16_f16;
     cl_kernel kernel_mul_mat_f16_f32_1row;
@@ -1858,6 +1863,29 @@ static void load_cl_kernels_argsort(ggml_backend_opencl_context *backend_ctx) {
     }
 }
 
+// [tongyi M-R1 2026-10-25] fused MoE router top-k. Compiled with the SAME
+// compile opts as the sigmoid family (backend kernel_compile_opts, incl.
+// -cl-fast-relaxed-math) so the in-kernel sigmoid is bit-identical with
+// kernel_sigmoid_f32 -- byte-equality with the old graph path depends on it.
+static void load_cl_kernels_moe_topk_fused(ggml_backend_opencl_context *backend_ctx) {
+    if (backend_ctx->kernels_loaded_moe_topk_fused) {
+        return;
+    }
+    cl_int err;
+#ifdef GGML_OPENCL_EMBED_KERNELS
+    const std::string kernel_src {
+        #include "moe_topk_fused.cl.h"
+    };
+#else
+    const std::string kernel_src = read_file("moe_topk_fused.cl");
+#endif
+    backend_ctx->program_moe_topk_fused =
+        build_program_from_source(backend_ctx, kernel_src.c_str(), backend_ctx->kernel_compile_opts);
+
+    CL_CHECK((backend_ctx->kernel_moe_topk_fused = clCreateKernel(backend_ctx->program_moe_topk_fused, "kernel_moe_topk_fused", &err), err));
+    backend_ctx->kernels_loaded_moe_topk_fused = true;
+}
+
 static bool use_adreno_bin_kernels(ggml_backend_opencl_context * backend_ctx) {
 #ifndef GGML_OPENCL_USE_ADRENO_BIN_KERNELS
     GGML_UNUSED(backend_ctx);
@@ -2040,6 +2068,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             }
         }
         CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
+        CL_CHECK((backend_ctx->kernel_cpy_f32_i32 = clCreateKernel(prog, "kernel_cpy_f32_i32", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -10561,6 +10590,13 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
         case GGML_OP_CONT:
             switch (op->src[0]->type) {
                 case GGML_TYPE_F32:
+                    // [tongyi M-R1] numeric f32->i32 cast (ggml_cast wiring for
+                    // the fused router ids). CPY only: ggml_cl_dup has no
+                    // f32->i32 kernel, so DUP/CONT keep rejecting it.
+                    if (op->op == GGML_OP_CPY && op->type == GGML_TYPE_I32 &&
+                        backend_ctx->kernel_cpy_f32_i32 != nullptr) {
+                        return true;
+                    }
                     switch (op->type) {
                         case GGML_TYPE_F16:
                         case GGML_TYPE_F32:
@@ -10884,6 +10920,23 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]);
         case GGML_OP_IM2COL:
             return true;
+        case GGML_OP_MOE_TOPK_FUSED: {
+            // [tongyi M-R1] pinned grouped-MoE router shape (bailingmoe3/Ling):
+            // E=128 G=8 epg=16 gu=4 K=8, F32 in/out. Anything else -> CPU ref.
+            if (op->src[0] == nullptr || op->src[0]->type != GGML_TYPE_F32 ||
+                op->type != GGML_TYPE_F32 || !ggml_is_contiguous(op->src[0])) {
+                return false;
+            }
+            if (op->src[1] && (op->src[1]->type != GGML_TYPE_F32 || !ggml_is_contiguous(op->src[1]))) {
+                return false;
+            }
+            const int E_f   = ggml_get_op_params_i32(op, 0);
+            const int G_f   = ggml_get_op_params_i32(op, 1);
+            const int epg_f = ggml_get_op_params_i32(op, 2);
+            const int gu_f  = ggml_get_op_params_i32(op, 3);
+            const int K_f   = ggml_get_op_params_i32(op, 4);
+            return E_f == 128 && G_f == 8 && epg_f == 16 && gu_f == 4 && K_f == 8;
+        }
         case GGML_OP_ARGSORT: {
             load_cl_kernels_argsort(backend_ctx);
 
@@ -32851,6 +32904,11 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
                                        ? backend_ctx->kernel_cpy_f32_f32_pack
                                        : backend_ctx->kernel_cpy_f32_f32;
                     break;
+                case GGML_TYPE_I32:
+                    // [tongyi M-R1] numeric cast (ggml_cast F32->I32 wiring for
+                    // the fused router ids); matches CPU f32_to_i32 truncation
+                    kernel = backend_ctx->kernel_cpy_f32_i32;
+                    break;
                 default:
                     GGML_ASSERT(false && "not implemented");
             }
@@ -33638,6 +33696,72 @@ static void ggml_cl_argsort(ggml_backend_t backend, const ggml_tensor * src0, co
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 }
 
+// [tongyi M-R1 2026-10-25] fused MoE router top-k executor.
+// One workgroup per token row, lws=128 (one thread per expert, E<=128).
+// dst = [K, n_tokens, 2] F32: plane 0 = normalized weights, plane 1 = ids
+// as exact float values (wired to I32 through a f32->i32 cpy kernel).
+static void ggml_cl_moe_topk_fused(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra);
+    GGML_ASSERT(dst && dst->extra);
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src0) && ggml_is_contiguous(dst));
+
+    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    load_cl_kernels_moe_topk_fused(backend_ctx);
+
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
+
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    // bias (src1) may be NULL; pass the logits buffer as a dummy when absent
+    // (the kernel never reads it when has_bias == 0)
+    cl_mem bias_mem = extra0->data_device;
+    cl_ulong offset1 = offset0;
+    bool has_bias = false;
+    if (src1) {
+        GGML_ASSERT(src1->extra);
+        ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
+        bias_mem = extra1->data_device;
+        offset1  = extra1->offset + src1->view_offs;
+        has_bias = true;
+    }
+
+    const int E   = ggml_get_op_params_i32(dst, 0);
+    const int G   = ggml_get_op_params_i32(dst, 1);
+    const int epg = ggml_get_op_params_i32(dst, 2);
+    const int gu  = ggml_get_op_params_i32(dst, 3);
+    const int K   = ggml_get_op_params_i32(dst, 4);
+    const int nt  = (int) dst->ne[1];
+    const float w_scale = ggml_get_op_params_f32(dst, 6);
+
+    GGML_ASSERT(E <= 128 && G <= 8 && gu <= 4 && K <= 8);
+
+    cl_kernel kernel = backend_ctx->kernel_moe_topk_fused;
+
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &bias_mem));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(int),      &E));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(int),      &G));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(int),      &epg));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &gu));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &K));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),      &nt));
+    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),      &has_bias));
+    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(float),    &w_scale));
+
+    size_t global_work_size[] = {(size_t)128, (size_t)nt, 1};
+    size_t local_work_size[]  = {(size_t)128, 1, 1};
+
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+}
+
 static void ggml_cl_sum_rows(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
     GGML_ASSERT(src0->extra);
@@ -34229,6 +34353,12 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
                 return false;
             }
             func = ggml_cl_mean;
+            break;
+        case GGML_OP_MOE_TOPK_FUSED:
+            if (!any_on_device) {
+                return false;
+            }
+            func = ggml_cl_moe_topk_fused;
             break;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(tensor)) {

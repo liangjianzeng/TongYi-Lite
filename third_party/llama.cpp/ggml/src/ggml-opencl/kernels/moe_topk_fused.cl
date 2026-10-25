@@ -4,37 +4,58 @@
 //   SIGMOID + ADD(bias) + ARGSORT_TOP_K(2/group) + GET_ROWS + SUM_ROWS
 //   + ARGSORT_TOP_K(4 groups) + GET_ROWS + FILL(-inf) + SET_ROWS
 //   + ARGSORT_TOP_K(8) + GET_ROWS(weights) + MUL/DIV(norm)
-// with ONE kernel for grouped-MoE architectures (bailingmoe3: E=128, G=8,
-// epg=16, group_used=4, k=8). ~13 kernels/layer -> 1 (+1 downstream cast).
+// with ONE kernel for grouped-MoE architectures (bailingmoe3/Ling: E=128, G=8,
+// epg=16, group_used=4, k=8). ~13 kernels/layer -> 1 (+1 downstream f32->i32 cpy).
 //
 // Semantics contract (byte-equivalence with the graph path):
+//   * sigmoid uses the SAME expression as kernels/sigmoid.cl
+//     (1.0f / (1.0f + exp(-x))) and the SAME compile flags
+//     (backend kernel_compile_opts, incl. -cl-fast-relaxed-math) so the fused
+//     probs are bit-identical with the old path's kernel_sigmoid_f32.
 //   * selection uses sel = sigmoid(logits) + bias; weights gather uses the
 //     UNBIASED p = sigmoid(logits) (weights = get_rows(probs, selected)).
 //   * comparator is strict > (cmp_argsort<DESC>, ops.cpp:8798); ties resolved
 //     by lowest index via ordered argmax scan. Real ties only occur among -inf
-//     masked entries (outside top-8 when >=8 finite candidates exist).
+//     masked entries (outside top-8 when >=8 finite candidates exist) or on
+//     exact fp32 ties of finite scores (rare; e2e text-diff is the arbiter).
 //   * weight normalization: w_i /= max(sum(w), 6.103515625e-5f)  -- the clamp
-//     from ggml_clamp in build_moe_ffn (weights_sum).
+//     from ggml_clamp in build_moe_ffn (weights_sum); then w_i *= w_scale
+//     (ggml_scale) when the graph passed a real scaling factor.
+//   * ids are stored as EXACT float values (NOT bit-cast): the graph wires
+//     them through ggml_cast(F32 -> I32), which is a numeric conversion in
+//     ggml (f32_to_i32), so as_float() denormals would truncate to 0. Exact
+//     for ids < 2^24.
 //
-// Dst layout: float dst[16] = { w[0..7] (f32), ids[0..7] (f32-bit-cast i32) }.
-// The graph wires ids through a CAST node into I32 for MUL_MAT_ID's src2.
+// Dst layout [K, n_tokens, 2] F32 (flat, row-major):
+//   dst[row*K + k]              = weights[k]   (plane 0)
+//   dst[K*nt + row*K + k]       = (float)id[k] (plane 1)
 //
-// Launch: ONE workgroup, local_size = 128 (one thread per expert).
-// Args: logits [E] f32, bias [E] f32, dst [16] f32, E, G, epg, gu, K.
+// Launch: ONE workgroup per token row, local_size = 128 (one thread/expert).
+// Args (fork convention): base pointers + ulong offsets.
 
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
 __kernel void kernel_moe_topk_fused(
-        __global const float * logits,   // [E]
-        __global const float * bias,     // [E], may contain 0 when no bias
-        __global float * dst,            // [2*K]
+        __global const float * logits,   // [E x nt]
+        const ulong offset0,
+        __global const float * bias,     // [E], unused when has_bias == 0
+        const ulong offset1,
+        __global float * dst,            // [K, nt, 2]
+        const ulong offsetd,
         const int E,
         const int G,
         const int epg,                   // E / G
         const int gu,                    // groups used
-        const int K) {                   // experts used
+        const int K,                     // experts used
+        const int nt,                    // n_tokens (for the ids plane base)
+        const int has_bias,
+        const float w_scale) {
     const int t = get_local_id(0);
-    const int lsz = get_local_size(0);
+    const int row = get_group_id(0);     // one workgroup per token
+
+    __global const float * lg = (__global const float *)((__global const char *) logits + offset0);
+    __global const float * bs = (__global const float *)((__global const char *) bias   + offset1);
+    __global float * out = (__global float *)((__global char *) dst + offsetd);
 
     __local float p_sel[128];    // sigmoid + bias (selection score)
     __local float p_raw[128];    // sigmoid only (weight source)
@@ -43,17 +64,17 @@ __kernel void kernel_moe_topk_fused(
     __local float masked[128];
     __local int   topk[8];
 
-    // 1) probs
+    // 1) probs (bit-identical with kernel_sigmoid_f32)
     if (t < E) {
-        const float x = logits[t];
-        const float s = 1.0f / (1.0f + exp2(-1.4426950408889634f * x)); // sigmoid
-        p_raw[t]  = s;
-        p_sel[t]  = s + bias[t];
+        const float x = lg[row*E + t];
+        const float s = 1.0f / (1.0f + exp(-x));
+        p_raw[t] = s;
+        p_sel[t] = has_bias ? (s + bs[t]) : s;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // 2) per-group top-2 sum (each group = epg threads; thread 0 of the group
-    //    scans its epg members serially -- epg <= 32, E <= 128 work total)
+    // 2) per-group top-2 sum (thread g scans its epg members serially; the
+    //    sum order matches the graph's get_rows + sum_rows: top1 + top2)
     if (t < G) {
         const int base = t * epg;
         float best1 = -INFINITY, best2 = -INFINITY;
@@ -66,7 +87,8 @@ __kernel void kernel_moe_topk_fused(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // 3) top-gu groups by gsum (gu <= 4; deterministic tie = lowest index)
+    // 3) top-gu groups by gsum (gu <= 4; ordered argmax, tie = lowest index).
+    //    Only the SET of selected groups matters (the mask is a union).
     if (t == 0) {
         for (int j = 0; j < gu; ++j) {
             int bi = -1; float bv = -INFINITY;
@@ -76,11 +98,10 @@ __kernel void kernel_moe_topk_fused(
             gsel[j] = bi;
             gsum[bi] = -INFINITY;   // remove from candidacy
         }
-        // restore gsum not needed afterwards
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // 4) group mask: in-group flag per thread
+    // 4) group mask: keep values of selected groups, -inf elsewhere
     if (t < E) {
         const int g = t / epg;
         bool in = false;
@@ -102,19 +123,22 @@ __kernel void kernel_moe_topk_fused(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // 6) weights: gather unbiased probs by selected ids + normalize
+    // 6) weights: gather unbiased probs by selected ids; ids as exact floats
     if (t < K) {
         const int e = topk[t];
-        dst[K + t] = as_float(e);                       // ids bit-cast to f32
-        float w = (e >= 0) ? p_raw[e] : 0.0f;
-        // sequential normalize: sum first, then divide
-        dst[t] = w;                                      // temp store
+        out[row*K + t] = p_raw[e];                    // plane 0: weights
+        out[K*nt + row*K + t] = (float) e;            // plane 1: ids
     }
     barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 7) normalize: sum (sequential, k order = sum_rows), clamp, div, scale
     if (t == 0) {
         float s = 0.0f;
-        for (int j = 0; j < K; ++j) s += dst[j];
-        s = max(s, 6.103515625e-5f);
-        for (int j = 0; j < K; ++j) dst[j] /= s;
+        for (int j = 0; j < K; ++j) s += out[row*K + j];
+        s = s > 6.103515625e-5f ? s : 6.103515625e-5f;
+        for (int j = 0; j < K; ++j) out[row*K + j] /= s;
+        if (w_scale != 0.0f && w_scale != 1.0f) {
+            for (int j = 0; j < K; ++j) out[row*K + j] *= w_scale;
+        }
     }
 }

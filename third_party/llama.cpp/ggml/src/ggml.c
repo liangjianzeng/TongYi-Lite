@@ -5519,7 +5519,7 @@ struct ggml_tensor * ggml_moe_topk_fused(
     GGML_ASSERT(n_expert == n_groups * n_exp_per_group);
     GGML_ASSERT(n_groups_used > 0 && n_groups_used <= n_groups);
     GGML_ASSERT(n_expert_used > 0 && n_expert_used <= n_groups_used * n_exp_per_group);
-    GGML_ASSERT(bias == nullptr || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) == n_expert));
+    GGML_ASSERT(bias == NULL || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) == n_expert));
 
     // ids stored as float values must round-trip ggml_cast(F32 -> I32) exactly
     GGML_ASSERT(n_expert <= (int64_t) UINT32_MAX && n_expert <= (int64_t) INT32_MAX);
@@ -5535,7 +5535,7 @@ struct ggml_tensor * ggml_moe_topk_fused(
     ggml_set_op_params_i32(result, 2, (int32_t) n_exp_per_group);
     ggml_set_op_params_i32(result, 3, (int32_t) n_groups_used);
     ggml_set_op_params_i32(result, 4, (int32_t) n_expert_used);
-    ggml_set_op_params_i32(result, 5, bias != nullptr);
+    ggml_set_op_params_i32(result, 5, bias != NULL);
     ggml_set_op_params_f32(result, 6, w_scale);
 
     return result;
