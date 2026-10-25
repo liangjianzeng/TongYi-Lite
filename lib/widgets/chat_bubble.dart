@@ -277,6 +277,20 @@ class ChatBubble extends StatelessWidget {
                             // 任务清单活卡（todo_write upsert）：结构化清单
                             // 视图（状态图标/完成删除线/进行中高亮），不走 MD。
                             TodoChecklistCard(content: content)
+                          else if (isStreaming)
+                            // finalize swap（DSH 同构，2026-10-25 阶段 4）：
+                            // 流式期间平文本渲染（每帧重排一张 Text），落档
+                            // 后一次性换完整 markdown（标题/代码块/表格）。
+                            // 长回复滚动性能的关键：流式中 MarkdownBody 每帧
+                            // 全量重排是卡顿大头。
+                            Text(
+                              content,
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurface,
+                                fontSize: 15,
+                                height: 1.5,
+                              ),
+                            )
                           else
                             // 智能体回答 markdown 美化渲染（WP-B）：标题/列表/
                             // 代码块/表格/加粗等结构化排版。流式期间部分 MD

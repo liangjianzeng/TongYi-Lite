@@ -12,13 +12,13 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../models/chat_message.dart';
 import '../models/turn_trace.dart';
 import '../providers/agent_state_provider.dart';
 import '../services/device_files_service.dart';
 import 'chat_bubble.dart';
+import 'turn_clock.dart';
 import 'turn_items.dart';
 
 // ---------------------------------------------------------------------------
@@ -221,8 +221,39 @@ List<ToolActivityUi> parsedToolActivities(List<ChatMessage> tools) =>
 ///
 /// 用户定案：这里不是"思考"（真思考走 ThinkingStreamCard），只是任务
 /// 执行中的状态过渡，标签必须写「执行中」，否则会误导成模型在空想。
-class ThinkingIndicator extends StatelessWidget {
+class ThinkingIndicator extends StatefulWidget {
   const ThinkingIndicator({super.key});
+
+  @override
+  State<ThinkingIndicator> createState() => _ThinkingIndicatorState();
+}
+
+class _ThinkingIndicatorState extends State<ThinkingIndicator> {
+  DateTime? _start;
+  bool _clockOn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = DateTime.now();
+    _clockOn = true;
+    TurnClock.instance.acquire();
+    TurnClock.instance.tick.addListener(_onTick);
+  }
+
+  @override
+  void dispose() {
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
+    super.dispose();
+  }
+
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -237,13 +268,18 @@ class ThinkingIndicator extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 8),
           Text(
-            '执行中…',
+            _elapsed == null || _elapsed! < const Duration(seconds: 15)
+                ? '执行中…'
+                : '执行中 - 持续了${_fmtDur(_elapsed)}',
             style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
           ),
         ],
       ),
     );
   }
+
+  Duration? get _elapsed =>
+      _start == null ? null : DateTime.now().difference(_start!);
 }
 
 /// _ToolGenIndicator —— 工具调用参数生成期进度（WP5）。
@@ -483,18 +519,16 @@ class ToolActivityCard extends StatefulWidget {
   State<ToolActivityCard> createState() => _ToolActivityCardState();
 }
 
-class _ToolActivityCardState extends State<ToolActivityCard>
-    with SingleTickerProviderStateMixin {
+class _ToolActivityCardState extends State<ToolActivityCard> {
   bool _expanded = false;
 
   /// 执行起点（首次以 executing 状态入树时记录）；null = 未知（历史回合）。
   DateTime? _execStart;
   Duration? _total;
 
-  /// 秒级刷新用 Ticker（flutter test 下被 muted，无 pending-timer 问题；
-  /// 真机上每帧回调，只在秒数变化时 setState）。
-  Ticker? _ticker;
-  int _lastSec = -1;
+  /// 秒级刷新走全 app 单时钟 [TurnClock]（阶段 4 计时器收敛：替代每卡
+  /// 一个 Ticker；实际耗时用 DateTime 差值，重建不丢）。
+  bool _clockOn = false;
 
   /// 折叠行摘要（2026-10-25 阶段 2）：variant 键优先级取参数首行（DSH
   /// toolRowModel 同构）；无命中回退参数 JSON 60 字旧口径。
@@ -561,7 +595,11 @@ class _ToolActivityCardState extends State<ToolActivityCard>
 
   @override
   void dispose() {
-    _ticker?.dispose();
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
     super.dispose();
   }
 
@@ -572,23 +610,24 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     if (st == ToolUiStatus.executing) {
       if (_execStart == null) {
         _execStart = DateTime.now();
-        _lastSec = -1;
-        _ticker?.dispose();
-        _ticker = createTicker(_onTick)..start();
+        if (!_clockOn) {
+          _clockOn = true;
+          TurnClock.instance.acquire();
+          TurnClock.instance.tick.addListener(_onTick);
+        }
       }
     } else if (_execStart != null && _total == null) {
       _total = DateTime.now().difference(_execStart!);
-      _ticker?.dispose();
-      _ticker = null;
+      if (_clockOn) {
+        _clockOn = false;
+        TurnClock.instance.tick.removeListener(_onTick);
+        TurnClock.instance.release();
+      }
     }
   }
 
-  void _onTick(Duration elapsed) {
-    if (!mounted) return;
-    final now = DateTime.now();
-    if (now.second == _lastSec) return;
-    _lastSec = now.second;
-    setState(() {});
+  void _onTick() {
+    if (mounted) setState(() {});
   }
 
   /// 当前/最终耗时（未知为 null）。
@@ -785,13 +824,11 @@ class ThinkingStreamCard extends StatefulWidget {
   State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
 }
 
-class _ThinkingStreamCardState extends State<ThinkingStreamCard>
-    with SingleTickerProviderStateMixin {
+class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
   /// null = 默认收起；非 null = 用户手动覆盖。
   bool? _override;
   DateTime? _start;
-  Ticker? _ticker;
-  int _lastSec = -1;
+  bool _clockOn = false;
 
   /// 流式长内容自动跟随：内容变长时滚到可见区底部，直到用户手动上滑。
   final ScrollController _scroll = ScrollController();
@@ -805,7 +842,11 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
 
   @override
   void dispose() {
-    _ticker?.dispose();
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
     _scroll.dispose();
     super.dispose();
   }
@@ -844,23 +885,21 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
     }
   }
 
-  /// 思考开始时记录起点并开秒级 Ticker（头部耗时走秒更新）。
+  /// 思考开始时记录起点并挂全 app 单时钟（秒级 setState）。
   void _syncClock() {
     final s = widget.ui;
     if (_start == null && s.hasThinking && s.running) {
       _start = DateTime.now();
-      _lastSec = -1;
-      _ticker?.dispose();
-      _ticker = createTicker(_onTick)..start();
+      if (!_clockOn) {
+        _clockOn = true;
+        TurnClock.instance.acquire();
+        TurnClock.instance.tick.addListener(_onTick);
+      }
     }
   }
 
-  void _onTick(Duration elapsed) {
-    if (!mounted) return;
-    final now = DateTime.now();
-    if (now.second == _lastSec) return;
-    _lastSec = now.second;
-    setState(() {});
+  void _onTick() {
+    if (mounted) setState(() {});
   }
 
   Duration? get _elapsed =>
