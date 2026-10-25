@@ -2143,14 +2143,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final usage = ref.watch(contextUsageProvider)[_currentConversationId];
     final fraction = usage?.fraction;
     final hasData = fraction != null;
-    // 无占用数据（本地未加载/该会话还没发过请求）→ 整个环不渲染：
-    // 灰环「—」看着像个坏掉的按钮（2026-10-25 真机截图定案）。
-    if (!hasData) return const SizedBox.shrink();
-    final color = fraction >= 0.85
-        ? const Color(0xFFE53935)
-        : fraction >= 0.60
-            ? const Color(0xFFFB8C00)
-            : const Color(0xFF2196F3);
+    // 环**常显**（KV/上下文占用的固定指示位，2026-10-25 用户定案不许藏）。
+    // 无数据的空会话显示 0% 灰环——新会话占用为 0 是事实；
+    // 此前的「—」灰圈看着像坏按钮，那才是问题本体。
+    final display = hasData ? fraction! : 0.0;
+    final color = !hasData
+        ? Colors.grey.shade400
+        : display >= 0.85
+            ? const Color(0xFFE53935)
+            : display >= 0.60
+                ? const Color(0xFFFB8C00)
+                : const Color(0xFF2196F3);
     return Tooltip(
       message: '上下文占用详情 / 手动压缩',
       child: InkWell(
@@ -2166,7 +2169,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 width: 22,
                 height: 22,
                 child: CircularProgressIndicator(
-                  value: hasData ? fraction.clamp(0.02, 1.0) : 0.0,
+                  value: display.clamp(0.0, 1.0),
                   strokeWidth: 2.4,
                   strokeCap: StrokeCap.round,
                   color: color,
@@ -2174,7 +2177,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
               ),
               Text(
-                hasData ? '${(fraction * 100).toStringAsFixed(0)}%' : '—',
+                '${(display * 100).toStringAsFixed(0)}%',
                 style: TextStyle(
                   fontSize: 9,
                   height: 1.0,
