@@ -250,25 +250,6 @@ static void bailingmoe3_g1_skip_debug(const char * reason) {
 //   QKVZ_DIM = H_K*(2*S_K + 2*S_V*RF)、CC = 2*H_K*S_K + H_V*S_V，RF = H_V/H_K。
 // bailingmoe3 hparams 无 ssm_d_state/ssm_n_group/ssm_dt_rank（qwen3next 专属，
 // 本 arch 从不读取），维度只能由形状推导；解不出 = 张量组不符合 G1 契约 → 拒绝融合。
-static bool bailingmoe3_g1_solve_sk_hk(int64_t qkvz_dim, int64_t cc,
-        int64_t h_v, int64_t s_v, int64_t & s_k, int64_t & h_k) {
-    for (int64_t hk = 1; hk <= h_v; ++hk) {
-        if (h_v % hk != 0 || qkvz_dim % hk != 0) {
-            continue;
-        }
-        const int64_t rf  = h_v / hk;
-        const int64_t sk2 = qkvz_dim / hk - 2 * s_v * rf;   // = 2*S_K
-        if (sk2 <= 0 || sk2 % 2 != 0) {
-            continue;
-        }
-        if (2 * hk * (sk2 / 2) + h_v * s_v == cc) {
-            s_k = sk2 / 2;
-            h_k = hk;
-            return true;
-        }
-    }
-    return false;
-}
 
 // G1 门条件（全部满足才融合；env 关 = 静默走原链、不告警）。
 // n_seqs==1 是 op 形状契约所需（ggml_g1_ssm_layer 的 state/conv_state 均无 seq 维）。
@@ -279,20 +260,28 @@ static bool bailingmoe3_g1_gate(const llama_layer & layer, int64_t n_tokens, int
     }
     if (n_tokens != 1)                         { *reason = "decode only (n_tokens != 1)";   return false; }
     if (n_seqs != 1)                           { *reason = "single-seq decode only (n_seqs != 1)"; return false; }
-    if (!layer.ssm_in)                         { *reason = "ssm_in == nullptr (bailingmoe3 KDA loader never creates GDN-shaped tensors)"; return false; }
-    if (!layer.ssm_beta_alpha)                 { *reason = "ssm_beta_alpha == nullptr";     return false; }
-    if (!layer.ssm_dt)                         { *reason = "ssm_dt == nullptr";             return false; }
-    if (!layer.ssm_a)                          { *reason = "ssm_a == nullptr";              return false; }
-    if (!layer.ssm_conv1d)                     { *reason = "ssm_conv1d == nullptr";         return false; }
-    if (!layer.ssm_norm)                       { *reason = "ssm_norm == nullptr";           return false; }
-    if (!layer.ssm_out)                        { *reason = "ssm_out == nullptr";            return false; }
-    if (layer.ssm_in->type  != GGML_TYPE_Q4_0) { *reason = "ssm_in  != Q4_0";               return false; }
-    if (layer.ssm_out->type != GGML_TYPE_Q4_0) { *reason = "ssm_out != Q4_0";               return false; }
-    if (layer.ssm_beta_alpha->type != GGML_TYPE_F32) { *reason = "ssm_beta_alpha != F32";   return false; }
-    if (layer.ssm_conv1d->type     != GGML_TYPE_F32) { *reason = "ssm_conv1d != F32";       return false; }
-    if (layer.ssm_dt->type         != GGML_TYPE_F32) { *reason = "ssm_dt != F32";           return false; }
-    if (layer.ssm_a->type          != GGML_TYPE_F32) { *reason = "ssm_a != F32";            return false; }
-    if (layer.ssm_norm->type       != GGML_TYPE_F32) { *reason = "ssm_norm != F32";         return false; }
+    // [R-016/R-017] KDA 形状门：bailingmoe3 recr 层真实张量组（非 qwen3next GDN）
+    if (!layer.wq || !layer.wk || !layer.wv) {
+        *reason = "wq/wk/wv missing"; return false;
+    }
+    if (!layer.ssm_q_conv || !layer.ssm_k_conv || !layer.ssm_v_conv) {
+        *reason = "ssm_q/k/v_conv missing"; return false;
+    }
+    if (!layer.ssm_f_a || !layer.ssm_g_a || !layer.ssm_dt_b || !layer.ssm_a ||
+        !layer.ssm_beta || !layer.ssm_o_norm || !layer.wo) {
+        *reason = "kda gate/out tensors missing"; return false;
+    }
+    if (layer.wq->type != GGML_TYPE_Q4_0 || layer.wk->type != GGML_TYPE_Q4_0 ||
+        layer.wv->type != GGML_TYPE_Q4_0 || layer.wo->type != GGML_TYPE_Q4_0) {
+        *reason = "wq/wk/wv/wo != Q4_0"; return false;
+    }
+    if (layer.ssm_q_conv->type != GGML_TYPE_F32 || layer.ssm_k_conv->type != GGML_TYPE_F32 ||
+        layer.ssm_v_conv->type != GGML_TYPE_F32 || layer.ssm_f_a->type != GGML_TYPE_F32 ||
+        layer.ssm_g_a->type != GGML_TYPE_F32 || layer.ssm_dt_b->type != GGML_TYPE_F32 ||
+        layer.ssm_a->type != GGML_TYPE_F32 || layer.ssm_beta->type != GGML_TYPE_F32 ||
+        layer.ssm_o_norm->type != GGML_TYPE_F32) {
+        *reason = "kda aux tensors != F32"; return false;
+    }
     return true;
 }
 
@@ -351,47 +340,37 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             const char * g1_skip = nullptr;
             ggml_tensor * g1_out = nullptr;
             if (bailingmoe3_g1_gate(layer, n_tokens, n_seqs, &g1_skip)) {
-                // 维度全部由张量形状推导（bailingmoe3 hparams 无 GDN 维度字段）
-                const int64_t g1_n_embd = cur->ne[0];
-                const int64_t g1_d_conv = layer.ssm_conv1d->ne[0];
-                const int64_t g1_cc     = layer.ssm_conv1d->ne[1];
-                const int64_t g1_s_v    = layer.ssm_norm->ne[0];
-                int64_t g1_s_k = 0;
-                int64_t g1_h_k = 0;
-                if (g1_s_v <= 0 || layer.ssm_out->ne[0] % g1_s_v != 0) {
-                    g1_skip = "ssm_out->ne[0] not divisible by ssm_norm->ne[0]";
+                // [R-017] KDA 两 op 路径（规格书 _probe/g1_probe/KDA_SPEC.md）
+                if (cparams.n_rs_seq != 0) {
+                    // 回滚 split 路径的 conv_state 多槽快照与内核单趟直写不等价
+                    g1_skip = "rs rollback splits unsupported (n_rs_seq != 0)";
                 } else {
-                    const int64_t g1_h_v = layer.ssm_out->ne[0] / g1_s_v;
-                    if (!bailingmoe3_g1_solve_sk_hk(layer.ssm_in->ne[1], g1_cc, g1_h_v, g1_s_v, g1_s_k, g1_h_k)) {
-                        g1_skip = "cannot solve (S_K, H_K) from ssm_in/ssm_conv1d shapes (not G1 contract)";
-                    } else {
-                        // conv_state：G1 契约 [CC, D_CONV-1] f32 常驻（内核内原地滚动，
-                        // out[0]=in[1], out[1]=in[2], out[2]=本 token 混合值）。
-                        // ⚠️ 布局疑点（接线报告已列）：现行 r_l 槽位是窗口主序
-                        // [d_conv-1, d_inner]×{q,k,v}（bailingmoe3_causal_conv1d 所用），
-                        // 与 G1 契约通道主序 [CC, D_CONV-1] 不同；此视图按契约形状直取
-                        // 槽首（cache_head 偏移照抄现路径 seq 槽位写法），待 KDA 变体
-                        // op / 装载器定稿时以实际 memory 布局复核。
-                        const int64_t g1_cst_size = (g1_d_conv - 1) * g1_cc;
-                        ggml_tensor * conv_state = ggml_view_2d(ctx0, conv_states_all,
-                                g1_cc, g1_d_conv - 1,
-                                g1_cc * ggml_element_size(conv_states_all),
-                                cache_head * g1_cst_size * ggml_element_size(conv_states_all));
+                    const int64_t g1_d     = layer.ssm_o_norm->ne[0];   // head_dim（KDA 方阵）
+                    const int64_t g1_h     = layer.ssm_a->ne[1];        // n_head
+                    const int64_t g1_inner = g1_d * g1_h;
+                    const int64_t g1_dc    = layer.ssm_q_conv->ne[0];
+                    const int64_t g1_cst   = (g1_dc - 1) * g1_inner;
+                    // conv_state：三槽连续 [3*(dc-1)*d_inner]（causal_conv1d :190 同款寻址，
+                    // n_seqs==1 → 单 cache_head 槽、slot 0 项）；内核内原地滚动（R-017）。
+                    // ⚠️ 激活前待办（R-016）：memory bookkeeping 与直写等价性真机复核。
+                    ggml_tensor * g1_conv_state = ggml_view_1d(ctx0, conv_states_all,
+                            3 * g1_cst,
+                            cache_head * 3 * g1_cst * ggml_element_size(conv_states_all));
+                    // state：照抄现 GDN 路径（build_rs → [d,d,H] 列主，GATED_DELTA_NET 契约）
+                    ggml_tensor * g1_states_all = mctx_cur->get_s_l(il);
+                    ggml_tensor * g1_state = build_rs(inp_rs, g1_states_all, hparams.n_embd_s(), n_seqs);
+                    g1_state = ggml_reshape_3d(ctx0, g1_state, g1_d, g1_d, g1_h);
 
-                        // state：照抄现 GDN 路径（build_rs → reshape [S_V,S_V,H_V]，
-                        // 列主 S(i,j)=s[j*S_V+i]，同 GGML_OP_GATED_DELTA_NET 契约）
-                        ggml_tensor * states_all = mctx_cur->get_s_l(il);
-                        ggml_tensor * state = build_rs(inp_rs, states_all, hparams.n_embd_s(), n_seqs);
-                        state = ggml_reshape_3d(ctx0, state, g1_s_v, g1_s_v, g1_h_v);
-
-                        // eps：l2 与 rms 同源 = hparams.f_norm_rms_eps（ggml.h 契约注）
-                        const float g1_eps = hparams.f_norm_rms_eps;
-                        g1_out = ggml_g1_ssm_layer(ctx0, cur,
-                                layer.ssm_in, layer.ssm_beta_alpha, layer.ssm_dt, layer.ssm_a,
-                                layer.ssm_conv1d, conv_state, layer.ssm_norm, layer.ssm_out, state,
-                                g1_n_embd, g1_s_k, g1_h_k, g1_h_v, g1_s_v, g1_d_conv,
-                                g1_eps, g1_eps);
-                    }
+                    ggml_tensor * g1_scratch = ggml_g1_kda_in(ctx0, cur,
+                            layer.wq, layer.wk, layer.wv,
+                            layer.ssm_q_conv, layer.ssm_k_conv, layer.ssm_v_conv,
+                            layer.ssm_beta, g1_conv_state,
+                            g1_d, g1_dc, hparams.f_norm_rms_eps);
+                    cb(g1_scratch, "g1_kda_in", il);
+                    g1_out = ggml_g1_kda_out(ctx0, g1_scratch, cur,
+                            layer.ssm_f_a, layer.ssm_g_a, layer.ssm_dt_b, layer.ssm_a,
+                            layer.ssm_o_norm, layer.wo, g1_state,
+                            hparams.f_norm_rms_eps, hparams.kda_gate_lower_bound);
                 }
             }
             if (g1_out) {

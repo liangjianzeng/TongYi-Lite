@@ -193,7 +193,7 @@ kernel void g1_ssm_stage1_proj(
     if (lid == 0) {
         float ss = 0.0f;
         for (uint t = 0; t < S_K; ++t) { const float v_ = lmem[L_CONV + t]; ss += v_*v_; }
-        const float f = (float)S_K / sqrt(ss + L2_EPS);
+        const float f = 1.0f / sqrt(ss + L2_EPS);   /* build_gdn_l2_norm 闭式 = 1/sqrt(Σx²+eps)（单位 L2 范数；R-018 代数更正） */
         for (uint t = 0; t < S_K; ++t) {
             const float v_ = lmem[L_CONV + t] * f;
             scratch[2*g*S_K + t]         = v_;   // v 头 2g
@@ -201,7 +201,7 @@ kernel void g1_ssm_stage1_proj(
         }
         ss = 0.0f;
         for (uint t = 0; t < S_K; ++t) { const float v_ = lmem[L_CONV + S_K + t]; ss += v_*v_; }
-        const float fk = (float)S_K / sqrt(ss + L2_EPS);
+        const float fk = 1.0f / sqrt(ss + L2_EPS);
         for (uint t = 0; t < S_K; ++t) {
             const float v_ = lmem[L_CONV + S_K + t] * fk;
             scratch[SCR_K_OFF + 2*g*S_K + t]     = v_;

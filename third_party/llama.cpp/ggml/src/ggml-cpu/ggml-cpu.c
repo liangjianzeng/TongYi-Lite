@@ -1852,14 +1852,14 @@ static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params *
             const float av = (float)acc;
             convv[(size_t)g*conv_new + t] = (double)(av / (1.0f + expf(-av)));   // silu
         }
-        // q/k l2norm（因子 = S_K/sqrt(Σx²+eps)）+ interleave（v 头 2g+r ← k 头 g 第 r 段）
+        // q/k l2norm（因子 = 1/sqrt(Σx²+eps)，R-018 代数更正）+ interleave（v 头 2g+r ← k 头 g 第 r 段）
         for (int seg = 0; seg < 2; ++seg) {
             double ss = 0.0;
             for (int t = 0; t < s_k; ++t) {
                 const double v_ = convv[(size_t)g*conv_new + seg*s_k + t];
                 ss += v_*v_;
             }
-            const float f = (float)s_k / sqrtf((float)ss + l2_eps);
+            const float f = 1.0f / sqrtf((float)ss + l2_eps);
             float * base = scrf + (seg == 0 ? 0 : scr_k_off);
             for (int t = 0; t < s_k; ++t) {
                 const float v_ = (float)convv[(size_t)g*conv_new + seg*s_k + t] * f;
@@ -2021,7 +2021,7 @@ static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * pa
         }
     }
 
-    // q/k 逐头 l2norm（因子 = d/sqrt(Σx²+eps)，build_gdn_l2_norm 闭式）→ dst q|k 段
+    // q/k 逐头 l2norm（因子 = 1/sqrt(Σx²+eps)，R-018）→ dst q|k 段
     for (int s = 0; s < 2; ++s) {
         for (int h = 0; h < n_head; ++h) {
             double ss = 0.0;
@@ -2029,7 +2029,7 @@ static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * pa
                 const double v_ = conv[(size_t)s*d_inner + h*head_dim + j];
                 ss += v_*v_;
             }
-            const float f = (float)head_dim / sqrtf((float)ss + l2_eps);
+            const float f = 1.0f / sqrtf((float)ss + l2_eps);   /* build_gdn_l2_norm 闭式（R-018 代数更正） */
             for (int j = 0; j < head_dim; ++j) {
                 yf[(size_t)s*d_inner + h*head_dim + j] =
                     (float)conv[(size_t)s*d_inner + h*head_dim + j] * f;

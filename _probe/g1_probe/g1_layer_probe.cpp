@@ -157,7 +157,7 @@ static void ref_stage1(const std::vector<Blk>& W_in, const std::vector<float>& W
         for (int seg = 0; seg < 2; ++seg) {
             double ss = 0.0;
             for (int t = 0; t < S_K; ++t) ss += convv[seg*S_K + t] * convv[seg*S_K + t];
-            const float f = (float)S_K / sqrtf((float)ss + L2_EPS);
+            const float f = 1.0f / sqrtf((float)ss + L2_EPS);
             float* base = r.scratch.data() + (seg == 0 ? 0 : SCR_K_OFF);
             for (int t = 0; t < S_K; ++t) {
                 const float v_ = (float)convv[seg*S_K + t] * f;
