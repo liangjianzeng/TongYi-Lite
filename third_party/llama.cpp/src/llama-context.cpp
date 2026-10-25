@@ -4146,7 +4146,11 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    if (ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
+    // [TongYi-Lite R-012] MLA models are exempt from the quantized-V gate:
+    // MLA layers have has_v == false (llama-kv-cache allocates no V tensor),
+    // so type_v is never materialized - it only exists to satisfy the
+    // type_k == type_v precondition above. Quantized-V semantics are vacuous.
+    if (!model->hparams.is_mla() && ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
         if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
             LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for quantized V cache\n", __func__);
             params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;

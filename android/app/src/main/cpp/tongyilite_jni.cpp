@@ -259,8 +259,10 @@ static int64_t read_mem_available_bytes() {
 // KV cache K-type selection (Settings -> Inference Engine -> KV Precision).
 // 0 = q4_0 (default), 1 = q8_0. V is always F16: quantized V requires flash
 // attention (llama-context refuses otherwise) and this app keeps FA disabled.
-// MLA models (DeepSeek family) also keep K/V at F16 - upstream requires
-// type_k == type_v for them.
+// [R-012] Exception: MLA models (bailingmoe3, detected via
+// llama_model_is_mla()) have no independent V cache — type_v is mirrored to
+// type_k at ctx creation purely to pass llama-context's type_k == type_v
+// precondition, so q4_0/q8_0 applies to the MLA compressed-K cache directly.
 static std::atomic<int> g_kv_cache_type{0};
 // [dspark 2026-10-14] P1: opt-in flash attention (设置→推理引擎). 0=off (default,
 // legacy behavior), 1=on. Applied at the next model load. See the ctx-creation
@@ -1150,18 +1152,28 @@ struct InferenceEngine {
         // default q4_0. V follows K when flash-attn is on: the OpenCL FA kernel
         // variants only accept K/V in the SAME format (f32_q4_0 / f32_q8_0), and
         // quantized V itself requires FA. With FA off, V stays F16 (quantized V
-        // is unsupported without FA). Failed archs (MLA) retry at F16 below.
+        // is unsupported without FA).
+        // [R-012 ling/MLA] Exception: MLA models (bailingmoe3, hparams.is_mla())
+        // have has_v == false — there is NO independent V cache, only the single
+        // compressed ck per layer. llama-context requires type_k == type_v as a
+        // precondition even though type_v is never materialized, so we mirror
+        // type_v to type_k here to let the user's KV quantization reach the MLA
+        // K cache (the quantized-V-requires-FA gate is MLA-exempt on the
+        // llama.cpp side). Non-MLA models keep the exact previous behavior.
         switch (g_kv_cache_type.load(std::memory_order_relaxed)) {
             case 1:  ctx_params.type_k = GGML_TYPE_Q8_0; break;
             case 2:  ctx_params.type_k = GGML_TYPE_F16;  break;
             default: ctx_params.type_k = GGML_TYPE_Q4_0; break;
         }
-        ctx_params.type_v = (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
+        const bool model_is_mla = llama_model_is_mla(model);
+        ctx_params.type_v = (model_is_mla ||
+                             ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
                                 ? ctx_params.type_k : GGML_TYPE_F16;
-        LOGI("KV cache: type_k=%s type_v=%s flash_attn=%s%s",
+        LOGI("KV cache: type_k=%s type_v=%s flash_attn=%s%s%s",
              ggml_type_name(ctx_params.type_k), ggml_type_name(ctx_params.type_v),
              ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED ? "auto" : "off",
-             fa_hybrid_off ? " (hybrid arch: forced off)" : "");
+             fa_hybrid_off ? " (hybrid arch: forced off)" : "",
+             model_is_mla ? " (MLA: type_v mirrors type_k)" : "");
 
         // For speculative decoding (MTP or DSpark), partial draft acceptance is
         // rolled back via the rollback-sequence (RS) mechanism: llama_memory_seq_rm()
@@ -1217,11 +1229,16 @@ struct InferenceEngine {
         if (!new_ctx && ctx_params.type_k != GGML_TYPE_F16) {
             // Rejected by the arch (e.g. MLA models require type_k == type_v):
             // one automatic retry with an F16 KV cache.
+            // [R-012] For MLA, type_v mirrors type_k (quantized, FA off), so the
+            // F16 retry MUST wash type_v as well - leaving it quantized would
+            // fail the type_k == type_v precondition and kill the retry. For
+            // non-MLA models with FA off type_v is already F16 (no-op), and the
+            // FA-on case is covered by the flash_attn_type check below.
             LOGW("ctx init failed with quantized KV (type_k=%s) - retrying with F16 KV",
                  ggml_type_name(ctx_params.type_k));
             reportLoadingLog("KV 精度 Q4/Q8 与该模型架构不兼容，已自动回退 F16 KV 重试");
             ctx_params.type_k = GGML_TYPE_F16;
-            if (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+            if (ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED || model_is_mla) {
                 ctx_params.type_v = GGML_TYPE_F16;   // FA combos need K/V in the same format
             }
             future_ctx = spawn_ctx();
@@ -3225,12 +3242,22 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetOomGuardParams(
 
 // KV cache precision from the UI (设置→推理引擎→KV 精度). "q4_0" (default) or
 // "q8_0". Applied at the next model load (ctx params are fixed per context).
+// [R-012 ling/MLA] Whitelist note: for MLA models (bailingmoe3) q8_0/q4_0 are
+// VALID and apply to the compressed K (ck) cache directly — those layers have
+// no independent V cache (has_v == false), so ctx creation mirrors type_v =
+// type_k (see loadModel) and llama-context's quantized-V gate is MLA-exempt.
+// For non-MLA models the old rule still holds: K quantized per setting, V
+// stays F16 with FA off. Caveat unchanged for hybrid archs with GPU offload:
+// quantized K can push the attention chain onto CPU islands (placement
+// concern only — correctness is unaffected).
 JNIEXPORT void JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetKvCacheType(
     JNIEnv * env, jobject, jstring j_type
 ) {
     // v: 0=q4_0, 1=q8_0, 2=f16 (unquantized K — GPU-offload placement on hybrid
     // archs: quantized K forces the attention chain onto CPU islands).
+    // For MLA (bailingmoe3) all three values are whitelisted: quantized selects
+    // the MLA ck cache format, f16 = no quantization.
     int v = 0;
     if (j_type) {
         const char * s = env->GetStringUTFChars(j_type, nullptr);
@@ -3241,7 +3268,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetKvCacheType(
         if (s) env->ReleaseStringUTFChars(j_type, s);
     }
     g_kv_cache_type.store(v, std::memory_order_relaxed);
-    LOGI("nativeSetKvCacheType: type_k=%s (type_v stays f16, flash-attn off)",
+    LOGI("nativeSetKvCacheType: type_k=%s (type_v stays f16 except MLA: mirrors "
+         "type_k, flash-attn off)",
          v == 1 ? "q8_0" : (v == 2 ? "f16" : "q4_0"));
 }
 

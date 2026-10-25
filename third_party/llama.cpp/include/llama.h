@@ -696,6 +696,11 @@ extern "C" {
     // Returns true if the model is hybrid (like Jamba, Granite, etc.)
     LLAMA_API bool llama_model_is_hybrid(const struct llama_model * model);
 
+    // Returns true if the model uses Multi-head Latent Attention (MLA) for all
+    // its attention layers (like DeepSeek, bailingmoe3). MLA models have no
+    // independent V cache (has_v == false) and require type_k == type_v.
+    LLAMA_API bool llama_model_is_mla(const struct llama_model * model);
+
     // Returns true if the model is diffusion-based (like LLaDA, Dream, etc.)
     LLAMA_API bool llama_model_is_diffusion(const struct llama_model * model);
 

@@ -4192,6 +4192,10 @@ bool llama_model_is_hybrid(const llama_model * model) {
     return llm_arch_is_hybrid(model->arch);
 }
 
+bool llama_model_is_mla(const llama_model * model) {
+    return model->hparams.is_mla();
+}
+
 bool llama_model_is_diffusion(const llama_model * model) {
     return llm_arch_is_diffusion(model->arch);
 }
