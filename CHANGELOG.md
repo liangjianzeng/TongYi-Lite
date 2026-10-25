@@ -6,7 +6,31 @@
 
 ---
 
-## [Unreleased] — 2026-10-24
+## [0.3.5] — 2026-10-25
+
+### 🚀 GPU 全卸载产品化第一轮（740 主线）+ 仓库单主线收敛
+
+- **双线合流出包**：`feature/rail-harness`（UI 线）与 `main`（GPU-offload 线）merge 进同一
+  构建树，debug/release 双包验收装机（签名 CN=TongYiLite，字符串级验收 native 符号
+  `moe_topk_fused` / `mmid_q4_1_batched` / `GGML_BUFT_PROBE_BATCH` 全命中）。**此后仓库单主线
+  （main）**：`temp-appbuild-gpuoffload` / `spike` / `tongyi-r2` 分支删除；spike 线独有的
+  OpenCL 显存硬上限守卫（未合入 JNI）以 tag `archive/spike-opencl-clmem-guard` 归档。
+- **KV 精度开关新增 F16 档（JNI + 设置页三档）**：混合架构（GDN+注意力，如 Ling）上 Q4 K 会把
+  注意力链踢回 CPU 岛（decode splits 暴涨、CPU compute 313MB）；ling 的 Q4/Q8 KV 更因 V 尺寸
+  不齐直接建不了 ctx（JNI 已有自动回退 F16 重试）。选 F16 恢复 decode 3-split 结构
+  （CPU-embed 头 + GPU 整网 + CPU-lm_head 尾，GGML_SCHED_DEBUG dump 实证）。
+- **offload 线成果并入产品**：M-R1 融合路由算子（`GGML_FUSED_MOE_TOPK`，CLI 实测 kernel
+  1498→1199、host 提交 -24%、+6~20% tok/s，App 侧 env 门默认关待验收开启）；BUFT placement
+  探针默认批量 512→1（CLI splits 31→6）；q4_1 batched MoE 路由行（splits 6→2，CLI decode
+  2.97→8.38 tok/s = 2.8×）；K-quant flat GEMV 数值门通过。
+- **App 侧实测基线（740 · ling-3.0-tiny · OpenCL 全 GPU）**：decode **5.3 tok/s**（f16 KV 直载，
+  UI 统计条权威）；回合 wall 大头 = 智能体系统提示词 prefill（12k 字符，pp 图 63-split 中 37 个
+  dense q5_0 MUL_MAT 按 Adreno `ne[1]>=512` GEMV 门设计内回退 CPU）——UBATCH 收敛与 M-R1 开启
+  两腿 A/B 待续。测量装备：`tool/measure_toks.sh` + `vk_flags.conf` 任意 env 注入通道
+  （HOST_TIMING / SCHED_DEBUG / UBATCH，免重编免 root）。
+- worktree 三坑入档：`local.properties` 与 `GeneratedPluginRegistrant.java`（必须 `flutter pub
+  get`，缺失 = 全插件不注册且症状静默）gitignored 不随 worktree；Dart 设置白名单会洗掉 JSON
+  注入值。
 
 ### 🧠 智能体思考治理：失控根治 + API「思考强度」档位 + token 读数 + 停止按钮修复
 
