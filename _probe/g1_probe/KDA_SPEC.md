@@ -12,7 +12,7 @@ ling/bailingmoe3 recr 层 = KDA（R-016 定案）。复用 G1-GDN 三阶段骨�
 ## opA：GGML_OP_G1_KDA_IN（stage1，1 kernel）
 srcs（9）：`x[n_embd]f32, wq[n_embd,d_inner]Q4_0, wk 同, wv 同,
 cq[d_conv,d_inner]f32, ck 同, cv 同, beta_w[n_embd,n_head]f32,
-conv_state[3*(d_conv-1)*d_inner]f32(RMW 常驻，槽序 q|k|v，每槽窗口主序 [d_conv-1 行, d_inner 列])`
+conv_state[3*(d_conv-1)*d_inner]f32(RMW 常驻，槽序 q|k|v，每槽**通道主序**：地址 = slot*(d_conv-1)*d_inner + c*(d_conv-1) + w——与装载器 causal_conv1d 的 conv_state view 同构（R-021：prefill 原链/decode 融合共享同一 RMW 内存，布局必须按原链）)`
 dst：scratch f32 [3*d_inner + n_head] = q(l2norm 后)|k(l2norm 后)|v|beta[n_head]
 op_params：i32[0..3]=n_embd,head_dim(H=d),d_conv；f32[4]=l2_eps。
 - GEMV（q4_0，Q4_DOT 序：块内 Σt q·x 再 ×d 累加；f32 GEMV 双精度）：qkv_proj =
@@ -23,7 +23,9 @@ op_params：i32[0..3]=n_embd,head_dim(H=d),d_conv；f32[4]=l2_eps。
   （cqw = cq|ck|cv 按槽拼接的通道主序视角：cq ne=[d_conv,d_inner] → cqw[(s*d_inner+c)*d_conv+w]）。
 - l2norm：q/k 逐头（H 头，因子 = **1/sqrt(Σx²+eps)**，build_gdn_l2_norm 闭式=单位 L2 范数；R-018 代数更正——rms_norm(x,eps/n)×1/sqrt(n) 的 √n 恰好抵消）。
 - beta = sigmoid(beta_raw)。
-- conv_state 原地滚动（每槽：out_w0=in_w1, out_w1=in_w2, out_w2=qkv_proj 段）。
+- conv_state 原地滚动（每通道连续段内：out_w0=in_w1, out_w1=in_w2, out_w2=qkv_proj 段；R-021 通道主序）。
+- **AR 输出 q 预乘 1/sqrt(d)**（原链 build_delta_net_autoregressive 的 ggml_scale，R-021 补齐——论文口径无此 scale，但 op 链有；漏乘 = o 放大 ~sqrt(d) 倍）。
+- **派发侧**：opB 的 n_head 从 state->ne[2]（[d,d,H]）取（ssm_a 已 reshape 1D，ne[1]==1 恒假，R-020 真机 -52 根因之一）；in/out program 槽分离（R-021）。
 
 ## opB：GGML_OP_G1_KDA_OUT（stage2+3，2 kernel）
 srcs（9）：`scratchA(dstA), x, f_a[n_embd,d_inner]f32, g_a[n_embd,d_inner]f32,

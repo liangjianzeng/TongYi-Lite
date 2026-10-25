@@ -62,7 +62,11 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 #endif
 
 #ifdef GGML_USE_CPU_REPACK
-        if (ggml_backend_cpu_repack_buffer_type()) {
+        // [tongyi A7.2/R-021] GGML_CPU_NO_REPACK=1：不启用加载期权重重排 buffer type。
+        // 重排后 CPU 权重字节 ≠ 规范 GGUF 块（4 块交织 + nibble 交错），只有 mul_mat 的
+        // repack-aware traits 认得；自写 GEMV/对拍/融合内核按块_q4_0 直读会拿垃圾。
+        static const bool no_repack = getenv("GGML_CPU_NO_REPACK") != nullptr;
+        if (!no_repack && ggml_backend_cpu_repack_buffer_type()) {
             bufts.push_back(ggml_backend_cpu_repack_buffer_type());
         }
 #endif

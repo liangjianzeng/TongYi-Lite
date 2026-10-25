@@ -18,9 +18,12 @@
 //     - 三路 q4_0 GEMV（wq/wk/wv [N_EMBD,D_INNER] 行主，本 WG 本头 D 行）
 //       + beta f32 GEMV（gid==0 的 WG 顺带全量 H 列，各恰一次）
 //     - 三槽 causal conv（cq/ck/cv [D_CONV,D_INNER]，(w,c) 在 c*D_CONV+w；
-//       conv_state [3*(D_CONV-1)*D_INNER] 槽序 q|k|v、窗口主序，**原地 RMW 滚动**：
+//       conv_state [3*(D_CONV-1)*D_INNER] 槽序 q|k|v、**通道主序**（地址 =
+//       slot*CS_SLOT + c*(D_CONV-1) + w，与装载器 causal_conv1d 的 conv_state
+//       view 同构——R-021 真模型验收：prefill 原链/decode 融合共享同一 RMW 内存，
+//       布局必须按原链），**原地 RMW 滚动**：
 //       out_w = in_{w+1}（w<D_CONV-2），out_{D_CONV-2} = 本 token 混合值）
-//     - silu → q/k 逐头 l2norm（因子 = D/sqrt(Σx²+eps)，KDA_SPEC 闭式口径，
+//     - silu → q/k 逐头 l2norm（因子 = 1/sqrt(Σx²+eps)，R-018 闭式，
 //       与 g1_ssm_layer.cl 一致）→ v 直通 → beta=sigmoid
 //     - scratch [3*D_INNER + H] = q|k|v|beta（头内偏移 h*D+j）
 //   stage2（H 个 WG，一线程一通道 j，WG2==D）：
@@ -93,14 +96,14 @@
 
 static inline float silu1(float v) { return v / (1.0f + exp(-v)); }
 
-// q4_0：18B/块 = f16 scale + 16B nibble。ggml 主约定（与 gemv_noshuffle_q4_0_f32.cl
-// 展开一致）：偶数位 = 低 nibble。
+// q4_0：18B/块 = f16 scale + 16B nibble。ggml canonical（quantize_row_q4_0_ref /
+// ggml_vec_dot_q4_0_q8_0_generic）：byte j = 低 nibble 存元素 j，高 nibble 存元素 j+16。
 static inline float q4_scale(global const uchar * blk) {
     return (float) as_half((ushort)(blk[0] | ((ushort)blk[1] << 8)));
 }
 static inline float q4_val(global const uchar * blk, const uint i) {
-    const uchar b = blk[2 + (i >> 1)];
-    return (float)(((i & 1) ? (b >> 4) : (b & 0xF)) - 8);
+    const uchar b = blk[2 + (i & 15u)];
+    return (float)(((i < 16u) ? (b & 0xF) : (b >> 4)) - 8);
 }
 
 // q4_0 行 × x 点积：wrow = 该行首块，nblk 行内块数，x 点积向量（local 或 global）
@@ -131,7 +134,7 @@ kernel void g1_kda_stage1_in(
         global const float  * c_k,        ulong ck_off,   // 同上
         global const float  * c_v,        ulong cv_off,   // 同上
         global const float  * W_beta,     ulong wb_off,   // f32 [N_EMBD, H]（行 h 在 h*N_EMBD）
-        global float        * conv_state, ulong cs_off,   // [3*CS_SLOT] RMW 常驻，槽序 q|k|v，窗口主序
+        global float        * conv_state, ulong cs_off,   // [3*CS_SLOT] RMW 常驻，槽序 q|k|v，通道主序（R-021）
         global float        * scratch,    ulong scr_off,  // [3*D_INNER + H] = q|k|v|beta
         local  float        * lmem)                          // [L1_SIZE]
 {
@@ -164,19 +167,21 @@ kernel void g1_kda_stage1_in(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // (3) conv + silu：窗口 = conv_state D_CONV-1 行 + 本 token 混合值（bailingmoe3_causal_conv1d）
+    // (3) conv + silu：窗口 = conv_state 通道 c 的 D_CONV-1 历史 + 本 token 混合值
+    //     （conv_state 通道主序：c*(D_CONV-1)+w，R-021——原链 causal_conv1d view 同构）
     global const float * cw = (s == 0) ? c_q : (s == 1) ? c_k : c_v;
     for (uint j = lid; j < D; j += WG1) {
         const uint c = h*D + j;
+        global const float * cs = conv_state + (size_t)s*CS_SLOT + (size_t)c*(D_CONV-1);
         float acc = 0.0f;
         for (uint w = 0; w < D_CONV-1; ++w)
-            acc += conv_state[(size_t)(s*(D_CONV-1) + w)*D_INNER + c] * cw[(size_t)c*D_CONV + w];
+            acc += cs[w] * cw[(size_t)c*D_CONV + w];
         acc += lmem[L_MIX + j] * cw[(size_t)c*D_CONV + (D_CONV-1)];
         lmem[L_CONV + j] = silu1(acc);
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // (4) q/k 逐头 l2norm（因子 = D/sqrt(Σx²+eps)，KDA_SPEC 闭式）/ v 直通
+    // (4) q/k 逐头 l2norm（因子 = 1/sqrt(Σx²+eps)，R-018 闭式）/ v 直通
     if (s < 2) {
         if (lid == 0) {
             float ss = 0.0f;
@@ -192,12 +197,13 @@ kernel void g1_kda_stage1_in(
             scratch[2*D_INNER + h*D + j] = lmem[L_CONV + j];
     }
 
-    // (5) conv_state 原地滚动：out_w = in_{w+1}（升序原地安全），末行 = 本 token 混合值
+    // (5) conv_state 原地滚动（通道主序连续段内 out_w = in_{w+1}，升序原地安全），
+    //     末槽 = 本 token 混合值
     for (uint j = lid; j < D; j += WG1) {
         const uint c = h*D + j;
-        global float * cs = conv_state + (size_t)s*CS_SLOT + c;
-        for (uint w = 0; w < D_CONV-2; ++w) cs[(size_t)w*D_INNER] = cs[(size_t)(w+1)*D_INNER];
-        cs[(size_t)(D_CONV-2)*D_INNER] = lmem[L_MIX + j];
+        global float * cs = conv_state + (size_t)s*CS_SLOT + (size_t)c*(D_CONV-1);
+        for (uint w = 0; w < D_CONV-2; ++w) cs[w] = cs[w+1];
+        cs[D_CONV-2] = lmem[L_MIX + j];
     }
 }
 

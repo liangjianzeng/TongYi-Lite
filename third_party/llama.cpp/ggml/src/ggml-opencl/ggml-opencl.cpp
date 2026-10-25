@@ -1131,11 +1131,15 @@ struct ggml_backend_opencl_context {
     cl_mem g1_csout  = nullptr;    // [3*cc] f32 conv_state 滚动
     cl_mem g1_out    = nullptr;    // [hv*sv] f32 stage2 出 → stage3 入
     // [A7.2-KDA/R-017] G1-KDA lazy per-dims 缓存（两 op 三 kernel；stage2 要求 WG2==D）。
-    cl_program program_g1k      = nullptr;
-    cl_kernel  kernel_g1k_stage1 = nullptr, kernel_g1k_stage2 = nullptr, kernel_g1k_stage3 = nullptr;
+    // [R-021] KDA in/out 槽分离：opA↔opB 每层交替，共享单槽会互相 release 对方
+    // 已入队内核/重建 program（真机 -52 根因），现各持独立 program+kernel+buffer。
+    cl_program program_g1k_in  = nullptr;
+    cl_kernel  kernel_g1k_s1   = nullptr;
+    cl_program program_g1k_out = nullptr;
+    cl_kernel  kernel_g1k_s2   = nullptr, kernel_g1k_s3 = nullptr;
     uint64_t   g1k_key_in[5] = {}, g1k_key_out[5] = {};
-    cl_mem     g1k_scratch = nullptr;   // opA dst [3*d_inner + H] f32
-    cl_mem     g1k_out     = nullptr;   // opB 中间 [H*d] f32（stage2 出 → stage3 入）
+    cl_mem     g1k_scratch = nullptr;   // opA dst [3*d_inner + H] f32（in 槽持有）
+    cl_mem     g1k_out     = nullptr;   // opB 中间 [H*d] f32（stage2 出 → stage3 入，out 槽持有）
     cl_kernel kernel_ssm_scan_f32 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d128 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d256 = nullptr;
@@ -17919,26 +17923,20 @@ static void ggml_cl_g1_kda_in(ggml_backend_t backend, ggml_tensor * dst) {
 #else
         const std::string ksrc = read_file("g1_kda_layer.cl");
 #endif
-        if (backend_ctx->kernel_g1k_stage1) {
-            clReleaseKernel(backend_ctx->kernel_g1k_stage1);
-            clReleaseKernel(backend_ctx->kernel_g1k_stage2);
-            clReleaseKernel(backend_ctx->kernel_g1k_stage3);
-            clReleaseProgram(backend_ctx->program_g1k);
+        if (backend_ctx->kernel_g1k_s1) {
+            clReleaseKernel(backend_ctx->kernel_g1k_s1);
+            clReleaseProgram(backend_ctx->program_g1k_in);
         }
         cl_int err;
-        backend_ctx->program_g1k = build_program_from_source(backend_ctx, ksrc.c_str(), opts);
-        CL_CHECK((backend_ctx->kernel_g1k_stage1 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage1_in", &err), err));
-        CL_CHECK((backend_ctx->kernel_g1k_stage2 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage2_core", &err), err));
-        CL_CHECK((backend_ctx->kernel_g1k_stage3 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage3_out", &err), err));
-        if (backend_ctx->g1k_scratch) { clReleaseMemObject(backend_ctx->g1k_scratch); clReleaseMemObject(backend_ctx->g1k_out); }
+        backend_ctx->program_g1k_in = build_program_from_source(backend_ctx, ksrc.c_str(), opts);
+        CL_CHECK((backend_ctx->kernel_g1k_s1 = clCreateKernel(backend_ctx->program_g1k_in, "g1_kda_stage1_in", &err), err));
+        if (backend_ctx->g1k_scratch) { clReleaseMemObject(backend_ctx->g1k_scratch); }
         CL_CHECK((backend_ctx->g1k_scratch = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)(3*d_inner + h)*4, nullptr, &err), err));
-        CL_CHECK((backend_ctx->g1k_out     = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)h*d*4, nullptr, &err), err));
         memcpy(backend_ctx->g1k_key_in, key, sizeof(key));
-        memset(backend_ctx->g1k_key_out, 0, sizeof(backend_ctx->g1k_key_out));  // rms_eps/lb 可能同程序异值→opB 侧重建
         GGML_LOG_DEBUG("ggml_opencl: g1_kda program built (%d,%d,%d,%d)\n", n_embd, d, h, d_conv);
     }
     const cl_ulong z0 = 0;
-    cl_kernel k1 = backend_ctx->kernel_g1k_stage1;
+    cl_kernel k1 = backend_ctx->kernel_g1k_s1;
     cl_uint a = 0;
     CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[1]->data_device));   // W_q
     CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[1]));
@@ -17979,7 +17977,9 @@ static void ggml_cl_g1_kda_out(ggml_backend_t backend, ggml_tensor * dst) {
         ex[i] = (ggml_tensor_extra_cl *)dst->src[i]->extra;
         off[i] = ex[i]->offset + dst->src[i]->view_offs;
     }
-    const int h = (int)dst->src[5]->ne[1];   // n_head = ssm_a->ne[1]
+    const int h = (int)dst->src[8]->ne[2];   // n_head = state->ne[2]（[d,d,H]；R-021：
+                                             // 原从 ssm_a->ne[1] 取，形状修复后 ssm_a
+                                             // 已 reshape 成 1D → ne[1]==1 恒假）
     const int d_inner = d * h;
     uint64_t key[5] = { (uint64_t)n_embd, (uint64_t)d, (uint64_t)h, (uint64_t)0 };
     memcpy(&key[3], &rms_eps, 4); memcpy(&key[4], &gate_lb, 4);
@@ -17995,27 +17995,23 @@ static void ggml_cl_g1_kda_out(ggml_backend_t backend, ggml_tensor * dst) {
 #else
         const std::string ksrc = read_file("g1_kda_layer.cl");
 #endif
-        if (backend_ctx->kernel_g1k_stage1) {
-            clReleaseKernel(backend_ctx->kernel_g1k_stage1);
-            clReleaseKernel(backend_ctx->kernel_g1k_stage2);
-            clReleaseKernel(backend_ctx->kernel_g1k_stage3);
-            clReleaseProgram(backend_ctx->program_g1k);
+        if (backend_ctx->kernel_g1k_s2) {
+            clReleaseKernel(backend_ctx->kernel_g1k_s2);
+            clReleaseKernel(backend_ctx->kernel_g1k_s3);
+            clReleaseProgram(backend_ctx->program_g1k_out);
         }
         cl_int err;
-        backend_ctx->program_g1k = build_program_from_source(backend_ctx, ksrc.c_str(), opts);
-        CL_CHECK((backend_ctx->kernel_g1k_stage1 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage1_in", &err), err));
-        CL_CHECK((backend_ctx->kernel_g1k_stage2 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage2_core", &err), err));
-        CL_CHECK((backend_ctx->kernel_g1k_stage3 = clCreateKernel(backend_ctx->program_g1k, "g1_kda_stage3_out", &err), err));
-        if (backend_ctx->g1k_scratch) { clReleaseMemObject(backend_ctx->g1k_scratch); clReleaseMemObject(backend_ctx->g1k_out); }
-        CL_CHECK((backend_ctx->g1k_scratch = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)(3*d_inner + h)*4, nullptr, &err), err));
-        CL_CHECK((backend_ctx->g1k_out     = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)h*d*4, nullptr, &err), err));
+        backend_ctx->program_g1k_out = build_program_from_source(backend_ctx, ksrc.c_str(), opts);
+        CL_CHECK((backend_ctx->kernel_g1k_s2 = clCreateKernel(backend_ctx->program_g1k_out, "g1_kda_stage2_core", &err), err));
+        CL_CHECK((backend_ctx->kernel_g1k_s3 = clCreateKernel(backend_ctx->program_g1k_out, "g1_kda_stage3_out", &err), err));
+        if (backend_ctx->g1k_out) { clReleaseMemObject(backend_ctx->g1k_out); }
+        CL_CHECK((backend_ctx->g1k_out = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)h*d*4, nullptr, &err), err));
         memcpy(backend_ctx->g1k_key_out, key, sizeof(key));
-        memset(backend_ctx->g1k_key_in, 0, sizeof(backend_ctx->g1k_key_in));
         GGML_LOG_DEBUG("ggml_opencl: g1_kda program built (out %d,%d,%d)\n", n_embd, d, h);
     }
     const cl_ulong z0 = 0;
     // stage2：scratch(opA dst), x, f_a, g_a, dt_b, ssm_a, o_norm, state, out
-    cl_kernel k2 = backend_ctx->kernel_g1k_stage2;
+    cl_kernel k2 = backend_ctx->kernel_g1k_s2;
     cl_uint a = 0;
     CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_mem),   &backend_ctx->g1k_scratch));
     CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_ulong), &z0));
@@ -18041,7 +18037,7 @@ static void ggml_cl_g1_kda_out(ggml_backend_t backend, ggml_tensor * dst) {
     // stage3：fin(g1k_out), W_out(wo=src7), y=dst
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
     const cl_ulong offd = extrad->offset + dst->view_offs;
-    cl_kernel k3 = backend_ctx->kernel_g1k_stage3;
+    cl_kernel k3 = backend_ctx->kernel_g1k_s3;
     a = 0;
     CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_mem),   &backend_ctx->g1k_out));
     CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_ulong), &z0));

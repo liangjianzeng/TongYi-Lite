@@ -126,17 +126,18 @@ static void ref_stage1(const std::vector<Blk>& Wq, const std::vector<Blk>& Wk,
     std::vector<double> convv(D_INNER);   // 本槽 conv+silu 出（头内偏移 h*D+j）
     for (int s = 0; s < 3; ++s) {
         const float* cw = cwv[s];
-        // conv：窗口 = conv_state D_CONV-1 行 + 本 token 混合值（(w,c) 在 c*D_CONV+w）
+        // conv：窗口 = conv_state 通道 c 的 D_CONV-1 历史 + 本 token 混合值
+        // （conv_state 通道主序：slot*CS_SLOT + c*(D_CONV-1) + w，R-021 对齐原链 view）
         for (int c = 0; c < D_INNER; ++c) {
             double acc = 0.0;
+            const float* ch = conv_state.data() + (size_t)s*CS_SLOT + (size_t)c*(D_CONV-1);
             for (int w = 0; w < D_CONV-1; ++w)
-                acc += (double)conv_state[(size_t)(s*(D_CONV-1) + w)*D_INNER + c]
-                     * (double)cw[(size_t)c*D_CONV + w];
+                acc += (double)ch[w] * (double)cw[(size_t)c*D_CONV + w];
             acc += mixed[(size_t)s * D_INNER + c] * (double)cw[(size_t)c*D_CONV + (D_CONV-1)];
             convv[c] = (double)silu_ref((float)acc);
         }
         if (s < 2) {
-            // q/k 逐头 l2norm（因子 = D/sqrt(Σx²+eps)，KDA_SPEC 闭式）
+            // q/k 逐头 l2norm（因子 = 1/sqrt(Σx²+eps)，R-018 闭式）
             for (int h = 0; h < H; ++h) {
                 double ss = 0.0;
                 for (int j = 0; j < D; ++j) ss += convv[h*D + j] * convv[h*D + j];
@@ -148,12 +149,13 @@ static void ref_stage1(const std::vector<Blk>& Wq, const std::vector<Blk>& Wk,
             for (int c = 0; c < D_INNER; ++c)
                 r.scratch[2 * D_INNER + c] = (float)convv[c];
         }
-        // conv_state 原地滚动（out_w = in_{w+1}，末行 = 本 token 混合值）
+        // conv_state 原地滚动（通道主序连续段内 out_w = in_{w+1}，末槽 = 本 token 混合值）
         for (int c = 0; c < D_INNER; ++c) {
-            float* co = r.conv_state_out.data() + (size_t)s * CS_SLOT + c;
+            float* co = r.conv_state_out.data() + (size_t)s * CS_SLOT + (size_t)c*(D_CONV-1);
+            const float* ch = conv_state.data() + (size_t)s*CS_SLOT + (size_t)c*(D_CONV-1);
             for (int w = 0; w < D_CONV-2; ++w)
-                co[(size_t)w * D_INNER] = conv_state[(size_t)(s*(D_CONV-1) + w + 1)*D_INNER + c];
-            co[(size_t)(D_CONV-2) * D_INNER] = (float)mixed[(size_t)s * D_INNER + c];
+                co[w] = ch[w+1];
+            co[D_CONV-2] = (float)mixed[(size_t)s * D_INNER + c];
         }
     }
 }

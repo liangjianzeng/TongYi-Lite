@@ -1,8 +1,10 @@
 #include "models.h"
 #include "llama-memory-recurrent.h"
+#include "ggml-backend.h"
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 
 void llama_model_bailingmoe3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,      hparams.f_norm_rms_eps);
@@ -281,6 +283,16 @@ static bool bailingmoe3_g1_gate(const llama_layer & layer, int64_t n_tokens, int
         layer.ssm_a->type != GGML_TYPE_F32 || layer.ssm_beta->type != GGML_TYPE_F32 ||
         layer.ssm_o_norm->type != GGML_TYPE_F32) {
         *reason = "kda aux tensors != F32"; return false;
+    }
+    // [R-021 真机定案] CPU_REPACK buffer type = 加载期权重已 4 块交织重排（nibble 序
+    // ≠ 规范 GGUF 块），G1 自写 q4_0 GEMV（CPU kda_in/kda_out）按块直读 = 垃圾。
+    // GPU buft（OpenCL 上传 = 规范 GGUF 字节）不受影响。CPU 融合路径需
+    // GGML_CPU_NO_REPACK=1（或上游关掉 repack buft）才有正确性。
+    for (const ggml_tensor * t : { layer.wq, layer.wk, layer.wv, layer.wo }) {
+        if (t->buffer &&
+            std::strcmp(ggml_backend_buft_name(ggml_backend_buffer_get_type(t->buffer)), "CPU_REPACK") == 0) {
+            *reason = "q4_0 weights on CPU_REPACK buft (load-time repacked)"; return false;
+        }
     }
     return true;
 }

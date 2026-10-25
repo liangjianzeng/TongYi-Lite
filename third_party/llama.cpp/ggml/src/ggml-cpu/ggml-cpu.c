@@ -1816,8 +1816,9 @@ static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params *
             const float d = GGML_FP16_TO_FP32(row[b].d);
             double sm = 0.0;
             for (int t = 0; t < QK4_0; ++t) {
-                const uint8_t qb = row[b].qs[t >> 1];
-                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
+                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
+                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
                 sm += (double)(nib - 8) * xf[b*QK4_0 + t];
             }
             acc += sm * (double)d;
@@ -1924,8 +1925,9 @@ static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params *
             const float d = GGML_FP16_TO_FP32(row[b].d);
             double sm = 0.0;
             for (int t = 0; t < QK4_0; ++t) {
-                const uint8_t qb = row[b].qs[t >> 1];
-                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
+                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
+                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
                 sm += (double)(nib - 8) * gated[b*QK4_0 + t];
             }
             acc += sm * (double)d;
@@ -1990,8 +1992,9 @@ static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * pa
                 const float d = GGML_FP16_TO_FP32(row[b].d);
                 double sm = 0.0;
                 for (int t = 0; t < QK4_0; ++t) {
-                    const uint8_t qb = row[b].qs[t >> 1];
-                    const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);   // 偶数位=低 nibble
+                    // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
+                    const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
+                    const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
                     sm += (double)(nib - 8) * xf[b*QK4_0 + t];
                 }
                 acc += sm * (double)d;
@@ -2006,14 +2009,16 @@ static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * pa
         braw[h] = acc;
     }
 
-    // conv（每槽 s、通道 c）：窗口主序 [d_conv-1 行, d_inner 列]，窗口末行 = 本 token
-    // 混合值；cqw[(s*d_inner+c)*d_conv+w] = c{q,k,v}[c*d_conv+w]（通道主序视角）
+    // conv（每槽 s、通道 c）：conv_state 通道主序（通道 c 的 d_conv-1 个历史值连续，
+    // 地址 = s*cst + c*(d_conv-1) + w——与装载器 causal_conv1d 的 conv_state view
+    // 同构，R-021：prefill 原链/decode 融合共享同一 RMW 内存，布局必须按原链）；
+    // cqw[c*d_conv + w] = c{q,k,v}[c*d_conv + w]（GGUF 行主，通道 c 的核宽连续）
     for (int s = 0; s < 3; ++s) {
         for (int c = 0; c < d_inner; ++c) {
             double acc = 0.0;
+            const float * ch = csf + (size_t)s*(d_conv-1)*d_inner + (size_t)c*(d_conv-1);
             for (int w = 0; w < d_conv-1; ++w) {
-                acc += (double)csf[((size_t)s*(d_conv-1) + w)*d_inner + c]
-                     * (double)cwf[s][(size_t)c*d_conv + w];
+                acc += (double)ch[w] * (double)cwf[s][(size_t)c*d_conv + w];
             }
             acc += qkv[(size_t)s*d_inner + c] * (double)cwf[s][(size_t)c*d_conv + (d_conv-1)];
             const float av = (float)acc;
@@ -2044,15 +2049,15 @@ static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * pa
         yf[(size_t)3*d_inner + h] = 1.0f / (1.0f + expf(-(float)braw[h]));
     }
 
-    // conv_state 原地滚动（先算 conv 后滚动；升序 w 写入安全：new[w]=old[w+1]，
+    // conv_state 原地滚动（先算 conv 后滚动；通道主序连续段内 new[w]=old[w+1]，
     // 写 w 时 old[w+1] 尚未被覆盖，new[d_conv-2]=本 token qkv 段）
     for (int s = 0; s < 3; ++s) {
         for (int c = 0; c < d_inner; ++c) {
-            float * win = csf + (size_t)s*(d_conv-1)*d_inner + c;
+            float * ch = csf + (size_t)s*(d_conv-1)*d_inner + (size_t)c*(d_conv-1);
             for (int w = 0; w < d_conv-2; ++w) {
-                win[(size_t)w*d_inner] = win[(size_t)(w+1)*d_inner];
+                ch[w] = ch[w+1];
             }
-            win[(size_t)(d_conv-2)*d_inner] = (float)qkv[(size_t)s*d_inner + c];
+            ch[d_conv-2] = (float)qkv[(size_t)s*d_inner + c];
         }
     }
     free(wk_);
@@ -2146,13 +2151,16 @@ static void ggml_compute_forward_g1_kda_out(const struct ggml_compute_params * p
                 S[(size_t)j*d + i] += (double)kh[i] * dcol[j];
             }
         }
-        // o_j = Σ_i S[j*d+i]·q[i]（无 1/sqrt(d) 预乘，KDA_SPEC 口径）
+        // o_j = Σ_i S[j*d+i]·q[i] × qs（qs = 1/sqrt(d)：原链 build_delta_net_autoregressive
+        // 的 q 预乘 scale，R-021 补齐——此前误按 KDA_SPEC 论文口径漏乘，o 放大 ~sqrt(d) 倍）
+        const double qs = 1.0 / sqrt((double)d);
         double ss = 0.0;
         for (int j = 0; j < d; ++j) {
             double acc = 0.0;
             for (int i = 0; i < d; ++i) acc += S[(size_t)j*d + i] * (double)qh[i];
-            gated[(size_t)h*d + j] = acc;
-            ss += acc * acc;
+            const double o = acc * qs;
+            gated[(size_t)h*d + j] = o;
+            ss += o * o;
         }
         // 尾部融合：gated[j] = o_j·rms 因子·o_norm[j]·ogate[j]
         const float f = 1.0f / sqrtf((float)(ss / d) + rms_eps);
@@ -2173,8 +2181,9 @@ static void ggml_compute_forward_g1_kda_out(const struct ggml_compute_params * p
             const float d_ = GGML_FP16_TO_FP32(row[b].d);
             double sm = 0.0;
             for (int t = 0; t < QK4_0; ++t) {
-                const uint8_t qb = row[b].qs[t >> 1];
-                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
+                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
+                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
                 sm += (double)(nib - 8) * gated[b*QK4_0 + t];
             }
             acc += sm * (double)d_;
