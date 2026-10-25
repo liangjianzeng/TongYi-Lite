@@ -36,14 +36,6 @@ class ConversationStatsBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final groupStyle = TextStyle(
-      fontSize: 12,
-      height: 1.4,
-      color: theme.colorScheme.onSurfaceVariant,
-      fontFeatures: const [FontFeature.tabularFigures()],
-    );
-    final sepStyle = TextStyle(
-        fontSize: 12, color: theme.colorScheme.outlineVariant);
 
     // ---- 折算 ----
     var rounds = 0;
@@ -53,11 +45,15 @@ class ConversationStatsBar extends ConsumerWidget {
     var genTok = 0;
     for (final m in messages) {
       final c = m.content;
-      if (c.startsWith('🔧')) {
+      if (m.kind == MessageKind.toolActivity ||
+          (m.kind == MessageKind.text && c.startsWith('🔧'))) {
         steps++;
         continue;
       }
-      if (c.startsWith('💭')) continue;
+      if (m.kind == MessageKind.thinking ||
+          (m.kind == MessageKind.text && c.startsWith('💭'))) {
+        continue;
+      }
       if (m.role == MessageRole.user) rounds++;
       tokens += estimateTokens(c);
       final s = m.inferenceStats;
@@ -67,19 +63,53 @@ class ConversationStatsBar extends ConsumerWidget {
       }
     }
 
+    // 组装：数字加重（w600 tabular），标签用次级色——DSH 读数行的信息层级。
+    final numStyle = TextStyle(
+        fontSize: 12,
+        height: 1.4,
+        fontWeight: FontWeight.w600,
+        color: theme.colorScheme.onSurfaceVariant,
+        fontFeatures: const [FontFeature.tabularFigures()]);
+    final labelStyle = TextStyle(
+        fontSize: 12,
+        height: 1.4,
+        color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75));
+
+    Widget group(List<(String, bool)> parts) => Flexible(
+        child: Text.rich(
+            TextSpan(children: [
+              for (final (text, bold) in parts)
+                TextSpan(text: text, style: bold ? numStyle : labelStyle),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis));
+
     final groups = <Widget>[];
-    Widget group(String text) => Flexible(child: Text(text, style: groupStyle, maxLines: 1, overflow: TextOverflow.ellipsis));
-    if (rounds > 0 || steps > 0) groups.add(group('$rounds 轮 · $steps 步'));
-    if (llmMs > 0) {
-      final dur = _formatDuration(llmMs);
-      final rate = genTok / (llmMs / 1000);
-      groups.add(group('LLM $dur · ${rate.toStringAsFixed(1)} tok/s'));
+    if (rounds > 0 || steps > 0) {
+      groups.add(group([
+        ('$rounds', true),
+        (' 轮 · ', false),
+        ('$steps', true),
+        (' 步', false),
+      ]));
     }
-    if (tokens > 0) groups.add(group('≈${_formatTokens(tokens)} tok'));
+    if (llmMs > 0) {
+      final rate = genTok / (llmMs / 1000);
+      groups.add(group([
+        ('LLM ', false),
+        (_formatDuration(llmMs), true),
+        (' · ', false),
+        (rate.toStringAsFixed(1), true),
+        (' tok/s', false),
+      ]));
+    }
+    if (tokens > 0) {
+      groups.add(group([('≈', false), (_formatTokens(tokens), true), (' tok', false)]));
+    }
     final fraction =
         ref.watch(contextUsageProvider)[conversationId]?.fraction;
     if (fraction != null) {
-      groups.add(group('上下文 ${(fraction * 100).round()}%'));
+      groups.add(group([('上下文 ', false), ('${(fraction * 100).round()}', true), ('%', false)]));
     }
 
     return Padding(
@@ -95,7 +125,11 @@ class ConversationStatsBar extends ConsumerWidget {
                   if (i > 0)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Text('|', style: sepStyle),
+                      child: Text('|',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color:
+                                  theme.colorScheme.outlineVariant)),
                     ),
                   groups[i],
                 ],

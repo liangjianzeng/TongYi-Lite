@@ -27,7 +27,6 @@ import '../services/inference_service.dart';
 import '../providers/shared_providers.dart';
 import '../providers/context_usage_provider.dart' show contextUsageProvider;
 import '../models/agent_persona.dart' show AgentPersona, kStandardPersonaId;
-import '../agent/observability/turn_meter.dart';
 import '../agent/goal/goal_store.dart'
     show GoalStore, GoalState, GoalStatus, PlanStepStatus;
 import '../agent/builtin_tools/todo_tool.dart'
@@ -43,7 +42,7 @@ import '../widgets/rail/rail_scaffold.dart';
 import '../plugins/panel/plugins_screen.dart';
 import 'package:uuid/uuid.dart';
 import '../providers/agent_state_provider.dart'
-    show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
+    show agentUiStateProvider, AgentUiState, ToolActivityUi;
 import '../models/chat_message.dart' show ChatMessage;
 import '../widgets/conversation_stats_bar.dart';
 import 'settings_screen.dart';
@@ -2005,8 +2004,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             slotId: 'app.input.dock', axis: Axis.vertical, registry: slots),
         // ask_user_question 待回答卡片（P2-B2）：智能体提问挂起等待时显示。
         _buildPendingQuestionCard(),
-        // 生成中状态细条：执行进度一眼可见 + 停止兜底入口。
-        _buildTurnStatusStrip(isGenerating),
         Container(
           margin: const EdgeInsets.fromLTRB(8, 4, 8, 4),
           padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
@@ -2173,88 +2170,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
     if (isGenerating) return '插话给执行中的智能体…（不打断）';
     return '输入消息…';
-  }
-
-  /// 生成中状态细条：**实时产出读数** + 停止兜底入口。
-  ///
-  /// 用户反馈（2026-10-23）：这行原本只有「生成中」+ 停止键，"一点卵用都没有"
-  /// ——看不出模型在产出还是在空转、这一回合烧了多少 token。现在读数：
-  /// 「第 N 步 · 约 X/Y tok · 思考 Z 字 · 工具 K」，思考狂涨而零产出时追加
-  /// ⚠️只想不写（无用功信号；判据与估算口径都在 [TurnMeter]，有单测钉住）。
-  ///
-  /// token 是**估算**（流式期间本地无逐 token 出口、API usage 只在末块），
-  /// 故带「约」；判据刻意保守（思考 ≥600 tok 且产出 <5%）免得开局乱闪。
-  Widget _buildTurnStatusStrip(bool isGenerating) {
-    if (!isGenerating) return const SizedBox.shrink();
-    final ui = ref.watch(agentUiStateProvider)[_currentConversationId] ??
-        const AgentUiState();
-    final settings = ref.watch(settingsProvider);
-    // 本步可见产出 = 当前会话里那条正在流式的 assistant 消息（智能体答案步与
-    // 普通聊天共用同一占位消息；工具活动消息 isStreaming 恒 false，不会掺和）。
-    var answerSoFar = '';
-    for (final m
-        in (ref.watch(messagesProvider(_currentConversationId)).valueOrNull ??
-                const <ChatMessage>[])
-            .reversed) {
-      if (m.isStreaming) {
-        answerSoFar = m.content;
-        break;
-      }
-    }
-    final activeApi = settings.activeApiModel();
-    final useApi = activeApi != null &&
-        !ref.watch(modelManagerProvider).isLoaded &&
-        settings.defaultModelId == null;
-    final meter = TurnMeter(
-      step: ui.step,
-      // 预算 = 本档每步 token 档位（与 _buildRequest 用的同一设置项）。
-      // 普通聊天（step=0）**不显示**预算：那用的是聊天档 max_tokens，不是
-      // 智能体每步预算，挂上去是假数字。
-      stepBudget: ui.step > 0
-          ? (useApi
-              ? settings.agentApiTokensPerRound
-              : settings.agentTokensPerRound)
-          : null,
-      answer: answerSoFar,
-      liveThinking: ui.thinking,
-      archivedThinking: ui.thinkingHistory,
-      // 工具调用参数也是模型生成的 token，不计进来会低估智能体回合的消耗
-      toolArgumentJson: [for (final t in ui.tools) t.arguments.toString()],
-      toolGenChars: ui.toolGen?.chars ?? 0,
-      toolCount: ui.tools.length,
-      retryAttempt: ui.retryAttempt,
-    );
-    final executing = ui.tools
-        .where((t) => t.status == ToolUiStatus.executing)
-        .toList()
-        .lastOrNull
-        ?.name;
-    final label = meter.label + (executing != null ? ' · $executing' : '');
-    final color = meter.looksWasteful
-        ? Theme.of(context).colorScheme.tertiary
-        : Theme.of(context).colorScheme.primary;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 4, 8, 0),
-      child: Row(
-        children: [
-          _buildPulsingDot(),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: color)),
-          ),
-          TextButton(
-            style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 8)),
-            onPressed: _stopGeneration,
-            child: const Text('停止', style: TextStyle(fontSize: 12)),
-          ),
-        ],
-      ),
-    );
   }
 
   /// 附件 chips 行：图片 = 40px 缩略图、文件 = 文件名 chip，各带 × 删除。
