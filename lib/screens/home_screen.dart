@@ -1294,9 +1294,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 内置数量随发版变，不写死（技能库标题里已有动态计数）。
           _railCard(const Text(
-            '技能 = 智能体按需加载的能力包（内置 17 个 + 用户自定义）。'
-            '模型经 load_skill 启用，技能卡在对话里展示执行过程。',
+            '技能 = 智能体按需加载的能力包，模型经 load_skill 启用，'
+            '技能卡在对话里展示执行过程。点技能库标题可收起列表。',
             style: TextStyle(fontSize: 12, height: 1.5),
           )),
           const SizedBox(height: 8),
@@ -2142,13 +2143,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final usage = ref.watch(contextUsageProvider)[_currentConversationId];
     final fraction = usage?.fraction;
     final hasData = fraction != null;
-    final color = !hasData
-        ? Colors.grey.shade400
-        : fraction >= 0.85
-            ? const Color(0xFFE53935)
-            : fraction >= 0.60
-                ? const Color(0xFFFB8C00)
-                : const Color(0xFF2196F3);
+    // 无占用数据（本地未加载/该会话还没发过请求）→ 整个环不渲染：
+    // 灰环「—」看着像个坏掉的按钮（2026-10-25 真机截图定案）。
+    if (!hasData) return const SizedBox.shrink();
+    final color = fraction >= 0.85
+        ? const Color(0xFFE53935)
+        : fraction >= 0.60
+            ? const Color(0xFFFB8C00)
+            : const Color(0xFF2196F3);
     return Tooltip(
       message: '上下文占用详情 / 手动压缩',
       child: InkWell(
@@ -3698,9 +3700,7 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('📋 计划',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 8),
+        // 不再重复「📋 计划」标题（面板标题栏已有，2026-10-25 真机截图定案）。
         const Text(
             '当前会话没有活跃计划。发送「/plan <任务>」，智能体调研后提交计划，'
             '你批准后自动执行，进度在这里回看。',

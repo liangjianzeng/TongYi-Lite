@@ -484,8 +484,7 @@
       "sha256Hash": null,
       "tags": [
         "GPU 加速",
-        "MoE 高效",
-        "MoE GPU 路径以引擎加载日志为准（batched 曾静默回落，G-725 插桩后加载即判明）"
+        "MoE 高效"
       ]
     },
     {

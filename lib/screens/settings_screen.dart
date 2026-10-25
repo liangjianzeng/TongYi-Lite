@@ -1040,23 +1040,22 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
                     gpuNotifier.setEnableGpu,
                   ),
                   const SizedBox(height: 10),
+                  // 分段钮不带图标（图标+长英文 label 在窄面板必然断行成
+                  // 「Ope nCL / Vulk an」，2026-10-25 真机截图定案），字号 12。
                   SegmentedButton<String>(
                     segments: [
                       const ButtonSegment(
                         value: 'auto',
-                        label: Text('自动'),
-                        icon: Icon(Icons.auto_awesome, size: 16),
+                        label: Text('自动', style: TextStyle(fontSize: 12)),
                       ),
                       ButtonSegment(
                         value: 'opencl',
-                        label: Text('OpenCL'),
-                        icon: Icon(Icons.speed, size: 16),
+                        label: Text('OpenCL', style: TextStyle(fontSize: 12)),
                         enabled: !isDimensity,
                       ),
                       const ButtonSegment(
                         value: 'vulkan',
-                        label: Text('Vulkan'),
-                        icon: Icon(Icons.view_in_ar, size: 16),
+                        label: Text('Vulkan', style: TextStyle(fontSize: 12)),
                       ),
                     ],
                     selected: {gpuSettings.gpuBackend},
@@ -1935,8 +1934,10 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
           dense: true,
           leading: const Icon(Icons.extension, size: 20),
           title: Text(
-            '技能库（内置 ${_builtinSkills.length}'
-            ' · 我的 ${_userSkills?.length ?? '?'}）',
+            // 短形态单行：全角括号长标题在窄面板折行出「0）」孤行（真机截图定案）。
+            '技能库 ${_builtinSkills.length} · 我的 ${_userSkills?.length ?? '?'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 14),
           ),
           subtitle: const Text(

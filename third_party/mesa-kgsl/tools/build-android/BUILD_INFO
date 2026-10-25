@@ -1,5 +1,5 @@
-git=524dfc52
-cc=/home/jianzengliang/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-aarch64/bin/clang
+git=7b6fb67a
+cc=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang
 abi=arm64-v8a platform=android-28 flags=-O3 -DNDEBUG
-built=2026-10-20T19:15:15+08:00
-tools= cl_subgroup_probe
+built=2026-10-25T11:14:25+08:00
+tools= cl_cc_probe
