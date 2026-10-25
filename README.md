@@ -510,9 +510,10 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.3.5.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.5.apk)  
-> v0.3.5+23 · 72,115,434 B（2026-10-25，GPU 全卸载产品化第一轮 + UI rail 重构 + 单主线收敛；  
-> 追加：外观浅色/深色/跟随系统、产物另存到任意目录、简单聊天流式思考卡）  
-> `SHA-256: 0cf0ba234b574e75886ac9c9a2269a30c2c6e2050c73ddd41f324c8fb166691f`
+> v0.3.5+23 · 72,114,342 B（2026-10-25，GPU 全卸载产品化第一轮 + UI rail 重构 + 单主线收敛；  
+> 追加：外观浅色/深色/跟随系统、产物另存到任意目录、简单聊天流式思考卡、  
+> 滚动焦点拖拽仲裁（上翻释放/回底截获）、API 档占用窗口路由修复）  
+> `SHA-256: dcb53cd9b1a49578d42d20642fe6ae2fb1d4df9e76d8e9204a2b8cf1ff1774f8`
 
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
 > 模型缓存，切勿先卸载。历史版本见 [`releases/`](releases/) 目录或按[构建与开发](#构建与开发)自行构建。
