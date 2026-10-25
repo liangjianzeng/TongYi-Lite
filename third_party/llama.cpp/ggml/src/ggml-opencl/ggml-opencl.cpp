@@ -1123,6 +1123,13 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_g1_ssm_stage1 = nullptr;
     cl_kernel kernel_g1_ssm_stage2 = nullptr;
     cl_kernel kernel_g1_ssm_stage3 = nullptr;
+    // [A7.2/R-014] G1 lazy per-dims 程序缓存（key=6 dims+2 eps bits）+ 巨核 scratch。
+    // 重建时 release 旧 kernel/program/buffer（in-order 队列 + CL 引用计数保证 in-flight 安全）。
+    cl_program program_g1_ssm = nullptr;
+    uint64_t g1_key[8] = {};
+    cl_mem g1_scratch = nullptr;   // [2*hv*sk + 2*hv*sv + 2*hv] f32（stage1 出）
+    cl_mem g1_csout  = nullptr;    // [3*cc] f32 conv_state 滚动
+    cl_mem g1_out    = nullptr;    // [hv*sv] f32 stage2 出 → stage3 入
     cl_kernel kernel_ssm_scan_f32 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d128 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d256 = nullptr;
@@ -10946,6 +10953,18 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]);
         case GGML_OP_IM2COL:
             return true;
+        case GGML_OP_G1_SSM_LAYER: {
+            // [A7.2/R-014] 类型与形状门（CPU fallback 存在，refuse 即落 CPU：正确但慢）
+            if (op->type != GGML_TYPE_F32 || op->src[0] == nullptr) return false;
+            if (op->src[0]->type != GGML_TYPE_F32) return false;
+            if (op->src[1]->type != GGML_TYPE_Q4_0 || op->src[8]->type != GGML_TYPE_Q4_0) return false;
+            for (int i = 2; i <= 7; ++i) if (op->src[i]->type != GGML_TYPE_F32) return false;
+            if (op->src[9]->type != GGML_TYPE_F32) return false;
+            const int32_t hk = ggml_get_op_params_i32(op, 2);
+            const int32_t hv = ggml_get_op_params_i32(op, 3);
+            if (hk <= 0 || hv % hk != 0) return false;
+            return true;
+        }
         case GGML_OP_MOE_TOPK_FUSED: {
             // [tongyi M-R1] pinned grouped-MoE router shape (bailingmoe3/Ling):
             // E=128 G=8 epg=16 gu=4 K=8, F32 in/out. Anything else -> CPU ref.
@@ -17725,6 +17744,127 @@ static void ggml_cl_ssm_scan(ggml_backend_t backend, ggml_tensor * dst) {
     size_t local_work_size[] = { nth, 1 };
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
+}
+
+// [A7.2/R-014] G1 逐层巨核三阶段：stage1(投影+conv+门控) -> stage2(GDN AR+gated norm)
+// -> stage3(o_proj)。阶段边界 = launch 边界（in-order 队列，无 host 同步）；
+// state/conv_state 原地 RMW；程序/scratch 按 dims+eps lazy 缓存。
+static void ggml_cl_g1_ssm_layer(ggml_backend_t backend, ggml_tensor * dst) {
+    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    const int n_embd = ggml_get_op_params_i32(dst, 0);
+    const int s_k    = ggml_get_op_params_i32(dst, 1);
+    const int h_k    = ggml_get_op_params_i32(dst, 2);
+    const int h_v    = ggml_get_op_params_i32(dst, 3);
+    const int s_v    = ggml_get_op_params_i32(dst, 4);
+    const int d_conv = ggml_get_op_params_i32(dst, 5);
+    const float l2_eps  = ggml_get_op_params_f32(dst, 6);
+    const float rms_eps = ggml_get_op_params_f32(dst, 7);
+    const int rf = h_v / h_k;
+    const int qkvz_new = 2*s_k + 2*s_v*rf;
+    const int conv_new = 2*s_k + s_v*rf;
+    const int ba_new   = 2*rf;
+    const int l1_size  = n_embd + qkvz_new + conv_new + ba_new;   // floats，与内核 L1_SIZE 一致
+    const int cc       = 2*h_k*s_k + h_v*s_v;
+
+    uint64_t key[8] = { (uint64_t)n_embd, (uint64_t)s_k, (uint64_t)h_k, (uint64_t)h_v,
+                        (uint64_t)s_v, (uint64_t)d_conv };
+    memcpy(&key[6], &l2_eps, 4); memcpy(&key[7], &rms_eps, 4);
+    if (memcmp(backend_ctx->g1_key, key, sizeof(key)) != 0) {
+        char opts[640];
+        snprintf(opts, sizeof(opts),
+                 " -DN_EMBD=%d -DS_K=%d -DH_K=%d -DH_V=%d -DS_V=%d -DD_CONV=%d"
+                 " -DL2_EPS=%.9ef -DRMS_EPS=%.9ef",
+                 n_embd, s_k, h_k, h_v, s_v, d_conv, l2_eps, rms_eps);
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string g1_src {
+            #include "g1_ssm_layer.cl.h"
+        };
+#else
+        const std::string g1_src = read_file("g1_ssm_layer.cl");
+#endif
+        if (backend_ctx->kernel_g1_ssm_stage1) {
+            clReleaseKernel(backend_ctx->kernel_g1_ssm_stage1);
+            clReleaseKernel(backend_ctx->kernel_g1_ssm_stage2);
+            clReleaseKernel(backend_ctx->kernel_g1_ssm_stage3);
+            clReleaseProgram(backend_ctx->program_g1_ssm);
+        }
+        cl_int err;
+        backend_ctx->program_g1_ssm = build_program_from_source(backend_ctx, g1_src.c_str(), opts);
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage1 = clCreateKernel(backend_ctx->program_g1_ssm, "g1_ssm_stage1_proj", &err), err));
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage2 = clCreateKernel(backend_ctx->program_g1_ssm, "g1_ssm_stage2_gdn", &err), err));
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage3 = clCreateKernel(backend_ctx->program_g1_ssm, "g1_ssm_stage3_out", &err), err));
+        if (backend_ctx->g1_scratch) { clReleaseMemObject(backend_ctx->g1_scratch); clReleaseMemObject(backend_ctx->g1_csout); clReleaseMemObject(backend_ctx->g1_out); }
+        const size_t scr_f = 2*(size_t)h_v*s_k + 2*(size_t)h_v*s_v + 2*(size_t)h_v;
+        CL_CHECK((backend_ctx->g1_scratch = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, scr_f*4, nullptr, &err), err));
+        CL_CHECK((backend_ctx->g1_csout   = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, 3*(size_t)cc*4, nullptr, &err), err));
+        CL_CHECK((backend_ctx->g1_out     = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, (size_t)h_v*s_v*4, nullptr, &err), err));
+        memcpy(backend_ctx->g1_key, key, sizeof(key));
+        GGML_LOG_DEBUG("ggml_opencl: g1_ssm_layer program built (%d,%d,%d,%d,%d,%d)\n", n_embd, s_k, h_k, h_v, s_v, d_conv);
+    }
+
+    ggml_tensor_extra_cl * ex[10];
+    cl_ulong off[10];
+    for (int i = 0; i < 10; ++i) {
+        GGML_ASSERT(dst->src[i] && dst->src[i]->extra);
+        ex[i] = (ggml_tensor_extra_cl *)dst->src[i]->extra;
+        off[i] = ex[i]->offset + dst->src[i]->view_offs;
+    }
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
+    const cl_ulong offd = extrad->offset + dst->view_offs;
+    const cl_ulong z0 = 0;
+
+    // stage1: src 顺序 = W_in,W_ba,x,ssm_dt,ssm_a,w_conv,conv_state（src[1..6]）
+    cl_kernel k1 = backend_ctx->kernel_g1_ssm_stage1;
+    cl_uint a = 0;
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[1]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[1]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[2]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[2]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[0]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[0]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[3]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[3]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[4]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[4]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[5]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[5]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &ex[6]->data_device));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &off[6]));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &backend_ctx->g1_scratch));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &z0));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_mem),   &backend_ctx->g1_csout));
+    CL_CHECK(clSetKernelArg(k1, a++, sizeof(cl_ulong), &z0));
+    CL_CHECK(clSetKernelArg(k1, a++, l1_size*4, nullptr));
+    { size_t g = (size_t)h_k*64, l = 64;
+      backend_ctx->enqueue_ndrange_kernel(k1, 1, &g, &l, dst); }
+
+    // stage2: scratch, rms_w(src7), state(src9), out
+    cl_kernel k2 = backend_ctx->kernel_g1_ssm_stage2;
+    a = 0;
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_mem),   &backend_ctx->g1_scratch));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_ulong), &z0));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_mem),   &ex[7]->data_device));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_ulong), &off[7]));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_mem),   &ex[9]->data_device));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_ulong), &off[9]));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_mem),   &backend_ctx->g1_out));
+    CL_CHECK(clSetKernelArg(k2, a++, sizeof(cl_ulong), &z0));
+    CL_CHECK(clSetKernelArg(k2, a++, ((size_t)s_v+1)*4, nullptr));
+    { size_t g = (size_t)h_v*128, l = 128;
+      backend_ctx->enqueue_ndrange_kernel(k2, 1, &g, &l, dst); }
+
+    // stage3: fin(g1_out), W_out(src8), y=dst
+    cl_kernel k3 = backend_ctx->kernel_g1_ssm_stage3;
+    a = 0;
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_mem),   &backend_ctx->g1_out));
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_ulong), &z0));
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_mem),   &ex[8]->data_device));
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_ulong), &off[8]));
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(k3, a++, sizeof(cl_ulong), &offd));
+    { size_t g = (size_t)n_embd, l = 64;
+      backend_ctx->enqueue_ndrange_kernel(k3, 1, &g, &l, dst); }
 }
 
 static void ggml_cl_ssm_conv(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
@@ -34466,6 +34606,12 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
             }
             func = ggml_cl_moe_topk_fused;
             break;
+        case GGML_OP_G1_SSM_LAYER:
+            if (!any_on_device) {
+                return false;
+            }
+            ggml_cl_g1_ssm_layer(backend, tensor);
+            return true;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(tensor)) {
                 case GGML_UNARY_OP_GELU:
