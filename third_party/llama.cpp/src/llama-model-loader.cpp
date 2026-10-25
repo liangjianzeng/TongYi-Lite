@@ -962,7 +962,13 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
                 // constraint on device, so GGML_BUFT_PROBE_BATCH=1 probes the decode shape;
                 // prefill re-checks supports_op with the real batch and falls back per-op
                 // (correct, just slower prefill). Default stays 512 = upstream behavior.
-                int probe_batch = 512;
+                // [tongyi 2026-10-25 default flip] 512 -> 1: decode is the binding
+                // constraint on device. Only q5_0/q5_1/MXFP4 (GEMV-only types) were
+                // ever misclassified by the 512 probe; verified numerically on 740
+                // (Ling-3.0-tiny q5_0 shexp chain + qwen3.5-4b q4_K/q6_K: text
+                // byte-identical, splits=2, no aborts). GGML_BUFT_PROBE_BATCH=512
+                // restores upstream behavior.
+                int probe_batch = 1;
                 if (const char * pb = getenv("GGML_BUFT_PROBE_BATCH")) {
                     probe_batch = atoi(pb);
                     if (probe_batch < 1) probe_batch = 512;
