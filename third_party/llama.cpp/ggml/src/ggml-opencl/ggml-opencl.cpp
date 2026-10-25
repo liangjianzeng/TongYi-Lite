@@ -30452,6 +30452,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -30739,6 +30749,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -30922,6 +30942,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -31175,6 +31205,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -31623,6 +31663,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -31879,6 +31929,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -32138,6 +32198,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
@@ -32403,6 +32473,16 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
 
                     // Reorder router if called from test-backend-ops or when new router is generated.
                     // Otherwise reuse the reordered result from previous mul_mat_id call.
+                    // [tongyi 2026-10-25 R-002] GEMM 分支无条件 ensure prealloc 三件套：
+                    // 初始化此前藏在 moe_router_reoerder 副作用里，toggle=false 且名字不含
+                    // "as" 时被跳过 → clCreateSubBuffer(NULL)=-38 SIGABRT（A2 腿实锤：M-R1
+                    // 开启后 prefill 首图直入 q4_1 GEMM）。allocate() 幂等只增，重复分配无害。
+                    backend_ctx->prealloc_post_router.allocate(
+                        backend_ctx->context, sizeof(int) * max_post_router_tile * n_tile_size);
+                    backend_ctx->prealloc_emap.allocate(
+                        backend_ctx->context, sizeof(short) * max_post_router_tile);
+                    backend_ctx->prealloc_hist.allocate(
+                        backend_ctx->context, sizeof(int) * ne02);
                     if ((strstr(src0->name, "as") != NULL) || backend_ctx->toggle_reorder) {
                         moe_router_reoerder(backend, src2, ne20);
                         backend_ctx->toggle_reorder = false;
