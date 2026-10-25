@@ -705,6 +705,13 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[spec] ctx n_batch=%d n_ubatch=%d n_rs_seq=%d\n",
                 (int) cparams.n_batch, (int) cparams.n_ubatch, (int) cparams.n_rs_seq);
     }
+    // [2026-10-25] A7X mixed-KV-type FA SIGSEGVs inside clBuildProgram (f32_f16 /
+    // q8_0 / q4_0 all declined in supports_op). F32 KV takes the uniform f32_f32
+    // FA program, which compiles fine on this compiler -> attention back on GPU.
+    if (getenv("E2E_KVF") && getenv("E2E_KVF")[0] == '1') {
+        cparams.type_k = GGML_TYPE_F32;
+        cparams.type_v = GGML_TYPE_F32;
+    }
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) { fprintf(stderr, "FATAL: context init failed\n"); return 1; }
 

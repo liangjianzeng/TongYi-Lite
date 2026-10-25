@@ -10,6 +10,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <regex>
@@ -953,7 +954,20 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
             } break;
         case GGML_OP_MUL_MAT:
             {
-                ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], 512, w->ne[2], w->ne[3]);
+                // [tongyi 2026-10-25] Placement probe batch is env-tunable. Upstream fixed
+                // 512 collides with backends that reject the generic GEMV path for large
+                // activation batches (Adreno q5_0/q5_1/MXFP4): the probe then misclassifies
+                // decode-shaped (batch=1) matmuls and banishes the whole weight to a CPU
+                // buffer -- every decode token pays a split handoff. Decode is the binding
+                // constraint on device, so GGML_BUFT_PROBE_BATCH=1 probes the decode shape;
+                // prefill re-checks supports_op with the real batch and falls back per-op
+                // (correct, just slower prefill). Default stays 512 = upstream behavior.
+                int probe_batch = 512;
+                if (const char * pb = getenv("GGML_BUFT_PROBE_BATCH")) {
+                    probe_batch = atoi(pb);
+                    if (probe_batch < 1) probe_batch = 512;
+                }
+                ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], probe_batch, w->ne[2], w->ne[3]);
                 op_tensor = ggml_mul_mat(ctx, w, b);
             } break;
         case GGML_OP_MUL_MAT_ID:

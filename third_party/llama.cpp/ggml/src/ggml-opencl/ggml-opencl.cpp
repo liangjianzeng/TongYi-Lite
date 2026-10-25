@@ -10172,7 +10172,34 @@ inline bool use_q5_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
 #endif
 }
 
+// [tongyi 2026-10-25 buft-probe] 模型加载期的权重 placement 判定日志。
+// weight_buft_supported 的合成 op 特征：MUL_MAT src1=F32[ne0,512,...]，MMID src1=F32[ne0,n_used,512]。
+// decode/prefill 真实 op 的 src1 永远不会是 ne=512 的这种形状（decode ne[1]=1，prefill=n_tokens），
+// 所以这些行只会出现在加载窗口，直接回答"这个权重为什么落 CPU"。
+static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct ggml_tensor * op);
+
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    bool r = ggml_opencl_supports_op_inner(dev, op);
+    if (op->op == GGML_OP_MUL_MAT && op->src[0] && op->src[1] &&
+        op->src[1]->type == GGML_TYPE_F32 && op->src[1]->ne[1] == 512 && op->src[1]->ne[3] <= 1) {
+        GGML_LOG_INFO("[buft-probe] MUL_MAT %s type=%s ne=[%lld,%lld,%lld,%lld] -> %s\n",
+            op->src[0]->name, ggml_type_name(op->src[0]->type),
+            (long long)op->src[0]->ne[0], (long long)op->src[0]->ne[1],
+            (long long)op->src[0]->ne[2], (long long)op->src[0]->ne[3],
+            r ? "GPU" : "CPU");
+    }
+    if (op->op == GGML_OP_MUL_MAT_ID && op->src[0] && op->src[1] &&
+        op->src[1]->type == GGML_TYPE_F32 && op->src[1]->ne[2] == 512) {
+        GGML_LOG_INFO("[buft-probe] MUL_MAT_ID %s type=%s ne=[%lld,%lld,%lld] -> %s\n",
+            op->src[0]->name, ggml_type_name(op->src[0]->type),
+            (long long)op->src[0]->ne[0], (long long)op->src[0]->ne[1],
+            (long long)op->src[0]->ne[2],
+            r ? "GPU" : "CPU");
+    }
+    return r;
+}
+
+static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
 

@@ -111,7 +111,8 @@ cmake -S "$PROBE_DIR" -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_FLAGS="-O3 -DNDEBUG -fno-omit-frame-pointer" \
   -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG -fno-omit-frame-pointer" \
-  -DCMAKE_EXE_LINKER_FLAGS="-Wl,--build-id=sha1"
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,--build-id=sha1" \
+  -DGGML_OPENMP=OFF # NDK only ships libomp.a (static); shared libggml-cpu.so would fail CANNOT LINK
 
 # ---------- 编译门机检（-O3 被静默顶掉 = 全线数字作废的老坑） ----------
 CC_JSON="$BUILD_DIR/compile_commands.json"
