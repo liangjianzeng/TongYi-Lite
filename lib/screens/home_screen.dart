@@ -924,6 +924,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             title: '能力与实验', build: (_) => CapabilitySettingsBody()),
         'storage': RailPageSpec(
             title: '存储 / 日志 / 关于', build: (_) => _buildStorageAboutRailPage()),
+        // 关于独立页（2026-10-25 用户定案）：存储/日志已有别处入口，
+        // 「更多（基础配置）」的下属入口只留关于。
+        'about':
+            RailPageSpec(title: '关于', build: (_) => _buildAboutRailPage()),
         'more': RailPageSpec(title: '更多', build: (_) => _buildMoreRailPage()),
       };
 
@@ -1312,6 +1316,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget _buildDevRailPage() => DevSettingsBody();
 
   /// 更多面板：入口全部指向面板内页（老设置页零跳转）。
+  /// 「更多」面板 = **基础配置**（2026-10-25 用户定案）：界面缩放 + 语音
+  /// （TTS/ASR）+ 无重复归属的唯一下属入口（搜索/存储日志关于）。
+  /// 已撤的重复入口：搜索（API 接入面板有联网搜索配置）、能力与实验
+  /// （原生能力开关=智能体面板、TTS/ASR=本页、插件/技能=各自面板）。
   Widget _buildMoreRailPage() {
     return Consumer(builder: (context, ref, __) {
       final scale = ref.watch(settingsProvider).uiScale.clamp(0.85, 1.30);
@@ -1341,22 +1349,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const Text('整体缩放全部 UI（85%–130%）',
                 style: TextStyle(fontSize: 11, color: Colors.grey)),
-            _railSection('设置'),
+            _railSection('语音'),
+            const VoiceSettingsBody(),
+            _railSection('更多入口'),
             _railRow(
-                icon: Icons.search,
-                title: '搜索',
-                subtitle: '六引擎 · SearXNG',
-                onTap: () => _railPanel.open('search')),
-            _railRow(
-                icon: Icons.science_outlined,
-                title: '能力与实验',
-                subtitle: '能力开关 · 基准',
-                onTap: () => _railPanel.open('capability')),
-            _railRow(
-                icon: Icons.storage_outlined,
-                title: '存储 / 日志 / 关于',
-                subtitle: '占用 · 运行日志 · 版本',
-                onTap: () => _railPanel.open('storage')),
+                icon: Icons.info_outline,
+                title: '关于',
+                subtitle: '版本 · 说明',
+                onTap: () => _railPanel.open('about')),
           ],
         ),
       );
@@ -1374,6 +1374,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         const SizedBox(height: 8),
         AboutSettingsCard(),
       ],
+    );
+  }
+
+  /// 关于独立页：只有版本/说明卡（存储与日志已另有归属）。
+  Widget _buildAboutRailPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      children: [AboutSettingsCard()],
     );
   }
 
@@ -2437,8 +2445,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _onVoiceLongPressMoveUpdate(d.globalPosition),
       onLongPressEnd: (_) => _onVoiceLongPressEnd(),
       onLongPressCancel: () => _onVoiceLongPressEnd(),
-      child: Tooltip(
-        message: '按住说话，松手即发送（上滑取消）',
+      // ⚠️ 这里绝不能包 Tooltip：Tooltip 的长按识别器是**内层**识别器，
+      // 手势竞技场里内层必胜（子先入 arena），外层的按住说话长按永远被
+      // 拒——2026-10-25 真机实锤（长按落在热区但 [Voice] 日志零触发，
+      // 自 10-24 composer 加 Tooltip 后语音一直废的根因）。
+      // 无障碍文案用 Semantics（零手势识别器）。
+      child: Semantics(
+        label: '按住说话，松手即发送（上滑取消）',
         child: SizedBox(
           width: 34,
           height: 34,
