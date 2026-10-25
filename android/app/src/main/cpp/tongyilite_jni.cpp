@@ -3137,7 +3137,9 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
         LOGI("tuning: TONGYI_UBATCH=%d (%s backend)", (int)j_n_ubatch,
              j_enable_gpu == JNI_TRUE ? "GPU" : "CPU");
     } else {
-        unsetenv("TONGYI_UBATCH");
+        // [tongyi 2026-10-25 A3/R-003] App「自动」(nUbatch=0) 时保留 vk_flags.conf
+        // 注入的 TONGYI_UBATCH（测量/调试通道），不再 unsetenv 抹掉——A3 腿实测
+        // conf=128 被清回 512（n_ubatch 日志实证）。优先级：App 显式 > conf > 默认 512。
     }
     if (j_vk_no_subgroup == JNI_TRUE) {
         setenv("GGML_VK_NO_SUBGROUP", "1", 1);
