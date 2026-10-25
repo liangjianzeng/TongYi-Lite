@@ -639,3 +639,109 @@ __kernel void kernel_mul_mat_id_q4_0_f32_batched(
 }
 #undef BMO_DQ_HI
 #undef BMO_DQ_LO
+
+// ============================================================================
+// [tongyi L4 2026-10-25] q4_0 fused gate+up GEMV + GLU — 克隆 q4_K GLU 族形
+//（gemv_noshuffle_q4_k_f32.cl:440），换 q4_0 平面（q image + d half2，无 dm/s）。
+// 动机（§20.38/G-776）：can_fuse 硬要求 gate/up 为 Q4_K，Ling 的 dense FFN
+// （shared-expert/GDN 侧）是 q4_0/q4_1 ⇒ 融合从不触发。放开 q4_0 = 每次触发
+// 省 2 次 GEMV 派发 + 1 次 GLU 派发（740 launch-bound 下 ~400µs/发射）。
+// 语义对齐：两段 K-loop 与 dense GEMV 逐行同构（字节级部分和同序）。
+// ============================================================================
+
+inline float q40_glu_act(int glu_op, float g) {
+    float act = g;
+    if (glu_op == 1) {          // GEGLU (gelu tanh)
+        const float GLU_COEF_SQRT_2_OVER_PI = 0.79788456080286535587989211986876f;
+        const float GLU_COEF_0P044715        = 0.044715f;
+        float x = GLU_COEF_SQRT_2_OVER_PI * g * (1.0f + GLU_COEF_0P044715 * g * g);
+        act = 0.5f * g * (1.0f + tanh(x));
+    } else if (glu_op == 2) {   // SWIGLU (silu)
+        act = g / (1.0f + exp(-g));
+    } else if (glu_op == 0) {   // REGLU
+        return g * (g > 0.0f);
+    } else if (glu_op == 4) {   // GEGLU_ERF
+        const float GLU_SQRT_2_INV = 0.70710678118654752440f;
+        act = 0.5f * g * (1.0f + erf(g * GLU_SQRT_2_INV));
+    } else {                    // GEGLU_QUICK (5)
+        const float GLU_QUICK_COEF = 1.702f;
+        act = g * (1.0f / (1.0f + exp(GLU_QUICK_COEF * g)));
+    }
+    return act;
+}
+
+#if defined(ADRENO_GPU) && !defined(GGML_OPENCL_RUSTICL)
+REQD_SUBGROUP_SIZE_64
+#endif
+__kernel void kernel_gemv_noshuffle_q4_0_f32_glu(
+        __read_only  image1d_buffer_t src0g_q,   // gate 权重 q 平面（noshuffle）
+        __global half2 * src0g_d,                // gate d 平面（行对 half2）
+        __read_only  image1d_buffer_t src0u_q,   // up 权重 q 平面
+        __global half2 * src0u_d,                // up d 平面
+        __read_only  image1d_buffer_t src1,      // 激活（decode 单列）
+        __global float * dst,
+        ulong offsetd,
+        int ne00,                                // K
+        int ne01,                                // M（ffn 中间宽）
+        int glu_op)
+{
+    uint groupId = get_local_id(1);
+    uint gid     = get_global_id(0);
+    ushort slid  = get_sub_group_local_id();
+
+    uint K = ne00;
+    uint M = ne01;
+
+    uint LINE_STRIDE_A = M / 2;
+    uint gid_s = min(gid, LINE_STRIDE_A - 1);
+    uint BLOCK_STRIDE_A = N_SIMDGROUP * M;
+
+    __private uint4  regA;
+    __private half2  regS;
+    __private float8 regB;
+
+    __private float2 gateSum = (float2)(0.0f);
+    __private float2 upSum   = (float2)(0.0f);
+
+    // 两段顺序 K-loop（gate 全程，再 up）——寄存器足迹与单权重 GEMV 持平
+    //（q4_K GLU 同法，见其 440 区注释）。
+#define Q40_GLU_LOOP(SUM, Q, DD)                                                                       \
+    for (uint k = groupId; k < (K / QK4_0); k += N_SIMDGROUP) {                                        \
+        regS = DD[gid_s + k * LINE_STRIDE_A];                                                          \
+        if (slid < 4) {                                                                                \
+            regB.s0123 = read_imagef(src1, (slid * 2 + k * 8));                                        \
+            regB.s4567 = read_imagef(src1, (1 + slid * 2 + k * 8));                                    \
+        }                                                                                              \
+        regA.s0 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;                 \
+        regA.s1 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;                 \
+        regA.s2 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;                 \
+        regA.s3 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;                 \
+        dequantizeBlockAccum_ns_sgbroadcast_1_hi(SUM, as_ushort8(regA), regS, regB);                   \
+        regA.s0 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;                 \
+        regA.s1 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;                 \
+        regA.s2 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 6)).x;                 \
+        regA.s3 = read_imageui(Q, (gid_s + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 7)).x;                 \
+        dequantizeBlockAccum_ns_sgbroadcast_1_lo(SUM, as_ushort8(regA), regS, regB);                   \
+    }
+
+    Q40_GLU_LOOP(gateSum, src0g_q, src0g_d)
+    Q40_GLU_LOOP(upSum,   src0u_q, src0u_d)
+#undef Q40_GLU_LOOP
+
+    // 跨子组归约：gate(xy)+up(zw) 打包 float4，一趟完成
+    __local float4 reduceLM[SIMDGROUP_WIDTH * 3];
+    if (groupId == 1) reduceLM[SIMDGROUP_WIDTH * 0 + slid] = (float4)(gateSum, upSum);
+    if (groupId == 2) reduceLM[SIMDGROUP_WIDTH * 1 + slid] = (float4)(gateSum, upSum);
+    if (groupId == 3) reduceLM[SIMDGROUP_WIDTH * 2 + slid] = (float4)(gateSum, upSum);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (groupId == 0) {
+        float4 p;
+        p = reduceLM[SIMDGROUP_WIDTH * 0 + slid]; gateSum += p.xy; upSum += p.zw;
+        p = reduceLM[SIMDGROUP_WIDTH * 1 + slid]; gateSum += p.xy; upSum += p.zw;
+        p = reduceLM[SIMDGROUP_WIDTH * 2 + slid]; gateSum += p.xy; upSum += p.zw;
+
+        dst = (__global float *)((__global char *)dst + offsetd);
+        if (gid * 2 + 0 < M) dst[gid * 2 + 0] = q40_glu_act(glu_op, gateSum.s0) * upSum.s0;
+        if (gid * 2 + 1 < M) dst[gid * 2 + 1] = q40_glu_act(glu_op, gateSum.s1) * upSum.s1;
+    }
+}

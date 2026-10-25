@@ -12,6 +12,7 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 #include "ggml.h"
+#include "tongyi_route_table.h"
 
 #include "cl-program-cache.h"
 
@@ -32,6 +33,67 @@ typedef const void * (*get_adreno_bin_kernel_func_t)(
 );
 
 #include <CL/cl.h>
+
+// [tongyi 2026-10-25 arg-cache] Memoizing clSetKernelArg shim. Decode re-sets
+// ~45K kernel args per token, nearly all byte-identical to the previous token;
+// measured ~1.8us per arg on the 740 host path (cl_bw_probe 4b). Args persist on
+// the cl_kernel object, so skipping a byte-identical re-set is semantically a
+// no-op. Macro applies to every clSetKernelArg call site in this file.
+#include <unordered_map>
+#include <dlfcn.h>
+#include <vector>
+#include <cstring>
+static long g_arg_sets = 0, g_arg_skips = 0;
+static long g_add4_fired = 0;
+long g_addchain_dbg_cnt = 0;
+long g_scan_add_seen = 0;
+static const ggml_tensor * g_addchain_in4 = nullptr;   // [tongyi] 4th leaf when chain-3 fires
+long g_cnt_alladd = 0, g_rej_subgraph = 0, g_rej_dtype = 0, g_rej_conn = 0, g_rej_contig = 0, g_rej_shape = 0, g_rej_overlap = 0;
+static cl_int ht_cl_set_kernel_arg(cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void * arg_value);
+#define clSetKernelArg ht_cl_set_kernel_arg
+static cl_int ht_cl_set_kernel_arg(cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void * arg_value) {
+    struct HtKey {
+        uintptr_t k; cl_uint i;
+        bool operator==(const HtKey & o) const { return k == o.k && i == o.i; }
+    };
+    struct HtKeyHash {
+        size_t operator()(const HtKey & x) const { return x.k * 1000003u + x.i; }
+    };
+    static std::unordered_map<HtKey, std::pair<size_t, std::vector<uint8_t>>, HtKeyHash> cache;
+    HtKey key{ (uintptr_t)kernel, arg_index };
+    auto it = cache.find(key);
+    const bool have = it != cache.end();
+    bool same = false;
+    if (have) {
+        const auto & ent = it->second;
+        if (ent.first == arg_size) {
+            if (arg_value == nullptr) {
+                same = ent.second.empty();   // __local arg: size is the value
+            } else if (ent.second.size() == arg_size) {
+                same = memcmp(ent.second.data(), arg_value, arg_size) == 0;
+            }
+        }
+    }
+    if (same) {
+        ++g_arg_skips;
+        return CL_SUCCESS;
+    }
+    // resolve the real symbol through the same path the backend uses (stub/vendor)
+    static cl_int (CL_API_ENTRY * real)(cl_kernel, cl_uint, size_t, const void *) = nullptr;
+    if (!real) {
+        real = (cl_int (CL_API_ENTRY *)(cl_kernel, cl_uint, size_t, const void *)) dlsym(RTLD_DEFAULT, "clSetKernelArg");
+        if (!real) { fprintf(stderr, "FATAL: arg-cache cannot resolve clSetKernelArg\n"); abort(); }
+    }
+    cl_int err = real(kernel, arg_index, arg_size, arg_value);
+    if (err == CL_SUCCESS) {
+        ++g_arg_sets;
+        auto & ent = cache[key];
+        ent.first = arg_size;
+        if (arg_value) ent.second.assign((const uint8_t *)arg_value, (const uint8_t *)arg_value + arg_size);
+        else ent.second.clear();
+    }
+    return err;
+}
 
 #include <inttypes.h>
 #include <string.h>
@@ -154,6 +216,23 @@ struct ggml_cl_compiler_version {
         return same(t, x, y, z) || newer_than(t, x, y, z);
     }
 };
+
+// [tongyi R1 2026-10-25] 路由表镜像枚举数值对齐（编译期把守；漂移即编不过）
+static_assert((int) tongyi::RGEN_UNKNOWN == (int) ADRENO_UNKNOWN, "route gen mirror");
+static_assert((int) tongyi::RGEN_A6X    == (int) A6X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_A7X    == (int) A7X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_A8X    == (int) A8X,    "route gen mirror");
+static_assert((int) tongyi::RGEN_X1E    == (int) X1E,    "route gen mirror");
+static_assert((int) tongyi::RGEN_X2E    == (int) X2E,    "route gen mirror");
+static_assert((int) tongyi::RCOMP_E031  == (int) E031,   "route compiler mirror");
+static_assert((int) tongyi::RCOMP_E17   == (int) E17,    "route compiler mirror");
+static_assert((int) tongyi::RCOMP_DX    == (int) DX,     "route compiler mirror");
+static_assert((int) tongyi::RTYPE_Q4_0  == (int) GGML_TYPE_Q4_0,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q4_K  == (int) GGML_TYPE_Q4_K,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q3_K  == (int) GGML_TYPE_Q3_K,  "route type mirror");
+static_assert((int) tongyi::RTYPE_Q8_0  == (int) GGML_TYPE_Q8_0,  "route type mirror");
+static_assert((int) tongyi::RTYPE_MXFP4 == (int) GGML_TYPE_MXFP4, "route type mirror");
+static_assert((int) tongyi::RTYPE_IQ4_XS == (int) GGML_TYPE_IQ4_XS, "route type mirror");
 
 static size_t align_to(size_t value, size_t to_alignment) {
     GGML_ASSERT(to_alignment && "Invalid alignment (must be non-zero)");
@@ -656,6 +735,7 @@ struct ggml_backend_opencl_context {
     // argsort is loaded in supports_op because its availability depends on how
     // many workgroups are allowed, which requires kernel compilation.
     bool kernels_loaded_argsort = false;
+    bool kernels_loaded_moe_topk_fused = false;
     // rest of the kernels are currently always loaded in alloc_buffer.
     bool kernels_loaded = false;
 
@@ -683,6 +763,10 @@ struct ggml_backend_opencl_context {
     bool disable_fusion;
     bool fuse_mm_glu = true;                     // opt-out GGML_OPENCL_FUSE_MM_GLU=0 (byte-identical gate+up GEMV + GLU, q4_K FFN)
     bool fuse_rms_add = true;                    // opt-out GGML_OPENCL_FUSE_RMS_ADD=0 (fused rms_norm*w + residual)
+    // [tongyi 2026-10-25 add4 判决] 默认关：数值 bit-identical（两腿文本逐字节相同）
+    // 但 740 decode 稳定 -2~4%（8.36→8.0），splits=2 后微内核 launch 数已非主矛盾，
+    // 削 launch 融合路线收益枯竭。GGML_OPENCL_FUSE_ADD_CHAIN=1 可复开（复现实验用）。
+    bool fuse_add_chain = false;                 // opt-in GGML_OPENCL_FUSE_ADD_CHAIN=1
     bool f16_mrow = true;                        // opt-out GGML_OPENCL_F16_MROW=0 (multi-row-per-WG f16 decode GEMV for attn proj + lm_head)
     int  f16_mrow_rpt = 1;                       // GGML_OPENCL_F16_MROW_RPT={1,2,4,8,16} rows-per-subgroup register blocking
 
@@ -854,6 +938,8 @@ struct ggml_backend_opencl_context {
     cl_program program_mul_mm_q8_0_f32_l4_lm;
 
     cl_kernel kernel_add, kernel_add_row, kernel_add_f16, kernel_add_row_f16;
+    cl_kernel kernel_add4;   // [tongyi 2026-10-25] fused ADD chain (3-op)
+    cl_kernel kernel_add3;   // [tongyi 2026-10-25] fused ADD chain (2-op)
     cl_kernel kernel_mul, kernel_mul_row, kernel_mul_f16, kernel_mul_row_f16;
     cl_kernel kernel_div, kernel_div_row, kernel_div_f16, kernel_div_row_f16;
     cl_kernel kernel_sub, kernel_sub_row, kernel_sub_f16, kernel_sub_row_f16;
@@ -899,6 +985,10 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_cpy_f16_f16, kernel_cpy_f16_f32, kernel_cpy_f32_f16, kernel_cpy_f32_f32, kernel_cpy_i32_i32;
     cl_kernel kernel_cpy_f32_f32_pack = nullptr;
     cl_kernel kernel_cpy_f32_f32_flat = nullptr;
+    cl_kernel kernel_cpy_f32_i32 = nullptr;
+    // [tongyi M-R1] fused MoE router top-k
+    cl_program program_moe_topk_fused;
+    cl_kernel kernel_moe_topk_fused;
     cl_kernel kernel_mul_mat_f32_f32;
     cl_kernel kernel_mul_mat_f16_f16;
     cl_kernel kernel_mul_mat_f16_f32_1row;
@@ -1085,6 +1175,8 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_mul_mm_q6_k_f32_l4_lm;
     cl_kernel kernel_mul_mm_iq4_nl_f32_l4_lm;
 
+    int n_enqueues = 0;   // [tongyi host-timing] enqueue count since last read
+    double ht_sub_ms = 0; // [tongyi host-timing] cumulative CL object churn / executor host time (ms)
     std::vector<ProfilingInfo> profiling_info;
     std::vector<ProfilingInfo> profiling_results;
 
@@ -1239,6 +1331,7 @@ struct ggml_backend_opencl_context {
     }
 
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
+        n_enqueues++;
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
         // and global_work_size is NULL or the value in any passed dimension is zero,
@@ -1351,10 +1444,12 @@ struct ggml_backend_opencl_context {
     // Gemm and Gemv related programs, kernels, etc
     cl_kernel kernel_gemm_noshuffle_q4_0_f32;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32;
+    cl_kernel kernel_gemv_noshuffle_q4_0_f32_glu;  // [tongyi L4 2026-10-25] fused gate+up GEMV+GLU (q4_0)
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_mc3;  // multi-column (N=3) verify GEMV (spec/MTP)
     cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
     cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
     cl_kernel kernel_mul_mat_id_q3_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q3_K, #28)
+    cl_kernel kernel_mul_mat_id_iq4_xs_f32_batched;  // [tongyi M1 2026-10-25] batched MoE gather (iq4_xs, G-733 M1)
 
     // [dspark 2026-10-14] P4: batched MoE activation image cache. The dense-loop
     // fixed q_img is cached on the weight tensor's extra, but the activation
@@ -1768,6 +1863,29 @@ static void load_cl_kernels_argsort(ggml_backend_opencl_context *backend_ctx) {
     }
 }
 
+// [tongyi M-R1 2026-10-25] fused MoE router top-k. Compiled with the SAME
+// compile opts as the sigmoid family (backend kernel_compile_opts, incl.
+// -cl-fast-relaxed-math) so the in-kernel sigmoid is bit-identical with
+// kernel_sigmoid_f32 -- byte-equality with the old graph path depends on it.
+static void load_cl_kernels_moe_topk_fused(ggml_backend_opencl_context *backend_ctx) {
+    if (backend_ctx->kernels_loaded_moe_topk_fused) {
+        return;
+    }
+    cl_int err;
+#ifdef GGML_OPENCL_EMBED_KERNELS
+    const std::string kernel_src {
+        #include "moe_topk_fused.cl.h"
+    };
+#else
+    const std::string kernel_src = read_file("moe_topk_fused.cl");
+#endif
+    backend_ctx->program_moe_topk_fused =
+        build_program_from_source(backend_ctx, kernel_src.c_str(), backend_ctx->kernel_compile_opts);
+
+    CL_CHECK((backend_ctx->kernel_moe_topk_fused = clCreateKernel(backend_ctx->program_moe_topk_fused, "kernel_moe_topk_fused", &err), err));
+    backend_ctx->kernels_loaded_moe_topk_fused = true;
+}
+
 static bool use_adreno_bin_kernels(ggml_backend_opencl_context * backend_ctx) {
 #ifndef GGML_OPENCL_USE_ADRENO_BIN_KERNELS
     GGML_UNUSED(backend_ctx);
@@ -1830,6 +1948,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_add_row     = clCreateKernel(backend_ctx->program_add, "kernel_add_row", &err), err));
         CL_CHECK((backend_ctx->kernel_add_f16     = clCreateKernel(backend_ctx->program_add, "kernel_add_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_add_row_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_row_f16", &err), err));
+        CL_CHECK((backend_ctx->kernel_add4        = clCreateKernel(backend_ctx->program_add, "kernel_add4", &err), err));
+        CL_CHECK((backend_ctx->kernel_add3        = clCreateKernel(backend_ctx->program_add, "kernel_add3", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -1948,6 +2068,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             }
         }
         CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
+        CL_CHECK((backend_ctx->kernel_cpy_f32_i32 = clCreateKernel(prog, "kernel_cpy_f32_i32", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -4114,6 +4235,21 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
     // gemv_noshuffle_q1_0_f32
     {
+        // [tongyi M1 2026-10-25] iq4_xs batched MoE (G-733 route-1 first sub-3bpw kernel)
+        std::string m1_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable";
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src_CL_iq4xs_m1 {
+            #include "gemv_noshuffle_iq4_xs_f32.cl.h"
+        };
+#else
+        const std::string kernel_src_CL_iq4xs_m1 = read_file("gemv_noshuffle_iq4_xs_f32.cl");
+#endif
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_iq4xs_m1.c_str(), m1_opts.c_str());
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_iq4_xs_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+    {
         std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
                                        " -cl-mad-enable "
                                        " -DSIMDGROUP_WIDTH=" +
@@ -4159,6 +4295,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_glu", &err), err));
         CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
         // P3 sort kernels moved to their own program (moe_sort_dspark): compiling
         // them inside the q4_0 program (with the perm param) miscompiled the
@@ -7158,6 +7295,16 @@ static void ggml_opencl_print_backend_info(ggml_backend_opencl_device_context * 
         backend_ctx->device_name.c_str());
     GGML_LOG_INFO("ggml_opencl: OpenCL driver: %s\n",
         backend_ctx->driver_version.c_str());
+    // [tongyi R3 2026-10-25] known_bad 指纹比对（driver 串已打印=解析完成）：本机编译器命中几条坏账
+    {
+        int kb_hits = 0;
+        for (int i = 0; i < tongyi::known_bad_count(); ++i) {
+            if (tongyi::known_bad()[i].compiler == (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type) {
+                ++kb_hits;
+            }
+        }
+        GGML_LOG_INFO("ggml_opencl: route-table known_bad: %d row(s) apply to this compiler fingerprint\n", kb_hits);
+    }
     GGML_LOG_INFO("ggml_opencl: vector subgroup broadcast support: %s\n",
         backend_ctx->has_vector_subgroup_broadcast ? "true" : "false");
     GGML_LOG_INFO("ggml_opencl: subgroup shuffle support: %s\n",
@@ -7580,6 +7727,9 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     }
     if (const char * env = getenv("GGML_OPENCL_FUSE_RMS_ADD")) {
         backend_ctx->fuse_rms_add = atoi(env) != 0;
+    }
+    if (const char * env = getenv("GGML_OPENCL_FUSE_ADD_CHAIN")) {
+        backend_ctx->fuse_add_chain = atoi(env) != 0;
     }
     if (const char * env = getenv("GGML_OPENCL_F16_MROW")) {
         backend_ctx->f16_mrow = atoi(env) != 0;
@@ -8852,6 +9002,157 @@ inline bool use_q4k_tiled(const ggml_backend_opencl_context *backend_ctx, const 
 inline bool use_q4_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor);
 inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor);   // defined below
 
+// [tongyi 2026-10-25] fused ADD->ADD->ADD residual chain (kernel_add4).
+// Grouped-MoE residual graphs emit ~115 such chains per decode token
+// (bailingmoe3 census); each fusion removes 2 kernel launches. Byte-identical
+// numerics: left-assoc ((a+b)+c)+d order preserved, all operands F32
+// contiguous same-shape (no broadcast), so linear indexing is valid.
+static void addchain_reject(const char * why) {
+    if (strcmp(why, "subgraph") == 0) ++g_rej_subgraph;
+    else if (strcmp(why, "dtype") == 0) ++g_rej_dtype;
+    else if (strcmp(why, "conn1") == 0 || strcmp(why, "conn2") == 0) ++g_rej_conn;
+    else if (strcmp(why, "leaf-contig") == 0) ++g_rej_contig;
+    else if (strcmp(why, "shape") == 0) ++g_rej_shape;
+    else if (strcmp(why, "overlap") == 0) ++g_rej_overlap;
+}
+#define ADDCHAIN_REJECT(why) addchain_reject(why)
+// view-class ops are metadata-only (same buffer, no kernel); the executor scan
+// skips them, so chain resolution must skip them too and connectivity must walk
+// view_src chains. Byte-size+contiguous replaces same-shape: reshaped views of
+// the same linear span are elementwise-equivalent.
+static const ggml_tensor * addchain_next_op(const struct ggml_cgraph * cgraph, int from, int * idx_out) {
+    for (int j = from + 1; j < cgraph->n_nodes; ++j) {
+        const ggml_tensor * n = cgraph->nodes[j];
+        if (ggml_is_empty(n) || n->op == GGML_OP_RESHAPE || n->op == GGML_OP_TRANSPOSE ||
+            n->op == GGML_OP_VIEW || n->op == GGML_OP_PERMUTE || n->op == GGML_OP_NONE) {
+            continue;
+        }
+        *idx_out = j;
+        return n;
+    }
+    *idx_out = cgraph->n_nodes;
+    return nullptr;
+}
+static const ggml_tensor * addchain_root(const ggml_tensor * t) {
+    while (t->view_src) { t = t->view_src; }
+    return t;
+}
+static bool ggml_opencl_can_fuse_add_chain(const ggml_backend_opencl_context * backend_ctx,
+                                           const struct ggml_cgraph * cgraph, int node_idx,
+                                           int * mid_idx, int * end_idx, const ggml_tensor ** out_dst,
+                                           bool * four) {
+    if (!backend_ctx->fuse_add_chain) {
+        return false;
+    }
+    const ggml_tensor * n0 = cgraph->nodes[node_idx];
+    if (n0->op != GGML_OP_ADD || n0->type != GGML_TYPE_F32) {
+        return false;
+    }
+    ++g_scan_add_seen;
+    int i1 = -1, i2 = -1, i3 = -1;
+    const ggml_tensor * n1 = addchain_next_op(cgraph, node_idx, &i1);
+    const ggml_tensor * n2 = n1 ? addchain_next_op(cgraph, i1, &i2) : nullptr;
+    const ggml_tensor * n3 = n2 ? addchain_next_op(cgraph, i2, &i3) : nullptr;
+    if (!n1 || n1->op != GGML_OP_ADD) { ADDCHAIN_REJECT("ops"); ++g_cnt_alladd; return false; }
+    // 2-chain: dst = n1 (kernel_add3). 3-chain: n2 also ADD (kernel_add4).
+    const bool has3 = (n2 && n2->op == GGML_OP_ADD);
+    const ggml_tensor * last = has3 ? n2 : n1;
+    const int i_last = has3 ? i2 : i1;
+    const ggml_tensor * n2r = n2;   // only valid when has3
+    if (n1->type != GGML_TYPE_F32 || (has3 && n2->type != GGML_TYPE_F32) ||
+        n0->src[0]->type != GGML_TYPE_F32 || n0->src[1]->type != GGML_TYPE_F32 ||
+        last->type != GGML_TYPE_F32) {
+        ADDCHAIN_REJECT("dtype");
+        return false;
+    }
+    const ggml_tensor * r0 = addchain_root(n0);
+    const ggml_tensor * r1 = addchain_root(n1);
+    if (addchain_root(n1->src[0]) != r0 && addchain_root(n1->src[1]) != r0) { ADDCHAIN_REJECT("conn1"); return false; }
+    const ggml_tensor * in[4] = { n0->src[0], n0->src[1],
+        (addchain_root(n1->src[0]) == r0) ? n1->src[1] : n1->src[0], nullptr };
+    const ggml_tensor * in4 = nullptr;
+    if (has3) {
+        const ggml_tensor * r2 = addchain_root(n2);
+        if (addchain_root(n2->src[0]) != r1 && addchain_root(n2->src[1]) != r1) { ADDCHAIN_REJECT("conn2"); return false; }
+        in[3] = (addchain_root(n2->src[0]) == r1) ? n2->src[1] : n2->src[0];
+    }
+    const ggml_tensor * dst = last;
+    const int n_leaf = has3 ? 4 : 3;
+    for (int k = 0; k < n_leaf; ++k) {
+        if (in[k]->type != GGML_TYPE_F32 || !ggml_is_contiguous(in[k]) ||
+            ggml_nbytes(in[k]) != ggml_nbytes(dst)) {
+            ADDCHAIN_REJECT("shape");
+            return false;
+        }
+    }
+    if (!ggml_is_contiguous(dst)) { ADDCHAIN_REJECT("shape"); return false; }
+    for (int k = 0; k < n_leaf; ++k) {
+        if (!ggml_cl_tensors_overlap(dst, in[k])) { continue; }
+        // exact in-place aliasing (dst IS the leaf, same span) is safe for the
+        // elementwise kernel: each thread reads its element before writing it.
+        ggml_tensor_extra_cl * exd = (ggml_tensor_extra_cl *)dst->extra;
+        ggml_tensor_extra_cl * exk = (ggml_tensor_extra_cl *)in[k]->extra;
+        const cl_ulong doff = exd->offset + dst->view_offs;
+        const cl_ulong koff = exk->offset + in[k]->view_offs;
+        if (exd->data_device == exk->data_device && doff == koff &&
+            ggml_nbytes(dst) == ggml_nbytes(in[k])) {
+            continue;   // in-place accumulate: safe
+        }
+        ADDCHAIN_REJECT("overlap");
+        return false;
+    }
+    g_addchain_in4 = nullptr;
+    { static int fired_dbg = 0; if (fired_dbg < 10) { ++fired_dbg;
+      fprintf(stderr, "[addchain-FIRE] i=%d n0=%s n1=%s dst=%s four=%d\n",
+          node_idx, n0->name, n1->name, dst->name, (int)has3); } }
+    *mid_idx = i1;
+    *end_idx = i_last;
+    *out_dst = dst;
+    *four = has3;
+    return true;
+#undef ADDCHAIN_REJECT
+}
+
+static void ggml_opencl_op_add_fused(ggml_backend_t backend,
+                                      const ggml_tensor * n0, const ggml_tensor * n1, ggml_tensor * dst, bool four) {
+    const ggml_tensor * in[4] = { n0->src[0], n0->src[1], nullptr, nullptr };
+    in[2] = (addchain_root(n1->src[0]) == addchain_root(n0)) ? n1->src[1] : n1->src[0];
+    in[3] = (addchain_root(dst->src[0]) == addchain_root(n1)) ? dst->src[1] : dst->src[0];
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    cl_kernel kernel = four ? backend_ctx->kernel_add4 : backend_ctx->kernel_add3;
+    const int n_in = four ? 4 : 3;
+
+    cl_ulong offs[4], offd;
+    cl_mem bufs[4];
+    for (int k = 0; k < n_in; ++k) {
+        ggml_tensor_extra_cl * e = (ggml_tensor_extra_cl *)in[k]->extra;
+        GGML_ASSERT(e);
+        offs[k] = e->offset + in[k]->view_offs;
+        bufs[k] = e->data_device;
+    }
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *)dst->extra;
+    GGML_ASSERT(ed);
+    offd = ed->offset + dst->view_offs;
+
+    cl_ulong n = (cl_ulong)ggml_nbytes(dst) / sizeof(float);
+    int a = 0;
+    for (int k = 0; k < n_in; ++k) {
+        CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &bufs[k]));
+        CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offs[k]));
+    }
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offd));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &n));
+
+    size_t global_work_size[] = { (size_t)((n + 63) / 64) * 64, 1, 1 };
+    // [tongyi 2026-10-25] lws nullptr = driver-chosen; forcing 64 measured ~12%
+    // decode regression on 740 (r3_add4 vs r3_add4off), driver default is better
+    // for these small [1536] elementwise chains.
+    backend_ctx->enqueue_ndrange_kernel(kernel, 1, global_work_size, nullptr, dst);
+}
+
+
 static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx, const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
 
     // glu(mul_mat(Wg,x), mul_mat(Wu,x)) — the FFN gate/up GEMVs + GLU. This is a
@@ -8875,8 +9176,12 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         if (gate->ne[1] != 1 || up->ne[1] != 1) {
             return false;
         }
-        // both projections must be q4_K weights, f32 activation/output
-        if (gate->src[0]->type != GGML_TYPE_Q4_K || up->src[0]->type != GGML_TYPE_Q4_K ||
+        // [tongyi L4 2026-10-25] 放开 q4_0：Ling 的 dense FFN（shared-expert/GDN）
+        // 是 q4_0/q4_1，原硬门 q4_K-only 使融合从不触发（§20.38 算子数 2052 不动实锤）。
+        // 成对同型（q4_K+q4_K 走原执行器；q4_0+q4_0 走 L4 新执行器）。
+        const ggml_type proj_t = gate->src[0]->type;
+        if ((proj_t != GGML_TYPE_Q4_K && proj_t != GGML_TYPE_Q4_0) ||
+            up->src[0]->type != proj_t ||
             gate->src[1]->type != GGML_TYPE_F32  || up->src[1]->type != GGML_TYPE_F32  ||
             gate->type != GGML_TYPE_F32 || up->type != GGML_TYPE_F32 || glu->type != GGML_TYPE_F32) {
             return false;
@@ -8901,7 +9206,8 @@ static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx
         }
         // the fused kernel reads the standard noshuffle image layout; the tiled
         // layout packs weights differently -> defer those to the per-op path
-        if (use_q4k_tiled(backend_ctx, gate->src[0]) || use_q4k_tiled(backend_ctx, up->src[0])) {
+        if (proj_t == GGML_TYPE_Q4_K &&
+            (use_q4k_tiled(backend_ctx, gate->src[0]) || use_q4k_tiled(backend_ctx, up->src[0]))) {
             return false;
         }
         // q4_K bin kernel requires 32b transposed layout, not compatible with the fused gemv
@@ -9172,6 +9478,105 @@ static void ggml_cl_mul_mat_q4_k_glu_fused(ggml_backend_t backend, ggml_tensor *
 #endif
 }
 
+// [tongyi L4 2026-10-25] q4_0 版 GLU 融合执行器：克隆 q4_K 版（上函数），q4_0 平面
+//（q image + d half2，无 dm/s/masks）。Ling 的 dense FFN（shared-expert/GDN）是
+// q4_0 ⇒ 原融合从不触发（§20.38 实锤算子数一字不动 2052）。
+static void ggml_cl_mul_mat_q4_0_glu_fused(ggml_backend_t backend, ggml_tensor * gate_tensor, ggml_tensor * up_tensor, ggml_tensor * glu_tensor) {
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    GGML_ASSERT(gate_tensor && up_tensor && glu_tensor);
+
+    const ggml_tensor * Wg   = gate_tensor->src[0];
+    const ggml_tensor * Wu   = up_tensor->src[0];
+    const ggml_tensor * src1 = gate_tensor->src[1];
+    const ggml_tensor * dst  = glu_tensor;
+
+    GGML_ASSERT(Wg && Wg->extra);
+    GGML_ASSERT(Wu && Wu->extra);
+    GGML_ASSERT(src1 && src1->extra);
+    GGML_ASSERT(dst && dst->extra);
+
+    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    ggml_tensor_extra_cl      * extra1  = (ggml_tensor_extra_cl *)src1->extra;
+    ggml_tensor_extra_cl      * extrad  = (ggml_tensor_extra_cl *)dst->extra;
+    ggml_tensor_extra_cl_q4_0 * extra_g = (ggml_tensor_extra_cl_q4_0 *)Wg->extra;
+    ggml_tensor_extra_cl_q4_0 * extra_u = (ggml_tensor_extra_cl_q4_0 *)Wu->extra;
+
+    cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    const int K = Wg->ne[0];
+    const int M = Wg->ne[1];
+    const int N = 1;   // decode GEMV
+    const int glu_op = (int)ggml_get_glu_op(dst);
+
+    cl_context context = backend_ctx->context;
+    cl_int           err;
+    cl_image_format  img_fmt;
+    cl_image_desc    img_desc;
+    cl_buffer_region region;
+
+    // q 平面图像（标准 noshuffle，同 dense GEMV 读法）
+    img_fmt = { CL_R, CL_UNSIGNED_INT32 };
+    memset(&img_desc, 0, sizeof(img_desc));
+    img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    img_desc.image_width = (size_t)M * K / 2 / 4;
+    img_desc.buffer      = extra_g->q;
+    cl_mem qg_img = nullptr, qu_img = nullptr;
+    CL_CHECK((qg_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+    img_desc.buffer = extra_u->q;
+    CL_CHECK((qu_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+    // 激活图像（decode 单列）
+    region.origin = offset1;
+    region.size   = (size_t)K * N * sizeof(float);
+    cl_mem b_sub_buf = nullptr, b_img = nullptr;
+    CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+    img_fmt = { CL_RGBA, CL_FLOAT };
+    memset(&img_desc, 0, sizeof(img_desc));
+    img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    img_desc.image_width = (size_t)K * N / 4;
+    img_desc.buffer      = b_sub_buf;
+    CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+    cl_kernel kernel = backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu;
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &qg_img));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_mem),   &extra_g->d));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &qu_img));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_mem),   &extra_u->d));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   &b_img));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_int),   &K));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_int),   &M));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(cl_int),   &glu_op));
+
+    // LDS 预算与 q4_K GLU 同账（float4 reduceLM）——同样硬顶 8 子组
+    size_t maxwg = backend_ctx->get_kernel_workgroup_size(kernel);
+    size_t nsg_y = gemv_ksplit_y(8);
+    while (nsg_y > 1 && 64 * nsg_y > maxwg) { nsg_y >>= 1; }
+    size_t local_work_size[3]  = { 64, nsg_y, 1 };
+    size_t global_work_size[3] = { (size_t)CEIL_DIV(M / 2, 64) * 64, nsg_y, 1 };
+
+    if (getenv("GGML_OPENCL_FUSE_DEBUG")) {
+        static int dbg = 0;
+        if (dbg < 3) { fprintf(stderr, "[FUSE_MM_GLU_Q40] fired #%d K=%d M=%d glu_op=%d nsg=%zu\n", ++dbg, K, M, glu_op, nsg_y); fflush(stderr); }
+    }
+
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    CL_CHECK(clReleaseMemObject(qg_img));
+    CL_CHECK(clReleaseMemObject(qu_img));
+    CL_CHECK(clReleaseMemObject(b_img));
+    CL_CHECK(clReleaseMemObject(b_sub_buf));
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(gate_tensor);
+    GGML_UNUSED(up_tensor);
+    GGML_UNUSED(glu_tensor);
+#endif
+}
+
 
 static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_tensor * rms_norm_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor) {
     GGML_ASSERT(rms_norm_tensor && mul_tensor && add_tensor);
@@ -9275,6 +9680,15 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
 
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    // [tongyi 2026-10-25 host-timing] decode bottleneck adjudicator: process CPU time
+    // of the submit loop (no sync waits) + kernel count. GGML_OPENCL_HOST_TIMING=1.
+    static const bool host_timing_en = [] {
+        const char * e = getenv("GGML_OPENCL_HOST_TIMING");
+        return e && e[0] == '1';
+    }();
+    const double ht_wall0 = host_timing_en ? (double)clock() / CLOCKS_PER_SEC : 0;
+    if (host_timing_en) { backend_ctx->n_enqueues = 0; backend_ctx->ht_sub_ms = 0; }
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -9444,6 +9858,20 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             i += 2;
             continue;
         }
+        // [tongyi 2026-10-25] Fuse ADD->ADD->ADD residual chains (kernel_add4).
+        // Default on, opt-out GGML_OPENCL_FUSE_ADD_CHAIN=0.
+        {
+            int add4_mid = -1, add4_end = -1;
+            bool add4_four = false;
+            const ggml_tensor * add4_dst = nullptr;
+            if (!backend_ctx->disable_fusion &&
+                ggml_opencl_can_fuse_add_chain(backend_ctx, cgraph, i, &add4_mid, &add4_end, &add4_dst, &add4_four)) {
+                ggml_opencl_op_add_fused(backend, node, cgraph->nodes[add4_mid], cgraph->nodes[add4_end], add4_four);
+                ++g_add4_fired;
+                i = add4_end;
+                continue;
+            }
+        }
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             // [dspark 2026-10-18] opt-out GGML_OPENCL_FUSE_RMS_MUL=0: race hunt —
             // the 2-op rms_norm+mul fuse runs every layer (attn_post_norm etc.)
@@ -9489,7 +9917,11 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // match so the FFN GLU subgraph stays dormant on Intel/other drivers.
         if (backend_ctx->fuse_mm_glu && !backend_ctx->disable_fusion &&
             ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU })) {
-            ggml_cl_mul_mat_q4_k_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            if (node->src[0]->type == GGML_TYPE_Q4_0) {
+                ggml_cl_mul_mat_q4_0_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            } else {
+                ggml_cl_mul_mat_q4_k_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+            }
             i += 2;
             continue;
         }
@@ -9611,6 +10043,16 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         }
     }
 
+    if (host_timing_en) {
+        const double wall_s = (double)clock() / CLOCKS_PER_SEC - ht_wall0;
+        GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f add4=%ld scanADD=%ld rej:sg=%ld dt=%ld conn=%ld ctg=%ld shp=%ld ovl=%ld\n",
+                      cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms, g_add4_fired, g_scan_add_seen,
+                      g_rej_subgraph, g_rej_dtype, g_rej_conn, g_rej_contig, g_rej_shape, g_rej_overlap);
+        g_add4_fired = 0; g_scan_add_seen = 0;
+        g_rej_subgraph = 0; g_rej_dtype = 0; g_rej_conn = 0; g_rej_contig = 0; g_rej_shape = 0; g_rej_overlap = 0;
+        backend_ctx->n_enqueues = 0;
+    }
+
     return GGML_STATUS_SUCCESS;
 }
 
@@ -9650,6 +10092,29 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
     return threashold_ok;
 }
 
+// [tongyi R1 2026-10-25] 路由表上下文（env 一次性快照，逐字对应旧门读法）。
+static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_context * backend_ctx) {
+    static const int  a7x_mode   = [] { const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");     return e ? ((e[0] == '0') ? 0 : 1) : -1; }();
+    static const bool e17_off    = [] { const char * e = getenv("GGML_OPENCL_ADRENO_E17_QUIRKS"); return e && e[0] == '0'; }();
+    static const bool vdiag      = [] { const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");        return e && e[0] == '1'; }();
+    static const bool dense_off  = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '0'; }();
+    static const bool dense_on   = [] { const char * e = getenv("GGML_OPENCL_DENSE_MOE");         return e && e[0] == '1'; }();
+    static const bool batched_off= [] { const char * e = getenv("GGML_OPENCL_BATCHED_MOE");       return e && e[0] == '0'; }();
+    tongyi::RouteContext c = {};
+    c.gen = backend_ctx ? (tongyi::RGen)backend_ctx->adreno_gen : tongyi::RGEN_UNKNOWN;
+    c.compiler = (backend_ctx && backend_ctx->gpu_family == GPU_FAMILY::ADRENO)
+                     ? (tongyi::RCompiler)backend_ctx->adreno_cl_compiler_version.type
+                     : tongyi::RCOMP_UNKNOWN;
+    c.is_mesa = false;
+    c.moe_a7x_mode = a7x_mode;
+    c.e17_quirks_off = e17_off;
+    c.vendor_diag = vdiag;
+    c.dense_off = dense_off;
+    c.dense_force = dense_on;
+    c.batched_off = batched_off;
+    return c;
+}
+
 static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backend_ctx) {
     if (!backend_ctx || backend_ctx->gpu_family != GPU_FAMILY::ADRENO ||
         backend_ctx->adreno_cl_compiler_version.type != ADRENO_CL_COMPILER_TYPE::E17) {
@@ -9660,35 +10125,15 @@ static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backen
 }
 
 inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
-    // A7X is in by default: the batched-MoE set_tensor path packs weights itself and never
-    // reaches the vendor *_trans4_ns repack (Adreno 740 measured 1.4 -> 2.9 tok/s on Ling).
-    // GGML_OPENCL_MOE_FORCE_A7X=0 restores the old exclusion; =1 also lets A6x in (probe),
-    // unset keeps A6x out until a K40 leg validates it.
-    static const int a7x_moe_mode = [] {
-        const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");
-        return e ? ((e[0] == '0') ? 0 : 1) : -1;
-    }();
-    // The *_trans4_ns repack aliases a private ushort8 through a uchar* and some A6x/A7x
-    // compilers miscompile it, but that kernel is not on the batched-MoE path (see above).
-    if (backend_ctx) {
-        const auto gen = backend_ctx->adreno_gen;
-        if (gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN) {
-            return false;
-        }
-        if (gen == ADRENO_GPU_GEN::A7X && a7x_moe_mode == 0) {
-            return false;
-        }
-        if (gen == ADRENO_GPU_GEN::A6X && a7x_moe_mode != 1) {
-            return false;
-        }
-    }
-
-    if (adreno_e17_compiler_quirks(backend_ctx)) {
-        return false;
-    }
-
-    int ne01 = tensor->ne[1];
-    return (((strstr(tensor->name, "ffn") != NULL) && (strstr(tensor->name, "exps") != NULL)) || (strstr(tensor->name, "as") != NULL)) && (ne01 % 32 == 0);
+    // [tongyi R2 2026-10-25] 薄包装：判定逻辑唯一实现 = 路由表 moe_admission_gate
+    //（名字+代际三态+E17+ne01%32；等价性由 tongyi_route_table_test 18.9 万 case 对拍
+    // 钉死。本函数保留原签名，set_tensor/batched/准入各调用点零改动翻转到表）。
+    const char * why = nullptr;
+    tongyi::RouteQuery q = {};
+    q.op = tongyi::ROUTE_MUL_MAT_ID;
+    q.M = (int)tensor->ne[1];
+    q.name = tensor->name;
+    return tongyi::moe_admission_gate(q, tongyi_route_context(backend_ctx), &why);
 }
 
 // [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
@@ -9704,13 +10149,7 @@ inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ct
 // q/d(/dm/s) are created lazily at first use and cached on the parent extra.
 // Default ON. GGML_OPENCL_DENSE_MOE=0 falls back to CPU-only MUL_MAT_ID
 // (weights land in the CPU buffer).
-inline bool dense_moe_loop_enabled() {
-    static const bool v = [] {
-        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
-        return !e || e[0] != '0';
-    }();
-    return v;
-}
+// [tongyi R2 2026-10-25] dense_moe_loop_enabled() 已并入 moe_use_dense_loop 的表委托（唯一实现 = 路由表）。
 
 // [dspark 2026-10-13] MUL_MAT_ID routing. The vendor single-dispatch MoE
 // kernels (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830
@@ -9726,18 +10165,18 @@ inline bool dense_moe_loop_enabled() {
 //   GGML_OPENCL_DENSE_MOE=0  -> dense-loop fully disabled (MoE -> CPU)
 //   GGML_OPENCL_MUL_MAT_ID=1 -> force vendor MoE kernels (diagnostics)
 inline bool moe_use_dense_loop(ggml_type type) {
-    if (!dense_moe_loop_enabled()) return false;
-    static const bool force = [] {
-        const char * e = getenv("GGML_OPENCL_DENSE_MOE");
-        return e && e[0] == '1';
+    // [tongyi R2 2026-10-25] 薄包装：唯一实现 = 路由表 dense_loop_type（env 折算进 ctx；
+    // dense_off/dense_force/vendor_diag 三态语义与 legacy 逐字等价，测试对拍钉死）。
+    static const tongyi::RouteContext c = [] {
+        const char * e   = getenv("GGML_OPENCL_DENSE_MOE");
+        const char * v   = getenv("GGML_OPENCL_MUL_MAT_ID");
+        tongyi::RouteContext x = {};
+        x.dense_off   = e && e[0] == '0';
+        x.dense_force = e && e[0] == '1';
+        x.vendor_diag = v && v[0] == '1';
+        return x;
     }();
-    if (force) return true;
-    static const bool vendor_diag = [] {
-        const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
-        return e && e[0] == '1';
-    }();
-    if (vendor_diag) return false; // diagnostics: let vendor kernels run
-    return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q4_0;
+    return tongyi::dense_loop_type((tongyi::RType)type, c);
 }
 
 // MoE expert weight tensors are the only 3D MUL_MAT weights (ne02 = n_expert).
@@ -10021,9 +10460,89 @@ inline bool use_q5_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx,
 #endif
 }
 
+// [tongyi 2026-10-25 buft-probe] 模型加载期的权重 placement 判定日志。
+// weight_buft_supported 的合成 op 特征：MUL_MAT src1=F32[ne0,512,...]，MMID src1=F32[ne0,n_used,512]。
+// decode/prefill 真实 op 的 src1 永远不会是 ne=512 的这种形状（decode ne[1]=1，prefill=n_tokens），
+// 所以这些行只会出现在加载窗口，直接回答"这个权重为什么落 CPU"。
+static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct ggml_tensor * op);
+
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    bool r = ggml_opencl_supports_op_inner(dev, op);
+    if (op->op == GGML_OP_MUL_MAT && op->src[0] && op->src[1] &&
+        op->src[1]->type == GGML_TYPE_F32 && op->src[1]->ne[1] == 512 && op->src[1]->ne[3] <= 1) {
+        GGML_LOG_INFO("[buft-probe] MUL_MAT %s type=%s ne=[%lld,%lld,%lld,%lld] -> %s\n",
+            op->src[0]->name, ggml_type_name(op->src[0]->type),
+            (long long)op->src[0]->ne[0], (long long)op->src[0]->ne[1],
+            (long long)op->src[0]->ne[2], (long long)op->src[0]->ne[3],
+            r ? "GPU" : "CPU");
+    }
+    if (op->op == GGML_OP_MUL_MAT_ID && op->src[0] && op->src[1] &&
+        op->src[1]->type == GGML_TYPE_F32 && op->src[1]->ne[2] == 512) {
+        GGML_LOG_INFO("[buft-probe] MUL_MAT_ID %s type=%s ne=[%lld,%lld,%lld] -> %s\n",
+            op->src[0]->name, ggml_type_name(op->src[0]->type),
+            (long long)op->src[0]->ne[0], (long long)op->src[0]->ne[1],
+            (long long)op->src[0]->ne[2],
+            r ? "GPU" : "CPU");
+    }
+    return r;
+}
+
+static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+
+    // [tongyi G-782 2026-10-25] 小算子尺寸路由（表驱动，tongyi_route_table.h）：
+    // 一维小数组（ne[0]<=256）的 ARGSORT/TOP_K/SET_ROWS/FILL/SUM_ROWS/SIGMOID 落 CPU
+    //（A7X 档每发射 ~400µs 完成往返）。豁免：任一相关张量（src×3/dst 含 view 溯源）
+    // 已绑定 buffer 即不搬——预分配 KV/compute 张量声明 CPU 会撞
+    // ggml-backend.cpp:1089 abort（G-782 名字路由判负的教训，尺寸+豁免是唯一形态）。
+    {
+        // [G-782 2026-10-25 实测定档] 本挂点在当前 sched 架构下对 Ling decode 图
+        // 零调用（supports_op 整个加载+生成期未被轮询，3176 节点 0 次）——per-op
+        // 分配不经过这里。策略表与判定保留（tongyi_route_table），有效挂点待迁到
+        // sched 侧（参照 OFFLOAD_MMID 的 offload_op 钩子模式）。
+        static std::atomic<int> ask_logs = {0};
+        if (ask_logs.fetch_add(1) < 4) {
+            GGML_LOG_INFO("ggml_opencl: supports-ask [%s] (G-782: 本挂点当前非调度路径，仅加载期偶发)\n",
+                          ggml_op_desc(op));
+        }
+        tongyi::SmallOpId sop = tongyi::SOP_NONE;
+        switch (op->op) {
+            case GGML_OP_ARGSORT:  sop = tongyi::SOP_ARGSORT;  break;
+            case GGML_OP_TOP_K:    sop = tongyi::SOP_TOP_K;    break;
+            case GGML_OP_SET_ROWS: sop = tongyi::SOP_SET_ROWS; break;
+            case GGML_OP_FILL:     sop = tongyi::SOP_FILL;     break;
+            case GGML_OP_SUM_ROWS: sop = tongyi::SOP_SUM_ROWS; break;
+            case GGML_OP_UNARY:
+                // SIGMOID 在图里是 GGML_OP_UNARY + op_params 子算子号
+                if (ggml_get_op_params_i32(op, 0) == GGML_UNARY_OP_SIGMOID) {
+                    sop = tongyi::SOP_SIGMOID;
+                }
+                break;
+            default: break;
+        }
+        if (sop != tongyi::SOP_NONE) {
+            bool any_buffered = op->buffer || (op->view_src && op->view_src->buffer);
+            for (int i = 0; !any_buffered && i < 3; ++i) {
+                const ggml_tensor * t = op->src[i];
+                const ggml_tensor * base = t ? (t->view_src ? t->view_src : t) : nullptr;
+                if (base && base->buffer) any_buffered = true;
+            }
+            // [G-782 诊断] 匹配到策略算子即留痕（含门裁决），限流 12 条
+            static std::atomic<int> diag_logs = {0};
+            if (diag_logs.fetch_add(1) < 12) {
+                GGML_LOG_INFO("ggml_opencl: small-op probe [%s/%d] ne={%lld,%lld,%lld,%lld} buffered=%d -> %s\n",
+                              ggml_op_name(op->op), (int)sop,
+                              (long long)op->ne[0], (long long)op->ne[1],
+                              (long long)op->ne[2], (long long)op->ne[3],
+                              (int)any_buffered,
+                              tongyi::small_op_to_cpu(sop, op->ne, any_buffered) ? "CPU" : "GPU");
+            }
+            if (tongyi::small_op_to_cpu(sop, op->ne, any_buffered)) {
+                return false;
+            }
+        }
+    }
 
     // reject ops that match the opfilter regex
     if (dev_ctx->opfilter && std::regex_match(std::string(ggml_op_desc(op)), *dev_ctx->opfilter)) {
@@ -10071,6 +10590,13 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         case GGML_OP_CONT:
             switch (op->src[0]->type) {
                 case GGML_TYPE_F32:
+                    // [tongyi M-R1] numeric f32->i32 cast (ggml_cast wiring for
+                    // the fused router ids). CPY only: ggml_cl_dup has no
+                    // f32->i32 kernel, so DUP/CONT keep rejecting it.
+                    if (op->op == GGML_OP_CPY && op->type == GGML_TYPE_I32 &&
+                        backend_ctx->kernel_cpy_f32_i32 != nullptr) {
+                        return true;
+                    }
                     switch (op->type) {
                         case GGML_TYPE_F16:
                         case GGML_TYPE_F32:
@@ -10335,92 +10861,32 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                 return op->src[1]->type == GGML_TYPE_F32;
             }
             return false;
-        case GGML_OP_MUL_MAT_ID:
-            // [dspark 2026-10-13] The vendor Adreno MoE kernels are numerically
-            // broken on Adreno 830 (SM8750, OpenCL 0800.71 / E031.47.18.49):
-            // llama.cpp's own test-backend-ops fails for q4_0 (ERR ~0.4),
-            // q4_K (ERR ~0.9 + NaN on large shapes) and mxfp4 (GGML_ABORT
-            // crash), on BOTH our vendored b11267 and upstream master
-            // 9d7d504. Real-model symptom: decode emits one fixed broken
-            // token (id 127) -> empty output.
-            //
-            // Instead, the dense-loop path runs one VALIDATED dense GEMV per
-            // selected expert (weights stored per-layer in the dense 2D
-            // noshuffle layout by set_tensor; accumulation via kernel_add_row).
-            // Admit it only when the per-expert slice sizes respect the
-            // sub-buffer alignment and the accumulatioin constraints hold;
-            // otherwise fall back to CPU (same proven GPU-dense + CPU-expert
-            // split as before).
-            if (moe_use_dense_loop(op->src[0]->type) &&
-                (op->src[0]->type == GGML_TYPE_Q4_0 || op->src[0]->type == GGML_TYPE_Q4_K) &&
-                op->src[1]->type == GGML_TYPE_F32 &&
-                op->src[2]->type == GGML_TYPE_I32 &&
-                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
-                const int N = (int)op->src[0]->ne[1];
-                const int K = (int)op->src[0]->ne[0];
-                const size_t align = backend_ctx->alignment;
-                size_t s_q = 0, s_d = 0, s_dm = 0, s_s = 0;
-                bool shape_ok = false;
-                if (op->src[0]->type == GGML_TYPE_Q4_0) {
-                    shape_ok = (K % 32 == 0);
-                    s_q = (size_t)N * (K/4)  * 2;
-                    s_d = (size_t)N * (K/32) * 2;
-                } else {
-                    shape_ok = (K % 256 == 0);
-                    s_q  = (size_t)N * (K/4)   * 2;
-                    s_d  = (size_t)N * (K/256) * 2;
-                    s_dm = (size_t)N * (K/256) * 2;
-                    s_s  = (size_t)N * (K/256) * 12;
-                }
-                // N%4: kernel_add_row works on float4; slice sizes must be
-                // sub-buffer-creatable at expert boundaries.
-                if (shape_ok && N % 4 == 0 &&
-                    s_q % align == 0 && s_d % align == 0 &&
-                    (s_dm == 0 || s_dm % align == 0) &&
-                    (s_s == 0 || s_s % align == 0)) {
-                    return true;
-                }
+        case GGML_OP_MUL_MAT_ID: {
+            // [tongyi R2 2026-10-25] 准入判定唯一实现 = 路由表 resolve_admission
+            //（dense 分支/q3_K batched 分支/vendor 诊断分支全部并入表行；语义与 legacy
+            // 逐字等价，tongyi_route_table_test 族 A 18.9 万 case 对拍钉死。准入门集
+            // 不含 view/cols —— 与 legacy supports_op 一致，那是派发侧 gate 6/8）。
+            if (!op->src[0] || !op->src[1]) {
                 return false;
             }
-            // [dspark 2026-10-14] q3_K batched-MoE (#28): batched-only GPU path
-            // (no dense q3_K GEMV). Gates mirror set_tensor's Q3_K branch and
-            // ggml_cl_mul_mat_id_batched exactly — a tensor admitted here is
-            // guaranteed to dispatch. The se planes are standalone cl_buffers
-            // (not subbuffers), so only the shape gates apply.
-            // GGML_OPENCL_BATCHED_MOE=0 must reject q3_K here (CPU fallback):
-            // the compute path has no dense q3_K route and would abort.
-            static const bool q3k_batched_moe_enabled = [] {
-                const char * e = getenv("GGML_OPENCL_BATCHED_MOE");
-                return !e || e[0] != '0';
-            }();
-            if (q3k_batched_moe_enabled &&
-                op->src[0]->type == GGML_TYPE_Q3_K &&
-                op->src[0]->ne[2] > 1 &&   // E==1: set_tensor skips packing -> must stay off-GPU
-                op->src[1]->type == GGML_TYPE_F32 &&
-                op->src[2]->type == GGML_TYPE_I32 &&
-                ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
-                use_adreno_moe_kernels(backend_ctx, op->src[0]) &&
-                (op->src[0]->ne[0] % 256 == 0) && (op->src[0]->ne[1] % 128 == 0)) {
-                return true;
-            }
-            // Vendor single-dispatch MoE kernels (q4_0/q8_0/mxfp4): broken on
-            // Adreno 830 (see moe_use_dense_loop notes) — diagnostics only via
-            // GGML_OPENCL_MUL_MAT_ID=1.
-            {
-                static const bool mul_mat_id_ocl_enabled = [] {
-                    const char * e = getenv("GGML_OPENCL_MUL_MAT_ID");
-                    return e && e[0] == '1';
-                }();
-                if (mul_mat_id_ocl_enabled &&
-                    (op->src[0]->type == GGML_TYPE_Q4_0 ||
-                     op->src[0]->type == GGML_TYPE_Q8_0 ||
-                     op->src[0]->type == GGML_TYPE_MXFP4) &&
-                    op->src[1]->type == GGML_TYPE_F32 &&
-                    ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1])) {
-                    return true;
-                }
-            }
-            return false;
+            tongyi::RouteQuery rq = {};
+            rq.op = tongyi::ROUTE_MUL_MAT_ID;
+            rq.type = (tongyi::RType)op->src[0]->type;
+            rq.K = (int)op->src[0]->ne[0];
+            rq.M = (int)op->src[0]->ne[1];
+            rq.E = (int)op->src[0]->ne[2];
+            rq.n_used = op->src[2] ? (int)op->src[2]->ne[0] : 0;
+            rq.n_tok  = op->src[2] ? (int)op->src[2]->ne[1] : 0;
+            rq.name = op->src[0]->name;
+            rq.src1_f32 = op->src[1]->type == GGML_TYPE_F32;
+            rq.src2_i32 = op->src[2] && op->src[2]->type == GGML_TYPE_I32;
+            rq.contiguous0 = ggml_is_contiguous(op->src[0]);
+            rq.contiguous1 = ggml_is_contiguous(op->src[1]);
+            rq.is_view = false;   // 准入语义不看 view（legacy 同）
+            rq.view_slot_aligned = false;
+            rq.align_bytes = backend_ctx ? backend_ctx->alignment : 0;
+            return tongyi::resolve_admission(rq, tongyi_route_context(backend_ctx)).admitted();
+        }
         case GGML_OP_RESHAPE:
         case GGML_OP_VIEW:
         case GGML_OP_PERMUTE:
@@ -10454,6 +10920,23 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]);
         case GGML_OP_IM2COL:
             return true;
+        case GGML_OP_MOE_TOPK_FUSED: {
+            // [tongyi M-R1] pinned grouped-MoE router shape (bailingmoe3/Ling):
+            // E=128 G=8 epg=16 gu=4 K=8, F32 in/out. Anything else -> CPU ref.
+            if (op->src[0] == nullptr || op->src[0]->type != GGML_TYPE_F32 ||
+                op->type != GGML_TYPE_F32 || !ggml_is_contiguous(op->src[0])) {
+                return false;
+            }
+            if (op->src[1] && (op->src[1]->type != GGML_TYPE_F32 || !ggml_is_contiguous(op->src[1]))) {
+                return false;
+            }
+            const int E_f   = ggml_get_op_params_i32(op, 0);
+            const int G_f   = ggml_get_op_params_i32(op, 1);
+            const int epg_f = ggml_get_op_params_i32(op, 2);
+            const int gu_f  = ggml_get_op_params_i32(op, 3);
+            const int K_f   = ggml_get_op_params_i32(op, 4);
+            return E_f == 128 && G_f == 8 && epg_f == 16 && gu_f == 4 && K_f == 8;
+        }
         case GGML_OP_ARGSORT: {
             load_cl_kernels_argsort(backend_ctx);
 
@@ -25042,10 +25525,52 @@ static void ggml_cl_mmid_gate_fail(int gate_id, const char * gate,
     }
 }
 
+
+// [tongyi R1 2026-10-25] 表驱动路由记账（行为零变化）：查表一次、限流打一行决策日志；
+// 控制流完全不变——下面的旧门仍是权威，R2 才翻转（等价性由 tongyi_route_table_test
+// 的 legacy 参照对拍钉死）。放在 gate 0/1 之后（src1/src2 已验型）。
+static void tongyi_route_bookkeeping(const ggml_backend_opencl_context * backend_ctx,
+        const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2) {
+    static std::atomic<int> route_logs = {0};
+    if (route_logs.fetch_add(1) >= 12) return;   // 每 (类型,形状) 首见各占一条，12 条封顶
+    const ggml_tensor * soa0 = src0->view_src != nullptr ? src0->view_src : src0;
+    tongyi::RouteQuery rq = {};
+    rq.op = tongyi::ROUTE_MUL_MAT_ID;
+    rq.type = (tongyi::RType)src0->type;
+    rq.K = (int)src0->ne[0];
+    rq.M = (int)src0->ne[1];
+    rq.E = (int)src0->ne[2];
+    rq.n_used = src2 ? (int)src2->ne[0] : 0;
+    rq.n_tok  = src2 ? (int)src2->ne[1] : 0;
+    rq.name = soa0->name;
+    rq.src1_f32 = src1 && src1->type == GGML_TYPE_F32;
+    rq.src2_i32 = src2 && src2->type == GGML_TYPE_I32;
+    rq.contiguous0 = ggml_is_contiguous(src0);
+    rq.contiguous1 = src1 ? ggml_is_contiguous(src1) : false;
+    rq.is_view = src0->view_src != nullptr;
+    rq.view_slot_aligned = true;   // 槽位对齐是运行时门（gate 6 会精查），记账侧不拦
+    rq.align_bytes = 0;            // dense 对齐门记账侧跳过（supports_op 侧才生效）
+    const tongyi::RouteResult rr = tongyi::resolve(rq, tongyi_route_context(backend_ctx));
+    if (rr.admitted()) {
+        GGML_LOG_INFO("ggml_opencl: route[%s] type=%s K=%d M=%d E=%d -> %s (%s)%s\n",
+                      soa0->name, ggml_type_name(src0->type), rq.K, rq.M, rq.E,
+                      tongyi::route_kind_name(rr.spec->kind), rr.spec->name,
+                      rr.refuse_detail ? rr.refuse_detail : "");
+    } else {
+        GGML_LOG_INFO("ggml_opencl: route[%s] type=%s K=%d M=%d E=%d -> REFUSED gate=%s%s (%s)\n",
+                      soa0->name, ggml_type_name(src0->type), rq.K, rq.M, rq.E,
+                      rr.refuse_gate ? rr.refuse_gate : "?",
+                      rr.attempted ? " fallback=" : "",
+                      rr.attempted && rr.attempted->fallback ? rr.attempted->fallback : "");
+    }
+}
+
 static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         const ggml_tensor * src0, const ggml_tensor * src1,
         const ggml_tensor * src2, ggml_tensor * dst) {
+    int64_t ht_t0_batched = 0;   // [tongyi host-timing]
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    ht_t0_batched = ggml_time_us();   // [tongyi host-timing] whole-executor host time
     if (src1->type != GGML_TYPE_F32 || src2->type != GGML_TYPE_I32) {
         ggml_cl_mmid_gate_fail(0, "src_types", src0, src1, src2, "need src1=F32 src2=I32");
         return false;
@@ -25060,9 +25585,16 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // (se0/se1) + re-packed uint q plane — the q4_K dodge recipe applied to
     // q3_K's hmask/qs/scales layout. Gates: K%256 (superblock scales), M%128.
     const bool is_q3_k = src0->type == GGML_TYPE_Q3_K;
-    if (!is_q4_0 && !is_q4_k && !is_q3_k) {
-        ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K only");
+    // [tongyi M1 2026-10-25] iq4_xs 入表（batched-only 家族，派发在族内核选择前的 M1 分支）
+    const bool is_iq4xs = src0->type == GGML_TYPE_IQ4_XS;
+    if (!is_q4_0 && !is_q4_k && !is_q3_k && !is_iq4xs) {
+        ggml_cl_mmid_gate_fail(1, "quant_type", src0, src1, src2, "batched covers q4_0/q4_K/q3_K/iq4_xs only");
         return false;
+    }
+    // [tongyi R1 2026-10-25] 查表记账（零行为变化）：一行 route 决策日志，控制流交给下面的旧门。
+    {
+        ggml_backend_opencl_context * bk_ctx = (ggml_backend_opencl_context *)backend->context;
+        tongyi_route_bookkeeping(bk_ctx, src0, src1, src2);
     }
     // [dspark 2026-10-14] HISTORICAL (superseded by the v2 note below): q4_K
     // batched MoE DISABLED — Adreno 830 (E031.47.18.49)
@@ -25122,12 +25654,120 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         ggml_cl_mmid_gate_fail(3, "extras", src0, src1, src2, "src1/src2/dst extra missing");
         return false;
     }
-    cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : pextra3k->q);
+
+    // [tongyi M1 2026-10-25] iq4_xs batched（G-733 路线①）：直读原始块布局
+    // （[E][M][K/256*136B]），无平面无 q_img——必须在族平面解引用（wq/wq_img_slot）
+    // 之前分流。b 激活图像每调用自建（无缓存，正确性优先；M2 再入 moe_b_cache）。
+    if (is_iq4xs) {
+        const int    m1_K    = (int)src0->ne[0];
+        const int    m1_M    = (int)src0->ne[1];
+        const int    m1_E    = (int)src0->ne[2];
+        const int    m1_used = (int)src2->ne[0];
+        const int    m1_tok  = (int)src2->ne[1];
+        const int    m1_ne11 = (int)src1->ne[1];
+        const int    m1_ids_row = (int)(src2->nb[1] / sizeof(int));
+        const long long m1_cols = (long long)m1_used * m1_tok;
+        cl_int       err;
+        if (m1_K % 256 != 0) {
+            ggml_cl_mmid_gate_fail(7, "shape_align", src0, src1, src2, "iq4_xs K%256 (block_iq4_xs)");
+            return false;
+        }
+        ggml_tensor_extra_cl * raw0 = (ggml_tensor_extra_cl *)soa0->extra;
+        if (!raw0 || !raw0->data_device) {
+            ggml_cl_mmid_gate_fail(2, "planes_iq4xs", src0, src1, src2, "raw tensor buffer missing");
+            return false;
+        }
+        const cl_ulong b_org = (cl_ulong)(extra1->offset + src1->view_offs);
+        const size_t   b_sz  = (size_t)src1->ne[2] * (size_t)m1_ne11 * (size_t)m1_K * sizeof(float);
+        // [tongyi M2 2026-10-25] b 激活图像接入族 moe_b_cache（此前每 op 自建：
+        // 族注释实锤建图开销可大于内核本体；160 槽覆盖整周期跨 token 复用）
+        static const bool m1_bcache = [] { const char * e = getenv("GGML_OPENCL_MOE_BCACHE"); return !e || e[0] != '0'; }();
+        cl_mem bsub = nullptr, m1_bimg = nullptr;
+        bool   m1_b_owned = false;   // 未入缓存（cache off）→ 用后释放
+        int    m1_slot = -1;
+        if (m1_bcache) {
+            for (int ci = 0; ci < 160; ++ci) {
+                auto & ce = backend_ctx->moe_b_cache[ci];
+                if (ce.sub && ce.src == extra1->data_device && ce.origin == (size_t)b_org && ce.size == b_sz) {
+                    bsub = ce.sub;
+                    m1_bimg = ce.img;
+                    break;
+                }
+            }
+        }
+        if (m1_bimg == nullptr) {
+            cl_buffer_region breg = { (size_t)b_org, b_sz };
+            CL_CHECK((bsub = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &breg, &err), err));
+            if (m1_bcache) {
+                m1_slot = backend_ctx->moe_b_cache_next;
+                backend_ctx->moe_b_cache_next = (backend_ctx->moe_b_cache_next + 1) % 160;
+                auto & slot = backend_ctx->moe_b_cache[m1_slot];
+                if (slot.sub) {
+                    CL_CHECK(clReleaseMemObject(slot.img));
+                    CL_CHECK(clReleaseMemObject(slot.sub));
+                    slot.sub = nullptr; slot.img = nullptr; slot.src = nullptr;
+                    slot.origin = 0; slot.size = 0;
+                }
+                slot.sub = bsub;
+            } else {
+                m1_b_owned = true;
+            }
+            cl_image_format bfmt = { CL_RGBA, CL_FLOAT };
+            cl_image_desc bdesc;
+            memset(&bdesc, 0, sizeof(bdesc));
+            bdesc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+            bdesc.image_width = b_sz / 16;   // float4 像素（同族 b_img）
+            bdesc.buffer      = bsub;
+            CL_CHECK((m1_bimg = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &bfmt, &bdesc, NULL, &err), err));
+            if (m1_slot >= 0) {
+                auto & slot = backend_ctx->moe_b_cache[m1_slot];
+                slot.src = extra1->data_device;
+                slot.origin = (size_t)b_org;
+                slot.size = b_sz;
+                slot.img = m1_bimg;
+            }
+        }
+
+        cl_mem   src0_raw = raw0->data_device;
+        cl_ulong src0_off = (cl_ulong)(raw0->offset + soa0->view_offs);
+        int      m1_ids_off = (int)((extra2->offset + src2->view_offs) / sizeof(int));
+        cl_ulong m1_dst_base = (cl_ulong)(extrad->offset + dst->view_offs);
+        cl_kernel km1 = backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched;
+        cl_uint ka = 0;
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &src0_raw));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong), &src0_off));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &m1_bimg));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &extra2->data_device));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ids_off));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_mem),  &extrad->data_device));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),&m1_dst_base));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_K));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_M));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_used));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_tok));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ne11));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_E));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(int),     &m1_ids_row));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[1]));
+        CL_CHECK(clSetKernelArg(km1, ka++, sizeof(cl_ulong),(cl_ulong *)&dst->nb[2]));
+        // 显式 local（Adreno 对 2D 网格 + NULL local 有挂死前科）
+        size_t m1_gws[2] = { (size_t)m1_cols, (size_t)m1_M };
+        size_t m1_lws[2] = { (m1_cols < 8) ? (size_t)m1_cols : 8, 4 };
+        backend_ctx->enqueue_ndrange_kernel(km1, 2, m1_gws, m1_lws, dst);
+        if (m1_b_owned) {
+            CL_CHECK(clReleaseMemObject(m1_bimg));
+            CL_CHECK(clReleaseMemObject(bsub));
+        }
+        return true;
+    }
+    // [tongyi M1 2026-10-25] iq4_xs 走下方 M1 原始布局分支，不消费族平面——
+    // 这里必须给 nullptr，否则三元链落到 pextra3k（NULL）解引用 SEGV（真机实锤）
+    cl_mem wq = is_q4_0 ? pextra40->q : (is_q4_k ? pextra4k->q : (is_iq4xs ? nullptr : pextra3k->q));
     // q4_0: one d plane; q4_K: two precomputed effective-scale planes;
     // q3_K: two host-decoded dl planes (row-even/row-odd)
-    cl_mem wd = is_q4_0 ? pextra40->d : (is_q4_k ? pextra4k->seff : pextra3k->se0);
-    cl_mem we = is_q4_0 ? nullptr     : (is_q4_k ? pextra4k->meff : pextra3k->se1);
-    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : &pextra3k->q_img);
+    cl_mem wd = is_q4_0 ? pextra40->d : (is_q4_k ? pextra4k->seff : (is_iq4xs ? nullptr : pextra3k->se0));
+    cl_mem we = is_q4_0 ? nullptr     : (is_q4_k ? pextra4k->meff : (is_iq4xs ? nullptr : pextra3k->se1));
+    cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : (is_iq4xs ? nullptr : &pextra3k->q_img));
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
     if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
@@ -25516,6 +26156,7 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         CL_CHECK(clReleaseMemObject(b_img));
         CL_CHECK(clReleaseMemObject(b_sub_buf));
     }
+    backend_ctx->ht_sub_ms += (ggml_time_us() - ht_t0_batched) / 1000.0;
     return true;
 #else
     GGML_UNUSED(backend); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(src2); GGML_UNUSED(dst);
@@ -29700,6 +30341,13 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
         }
         GGML_ABORT("q3_K batched MoE: precondition failed (set_tensor/support gate mismatch)");
     }
+    // [tongyi M1 2026-10-25] iq4_xs: batched-only (same contract as q3_K)
+    if (src0->type == GGML_TYPE_IQ4_XS) {
+        if (batched_moe_enabled && ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
+            return;
+        }
+        GGML_ABORT("iq4_xs batched MoE: precondition failed (set_tensor/support gate mismatch)");
+    }
 
     int sgs   = 32; // subgroup size
     int nsg   = 1;  // number of subgroups
@@ -32256,6 +32904,11 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
                                        ? backend_ctx->kernel_cpy_f32_f32_pack
                                        : backend_ctx->kernel_cpy_f32_f32;
                     break;
+                case GGML_TYPE_I32:
+                    // [tongyi M-R1] numeric cast (ggml_cast F32->I32 wiring for
+                    // the fused router ids); matches CPU f32_to_i32 truncation
+                    kernel = backend_ctx->kernel_cpy_f32_i32;
+                    break;
                 default:
                     GGML_ASSERT(false && "not implemented");
             }
@@ -33043,6 +33696,72 @@ static void ggml_cl_argsort(ggml_backend_t backend, const ggml_tensor * src0, co
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 }
 
+// [tongyi M-R1 2026-10-25] fused MoE router top-k executor.
+// One workgroup per token row, lws=128 (one thread per expert, E<=128).
+// dst = [K, n_tokens, 2] F32: plane 0 = normalized weights, plane 1 = ids
+// as exact float values (wired to I32 through a f32->i32 cpy kernel).
+static void ggml_cl_moe_topk_fused(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra);
+    GGML_ASSERT(dst && dst->extra);
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src0) && ggml_is_contiguous(dst));
+
+    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+
+    load_cl_kernels_moe_topk_fused(backend_ctx);
+
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
+    ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
+
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
+    cl_ulong offsetd = extrad->offset + dst->view_offs;
+
+    // bias (src1) may be NULL; pass the logits buffer as a dummy when absent
+    // (the kernel never reads it when has_bias == 0)
+    cl_mem bias_mem = extra0->data_device;
+    cl_ulong offset1 = offset0;
+    bool has_bias = false;
+    if (src1) {
+        GGML_ASSERT(src1->extra);
+        ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
+        bias_mem = extra1->data_device;
+        offset1  = extra1->offset + src1->view_offs;
+        has_bias = true;
+    }
+
+    const int E   = ggml_get_op_params_i32(dst, 0);
+    const int G   = ggml_get_op_params_i32(dst, 1);
+    const int epg = ggml_get_op_params_i32(dst, 2);
+    const int gu  = ggml_get_op_params_i32(dst, 3);
+    const int K   = ggml_get_op_params_i32(dst, 4);
+    const int nt  = (int) dst->ne[1];
+    const float w_scale = ggml_get_op_params_f32(dst, 6);
+
+    GGML_ASSERT(E <= 128 && G <= 8 && gu <= 4 && K <= 8);
+
+    cl_kernel kernel = backend_ctx->kernel_moe_topk_fused;
+
+    CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_ulong), &offset0));
+    CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &bias_mem));
+    CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_ulong), &offset1));
+    CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel,  6, sizeof(int),      &E));
+    CL_CHECK(clSetKernelArg(kernel,  7, sizeof(int),      &G));
+    CL_CHECK(clSetKernelArg(kernel,  8, sizeof(int),      &epg));
+    CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &gu));
+    CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &K));
+    CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),      &nt));
+    CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),      &has_bias));
+    CL_CHECK(clSetKernelArg(kernel, 13, sizeof(float),    &w_scale));
+
+    size_t global_work_size[] = {(size_t)128, (size_t)nt, 1};
+    size_t local_work_size[]  = {(size_t)128, 1, 1};
+
+    backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+}
+
 static void ggml_cl_sum_rows(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
     GGML_ASSERT(src0->extra);
@@ -33634,6 +34353,12 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
                 return false;
             }
             func = ggml_cl_mean;
+            break;
+        case GGML_OP_MOE_TOPK_FUSED:
+            if (!any_on_device) {
+                return false;
+            }
+            func = ggml_cl_moe_topk_fused;
             break;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(tensor)) {

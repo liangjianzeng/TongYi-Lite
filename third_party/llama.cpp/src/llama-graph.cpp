@@ -2274,6 +2274,15 @@ ggml_tensor * llm_graph_context::build_ffn(
     return cur;
 }
 
+// [tongyi M-R1 2026-10-25] fused router gate (GGML_FUSED_MOE_TOPK=1), default off
+static bool llm_moe_topk_fused_env() {
+    static const bool en = [] {
+        const char * e = getenv("GGML_FUSED_MOE_TOPK");
+        return e && e[0] == '1';
+    }();
+    return en;
+}
+
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
          ggml_tensor * gate_inp,
@@ -2370,119 +2379,162 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(logits, "ffn_moe_logits_biased", il);
     }
 
-    ggml_tensor * probs = nullptr;
-    switch (gating_op) {
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
-            {
-                probs = ggml_soft_max(ctx0, logits); // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID:
-            {
-                probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT:
-            {
-                probs = logits; // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SQRT_SOFTPLUS:
-            {
-                probs = ggml_sqrt(ctx0, ggml_softplus(ctx0, logits)); // [n_expert, n_tokens]
-            } break;
-        default:
-            GGML_ABORT("fatal error");
-    }
-    cb(probs, "ffn_moe_probs", il);
+    // [tongyi M-R1 2026-10-25] 融合路由：把路由段 ~13 个小 kernel（SIGMOID..weights
+    // 归一化）吃进 1 个 GGML_OP_MOE_TOPK_FUSED + 1 个 f32->i32 cast，仅分组 MoE 且
+    // 形状 pin 到 Ling/bailingmoe3（E=128 G=8 epg=16 gu=4 K=8）。env 默认关
+    // （GGML_FUSED_MOE_TOPK=1 开）。正确性契约见 ggml_moe_topk_fused（ggml.h）与
+    // moe_topk_fused_core.h：ids 走数值 float（id<2^24 经 ggml_cast 位精确），
+    // weights 用无 bias sigmoid gather + clamp/sum/div/scale 归一化，序与原图逐算子
+    // 一致（CPU 参考已对拍 2.66M 断言，见 moe_topk_fused_route_test.cpp）。
+    const bool fused_router = llm_moe_topk_fused_env()
+        && gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID
+        && probs_in == nullptr && selected_experts_in == nullptr && post_exp_norm == nullptr
+        && !(moe_slots && moe_slots->uses_layer(il))
+        && arch != LLM_ARCH_LLAMA4 && arch != LLM_ARCH_GROVEMOE
+        && hparams.n_expert_groups > 1 && n_tokens > 0
+        && n_expert == 128
+        && hparams.n_expert_groups == 8
+        && n_expert / hparams.n_expert_groups == 16
+        && hparams.n_group_used == 4
+        && n_expert_used == 8
+        && logits->type == GGML_TYPE_F32;
 
-    // add experts selection bias - introduced in DeepSeek V3
-    // leave probs unbiased as it's later used to get expert weights
-    ggml_tensor * selection_probs = probs;
-    if (exp_probs_b != nullptr) {
-        selection_probs = ggml_add(ctx0, probs, exp_probs_b);
-        cb(selection_probs, "ffn_moe_probs_biased", il);
-    }
-
-    // llama4 doesn't have exp_probs_b, and sigmoid is only used after top_k
-    // see: https://github.com/meta-llama/llama-models/blob/699a02993512fb36936b1b0741e13c06790bcf98/models/llama4/moe.py#L183-L198
-    if (arch == LLM_ARCH_LLAMA4) {
-        selection_probs = logits;
-    }
-
-    if (arch == LLM_ARCH_GROVEMOE) {
-        selection_probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
-        cb(selection_probs, "ffn_moe_probs_biased", il);
-    }
-
-    // select top n_group_used expert groups
-    // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
-    if (hparams.n_expert_groups > 1 && n_tokens > 0) {
-        const int64_t n_exp_per_group = n_expert / hparams.n_expert_groups;
-
-        // organize experts into n_expert_groups
-        ggml_tensor * selection_groups = ggml_reshape_3d(ctx0, selection_probs, n_exp_per_group, hparams.n_expert_groups, n_tokens); // [n_exp_per_group, n_expert_groups, n_tokens]
-
-        ggml_tensor * group_scores = ggml_argsort_top_k(ctx0, selection_groups, 2); // [2, n_expert_groups, n_tokens]
-        group_scores = ggml_get_rows(ctx0, ggml_reshape_4d(ctx0, selection_groups, 1, selection_groups->ne[0], selection_groups->ne[1], selection_groups->ne[2]), group_scores); // [1, 2, n_expert_groups, n_tokens]
-
-        // get top n_group_used expert groups
-        group_scores = ggml_sum_rows(ctx0, ggml_reshape_3d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2], group_scores->ne[3])); // [1, n_expert_groups, n_tokens]
-        group_scores = ggml_reshape_2d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2]); // [n_expert_groups, n_tokens]
-
-        ggml_tensor * expert_groups = ggml_argsort_top_k(ctx0, group_scores, hparams.n_group_used); // [n_group_used, n_tokens]
-        cb(expert_groups, "ffn_moe_group_topk", il);
-
-        // mask out the other groups
-        selection_probs = ggml_get_rows(ctx0, selection_groups, expert_groups); // [n_exp_per_group, n_group_used, n_tokens]
-        selection_probs = ggml_set_rows(ctx0, ggml_fill(ctx0, selection_groups, -INFINITY), selection_probs, expert_groups); // [n_exp_per_group, n_expert_groups, n_tokens]
-        selection_probs = ggml_reshape_2d(ctx0, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
-        cb(selection_probs, "ffn_moe_probs_masked", il);
-    }
-
-    // select experts
+    ggml_tensor * weights = nullptr;
     ggml_tensor * selected_experts = selected_experts_in;
-    if (selected_experts == nullptr) {
-        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
-        cb(selected_experts->src[0], "ffn_moe_argsort", il);
-    }
-    cb(selected_experts, "ffn_moe_topk", il);
+    if (fused_router) {
+        // w_scale 原样下发：kernel/CPU 核心内按 (ws != 0 && ws != 1) 折算，
+        // 与原路径「div 之后 scale」的两级舍入顺序一致
+        ggml_tensor * fused = ggml_moe_topk_fused(ctx0, logits, exp_probs_b,
+                n_expert, hparams.n_expert_groups, n_expert / hparams.n_expert_groups,
+                hparams.n_group_used, n_expert_used, w_scale);
+        cb(fused, "ffn_moe_topk_fused", il);
 
-    if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
-        // TODO: Use scalar div instead when/if implemented
-        ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
-        selected_experts = ggml_cast(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts)), GGML_TYPE_I32);
-        probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+        // plane 0 = weights：view [1, n_expert_used, n_tokens]（连续，等效原 get_rows 输出）
+        weights = ggml_view_3d(ctx0, fused, 1, n_expert_used, n_tokens,
+                fused->nb[0], fused->nb[1], 0);
+        cb(weights, "ffn_moe_weights", il);
+
+        // plane 1 = ids：view [n_expert_used, n_tokens] -> ggml_cast(F32->I32)。
+        // ggml 的 f32->i32 是数值截断（ggml-cpu/common.h f32_to_i32），ids 存的是
+        // 精确 float 值（非位模式），id < 2^24 时 roundtrip 位精确
+        ggml_tensor * ids_f = ggml_view_2d(ctx0, fused, n_expert_used, n_tokens,
+                fused->nb[1], (size_t) n_expert_used * n_tokens * sizeof(float));
+        selected_experts = ggml_cast(ctx0, ids_f, GGML_TYPE_I32);
+        cb(selected_experts, "ffn_moe_topk", il);
     } else {
-        probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
-    }
+        ggml_tensor * probs = nullptr;
+        switch (gating_op) {
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
+                {
+                    probs = ggml_soft_max(ctx0, logits); // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID:
+                {
+                    probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT:
+                {
+                    probs = logits; // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SQRT_SOFTPLUS:
+                {
+                    probs = ggml_sqrt(ctx0, ggml_softplus(ctx0, logits)); // [n_expert, n_tokens]
+                } break;
+            default:
+                GGML_ABORT("fatal error");
+        }
+        cb(probs, "ffn_moe_probs", il);
 
-    ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
-    cb(weights, "ffn_moe_weights", il);
+        // add experts selection bias - introduced in DeepSeek V3
+        // leave probs unbiased as it's later used to get expert weights
+        ggml_tensor * selection_probs = probs;
+        if (exp_probs_b != nullptr) {
+            selection_probs = ggml_add(ctx0, probs, exp_probs_b);
+            cb(selection_probs, "ffn_moe_probs_biased", il);
+        }
+
+        // llama4 doesn't have exp_probs_b, and sigmoid is only used after top_k
+        // see: https://github.com/meta-llama/llama-models/blob/699a02993512fb36936b1b0741e13c06790bcf98/models/llama4/moe.py#L183-L198
+        if (arch == LLM_ARCH_LLAMA4) {
+            selection_probs = logits;
+        }
+
+        if (arch == LLM_ARCH_GROVEMOE) {
+            selection_probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
+            cb(selection_probs, "ffn_moe_probs_biased", il);
+        }
+
+        // select top n_group_used expert groups
+        // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
+        if (hparams.n_expert_groups > 1 && n_tokens > 0) {
+            const int64_t n_exp_per_group = n_expert / hparams.n_expert_groups;
+
+            // organize experts into n_expert_groups
+            ggml_tensor * selection_groups = ggml_reshape_3d(ctx0, selection_probs, n_exp_per_group, hparams.n_expert_groups, n_tokens); // [n_exp_per_group, n_expert_groups, n_tokens]
+
+            ggml_tensor * group_scores = ggml_argsort_top_k(ctx0, selection_groups, 2); // [2, n_expert_groups, n_tokens]
+            group_scores = ggml_get_rows(ctx0, ggml_reshape_4d(ctx0, selection_groups, 1, selection_groups->ne[0], selection_groups->ne[1], selection_groups->ne[2]), group_scores); // [1, 2, n_expert_groups, n_tokens]
+
+            // get top n_group_used expert groups
+            group_scores = ggml_sum_rows(ctx0, ggml_reshape_3d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2], group_scores->ne[3])); // [1, n_expert_groups, n_tokens]
+            group_scores = ggml_reshape_2d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2]); // [n_expert_groups, n_tokens]
+
+            ggml_tensor * expert_groups = ggml_argsort_top_k(ctx0, group_scores, hparams.n_group_used); // [n_group_used, n_tokens]
+            cb(expert_groups, "ffn_moe_group_topk", il);
+
+            // mask out the other groups
+            selection_probs = ggml_get_rows(ctx0, selection_groups, expert_groups); // [n_exp_per_group, n_group_used, n_tokens]
+            selection_probs = ggml_set_rows(ctx0, ggml_fill(ctx0, selection_groups, -INFINITY), selection_probs, expert_groups); // [n_exp_per_group, n_expert_groups, n_tokens]
+            selection_probs = ggml_reshape_2d(ctx0, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
+            cb(selection_probs, "ffn_moe_probs_masked", il);
+        }
+
+        // select experts
+        if (selected_experts == nullptr) {
+            selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+            cb(selected_experts->src[0], "ffn_moe_argsort", il);
+        }
+        cb(selected_experts, "ffn_moe_topk", il);
+
+        if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
+            // TODO: Use scalar div instead when/if implemented
+            ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
+            selected_experts = ggml_cast(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts)), GGML_TYPE_I32);
+            probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+        } else {
+            probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+        }
+
+        weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+        cb(weights, "ffn_moe_weights", il);
 
 
-    if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
-        weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
-        cb(weights, "ffn_moe_weights_softmax", il);
-    }
+        if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
+            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+            weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
+            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+            cb(weights, "ffn_moe_weights_softmax", il);
+        }
 
-    if (norm_w) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+        if (norm_w) {
+            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
 
-        ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
-        cb(weights_sum, "ffn_moe_weights_sum", il);
+            ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
+            cb(weights_sum, "ffn_moe_weights_sum", il);
 
-        // Avoid division by zero, clamp to smallest number representable by F16
-        weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
-        cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
+            // Avoid division by zero, clamp to smallest number representable by F16
+            weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
+            cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
 
-        weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
-        cb(weights, "ffn_moe_weights_norm", il);
+            weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
+            cb(weights, "ffn_moe_weights_norm", il);
 
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
-    }
-    if (w_scale != 0.0f && w_scale != 1.0f) {
-        weights = ggml_scale(ctx0, weights, w_scale);
-        cb(weights, "ffn_moe_weights_scaled", il);
+            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+        }
+        if (w_scale != 0.0f && w_scale != 1.0f) {
+            weights = ggml_scale(ctx0, weights, w_scale);
+            cb(weights, "ffn_moe_weights_scaled", il);
+        }
     }
 
     //call early so that topk-moe can be used

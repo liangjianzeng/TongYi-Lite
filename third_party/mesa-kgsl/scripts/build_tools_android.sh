@@ -17,7 +17,8 @@ if [ -z "${ANDROID_NDK_HOME:-}" ]; then
 fi
 [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_NDK_HOME" ] || {
   echo "找不到 NDK：设 ANDROID_NDK_HOME" >&2; exit 1; }
-HOSTDIR=$(ls -d "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/* 2>/dev/null | grep -m1 "$(uname -m | sed 's/aarch64/linux-aarch64/;s/x86_64/linux-x86_64/')")
+case "$(uname -s)" in *MINGW*|*MSYS*|*CYGWIN*) HOSTGUESS=windows-x86_64 ;; *) HOSTGUESS="$(uname -m | sed 's/aarch64/linux-aarch64/;s/x86_64/linux-x86_64/')" ;; esac
+HOSTDIR=$(ls -d "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/* 2>/dev/null | grep -m1 "$HOSTGUESS")
 CC="$HOSTDIR/bin/clang"; SYSROOT="$HOSTDIR/sysroot"
 ABI=${ANDROID_ABI:-arm64-v8a}; PLAT=${ANDROID_PLATFORM:-android-28}
 # ANDROID_ABI 是 gradle 口径（arm64-v8a），clang 的 triple 要 aarch64；PLAT 要剥掉 "android-" 前缀

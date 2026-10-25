@@ -607,6 +607,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_MOE_TOPK_FUSED,
+
         GGML_OP_COUNT,
     };
 
@@ -2470,6 +2472,34 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   k);
+
+    // [tongyi M-R1 2026-10-25] fused MoE router top-k pipeline (grouped MoE):
+    // one op replacing SIGMOID + ADD(bias) + group top-2/sum + group top-k
+    // + fill(-inf)/set_rows mask + global top-k + gather + normalize of
+    // build_moe_ffn's routing section (llama-graph.cpp).
+    //
+    //   logits: [E, n_tokens] F32 router logits (pre-activation)
+    //   bias:   [E] F32 expert selection bias (DeepSeek-V3 style), may be NULL
+    //   E = G*epg experts; per-group top-2 sum -> group top-gu -> mask ->
+    //   global top-K; weights gathered from the UNBIASED sigmoid probs and
+    //   normalized by max(sum, 6.103515625e-5), then scaled by w_scale
+    //   (pass 1.0 to skip; the graph-level `w_scale != 0 && != 1` fold).
+    //
+    // dst: [K, n_tokens, 2] F32:
+    //   (:, :, 0) = weights   [K, n_tokens] normalized (consumed via view)
+    //   (:, :, 1) = expert ids [K, n_tokens] stored as exact float values
+    //               (wired to I32 through ggml_cast; bit-exact for ids < 2^24)
+    GGML_API struct ggml_tensor * ggml_moe_topk_fused(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * logits,
+            struct ggml_tensor  * bias,
+            int64_t               n_expert,      // E
+            int64_t               n_groups,      // G
+            int64_t               n_exp_per_group,
+            int64_t               n_groups_used, // gu
+            int64_t               n_expert_used, // K
+            float                 w_scale);
+
 
     // top k elements per row
     // note: the resulting top k indices are in no particular order

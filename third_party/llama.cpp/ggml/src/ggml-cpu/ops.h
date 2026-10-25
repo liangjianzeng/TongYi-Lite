@@ -83,6 +83,13 @@ void ggml_compute_forward_arange(const struct ggml_compute_params * params, stru
 void ggml_compute_forward_timestep_embedding(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_argsort(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_top_k(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+
+// [tongyi M-R1 2026-10-25] fused grouped-MoE router top-k (CPU reference).
+// Byte-exact transcription of build_moe_ffn's routing chain:
+// sigmoid + bias + group(top2,sum) + group(top-gu) + fill/set_rows mask +
+// argsort top-K + unbiased gather + clamp/sum/div(/scale) normalization.
+void ggml_compute_forward_moe_topk_fused(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+
 void ggml_compute_forward_leaky_relu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_tri(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_fill(const struct ggml_compute_params * params, struct ggml_tensor * dst);

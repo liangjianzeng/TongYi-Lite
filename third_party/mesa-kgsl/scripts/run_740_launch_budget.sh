@@ -42,6 +42,7 @@ topops() {
 leg() {  # leg 名字 额外env [ngl]
   local seq="$1" x="$2" ngl="${3:-$NGL}"
   local log="$G/lb740_${seq}_$(date +%H%M%S).log"
+  local la; la=$(adb -s "$DEV" shell "cat /proc/loadavg" 2>/dev/null | tr -d '\r' | cut -d' ' -f1)
   adb -s "$DEV" shell "GGML_OPENCL_NODER_STATS=1 GGML_OPENCL_MOE_FORCE_A7X=1 $x $P GGML_E2E_PROMPT='$PR' timeout 1800 $BIN '$M' - $ngl $TOK 0 > $log 2>&1" >/dev/null
   local n t s o pl
   n=$(opsum "$log"); t=$(adb -s "$DEV" shell "grep -aoE 'tok_s=[0-9.]+' $log | tail -1" | tr -d '\r')
@@ -49,11 +50,11 @@ leg() {  # leg 名字 额外env [ngl]
   o=$(adb -s "$DEV" shell "grep -aoE 'offloaded [0-9]+/[0-9]+ layers' $log | tail -1" | tr -d '\r')
   pl=$(adb -s "$DEV" shell "grep -ac 'selected platform' $log" | tr -d '\r')
   local per; per=$(awk -v n="${n:-0}" -v t="$TOK" 'BEGIN{printf "%.0f", n/t}')
-  printf "%-12s ops/tok=%-6s %-11s %-9s %-8s plat=%s\n" "$seq" "${per:-0}" "$t" "$s" "$o" "$pl"
+  printf "%-12s ops/tok=%-6s %-11s %-9s %-8s plat=%s la=%s\n" "$seq" "${per:-0}" "$t" "$s" "$o" "$pl" "${la:-?}"
   # R8(h)：结构字段缺任一项，这条腿作废（CPU 参照腿 ngl=0 没有 GPU 算子，不许拿 ops 作废它）
   if { [ "${ngl}" != "0" ] && [ "${per:-0}" -lt 1 ]; } || [ -z "$t" ] || [ -z "$s" ] || [ -z "$o" ] || [ "${pl:-0}" -lt 1 ]; then
     echo "   => 作废（R8(h) 结构字段不全）：$log"
-    adb -s "$DEV" shell "grep -aiE 'unable to allocate|FATAL|kernel compile error|failed to mlock' $log | tail -2" 2>&1 | tr -d '\r' | cut -c1-150 | sed 's/^/      死因: /'
+    adb -s "$DEV" shell "grep -aiE 'unable to allocate|FATAL|kernel compile error|failed to mlock|cannot run the operation|GGML_ABORT|backtrace|signal [0-9]+' $log | tail -3" 2>&1 | tr -d '\r' | cut -c1-150 | sed 's/^/      死因: /'
   else
     echo "   top: $(topops "$log")"
   fi
@@ -64,18 +65,38 @@ leg BASE        ""
 leg APPMOE      "$MOE_APP"
 leg MOEOFF      "LLAMA_MOE_BANK_GPU=0 LLAMA_MOE_UPLOAD=0 LLAMA_MOE_PREFETCH_READ=0 LLAMA_MOE_LOOKAHEAD_PREFETCH=0 LLAMA_MOE_DECODE_WINDOW=0 LLAMA_MOE_IO_THREADS=0"
 leg BASE2       ""
+# [2026-10-25 增] 干净腿（无 noder 插桩）：tok_s 与历史/矩阵可比。带 NODER_STATS 的腿
+# 每节点 clFinish，tok_s ≈ 干净腿的 1/4（实测 0.78 vs 2.97），只可用于腿间相对比较。
+leg_clean CLEAN ""
 echo "== B0. 路由落点实验 G-782（现成的 GGML_OPENCL_OPFILTER，零代码、零重编）=="
-# 这些是 decode 时每层 ~128 float 的小算子（§20.46 点算 = 18 次/层）；GET_ROWS 不许进过滤器：
+# 这些是 decode 时每层 ~128 float 的小数组（§20.46 点算 = 18 次/层）；GET_ROWS 不许进过滤器：
 # 它同时是 embedding gather，按算子名分不清大小，误伤就变成一次大拷贝（这正是最终要按尺寸判定的理由）。
-leg ROUTER1   "GGML_OPENCL_OPFILTER=ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS"
-leg ROUTER2   "GGML_OPENCL_OPFILTER=ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS|SIGMOID"
-leg ROUTER1B  "GGML_OPENCL_OPFILTER=ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS"
+# [2026-10-25 修] 值必须内嵌单引号：不带引号的 | 会被设备 sh 当管道（首跑三腿全作废的根因）。
+leg ROUTER1   "GGML_OPENCL_OPFILTER='ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS'"
+leg ROUTER2   "GGML_OPENCL_OPFILTER='ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS|SIGMOID'"
+leg ROUTER1B  "GGML_OPENCL_OPFILTER='ARGSORT|TOP_K|SET_ROWS|FILL|SUM_ROWS'"
 echo "== B. 融合是否真在干活（算子数不动=没触发）=="
 leg FUSE_ALL_OFF "GGML_OPENCL_DISABLE_FUSION=1"
 leg FUSE_RMSMUL  "GGML_OPENCL_FUSE_RMS_MUL=0"
 leg FUSE_MOECOMB "GGML_OPENCL_FUSE_MOE_COMBINE=0"
 echo "== C. CPU 后端参照（740 上 GPU 必须压过它才算赢，AGENTS 底线档口径）=="
 leg CPUONLY     "" 0
+leg_clean() {  # 干净腿：无 NODER_STATS（tok/s 可与历史干净数对比；ops/token 用插桩腿取）
+  local seq="$1" x="$2" ngl="${3:-$NGL}"
+  local log="$G/lb740_${seq}_$(date +%H%M%S).log"
+  local la; la=$(adb -s "$DEV" shell "cat /proc/loadavg" 2>/dev/null | tr -d '\r' | cut -d' ' -f1)
+  adb -s "$DEV" shell "GGML_OPENCL_MOE_FORCE_A7X=1 $x $P GGML_E2E_PROMPT='$PR' timeout 1800 $BIN '$M' - $ngl $TOK 0 > $log 2>&1" >/dev/null
+  local t s o pl
+  t=$(adb -s "$DEV" shell "grep -aoE 'tok_s=[0-9.]+' $log | tail -1" | tr -d '\r')
+  s=$(adb -s "$DEV" shell "grep -aoE 'splits = [0-9]+' $log | tail -1" | tr -d '\r')
+  o=$(adb -s "$DEV" shell "grep -aoE 'offloaded [0-9]+/[0-9]+ layers' $log | tail -1" | tr -d '\r')
+  pl=$(adb -s "$DEV" shell "grep -ac 'selected platform' $log" | tr -d '\r')
+  printf "%-12s (clean) %-11s %-9s %-8s plat=%s la=%s\n" "$seq" "$t" "$s" "$o" "$pl" "${la:-?}"
+  if [ -z "$t" ] || [ -z "$s" ] || [ -z "$o" ] || [ "${pl:-0}" -lt 1 ]; then
+    echo "   => 作废（R8(h)）：$log"
+  fi
+}
+
 echo "== D. App 侧复验（你自己点，我抓引擎日志）=="
 echo "   先清缓冲：adb -s $DEV logcat -c"
 echo "   在 App 里用 Ling 发一条，然后："

@@ -1126,9 +1126,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "MOE_TOPK_FUSED",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1241,9 +1243,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "moe_topk_fused(x, b)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5490,6 +5494,49 @@ struct ggml_tensor * ggml_argsort_top_k(
                 k, result->ne[1], result->ne[2], result->ne[3],
                    result->nb[1], result->nb[2], result->nb[3],
                 0);
+
+    return result;
+}
+
+// ggml_moe_topk_fused
+//
+// [tongyi M-R1 2026-10-25] fused grouped-MoE router top-k. See ggml.h for the
+// semantics contract. dst = [K, n_tokens, 2] F32: plane 0 = normalized weights,
+// plane 1 = expert ids as exact float values (round-trips through ggml_cast).
+//
+// op params: i32[0..5] = E, G, epg, gu, K, has_bias; f32[6] = w_scale.
+struct ggml_tensor * ggml_moe_topk_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * logits,
+        struct ggml_tensor  * bias,
+        int64_t               n_expert,
+        int64_t               n_groups,
+        int64_t               n_exp_per_group,
+        int64_t               n_groups_used,
+        int64_t               n_expert_used,
+        float                 w_scale) {
+    GGML_ASSERT(logits->type == GGML_TYPE_F32);
+    GGML_ASSERT(n_expert == n_groups * n_exp_per_group);
+    GGML_ASSERT(n_groups_used > 0 && n_groups_used <= n_groups);
+    GGML_ASSERT(n_expert_used > 0 && n_expert_used <= n_groups_used * n_exp_per_group);
+    GGML_ASSERT(bias == NULL || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) == n_expert));
+
+    // ids stored as float values must round-trip ggml_cast(F32 -> I32) exactly
+    GGML_ASSERT(n_expert <= (int64_t) UINT32_MAX && n_expert <= (int64_t) INT32_MAX);
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_expert_used, logits->ne[1], 2);
+
+    result->op     = GGML_OP_MOE_TOPK_FUSED;
+    result->src[0] = logits;
+    result->src[1] = bias;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_expert);
+    ggml_set_op_params_i32(result, 1, (int32_t) n_groups);
+    ggml_set_op_params_i32(result, 2, (int32_t) n_exp_per_group);
+    ggml_set_op_params_i32(result, 3, (int32_t) n_groups_used);
+    ggml_set_op_params_i32(result, 4, (int32_t) n_expert_used);
+    ggml_set_op_params_i32(result, 5, bias != NULL);
+    ggml_set_op_params_f32(result, 6, w_scale);
 
     return result;
 }
