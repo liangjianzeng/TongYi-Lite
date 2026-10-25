@@ -2026,6 +2026,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_top_k(params, tensor);
             } break;
+        case GGML_OP_MOE_TOPK_FUSED:
+            {
+                ggml_compute_forward_moe_topk_fused(params, tensor);
+            } break;
         case GGML_OP_LEAKY_RELU:
             {
                 ggml_compute_forward_leaky_relu(params, tensor);
@@ -2293,6 +2297,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_ARGMAX:
             {
                 n_tasks = 1;
+            } break;
+        case GGML_OP_MOE_TOPK_FUSED:
+            {
+                n_tasks = 1; // tiny [E<=128 x n_tokens] routing op, single task
             } break;
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:

@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "unary-ops.h"
 #include "vec.h"
+#include "moe_topk_fused_core.h" // [tongyi M-R1] fused router top-k core
 
 #include <algorithm>
 #include <cfloat>
@@ -8857,6 +8858,81 @@ void ggml_compute_forward_argsort(
         case GGML_TYPE_F32:
             {
                 ggml_compute_forward_argsort_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_moe_topk_fused
+//
+// [tongyi M-R1 2026-10-25] CPU reference for the fused grouped-MoE router
+// top-k. dst = [K, n_tokens, 2] F32: plane 0 = weights, plane 1 = expert ids
+// as exact float values. The routing logic lives in moe_topk_fused_core.h
+// (shared with the desktop A/B test); the sigmoid step uses
+// ggml_vec_sigmoid_f32 so it is bit-identical with the graph path's
+// GGML_UNARY_OP_SIGMOID by construction.
+static void ggml_compute_forward_moe_topk_fused_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0]; // logits [E, n_tokens] F32
+    const ggml_tensor * src1 = dst->src[1]; // bias [E] F32 or NULL
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src0) && ggml_is_contiguous(dst));
+    GGML_ASSERT(src1 == nullptr || (src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1)));
+
+    const int E   = ggml_get_op_params_i32(dst, 0);
+    const int G   = ggml_get_op_params_i32(dst, 1);
+    const int epg = ggml_get_op_params_i32(dst, 2);
+    const int gu  = ggml_get_op_params_i32(dst, 3);
+    const int K   = ggml_get_op_params_i32(dst, 4);
+    const bool has_bias = ggml_get_op_params_i32(dst, 5) != 0;
+    const float w_scale = ggml_get_op_params_f32(dst, 6);
+
+    GGML_ASSERT(E == G * epg);
+    GGML_ASSERT(E >= 1 && E <= moe_topk_core::kMaxE);
+    GGML_ASSERT(G >= 1 && G <= moe_topk_core::kMaxG);
+    GGML_ASSERT(gu >= 1 && gu <= moe_topk_core::kMaxGu && gu <= G);
+    GGML_ASSERT(K >= 1 && K <= moe_topk_core::kMaxK && K <= gu * epg);
+    GGML_ASSERT(epg >= 2); // group top-2
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    const float * logits = (const float *) src0->data;
+    const float * bias   = has_bias ? (const float *) src1->data : nullptr;
+
+    const int64_t n_tokens = dst->ne[1];
+    float * dst_w   = (float *) dst->data;                    // plane 0 [K, n_tokens]
+    float * dst_ids = dst_w + (size_t) K * n_tokens;          // plane 1 [K, n_tokens]
+
+    moe_topk_core::Workspace ws;
+    int32_t ids[moe_topk_core::kMaxK];
+
+    for (int64_t r = 0; r < n_tokens; ++r) {
+        ggml_vec_sigmoid_f32(E, ws.p, logits + r*E);
+        moe_topk_core::route_row(ws.p, bias, E, G, epg, gu, K, w_scale,
+                                 dst_w + r*K, ids, ws);
+        float * ids_row = dst_ids + r*K;
+        for (int k = 0; k < K; ++k) {
+            ids_row[k] = (float) ids[k];
+        }
+    }
+}
+
+void ggml_compute_forward_moe_topk_fused(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    switch (dst->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_moe_topk_fused_f32(params, dst);
             } break;
         default:
             {
