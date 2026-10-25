@@ -440,10 +440,12 @@ void main() {
       await tester.tap(find.textContaining('执行过程'));
       await tester.pump();
       expect(find.textContaining('🔧 get_time'), findsOneWidget);
-      expect(find.textContaining('12:00'), findsNothing); // 工具卡未展开
+      // 折叠态摘要 = 结果首行（2026-10-25 用户定案：收起也要概知输出）。
+      expect(find.textContaining('12:00'), findsOneWidget);
       await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
-      expect(find.textContaining('12:00'), findsOneWidget);
+      // 展开后折叠行摘要 + 结果正文各出现一次。
+      expect(find.textContaining('12:00'), findsWidgets);
       expect(find.textContaining('参数'), findsOneWidget);
     });
 
@@ -475,14 +477,14 @@ void main() {
         isLive: false,
       );
       expect(find.textContaining('1 工具 · 2 思考'), findsOneWidget);
-      expect(find.textContaining('思考 1'), findsNothing);
+      expect(find.textContaining('思考一'), findsNothing);
       await tester.tap(find.textContaining('执行过程'));
       await tester.pump();
-      // 展开后呈现思考存档块（块本身仍是折叠条，点开再看正文）。
-      expect(find.textContaining('思考 1'), findsOneWidget);
-      expect(find.textContaining('思考 2'), findsOneWidget);
-      expect(find.textContaining('思考一'), findsNothing);
-      await tester.tap(find.textContaining('思考 1'));
+      // 展开后呈现思考存档块（块本身仍是折叠条）：序号已去掉（用户定案
+      // 「思考 1/2/3 难看」），折叠头部直接显示思考首行摘要。
+      expect(find.textContaining('思考一'), findsOneWidget);
+      expect(find.textContaining('思考二'), findsOneWidget);
+      await tester.tap(find.textContaining('思考一'));
       await tester.pump();
       expect(find.textContaining('思考一'), findsOneWidget);
       expect(find.textContaining('答案'), findsOneWidget);
@@ -515,14 +517,15 @@ void main() {
         ],
       );
       await pump(tester, ui, isLive: true);
-      expect(find.textContaining('思考 1 - 持续了3秒'), findsOneWidget);
+      // 序号已去（用户定案「思考 1/2/3 难看」）：有耗时只显示「思考 - 持续了X」。
+      expect(find.textContaining('思考 - 持续了3秒'), findsOneWidget);
       expect(find.textContaining('🔧 web_search'), findsOneWidget);
-      expect(find.textContaining('思考 2 - 持续了2秒'), findsOneWidget);
+      expect(find.textContaining('思考 - 持续了2秒'), findsOneWidget);
       expect(find.textContaining('🔧 get_weather'), findsOneWidget);
       // 垂直顺序 = 执行顺序（思考0 → 工具0 → 思考1 → 工具1）。
-      final dyThink1 = tester.getTopLeft(find.textContaining('思考 1 - 持续了3秒')).dy;
+      final dyThink1 = tester.getTopLeft(find.textContaining('思考 - 持续了3秒')).dy;
       final dyTool1 = tester.getTopLeft(find.textContaining('🔧 web_search')).dy;
-      final dyThink2 = tester.getTopLeft(find.textContaining('思考 2 - 持续了2秒')).dy;
+      final dyThink2 = tester.getTopLeft(find.textContaining('思考 - 持续了2秒')).dy;
       final dyTool2 = tester.getTopLeft(find.textContaining('🔧 get_weather')).dy;
       expect(dyThink1, lessThan(dyTool1));
       expect(dyTool1, lessThan(dyThink2));

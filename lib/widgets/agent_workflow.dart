@@ -12,13 +12,13 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../models/chat_message.dart';
 import '../models/turn_trace.dart';
 import '../providers/agent_state_provider.dart';
 import '../services/device_files_service.dart';
 import 'chat_bubble.dart';
+import 'turn_clock.dart';
 import 'turn_items.dart';
 
 // ---------------------------------------------------------------------------
@@ -221,8 +221,39 @@ List<ToolActivityUi> parsedToolActivities(List<ChatMessage> tools) =>
 ///
 /// 用户定案：这里不是"思考"（真思考走 ThinkingStreamCard），只是任务
 /// 执行中的状态过渡，标签必须写「执行中」，否则会误导成模型在空想。
-class ThinkingIndicator extends StatelessWidget {
+class ThinkingIndicator extends StatefulWidget {
   const ThinkingIndicator({super.key});
+
+  @override
+  State<ThinkingIndicator> createState() => _ThinkingIndicatorState();
+}
+
+class _ThinkingIndicatorState extends State<ThinkingIndicator> {
+  DateTime? _start;
+  bool _clockOn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = DateTime.now();
+    _clockOn = true;
+    TurnClock.instance.acquire();
+    TurnClock.instance.tick.addListener(_onTick);
+  }
+
+  @override
+  void dispose() {
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
+    super.dispose();
+  }
+
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -237,13 +268,18 @@ class ThinkingIndicator extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 8),
           Text(
-            '执行中…',
+            _elapsed == null || _elapsed! < const Duration(seconds: 15)
+                ? '执行中…'
+                : '执行中 - 持续了${_fmtDur(_elapsed)}',
             style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
           ),
         ],
       ),
     );
   }
+
+  Duration? get _elapsed =>
+      _start == null ? null : DateTime.now().difference(_start!);
 }
 
 /// _ToolGenIndicator —— 工具调用参数生成期进度（WP5）。
@@ -401,23 +437,42 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                  // max 宽度：Spacer 生效，箭头对齐右缘（min 时跟标题飘）。
                   children: [
                     Icon(Icons.psychology,
                         size: 14,
                         color: theme.colorScheme.tertiary
                             .withValues(alpha: 0.7)),
                     const SizedBox(width: 6),
-                    Text(
-                      widget.duration == null
-                          ? '思考 ${widget.index}'
-                          : '思考 ${widget.index} - 持续了${_fmtDur(widget.duration)}',
-                      style: TextStyle(
-                          fontSize: 12,
-                          color:
-                              theme.colorScheme.tertiary.withValues(alpha: 0.8)),
-                    ),
-                    const Spacer(),
+                    // 序号「思考 1/2/3」用户定案去掉（难看）：有耗时显示
+                    // 耗时，没有就只剩图标+内容摘要（DSH ReasoningRow 同形）。
+                    if (widget.duration != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '思考 - 持续了${_fmtDur(widget.duration)}',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: theme.colorScheme.tertiary
+                                .withValues(alpha: 0.8)),
+                      ),
+                    ],
+                    // 折叠态摘要 = 思考首行（DSH ReasoningRow firstLine）：
+                    // 收起时用户概知里面想了啥。
+                    if (!_expanded) ...[
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _ThinkingStreamCardState._firstLine(widget.text),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontStyle: FontStyle.italic),
+                        ),
+                      ),
+                    ] else
+                      const Spacer(),
                     Icon(
                       _expanded ? Icons.expand_less : Icons.expand_more,
                       size: 15,
@@ -483,18 +538,16 @@ class ToolActivityCard extends StatefulWidget {
   State<ToolActivityCard> createState() => _ToolActivityCardState();
 }
 
-class _ToolActivityCardState extends State<ToolActivityCard>
-    with SingleTickerProviderStateMixin {
+class _ToolActivityCardState extends State<ToolActivityCard> {
   bool _expanded = false;
 
   /// 执行起点（首次以 executing 状态入树时记录）；null = 未知（历史回合）。
   DateTime? _execStart;
   Duration? _total;
 
-  /// 秒级刷新用 Ticker（flutter test 下被 muted，无 pending-timer 问题；
-  /// 真机上每帧回调，只在秒数变化时 setState）。
-  Ticker? _ticker;
-  int _lastSec = -1;
+  /// 秒级刷新走全 app 单时钟 [TurnClock]（阶段 4 计时器收敛：替代每卡
+  /// 一个 Ticker；实际耗时用 DateTime 差值，重建不丢）。
+  bool _clockOn = false;
 
   /// 折叠行摘要（2026-10-25 阶段 2）：variant 键优先级取参数首行（DSH
   /// toolRowModel 同构）；无命中回退参数 JSON 60 字旧口径。
@@ -521,6 +574,26 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     if (r == null || r.isEmpty) return null;
     final line = r.split('\n').first.trim();
     return line.isEmpty ? null : line;
+  }
+
+  /// 折叠态摘要（用户定案 2026-10-25）：收起时用户要知道**里面输出是啥**，
+  /// 不能只有工具名+参数——
+  /// 失败 → 错误首行；完成 → **结果首行**（输出概知，DSH resultSummary
+  /// 同语义）；无结果/执行中 → 回退参数摘要（执行中看的就是要干啥）。
+  String get _collapsedSummary {
+    final err = _errorSummary;
+    if (err != null) return err;
+    final a = widget.activity;
+    if (a.status == ToolUiStatus.done) {
+      final r = a.result?.trim();
+      if (r != null && r.isNotEmpty) {
+        for (final raw in r.split('\n')) {
+          final line = raw.trim();
+          if (line.isNotEmpty) return line;
+        }
+      }
+    }
+    return _argsSummary;
   }
 
   /// WP6：export_file 产物打开目标（复用顶层 [exportTargetOf]）。
@@ -561,7 +634,11 @@ class _ToolActivityCardState extends State<ToolActivityCard>
 
   @override
   void dispose() {
-    _ticker?.dispose();
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
     super.dispose();
   }
 
@@ -572,23 +649,24 @@ class _ToolActivityCardState extends State<ToolActivityCard>
     if (st == ToolUiStatus.executing) {
       if (_execStart == null) {
         _execStart = DateTime.now();
-        _lastSec = -1;
-        _ticker?.dispose();
-        _ticker = createTicker(_onTick)..start();
+        if (!_clockOn) {
+          _clockOn = true;
+          TurnClock.instance.acquire();
+          TurnClock.instance.tick.addListener(_onTick);
+        }
       }
     } else if (_execStart != null && _total == null) {
       _total = DateTime.now().difference(_execStart!);
-      _ticker?.dispose();
-      _ticker = null;
+      if (_clockOn) {
+        _clockOn = false;
+        TurnClock.instance.tick.removeListener(_onTick);
+        TurnClock.instance.release();
+      }
     }
   }
 
-  void _onTick(Duration elapsed) {
-    if (!mounted) return;
-    final now = DateTime.now();
-    if (now.second == _lastSec) return;
-    _lastSec = now.second;
-    setState(() {});
+  void _onTick() {
+    if (mounted) setState(() {});
   }
 
   /// 当前/最终耗时（未知为 null）。
@@ -612,7 +690,7 @@ class _ToolActivityCardState extends State<ToolActivityCard>
       ToolUiStatus.failed =>
         (Icons.error, theme.colorScheme.error, false),
     };
-    final summary = _errorSummary ?? _argsSummary;
+    final summary = _collapsedSummary;
     // running 态 = 扫光动画（DSH 同款），不再用小转圈——"最多一个 spinner"
     // 由结构保证：工具行跑起来是光带，不是转圈。
     return Padding(
@@ -623,13 +701,15 @@ class _ToolActivityCardState extends State<ToolActivityCard>
         color:
             theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(6),
-        child: InkWell(
+          child: InkWell(
           borderRadius: BorderRadius.circular(6),
           onTap: () => setState(() => _expanded = !_expanded),
           child: Padding(
             // 单行高度贴死文字：vertical 2 + fontSize 12 ≈ 22px。
+            // horizontal 10：与思考行/执行过程区的行内距一致——展开箭头
+            // 与图标落在同一条 x 线上（此前 8，箭头右缘差 2px 不对齐）。
             padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -785,13 +865,11 @@ class ThinkingStreamCard extends StatefulWidget {
   State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
 }
 
-class _ThinkingStreamCardState extends State<ThinkingStreamCard>
-    with SingleTickerProviderStateMixin {
+class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
   /// null = 默认收起；非 null = 用户手动覆盖。
   bool? _override;
   DateTime? _start;
-  Ticker? _ticker;
-  int _lastSec = -1;
+  bool _clockOn = false;
 
   /// 流式长内容自动跟随：内容变长时滚到可见区底部，直到用户手动上滑。
   final ScrollController _scroll = ScrollController();
@@ -805,7 +883,11 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
 
   @override
   void dispose() {
-    _ticker?.dispose();
+    if (_clockOn) {
+      _clockOn = false;
+      TurnClock.instance.tick.removeListener(_onTick);
+      TurnClock.instance.release();
+    }
     _scroll.dispose();
     super.dispose();
   }
@@ -844,23 +926,21 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
     }
   }
 
-  /// 思考开始时记录起点并开秒级 Ticker（头部耗时走秒更新）。
+  /// 思考开始时记录起点并挂全 app 单时钟（秒级 setState）。
   void _syncClock() {
     final s = widget.ui;
     if (_start == null && s.hasThinking && s.running) {
       _start = DateTime.now();
-      _lastSec = -1;
-      _ticker?.dispose();
-      _ticker = createTicker(_onTick)..start();
+      if (!_clockOn) {
+        _clockOn = true;
+        TurnClock.instance.acquire();
+        TurnClock.instance.tick.addListener(_onTick);
+      }
     }
   }
 
-  void _onTick(Duration elapsed) {
-    if (!mounted) return;
-    final now = DateTime.now();
-    if (now.second == _lastSec) return;
-    _lastSec = now.second;
-    setState(() {});
+  void _onTick() {
+    if (mounted) setState(() {});
   }
 
   Duration? get _elapsed =>
@@ -900,7 +980,8 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                  // max 宽度：Spacer 才生效，展开箭头对齐右缘（min 时箭头
+                  // 跟在标题后面飘，与工具行/执行过程区的箭头不在一条线）。
                   children: [
                     Icon(Icons.psychology,
                         size: 14, color: theme.colorScheme.tertiary),
@@ -912,13 +993,16 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
                       style: TextStyle(
                           fontSize: 12, color: theme.colorScheme.tertiary),
                     ),
-                    // 折叠态 + running：摘要 = 思考最后一行（DSH latestLine，
-                    // 跟随刷新）；展开态正文自可见，不重复。
-                    if (s.running && !expanded) ...[
+                    // 折叠态摘要（DSH ReasoningRow 同构）：running =
+                    // 最后一行（跟随刷新）；落档 = 首行（内容概知）。
+                    // 用户收起时看到的不是空洞的「思考」两个字。
+                    if (!expanded) ...[
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          _latestLine(s.thinking),
+                          s.running
+                              ? _latestLine(s.thinking)
+                              : _firstLine(s.thinking),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -927,8 +1011,10 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
                               fontStyle: FontStyle.italic),
                         ),
                       ),
-                    ],
-                    const Spacer(),
+                    ] else
+                      // 折叠态摘要的 Expanded 已把箭头顶到右缘；展开态
+                      // 没有摘要，用 Spacer 补位——两种态箭头都在右缘。
+                      const Spacer(),
                     Icon(
                       expanded ? Icons.expand_less : Icons.expand_more,
                       size: 15,
@@ -969,6 +1055,16 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
     if (visible.isEmpty) return '…';
     final i = visible.lastIndexOf('\n');
     final line = i == -1 ? visible : visible.substring(i + 1);
+    return line.trim().isEmpty ? '…' : line.trim();
+  }
+
+  /// DSH ReasoningRow firstLine：落档收起态摘要 = 思考首行（内容概知，
+  /// 用户收起时不该只看到「思考」两个字）。
+  static String _firstLine(String text) {
+    final visible = text.trimRight();
+    if (visible.isEmpty) return '…';
+    final i = visible.indexOf('\n');
+    final line = i == -1 ? visible : visible.substring(0, i);
     return line.trim().isEmpty ? '…' : line.trim();
   }
 }
@@ -1133,14 +1229,18 @@ class AgentTurnBlock extends StatelessWidget {
               showFooter: false,
             ),
           // 回合尾动作区：时间/耗时·tok/s/复制/分享/TTS 每回合一次。
+          // 独立进列表流（无 ChatBubble 外层），自补 16px 消息列轴。
           if (answer != null)
-            MessageActionsRow(
-              content: answer!.content,
-              timestamp: answer!.timestamp,
-              stats: answer!.inferenceStats,
-              isUser: false,
-              canSpeak:
-                  answer!.kind == MessageKind.text && !_answerPending,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: MessageActionsRow(
+                content: answer!.content,
+                timestamp: answer!.timestamp,
+                stats: answer!.inferenceStats,
+                isUser: false,
+                canSpeak:
+                    answer!.kind == MessageKind.text && !_answerPending,
+              ),
             ),
           // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
           if (answer != null && _artifacts.isNotEmpty)
@@ -1191,16 +1291,19 @@ class AgentTurnBlock extends StatelessWidget {
             showFooter: false,
           ),
         // 回合尾动作区：答案流式结束才出现（DSH 规则：IconActions 仅在
-        // turn 结束后出现）。
+        // turn 结束后出现）。独立进列表流，自补 16px 消息列轴。
         if (answer != null &&
             !_answerPending &&
             !(isLive && answer!.isStreaming))
-          MessageActionsRow(
-            content: answer!.content,
-            timestamp: answer!.timestamp,
-            stats: answer!.inferenceStats,
-            isUser: false,
-            canSpeak: answer!.kind == MessageKind.text,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: MessageActionsRow(
+              content: answer!.content,
+              timestamp: answer!.timestamp,
+              stats: answer!.inferenceStats,
+              isUser: false,
+              canSpeak: answer!.kind == MessageKind.text,
+            ),
           ),
         // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
         if (answer != null && !_answerPending && _artifacts.isNotEmpty)

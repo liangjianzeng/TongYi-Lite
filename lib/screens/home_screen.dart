@@ -88,9 +88,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // list). Disabled once the user scrolls up to read history.
   bool _followStream = true;
 
-  /// 跟随滚动签名（阶段 4 followSig 门控）：签名不变不滚底。
-  String _lastFollowSig = '';
-
   // Image picker state
   final List<String> _selectedImagePaths = [];
 
@@ -815,6 +812,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               onTap: () => _openRail('chats'),
               badge: anyRunning),
         ),
+        // 模型管理类入口紧跟会话、在智能体之前（2026-10-25 用户定案：
+        // 本地模型优先的产品形态，模型是第一公民，先进模型再谈智能体）。
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'model',
+              icon: Icons.memory_outlined,
+              tooltip: '模型',
+              onTap: () => _openRail('model')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'engine',
+              icon: Icons.tune,
+              tooltip: '推理引擎',
+              onTap: () => _openRail('engine')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'api',
+              icon: Icons.api_outlined,
+              tooltip: 'API 接入',
+              onTap: () => _openRail('api')),
+        ),
         RailIconButton(
           item: RailItem(
               panelKey: 'agent',
@@ -839,13 +859,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ),
         RailIconButton(
           item: RailItem(
-              panelKey: 'model',
-              icon: Icons.memory_outlined,
-              tooltip: '模型',
-              onTap: () => _openRail('model')),
-        ),
-        RailIconButton(
-          item: RailItem(
               panelKey: 'skills',
               icon: Icons.auto_awesome_outlined,
               tooltip: '技能',
@@ -857,13 +870,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: Icons.extension_outlined,
               tooltip: '插件',
               onTap: () => _openRail('plugins')),
-        ),
-        RailIconButton(
-          item: RailItem(
-              panelKey: 'api',
-              icon: Icons.api_outlined,
-              tooltip: 'API 接入',
-              onTap: () => _openRail('api')),
         ),
         RailIconButton(
           item: RailItem(
@@ -901,6 +907,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             RailPageSpec(title: '人格', build: (_) => _buildPersonaRailPage()),
         'plan': RailPageSpec(title: '计划', build: (_) => _buildPlanRailPage()),
         'model': RailPageSpec(title: '模型', build: (_) => _buildModelRailPage()),
+        // 引擎单拆（2026-10-25 用户定案）：推理引擎是大块设置，不再与模型
+        // 挤一页双段开关——模型页只管模型，引擎页只管引擎。
+        'engine': RailPageSpec(
+            title: '引擎', build: (_) => const InferenceEngineSettingsBody()),
         'skills':
             RailPageSpec(title: '技能', build: (_) => _buildSkillsRailPage()),
         'plugins':
@@ -914,6 +924,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             title: '能力与实验', build: (_) => CapabilitySettingsBody()),
         'storage': RailPageSpec(
             title: '存储 / 日志 / 关于', build: (_) => _buildStorageAboutRailPage()),
+        // 关于独立页（2026-10-25 用户定案）：存储/日志已有别处入口，
+        // 「更多（基础配置）」的下属入口只留关于。
+        'about':
+            RailPageSpec(title: '关于', build: (_) => _buildAboutRailPage()),
         'more': RailPageSpec(title: '更多', build: (_) => _buildMoreRailPage()),
       };
 
@@ -1159,6 +1173,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             FocusScope.of(context).requestFocus(FocusNode());
           },
           onChanged: _refreshActivePlanFlag,
+          onClose: _closeRailSurface,
         );
       },
     );
@@ -1218,7 +1233,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ]),
             ),
           ),
-          Expanded(child: const _ModelPanelSwitch()),
+          Expanded(child: const ModelManagementBody()),
         ],
       );
     });
@@ -1301,6 +1316,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget _buildDevRailPage() => DevSettingsBody();
 
   /// 更多面板：入口全部指向面板内页（老设置页零跳转）。
+  /// 「更多」面板 = **基础配置**（2026-10-25 用户定案）：界面缩放 + 语音
+  /// （TTS/ASR）+ 无重复归属的唯一下属入口（搜索/存储日志关于）。
+  /// 已撤的重复入口：搜索（API 接入面板有联网搜索配置）、能力与实验
+  /// （原生能力开关=智能体面板、TTS/ASR=本页、插件/技能=各自面板）。
   Widget _buildMoreRailPage() {
     return Consumer(builder: (context, ref, __) {
       final scale = ref.watch(settingsProvider).uiScale.clamp(0.85, 1.30);
@@ -1330,22 +1349,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const Text('整体缩放全部 UI（85%–130%）',
                 style: TextStyle(fontSize: 11, color: Colors.grey)),
-            _railSection('设置'),
+            _railSection('语音'),
+            const VoiceSettingsBody(),
+            _railSection('更多入口'),
             _railRow(
-                icon: Icons.search,
-                title: '搜索',
-                subtitle: '六引擎 · SearXNG',
-                onTap: () => _railPanel.open('search')),
-            _railRow(
-                icon: Icons.science_outlined,
-                title: '能力与实验',
-                subtitle: '能力开关 · 基准',
-                onTap: () => _railPanel.open('capability')),
-            _railRow(
-                icon: Icons.storage_outlined,
-                title: '存储 / 日志 / 关于',
-                subtitle: '占用 · 运行日志 · 版本',
-                onTap: () => _railPanel.open('storage')),
+                icon: Icons.info_outline,
+                title: '关于',
+                subtitle: '版本 · 说明',
+                onTap: () => _railPanel.open('about')),
           ],
         ),
       );
@@ -1363,6 +1374,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         const SizedBox(height: 8),
         AboutSettingsCard(),
       ],
+    );
+  }
+
+  /// 关于独立页：只有版本/说明卡（存储与日志已另有归属）。
+  Widget _buildAboutRailPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      children: [AboutSettingsCard()],
     );
   }
 
@@ -1886,15 +1905,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         }
 
-        // 跟随滚动签名门控（2026-10-25 阶段 4，DSH followSig 同构）：
-        // 只在「消息条数 / 末条 id / 回合运行态」变化时滚底——流式期间每帧
-        // 重建不再触发 animateTo（此前 messages 一变就滚，与流内跟随两套
-        // 机制互相打架）。
+        // 跟随滚动：跟随态下每次重建（含流式每帧内容增长）都滚到底。
+        // ⚠️ 不做任何签名门控（followSig 已回退）：流式期间末条消息 id 不变、
+        // 只是内容变长，按 id/条数做签名会漏掉流式跟随（2026-10-25 真机回归，
+        // 用户定案修回）——重建本身就是变化驱动的，无需二次去重。
         final units = groupMessages(rawMessages);
-        final followSig =
-            '${units.length}:${rawMessages.last.id}:${uiState.running}:$generating';
-        if (_followStream && followSig != _lastFollowSig) {
-          _lastFollowSig = followSig;
+        if (_followStream) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_followStream && _scrollController.hasClients) {
               _scrollController.animateTo(
@@ -2429,8 +2445,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _onVoiceLongPressMoveUpdate(d.globalPosition),
       onLongPressEnd: (_) => _onVoiceLongPressEnd(),
       onLongPressCancel: () => _onVoiceLongPressEnd(),
-      child: Tooltip(
-        message: '按住说话，松手即发送（上滑取消）',
+      // ⚠️ 这里绝不能包 Tooltip：Tooltip 的长按识别器是**内层**识别器，
+      // 手势竞技场里内层必胜（子先入 arena），外层的按住说话长按永远被
+      // 拒——2026-10-25 真机实锤（长按落在热区但 [Voice] 日志零触发，
+      // 自 10-24 composer 加 Tooltip 后语音一直废的根因）。
+      // 无障碍文案用 Semantics（零手势识别器）。
+      child: Semantics(
+        label: '按住说话，松手即发送（上滑取消）',
         child: SizedBox(
           width: 34,
           height: 34,
@@ -3058,59 +3079,6 @@ class _AttachOption extends StatelessWidget {
 /// 外边距/顶部圆角/拖拽把手，其余内容（状态/内存/日志/操作）完全一致。
 /// 模型面板子页切换：模型列表（下载/加载/默认）与引擎设置同面板承载，
 /// 模型列表为默认——用户下载和使用本地模型的主路径不许被藏起来。
-class _ModelPanelSwitch extends StatefulWidget {
-  const _ModelPanelSwitch();
-
-  @override
-  State<_ModelPanelSwitch> createState() => _ModelPanelSwitchState();
-}
-
-class _ModelPanelSwitchState extends State<_ModelPanelSwitch> {
-  bool _engine = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
-          child: Row(children: [
-            _seg('模型', !_engine, () => setState(() => _engine = false)),
-            const SizedBox(width: 6),
-            _seg('引擎', _engine, () => setState(() => _engine = true)),
-          ]),
-        ),
-        Expanded(
-            child: _engine
-                ? const InferenceEngineSettingsBody()
-                : const ModelManagementBody()),
-      ],
-    );
-  }
-
-  Widget _seg(String label, bool on, VoidCallback onTap) {
-    final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      borderRadius: BorderRadius.circular(999),
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-        decoration: BoxDecoration(
-          color: on ? scheme.primaryContainer : scheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color:
-                    on ? scheme.onPrimaryContainer : scheme.onSurfaceVariant)),
-      ),
-    );
-  }
-}
-
 class _ModelStatusSheet extends StatelessWidget {
   final ModelLifecyclePhase phase;
   final String modelName;
@@ -3614,11 +3582,16 @@ class _PlanPanelSheet extends StatefulWidget {
   final VoidCallback onRegenerate;
   final VoidCallback onChanged;
 
+  /// 关闭面板：面板是左栏内联 Stack（非路由），**Navigator.pop 会把主路由
+  /// pop 掉 = 整屏黑屏**（2026-10-25 真机定案）——必须走 RailPanelController。
+  final VoidCallback onClose;
+
   const _PlanPanelSheet({
     required this.store,
     required this.conversationId,
     required this.onRegenerate,
     required this.onChanged,
+    required this.onClose,
   });
 
   @override
@@ -3634,6 +3607,14 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PlanPanelSheet old) {
+    super.didUpdateWidget(old);
+    // 切会话：面板 State 不重建（同类型 widget 原位更新），必须显式重载，
+    // 否则显示的是上一个会话的计划/清单（计划与清单都按会话隔离）。
+    if (old.conversationId != widget.conversationId) _reload();
   }
 
   Future<void> _reload() async {
@@ -3681,7 +3662,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
     await widget.store.finish(widget.conversationId, status);
     widget.onChanged();
     if (!mounted) return;
-    Navigator.pop(context);
+    // 左栏内联面板非路由：Navigator.pop 会黑屏（见 onClose 注释）。
+    widget.onClose();
     if (status == GoalStatus.cancelled) widget.onRegenerate();
   }
 
@@ -3729,7 +3711,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
           width: double.infinity,
           child: FilledButton.icon(
             onPressed: () {
-              Navigator.pop(context);
+              // 先关面板再回填 /plan（面板内联非路由，不许 Navigator.pop）。
+              widget.onClose();
               widget.onRegenerate();
             },
             icon: const Icon(Icons.auto_fix_high, size: 18),
