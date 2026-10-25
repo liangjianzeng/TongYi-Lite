@@ -23,7 +23,7 @@ import datetime
 
 LEDGER = os.path.join(os.path.dirname(__file__), "..", "bench_ledger.jsonl")
 
-MODES = {"M-CPU", "M-MIX", "M-GPU"}
+MODES = {"M-CPU", "M-MIX", "M-GPU", "probe"}  # probe=非模型微基准（硬件特性，如发射税/命令缓冲）
 STACKS = {"S-VOCL", "S-MOCL", "S-VK"}
 DEVS = {"740", "830", "650"}
 REQUIRED = ["mode", "stack", "model", "dev", "la", "ngl", "kv", "ubatch",
