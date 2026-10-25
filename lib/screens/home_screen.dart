@@ -88,9 +88,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // list). Disabled once the user scrolls up to read history.
   bool _followStream = true;
 
-  /// 跟随滚动签名（阶段 4 followSig 门控）：签名不变不滚底。
-  String _lastFollowSig = '';
-
   // Image picker state
   final List<String> _selectedImagePaths = [];
 
@@ -1886,15 +1883,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         }
 
-        // 跟随滚动签名门控（2026-10-25 阶段 4，DSH followSig 同构）：
-        // 只在「消息条数 / 末条 id / 回合运行态」变化时滚底——流式期间每帧
-        // 重建不再触发 animateTo（此前 messages 一变就滚，与流内跟随两套
-        // 机制互相打架）。
+        // 跟随滚动：跟随态下每次重建（含流式每帧内容增长）都滚到底。
+        // ⚠️ 不做任何签名门控（followSig 已回退）：流式期间末条消息 id 不变、
+        // 只是内容变长，按 id/条数做签名会漏掉流式跟随（2026-10-25 真机回归，
+        // 用户定案修回）——重建本身就是变化驱动的，无需二次去重。
         final units = groupMessages(rawMessages);
-        final followSig =
-            '${units.length}:${rawMessages.last.id}:${uiState.running}:$generating';
-        if (_followStream && followSig != _lastFollowSig) {
-          _lastFollowSig = followSig;
+        if (_followStream) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_followStream && _scrollController.hasClients) {
               _scrollController.animateTo(

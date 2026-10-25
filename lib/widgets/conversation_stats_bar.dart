@@ -85,12 +85,17 @@ class ConversationStatsBar extends ConsumerWidget {
             overflow: TextOverflow.ellipsis));
 
     final groups = <Widget>[];
-    if (rounds > 0 || steps > 0) {
+    // 轮/步组：普通聊天没有步数，"0 步"是噪声——只有真有工具步或 ≥2 轮
+    // 才值得占一个组（单轮寒暄显示「1 轮」毫无信息量，DSH 亦然）。
+    if (steps > 0 || rounds >= 2) {
       groups.add(group([
         ('$rounds', true),
-        (' 轮 · ', false),
-        ('$steps', true),
-        (' 步', false),
+        (' 轮', false),
+        if (steps > 0) ...[
+          (' · ', false),
+          ('$steps', true),
+          (' 步', false),
+        ],
       ]));
     }
     if (llmMs > 0) {
@@ -103,7 +108,8 @@ class ConversationStatsBar extends ConsumerWidget {
         (' tok/s', false),
       ]));
     }
-    if (tokens > 0) {
+    // 短文本的估算 token（「≈1 tok」）是噪声，攒到有意义的量级才显示。
+    if (tokens >= 100) {
       groups.add(group([('≈', false), (_formatTokens(tokens), true), (' tok', false)]));
     }
     final fraction =
