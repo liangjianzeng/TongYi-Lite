@@ -510,8 +510,9 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.3.5.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.5.apk)  
-> v0.3.5+23 · 72,096,558 B（2026-10-25，GPU 全卸载产品化第一轮 + UI rail 重构 + 单主线收敛）  
-> `SHA-256: 70c1c1696f8ab2e8f8b7a58042595be5f8bd6fd99451155a1aac0db25aaba194`
+> v0.3.5+23 · 72,115,434 B（2026-10-25，GPU 全卸载产品化第一轮 + UI rail 重构 + 单主线收敛；  
+> 追加：外观浅色/深色/跟随系统、产物另存到任意目录、简单聊天流式思考卡）  
+> `SHA-256: 0cf0ba234b574e75886ac9c9a2269a30c2c6e2050c73ddd41f324c8fb166691f`
 
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
 > 模型缓存，切勿先卸载。历史版本见 [`releases/`](releases/) 目录或按[构建与开发](#构建与开发)自行构建。
@@ -527,7 +528,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.5**（当前） | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）。versionCode 23 |
+| **v0.3.5**（当前） | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
 | v0.3.4+ | 2026-10-20~24 | Mesa 测量接管 + L3 裁决（Mesa ≈ CPU bank 17.5–20%，提交层封死）；智能体思考失控根治（跨块累计守卫）；API「思考强度」档位 + 实时 token 读数 + 停止按钮三洞修复；调试机型分级定案（740 主力 / 830 参考 / 650 冒烟） |
 | v0.3.4+ | 2026-10-20 | Edge TTS 恢复播报（Sec-MS-GEC v2 强制 + 手机 IPv6 半死通道 → v2 token 移植 + IPv4 优先） |
 | v0.3.4 | 2026-10-18 | llama.cpp 0.5.0 → **0.7.0 四道门升级**（47 冲突 hunk、KleidiAI v1.31、REGC 宏守卫修复）；740 基准 decode +27%、首 Tok -49% |
