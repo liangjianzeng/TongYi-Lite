@@ -450,6 +450,23 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// composer 快捷图标白名单（更多 → 快捷设置；默认空 = 全关）。
+  Future<void> setComposerQuickActions(List<String> ids) async {
+    state = state.copyWith(composerQuickActions: ids);
+    await _persist();
+  }
+
+  /// 开/关单个快捷图标。
+  Future<void> toggleComposerQuickAction(String id, bool on) async {
+    final cur = [...state.composerQuickActions];
+    if (on) {
+      if (!cur.contains(id)) cur.add(id);
+    } else {
+      cur.remove(id);
+    }
+    await setComposerQuickActions(cur);
+  }
+
   /// 子代理工具注册开关??
   Future<void> setAgentSubagentEnabled(bool value) async {
     state = state.copyWith(agentSubagentEnabled: value);

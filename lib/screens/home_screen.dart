@@ -1350,6 +1350,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const Text('整体缩放全部 UI（85%–130%）',
                 style: TextStyle(fontSize: 11, color: Colors.grey)),
+            _railSection('快捷设置'),
+            // composer 快捷图标带管理（KV 环右侧）：默认全关，
+            // 开哪个 composer 就出现哪个图标（agent=直切开关，其余=开面板）。
+            _railCard(
+              Column(
+                children: [
+                  for (final (id, _, label) in _quickActionCatalog)
+                    _railRow(
+                      title: label,
+                      subtitle: id == 'agent' ? '点按直切智能体/纯聊天' : '点按打开面板',
+                      trailing: _railSwitch(
+                        ref.watch(settingsProvider)
+                            .composerQuickActions
+                            .contains(id),
+                        (on) => ref
+                            .read(settingsProvider.notifier)
+                            .toggleComposerQuickAction(id, on),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             _railSection('语音'),
             const VoiceSettingsBody(),
             _railSection('更多入口'),
@@ -2102,9 +2124,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     onPressed: _showAttachSheet,
                   ),
                   const SizedBox(width: 2),
-                  // 模式 chips 已整体迁入左栏（智能体/人格/计划/模型，
-                  // 2026-10-24 harness 改造）：composer 只留 KV 占用环。
+                  // KV 占用环 + 快捷图标带（环右侧；图标集在「更多 →
+                  // 快捷设置」里配置，默认全关——2026-10-25 用户定案）。
                   _buildContextUsageRing(),
+                  _buildQuickActions(),
                   const Spacer(),
                   if (!isGenerating) _buildMicKey(),
                   _buildSendKey(isGenerating),
@@ -2139,6 +2162,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 环 = 占用比例（蓝 <60% / 橙 ≥60% / 红 ≥85% 阈值配色），环心 = 百分比数字；
   /// 无数据时灰环显示「—」。点按 → 上下文详情面板（数字/来源/压缩记录/
   /// 手动压缩）。智能体回合执行中禁用点按（防误触打断注意力）。
+  // ---- composer 快捷图标带（2026-10-25）：KV 环右侧，图标集在
+  // 「更多 → 快捷设置」里逐个开启（settings.composerQuickActions，默认全关）。
+  // agent = 点按直切智能体模式；其余 = 点按直开对应面板快速查看/设置。
+  static const List<(String, IconData, String)> _quickActionCatalog = [
+    ('agent', Icons.smart_toy_outlined, '智能体开关'),
+    ('model', Icons.memory_outlined, '本地模型'),
+    ('persona', Icons.theater_comedy, '人格'),
+    ('plan', Icons.checklist, '计划'),
+    ('skills', Icons.auto_awesome_outlined, '技能'),
+    ('plugins', Icons.extension_outlined, '插件'),
+  ];
+
+  Widget _buildQuickActions() {
+    final enabled = ref.watch(settingsProvider).composerQuickActions;
+    if (enabled.isEmpty) return const SizedBox.shrink();
+    final agentOn = ref.watch(settingsProvider).agentEnabled;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      for (final (id, icon, label) in _quickActionCatalog)
+        if (enabled.contains(id))
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            iconSize: 20,
+            tooltip: label,
+            icon: Icon(
+              icon,
+              // agent 是真开关：开着点亮；其余是入口，常态色。
+              color: id == 'agent' && agentOn
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            onPressed: () {
+              if (id == 'agent') {
+                final notifier = ref.read(settingsProvider.notifier);
+                notifier.setAgentEnabled(!agentOn);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(agentOn ? '已关闭智能体模式（纯聊天）' : '已开启智能体模式'),
+                  duration: const Duration(seconds: 1),
+                ));
+                return;
+              }
+              _openRail(id);
+            },
+          ),
+    ]);
+  }
+
   Widget _buildContextUsageRing() {
     final usage = ref.watch(contextUsageProvider)[_currentConversationId];
     final fraction = usage?.fraction;

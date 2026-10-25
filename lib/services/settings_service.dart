@@ -224,6 +224,11 @@ class InferenceSettings {
   /// 0.85–1.30。1.0 = 跟随系统；整体等比放大/缩小全部 UI（图标/文字/间距）。
   final double uiScale;
 
+  /// composer 快捷图标白名单（2026-10-25）：KV 环右侧的快捷功能图标，
+  /// 默认空 = 全部关闭；在「更多 → 快捷设置」里逐个开启。
+  /// 合法 id：agent/model/persona/plan/skills/plugins。
+  final List<String> composerQuickActions;
+
   /// 子代理工具（subagent，spawn/fork）注册开关。默认开??
   /// 不变量固定（深度 ??2 / 子代理审批恒 never / 每层独立预算）??
   final bool agentSubagentEnabled;
@@ -502,6 +507,7 @@ class InferenceSettings {
     this.agentThinkingOnToolSteps = false,
     this.chatTextScale = 1.0,
     this.uiScale = 1.0,
+    this.composerQuickActions = const [],
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
     this.agentCompressionApiModelId = '',
@@ -693,6 +699,7 @@ class InferenceSettings {
     bool? agentThinkingOnToolSteps,
     double? chatTextScale,
     double? uiScale,
+    List<String>? composerQuickActions,
     bool? agentSubagentEnabled,
     String? agentSubagentApiModelId,
     String? agentCompressionApiModelId,
@@ -808,6 +815,7 @@ class InferenceSettings {
           agentThinkingOnToolSteps ?? this.agentThinkingOnToolSteps,
       chatTextScale: chatTextScale ?? this.chatTextScale,
       uiScale: uiScale ?? this.uiScale,
+      composerQuickActions: composerQuickActions ?? this.composerQuickActions,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentSubagentApiModelId:
           agentSubagentApiModelId ?? this.agentSubagentApiModelId,
@@ -928,6 +936,7 @@ class InferenceSettings {
         'agentThinkingOnToolSteps': agentThinkingOnToolSteps,
         'chatTextScale': chatTextScale,
         'uiScale': uiScale,
+        'composerQuickActions': composerQuickActions,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
         'agentCompressionApiModelId': agentCompressionApiModelId,
@@ -1071,6 +1080,14 @@ class InferenceSettings {
       chatTextScale:
           ((json['chatTextScale'] as num?)?.toDouble() ?? 1.0).clamp(0.7, 1.3),
       uiScale: ((json['uiScale'] as num?)?.toDouble() ?? 1.0).clamp(0.85, 1.30),
+      composerQuickActions: (() {
+        const known = {
+          'agent', 'model', 'persona', 'plan', 'skills', 'plugins',
+        };
+        final raw = json['composerQuickActions'];
+        final list = raw is List ? raw.whereType<String>() : const <String>[];
+        return list.where(known.contains).toSet().toList();
+      })(),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentSubagentApiModelId: json['agentSubagentApiModelId'] as String? ?? '',
       agentCompressionApiModelId:
