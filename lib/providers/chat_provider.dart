@@ -212,6 +212,13 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
 
   Future<void> delete(String id) async {
     await _storage.deleteConversation(id);
+    // 计划按会话管理（2026-10-25 用户定案）：会话删除 → 计划文件随删。
+    unawaited(() async {
+      try {
+        final base = await getApplicationSupportDirectory();
+        await GoalStore(baseDir: '${base.path}/goals').deletePlan(id);
+      } catch (_) {}
+    }());
     state = state.where((c) => c.id != id).toList();
   }
 
@@ -754,13 +761,11 @@ class ChatNotifier extends StateNotifier<bool> {
       // 排除智能体工具活动消息（🔧 前缀）—— 它们仅用于 UI 展示，不入模型上下文。
       final allMessages =
           await _storage.getMessages(conversationId, limit: 200);
-      final messagesForTemplate = <Map<String, String>>[];
-      for (final msg in allMessages) {
-        if (msg.content.isNotEmpty && !_isToolActivityMessage(msg)) {
-          messagesForTemplate
-              .add({'role': msg.role.name, 'content': msg.content});
-        }
-      }
+      // 压缩游标生效：游标前的旧文本轮不入上下文（投影级压缩）。
+      final messagesForTemplate = <Map<String, String>>[
+        for (final msg in _messagesForModelContext(allMessages))
+          {'role': msg.role.name, 'content': msg.content},
+      ];
       final messagesJson = jsonEncode(messagesForTemplate);
       debugPrint(
           '[ChatNotifier] Chat history: ${messagesForTemplate.length} msgs, jsonLen=${messagesJson.length}');
@@ -1014,6 +1019,7 @@ class ChatNotifier extends StateNotifier<bool> {
         } else {
           _updateLocalContextUsage(conversationId, genStats);
         }
+        unawaited(_maybeAutoCompact(conversationId));
 
         return fullResponse;
       } catch (e) {
@@ -1501,12 +1507,7 @@ class ChatNotifier extends StateNotifier<bool> {
     // 会把它还原成真实 assistant(toolCalls)/tool/result 事件（WP1a）；
     // 其余 🔧 活动消息（纯 UI 用）照旧排除。
     final allMessages = await _storage.getMessages(conversationId, limit: 200);
-    final history = allMessages
-        .where((m) =>
-            m.content.isNotEmpty &&
-            (!_isToolActivityMessage(m) ||
-                m.content.startsWith(kAgentTraceMessagePrefix)))
-        .toList();
+    final history = _messagesForModelContext(allMessages);
     final sessionLog =
         _sessionStore.importFromMessages(conversationId, history);
 
@@ -1905,6 +1906,7 @@ class ChatNotifier extends StateNotifier<bool> {
       // 本地路线：KV 缓存占比（已占用位置 kv_used / 上下文窗口 kv_ctx）。
       _updateLocalContextUsage(conversationId, genStats);
     }
+    unawaited(_maybeAutoCompact(conversationId));
     // 思考存档落库（kind=thinking，仅 UI 展示不入模型上下文）：turn 事件流
     // 结束时各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程
     // 痕迹消息——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
@@ -2061,6 +2063,39 @@ class ChatNotifier extends StateNotifier<bool> {
         );
   }
 
+  /// 压缩摘要信封的 noticeCode（存储级投影压缩，2026-10-25）：
+  /// 该消息在 UI 隐藏（notice 不渲染）、在模型上下文里作为 user 摘要恒入，
+  /// 其 timestamp 即压缩游标——之前的旧文本轮不再进入模型上下文。
+  static const String kCompactSummaryNotice = 'compactSummary';
+
+  /// 最新压缩摘要信封（可能没有）：timestamp = 压缩游标。
+  ChatMessage? _latestCompactSummary(List<ChatMessage> all) {
+    ChatMessage? latest;
+    for (final m in all) {
+      if (m.noticeCode == kCompactSummaryNotice &&
+          (latest == null || m.timestamp.isAfter(latest.timestamp))) {
+        latest = m;
+      }
+    }
+    return latest;
+  }
+
+  /// 模型上下文过滤（三路共用：简单聊天历史 / 智能体回合导入 / 占用估算）：
+  /// 排除 UI 活动消息（放行 🔧TRACE 信封）+ 排除压缩游标之前的旧文本轮
+  /// （UI 历史保留、模型不见）；压缩摘要信封恒入（只保留最新一份）。
+  List<ChatMessage> _messagesForModelContext(List<ChatMessage> all) {
+    final summary = _latestCompactSummary(all);
+    final cursor = summary?.timestamp;
+    return all.where((m) {
+      if (m.content.isEmpty) return false;
+      final isTrace = m.content.startsWith(kAgentTraceMessagePrefix);
+      if (_isToolActivityMessage(m) && !isTrace) return false;
+      if (m.noticeCode == kCompactSummaryNotice) return identical(m, summary);
+      if (cursor != null && m.timestamp.isBefore(cursor)) return false;
+      return true;
+    }).toList();
+  }
+
   /// 本地路线：更新某会话 KV 缓存占比（上下文占用圈数据源）。
   ///
   /// used = 原生 KV 缓存已占用位置数（kv_used，当前会话已解码进缓存的 token），
@@ -2110,13 +2145,8 @@ class ChatNotifier extends StateNotifier<bool> {
 
       final all = await _storage.getMessages(conversationId, limit: 200);
       if (all.isEmpty) return;
-      final history = all
-          .where((m) =>
-              m.content.isNotEmpty &&
-              (!_isToolActivityMessage(m) ||
-                  m.content.startsWith(kAgentTraceMessagePrefix)))
-          .toList();
-      final log = _sessionStore.importFromMessages(conversationId, history);
+      final log = _sessionStore
+          .importFromMessages(conversationId, _messagesForModelContext(all));
       final est = estimateContextTokens(log.deriveModelMessages());
       if (est <= 0) return;
 
@@ -2149,55 +2179,108 @@ class ChatNotifier extends StateNotifier<bool> {
     }
   }
 
+  /// 自动压缩（2026-10-25）：占用越过阈值（默认 80%，占用详情面板可拖）
+  /// 时在回合结束后自动执行存储级压缩。回合执行中不触发（导入竞态）。
+  Future<void> _maybeAutoCompact(String conversationId) async {
+    final usage =
+        _ref.read(contextUsageProvider.notifier).usageFor(conversationId);
+    final fraction = usage?.fraction;
+    if (fraction == null) return;
+    final threshold = _ref.read(settingsProvider).autoCompactThreshold;
+    if (fraction < threshold) return;
+    if (_activeTurns.containsKey(conversationId)) return;
+    final (envelopes, chars) = await manualCompact(conversationId);
+    if (envelopes > 0) {
+      _ref.read(modelManagerProvider.notifier).appendInferenceLog(
+            '自动压缩 | 占用 ${(fraction * 100).round()}% ≥ 阈值 '
+            '${(threshold * 100).round()}% | 移出 $envelopes 条 | 摘要 $chars 字',
+          );
+    }
+  }
+
   /// 手动压缩（输入框占用圈 → 详情面板入口）。
   ///
-  /// 把较早轮次的 🔧TRACE 工具轮轨迹信封从存储中清出（保留最近一条信封，
-  /// 即最近一轮的工具上下文）——工具结果是上下文的 token 大户。最早一条
-  /// 信封**原位改写**为「摘要信封」（同 TRACE 前缀 + 单条 user/message
-  /// 事件，下一轮导入时投影为 user 摘要，模型仍记得做过什么），其余信封
-  /// 删除；可见消息（user/assistant 文本）一律不动，UI 历史回看不受影响
-  /// （🔧TRACE 消息本就不渲染）。
+  /// **存储级投影压缩**（2026-10-25 重写，此前只清 TRACE 信封、纯文本会话
+  /// 永远 (0,0) 被 450 投诉"没有效果"）：
+  /// - 文本轮：保留最近 6 条（≈3 轮）原样入上下文，更早的折叠成**一条压缩
+  ///   摘要信封**（noticeCode=compactSummary，UI 不渲染、模型恒见）——其
+  ///   timestamp 即压缩游标，旧文本轮经 [_messagesForModelContext] 出上下文，
+  ///   **存储与 UI 历史原样保留**；
+  /// - 工具轮：沿用 planStorageCompaction（保留最近一条信封，其余删除，
+  ///   最早一条改写为摘要信封）；
+  /// - 旧摘要信封删除合并（重复压缩不留多份）。
   ///
-  /// 与回合内 DeterministicCompaction 的区别：那是一次性内存投影（下回合
-  /// 重建即失效），本方法**存储级持久**——之后每一轮导入都看到瘦身后历史。
-  ///
-  /// 返回 (清理信封数, 摘要字符数)；无可压缩内容返回 (0, 0)。
+  /// 与回合内 DeterministicCompaction 的区别：那是内存投影，本方法持久。
+  /// 返回 (移出上下文的消息数, 摘要字符数)；无可压缩内容返回 (0, 0)。
   Future<(int, int)> manualCompact(String conversationId) async {
     final all = await _storage.getMessages(conversationId, limit: 200);
+    // ① 工具轮信封清理（保留最近一条）。
     final plan = planStorageCompaction(all);
-    if (plan == null) return (0, 0);
-
-    // 最早一条信封原位改写为摘要信封（保持 id/timestamp → 排序不变），
-    // 其余删除。
-    final first =
-        all.firstWhere((m) => m.id == plan.firstId);
-    await _storage.saveMessage(ChatMessage(
-      id: first.id,
-      conversationId: first.conversationId,
-      role: first.role,
-      content: plan.summaryEnvelope,
-      timestamp: first.timestamp,
-    ));
-    if (plan.deleteIds.isNotEmpty) {
-      await _storage.deleteMessages(plan.deleteIds);
-    }
-
-    // 日志 + 占用快照即时回落（按瘦身后历史重估，窗口沿用原快照）。
-    final manager = _ref.read(modelManagerProvider.notifier);
-    manager.appendInferenceLog(
-      '手动压缩 | 清理工具轮信封 ${plan.deleteIds.length + 1} 条 | '
-      '摘要 ${plan.summaryChars} 字',
-    );
-    final updated = await _storage.getMessages(conversationId, limit: 200);
-    final history = updated
+    // ② 文本轮投影压缩：保留最近 6 条，更早的折叠。
+    const keepRecent = 6;
+    final summary = _latestCompactSummary(all);
+    final cursor = summary?.timestamp;
+    final textMsgs = all
         .where((m) =>
             m.content.isNotEmpty &&
-            (!_isToolActivityMessage(m) ||
-                m.content.startsWith(kAgentTraceMessagePrefix)))
+            !_isToolActivityMessage(m) &&
+            m.noticeCode != kCompactSummaryNotice &&
+            (cursor == null || m.timestamp.isAfter(cursor)))
         .toList();
-    final log = _sessionStore.importFromMessages(conversationId, history);
+    final folded = textMsgs.length > keepRecent
+        ? textMsgs.sublist(0, textMsgs.length - keepRecent)
+        : <ChatMessage>[];
+    if (plan == null && folded.isEmpty) return (0, 0);
+
+    // ③ 写压缩摘要信封（若本轮有折叠文本；timestamp = 折叠边界之后 1ms，
+    //   保证既覆盖全部折叠消息、又落在保留窗口之前）。
+    var summaryChars = plan?.summaryChars ?? 0;
+    String summaryText = plan?.summaryEnvelope ?? '';
+    if (folded.isNotEmpty) {
+      final boundary = folded.last.timestamp;
+      final topics = [
+        for (final m in folded)
+          if (m.role == MessageRole.user)
+            m.content.trim().split('\n').first
+      ].take(5).map((t) => '「${t.length > 16 ? t.substring(0, 16) : t}」');
+      summaryText = '【上下文已压缩】此前 ${folded.length} 条消息已移出模型'
+          '上下文（聊天记录不受影响）。用户此前问过：${topics.join('、')}。'
+          '如需细节请用户复述。';
+      summaryChars = summaryText.length;
+      await _storage.saveMessage(ChatMessage(
+        id: '${boundary.millisecondsSinceEpoch + 1}-compact',
+        conversationId: conversationId,
+        role: MessageRole.user,
+        kind: MessageKind.notice,
+        noticeCode: kCompactSummaryNotice,
+        content: summaryText,
+        timestamp: boundary.add(const Duration(milliseconds: 1)),
+      ));
+    }
+
+    // ④ 删除：旧 TRACE 信封（plan.deleteIds）+ 旧压缩摘要信封（合并）。
+    final deleteIds = [
+      ...?plan?.deleteIds,
+      for (final m in all)
+        if (m.noticeCode == kCompactSummaryNotice) m.id,
+    ];
+    if (deleteIds.isNotEmpty) {
+      await _storage.deleteMessages(deleteIds);
+    }
+
+    // ⑤ 重估占用（用压缩后的模型上下文口径），窗口沿用原快照。
+    final manager = _ref.read(modelManagerProvider.notifier);
+    manager.appendInferenceLog(
+      '手动压缩 | 移出上下文 ${deleteIds.length + folded.length} 条'
+      '（工具信封 ${plan?.deleteIds.length ?? 0} + 旧文本 ${folded.length}）'
+      ' | 摘要 $summaryChars 字',
+    );
+    final updated = await _storage.getMessages(conversationId, limit: 200);
+    final log = _sessionStore
+        .importFromMessages(conversationId, _messagesForModelContext(updated));
     final est = estimateContextTokens(log.deriveModelMessages());
-    final prev = _ref.read(contextUsageProvider.notifier).usageFor(conversationId);
+    final prev =
+        _ref.read(contextUsageProvider.notifier).usageFor(conversationId);
     if (prev?.windowTokens != null) {
       _ref.read(contextUsageProvider.notifier).update(
             conversationId,
@@ -2206,10 +2289,9 @@ class ChatNotifier extends StateNotifier<bool> {
             windowSource: '压缩后估算',
           );
     }
-    debugPrint('[ManualCompact] conv=$conversationId envelopes='
-        '${plan.deleteIds.length + 1} summary=${plan.summaryChars}chars '
-        'est=$est tok');
-    return (plan.deleteIds.length + 1, plan.summaryChars);
+    debugPrint('[ManualCompact] conv=$conversationId folded=${folded.length} '
+        'deleted=${deleteIds.length} est=$est tok');
+    return (deleteIds.length + folded.length, summaryChars);
   }
 
   /// 溢写存储：超长工具输出落盘 `ApplicationSupport/agent_spill/`，

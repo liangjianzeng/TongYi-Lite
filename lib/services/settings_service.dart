@@ -229,6 +229,10 @@ class InferenceSettings {
   /// 合法 id：agent/model/persona/plan/skills/plugins。
   final List<String> composerQuickActions;
 
+  /// 自动压缩阈值（占用比例，0.5–0.95，默认 0.8）：上下文占用越过该刻度
+  /// 自动触发存储级压缩（占用详情面板刻度条上可拖动调节）。
+  final double autoCompactThreshold;
+
   /// 子代理工具（subagent，spawn/fork）注册开关。默认开??
   /// 不变量固定（深度 ??2 / 子代理审批恒 never / 每层独立预算）??
   final bool agentSubagentEnabled;
@@ -508,6 +512,7 @@ class InferenceSettings {
     this.chatTextScale = 1.0,
     this.uiScale = 1.0,
     this.composerQuickActions = const [],
+    this.autoCompactThreshold = 0.8,
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
     this.agentCompressionApiModelId = '',
@@ -700,6 +705,7 @@ class InferenceSettings {
     double? chatTextScale,
     double? uiScale,
     List<String>? composerQuickActions,
+    double? autoCompactThreshold,
     bool? agentSubagentEnabled,
     String? agentSubagentApiModelId,
     String? agentCompressionApiModelId,
@@ -816,6 +822,7 @@ class InferenceSettings {
       chatTextScale: chatTextScale ?? this.chatTextScale,
       uiScale: uiScale ?? this.uiScale,
       composerQuickActions: composerQuickActions ?? this.composerQuickActions,
+      autoCompactThreshold: autoCompactThreshold ?? this.autoCompactThreshold,
       agentSubagentEnabled: agentSubagentEnabled ?? this.agentSubagentEnabled,
       agentSubagentApiModelId:
           agentSubagentApiModelId ?? this.agentSubagentApiModelId,
@@ -937,6 +944,7 @@ class InferenceSettings {
         'chatTextScale': chatTextScale,
         'uiScale': uiScale,
         'composerQuickActions': composerQuickActions,
+        'autoCompactThreshold': autoCompactThreshold,
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
         'agentCompressionApiModelId': agentCompressionApiModelId,
@@ -1088,6 +1096,9 @@ class InferenceSettings {
         final list = raw is List ? raw.whereType<String>() : const <String>[];
         return list.where(known.contains).toSet().toList();
       })(),
+      autoCompactThreshold:
+          ((json['autoCompactThreshold'] as num?)?.toDouble() ?? 0.8)
+              .clamp(0.5, 0.95),
       agentSubagentEnabled: json['agentSubagentEnabled'] as bool? ?? true,
       agentSubagentApiModelId: json['agentSubagentApiModelId'] as String? ?? '',
       agentCompressionApiModelId:

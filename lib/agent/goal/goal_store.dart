@@ -276,6 +276,33 @@ class GoalStore {
     }
   }
 
+  /// 全量计划（跨会话，2026-10-25 用户需求：左栏计划面板按时间倒序浏览
+  /// 各历史会话的计划，完成与否可见；会话删除时计划随删）。
+  /// 返回 (conversationId, GoalState)；坏文件跳过。
+  Future<List<(String, GoalState)>> listAll() async {
+    final dir = Directory(baseDir);
+    if (!dir.existsSync()) return const [];
+    final out = <(String, GoalState)>[];
+    for (final f in dir.listSync()) {
+      final name = f.path.split(Platform.pathSeparator).last;
+      if (!name.startsWith('goal_') || !name.endsWith('.json')) continue;
+      final conv = name.substring(5, name.length - 5);
+      try {
+        final m = jsonDecode(await (f as File).readAsString())
+            as Map<String, dynamic>;
+        out.add((conv, GoalState.fromJson(m)));
+      } catch (_) {}
+    }
+    out.sort((a, b) => b.$2.updatedAtMs.compareTo(a.$2.updatedAtMs));
+    return out;
+  }
+
+  /// 删除某会话的计划文件（会话删除时随删；无文件静默）。
+  Future<void> deletePlan(String conversationId) async {
+    final f = _fileOf(conversationId);
+    if (await f.exists()) await f.delete();
+  }
+
   Future<void> save(String conversationId, GoalState goal) async {
     final dir = Directory(baseDir);
     if (!await dir.exists()) await dir.create(recursive: true);

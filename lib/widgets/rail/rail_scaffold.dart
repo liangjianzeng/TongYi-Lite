@@ -81,6 +81,9 @@ class RailPanelController extends ChangeNotifier {
 }
 
 /// 左栏本体：Logo + children（主图标组，含插件槽位）+ spacer + bottomChildren。
+///
+/// 点 Logo = 完全收起侧边栏（2026-10-25 用户需求，收/恢复状态由宿主持有）：
+/// 宿主隐藏整条 rail 后在顶栏左上角放恢复 Logo，主区自动吃满横向宽度。
 class AppRail extends StatelessWidget {
   final VoidCallback? onLogoTap;
   final String? logoTooltip;

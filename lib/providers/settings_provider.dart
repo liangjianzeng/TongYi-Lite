@@ -456,6 +456,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 自动压缩阈值（占用详情面板刻度条滑块，0.5–0.95）。
+  Future<void> setAutoCompactThreshold(double value) async {
+    state =
+        state.copyWith(autoCompactThreshold: value.clamp(0.5, 0.95));
+    await _persist();
+  }
+
   /// 开/关单个快捷图标。
   Future<void> toggleComposerQuickAction(String id, bool on) async {
     final cur = [...state.composerQuickActions];

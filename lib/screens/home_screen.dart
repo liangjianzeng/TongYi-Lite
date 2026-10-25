@@ -731,8 +731,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           rail: _buildRail(slots),
           child: Scaffold(
             appBar: AppBar(
-              // 紧凑标题栏：44px（默认 56）。导航全部在左栏（设计稿无 leading），
-              // 顶栏只承担状态呈现（模型状态 chip）。
+              // 紧凑标题栏：44px（默认 56）。导航默认全在左栏（设计稿无 leading）；
+              // 侧边栏折叠态（logo 点击收起）时顶栏左上角显示恢复 Logo。
               // 常驻底部分界线（设计稿 border-bottom）：状态栏条带/顶栏/消息区
               // 同底色，没这条线三者融成一片。
               shape: Border(
@@ -740,6 +740,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     color: Theme.of(context).colorScheme.outlineVariant),
               ),
               toolbarHeight: 44,
+              leading: _railCollapsed
+                  ? Tooltip(
+                      message: '展开侧边栏',
+                      child: GestureDetector(
+                        onTap: () => setState(() => _railCollapsed = false),
+                        // Center + 固定尺寸：AppBar leading 默认约束会把
+                        // 无对齐的 Container 拉伸变形（2026-10-25 真机截图）。
+                        child: Center(
+                          child: Container(
+                            width: 30,
+                            height: 30,
+                            alignment: Alignment.center,
+                            decoration: const BoxDecoration(
+                              borderRadius:
+                                  BorderRadius.all(Radius.circular(10)),
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  Color(0xFF7C5CFC),
+                                  Color(0xFF5B8DEF)
+                                ],
+                              ),
+                            ),
+                            child: const Icon(Icons.auto_awesome,
+                                size: 16, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    )
+                  : null,
               title: const Text(
                 'TongYi-Lite',
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
@@ -792,11 +823,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  /// 左栏折叠态（2026-10-25 用户需求）：点 rail 的 Logo **完全隐藏**侧边栏
+  /// （非窄条），恢复 Logo 出现在顶栏左上角；对话区/输入框铺满全宽。
+  bool _railCollapsed = false;
+
   Widget _buildRail(SlotRegistry registry) {
     final anyRunning = ref.watch(runningTurnsProvider).isNotEmpty;
+    if (_railCollapsed) return const SizedBox.shrink();
     return AppRail(
-      onLogoTap: () => _openRail('model'),
-      logoTooltip: '应用总览 / 模型状态',
+      onLogoTap: () {
+        setState(() => _railCollapsed = true);
+        _railPanel.close(); // 收起 = 看全宽内容，开着面板会挡住。
+      },
+      logoTooltip: '收起侧边栏',
       children: [
         RailIconButton(
           item: RailItem(
@@ -1133,10 +1172,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         if (!snap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        return _PlanPanelSheet(
-          store: snap.data!,
-          conversationId: _currentConversationId,
-          onRegenerate: () {
+        // 全部计划（2026-10-25 用户需求）：跨会话按时间倒序浏览，完成与否
+        // 可见；会话已删的计划可单独删除；点行切换到对应会话。
+        return Column(
+          children: [
+            _AllPlansSection(
+              store: snap.data!,
+              onOpenConversation: (id) {
+                _switchConversation(id);
+                _railPanel.close();
+              },
+            ),
+            Expanded(
+              child: _PlanPanelSheet(
+                store: snap.data!,
+                conversationId: _currentConversationId,
+                onRegenerate: () {
             final text = _textController.text;
             if (!text.startsWith(_planPrefix)) {
               _textController.text = '$_planPrefix${text.trimLeft()}';
@@ -1145,8 +1196,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             }
             FocusScope.of(context).requestFocus(FocusNode());
           },
-          onChanged: _refreshActivePlanFlag,
-          onClose: _closeRailSurface,
+                onChanged: _refreshActivePlanFlag,
+                onClose: _closeRailSurface,
+              ),
+            ),
+          ],
         );
       },
     );
@@ -1611,9 +1665,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('手动压缩上下文'),
         content: const Text(
-          '把较早轮次的工具结果从会话上下文中清出（保留最近一轮的工具记录'
-          '与全部对话文本，'
-          '存一条摘要供模型回看）。聊天记录显示不受影响。',
+          '把较早轮次的对话与工具结果移出模型上下文（保留最近 3 轮原文与'
+          '压缩摘要），聊天记录显示不受影响，下一轮请求立即瘦身。',
         ),
         actions: [
           TextButton(
@@ -1725,17 +1778,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: SizedBox(
-                      height: 8,
-                      child: LinearProgressIndicator(
-                        value: fraction,
-                        backgroundColor: barColor.withValues(alpha: 0.15),
-                        valueColor: AlwaysStoppedAnimation(barColor),
-                      ),
-                    ),
-                  ),
+                  // 刻度条 + 自动压缩阈值滑块（默认 80%，可拖动调节，
+                  // 2026-10-25 用户需求：拖到哪，占用越线就自动压缩）。
+                  _ContextGaugeWithThreshold(fraction: fraction),
                 ],
                 const SizedBox(height: 12),
                 Text(
@@ -1759,8 +1804,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '清理较早轮次的工具结果（保留最近一轮的工具记录与全部对话文本），'
-                  '存一条摘要供模型回看——下一轮请求立即瘦身。',
+                  '把较早轮次的对话与工具结果移出模型上下文（最近 3 轮与压缩'
+                  '摘要保留），聊天记录显示不受影响——下一轮请求立即瘦身。'
+                  '刻度条上的滑块 = 自动压缩阈值，越过即自动压缩。',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -2014,6 +2060,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final Widget inputBar = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // 计划执行条（2026-10-25 用户需求）：有活跃计划才出现，默认折叠，
+        // 点开展开步骤清单（最高 6 项，超出滚动）。
+        _buildPlanQuickStrip(),
         // 插件活动条 / 整块停靠区（single：最低 priority 的那个渲染）。
         SlotOutlet(slotId: 'app.input.activity', registry: slots),
         SlotOutlet(
@@ -2135,6 +2184,117 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 环 = 占用比例（蓝 <60% / 橙 ≥60% / 红 ≥85% 阈值配色），环心 = 百分比数字；
   /// 无数据时灰环显示「—」。点按 → 上下文详情面板（数字/来源/压缩记录/
   /// 手动压缩）。智能体回合执行中禁用点按（防误触打断注意力）。
+  // ---- composer 计划执行条（2026-10-25）：默认折叠一行读数
+  // （📋 计划 · done/total · 进行中步骤），点开展开步骤清单（最高 6 项，
+  // 超出滚动）；点步骤行切换状态。无活跃计划不渲染。
+  Widget _buildPlanQuickStrip() {
+    final plan = _activePlan;
+    if (plan == null || !plan.isActive) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final steps = plan.steps;
+    final done = steps.where((s) => s.status == PlanStepStatus.done).length;
+    final running =
+        steps.where((s) => s.status == PlanStepStatus.running).toList();
+    final current = running.isNotEmpty
+        ? running.first.title
+        : (steps.any((s) => s.status == PlanStepStatus.pending)
+            ? '待继续'
+            : '已全部完成');
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() => _planStripExpanded = !_planStripExpanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.checklist,
+                      size: 16, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '计划 · $done/${steps.length} · $current',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 12.5, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Icon(
+                    _planStripExpanded
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                    size: 18,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_planStripExpanded)
+            ConstrainedBox(
+              // 最高 ~6 项，超出滚动浏览。
+              constraints: const BoxConstraints(maxHeight: 6 * 44),
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+                children: [
+                  for (final s in steps)
+                    ListTile(
+                      dense: true,
+                      visualDensity: VisualDensity.compact,
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 4),
+                      leading: Icon(
+                        switch (s.status) {
+                          PlanStepStatus.done => Icons.check_circle,
+                          PlanStepStatus.running => Icons.play_circle,
+                          PlanStepStatus.failed => Icons.error,
+                          PlanStepStatus.pending => Icons.radio_button_unchecked,
+                        },
+                        size: 18,
+                        color: switch (s.status) {
+                          PlanStepStatus.done => Colors.green.shade600,
+                          PlanStepStatus.running => theme.colorScheme.primary,
+                          PlanStepStatus.failed => theme.colorScheme.error,
+                          PlanStepStatus.pending =>
+                            theme.colorScheme.onSurfaceVariant,
+                        },
+                      ),
+                      title: Text(s.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 12.5,
+                              decoration: s.status == PlanStepStatus.done
+                                  ? TextDecoration.lineThrough
+                                  : null,
+                              color: s.status == PlanStepStatus.done
+                                  ? theme.colorScheme.onSurfaceVariant
+                                  : null)),
+                      subtitle: s.detail.isEmpty
+                          ? null
+                          : Text(s.detail,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 11)),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   // ---- composer 快捷图标带（2026-10-25）：KV 环右侧，图标集在
   // 「更多 → 快捷设置」里逐个开启（settings.composerQuickActions，默认全关）。
   // agent = 点按直切智能体模式；其余 = 点按直开对应面板快速查看/设置。
@@ -2357,10 +2517,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 是否存在活跃计划（打开面板/切会话时刷新；驱动 chip 高亮）。
   bool _hasActivePlan = false;
 
+  /// 当前会话活跃计划体（composer 计划条数据源）。
+  GoalState? _activePlan;
+
+  /// composer 计划条展开态（默认折叠，2026-10-25 用户需求）。
+  bool _planStripExpanded = false;
+
   Future<void> _refreshActivePlanFlag() async {
     final plan = await (await _planStore()).load(_currentConversationId);
-    if (mounted && _hasActivePlan != (plan != null)) {
+    if (!mounted) return;
+    _activePlan = plan;
+    if (_hasActivePlan != (plan != null)) {
       setState(() => _hasActivePlan = plan != null);
+    } else {
+      setState(() {}); // 步骤进度变化也要刷新计划条。
     }
   }
 
@@ -3632,6 +3802,130 @@ class _MemoryPanelState extends State<_MemoryPanel> {
   }
 }
 
+/// 全部计划列表（2026-10-25 用户需求）：跨会话按更新时间倒序，
+/// 完成与否/进度可见；点行切到对应会话看执行；会话已删的可单独删除
+/// （计划按会话管理，会话删除时已自动随删，这里兜底手动清）。
+class _AllPlansSection extends ConsumerStatefulWidget {
+  final GoalStore store;
+  final void Function(String conversationId) onOpenConversation;
+
+  const _AllPlansSection({required this.store, required this.onOpenConversation});
+
+  @override
+  ConsumerState<_AllPlansSection> createState() => _AllPlansSectionState();
+}
+
+class _AllPlansSectionState extends ConsumerState<_AllPlansSection> {
+  List<(String, GoalState)>? _plans;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final plans = await widget.store.listAll();
+    if (!mounted) return;
+    setState(() => _plans = plans);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final conversations = ref.watch(conversationsProvider);
+    final titles = {
+      for (final c in conversations) c.id: c.title,
+    };
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text('全部计划（按时间倒序）',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: theme.colorScheme.onSurfaceVariant)),
+              ),
+            ],
+          ),
+        ),
+        if (_plans == null)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_plans!.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text('还没有任何计划',
+                style: TextStyle(
+                    fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
+          )
+        else
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              children: [
+                for (final (convId, plan) in _plans!)
+                  ListTile(
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                    leading: Icon(
+                      switch (plan.status) {
+                        GoalStatus.active => Icons.play_circle,
+                        GoalStatus.done => Icons.check_circle,
+                        GoalStatus.cancelled => Icons.cancel,
+                        GoalStatus.expired => Icons.schedule,
+                      },
+                      size: 20,
+                      color: switch (plan.status) {
+                        GoalStatus.active => theme.colorScheme.primary,
+                        GoalStatus.done => Colors.green.shade600,
+                        GoalStatus.cancelled => Colors.grey,
+                        GoalStatus.expired => Colors.orange,
+                      },
+                    ),
+                    title: Text(plan.title.isEmpty ? plan.goal : plan.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13)),
+                    subtitle: Text(
+                      '${titles[convId] ?? '会话已删除'} · '
+                      '${plan.steps.where((s) => s.status == PlanStepStatus.done).length}'
+                      '/${plan.steps.length} 步'
+                      '${plan.isActive ? ' · 执行中' : plan.status == GoalStatus.done ? ' · 已完成' : ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    trailing: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.delete_outline, size: 17),
+                      tooltip: '删除该计划',
+                      onPressed: () async {
+                        await widget.store.deletePlan(convId);
+                        await _reload();
+                      },
+                    ),
+                    onTap: () => widget.onOpenConversation(convId),
+                  ),
+              ],
+            ),
+          ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+}
+
 class _PlanPanelSheet extends StatefulWidget {
   final GoalStore store;
   final String conversationId;
@@ -3914,5 +4208,94 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
         _setStep(i + 1, next);
       },
     );
+  }
+}
+
+
+/// 占用刻度条 + 自动压缩阈值滑块（2026-10-25）：
+/// 底层 = 占用进度条（蓝/橙/红随 fraction），上层 = 阈值竖线 + 把手，
+/// 横向拖动（或点按任意位置）即改 autoCompactThreshold（0.5–0.95，持久化）。
+class _ContextGaugeWithThreshold extends ConsumerWidget {
+  final double fraction;
+  const _ContextGaugeWithThreshold({required this.fraction});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final threshold = ref.watch(settingsProvider).autoCompactThreshold;
+    final scheme = Theme.of(context).colorScheme;
+    return LayoutBuilder(builder: (context, box) {
+      final w = box.maxWidth;
+      void update(DragUpdateDetails d) {
+        final v = (d.localPosition.dx / w).clamp(0.5, 0.95);
+        ref.read(settingsProvider.notifier).setAutoCompactThreshold(v);
+      }
+
+      final thumbX = (threshold * w).clamp(14.0, w - 14.0);
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: update,
+        onTapUp: (d) {
+          final v = (d.localPosition.dx / w).clamp(0.5, 0.95);
+          ref.read(settingsProvider.notifier).setAutoCompactThreshold(v);
+        },
+        child: SizedBox(
+          height: 34,
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              // 刻度条（占用）
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 13,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: SizedBox(
+                    height: 8,
+                    child: LinearProgressIndicator(
+                      value: fraction,
+                      backgroundColor:
+                          scheme.surfaceContainerHighest,
+                      valueColor: AlwaysStoppedAnimation(
+                        fraction >= 0.85
+                            ? const Color(0xFFE53935)
+                            : fraction >= 0.60
+                                ? const Color(0xFFFB8C00)
+                                : const Color(0xFF2196F3),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              // 阈值竖线 + 把手 + 百分比标签
+              Positioned(
+                left: thumbX - 9,
+                top: 0,
+                child: Column(
+                  children: [
+                    Text('${(threshold * 100).round()}%',
+                        style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: scheme.primary)),
+                    Container(
+                      width: 18,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: scheme.primary,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: const Icon(Icons.compress,
+                          size: 10, color: Colors.white),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    });
   }
 }
