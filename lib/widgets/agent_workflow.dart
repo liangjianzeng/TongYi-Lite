@@ -437,7 +437,7 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                  // max 宽度：Spacer 生效，箭头对齐右缘（min 时跟标题飘）。
                   children: [
                     Icon(Icons.psychology,
                         size: 14,
@@ -453,7 +453,23 @@ class _ThinkingBlockCardState extends State<_ThinkingBlockCard> {
                           color:
                               theme.colorScheme.tertiary.withValues(alpha: 0.8)),
                     ),
-                    const Spacer(),
+                    // 折叠态摘要 = 思考首行（DSH ReasoningRow firstLine）：
+                    // 收起时用户概知里面想了啥，不是空洞的「思考 N」。
+                    if (!_expanded) ...[
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _ThinkingStreamCardState._firstLine(widget.text),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontStyle: FontStyle.italic),
+                        ),
+                      ),
+                    ] else
+                      const Spacer(),
                     Icon(
                       _expanded ? Icons.expand_less : Icons.expand_more,
                       size: 15,
@@ -992,8 +1008,10 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                               fontStyle: FontStyle.italic),
                         ),
                       ),
-                    ],
-                    const Spacer(),
+                    ] else
+                      // 折叠态摘要的 Expanded 已把箭头顶到右缘；展开态
+                      // 没有摘要，用 Spacer 补位——两种态箭头都在右缘。
+                      const Spacer(),
                     Icon(
                       expanded ? Icons.expand_less : Icons.expand_more,
                       size: 15,

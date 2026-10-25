@@ -483,7 +483,8 @@ void main() {
       // 展开后呈现思考存档块（块本身仍是折叠条，点开再看正文）。
       expect(find.textContaining('思考 1'), findsOneWidget);
       expect(find.textContaining('思考 2'), findsOneWidget);
-      expect(find.textContaining('思考一'), findsNothing);
+      // 折叠条摘要 = 思考首行（2026-10-25 用户定案：收起也概知内容）。
+      expect(find.textContaining('思考一'), findsOneWidget);
       await tester.tap(find.textContaining('思考 1'));
       await tester.pump();
       expect(find.textContaining('思考一'), findsOneWidget);
