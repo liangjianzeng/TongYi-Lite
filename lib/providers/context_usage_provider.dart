@@ -11,10 +11,16 @@ class ContextUsage {
   final int? windowTokens;
   final String windowSource;
 
+  /// 数据域（2026-10-25）：true = 本地引擎 KV（kv_used/kv_ctx，单实例，
+  /// 切会话即失效）；false = API usage（按会话有效，不随本地轮次失效）。
+  /// 清理策略按域走：本地轮次只清本地域快照，API 会话数据不被抹掉。
+  final bool isLocal;
+
   const ContextUsage({
     this.usedTokens,
     this.windowTokens,
     this.windowSource = '',
+    this.isLocal = false,
   });
 
   /// 占用比例（0..1）。任一项缺失 → null（无数据不显示）。
@@ -43,14 +49,36 @@ class ContextUsageNotifier extends StateNotifier<Map<String, ContextUsage>> {
     int? usedTokens,
     int? windowTokens,
     String windowSource = '',
+    bool isLocal = false,
   }) {
     final next = Map<String, ContextUsage>.from(state);
     next[conversationId] = ContextUsage(
       usedTokens: usedTokens,
       windowTokens: windowTokens,
       windowSource: windowSource,
+      isLocal: isLocal,
     );
     state = next;
+  }
+
+  /// 只清本地域快照（本地 KV 单实例，resetContext 后全部失效）；
+  /// API 会话的 usage 快照不受影响（2026-10-25：此前 clear() 把 API
+  /// 会话的占用一并抹掉——用户实测 API 的 KV 管理丢失的根因）。
+  void clearLocal() {
+    final next = <String, ContextUsage>{
+      for (final e in state.entries)
+        if (!e.value.isLocal) e.key: e.value,
+    };
+    if (next.length != state.length) state = next;
+  }
+
+  /// 保留 keep 会话，其余**本地域**快照清除（本地轮次结束时调用）。
+  void clearLocalExcept(String? keepConversationId) {
+    final next = <String, ContextUsage>{
+      for (final e in state.entries)
+        if (e.key == keepConversationId || !e.value.isLocal) e.key: e.value,
+    };
+    if (next.length != state.length) state = next;
   }
 
   /// 清空全部快照（本地 resetContext 后：KV 归零，旧快照全部失效）。

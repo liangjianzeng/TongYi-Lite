@@ -728,7 +728,7 @@ class ChatNotifier extends StateNotifier<bool> {
         kvReset = true;
       }
       // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
-      if (kvReset) _ref.read(contextUsageProvider.notifier).clear();
+      if (kvReset) _ref.read(contextUsageProvider.notifier).clearLocal();
       _currentKvWasAgentMode = false;
       _currentKvPersonaId = null;
     }
@@ -1241,7 +1241,7 @@ class ChatNotifier extends StateNotifier<bool> {
         kvReset = true;
       }
       // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
-      if (kvReset) _ref.read(contextUsageProvider.notifier).clear();
+      if (kvReset) _ref.read(contextUsageProvider.notifier).clearLocal();
       _currentKvWasAgentMode = true;
       _currentKvPersonaId = personaId;
     }
@@ -2110,12 +2110,15 @@ class ChatNotifier extends StateNotifier<bool> {
     if (used == null || ctx == null || ctx <= 0) return;
     // 本地 KV 单实例：当前快照只对刚测量完的会话有效，清掉其它会话的
     // 陈旧值（切会话后旧占用圈仍显示是误导）。
-    _ref.read(contextUsageProvider.notifier).clearExcept(conversationId);
+    _ref
+        .read(contextUsageProvider.notifier)
+        .clearLocalExcept(conversationId);
     _ref.read(contextUsageProvider.notifier).update(
           conversationId,
           usedTokens: used.toInt(),
           windowTokens: ctx.toInt(),
           windowSource: '原生',
+          isLocal: true,
         );
   }
 
@@ -2287,6 +2290,7 @@ class ChatNotifier extends StateNotifier<bool> {
             usedTokens: est,
             windowTokens: prev!.windowTokens,
             windowSource: '压缩后估算',
+            isLocal: prev.isLocal,
           );
     }
     debugPrint('[ManualCompact] conv=$conversationId folded=${folded.length} '
