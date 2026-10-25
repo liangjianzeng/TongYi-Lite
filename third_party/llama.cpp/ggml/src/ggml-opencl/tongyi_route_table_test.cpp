@@ -103,6 +103,14 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
                legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off) &&
                (q.K % 256 == 0) && (q.M % 128 == 0);
     }
+    // [tongyi 2026-10-25 q4_1 deliberate extension] 非 legacy 等价：镜像表行
+    // mmid_q4_1_batched（形状语义 = q4_0：K%32/M%128，无 E>1/K%256；view 禁入——
+    // extra_q4_1 无 es_base）。executor = 派发器通用 switch Q4_1 case。
+    if (q.type == RTYPE_Q4_1 && !ctx.batched_off) {
+        return srcs && !q.is_view &&
+               legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off) &&
+               (q.K % 32 == 0) && (q.M % 128 == 0);
+    }
     if (ctx.vendor_diag && (q.type == RTYPE_Q4_0 || q.type == RTYPE_Q8_0 || q.type == RTYPE_MXFP4) &&
         q.src1_f32 && q.contiguous0 && q.contiguous1) {
         return true;
@@ -113,7 +121,8 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
 // 镜像 batched 静态门（:25046 gate 0/1/4/5/6/7/8）
 static bool legacy_batched_static(const RouteQuery & q, const RouteContext & ctx) {
     if (!q.src1_f32 || !q.src2_i32) return false;
-    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K && q.type != RTYPE_IQ4_XS) return false;
+    // q4_1：2026-10-25 故意扩展（镜像表行 mmid_q4_1_batched）
+    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_1 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K && q.type != RTYPE_IQ4_XS) return false;
     if (!legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off)) return false;
     if (!q.contiguous0 || !q.contiguous1) return false;
     if (q.is_view) {
@@ -144,6 +153,11 @@ static int legacy_dispatch_kind(const RouteQuery & q, const RouteContext & ctx) 
     if (q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) {
         if (!ctx.batched_off && legacy_batched_static(q, ctx)) return 1;
         return 0;   // 静态拒 = supports_op 同门拒（GGML_ABORT 契约路径不会发生）
+    }
+    // [tongyi 2026-10-25 q4_1 deliberate extension] batched-only 家族记账
+    if (q.type == RTYPE_Q4_1) {
+        if (!ctx.batched_off && legacy_batched_static(q, ctx)) return 1;
+        return 0;
     }
     if (ctx.vendor_diag && (q.type == RTYPE_Q8_0 || q.type == RTYPE_MXFP4) &&
         q.src1_f32 && q.contiguous0 && q.contiguous1) return 3;
@@ -299,7 +313,7 @@ static void family_b() {
     CHECK(known_bad_lookup(RCOMP_E031, "kernel_convert_q4_0_trans4_ns"), "B4h R3 trans4_ns 族");
     CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched_raw"), "B4i R3 raw 3-plane 留档");
     CHECK(!known_bad_lookup(RCOMP_E17, "mul_mv_q4_k_f32_flat"), "B4j E17 flat 不在账");
-    CHECK(known_bad_count() == 6 && spec_count() == 9, "B4e 表规模 pin（9 行 + 6 坏账，R3）");
+    CHECK(known_bad_count() == 6 && spec_count() == 10, "B4e 表规模 pin（10 行 + 6 坏账，R3 + q4_1 扩展）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 
