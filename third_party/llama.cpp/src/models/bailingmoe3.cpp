@@ -361,14 +361,23 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
                     ggml_tensor * g1_state = build_rs(inp_rs, g1_states_all, hparams.n_embd_s(), n_seqs);
                     g1_state = ggml_reshape_3d(ctx0, g1_state, g1_d, g1_d, g1_h);
 
+                    // [R-020 真机验收 2026-10-26] 装载器张量形状 → G1 契约形状：
+                    // conv 权重 GGUF 存 4D {d_conv,1,d_inner,1}（内存 = d_inner 行 × d_conv 连续，
+                    // 内核按 c*d_conv+w 读，reshape_2d 纯投影零拷贝）；ssm_a 存 {1,n_head}，
+                    // 契约要 1D {n_head}（同内存 reshape_1d）。
+                    ggml_tensor * g1_cq = ggml_reshape_2d(ctx0, layer.ssm_q_conv, g1_dc, g1_inner);
+                    ggml_tensor * g1_ck = ggml_reshape_2d(ctx0, layer.ssm_k_conv, g1_dc, g1_inner);
+                    ggml_tensor * g1_cv = ggml_reshape_2d(ctx0, layer.ssm_v_conv, g1_dc, g1_inner);
+                    ggml_tensor * g1_a  = ggml_reshape_1d(ctx0, layer.ssm_a, g1_h);
+
                     ggml_tensor * g1_scratch = ggml_g1_kda_in(ctx0, cur,
                             layer.wq, layer.wk, layer.wv,
-                            layer.ssm_q_conv, layer.ssm_k_conv, layer.ssm_v_conv,
+                            g1_cq, g1_ck, g1_cv,
                             layer.ssm_beta, g1_conv_state,
                             g1_d, g1_dc, hparams.f_norm_rms_eps);
                     cb(g1_scratch, "g1_kda_in", il);
                     g1_out = ggml_g1_kda_out(ctx0, g1_scratch, cur,
-                            layer.ssm_f_a, layer.ssm_g_a, layer.ssm_dt_b, layer.ssm_a,
+                            layer.ssm_f_a, layer.ssm_g_a, layer.ssm_dt_b, g1_a,
                             layer.ssm_o_norm, layer.wo, g1_state,
                             hparams.f_norm_rms_eps, hparams.kda_gate_lower_bound);
                 }
