@@ -11,6 +11,13 @@
 // 跑法（本机 MinGW / 任意 host g++）：
 //   g++ -std=c++17 -O2 -I../ggml-cpu moe_topk_fused_route_test.cpp -o moe_topk_route_test && ./moe_topk_route_test
 // 期望：全 pass 退出码 0（含 ids→f32→I32 CAST roundtrip 位精确断言）。
+//
+// 设备验收记录（2026-10-25，740 / Adreno 830，Ling-3.0-tiny-Q4_0，16-token 短腿）：
+//   ① 文本：ON/OFF 六腿生成文本逐字节相同
+//   ② kernels/token：1498 → 1199（-299，-20.0%；设计稿预测 ~1210）
+//   ③ tok_s 交错 A/B：OFF 7.70/8.18/8.48 vs ON 9.21/8.86/8.83
+//      （首腿对 +19.6%，后两腿对均值 +6.2%，无回退）
+//   ④ 无 GGML_ABORT / signal；decode host_ms 均值 ~143 → ~109（-24%）
 #include "moe_topk_fused_core.h"
 
 #include <stdio.h>
