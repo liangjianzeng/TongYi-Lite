@@ -1749,6 +1749,192 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
+// [A7.2/R-014] GGML_OP_G1_SSM_LAYER CPU 参考（单 task；数值 = _probe/g1_probe 双精度
+// 口径，与 kernels/g1_ssm_layer.cl 双栈对拍 NMSE 1e-13 一致）。state/conv_state 原地 RMW。
+static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    if (params->ith != 0) return;
+
+    const struct ggml_tensor * x    = dst->src[0];
+    const struct ggml_tensor * w_in = dst->src[1];
+    const struct ggml_tensor * w_ba = dst->src[2];
+    const struct ggml_tensor * ssm_dt = dst->src[3];
+    const struct ggml_tensor * ssm_a  = dst->src[4];
+    const struct ggml_tensor * w_conv = dst->src[5];
+    struct ggml_tensor * conv_state = dst->src[6];   // RMW
+    const struct ggml_tensor * rms_w = dst->src[7];
+    const struct ggml_tensor * w_out = dst->src[8];
+    struct ggml_tensor * state = dst->src[9];        // RMW
+
+    const int n_embd = ggml_get_op_params_i32(dst, 0);
+    const int s_k    = ggml_get_op_params_i32(dst, 1);
+    const int h_k    = ggml_get_op_params_i32(dst, 2);
+    const int h_v    = ggml_get_op_params_i32(dst, 3);
+    const int s_v    = ggml_get_op_params_i32(dst, 4);
+    const int d_conv = ggml_get_op_params_i32(dst, 5);
+    const float l2_eps  = ggml_get_op_params_f32(dst, 6);
+    const float rms_eps = ggml_get_op_params_f32(dst, 7);
+    const int rf = h_v / h_k;
+    const int qkvz_new = 2*s_k + 2*s_v*rf;
+    const int conv_new = 2*s_k + s_v*rf;
+    const int cc       = 2*h_k*s_k + h_v*s_v;
+    const int nb_in    = n_embd / QK4_0;
+    const int nb_out   = (h_v*s_v) / QK4_0;
+    const int scr_total = 2*h_v*s_k + 2*h_v*s_v + 2*h_v;
+
+    const float * xf   = (const float *) x->data;
+    const float * wbaf = (const float *) w_ba->data;
+    const float * dtf  = (const float *) ssm_dt->data;
+    const float * af   = (const float *) ssm_a->data;
+    const float * wcf  = (const float *) w_conv->data;
+    float * csf        = (float *) conv_state->data;
+    const float * rwf  = (const float *) rms_w->data;
+    float * stf        = (float *) state->data;
+    float * yf         = (float *) dst->data;
+    const block_q4_0 * wif  = (const block_q4_0 *) w_in->data;
+    const block_q4_0 * wof  = (const block_q4_0 *) w_out->data;
+
+    // 工作区（单 malloc 分段）：mixed | ba | convv | dcol | ocol | sreg(state) | gated
+    double * wk = (double *) malloc(((size_t)qkvz_new*h_k + 2*h_v + (size_t)conv_new*h_k
+                + s_v + (size_t)h_v*s_v + (size_t)h_v*s_v*s_v + (size_t)h_v*s_v) * sizeof(double));
+    double * mixed = wk;                                   // [qkvz_new*h_k]
+    double * ba    = mixed + (size_t)qkvz_new*h_k;         // [2*h_v]
+    double * convv = ba + 2*h_v;                           // [conv_new*h_k]
+    double * dcol  = convv + (size_t)conv_new*h_k;         // [s_v]
+    double * ocol  = dcol + s_v;                           // [h_v*s_v]
+    double * sreg  = ocol + (size_t)h_v*s_v;               // [h_v*s_v*s_v] 列主 state
+    double * gated = sreg + (size_t)h_v*s_v*s_v;           // [h_v*s_v] stage2 出（stage3 的 x）
+    float * scrf = (float *) malloc((size_t)scr_total * sizeof(float));
+    const int scr_k_off = h_v*s_k, scr_v_off = 2*h_v*s_k;
+    const int scr_z_off = 2*h_v*s_k + h_v*s_v, scr_g_off = 2*h_v*s_k + 2*h_v*s_v;
+    const int scr_b_off = scr_g_off + h_v;
+
+    // stage1：in_proj + ba GEMV（块内积 ×d 再累加，与内核 Q4_DOT 同序）
+    for (int r = 0; r < qkvz_new*h_k; ++r) {
+        double acc = 0.0;
+        const block_q4_0 * row = wif + (size_t)r*nb_in;
+        for (int b = 0; b < nb_in; ++b) {
+            const float d = GGML_FP16_TO_FP32(row[b].d);
+            double sm = 0.0;
+            for (int t = 0; t < QK4_0; ++t) {
+                const uint8_t qb = row[b].qs[t >> 1];
+                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                sm += (double)(nib - 8) * xf[b*QK4_0 + t];
+            }
+            acc += sm * (double)d;
+        }
+        mixed[r] = acc;
+    }
+    for (int r = 0; r < 2*h_v; ++r) {
+        double acc = 0.0;
+        const float * row = wbaf + (size_t)r*n_embd;
+        for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
+        ba[r] = acc;
+    }
+    for (int g = 0; g < h_k; ++g) {
+        const double * lq = mixed + (size_t)g*qkvz_new;
+        // gate/beta（b=前 RF 列 / a=后 RF 列；gate=softplus(a+dt)*ssm_a）
+        for (int r = 0; r < rf; ++r) {
+            const double b = ba[g*(2*rf) + r];
+            const double a = ba[g*(2*rf) + rf + r];
+            const int h = 2*g + r;
+            const float aa = (float)(a + (double)dtf[h]);
+            scrf[scr_b_off + h] = 1.0f / (1.0f + expf(-(float)b));
+            scrf[scr_g_off + h] = (aa > 20.0f ? aa : log1pf(expf(aa))) * af[h];
+        }
+        // conv + silu（wcf[c*d_conv + w]；窗口末行=本 token 混合值）
+        for (int t = 0; t < conv_new; ++t) {
+            const int c = (t < s_k) ? (g*s_k + t)
+                        : (t < 2*s_k) ? (h_k*s_k + g*s_k + (t - s_k))
+                        : (2*h_k*s_k + g*s_v*rf + (t - 2*s_k));
+            double acc = 0.0;
+            for (int w = 0; w < d_conv-1; ++w) acc += (double)csf[(size_t)w*cc + c] * wcf[(size_t)c*d_conv + w];
+            acc += lq[t] * (double)wcf[(size_t)c*d_conv + (d_conv-1)];
+            const float av = (float)acc;
+            convv[(size_t)g*conv_new + t] = (double)(av / (1.0f + expf(-av)));   // silu
+        }
+        // q/k l2norm（因子 = S_K/sqrt(Σx²+eps)）+ interleave（v 头 2g+r ← k 头 g 第 r 段）
+        for (int seg = 0; seg < 2; ++seg) {
+            double ss = 0.0;
+            for (int t = 0; t < s_k; ++t) {
+                const double v_ = convv[(size_t)g*conv_new + seg*s_k + t];
+                ss += v_*v_;
+            }
+            const float f = (float)s_k / sqrtf((float)ss + l2_eps);
+            float * base = scrf + (seg == 0 ? 0 : scr_k_off);
+            for (int t = 0; t < s_k; ++t) {
+                const float v_ = (float)convv[(size_t)g*conv_new + seg*s_k + t] * f;
+                base[(2*g)  *s_k + t] = v_;
+                base[(2*g+1)*s_k + t] = v_;
+            }
+        }
+        // v/z 直通
+        for (int t = 0; t < s_v*rf; ++t) {
+            const int h = 2*g + t/s_v, j = t % s_v;
+            scrf[scr_v_off + h*s_v + j] = (float)convv[(size_t)g*conv_new + 2*s_k + t];
+            scrf[scr_z_off + h*s_v + j] = (float)lq[2*s_k + t];
+        }
+        // conv_state 滚动直写（原地：out[0]=in[1], out[1]=in[2], out[2]=本 token）
+        for (int t = 0; t < conv_new; ++t) {
+            const int c = (t < s_k) ? (g*s_k + t)
+                        : (t < 2*s_k) ? (h_k*s_k + g*s_k + (t - s_k))
+                        : (2*h_k*s_k + g*s_v*rf + (t - 2*s_k));
+            csf[(size_t)0*cc + c] = csf[(size_t)1*cc + c];
+            csf[(size_t)1*cc + c] = csf[(size_t)2*cc + c];
+            csf[(size_t)2*cc + c] = (float)lq[t];
+        }
+    }
+
+    // stage2：GDN AR（state 列主 S(i,j)=s[j*s_v+i]）+ gated RMSNorm
+    for (int h = 0; h < h_v; ++h) {
+        const float * k = scrf + scr_k_off, * q = scrf, * v = scrf + scr_v_off, * z = scrf + scr_z_off;
+        const float gexp = expf(scrf[scr_g_off + h]);
+        const float bta  = scrf[scr_b_off + h];
+        double * S = sreg + (size_t)h*s_v*s_v;
+        for (int idx = 0; idx < s_v*s_v; ++idx) S[idx] = (double)stf[(size_t)h*s_v*s_v + idx] * gexp;
+        for (int j = 0; j < s_v; ++j) {
+            double sk = 0.0;
+            for (int i = 0; i < s_v; ++i) sk += S[j*s_v + i] * (double)k[h*s_k + i];
+            dcol[j] = ((double)v[h*s_v + j] - sk) * (double)bta;
+        }
+        for (int j = 0; j < s_v; ++j)
+            for (int i = 0; i < s_v; ++i)
+                S[j*s_v + i] += (double)k[h*s_k + i] * dcol[j];
+        double ss = 0.0;
+        for (int j = 0; j < s_v; ++j) {
+            double acc = 0.0;
+            for (int i = 0; i < s_v; ++i) acc += S[j*s_v + i] * (double)q[h*s_k + i];
+            ocol[(size_t)h*s_v + j] = acc / sqrt((double)s_k);   // q 预乘 1/sqrt(S_K)
+            ss += ocol[(size_t)h*s_v + j] * ocol[(size_t)h*s_v + j];
+        }
+        const float f = 1.0f / sqrtf((float)(ss / s_v) + rms_eps);
+        for (int j = 0; j < s_v; ++j) {
+            const float ov = (float)ocol[(size_t)h*s_v + j];
+            const float zv = z[h*s_v + j];
+            gated[(size_t)h*s_v + j] = (double)(ov * f * rwf[j] * (zv / (1.0f + expf(-zv))));
+        }
+    }
+    // state 写回（原地 RMW）
+    for (size_t i = 0; i < (size_t)h_v*s_v*s_v; ++i) stf[i] = (float)sreg[i];
+
+    // stage3：o_proj GEMV（q4_0，x = gated → y 直接写 dst，无重叠）
+    for (int r = 0; r < n_embd; ++r) {
+        double acc = 0.0;
+        const block_q4_0 * row = wof + (size_t)r*nb_out;
+        for (int b = 0; b < nb_out; ++b) {
+            const float d = GGML_FP16_TO_FP32(row[b].d);
+            double sm = 0.0;
+            for (int t = 0; t < QK4_0; ++t) {
+                const uint8_t qb = row[b].qs[t >> 1];
+                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                sm += (double)(nib - 8) * gated[b*QK4_0 + t];
+            }
+            acc += sm * (double)d;
+        }
+        yf[r] = (float)acc;
+    }
+    free(wk); free(scrf);
+}
+
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
 
@@ -2030,6 +2216,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_moe_topk_fused(params, tensor);
             } break;
+        case GGML_OP_G1_SSM_LAYER:
+            {
+                ggml_compute_forward_g1_ssm_layer(params, tensor);
+            } break;
         case GGML_OP_LEAKY_RELU:
             {
                 ggml_compute_forward_leaky_relu(params, tensor);
@@ -2301,6 +2491,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_MOE_TOPK_FUSED:
             {
                 n_tasks = 1; // tiny [E<=128 x n_tokens] routing op, single task
+            } break;
+        case GGML_OP_G1_SSM_LAYER:
+            {
+                n_tasks = 1; // decode 单 token 层巨核，单 task（参考实现串行）
             } break;
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
