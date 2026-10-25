@@ -41,6 +41,9 @@
 
 ---
 
+> 📁 **docs/ 已迁移至私有仓库** [`TongYi-Lite-docs`](https://github.com/liangjianzeng/TongYi-Lite-docs)
+> （工程笔记/排障档案/内部文档，仅仓库所有者可见；公开克隆中 docs 为空指针，正文内 docs/ 链接仅限所有者本地有效）。
+
 ## 功能概览
 
 TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应用：模型权重完全本地推理，  
