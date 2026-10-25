@@ -232,6 +232,7 @@ set(GGML_OPENCL_KERNELS
     ssm_conv
     ssm_scan
     gated_delta_net
+    g1_ssm_layer
     sub
     sum_rows
     cumsum

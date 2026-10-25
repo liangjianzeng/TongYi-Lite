@@ -1117,6 +1117,12 @@ struct ggml_backend_opencl_context {
     // [size_idx][kda][tgpp] where size_idx: 0=S_V=16, 1=32, 2=64, 3=128; kda: 0 or 1.
     // tgpp 0 = TG variant (COLS_PER_LANE_GROUP=1), tgpp 1 = prefill variant (COLS_PER_LANE_GROUP=4).
     cl_kernel kernel_gated_delta_net_f32[4][2][2] = {};
+    // [A7.1/R-010] G1 逐层巨核（ling/qwen3next GDN 层 decode，3 launch/层）。
+    // 装载默认维度编译（内核 #ifndef 默认=ling tiny 形状）；派发接入未完成（图形融合
+    // 点 = 设计文档 §10.2 route case，过 X2 后合入），先入编译门防 bitrot。
+    cl_kernel kernel_g1_ssm_stage1 = nullptr;
+    cl_kernel kernel_g1_ssm_stage2 = nullptr;
+    cl_kernel kernel_g1_ssm_stage3 = nullptr;
     cl_kernel kernel_ssm_scan_f32 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d128 = nullptr;
     cl_kernel kernel_ssm_scan_f32_mamba2_d256 = nullptr;
@@ -4092,6 +4098,26 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 }
             }
         }
+        GGML_LOG_CONT(".");
+    }
+
+    // g1_ssm_layer: G1 巨核三阶段（stage1 投影+conv+门控 / stage2 GDN AR+gated norm /
+    // stage3 o_proj）。默认维度编译（探针 g1_layer_probe 同形状）；真模型 -D 注入 =
+    // §10.2 派发接入时做（lazy per-dims 缓存）。仅装载不派发。
+    {
+    #ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "g1_ssm_layer.cl.h"
+        };
+    #else
+        const std::string kernel_src = read_file("g1_ssm_layer.cl");
+    #endif
+        cl_program prog =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage1 = clCreateKernel(prog, "g1_ssm_stage1_proj", &err), err));
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage2 = clCreateKernel(prog, "g1_ssm_stage2_gdn", &err), err));
+        CL_CHECK((backend_ctx->kernel_g1_ssm_stage3 = clCreateKernel(prog, "g1_ssm_stage3_out", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
