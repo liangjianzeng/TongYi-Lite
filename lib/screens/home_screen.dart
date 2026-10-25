@@ -117,7 +117,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
     _initStoragePermission();
     _initConversation();
     _initAutoLoadDefaultModel();
@@ -125,7 +124,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   void dispose() {
-    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _textController.dispose();
     _conversationSearchCtrl.dispose();
@@ -135,25 +133,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     super.dispose();
   }
 
-  /// Track whether the user is near the bottom of the list (where the newest
-  /// message lives) so we only auto-scroll while they're following the
-  /// conversation, not when they've scrolled up to read history.
-  void _onScroll() {
-    if (!_scrollController.hasClients) return;
-    // While a reply is streaming in, always keep following the bottom. The
-    // auto-scroll animation (animateTo) fires scroll notifications mid-flight;
-    // if we let those intermediate positions flip _followStream off, the
-    // following stops and the incoming assistant message piles up off-screen.
-    // So during generation we pin _followStream = true and ignore position.
-    if (ref.read(runningTurnsProvider).containsKey(_currentConversationId)) {
-      if (!_followStream) setState(() => _followStream = true);
-      return;
+  /// 滚动焦点仲裁（2026-10-25 用户定案）：**只在用户手指拖动的滚动里**
+  /// 判定跟随焦点——拖离底部 = 释放自动跟随（生成中不再每帧拽到底部，
+  /// 可自由上翻看历史）；拖回底部（±60px）= 重新截获自动跟随。
+  ///
+  /// 仲裁信号 = ScrollUpdateNotification.dragDetails（非 null 才是手指
+  /// 拖动；跟随态每帧的 animateTo / 惯性 fling 都是程序化滚动，
+  /// dragDetails 为 null，一律忽略——否则动画中段位置会把焦点打掉，
+  /// 流式跟随随之失效，这正是此前 followSig 门控翻车的根因）。
+  bool _onScrollNotification(ScrollNotification n) {
+    if (n is ScrollUpdateNotification && n.dragDetails != null) {
+      final nearBottom = n.metrics.pixels >= n.metrics.maxScrollExtent - 60;
+      if (nearBottom != _followStream) {
+        setState(() => _followStream = nearBottom);
+      }
     }
-    final pos = _scrollController.position;
-    final nearBottom = pos.pixels >= pos.maxScrollExtent - 60;
-    if (nearBottom != _followStream) {
-      setState(() => _followStream = nearBottom);
-    }
+    return false;
   }
 
   Future<void> _initStoragePermission() async {
@@ -1997,7 +1992,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return MediaQuery(
           data: MediaQuery.of(context)
               .copyWith(textScaler: TextScaler.linear(textScale)),
-          child: ListView.builder(
+          // 拖拽仲裁（见 _onScrollNotification）：手指拖离底部释放跟随，
+          // 拖回底部重截获；程序化滚动不参与仲裁。
+          child: NotificationListener<ScrollNotification>(
+            onNotification: _onScrollNotification,
+            child: ListView.builder(
             controller: _scrollController,
             padding: const EdgeInsets.symmetric(vertical: 8),
             itemCount: units.length + extraItem,
@@ -2043,6 +2042,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
               };
             },
+          ),
           ),
         );
       },

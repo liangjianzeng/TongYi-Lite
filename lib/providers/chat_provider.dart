@@ -2148,12 +2148,27 @@ class ChatNotifier extends StateNotifier<bool> {
         return;
       }
       final settings = await SettingsService().load();
-      final activeApi = settings.activeApiModel();
       final hasLocalLoaded = _ref.read(modelManagerProvider).isLoaded;
       final hasDefault = settings.defaultModelId != null;
-      final isAgentApi =
-          settings.agentModelSource == 'api' && activeApi != null;
-      final isPlainApi = activeApi != null && !hasLocalLoaded && !hasDefault;
+      // API 配置解析必须与回合路由同构（2026-10-25 修复：API 会话的占用
+      // 窗口被回填成本地 contextSize）：智能体 API 档实际驱动模型 =
+      // agentModelId 在 apiModels 里的配置（不是 activeApiModel()）——
+      // 两者不一致时此前查不到 API 配置 → 落到本地 contextSize。
+      ApiModelConfig? apiCfg;
+      var apiRouted = false;
+      if (settings.agentModelSource == 'api') {
+        for (final m in settings.apiModels) {
+          if (m.id == settings.agentModelId) {
+            apiCfg = m;
+            break;
+          }
+        }
+        apiCfg ??= settings.activeApiModel();
+        apiRouted = apiCfg != null;
+      } else {
+        apiCfg = settings.activeApiModel();
+        apiRouted = apiCfg != null && !hasLocalLoaded && !hasDefault;
+      }
 
       final all = await _storage.getMessages(conversationId, limit: 200);
       if (all.isEmpty) return;
@@ -2164,15 +2179,15 @@ class ChatNotifier extends StateNotifier<bool> {
 
       int? window;
       var source = '';
-      if (isAgentApi || isPlainApi) {
+      if (apiRouted && apiCfg != null) {
         final fetched = await _ref
             .read(openAiServiceProvider)
-            .fetchContextWindow(activeApi!);
+            .fetchContextWindow(apiCfg);
         if (fetched != null && fetched > 0) {
           window = fetched;
           source = '实测';
-        } else if ((activeApi.contextWindow ?? 0) > 0) {
-          window = activeApi.contextWindow;
+        } else if ((apiCfg.contextWindow ?? 0) > 0) {
+          window = apiCfg.contextWindow;
           source = '配置';
         }
       } else if (settings.contextSize > 0) {
