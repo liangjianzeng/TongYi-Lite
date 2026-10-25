@@ -17,7 +17,12 @@ endif()
 
 set(GGML_OPENCL ON CACHE BOOL "" FORCE)
 set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
-set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
+# TYL_MESA_LEG=1 时不再 FORCE Adreno 内核路径（Mesa/ir3 腿走通用内核，
+# 绕 LLVM "Unsupported vector type with 32 elements" abort——C1-P1 R-008）。
+# 默认（空）行为不变：vendor 腿仍 FORCE ON。
+if("$ENV{TYL_MESA_LEG}" STREQUAL "")
+    set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
+endif()
 set(GGML_BUILD_TESTS ON CACHE BOOL "" FORCE)
 # stub: tests/CMakeLists.txt uses this root-only cmake helper
 macro(llama_add_compile_flags)
