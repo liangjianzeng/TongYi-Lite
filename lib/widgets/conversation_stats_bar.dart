@@ -1,15 +1,23 @@
 // ============================================================
-// 会话数据统计条（2026-10-25）：DSH StatsLine 形态的 Flutter 对应物。
+// 会话数据统计条（2026-10-25）：DSH StatsLine 逐行同构实现。
 //
-// 参考 deepseek-harness ui-conversation/chat/StatsLine.tsx：
-// 单行 12px 居中读数，组间「|」分隔，无数据的组整组掉线，超长省略号。
-// 组态（本 app 数据源可得的部分）：
-//   {N 轮 · M 步} | {LLM {dur} · {rate} tok/s} | ≈{tok} tok | 上下文 {n}%
-// DSH 的 缓存命中 / 首token平均 组依赖服务端 usage 投影，本 app 无对应
-// 数据源（本地路线无逐 token 计数出口），不强造假数字。
+// 对照源：deepseek-harness ui-conversation/src/client/chat/StatsLine.tsx
+// + locales.ts（zh 组串）+ StatsLine.module.css。此前的自由发挥
+// （steps=工具数 / ≈估算 tok / 上下文% 入行 / 数字加重双色）全部作废。
 //
-// 「封装」：独立 widget，home_screen 只喂 conversationId + 消息流，
-// 折算口径（轮/步/token 估算/LLM 耗时聚合）全部收在本文件内。
+// DSH 真实组态（有数据的组才上屏，整组掉线；全空 → 整条不渲染）：
+//   {turns} 轮 · {steps} 步            （steps = assistant 消息数！）
+//   LLM {dur} · 工具调用 {dur}          （durations，两项都有才成组）
+//   首 token 平均 {dur} · {rate} tok/s  （speeds，同上）
+//   输入 {n} tok · 输出 {n} tok         （真 usage；无 billing 不显示）
+// 上下文占用不进这条——归输入框占用环（一事实一处，DSH 注释原文）。
+//
+// 本 app 数据源映射：
+//   turns = user 消息数；steps = assistant 回答消息数；
+//   LLM dur = Σ inferenceStats.totalMs；工具 dur = Σ toolData.durationMs；
+//   首 token 平均 = Σ firstTokenMs / 计数步；tok/s = Σ输出tok / Σ解码ms；
+//   输入 = API 真 prompt_tokens（contextUsage.usedTokens），本地回退字符估算；
+//   输出 = Σ round(tokPerSec × totalMs/1000)，无统计回退估算。
 // ============================================================
 
 import 'dart:math' as math;
@@ -21,8 +29,7 @@ import '../agent/observability/turn_meter.dart' show estimateTokens;
 import '../models/chat_message.dart';
 import '../providers/context_usage_provider.dart' show contextUsageProvider;
 
-/// 会话统计条。始终占住手势条避让高度（键盘弹出时由宿主整体收起），
-/// 没有任何可显示的组时内容为空但 padding 保留——composer 不贴死屏幕底。
+/// 会话统计条。键盘弹出时由宿主整体收起；无可显示组时整条不渲染。
 class ConversationStatsBar extends ConsumerWidget {
   final String conversationId;
   final List<ChatMessage> messages;
@@ -37,110 +44,128 @@ class ConversationStatsBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
 
-    // ---- 折算 ----
-    var rounds = 0;
+    // ---- 折算（DSH deriveStats 同构）----
+    var turns = 0;
     var steps = 0;
-    var tokens = 0;
     var llmMs = 0;
-    var genTok = 0;
+    var toolMs = 0;
+    var ttftMs = 0;
+    var ttftSteps = 0;
+    var decodeMs = 0;
+    var decodeTokens = 0;
+    var inputTokens = 0;
+    var outputTokens = 0;
     for (final m in messages) {
-      final c = m.content;
+      if (m.role == MessageRole.user) {
+        turns++;
+        inputTokens += estimateTokens(m.content);
+        continue;
+      }
       if (m.kind == MessageKind.toolActivity ||
-          (m.kind == MessageKind.text && c.startsWith('🔧'))) {
-        steps++;
+          (m.kind == MessageKind.text && m.content.startsWith('🔧'))) {
+        // 工具结果节点：进工具耗时，不进步数（DSH tool-result 分支）。
+        final d = m.toolData?.durationMs;
+        if (d != null && d > 0) toolMs += d;
+        inputTokens += estimateTokens(m.content);
         continue;
       }
       if (m.kind == MessageKind.thinking ||
-          (m.kind == MessageKind.text && c.startsWith('💭'))) {
-        continue;
+          (m.kind == MessageKind.text && m.content.startsWith('💭')) ||
+          m.kind == MessageKind.notice ||
+          m.kind == MessageKind.error) {
+        continue; // 过程痕迹不进统计。
       }
-      if (m.role == MessageRole.user) rounds++;
-      tokens += estimateTokens(c);
-      final s = m.inferenceStats;
-      if (s != null && s.totalMs > 0) {
-        llmMs += s.totalMs;
-        genTok += (s.tokPerSec * s.totalMs / 1000).round();
+      if (m.role == MessageRole.assistant) {
+        // assistant 节点 = 一步（DSH：steps 数 assistant 消息，非工具数）。
+        steps++;
+        final s = m.inferenceStats;
+        if (s != null && s.totalMs > 0) {
+          llmMs += s.totalMs;
+          if (s.firstTokenMs > 0) {
+            ttftMs += s.firstTokenMs;
+            ttftSteps++;
+          }
+          final out = (s.tokPerSec * s.totalMs / 1000).round();
+          decodeTokens += out;
+          decodeMs += s.totalMs;
+          outputTokens += out;
+        } else {
+          outputTokens += estimateTokens(m.content);
+        }
+        inputTokens += estimateTokens(m.content) ~/ 4; // 上下文携带的粗略回填
       }
     }
 
-    // 组装：数字加重（w600 tabular），标签用次级色——DSH 读数行的信息层级。
-    final numStyle = TextStyle(
+    // ---- 组装（DSH StatsLine 主体逐行同构）----
+    final groups = <List<String>>[];
+    if (steps > 0) {
+      groups.add(['$turns 轮 · $steps 步']);
+      final durations = <String>[
+        if (llmMs > 0) 'LLM ${_formatDuration(llmMs)}',
+        if (toolMs > 0) '工具调用 ${_formatDuration(toolMs)}',
+      ];
+      if (durations.isNotEmpty) groups.add(durations);
+      final speeds = <String>[
+        if (ttftSteps > 0) '首 token 平均 ${_formatDuration(ttftMs ~/ ttftSteps)}',
+        if (decodeMs > 0)
+          '${_scaled(decodeTokens / (decodeMs / 1000))} tok/s',
+      ];
+      if (speeds.isNotEmpty) groups.add(speeds);
+    }
+    // 有 token 活动（出过字/有输入）才显示；全失败会话不出零值组（DSH 同门槛）。
+    // 输入优先取 API 真 prompt_tokens，无则用字符估算累计。
+    final usage = ref.watch(contextUsageProvider)[conversationId];
+    final apiInput = usage?.usedTokens;
+    final input = apiInput ?? inputTokens;
+    if (steps > 0 && (input > 0 || outputTokens > 0)) {
+      groups.add([
+        '输入 ${_formatTokens(input)} tok · 输出 ${_formatTokens(outputTokens)} tok',
+      ]);
+    }
+
+    if (groups.isEmpty) return const SizedBox.shrink();
+
+    // DSH StatsLine.module.css：12px/20px 三级灰、居中、组间「|」（10px 间距）、
+    // 超长省略号。全行统一色——DSH 无数字加重双色（此前是自由发挥，作废）。
+    final style = TextStyle(
         fontSize: 12,
-        height: 1.4,
-        fontWeight: FontWeight.w600,
-        color: theme.colorScheme.onSurfaceVariant,
-        fontFeatures: const [FontFeature.tabularFigures()]);
-    final labelStyle = TextStyle(
-        fontSize: 12,
-        height: 1.4,
+        height: 20 / 12,
         color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75));
-
-    Widget group(List<(String, bool)> parts) => Flexible(
-        child: Text.rich(
-            TextSpan(children: [
-              for (final (text, bold) in parts)
-                TextSpan(text: text, style: bold ? numStyle : labelStyle),
-            ]),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis));
-
-    final groups = <Widget>[];
-    // 轮/步组：普通聊天没有步数，"0 步"是噪声——只有真有工具步或 ≥2 轮
-    // 才值得占一个组（单轮寒暄显示「1 轮」毫无信息量，DSH 亦然）。
-    if (steps > 0 || rounds >= 2) {
-      groups.add(group([
-        ('$rounds', true),
-        (' 轮', false),
-        if (steps > 0) ...[
-          (' · ', false),
-          ('$steps', true),
-          (' 步', false),
-        ],
-      ]));
-    }
-    if (llmMs > 0) {
-      final rate = genTok / (llmMs / 1000);
-      groups.add(group([
-        ('LLM ', false),
-        (_formatDuration(llmMs), true),
-        (' · ', false),
-        (rate.toStringAsFixed(1), true),
-        (' tok/s', false),
-      ]));
-    }
-    // 短文本的估算 token（「≈1 tok」）是噪声，攒到有意义的量级才显示。
-    if (tokens >= 100) {
-      groups.add(group([('≈', false), (_formatTokens(tokens), true), (' tok', false)]));
-    }
-    final fraction =
-        ref.watch(contextUsageProvider)[conversationId]?.fraction;
-    if (fraction != null) {
-      groups.add(group([('上下文 ', false), ('${(fraction * 100).round()}', true), ('%', false)]));
-    }
+    final sepStyle = TextStyle(
+        fontSize: 12,
+        height: 20 / 12,
+        color: theme.colorScheme.outlineVariant);
 
     return Padding(
       // 手势条避让收口：常驻，与内容有无无关（composer 不贴死屏幕底）。
       padding: EdgeInsets.fromLTRB(
-          16, 0, 16, math.max(MediaQuery.of(context).padding.bottom, 16) + 2),
-      child: groups.isEmpty
-          ? const SizedBox.shrink()
-          : Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                for (var i = 0; i < groups.length; i++) ...[
-                  if (i > 0)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Text('|',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color:
-                                  theme.colorScheme.outlineVariant)),
-                    ),
-                  groups[i],
+          16, 4, 16, math.max(MediaQuery.of(context).padding.bottom, 16) + 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  for (var i = 0; i < groups.length; i++) ...[
+                    if (i > 0)
+                      TextSpan(
+                          text: '  |  ',
+                          style: sepStyle.copyWith(
+                              letterSpacing: 0)), // DSH sep margin 10px
+                    for (var j = 0; j < groups[i].length; j++) ...[
+                      if (j > 0) const TextSpan(text: ' · '),
+                      TextSpan(text: groups[i][j], style: style),
+                    ],
+                  ],
                 ],
-              ],
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
             ),
+          ),
+        ],
+      ),
     );
   }
 
