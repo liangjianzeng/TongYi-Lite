@@ -143,7 +143,13 @@ class TongYiLiteApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // 全局 UI 缩放（设置「更多 → UI 缩放」）：devicePixelRatio 乘数，
     // 与系统"显示大小"同机制，图标/文字/间距整体等比缩放。
-    final uiScale = ref.watch(settingsProvider).uiScale;
+    final settings = ref.watch(settingsProvider);
+    final uiScale = settings.uiScale;
+    final themeMode = switch (settings.themeMode) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
     return MaterialApp(
       builder: (context, child) {
         final mq = MediaQuery.of(context);
@@ -182,7 +188,7 @@ class TongYiLiteApp extends ConsumerWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
       ),
-      themeMode: ThemeMode.system,
+      themeMode: themeMode,
       home: const AppStartupGate(),
     );
   }

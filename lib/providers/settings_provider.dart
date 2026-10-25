@@ -463,6 +463,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// 应用外观：system / light / dark（更多 → 外观）。
+  Future<void> setThemeMode(String value) async {
+    const known = {'system', 'light', 'dark'};
+    if (!known.contains(value)) return;
+    state = state.copyWith(themeMode: value);
+    await _persist();
+  }
+
   /// 开/关单个快捷图标。
   Future<void> toggleComposerQuickAction(String id, bool on) async {
     final cur = [...state.composerQuickActions];

@@ -463,4 +463,32 @@ void main() {
       expect(decoded.buffer.asByteData(15, 4).getUint32(0), 32);
     });
   });
+
+  group('InferenceSettings 外观（themeMode）', () {
+    test('默认跟随系统；合法值往返一致', () {
+      expect(InferenceSettings().themeMode, 'system');
+      for (final v in ['system', 'light', 'dark']) {
+        final s = InferenceSettings(themeMode: v);
+        final back = InferenceSettings.fromJson(s.toJson());
+        expect(back.themeMode, v);
+      }
+    });
+
+    test('非法值回落 system（白名单）', () {
+      final back = InferenceSettings.fromJson(
+          InferenceSettings(themeMode: 'night').toJson()
+            ..['themeMode'] = 'night');
+      expect(back.themeMode, 'system');
+      expect(
+        InferenceSettings.fromJson({'themeMode': 3}).themeMode,
+        'system',
+      );
+    });
+
+    test('copyWith：不传保留', () {
+      final s = InferenceSettings(themeMode: 'dark');
+      expect(s.copyWith().themeMode, 'dark');
+      expect(s.copyWith(themeMode: 'light').themeMode, 'light');
+    });
+  });
 }

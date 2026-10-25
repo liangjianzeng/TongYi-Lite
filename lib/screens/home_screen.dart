@@ -1374,6 +1374,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const Text('整体缩放全部 UI（85%–130%）',
                 style: TextStyle(fontSize: 11, color: Colors.grey)),
+            const SizedBox(height: 10),
+            // 外观（2026-10-25）：浅色/深色/跟随系统，默认跟随系统。
+            _railSection('外观'),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final (value, label) in const [
+                  ('system', '跟随系统'),
+                  ('light', '浅色'),
+                  ('dark', '深色'),
+                ])
+                  ChoiceChip(
+                    label: Text(label, style: const TextStyle(fontSize: 12)),
+                    selected: ref.watch(settingsProvider).themeMode == value,
+                    onSelected: (_) => ref
+                        .read(settingsProvider.notifier)
+                        .setThemeMode(value),
+                  ),
+              ],
+            ),
             _railSection('快捷设置'),
             // composer 快捷图标带管理（KV 环右侧）：默认全关，
             // 开哪个 composer 就出现哪个图标（agent=直切开关，其余=开面板）。
