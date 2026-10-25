@@ -41,11 +41,18 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         const val TAG = "TongYiLite"
+        private const val REQUEST_SAVE_AS = 47001
     }
 
     private lateinit var engine: InferenceEngine
     private val mainHandler = Handler(Looper.getMainLooper())
     private var audioRecorder: AudioRecorder? = null
+
+    // 另存产物（SAF ACTION_CREATE_DOCUMENT）：跨 onActivityResult 保存
+    // 挂起的 channel result 与源（path 优先，content URI 兜底）。
+    private var pendingSaveAs: MethodChannel.Result? = null
+    private var pendingSaveAsPath: String? = null
+    private var pendingSaveAsUri: String? = null
 
     // ---- Debug logging helpers (always visible in Release logcat) ----
     private fun logI(method: String, message: String) { Log.i(TAG, "[$method] $message") }
@@ -140,6 +147,7 @@ class MainActivity : FlutterActivity() {
                 "exportFile" -> handleExportFile(call, result)
                 "openFile"   -> handleOpenFile(call, result)
                 "shareText"  -> handleShareText(call, result)
+                "saveAs"     -> handleSaveAs(call, result)
                 else         -> result.notImplemented()
             }
         }
@@ -597,6 +605,46 @@ class MainActivity : FlutterActivity() {
         result.error("OPEN_FAILED", "所有打开方式被拒绝：$errors", null)
     }
 
+    /**
+     * saveAs：另存产物到用户指定目录。系统文件选择器（SAF
+     * ACTION_CREATE_DOCUMENT）选目录+文件名，onActivityResult 回调后
+     * 把源（工作区文件优先，Download 里已导出的 content URI 兜底）流式
+     * 写入选定目标。成功返回目标 content:// URI；用户取消返回 CANCELLED。
+     */
+    private fun handleSaveAs(call: MethodCall, result: MethodChannel.Result) {
+        val srcPath = call.argument<String>("srcPath")?.trim().orEmpty()
+        val srcUri = call.argument<String>("srcUri")?.trim().orEmpty()
+        val name = call.argument<String>("name")?.trim().orEmpty()
+            .ifEmpty { File(srcPath.ifEmpty { "artifact" }).name.ifEmpty { "artifact" } }
+        val hasFile = srcPath.isNotEmpty() && File(srcPath).isFile
+        val hasUri = srcUri.startsWith("content:")
+        if (!hasFile && !hasUri) {
+            result.error("NOT_FOUND", "无可另存的源文件", null)
+            return
+        }
+        if (pendingSaveAs != null) {
+            result.error("BUSY", "已有另存操作进行中", null)
+            return
+        }
+        pendingSaveAs = result
+        pendingSaveAsPath = if (hasFile) srcPath else null
+        pendingSaveAsUri = if (hasUri) srcUri else null
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = mimeFor(name)
+            putExtra(Intent.EXTRA_TITLE, name)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_SAVE_AS)
+        } catch (e: Exception) {
+            pendingSaveAs = null
+            pendingSaveAsPath = null
+            pendingSaveAsUri = null
+            logW("handleSaveAs", "picker launch failed: ${e.message}", e)
+            result.error("SAVE_FAILED", "无法打开系统文件选择器：${e.message}", null)
+        }
+    }
+
     // ------------------------------------------------------------------
     // MethodChannel handlers
     // ------------------------------------------------------------------
@@ -771,6 +819,40 @@ class MainActivity : FlutterActivity() {
     }
 
     /** 在主线程执行回调（MethodChannel.Result 需 @UiThread）。 */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SAVE_AS) return
+        val result = pendingSaveAs ?: return
+        val srcPath = pendingSaveAsPath
+        val srcUri = pendingSaveAsUri
+        pendingSaveAs = null
+        pendingSaveAsPath = null
+        pendingSaveAsUri = null
+        if (resultCode != RESULT_OK || data?.data == null) {
+            result.error("CANCELLED", "已取消", null)
+            return
+        }
+        val dest = data.data!!
+        Thread {
+            try {
+                val input = when {
+                    srcPath != null && File(srcPath).isFile -> File(srcPath).inputStream()
+                    srcUri != null && srcUri.startsWith("content:") ->
+                        contentResolver.openInputStream(Uri.parse(srcUri))
+                    else -> null
+                } ?: throw IllegalStateException("源文件不可读")
+                contentResolver.openOutputStream(dest, "wt")!!.use { out ->
+                    input.use { it.copyTo(out) }
+                }
+                logI("handleSaveAs", "saved -> $dest")
+                runOnMain { result.success(dest.toString()) }
+            } catch (e: Exception) {
+                logE("handleSaveAs", "save failed: ${e.message}", e)
+                runOnMain { result.error("SAVE_FAILED", "另存失败：${e.message}", null) }
+            }
+        }.start()
+    }
+
     private fun runOnMain(block: () -> Unit) {
         mainHandler.post { block() }
     }

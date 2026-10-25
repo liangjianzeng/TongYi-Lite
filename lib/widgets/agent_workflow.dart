@@ -12,6 +12,7 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 
 import '../models/chat_message.dart';
 import '../models/turn_trace.dart';
@@ -620,6 +621,48 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
     }
   }
 
+  /// 另存默认文件名：源文件 basename > export_file 的 name 参数 >
+  /// path basename > artifact。
+  String get _saveAsName {
+    final info = _exportTargetInfo;
+    final fb = info?.fallback;
+    if (fb != null && fb.isNotEmpty) return fb.split('/').last;
+    final name = widget.activity.arguments['name'];
+    if (name is String && name.trim().isNotEmpty) return name.trim();
+    final path = widget.activity.arguments['path'];
+    if (path is String && path.trim().isNotEmpty) {
+      return path.trim().split('/').last;
+    }
+    return 'artifact';
+  }
+
+  Future<void> _saveAsExport() async {
+    final info = _exportTargetInfo;
+    if (info == null) return;
+    try {
+      final uri = await DeviceFilesService.instance.saveAs(
+        srcUri: info.primary.startsWith('content:') ? info.primary : null,
+        srcPath: info.fallback,
+        name: _saveAsName,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已另存：$uri'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } on PlatformException catch (e) {
+      if (e.code == 'CANCELLED') return;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('另存失败：${e.message ?? e.code}')),
+        );
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -775,6 +818,28 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
                                   size: 12, color: theme.colorScheme.primary),
                               const SizedBox(width: 2),
                               Text('打开',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.colorScheme.primary)),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      InkWell(
+                        onTap: _saveAsExport,
+                        borderRadius: BorderRadius.circular(4),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 2),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.save_alt,
+                                  size: 12, color: theme.colorScheme.primary),
+                              const SizedBox(width: 2),
+                              Text('另存',
                                   style: TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.w600,
@@ -1530,6 +1595,28 @@ class _ArtifactSummaryCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                      const SizedBox(width: 4),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => _saveAsArtifact(context, a),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.save_alt,
+                                  size: 12, color: theme.colorScheme.primary),
+                              const SizedBox(width: 3),
+                              Text('另存',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: theme.colorScheme.primary)),
+                            ],
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -1538,6 +1625,33 @@ class _ArtifactSummaryCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  static Future<void> _saveAsArtifact(
+      BuildContext context, ArtifactEntry a) async {
+    final name = a.label.contains('.') ? a.label : 'artifact';
+    try {
+      final uri = await DeviceFilesService.instance.saveAs(
+        srcUri: a.primary.startsWith('content:') ? a.primary : null,
+        srcPath: a.fallback,
+        name: name,
+      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已另存：$uri'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } on PlatformException catch (e) {
+      if (e.code == 'CANCELLED') return;
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('另存失败：${e.message ?? e.code}')),
+        );
+      }
+    }
   }
 
   Icon _iconFor(String label) {

@@ -32,6 +32,28 @@ class DeviceFilesService {
     return uri;
   }
 
+  /// 另存产物到用户指定目录（2026-10-25）：系统文件选择器（SAF）选目录
+  /// +文件名，流式写入。源二选一：[srcPath]（工作区文件，优先）或
+  /// [srcUri]（Download 里已导出的 content URI）。用户取消抛 code=CANCELLED。
+  Future<String> saveAs({
+    String? srcPath,
+    String? srcUri,
+    required String name,
+  }) async {
+    final uri = await _channel.invokeMethod<String>('saveAs', {
+      if (srcPath != null && srcPath.isNotEmpty) 'srcPath': srcPath,
+      if (srcUri != null && srcUri.isNotEmpty) 'srcUri': srcUri,
+      'name': name,
+    });
+    if (uri == null || uri.trim().isEmpty) {
+      throw PlatformException(
+        code: 'save_no_uri',
+        message: '另存没有返回目标位置（$name）—— 文件可能没有写进去',
+      );
+    }
+    return uri;
+  }
+
   /// 用系统应用打开（html/png/pdf/md 等）。失败抛 PlatformException。
   /// [fallbackPath]：content URI 被拒时改用的工作区源文件路径
   ///（Kotlin 侧 FileProvider 分层回退；应用自有文件授权必成功）。
