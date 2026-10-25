@@ -2077,6 +2077,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 builder: (_, value, __) => TextField(
                   controller: _textController,
                   textInputAction: TextInputAction.newline,
+                  // 行高压到 1.3：默认行高让「两行」虚高近三行（2026-10-25
+                  // 用户定案：自然两行即可，手机打不了那么多字）。
+                  style: const TextStyle(fontSize: 14, height: 1.3),
                   decoration: InputDecoration(
                     hintText: _inputHintFor(isGenerating, value.text),
                     hintStyle: const TextStyle(fontSize: 14),
@@ -2084,7 +2087,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     filled: false,
                     isDense: true,
                     contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
                   ),
                   onSubmitted: (_) {
                     // 生成中：Enter = 插话转向（steer，不打断执行）。
@@ -2195,8 +2198,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       for (final (id, icon, label) in _quickActionCatalog)
         if (enabled.contains(id))
           IconButton(
-            visualDensity: VisualDensity.compact,
-            iconSize: 20,
+            // 紧凑：负密度 + 30dp 触点（默认 40/48 太占一行，2026-10-25 用户定案）。
+            visualDensity: const VisualDensity(horizontal: -4, vertical: -2),
+            constraints:
+                const BoxConstraints(minWidth: 30, minHeight: 30),
+            padding: EdgeInsets.zero,
+            iconSize: 19,
             tooltip: '$label（${stateOf(id) ? '开' : '关'}）',
             icon: Icon(
               icon,
