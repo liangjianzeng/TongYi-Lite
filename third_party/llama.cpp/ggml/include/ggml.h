@@ -611,6 +611,9 @@ extern "C" {
 
         GGML_OP_G1_SSM_LAYER,
 
+        GGML_OP_G1_KDA_IN,
+        GGML_OP_G1_KDA_OUT,
+
         GGML_OP_COUNT,
     };
 
@@ -2542,6 +2545,65 @@ extern "C" {
             int64_t               d_conv,
             float                 l2_eps,
             float                 rms_eps);
+
+    // [tongyi R-017 2026-10-25] G1-KDA 变体（ling/bailingmoe3 recr 层 = KDA，R-016 定案）：
+    // 复用 G1-GDN 三阶段骨架（3 launch/层），拆两 op 消 GGML_MAX_SRC=10 限制。
+    // 语义锚点 = src/models/bailingmoe3.cpp recr 层原 op 链 + bailingmoe3_causal_conv1d。
+    // 数值口径 = KDA_SPEC.md（_probe/g1_probe CPU 参考双精度对拍，NMSE ≤1e-6）。
+    // 仅 decode（n_seqs=1、n_tokens=1 门在 bailingmoe3 侧）。
+    //
+    // ggml_g1_kda_in（stage1，1 kernel）：
+    //   x          [N_EMBD] F32 当前 token 层输入
+    //   wq/wk/wv   [N_EMBD, D_INNER] Q4_0 三路投影（q/k/v 均 H 头 × d，无 repeat interleave）
+    //   cq/ck/cv   [D_CONV, D_INNER] F32 三路卷积权（ggml ssm_conv 核约定，ne[0]=D_CONV）
+    //   beta_w     [N_EMBD, N_HEAD] F32（beta = sigmoid(beta_w·x)）
+    //   conv_state [3*(D_CONV-1)*D_INNER] F32 常驻，**原地滚动**（槽序 q|k|v，每槽窗口主序
+    //              [D_CONV-1 行, D_INNER 列]；out_w0=in_w1, out_w1=in_w2, out_w2=本 token）
+    //   dst        [3*D_INNER + N_HEAD] F32 scratch = q(l2norm 后) | k(l2norm 后) | v | beta[N_HEAD]
+    // 阶段：三路 q4_0 GEMV（Q4_DOT 序）+ beta f32 GEMV → 每槽 conv（窗口末行=本 token）+ silu
+    // → q/k 逐头 l2norm（因子 = d/sqrt(Σx²+eps)，build_gdn_l2_norm 闭式）→ beta sigmoid。
+    // params: i32[0..2]=N_EMBD,HEAD_DIM,D_CONV; f32[3]=L2_EPS。
+    GGML_API struct ggml_tensor * ggml_g1_kda_in(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * wq,
+            struct ggml_tensor  * wk,
+            struct ggml_tensor  * wv,
+            struct ggml_tensor  * cq,
+            struct ggml_tensor  * ck,
+            struct ggml_tensor  * cv,
+            struct ggml_tensor  * beta_w,
+            struct ggml_tensor  * conv_state,
+            int64_t               head_dim,
+            int64_t               d_conv,
+            float                 l2_eps);
+
+    // ggml_g1_kda_out（stage2+3，2 kernel 融合）：KDA AR（行衰减按 g[i] 向量，与 GDN 唯一差异）
+    // + gated RMSNorm 尾融合 + o_proj GEMV。
+    //   scratch    [3*D_INNER + N_HEAD] F32（= ggml_g1_kda_in 的 dst，q|k|v|beta）
+    //   x          [N_EMBD] F32（gate / out-gate 逐通道点积复用层输入）
+    //   f_a        [N_EMBD, D_INNER] F32；dt_b [D_INNER] F32；ssm_a [N_HEAD] F32
+    //              gate[c] = LOWER_BOUND·sigmoid((f_a·x + dt_b)[c]·ssm_a[h])（LOWER_BOUND 负
+    //              → gate∈(lb,0)，衰减 g[c] = exp(gate[c]) < 1）
+    //   g_a        [N_EMBD, D_INNER] F32（out-gate = sigmoid(g_a·x)）
+    //   o_norm     [HEAD_DIM] F32；wo [D_INNER, N_EMBD] Q4_0（o_proj）
+    //   state      [HEAD_DIM, HEAD_DIM, N_HEAD] F32 常驻，**原地 RMW**（KDA AR，列主
+    //              S(i,j)=s[j*d+i]，同 GGML_OP_GATED_DELTA_NET 契约；单趟合并衰减+外积）
+    //   dst        [N_EMBD] F32 层输出
+    // params: i32[0..1]=N_EMBD,HEAD_DIM; f32[2..3]=RMS_EPS,GATE_LOWER_BOUND。
+    GGML_API struct ggml_tensor * ggml_g1_kda_out(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scratch,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * f_a,
+            struct ggml_tensor  * g_a,
+            struct ggml_tensor  * dt_b,
+            struct ggml_tensor  * ssm_a,
+            struct ggml_tensor  * o_norm,
+            struct ggml_tensor  * wo,
+            struct ggml_tensor  * state,
+            float                 rms_eps,
+            float                 gate_lower_bound);
 
     // top k elements per row
     // note: the resulting top k indices are in no particular order

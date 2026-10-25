@@ -1935,6 +1935,255 @@ static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params *
     free(wk); free(scrf);
 }
 
+// [R-017] GGML_OP_G1_KDA_IN CPU 参考（单 task；语义 = KDA_SPEC.md stage1，数值双精度
+// 口径，锚点 = bailingmoe3 recr 层 op 链 + bailingmoe3_causal_conv1d）。
+// conv_state 原地滚动（槽序 q|k|v，每槽窗口主序 [d_conv-1 行, d_inner 列]）。
+static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    if (params->ith != 0) return;
+
+    const struct ggml_tensor * x      = dst->src[0];
+    const struct ggml_tensor * wq     = dst->src[1];
+    const struct ggml_tensor * wk     = dst->src[2];
+    const struct ggml_tensor * wv     = dst->src[3];
+    const struct ggml_tensor * cq     = dst->src[4];
+    const struct ggml_tensor * ck     = dst->src[5];
+    const struct ggml_tensor * cv     = dst->src[6];
+    const struct ggml_tensor * beta_w = dst->src[7];
+    struct ggml_tensor * conv_state   = dst->src[8];   // RMW
+
+    const int n_embd   = ggml_get_op_params_i32(dst, 0);
+    const int head_dim = ggml_get_op_params_i32(dst, 1);
+    const int d_conv   = ggml_get_op_params_i32(dst, 2);
+    const float l2_eps = ggml_get_op_params_f32(dst, 3);
+
+    const int d_inner = (int) wq->ne[1];
+    const int n_head  = d_inner / head_dim;
+    const int nb_in   = n_embd / QK4_0;
+
+    const float * xf  = (const float *) x->data;
+    const float * cwf[3] = {
+        (const float *) cq->data,
+        (const float *) ck->data,
+        (const float *) cv->data,
+    };
+    const float * bwf = (const float *) beta_w->data;
+    float * csf       = (float *) conv_state->data;
+    float * yf        = (float *) dst->data;   // [3*d_inner + n_head] = q|k|v|beta
+    const block_q4_0 * wsf[3] = {
+        (const block_q4_0 *) wq->data,
+        (const block_q4_0 *) wk->data,
+        (const block_q4_0 *) wv->data,
+    };
+
+    // 工作区（单 malloc 分段）：qkv_proj[3*d_inner] | conv_out[3*d_inner] | beta_raw[n_head]
+    double * wk_ = (double *) malloc(((size_t)3*d_inner*2 + (size_t)n_head) * sizeof(double));
+    double * qkv  = wk_;                                   // [3*d_inner]
+    double * conv = qkv + (size_t)3*d_inner;               // [3*d_inner]（silu 后）
+    double * braw = conv + (size_t)3*d_inner;              // [n_head]
+
+    // 三路 q4_0 GEMV（Q4_DOT 序：块内 Σt q·x 再 ×d 累加）+ beta f32 GEMV（双精度）
+    for (int s = 0; s < 3; ++s) {
+        for (int c = 0; c < d_inner; ++c) {
+            double acc = 0.0;
+            const block_q4_0 * row = wsf[s] + (size_t)c*nb_in;
+            for (int b = 0; b < nb_in; ++b) {
+                const float d = GGML_FP16_TO_FP32(row[b].d);
+                double sm = 0.0;
+                for (int t = 0; t < QK4_0; ++t) {
+                    const uint8_t qb = row[b].qs[t >> 1];
+                    const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);   // 偶数位=低 nibble
+                    sm += (double)(nib - 8) * xf[b*QK4_0 + t];
+                }
+                acc += sm * (double)d;
+            }
+            qkv[(size_t)s*d_inner + c] = acc;
+        }
+    }
+    for (int h = 0; h < n_head; ++h) {
+        double acc = 0.0;
+        const float * row = bwf + (size_t)h*n_embd;
+        for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
+        braw[h] = acc;
+    }
+
+    // conv（每槽 s、通道 c）：窗口主序 [d_conv-1 行, d_inner 列]，窗口末行 = 本 token
+    // 混合值；cqw[(s*d_inner+c)*d_conv+w] = c{q,k,v}[c*d_conv+w]（通道主序视角）
+    for (int s = 0; s < 3; ++s) {
+        for (int c = 0; c < d_inner; ++c) {
+            double acc = 0.0;
+            for (int w = 0; w < d_conv-1; ++w) {
+                acc += (double)csf[((size_t)s*(d_conv-1) + w)*d_inner + c]
+                     * (double)cwf[s][(size_t)c*d_conv + w];
+            }
+            acc += qkv[(size_t)s*d_inner + c] * (double)cwf[s][(size_t)c*d_conv + (d_conv-1)];
+            const float av = (float)acc;
+            conv[(size_t)s*d_inner + c] = (double)(av / (1.0f + expf(-av)));   // silu
+        }
+    }
+
+    // q/k 逐头 l2norm（因子 = d/sqrt(Σx²+eps)，build_gdn_l2_norm 闭式）→ dst q|k 段
+    for (int s = 0; s < 2; ++s) {
+        for (int h = 0; h < n_head; ++h) {
+            double ss = 0.0;
+            for (int j = 0; j < head_dim; ++j) {
+                const double v_ = conv[(size_t)s*d_inner + h*head_dim + j];
+                ss += v_*v_;
+            }
+            const float f = (float)head_dim / sqrtf((float)ss + l2_eps);
+            for (int j = 0; j < head_dim; ++j) {
+                yf[(size_t)s*d_inner + h*head_dim + j] =
+                    (float)conv[(size_t)s*d_inner + h*head_dim + j] * f;
+            }
+        }
+    }
+    // v 直通 + beta sigmoid
+    for (int i = 0; i < d_inner; ++i) {
+        yf[(size_t)2*d_inner + i] = (float)conv[(size_t)2*d_inner + i];
+    }
+    for (int h = 0; h < n_head; ++h) {
+        yf[(size_t)3*d_inner + h] = 1.0f / (1.0f + expf(-(float)braw[h]));
+    }
+
+    // conv_state 原地滚动（先算 conv 后滚动；升序 w 写入安全：new[w]=old[w+1]，
+    // 写 w 时 old[w+1] 尚未被覆盖，new[d_conv-2]=本 token qkv 段）
+    for (int s = 0; s < 3; ++s) {
+        for (int c = 0; c < d_inner; ++c) {
+            float * win = csf + (size_t)s*(d_conv-1)*d_inner + c;
+            for (int w = 0; w < d_conv-2; ++w) {
+                win[(size_t)w*d_inner] = win[(size_t)(w+1)*d_inner];
+            }
+            win[(size_t)(d_conv-2)*d_inner] = (float)qkv[(size_t)s*d_inner + c];
+        }
+    }
+    free(wk_);
+}
+
+// [R-017] GGML_OP_G1_KDA_OUT CPU 参考（单 task；语义 = KDA_SPEC.md stage2+3）。
+// KDA AR（行衰减按 g[i] 向量，与 GDN 唯一差异）+ gated RMSNorm 尾融合 + o_proj GEMV。
+// state 原地 RMW（列主 S(i,j)=s[j*d+i]）；stage3 输入走本地 gated 缓冲，无原地读写冲突。
+static void ggml_compute_forward_g1_kda_out(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    if (params->ith != 0) return;
+
+    const struct ggml_tensor * scr    = dst->src[0];   // opA dst：q|k|v|beta
+    const struct ggml_tensor * x      = dst->src[1];
+    const struct ggml_tensor * f_a    = dst->src[2];
+    const struct ggml_tensor * g_a    = dst->src[3];
+    const struct ggml_tensor * dt_b   = dst->src[4];
+    const struct ggml_tensor * ssm_a  = dst->src[5];
+    const struct ggml_tensor * o_norm = dst->src[6];
+    const struct ggml_tensor * wo     = dst->src[7];
+    struct ggml_tensor * state        = dst->src[8];   // RMW
+
+    const int n_embd = ggml_get_op_params_i32(dst, 0);
+    // params i32[1]=head_dim（= o_norm->ne[0]，与 d 冗余，builder 侧已 assert）
+    (void) ggml_get_op_params_i32(dst, 1);
+    const float rms_eps   = ggml_get_op_params_f32(dst, 2);
+    const float lower_bnd = ggml_get_op_params_f32(dst, 3);
+
+    const int d       = (int) o_norm->ne[0];
+    const int n_head  = (int) ssm_a->ne[0];
+    const int d_inner = d * n_head;
+    const int nb_out  = d_inner / QK4_0;
+
+    const float * qf = (const float *) scr->data;      // q|k|v|beta（head 主序 h*d+j）
+    const float * kf = qf + (size_t)d_inner;
+    const float * vf = qf + (size_t)2*d_inner;
+    const float * xf  = (const float *) x->data;
+    const float * faf = (const float *) f_a->data;
+    const float * gaf = (const float *) g_a->data;
+    const float * dtf = (const float *) dt_b->data;
+    const float * af  = (const float *) ssm_a->data;
+    const float * onf = (const float *) o_norm->data;
+    float * stf       = (float *) state->data;
+    float * yf        = (float *) dst->data;
+    const block_q4_0 * wof = (const block_q4_0 *) wo->data;
+
+    // 工作区（单 malloc 分段）：sreg[H*d*d] | dcol[d] | gdec[d] | ogate[d] | gated[d_inner]
+    double * wk_ = (double *) malloc(((size_t)n_head*d*d + (size_t)d_inner + (size_t)3*d) * sizeof(double));
+    double * sreg  = wk_;                                   // [H*d*d] 列主 S(j,i)=s[j*d+i]
+    double * dcol  = sreg + (size_t)n_head*d*d;             // [d]
+    double * gdec  = dcol + d;                              // [d] 衰减 exp(gate)
+    double * ogate = gdec + d;                              // [d] 输出门
+    double * gated = ogate + d;                             // [d_inner] stage3 输入
+
+    // stage2：每头 gate/out-gate 逐通道自算 + KDA AR + 尾融合
+    for (int h = 0; h < n_head; ++h) {
+        // gate（行衰减 g[i]=exp(gate)，lower_bound 负 → gate∈(lb,0)，exp<1）
+        for (int c = 0; c < d; ++c) {
+            const float * row = faf + (size_t)(h*d + c)*n_embd;
+            double acc = 0.0;
+            for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
+            const float pre = (float)acc + dtf[h*d + c];
+            gdec[c] = (double)expf(lower_bnd / (1.0f + expf(-(pre * af[h]))));
+        }
+        // out-gate 逐通道自算
+        for (int c = 0; c < d; ++c) {
+            const float * row = gaf + (size_t)(h*d + c)*n_embd;
+            double acc = 0.0;
+            for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
+            ogate[c] = (double)(1.0f / (1.0f + expf(-(float)acc)));
+        }
+
+        const float * qh = qf + (size_t)h*d;
+        const float * kh = kf + (size_t)h*d;
+        const float * vh = vf + (size_t)h*d;
+        const float bta  = qf[(size_t)3*d_inner + h];
+        double * S = sreg + (size_t)h*d*d;
+
+        // AR（衰减与外积合并单趟：预乘衰减进寄存器，state 存衰减后值，同 delta-net）
+        for (int j = 0; j < d; ++j) {
+            for (int i = 0; i < d; ++i) {
+                S[(size_t)j*d + i] = (double)stf[(size_t)h*d*d + (size_t)j*d + i] * gdec[i];
+            }
+        }
+        for (int j = 0; j < d; ++j) {
+            double sk = 0.0;
+            for (int i = 0; i < d; ++i) sk += S[(size_t)j*d + i] * (double)kh[i];
+            dcol[j] = ((double)vh[j] - sk) * (double)bta;
+        }
+        for (int j = 0; j < d; ++j) {
+            for (int i = 0; i < d; ++i) {
+                S[(size_t)j*d + i] += (double)kh[i] * dcol[j];
+            }
+        }
+        // o_j = Σ_i S[j*d+i]·q[i]（无 1/sqrt(d) 预乘，KDA_SPEC 口径）
+        double ss = 0.0;
+        for (int j = 0; j < d; ++j) {
+            double acc = 0.0;
+            for (int i = 0; i < d; ++i) acc += S[(size_t)j*d + i] * (double)qh[i];
+            gated[(size_t)h*d + j] = acc;
+            ss += acc * acc;
+        }
+        // 尾部融合：gated[j] = o_j·rms 因子·o_norm[j]·ogate[j]
+        const float f = 1.0f / sqrtf((float)(ss / d) + rms_eps);
+        for (int j = 0; j < d; ++j) {
+            gated[(size_t)h*d + j] *= (double)(f * onf[j]) * ogate[j];
+        }
+        // state 写回（原地 RMW）
+        for (size_t idx = 0; idx < (size_t)d*d; ++idx) {
+            stf[(size_t)h*d*d + idx] = (float)S[idx];
+        }
+    }
+
+    // stage3：o_proj GEMV（q4_0，x = gated → y 直接写 dst，无重叠）
+    for (int r = 0; r < n_embd; ++r) {
+        double acc = 0.0;
+        const block_q4_0 * row = wof + (size_t)r*nb_out;
+        for (int b = 0; b < nb_out; ++b) {
+            const float d_ = GGML_FP16_TO_FP32(row[b].d);
+            double sm = 0.0;
+            for (int t = 0; t < QK4_0; ++t) {
+                const uint8_t qb = row[b].qs[t >> 1];
+                const int nib = (t & 1) ? (qb >> 4) : (qb & 0xF);
+                sm += (double)(nib - 8) * gated[b*QK4_0 + t];
+            }
+            acc += sm * (double)d_;
+        }
+        yf[r] = (float)acc;
+    }
+    free(wk_);
+}
+
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
 
@@ -2220,6 +2469,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_g1_ssm_layer(params, tensor);
             } break;
+        case GGML_OP_G1_KDA_IN:
+            {
+                ggml_compute_forward_g1_kda_in(params, tensor);
+            } break;
+        case GGML_OP_G1_KDA_OUT:
+            {
+                ggml_compute_forward_g1_kda_out(params, tensor);
+            } break;
         case GGML_OP_LEAKY_RELU:
             {
                 ggml_compute_forward_leaky_relu(params, tensor);
@@ -2493,6 +2750,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 n_tasks = 1; // tiny [E<=128 x n_tokens] routing op, single task
             } break;
         case GGML_OP_G1_SSM_LAYER:
+            {
+                n_tasks = 1; // decode 单 token 层巨核，单 task（参考实现串行）
+            } break;
+        case GGML_OP_G1_KDA_IN:
+        case GGML_OP_G1_KDA_OUT:
             {
                 n_tasks = 1; // decode 单 token 层巨核，单 task（参考实现串行）
             } break;
