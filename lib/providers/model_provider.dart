@@ -485,9 +485,11 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
           ? '内存守卫: 开启（预检余量 ${gpu.oomPreHeadroomMb}MB，加载后余量 ${gpu.oomPostHeadroomMb}MB）'
           : '内存守卫: 关闭 ⚠️（超大模型可强行加载，内存不足时可能整机死机）');
       // KV 缓存精度（设置→推理引擎→KV 精度）：每次加载前推送到原生层。
-      // 默认 Q4；FA 关闭时 V 恒 F16，FA 开启时 V 跟随 K 的量化格式。
+      // 默认 Q4；f16 = 不量化（混合架构 GPU 卸载需 K 为 F16，否则注意力链
+      // 被踢回 CPU）；FA 关闭时 V 恒 F16，FA 开启时 V 跟随 K 的量化格式。
       await _inference.setKvCacheType(gpu.kvCacheType);
-      mtpLogs.add('KV 精度: ${gpu.kvCacheType == 'q8_0' ? 'Q8' : 'Q4'}（K 量化 / V 为 ${gpu.flashAttn ? '同 K（FA 开）' : 'F16'}）');
+      mtpLogs.add('KV 精度: ${gpu.kvCacheType == 'q8_0' ? 'Q8' : (gpu.kvCacheType == 'f16' ? 'F16（K 不量化）' : 'Q4')}'
+          '（K ${gpu.kvCacheType == 'f16' ? 'F16' : '量化'} / V 为 ${gpu.flashAttn ? '同 K（FA 开）' : 'F16'}）');
       // flash attention（设置→推理引擎）：默认关。hybrid 架构原生层会强制关闭。
       await _inference.setFlashAttn(gpu.flashAttn);
       if (smartMoeLog.isNotEmpty) {

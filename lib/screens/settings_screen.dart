@@ -1436,6 +1436,11 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
                         label: Text('Q8'),
                         icon: Icon(Icons.balance, size: 16),
                       ),
+                      ButtonSegment(
+                        value: 'f16',
+                        label: Text('F16'),
+                        icon: Icon(Icons.speed, size: 16),
+                      ),
                     ],
                     selected: {gpuSettings.kvCacheType},
                     onSelectionChanged: (sel) {
@@ -1457,6 +1462,8 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
                     '端侧内存有限，KV 缓存默认 Q4 量化（所有本地模型生效）；'
                     'Q8 精度更高、更占内存。仅量化 K 部分，V 保持 F16'
                     '（V 量化需开启下方 flash-attn）。'
+                    'F16 不量化：混合架构（GDN+注意力，如 Ling）GPU 卸载时'
+                    'Q4 K 会把注意力链踢回 CPU，选 F16 恢复全 GPU 路径。'
                     '修改后重新加载模型生效',
                     style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                   ),
