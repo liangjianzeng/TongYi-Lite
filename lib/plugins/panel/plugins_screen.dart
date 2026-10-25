@@ -244,7 +244,7 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
               width: 18,
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2))
-          : const Icon(Icons.refresh),
+          : const Icon(Icons.refresh, size: 20),
       onPressed: service == null || _busy
           ? null
           : () => _run((s) => s.reload(), okMessage: '已重新扫描'),
@@ -267,6 +267,8 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
             onCreateProfile: _createProfile,
             onDeleteProfile: _deleteProfile,
             pluginsDirHint: widget.pluginsDirHint,
+            // 刷新钮进标题行（内嵌态）；Scaffold 态仍走 AppBar action。
+            headerTrailing: widget.embedded ? refreshButton : null,
             onToggle: (id, on) => _run((s) => s.setEnabled(id, on)),
             onRetry: (id) => _run((s) => s.retry(id), okMessage: '已重试'),
             onSaveParams: (id, patch) => _run(
@@ -279,15 +281,10 @@ class _PluginsScreenState extends ConsumerState<PluginsScreen> {
                 okMessage: '只在这次会话生效（不落盘；重启就回到原值）'),
           );
     if (widget.embedded) {
-      return Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-            child:
-                Align(alignment: Alignment.centerRight, child: refreshButton),
-          ),
-          Expanded(child: body),
-        ],
+      // 内嵌态（左栏面板）：列表自带标题行，不再让刷新钮孤零零漂在右上角。
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: body,
       );
     }
     return Scaffold(
@@ -336,10 +333,14 @@ class _PluginList extends StatelessWidget {
     this.onCreateProfile,
     this.onDeleteProfile,
     this.pluginsDirHint,
+    this.headerTrailing,
   });
 
   final PluginService service;
   final bool busy;
+
+  /// 标题行尾部（内嵌态放刷新钮；Scaffold 态走 AppBar，为 null）。
+  final Widget? headerTrailing;
   final HostProfiles? profiles;
   final void Function(String? name)? onSwitchProfile;
   final Future<void> Function()? onCreateProfile;
@@ -364,26 +365,47 @@ class _PluginList extends StatelessWidget {
     final rejected =
         views.where((v) => v.loaded.status == PluginLoadStatus.rejected).length;
 
+    final scheme = Theme.of(context).colorScheme;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+      padding: const EdgeInsets.fromLTRB(0, 4, 0, 24),
       children: [
-        Text('已启用 $on/${views.length}',
-            style: Theme.of(context).textTheme.titleMedium),
+        // 标题行：计数读数 + 异常摘要一句 + 刷新钮（内嵌态）收进同一行。
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('插件 · 已启用 $on/${views.length}',
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600)),
+                    if (gated + rejected > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Text(
+                          [
+                            if (gated > 0) '$gated 个在等功能',
+                            if (rejected > 0) '$rejected 个声明有问题',
+                          ].join('，'),
+                          style: TextStyle(
+                              fontSize: 11, color: scheme.onSurfaceVariant),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (headerTrailing != null) headerTrailing!,
+            ],
+          ),
+        ),
         if (views.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 16),
-            child: Text('还没有插件。内置的「你好示例 / 英语听写」在开关里打开就有图标了。'),
-          )
-        else if (gated + rejected > 0)
           Padding(
-            padding: const EdgeInsets.only(top: 2, bottom: 8),
-            child: Text(
-              [
-                if (gated > 0) '$gated 个在等功能',
-                if (rejected > 0) '$rejected 个声明有问题',
-              ].join('，'),
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
+            child: Text('还没有插件。内置的「你好示例 / 英语听写」在开关里打开就有图标了。',
+                style: TextStyle(
+                    fontSize: 12, color: scheme.onSurfaceVariant)),
           ),
         if (profiles case final hp?)
           _ProfileSection(
@@ -395,17 +417,14 @@ class _PluginList extends StatelessWidget {
             onSwitch: onSwitchProfile ?? (_) {},
           ),
         _CapabilitySection(service: service, busy: busy),
-        if (pluginsDirHint != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 12),
-            child: Text('第三方插件放：$pluginsDirHint（每个目录一个 plugin.json）',
-                style: Theme.of(context).textTheme.bodySmall),
-          ),
         for (final group in _groupBySource(views)) ...[
           Padding(
-            padding: const EdgeInsets.only(top: 12, bottom: 4),
-            child:
-                Text(group.$1, style: Theme.of(context).textTheme.labelLarge),
+            padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+            child: Text(group.$1,
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurfaceVariant)),
           ),
           for (final v in group.$2)
             _PluginTile(
@@ -419,6 +438,13 @@ class _PluginList extends StatelessWidget {
               onTrialParams: onTrialParams,
             ),
         ],
+        if (pluginsDirHint != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 14, 4, 0),
+            child: Text('第三方插件放：$pluginsDirHint（每个目录一个 plugin.json）',
+                style: TextStyle(
+                    fontSize: 11, color: scheme.onSurfaceVariant)),
+          ),
       ],
     );
   }
@@ -465,62 +491,126 @@ class _PluginTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final m = view.manifest;
-    final status = _StatusBadge(view: view);
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: ListTile(
-        leading: const Icon(Icons.extension_outlined),
-        title: Text(m.name),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(m.description, maxLines: 2, overflow: TextOverflow.ellipsis),
-            const SizedBox(height: 4),
-            Wrap(spacing: 6, runSpacing: 4, children: [
-              status,
-              if (view.slotCount > 0)
-                _chip(context, '${view.slotCount} 处界面',
-                    Icons.dashboard_customize_outlined, null),
-              if (view.loaded.gatedHint != null)
-                _chip(context, view.loaded.gatedHint!, Icons.help_outline,
-                    Colors.amber.shade700)
-              else if (view.loaded.gatedOn.isNotEmpty)
-                _chip(context, '缺：${view.loaded.gatedOn.join('、')}',
-                    Icons.help_outline, Colors.amber.shade700),
-              if (_softWarnings(view.loaded).isNotEmpty &&
-                  view.loaded.gatedHint == null)
-                // **弃用黄条**：还能跑，但作者该改（对齐 §7"警告不许静默"）。
-                // 已经用 gatedHint 说过的不重复刷，否则一条 env 提醒变成两个黄条。
-                _chip(context, '声明提醒 ${_softWarnings(view.loaded).length} 条',
-                    Icons.warning_amber_rounded, Colors.orange.shade800),
-              if (view.lastFailure != null)
-                _chip(context, view.lastFailure!.message, Icons.error_outline,
-                    Colors.red.shade700),
-            ]),
-          ],
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (view.state == FiberState.failed ||
-                view.state == FiberState.disposed)
-              IconButton(
-                tooltip: '重试',
-                icon: const Icon(Icons.replay),
-                onPressed: busy ? null : () => onRetry(view.id),
-              ),
-            IconButton(
-              tooltip: '体检详情',
-              icon: const Icon(Icons.monitor_heart_outlined),
-              onPressed: () => _openDetail(context),
+    final (statusText, statusColor) = _statusOf(view);
+    final scheme = Theme.of(context).colorScheme;
+    final badges = <String, Color>{
+      if (view.slotCount > 0) '${view.slotCount} 处界面': scheme.onSurfaceVariant,
+      if (view.loaded.gatedHint != null)
+        view.loaded.gatedHint!: Colors.amber.shade700
+      else if (view.loaded.gatedOn.isNotEmpty)
+        '缺：${view.loaded.gatedOn.join('、')}': Colors.amber.shade700,
+      if (_softWarnings(view.loaded).isNotEmpty &&
+          view.loaded.gatedHint == null)
+        '声明提醒 ${_softWarnings(view.loaded).length} 条': Colors.orange.shade800,
+      if (view.lastFailure != null)
+        view.lastFailure!.message: Colors.red.shade700,
+    };
+    // 圆角信息行（2026-10-25 重排）：着色图标位 + 名称/状态点 + 描述 + 小徽标，
+    // 尾部只剩开关（失败态加重试）——Chip 大徽标与三连按钮的旧布局作废。
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Material(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _openDetail(context),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: statusColor.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    Icons.extension_outlined,
+                    size: 20,
+                    color: statusColor,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(m.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600)),
+                          ),
+                          const SizedBox(width: 6),
+                          // 状态点：一眼可扫（8px 圆点 + 11px 文案），
+                          // 不再占一整个 Chip 的宽度。
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                                color: statusColor,
+                                shape: BoxShape.circle),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(statusText,
+                              style: TextStyle(
+                                  fontSize: 11, color: statusColor)),
+                        ],
+                      ),
+                      if (m.description.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 1),
+                          child: Text(m.description,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: scheme.onSurfaceVariant)),
+                        ),
+                      if (badges.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Wrap(
+                            spacing: 5,
+                            runSpacing: 3,
+                            children: [
+                              for (final e in badges.entries)
+                                _MiniBadge(text: e.key, color: e.value),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                if (view.state == FiberState.failed ||
+                    view.state == FiberState.disposed)
+                  IconButton(
+                    tooltip: '重试',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 20,
+                    icon: const Icon(Icons.replay),
+                    onPressed: busy ? null : () => onRetry(view.id),
+                  ),
+                SizedBox(
+                  height: 30,
+                  child: Switch(
+                    value: service.isEnabled(view.id),
+                    onChanged: busy ? null : (on) => onToggle(view.id, on),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
             ),
-            Switch(
-              value: service.isEnabled(view.id),
-              onChanged: busy ? null : (on) => onToggle(view.id, on),
-            ),
-          ],
+          ),
         ),
-        onTap: () => _openDetail(context),
       ),
     );
   }
@@ -540,6 +630,41 @@ class _PluginTile extends StatelessWidget {
   }
 }
 
+/// 状态折算（列表行 + 徽标共用）：状态 → (文案, 颜色)。
+(String, Color) _statusOf(PluginView view) => switch (view.loaded.status) {
+      PluginLoadStatus.active => view.running
+          ? ('可运行', Colors.green.shade700)
+          : ('启动中（${view.state?.name ?? 'idle'}）', Colors.blueGrey),
+      PluginLoadStatus.gated => ('待功能', Colors.amber.shade700),
+      PluginLoadStatus.rejected => ('声明有问题', Colors.red.shade700),
+      PluginLoadStatus.disabled => ('未启用', Colors.grey),
+    };
+
+/// 列表用小徽标：11px 文字装进 3px 垂直距的浅色圆角块——比 Chip 矮一半。
+class _MiniBadge extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _MiniBadge({required this.text, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      constraints: const BoxConstraints(maxWidth: 220),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 10.5, color: color),
+      ),
+    );
+  }
+}
+
 Widget _chip(BuildContext context, String text, IconData icon, Color? color) {
   final fg = color ?? Theme.of(context).colorScheme.onSurfaceVariant;
   return Chip(
@@ -549,24 +674,6 @@ Widget _chip(BuildContext context, String text, IconData icon, Color? color) {
     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     padding: EdgeInsets.zero,
   );
-}
-
-class _StatusBadge extends StatelessWidget {
-  const _StatusBadge({required this.view});
-  final PluginView view;
-
-  @override
-  Widget build(BuildContext context) {
-    final (text, color) = switch (view.loaded.status) {
-      PluginLoadStatus.active => view.running
-          ? ('可运行', Colors.green.shade700)
-          : ('启动中（${view.state?.name ?? 'idle'}）', Colors.blueGrey),
-      PluginLoadStatus.gated => ('待功能', Colors.amber.shade700),
-      PluginLoadStatus.rejected => ('声明有问题', Colors.red.shade700),
-      PluginLoadStatus.disabled => ('未启用', Colors.grey),
-    };
-    return _chip(context, text, Icons.bolt_outlined, color);
-  }
 }
 
 /// 体检详情：状态 / 声明 / 参数 / effect 树 / 占用的槽 / 最近日志 / 原文。

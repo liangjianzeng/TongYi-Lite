@@ -812,6 +812,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               onTap: () => _openRail('chats'),
               badge: anyRunning),
         ),
+        // 模型管理类入口紧跟会话、在智能体之前（2026-10-25 用户定案：
+        // 本地模型优先的产品形态，模型是第一公民，先进模型再谈智能体）。
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'model',
+              icon: Icons.memory_outlined,
+              tooltip: '模型',
+              onTap: () => _openRail('model')),
+        ),
+        RailIconButton(
+          item: RailItem(
+              panelKey: 'api',
+              icon: Icons.api_outlined,
+              tooltip: 'API 接入',
+              onTap: () => _openRail('api')),
+        ),
         RailIconButton(
           item: RailItem(
               panelKey: 'agent',
@@ -836,13 +852,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ),
         RailIconButton(
           item: RailItem(
-              panelKey: 'model',
-              icon: Icons.memory_outlined,
-              tooltip: '模型',
-              onTap: () => _openRail('model')),
-        ),
-        RailIconButton(
-          item: RailItem(
               panelKey: 'skills',
               icon: Icons.auto_awesome_outlined,
               tooltip: '技能',
@@ -854,13 +863,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: Icons.extension_outlined,
               tooltip: '插件',
               onTap: () => _openRail('plugins')),
-        ),
-        RailIconButton(
-          item: RailItem(
-              panelKey: 'api',
-              icon: Icons.api_outlined,
-              tooltip: 'API 接入',
-              onTap: () => _openRail('api')),
         ),
         RailIconButton(
           item: RailItem(

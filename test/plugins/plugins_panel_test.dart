@@ -158,7 +158,7 @@ Future<void> settleIoUntil(WidgetTester tester, bool Function() done, String wha
   expect(done(), isTrue, reason: '等不到：$what（要么真 IO 没落定，要么代码回归了）');
 }
 
-Finder _tileOf(String name) => find.ancestor(of: find.text(name), matching: find.byType(ListTile)).first;
+Finder _tileOf(String name) => find.ancestor(of: find.text(name), matching: find.byType(Material)).first;
 
 void main() {
   /// 点「建好」。对话框里按钮位置随内容高度浮动，`tester.tap` 判不到就会**静默不响应**
@@ -357,7 +357,7 @@ void main() {
     final service = await buildService();
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('记事小卡'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('记事小卡'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('运行中，资源都挂在 effect 树上'), findsOneWidget);
@@ -374,7 +374,7 @@ void main() {
     final service = await buildService(withVision: false);
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('缺能力：llm.vision'), findsOneWidget);
@@ -385,7 +385,7 @@ void main() {
     final service = await buildService();
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
     expect(find.text('设置'), findsWidgets);
 
@@ -410,7 +410,7 @@ void main() {
     await pumpPanel(tester, service);
     await service.setConfig(id: 'en-dictation', patch: const {'gapSeconds': 9});
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('你的改动'), findsWidgets,
@@ -440,7 +440,7 @@ void main() {
     await service.trialConfig(id: 'en-dictation', patch: const {'gapSeconds': 7});
     await pumpPanel(tester, service, profiles: profiles);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('方案档给的'), findsWidgets,
@@ -462,7 +462,7 @@ void main() {
     await service.setConfig(id: 'en-dictation', patch: const {'gapSeconds': 12});
     expect(service.configStore.userOf('en-dictation'), isNotEmpty);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
     final reset = find.widgetWithText(TextButton, '恢复默认');
     expect(reset, findsOneWidget);
@@ -478,7 +478,7 @@ void main() {
     final service = await buildService(withBoom: true);
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('配置会炸'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('配置会炸'));
     await tester.pumpAndSettle();
     await tester.enterText(find.widgetWithText(TextField, '模式'), 'boom');
     tester.widget<FilledButton>(find.widgetWithText(FilledButton, '保存')).onPressed!();
@@ -496,7 +496,7 @@ void main() {
     final service = await buildService();
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
     await tester.enterText(find.widgetWithText(TextField, '间隔秒数'), '99');
     tester.widget<FilledButton>(find.widgetWithText(FilledButton, '保存')).onPressed!();
@@ -513,7 +513,7 @@ void main() {
     final service = await buildService();
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
     await tester.enterText(find.widgetWithText(TextField, '间隔秒数'), '11');
     tester.widget<TextButton>(find.widgetWithText(TextButton, '先试试这组值')).onPressed!();
@@ -527,7 +527,7 @@ void main() {
     expect(service.configStore.sessionOf('en-dictation')['gapSeconds'], 11.0,
         reason: '整组值一起试（与保存同一形态），但只在会话层');
 
-    await tester.tap(find.descendant(of: _tileOf('英语听写'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('英语听写'));
     await tester.pumpAndSettle();
     expect(find.textContaining('你的改动'), findsNothing, reason: '没写进设置就不许标成"你的改动"');
 
@@ -544,7 +544,7 @@ void main() {
     expect(service.slots.reportEntryError('app.input.right', 'note-chip', pluginId: 'hello-note'), isTrue);
     await pumpPanel(tester, service);
 
-    await tester.tap(find.descendant(of: _tileOf('记事小卡'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('记事小卡'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('已让位'), findsOneWidget,
@@ -668,7 +668,7 @@ void main() {
     expect(find.textContaining('声明有问题'), findsNothing, reason: '不是作者的错，别画成坏声明');
     expect(find.textContaining('声明提醒'), findsNothing, reason: 'gatedHint 已经说过，不重复刷第二条黄条');
 
-    await tester.tap(find.descendant(of: _tileOf('来自未来的插件'), matching: find.byType(IconButton)).last);
+    await tester.tap(find.text('来自未来的插件'));
     await tester.pumpAndSettle();
     expect(find.textContaining('声明提醒（还能跑，但作者该改）'), findsOneWidget);
     expect(find.textContaining('engines.app'), findsWidgets, reason: '详情里要能看到那条警告原文（含 path）');

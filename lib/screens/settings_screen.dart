@@ -1944,10 +1944,10 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
           onTap: () => setState(() => _skillsExpanded = !_skillsExpanded),
         ),
         if (_skillsExpanded)
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 320),
-            child: SingleChildScrollView(
-              child: Column(
+          // 高度自适应：不再按 ~10 条控高（320px）内滚（2026-10-25 用户定案）
+          // ——技能面板独立成 Tab 后列表全量铺开，随条目多少自然伸缩，
+          // 整页滚动交给宿主 SingleChildScrollView。
+          Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   for (final s in _builtinSkills)
@@ -1990,8 +1990,6 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
                         onTap: () => _showUserSkillDialog(existing: s),
                       ),
                 ],
-              ),
-            ),
           ),
         Row(
           children: [
@@ -3240,19 +3238,16 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
 
                   const SizedBox(height: 10),
 
-                  // ================= ⑤ Skills 与指令文件 =================
+                  // ================= ⑤ 指令文件 =================
+                  // Skills 管理已独立到「能力」Tab 的技能卡（2026-10-25 用户
+                  // 定案：两处重复列表，智能体 Tab 不再放）。
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _buildSectionHeader('📚 Skills 与指令文件', context),
-                          const SkillsManagementBody(),
-
-                          const Divider(height: 20),
-
-                          const Divider(height: 20),
+                          _buildSectionHeader('📄 指令文件', context),
 
                           ListTile(
                             contentPadding: EdgeInsets.zero,
