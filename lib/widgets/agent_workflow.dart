@@ -1160,6 +1160,10 @@ class AgentTurnBlock extends StatelessWidget {
             preview: ui.toolGen!.preview,
           ),
         if (_thinking) const ThinkingIndicator(),
+        // 回合错误行（2026-10-25 阶段 3）：AgentUiState.lastError 此前只写
+        // 不渲染——红点行给出"该回合失败了"的显式落点（DSH TurnErrorItem）。
+        if (isLive && !running && (ui.lastError?.isNotEmpty ?? false))
+          _TurnErrorRow(message: ui.lastError!),
         // 智能体回合里答案还是空占位 → 不渲染回答气泡：ChatBubble 自带的
         // 「思考中…」占位会和上面的思考行/工具卡转圈叠成第二个 spinner。
         if (answer != null && !_answerPending)
@@ -1180,8 +1184,33 @@ class AgentTurnBlock extends StatelessWidget {
   }
 }
 
-/// _TurnProcessSection —— 已完成回合的过程痕迹总折叠区（用户定案）。
-///
+/// _TurnErrorRow —— 回合错误行（红点 + 文案，DSH TurnErrorItem 形态）。
+class _TurnErrorRow extends StatelessWidget {
+  final String message;
+  const _TurnErrorRow({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
+      child: Row(
+        children: [
+          Icon(Icons.error, size: 13, color: theme.colorScheme.error),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(message,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: theme.colorScheme.error)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// _TurnProcessSection —— 已完成回合的过程痕迹总折叠区（用户定案）。///
 /// 回合完成后，工具调用卡与思考存档卡**自动折叠**进这个总区域：
 /// 默认只显示一行摘要头（步骤数），点按展开再呈现各工具/思考块——
 /// 过程可回看、但不再占屏。
