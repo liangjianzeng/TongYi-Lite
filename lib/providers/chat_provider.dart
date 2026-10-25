@@ -2062,6 +2062,15 @@ class ChatNotifier extends StateNotifier<bool> {
     } else if (api.contextWindow != null && api.contextWindow! > 0) {
       window = api.contextWindow;
       source = '配置';
+    } else {
+      // 兜底（2026-10-25 真机：云端 API 不报 n_ctx、contextWindow 未配置
+      // → 窗口 null → 占用环恒 0）：用 API 上下文压缩预算作为窗口估计
+      // ——那本来就是本 app 侧的有效上下文口径。
+      final budget = _ref.read(settingsProvider).agentApiContextBudget;
+      if (budget > 0) {
+        window = budget;
+        source = '预算';
+      }
     }
 
     _ref.read(contextUsageProvider.notifier).update(
@@ -2189,6 +2198,12 @@ class ChatNotifier extends StateNotifier<bool> {
         } else if ((apiCfg.contextWindow ?? 0) > 0) {
           window = apiCfg.contextWindow;
           source = '配置';
+        } else {
+          final budget = settings.agentApiContextBudget;
+          if (budget > 0) {
+            window = budget;
+            source = '预算';
+          }
         }
       } else if (settings.contextSize > 0) {
         window = settings.contextSize;

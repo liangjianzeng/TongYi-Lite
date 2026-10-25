@@ -89,9 +89,11 @@ class ConversationStatsBar extends ConsumerWidget {
           decodeTokens += out;
           decodeMs += s.totalMs;
           outputTokens += out;
-        } else if (m.isStreaming) {
-          // 流式中的回答还没有 stats（回合结束才写入）：按已生成文本实时
-          // 估算输出——否则生成期间「输出」纹丝不动，回合结束才跳变。
+        } else {
+          // 无 stats 的回答按已生成文本估算输出。两类来源：
+          // ① 流式中（回合结束才写入 stats）——不估算则「输出」整回合
+          //    纹丝不动、结束才跳变；② API 路线（尤其智能体）回答从不
+          //    带原生 stats——不估算则「输出」恒 0（2026-10-25 真机反馈）。
           outputTokens += estimateTokens(m.content);
         }
         inputTokens += estimateTokens(m.content) ~/ 4; // 上下文携带的粗略回填
