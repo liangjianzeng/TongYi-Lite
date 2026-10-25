@@ -65,7 +65,6 @@ import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
 import '../models/model_catalog.dart';
 import '../models/api_model.dart';
-import '../models/agent_persona.dart';
 import '../agent/llm/thinking_effort.dart';
 import '../providers/index.dart';
 import '../providers/shared_providers.dart' show openAiServiceProvider;
@@ -2332,9 +2331,6 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
     }
     super.dispose();
   }
-
-  static String _signedPct(int v) => '${v >= 0 ? '+' : ''}$v%';
-  static String _signedHz(int v) => '${v >= 0 ? '+' : ''}$v Hz';
 
   // ================= 记忆管理（查看/删除，与 memory.json 同存储） =================
 

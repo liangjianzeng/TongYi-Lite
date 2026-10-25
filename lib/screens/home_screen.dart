@@ -1014,33 +1014,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 工具组小胶囊 chip（设计稿形态：选中 = 主色底 + ✓，未选 = 灰底）。
-  Widget _railToolChip(String label, bool on, Future<void> Function(bool) set) {
-    final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      borderRadius: BorderRadius.circular(999),
-      onTap: () => set(!on),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: on ? scheme.primaryContainer : scheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (on) ...[
-            Icon(Icons.check, size: 12, color: scheme.onPrimaryContainer),
-            const SizedBox(width: 3),
-          ],
-          Text(label,
-              style: TextStyle(
-                  fontSize: 11.5,
-                  color: on
-                      ? scheme.onPrimaryContainer
-                      : scheme.onSurfaceVariant)),
-        ]),
-      ),
-    );
-  }
 
   /// 智能体面板：直接承载设置页「智能体」Tab 全部内容（工具/审批/思考/
   /// MCP/语音播报/热词/记忆/人格/技能/任务规划）——设置封装进新 UI，
@@ -1312,9 +1285,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// API 面板：设置页「API」Tab 全量（端点/密钥/模型列表/路由）。
   Widget _buildApiRailPage() => ApiSettingsBody();
-
-  /// Dev 面板：设置页「开发者」Tab 全量（工作区/SSH/任务规划/双向同步）。
-  Widget _buildDevRailPage() => DevSettingsBody();
 
   /// 更多面板：入口全部指向面板内页（老设置页零跳转）。
   /// 「更多」面板 = **基础配置**（2026-10-25 用户定案）：界面缩放 + 语音
@@ -3169,17 +3139,15 @@ class _AttachOption extends StatelessWidget {
 // =========================================================================
 
 /// Reusable bottom-sheet widget for model status details.
-/// [embedded] = true 时作为左栏「模型」面板的内嵌页渲染：去掉底部弹层的
-/// 外边距/顶部圆角/拖拽把手，其余内容（状态/内存/日志/操作）完全一致。
 /// 模型面板子页切换：模型列表（下载/加载/默认）与引擎设置同面板承载，
 /// 模型列表为默认——用户下载和使用本地模型的主路径不许被藏起来。
+/// （embedded 形态已死：从未传过 true，2026-10-25 评审清除。）
 class _ModelStatusSheet extends StatelessWidget {
   final ModelLifecyclePhase phase;
   final String modelName;
   final String? errorMessage;
   final List<String> logs;
   final bool isGenerating;
-  final bool embedded;
   final VoidCallback onUnload;
   final VoidCallback onLoad;
   final VoidCallback onGoToSettings;
@@ -3191,7 +3159,6 @@ class _ModelStatusSheet extends StatelessWidget {
     this.errorMessage,
     this.logs = const [],
     required this.isGenerating,
-    this.embedded = false,
     required this.onUnload,
     required this.onLoad,
     required this.onGoToSettings,
@@ -3202,12 +3169,10 @@ class _ModelStatusSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = _sheetColorFor(phase);
     return Container(
-      margin: embedded ? EdgeInsets.zero : const EdgeInsets.only(top: 8),
+      margin: const EdgeInsets.only(top: 8),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        borderRadius: embedded
-            ? BorderRadius.zero
-            : const BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
       ),
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height * 0.85,
@@ -3218,16 +3183,15 @@ class _ModelStatusSheet extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Handle bar（内嵌面板形态无弹层把手）
-              if (!embedded)
-                Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                      color: Colors.grey.shade400,
-                      borderRadius: BorderRadius.circular(2)),
-                ),
+              // Handle bar（弹层把手）
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                    color: Colors.grey.shade400,
+                    borderRadius: BorderRadius.circular(2)),
+              ),
               // Title + icon
               Row(
                 children: [
@@ -3320,14 +3284,12 @@ class _ModelStatusSheet extends StatelessWidget {
                     onTap: onGoToSettings),
                 const SizedBox(height: 8),
               ],
-              // 内嵌左栏面板时无「关闭」：面板头部自带 ×（避免双关闭入口）。
-              if (!embedded)
-                _sheetButton(context,
-                    label: '关闭',
-                    icon: null,
-                    color: null,
-                    onTap: () => Navigator.pop(context),
-                    isDefault: true),
+              _sheetButton(context,
+                  label: '关闭',
+                  icon: null,
+                  color: null,
+                  onTap: () => Navigator.pop(context),
+                  isDefault: true),
             ],
           ),
         ),

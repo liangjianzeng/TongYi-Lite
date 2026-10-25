@@ -43,14 +43,7 @@ import '../agent/builtin_tools/goal_tools.dart'
     show createGoalTools, createExitPlanTool, createPlanStepUpdateTool;
 import '../agent/mcp/mcp_client.dart' show fetchMcpTools;
 import '../agent/goal/goal_store.dart'
-    show
-        GoalStore,
-        GoalState,
-        GoalStatus,
-        GoalAction,
-        PlanStep,
-        PlanStepStatus,
-        decideGoalAction;
+    show GoalStore, GoalStatus, GoalAction, decideGoalAction;
 import '../agent/builtin_tools/run_code_tool.dart' show createRunCodeTool;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
@@ -60,7 +53,6 @@ import '../agent/session/store.dart'
         JsonlSessionStore,
         kAgentTraceMessagePrefix,
         encodeAgentTraceMessage,
-        decodeAgentTraceMessage,
         planStorageCompaction;
 import '../agent/session/event.dart'
     show kEventAssistantMessage, kEventCompactionSummary;
