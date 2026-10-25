@@ -701,6 +701,10 @@ struct ggml_backend_opencl_context {
     bool disable_fusion;
     bool fuse_mm_glu = true;                     // opt-out GGML_OPENCL_FUSE_MM_GLU=0 (byte-identical gate+up GEMV + GLU, q4_K FFN)
     bool fuse_rms_add = true;                    // opt-out GGML_OPENCL_FUSE_RMS_ADD=0 (fused rms_norm*w + residual)
+    // [tongyi 2026-10-25 add4 判决] 默认关：数值 bit-identical（两腿文本逐字节相同）
+    // 但 740 decode 稳定 -2~4%（8.36→8.0），splits=2 后微内核 launch 数已非主矛盾，
+    // 削 launch 融合路线收益枯竭。GGML_OPENCL_FUSE_ADD_CHAIN=1 可复开（复现实验用）。
+    bool fuse_add_chain = false;                 // opt-in GGML_OPENCL_FUSE_ADD_CHAIN=1
     bool f16_mrow = true;                        // opt-out GGML_OPENCL_F16_MROW=0 (multi-row-per-WG f16 decode GEMV for attn proj + lm_head)
     int  f16_mrow_rpt = 1;                       // GGML_OPENCL_F16_MROW_RPT={1,2,4,8,16} rows-per-subgroup register blocking
 
@@ -872,6 +876,7 @@ struct ggml_backend_opencl_context {
     cl_program program_mul_mm_q8_0_f32_l4_lm;
 
     cl_kernel kernel_add, kernel_add_row, kernel_add_f16, kernel_add_row_f16;
+    cl_kernel kernel_add4;   // [tongyi 2026-10-25] fused ADD->ADD->ADD residual chain
     cl_kernel kernel_mul, kernel_mul_row, kernel_mul_f16, kernel_mul_row_f16;
     cl_kernel kernel_div, kernel_div_row, kernel_div_f16, kernel_div_row_f16;
     cl_kernel kernel_sub, kernel_sub_row, kernel_sub_f16, kernel_sub_row_f16;
@@ -1850,6 +1855,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_add_row     = clCreateKernel(backend_ctx->program_add, "kernel_add_row", &err), err));
         CL_CHECK((backend_ctx->kernel_add_f16     = clCreateKernel(backend_ctx->program_add, "kernel_add_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_add_row_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_row_f16", &err), err));
+        CL_CHECK((backend_ctx->kernel_add4        = clCreateKernel(backend_ctx->program_add, "kernel_add4", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -7627,6 +7633,9 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
     if (const char * env = getenv("GGML_OPENCL_FUSE_RMS_ADD")) {
         backend_ctx->fuse_rms_add = atoi(env) != 0;
     }
+    if (const char * env = getenv("GGML_OPENCL_FUSE_ADD_CHAIN")) {
+        backend_ctx->fuse_add_chain = atoi(env) != 0;
+    }
     if (const char * env = getenv("GGML_OPENCL_F16_MROW")) {
         backend_ctx->f16_mrow = atoi(env) != 0;
     } else if (getenv("GGML_OPENCL_FAKE_QCOM_REQD") != NULL) {
@@ -8898,6 +8907,97 @@ inline bool use_q4k_tiled(const ggml_backend_opencl_context *backend_ctx, const 
 inline bool use_q4_k_bin_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor);
 inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor);   // defined below
 
+// [tongyi 2026-10-25] fused ADD->ADD->ADD residual chain (kernel_add4).
+// Grouped-MoE residual graphs emit ~115 such chains per decode token
+// (bailingmoe3 census); each fusion removes 2 kernel launches. Byte-identical
+// numerics: left-assoc ((a+b)+c)+d order preserved, all operands F32
+// contiguous same-shape (no broadcast), so linear indexing is valid.
+static bool ggml_opencl_can_fuse_add_chain(const ggml_backend_opencl_context * backend_ctx,
+                                           const struct ggml_cgraph * cgraph, int node_idx,
+                                           const ggml_tensor ** out_dst) {
+    if (!backend_ctx->fuse_add_chain) {
+        return false;
+    }
+    if (node_idx + 3 > cgraph->n_nodes) {
+        return false;
+    }
+    const ggml_tensor * n0 = cgraph->nodes[node_idx];
+    const ggml_tensor * n1 = cgraph->nodes[node_idx + 1];
+    const ggml_tensor * n2 = cgraph->nodes[node_idx + 2];
+    if (n0->op != GGML_OP_ADD || n1->op != GGML_OP_ADD || n2->op != GGML_OP_ADD) {
+        return false;
+    }
+    // structure/uses: contiguous subgraph, intermediates consumed only inside
+    const enum ggml_op chain_ops[3] = { GGML_OP_ADD, GGML_OP_ADD, GGML_OP_ADD };
+    const int chain_out[1] = { node_idx + 2 };
+    if (!ggml_can_fuse_subgraph(cgraph, node_idx, 3, chain_ops, chain_out, 1)) {
+        return false;
+    }
+    // all F32
+    if (n0->type != GGML_TYPE_F32 || n1->type != GGML_TYPE_F32 || n2->type != GGML_TYPE_F32 ||
+        n0->src[0]->type != GGML_TYPE_F32 || n0->src[1]->type != GGML_TYPE_F32) {
+        return false;
+    }
+    // chain connectivity: each next node consumes the previous result
+    if (n1->src[0] != n0 && n1->src[1] != n0) { return false; }
+    if (n2->src[0] != n1 && n2->src[1] != n1) { return false; }
+    // the four leaf inputs (in evaluation order a, b, c, d)
+    const ggml_tensor * in[4] = { n0->src[0], n0->src[1], nullptr, nullptr };
+    in[2] = (n1->src[0] == n0) ? n1->src[1] : n1->src[0];
+    in[3] = (n2->src[0] == n1) ? n2->src[1] : n2->src[0];
+    for (int k = 0; k < 4; ++k) {
+        if (in[k]->type != GGML_TYPE_F32 || !ggml_is_contiguous(in[k])) { return false; }
+        if (!ggml_are_same_shape(in[k], n2)) { return false; }   // no broadcast anywhere
+    }
+    if (!ggml_is_contiguous(n2)) { return false; }
+    // dst must not alias any leaf input (pool allocator may reuse dead
+    // intermediates, which is fine -- only leaf aliasing would race)
+    for (int k = 0; k < 4; ++k) {
+        if (ggml_cl_tensors_overlap(n2, in[k])) { return false; }
+    }
+    *out_dst = n2;
+    return true;
+}
+
+static void ggml_opencl_op_add4_fused(ggml_backend_t backend,
+                                      const ggml_tensor * n0, const ggml_tensor * n1, ggml_tensor * dst) {
+    const ggml_tensor * in[4] = { n0->src[0], n0->src[1], nullptr, nullptr };
+    in[2] = (n1->src[0] == n0) ? n1->src[1] : n1->src[0];
+    in[3] = (dst->src[0] == n1) ? dst->src[1] : dst->src[0];
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    cl_kernel kernel = backend_ctx->kernel_add4;
+
+    cl_ulong offs[4], offd;
+    cl_mem bufs[4];
+    for (int k = 0; k < 4; ++k) {
+        ggml_tensor_extra_cl * e = (ggml_tensor_extra_cl *)in[k]->extra;
+        GGML_ASSERT(e);
+        offs[k] = e->offset + in[k]->view_offs;
+        bufs[k] = e->data_device;
+    }
+    ggml_tensor_extra_cl * ed = (ggml_tensor_extra_cl *)dst->extra;
+    GGML_ASSERT(ed);
+    offd = ed->offset + dst->view_offs;
+
+    cl_ulong n = (cl_ulong)ggml_nbytes(dst) / sizeof(float);
+    int a = 0;
+    for (int k = 0; k < 4; ++k) {
+        CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &bufs[k]));
+        CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offs[k]));
+    }
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &ed->data_device));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offd));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &n));
+
+    size_t global_work_size[] = { (size_t)((n + 63) / 64) * 64, 1, 1 };
+    // [tongyi 2026-10-25] lws nullptr = driver-chosen; forcing 64 measured ~12%
+    // decode regression on 740 (r3_add4 vs r3_add4off), driver default is better
+    // for these small [1536] elementwise chains.
+    backend_ctx->enqueue_ndrange_kernel(kernel, 1, global_work_size, nullptr, dst);
+}
+
+
 static bool ggml_opencl_can_fuse(const ggml_backend_opencl_context * backend_ctx, const struct ggml_cgraph * cgraph, int node_idx, std::initializer_list<enum ggml_op> ops) {
 
     // glu(mul_mat(Wg,x), mul_mat(Wu,x)) — the FFN gate/up GEMVs + GLU. This is a
@@ -9593,6 +9693,17 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             ggml_opencl_op_rms_norm_mul_add_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
             i += 2;
             continue;
+        }
+        // [tongyi 2026-10-25] Fuse ADD->ADD->ADD residual chains (kernel_add4).
+        // Default on, opt-out GGML_OPENCL_FUSE_ADD_CHAIN=0.
+        {
+            const ggml_tensor * add4_dst = nullptr;
+            if (!backend_ctx->disable_fusion &&
+                ggml_opencl_can_fuse_add_chain(backend_ctx, cgraph, i, &add4_dst)) {
+                ggml_opencl_op_add4_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+                i += 2;
+                continue;
+            }
         }
         if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             // [dspark 2026-10-18] opt-out GGML_OPENCL_FUSE_RMS_MUL=0: race hunt —

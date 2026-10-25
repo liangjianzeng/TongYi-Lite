@@ -188,3 +188,28 @@ kernel void kernel_add_row_f16(
 
     dst[gid] = v0 + v1;
 }
+
+//------------------------------------------------------------------------------
+// [tongyi 2026-10-25] fused residual chain: dst = ((a + b) + c) + d.
+// Matches the ADD->ADD->ADD pattern emitted by grouped-MoE residual graphs
+// (bailingmoe3: ~4.8 chains/layer, ~115 chains/token). The matcher enforces
+// contiguous F32 + identical shapes, so linear indexing is valid; byte offsets
+// mirror kernel_add's (buffer, offset) argument style. Evaluation order keeps
+// the graph's left-assoc sequence, results are bit-identical to 3 launches.
+kernel void kernel_add4(
+        global float * src0,
+        ulong  off0,
+        global float * src1,
+        ulong  off1,
+        global float * src2,
+        ulong  off2,
+        global float * src3,
+        ulong  off3,
+        global float * dst,
+        ulong  offd,
+        ulong  n) {
+    const ulong i = get_global_id(0);
+    if (i < n) {
+        dst[offd/4 + i] = ((src0[off0/4 + i] + src1[off1/4 + i]) + src2[off2/4 + i]) + src3[off3/4 + i];
+    }
+}
