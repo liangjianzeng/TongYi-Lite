@@ -133,17 +133,19 @@ static inline float q4_val(global const uchar * blk, const uint i) {
 //         conv_state 滚动。grid = H_K 个 WG（每 k 头 1 个），WG = WG1 线程。
 // ---------------------------------------------------------------------------
 kernel void g1_ssm_stage1_proj(
-        global const uchar * W_in,        // q4_0 [QKVZ_DIM, N_EMBD] 行主
-        global const float  * W_ba,       // f32  [BA_DIM, N_EMBD] 行主
-        global const float  * x,          // [N_EMBD] 本 token 输入
-        global const float  * ssm_dt,     // [H_V] softplus 偏置
-        global const float  * ssm_a,      // [H_V] -A_log.exp() 门系数
-        global const float  * w_conv,     // [CC, D_CONV]（w[c*D_CONV+t]）
-        global const float  * conv_state, // [D_CONV-1, CC] 上一 token 状态
-        global float        * scratch,    // 见文件头 scratch 布局
-        global float        * conv_state_out, // [D_CONV-1, CC] 滚动后
-        local  float        * lmem)       // [L1_SIZE]
+        global const uchar * W_in,        ulong W_in_off,   // q4_0 [QKVZ_DIM, N_EMBD] 行主
+        global const float  * W_ba,       ulong W_ba_off,   // f32  [BA_DIM, N_EMBD] 行主
+        global const float  * x,          ulong x_off,      // [N_EMBD] 本 token 输入
+        global const float  * ssm_dt,     ulong dt_off,     // [H_V] softplus 偏置
+        global const float  * ssm_a,      ulong a_off,      // [H_V] -A_log.exp() 门系数
+        global const float  * w_conv,     ulong conv_off,   // [CC, D_CONV]（w[c*D_CONV+t]）
+        global const float  * conv_state, ulong cs_off,     // [D_CONV-1, CC] 上一 token 状态
+        global float        * scratch,    ulong scr_off,    // 见文件头 scratch 布局
+        global float        * conv_state_out, ulong cso_off, // [D_CONV-1, CC] 滚动后
+        local  float        * lmem)                            // [L1_SIZE]
 {
+    W_in += W_in_off; W_ba += W_ba_off; x += x_off; ssm_dt += dt_off; ssm_a += a_off;
+    w_conv += conv_off; conv_state += cs_off; scratch += scr_off; conv_state_out += cso_off;
     const uint lid = get_local_id(0);
     const uint g   = get_group_id(0);            // k 头 id
 
@@ -237,12 +239,13 @@ kernel void g1_ssm_stage1_proj(
 //   归约列主：线程=列，S 列访问连续（S(i,j)=S[j*S_V+i]）。
 // ---------------------------------------------------------------------------
 kernel void g1_ssm_stage2_gdn(
-        global const float * scratch,    // stage1 出（布局见文件头，段偏移=编译期常量）
-        global const float * rms_w,      // [S_V] ssm_norm
-        global float       * state,      // [H_V,S_V,S_V] 常驻 state，直接 RMW
-        global float       * out,        // [H_V,S_V] gated normed 输出
-        local  float       * red)        // [S_V+1]：red[0..S_V)=列暂存，red[S_V]=rms 因子
+        global const float * scratch,    ulong scr_off,  // stage1 出（段偏移=编译期常量）
+        global const float * rms_w,      ulong rms_off,  // [S_V] ssm_norm
+        global float       * state,      ulong st_off,   // [H_V,S_V,S_V] 常驻 state，直接 RMW
+        global float       * out,        ulong out_off,  // [H_V,S_V] gated normed 输出
+        local  float       * red)                           // [S_V+1]
 {
+    scratch += scr_off; rms_w += rms_off; state += st_off; out += out_off;
     const uint h   = get_group_id(0);
     const uint lid = get_local_id(0);
     global const float * q    = scratch;
@@ -307,10 +310,11 @@ kernel void g1_ssm_stage2_gdn(
 //   无归约无 barrier（x = stage2 出的 gated output，全局广播读）。
 // ---------------------------------------------------------------------------
 kernel void g1_ssm_stage3_out(
-        global const float * fin,        // [H_V*S_V] stage2 gated 输出
-        global const uchar * W_out,      // q4_0 [N_EMBD, H_V*S_V] 行主
-        global float       * y)          // [N_EMBD] 层输出
+        global const float * fin,        ulong fin_off,  // [H_V*S_V] stage2 gated 输出
+        global const uchar * W_out,      ulong wo_off,   // q4_0 [N_EMBD, H_V*S_V] 行主
+        global float       * y,          ulong y_off)    // [N_EMBD] 层输出
 {
+    fin += fin_off; W_out += wo_off; y += y_off;
     const uint lid = get_local_id(0);
     const uint col = get_group_id(0) * WG3 + lid;
     if (col >= N_EMBD) return;

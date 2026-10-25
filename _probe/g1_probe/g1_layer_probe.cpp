@@ -383,15 +383,16 @@ int main(int argc, char** argv) {
     float nullf = 0;
     (void)nullf;
     cl_uint a = 0;
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mW_in);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mW_ba);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mx);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mdt);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &ma);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mconv);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mcst);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mscr);
-    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mcsout);
+    cl_ulong z = 0;
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mW_in);  p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mW_ba);  p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mx);     p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mdt);    p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &ma);     p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mconv);  p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mcst);   p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mscr);   p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k1, a++, sizeof(cl_mem), &mcsout); p_clSetKernelArg(k1, a++, sizeof(cl_ulong), &z);
     p_clSetKernelArg(k1, a++, L1_SIZE*4, nullptr);
     { const size_t g = H_K*WG1, l = WG1;
       e = p_clEnqueueNDRangeKernel(q_, k1, 1, nullptr, &g, &l, 0, nullptr, nullptr); }
@@ -408,10 +409,10 @@ int main(int argc, char** argv) {
 
     // ---- stage2 ----
     a = 0;
-    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mscr);
-    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mrms);
-    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mstate);
-    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mout);
+    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mscr);   p_clSetKernelArg(k2, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mrms);   p_clSetKernelArg(k2, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mstate); p_clSetKernelArg(k2, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k2, a++, sizeof(cl_mem), &mout);   p_clSetKernelArg(k2, a++, sizeof(cl_ulong), &z);
     p_clSetKernelArg(k2, a++, (S_V+1)*4, nullptr);
     { const size_t g = H_V*WG2, l = WG2;
       e = p_clEnqueueNDRangeKernel(q_, k2, 1, nullptr, &g, &l, 0, nullptr, nullptr); }
@@ -428,9 +429,9 @@ int main(int argc, char** argv) {
 
     // ---- stage3 ----
     a = 0;
-    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &mout);
-    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &mW_out);
-    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &my);
+    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &mout);   p_clSetKernelArg(k3, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &mW_out); p_clSetKernelArg(k3, a++, sizeof(cl_ulong), &z);
+    p_clSetKernelArg(k3, a++, sizeof(cl_mem), &my);     p_clSetKernelArg(k3, a++, sizeof(cl_ulong), &z);
     { const size_t g = N_EMBD, l = WG3;
       e = p_clEnqueueNDRangeKernel(q_, k3, 1, nullptr, &g, &l, 0, nullptr, nullptr); }
     if (e != CL_SUCCESS) { fprintf(stderr, "stage3 NDRange err=%d\n", e); return 2; }
