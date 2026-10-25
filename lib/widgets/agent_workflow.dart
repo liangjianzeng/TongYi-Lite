@@ -1129,6 +1129,18 @@ class AgentTurnBlock extends StatelessWidget {
               imagePath: answer!.imagePath,
               audioPath: answer!.audioPath,
               inferenceStats: answer!.inferenceStats,
+              // 页脚集中到回合尾动作区（一条信息一个家）。
+              showFooter: false,
+            ),
+          // 回合尾动作区：时间/耗时·tok/s/复制/分享/TTS 每回合一次。
+          if (answer != null)
+            MessageActionsRow(
+              content: answer!.content,
+              timestamp: answer!.timestamp,
+              stats: answer!.inferenceStats,
+              isUser: false,
+              canSpeak:
+                  answer!.kind == MessageKind.text && !_answerPending,
             ),
           // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
           if (answer != null && _artifacts.isNotEmpty)
@@ -1175,6 +1187,20 @@ class AgentTurnBlock extends StatelessWidget {
             imagePath: answer!.imagePath,
             audioPath: answer!.audioPath,
             inferenceStats: answer!.inferenceStats,
+            // 页脚集中到回合尾动作区（一条信息一个家）。
+            showFooter: false,
+          ),
+        // 回合尾动作区：答案流式结束才出现（DSH 规则：IconActions 仅在
+        // turn 结束后出现）。
+        if (answer != null &&
+            !_answerPending &&
+            !(isLive && answer!.isStreaming))
+          MessageActionsRow(
+            content: answer!.content,
+            timestamp: answer!.timestamp,
+            stats: answer!.inferenceStats,
+            isUser: false,
+            canSpeak: answer!.kind == MessageKind.text,
           ),
         // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
         if (answer != null && !_answerPending && _artifacts.isNotEmpty)

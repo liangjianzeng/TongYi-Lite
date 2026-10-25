@@ -88,6 +88,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // list). Disabled once the user scrolls up to read history.
   bool _followStream = true;
 
+  /// 跟随滚动签名（阶段 4 followSig 门控）：签名不变不滚底。
+  String _lastFollowSig = '';
+
   // Image picker state
   final List<String> _selectedImagePaths = [];
 
@@ -1883,11 +1886,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         }
 
-        // Keep the newest message in view: auto-scroll to the bottom whenever
-        // messages change while the user is following the conversation. This
-        // makes streaming replies follow in real time instead of requiring a
-        // manual scroll-up to reveal the new content.
-        if (rawMessages.isNotEmpty && _followStream) {
+        // 跟随滚动签名门控（2026-10-25 阶段 4，DSH followSig 同构）：
+        // 只在「消息条数 / 末条 id / 回合运行态」变化时滚底——流式期间每帧
+        // 重建不再触发 animateTo（此前 messages 一变就滚，与流内跟随两套
+        // 机制互相打架）。
+        final units = groupMessages(rawMessages);
+        final followSig =
+            '${units.length}:${rawMessages.last.id}:${uiState.running}:$generating';
+        if (_followStream && followSig != _lastFollowSig) {
+          _lastFollowSig = followSig;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_followStream && _scrollController.hasClients) {
               _scrollController.animateTo(
@@ -1899,23 +1906,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           });
         }
 
-        // 聊天顺序：自上而下 = 最早的在上、最新的在下（messages 即旧→新）。
-        // 无 reverse，maxScrollExtent 即最底部（最新消息）。
-        //
-        // 内嵌工作流：把流重排为 [user | 智能体回合块]。回合块 =
-        // [工具步骤… → 最终回答]；运行中步骤取事件流实时数据，历史步骤
-        // 解析自存储 🔧 活动消息（groupMessages / parsedToolActivities）。
-        final units = groupMessages(rawMessages);
         // 对话区文字整体缩放（设置→智能体→对话文字大小，0.7~1.3）。
         final textScale = ref.watch(settingsProvider).chatTextScale;
+        // 提问卡入流（阶段 3）：ask_user_question 挂起时作为列表末项渲染
+        // 在提问回合的上下文里，不再悬浮在输入区上方。
+        final pendingQuestion =
+            ref.watch(agentPendingQuestionProvider)[_currentConversationId];
+        final extraItem = pendingQuestion != null ? 1 : 0;
         return MediaQuery(
           data: MediaQuery.of(context)
               .copyWith(textScaler: TextScaler.linear(textScale)),
           child: ListView.builder(
             controller: _scrollController,
             padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: units.length,
+            itemCount: units.length + extraItem,
             itemBuilder: (context, index) {
+              // 提问卡入流：末项渲染挂起的 ask_user_question（在提问回合
+              // 的上下文里作答，不再悬浮输入区上方）。
+              if (index >= units.length) return _buildPendingQuestionCard();
               final unit = units[index];
               final isLiveTurn =
                   (uiState.running || generating) && index == units.length - 1;
@@ -1950,7 +1958,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       },
     );
   }
-
   /// 回合步骤：live **智能体**回合用事件流实时数据（参数/结果/状态实时更新）；
   /// 其余（历史回合 / 普通聊天生成中）解析存储 🔧 活动消息。
   /// 普通聊天生成中绝不借用事件流——那是上一智能体回合的残留卡片，
@@ -2002,8 +2009,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         SlotOutlet(slotId: 'app.input.activity', registry: slots),
         SlotOutlet(
             slotId: 'app.input.dock', axis: Axis.vertical, registry: slots),
-        // ask_user_question 待回答卡片（P2-B2）：智能体提问挂起等待时显示。
-        _buildPendingQuestionCard(),
+        // ask_user_question 提问卡已迁入对话流末项（在提问回合上下文作答）。
         Container(
           margin: const EdgeInsets.fromLTRB(8, 4, 8, 4),
           padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),

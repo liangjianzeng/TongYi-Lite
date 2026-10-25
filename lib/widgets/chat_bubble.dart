@@ -15,6 +15,11 @@ class ChatBubble extends StatelessWidget {
   final String content;
   final DateTime timestamp;
   final bool isStreaming;
+
+  /// 页脚（时间/stats/复制/分享/TTS）是否随本气泡渲染。智能体回合把
+  /// 页脚集中到回合尾动作区（一条信息一个家，DSH TurnTail 形态），
+  /// 传 false 抑制；普通聊天/用户消息保持默认 true。
+  final bool showFooter;
   final String? imagePath;
   final List<String>? imagePaths;
   final List<String>? attachments;
@@ -27,6 +32,7 @@ class ChatBubble extends StatelessWidget {
     required this.content,
     required this.timestamp,
     this.isStreaming = false,
+    this.showFooter = true,
     this.imagePath,
     this.imagePaths,
     this.attachments,
@@ -49,63 +55,6 @@ class ChatBubble extends StatelessWidget {
       !content.startsWith('☑') &&
       !content.startsWith('📋') &&
       !content.startsWith('🔔');
-
-  /// TTS 播报按钮：Consumer 自取设置（开关/音色/语速…）与播放状态。
-  /// 播报中（playingKey == 本条）图标变停止样式，点按即停（speak 内部处理）。
-  Widget _buildSpeakButton(BuildContext context, ThemeData theme) {
-    // 无 ProviderScope（部分纯渲染测试直接 pump ChatBubble）→ 不渲染，
-    // 避免抛 "No ProviderScope found"；真机恒有 scope，不受影响。
-    try {
-      ProviderScope.containerOf(context);
-    } catch (_) {
-      return const SizedBox.shrink();
-    }
-    return Consumer(
-      builder: (context, ref, _) {
-        final settings = ref.watch(settingsProvider);
-        final tts = EdgeTtsService.instance;
-        return ValueListenableBuilder<String?>(
-          valueListenable: tts.playingKey,
-          builder: (context, playing, _) {
-            final isThis = playing == content.hashCode.toString();
-            return InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () async {
-                final ok = await tts.speak(
-                  content,
-                  key: content.hashCode.toString(),
-                  voice: settings.edgeTtsVoice,
-                  rate: settings.edgeTtsRate,
-                  pitch: settings.edgeTtsPitch,
-                  volume: settings.edgeTtsVolume,
-                );
-                // 手动点按 = 明确要听，失败必须说清楚为什么没声音；
-                // 自动播报走 chat_provider，保持静默不打断聊天。
-                if (ok || !context.mounted) return;
-                final err = tts.lastError;
-                if (err == null) return; // 用户主动停止 → 不打扰
-                ScaffoldMessenger.of(context)
-                  ..hideCurrentSnackBar()
-                  ..showSnackBar(SnackBar(
-                    content: Text('🔊 没能播报：$err'),
-                    duration: const Duration(seconds: 4),
-                  ));
-              },
-              child: Padding(
-                padding: const EdgeInsets.all(2),
-                child: Icon(
-                  isThis ? Icons.stop_circle : Icons.volume_up,
-                  size: 15,
-                  color:
-                      isThis ? theme.colorScheme.primary : Colors.grey.shade400,
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
 
   /// 思考中占位（内容为空 + 流式中 → 显示「思考中…」指示器）。
   bool get _isThinkingPlaceholder => !_isUser && isStreaming && content.isEmpty;
@@ -408,124 +357,180 @@ class ChatBubble extends StatelessWidget {
                     ],
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _formatTime(timestamp),
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade500),
-                      ),
-                      if (!_isUser && inferenceStats != null) ...[
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            _formatStats(inferenceStats!),
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.grey.shade500,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures()
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                      // 用户消息同样可复制：长文/提示词常需复用，与回复复制同款式。
-                      if (_isUser && content.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: () async {
-                            await Clipboard.setData(
-                                ClipboardData(text: content));
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('已复制消息内容'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            }
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.all(2),
-                            child: Icon(
-                              Icons.content_copy,
-                              size: 15,
-                              color: Colors.grey.shade400,
-                            ),
-                          ),
-                        ),
-                      ],
-                      if (!_isUser && content.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: () async {
-                            await Clipboard.setData(
-                                ClipboardData(text: content));
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('已复制回复内容'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            }
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.all(2),
-                            child: Icon(
-                              Icons.content_copy,
-                              size: 15,
-                              color: Colors.grey.shade400,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        // 转发/分享：经系统分享面板（微信/QQ/邮件等均可选）。
-                        InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: () async {
-                            final ok = await ShareService.instance
-                                .shareText(content, title: '分享回复');
-                            if (context.mounted && !ok) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('未找到可用的分享入口'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            }
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.all(2),
-                            child: Icon(
-                              Icons.share,
-                              size: 15,
-                              color: Colors.grey.shade400,
-                            ),
-                          ),
-                        ),
-                        // TTS 播报：普通回答才有（工具活动/思考存档/卡片不显示）。
-                        // 按钮自取设置与播放状态；播报中变停止键（点按即停）。
-                        if (_canSpeak) ...[
-                          const SizedBox(width: 6),
-                          _buildSpeakButton(context, theme),
-                        ],
-                      ],
-                    ],
+                if (showFooter)
+                  MessageActionsRow(
+                    content: content,
+                    timestamp: timestamp,
+                    stats: inferenceStats,
+                    isUser: _isUser,
+                    canSpeak: _canSpeak,
                   ),
-                ),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 消息动作行（2026-10-25 阶段 3，DSH MessageIconActions 同位）：
+/// `[时间] · [耗时 X · N tok/s] · [复制] [分享] [TTS]`。
+/// 从 ChatBubble 页脚抽出——智能体回合把它放在**回合尾**渲染一次
+/// （showFooter:false 抑制气泡内页脚），普通聊天/用户消息仍随气泡。
+class MessageActionsRow extends StatelessWidget {
+  final String content;
+  final DateTime timestamp;
+  final InferenceStats? stats;
+  final bool isUser;
+
+  /// TTS 播报按钮可见性（调用方按消息类型判定，工具/思考/卡片不给）。
+  final bool canSpeak;
+
+  const MessageActionsRow({
+    super.key,
+    required this.content,
+    required this.timestamp,
+    this.stats,
+    required this.isUser,
+    this.canSpeak = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _formatTime(timestamp),
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+          ),
+          if (!isUser && stats != null) ...[
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                _formatStats(stats!),
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade500,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ],
+          if (content.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () async {
+                await Clipboard.setData(ClipboardData(text: content));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(isUser ? '已复制消息内容' : '已复制回复内容'),
+                      duration: const Duration(seconds: 1),
+                    ),
+                  );
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  Icons.content_copy,
+                  size: 15,
+                  color: Colors.grey.shade400,
+                ),
+              ),
+            ),
+          ],
+          if (!isUser && content.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () async {
+                final ok = await ShareService.instance
+                    .shareText(content, title: '分享回复');
+                if (context.mounted && !ok) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('未找到可用的分享入口'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  Icons.share,
+                  size: 15,
+                  color: Colors.grey.shade400,
+                ),
+              ),
+            ),
+            if (canSpeak) ...[
+              const SizedBox(width: 6),
+              _buildSpeakButton(context, theme),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// TTS 播报按钮：Consumer 自取设置与播放状态；播报中变停止键。
+  Widget _buildSpeakButton(BuildContext context, ThemeData theme) {
+    try {
+      ProviderScope.containerOf(context);
+    } catch (_) {
+      return const SizedBox.shrink();
+    }
+    return Consumer(
+      builder: (context, ref, _) {
+        final settings = ref.watch(settingsProvider);
+        final tts = EdgeTtsService.instance;
+        return ValueListenableBuilder<String?>(
+          valueListenable: tts.playingKey,
+          builder: (context, playing, _) {
+            final isThis = playing == content.hashCode.toString();
+            return InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () async {
+                final ok = await tts.speak(
+                  content,
+                  key: content.hashCode.toString(),
+                  voice: settings.edgeTtsVoice,
+                  rate: settings.edgeTtsRate,
+                  pitch: settings.edgeTtsPitch,
+                  volume: settings.edgeTtsVolume,
+                );
+                if (ok || !context.mounted) return;
+                final err = tts.lastError;
+                if (err == null) return;
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(
+                    content: Text('🔊 没能播报：$err'),
+                    duration: const Duration(seconds: 4),
+                  ));
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  isThis ? Icons.stop_circle : Icons.volume_up,
+                  size: 15,
+                  color:
+                      isThis ? theme.colorScheme.primary : Colors.grey.shade400,
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -537,9 +542,6 @@ class ChatBubble extends StatelessWidget {
     return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
-  /// 性能指标：首Tok / 视觉(仅视觉) / 耗时 / 速率。
-  /// 例：'首Tok 1.2s · 视觉 3.4s · 耗时 5.3s · 14.5 tok/s'
-  /// 首Tok=0（智能体回答无单步首Tok语义）时省略，显示 '耗时 X · Y tok/s'。
   String _formatStats(InferenceStats s) {
     final first = s.firstTokenMs > 0
         ? (s.firstTokenMs >= 1000
@@ -550,7 +552,6 @@ class ChatBubble extends StatelessWidget {
         ? '${(s.totalMs / 1000).toStringAsFixed(1)}s'
         : '${s.totalMs}ms';
     final rate = s.tokPerSec.toStringAsFixed(1);
-    // 视觉回复额外展示「视觉」耗时，语音回复展示「听音」耗时（媒体编码耗时）。
     final vision = s.visionMs > 0
         ? (s.visionMs >= 1000
             ? ' · 视觉 ${(s.visionMs / 1000).toStringAsFixed(1)}s'
