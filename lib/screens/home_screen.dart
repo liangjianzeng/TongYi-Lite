@@ -1158,6 +1158,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             FocusScope.of(context).requestFocus(FocusNode());
           },
           onChanged: _refreshActivePlanFlag,
+          onClose: _closeRailSurface,
         );
       },
     );
@@ -3610,11 +3611,16 @@ class _PlanPanelSheet extends StatefulWidget {
   final VoidCallback onRegenerate;
   final VoidCallback onChanged;
 
+  /// 关闭面板：面板是左栏内联 Stack（非路由），**Navigator.pop 会把主路由
+  /// pop 掉 = 整屏黑屏**（2026-10-25 真机定案）——必须走 RailPanelController。
+  final VoidCallback onClose;
+
   const _PlanPanelSheet({
     required this.store,
     required this.conversationId,
     required this.onRegenerate,
     required this.onChanged,
+    required this.onClose,
   });
 
   @override
@@ -3630,6 +3636,14 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PlanPanelSheet old) {
+    super.didUpdateWidget(old);
+    // 切会话：面板 State 不重建（同类型 widget 原位更新），必须显式重载，
+    // 否则显示的是上一个会话的计划/清单（计划与清单都按会话隔离）。
+    if (old.conversationId != widget.conversationId) _reload();
   }
 
   Future<void> _reload() async {
@@ -3677,7 +3691,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
     await widget.store.finish(widget.conversationId, status);
     widget.onChanged();
     if (!mounted) return;
-    Navigator.pop(context);
+    // 左栏内联面板非路由：Navigator.pop 会黑屏（见 onClose 注释）。
+    widget.onClose();
     if (status == GoalStatus.cancelled) widget.onRegenerate();
   }
 
@@ -3725,7 +3740,8 @@ class _PlanPanelSheetState extends State<_PlanPanelSheet> {
           width: double.infinity,
           child: FilledButton.icon(
             onPressed: () {
-              Navigator.pop(context);
+              // 先关面板再回填 /plan（面板内联非路由，不许 Navigator.pop）。
+              widget.onClose();
               widget.onRegenerate();
             },
             icon: const Icon(Icons.auto_fix_high, size: 18),
