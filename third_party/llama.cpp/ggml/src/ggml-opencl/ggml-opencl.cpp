@@ -1108,6 +1108,8 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_mul_mm_q6_k_f32_l4_lm;
     cl_kernel kernel_mul_mm_iq4_nl_f32_l4_lm;
 
+    int n_enqueues = 0;   // [tongyi host-timing] enqueue count since last read
+    double ht_sub_ms = 0; // [tongyi host-timing] cumulative CL object churn / executor host time (ms)
     std::vector<ProfilingInfo> profiling_info;
     std::vector<ProfilingInfo> profiling_results;
 
@@ -1262,6 +1264,7 @@ struct ggml_backend_opencl_context {
     }
 
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
+        n_enqueues++;
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
         // and global_work_size is NULL or the value in any passed dimension is zero,
@@ -9526,6 +9529,15 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
+    // [tongyi 2026-10-25 host-timing] decode bottleneck adjudicator: process CPU time
+    // of the submit loop (no sync waits) + kernel count. GGML_OPENCL_HOST_TIMING=1.
+    static const bool host_timing_en = [] {
+        const char * e = getenv("GGML_OPENCL_HOST_TIMING");
+        return e && e[0] == '1';
+    }();
+    const double ht_wall0 = host_timing_en ? (double)clock() / CLOCKS_PER_SEC : 0;
+    if (host_timing_en) { backend_ctx->n_enqueues = 0; backend_ctx->ht_sub_ms = 0; }
+
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
 
@@ -9874,6 +9886,13 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
                 }
             }
         }
+    }
+
+    if (host_timing_en) {
+        const double wall_s = (double)clock() / CLOCKS_PER_SEC - ht_wall0;
+        GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f\n",
+                      cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms);
+        backend_ctx->n_enqueues = 0;
     }
 
     return GGML_STATUS_SUCCESS;
@@ -25367,7 +25386,9 @@ static void tongyi_route_bookkeeping(const ggml_backend_opencl_context * backend
 static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         const ggml_tensor * src0, const ggml_tensor * src1,
         const ggml_tensor * src2, ggml_tensor * dst) {
+    int64_t ht_t0_batched = 0;   // [tongyi host-timing]
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    ht_t0_batched = ggml_time_us();   // [tongyi host-timing] whole-executor host time
     if (src1->type != GGML_TYPE_F32 || src2->type != GGML_TYPE_I32) {
         ggml_cl_mmid_gate_fail(0, "src_types", src0, src1, src2, "need src1=F32 src2=I32");
         return false;
@@ -25953,6 +25974,7 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         CL_CHECK(clReleaseMemObject(b_img));
         CL_CHECK(clReleaseMemObject(b_sub_buf));
     }
+    backend_ctx->ht_sub_ms += (ggml_time_us() - ht_t0_batched) / 1000.0;
     return true;
 #else
     GGML_UNUSED(backend); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(src2); GGML_UNUSED(dst);
