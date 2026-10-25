@@ -2175,22 +2175,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   ];
 
   Widget _buildQuickActions() {
-    final enabled = ref.watch(settingsProvider).composerQuickActions;
+    final settings = ref.watch(settingsProvider);
+    final enabled = settings.composerQuickActions;
     if (enabled.isEmpty) return const SizedBox.shrink();
-    final agentOn = ref.watch(settingsProvider).agentEnabled;
+    final agentOn = settings.agentEnabled;
+    final modelLoaded = ref.watch(modelManagerProvider).isLoaded;
+    final pluginReady = ref.watch(pluginHostProvider).valueOrNull != null;
+    // 每个图标反映各自功能的真实状态：绿 = 开，灰 = 关（2026-10-25 用户定案）。
+    bool stateOf(String id) => switch (id) {
+          'agent' => agentOn,
+          'model' => modelLoaded,
+          'persona' => settings.activePersona() != null,
+          'plan' => _hasActivePlan,
+          'skills' => true, // 技能库恒可用
+          'plugins' => pluginReady,
+          _ => false,
+        };
     return Row(mainAxisSize: MainAxisSize.min, children: [
       for (final (id, icon, label) in _quickActionCatalog)
         if (enabled.contains(id))
           IconButton(
             visualDensity: VisualDensity.compact,
             iconSize: 20,
-            tooltip: label,
+            tooltip: '$label（${stateOf(id) ? '开' : '关'}）',
             icon: Icon(
               icon,
-              // agent 是真开关：开着点亮；其余是入口，常态色。
-              color: id == 'agent' && agentOn
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.onSurfaceVariant,
+              color: stateOf(id)
+                  ? Colors.green.shade600
+                  : Theme.of(context).colorScheme.onSurfaceVariant
+                      .withValues(alpha: 0.55),
             ),
             onPressed: () {
               if (id == 'agent') {
