@@ -125,15 +125,15 @@ class ConversationStatsBar extends ConsumerWidget {
 
     if (groups.isEmpty) return const SizedBox.shrink();
 
-    // DSH StatsLine.module.css：12px/20px 三级灰、居中、组间「|」（10px 间距）、
-    // 超长省略号。全行统一色——DSH 无数字加重双色（此前是自由发挥，作废）。
+    // DSH StatsLine 三级灰、居中、组间「|」、超长省略号；字号 11 对齐思考
+    // 输出正文（2026-10-25 用户定案：统计读数是次级信息，没必要 12px）。
     final style = TextStyle(
-        fontSize: 12,
-        height: 20 / 12,
+        fontSize: 11,
+        height: 20 / 11,
         color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75));
     final sepStyle = TextStyle(
-        fontSize: 12,
-        height: 20 / 12,
+        fontSize: 11,
+        height: 20 / 11,
         color: theme.colorScheme.outlineVariant);
 
     return Padding(

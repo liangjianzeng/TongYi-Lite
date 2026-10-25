@@ -440,10 +440,12 @@ void main() {
       await tester.tap(find.textContaining('执行过程'));
       await tester.pump();
       expect(find.textContaining('🔧 get_time'), findsOneWidget);
-      expect(find.textContaining('12:00'), findsNothing); // 工具卡未展开
+      // 折叠态摘要 = 结果首行（2026-10-25 用户定案：收起也要概知输出）。
+      expect(find.textContaining('12:00'), findsOneWidget);
       await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
-      expect(find.textContaining('12:00'), findsOneWidget);
+      // 展开后折叠行摘要 + 结果正文各出现一次。
+      expect(find.textContaining('12:00'), findsWidgets);
       expect(find.textContaining('参数'), findsOneWidget);
     });
 

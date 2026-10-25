@@ -557,6 +557,26 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
     return line.isEmpty ? null : line;
   }
 
+  /// 折叠态摘要（用户定案 2026-10-25）：收起时用户要知道**里面输出是啥**，
+  /// 不能只有工具名+参数——
+  /// 失败 → 错误首行；完成 → **结果首行**（输出概知，DSH resultSummary
+  /// 同语义）；无结果/执行中 → 回退参数摘要（执行中看的就是要干啥）。
+  String get _collapsedSummary {
+    final err = _errorSummary;
+    if (err != null) return err;
+    final a = widget.activity;
+    if (a.status == ToolUiStatus.done) {
+      final r = a.result?.trim();
+      if (r != null && r.isNotEmpty) {
+        for (final raw in r.split('\n')) {
+          final line = raw.trim();
+          if (line.isNotEmpty) return line;
+        }
+      }
+    }
+    return _argsSummary;
+  }
+
   /// WP6：export_file 产物打开目标（复用顶层 [exportTargetOf]）。
   /// live 取 result（工具真实输出），历史取解析后的 summary（落库 🔧 消息）。
   ({String primary, String? fallback})? get _exportTargetInfo =>
@@ -651,7 +671,7 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
       ToolUiStatus.failed =>
         (Icons.error, theme.colorScheme.error, false),
     };
-    final summary = _errorSummary ?? _argsSummary;
+    final summary = _collapsedSummary;
     // running 态 = 扫光动画（DSH 同款），不再用小转圈——"最多一个 spinner"
     // 由结构保证：工具行跑起来是光带，不是转圈。
     return Padding(
@@ -662,13 +682,15 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
         color:
             theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(6),
-        child: InkWell(
+          child: InkWell(
           borderRadius: BorderRadius.circular(6),
           onTap: () => setState(() => _expanded = !_expanded),
           child: Padding(
             // 单行高度贴死文字：vertical 2 + fontSize 12 ≈ 22px。
+            // horizontal 10：与思考行/执行过程区的行内距一致——展开箭头
+            // 与图标落在同一条 x 线上（此前 8，箭头右缘差 2px 不对齐）。
             padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -939,7 +961,8 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                  // max 宽度：Spacer 才生效，展开箭头对齐右缘（min 时箭头
+                  // 跟在标题后面飘，与工具行/执行过程区的箭头不在一条线）。
                   children: [
                     Icon(Icons.psychology,
                         size: 14, color: theme.colorScheme.tertiary),
@@ -951,13 +974,16 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                       style: TextStyle(
                           fontSize: 12, color: theme.colorScheme.tertiary),
                     ),
-                    // 折叠态 + running：摘要 = 思考最后一行（DSH latestLine，
-                    // 跟随刷新）；展开态正文自可见，不重复。
-                    if (s.running && !expanded) ...[
+                    // 折叠态摘要（DSH ReasoningRow 同构）：running =
+                    // 最后一行（跟随刷新）；落档 = 首行（内容概知）。
+                    // 用户收起时看到的不是空洞的「思考」两个字。
+                    if (!expanded) ...[
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          _latestLine(s.thinking),
+                          s.running
+                              ? _latestLine(s.thinking)
+                              : _firstLine(s.thinking),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -1008,6 +1034,16 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
     if (visible.isEmpty) return '…';
     final i = visible.lastIndexOf('\n');
     final line = i == -1 ? visible : visible.substring(i + 1);
+    return line.trim().isEmpty ? '…' : line.trim();
+  }
+
+  /// DSH ReasoningRow firstLine：落档收起态摘要 = 思考首行（内容概知，
+  /// 用户收起时不该只看到「思考」两个字）。
+  static String _firstLine(String text) {
+    final visible = text.trimRight();
+    if (visible.isEmpty) return '…';
+    final i = visible.indexOf('\n');
+    final line = i == -1 ? visible : visible.substring(0, i);
     return line.trim().isEmpty ? '…' : line.trim();
   }
 }
