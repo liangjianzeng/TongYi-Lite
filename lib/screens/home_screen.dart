@@ -1967,7 +1967,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // 在提问回合的上下文里，不再悬浮在输入区上方。
         final pendingQuestion =
             ref.watch(agentPendingQuestionProvider)[_currentConversationId];
-        final extraItem = pendingQuestion != null ? 1 : 0;
+        // 简单聊天（非智能体回合）的流式思考：生成中且有思考流 → 列表尾
+        // 渲染 ThinkingStreamCard（「思考中…」+自动展开，回合结束收起）。
+        // 智能体回合的思考已在 AgentTurnBlock 内（不在列表尾重复）。
+        final simpleChatThinking =
+            generating && !uiState.running && uiState.thinking.isNotEmpty;
+        final extraItem =
+            (pendingQuestion != null ? 1 : 0) + (simpleChatThinking ? 1 : 0);
         return MediaQuery(
           data: MediaQuery.of(context)
               .copyWith(textScaler: TextScaler.linear(textScale)),
@@ -1976,9 +1982,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             padding: const EdgeInsets.symmetric(vertical: 8),
             itemCount: units.length + extraItem,
             itemBuilder: (context, index) {
-              // 提问卡入流：末项渲染挂起的 ask_user_question（在提问回合
-              // 的上下文里作答，不再悬浮输入区上方）。
-              if (index >= units.length) return _buildPendingQuestionCard();
+              // 末项区：提问卡 / 简单聊天流式思考卡。
+              if (index >= units.length) {
+                if (simpleChatThinking &&
+                    pendingQuestion == null &&
+                    index == units.length) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: ThinkingStreamCard(ui: uiState, live: true),
+                  );
+                }
+                return _buildPendingQuestionCard();
+              }
               final unit = units[index];
               final isLiveTurn =
                   (uiState.running || generating) && index == units.length - 1;

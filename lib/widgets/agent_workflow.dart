@@ -859,7 +859,16 @@ class ThinkingStreamCard extends StatefulWidget {
 
   /// 正文回答是否已开始输出（保留：答案开始后不展开内容，头部仅剩耗时）。
   final bool answerVisible;
-  const ThinkingStreamCard({super.key, required this.ui, this.answerVisible = false});
+
+  /// 直播态（2026-10-25）：简单聊天没有 ui.running（非智能体回合），
+  /// 由调用方传 true——头部显示「思考中…」+ 自动展开，回合结束收起。
+  final bool live;
+  const ThinkingStreamCard({
+    super.key,
+    required this.ui,
+    this.answerVisible = false,
+    this.live = false,
+  });
 
   @override
   State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
@@ -954,7 +963,8 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
     final theme = Theme.of(context);
     // 流式输出中（running 且答案未开始）自动展开跟随滚动；答案开始/回合
     // 结束自动闭合。用户手动点按优先（_override 非 null 即覆盖）。
-    final expanded = _override ?? (s.running && !widget.answerVisible);
+    final live = widget.live || s.running;
+    final expanded = _override ?? (live && !widget.answerVisible);
     // 只显示尾部（长思考时头部早已滚出视野，截断省内存与布局开销）。
     final tail = s.thinking.length > 2000
         ? '…${s.thinking.substring(s.thinking.length - 2000)}'
@@ -988,7 +998,7 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                     const SizedBox(width: 6),
                     Text(
                       _elapsed == null
-                          ? (s.running ? '思考中…' : '思考')
+                          ? (live ? '思考中…' : '思考')
                           : '思考 - 持续了${_fmtDur(_elapsed)}',
                       style: TextStyle(
                           fontSize: 12, color: theme.colorScheme.tertiary),
@@ -1000,7 +1010,7 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          s.running
+                          live
                               ? _latestLine(s.thinking)
                               : _firstLine(s.thinking),
                           maxLines: 1,

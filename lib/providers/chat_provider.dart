@@ -872,6 +872,10 @@ class ChatNotifier extends StateNotifier<bool> {
         final visible = StringBuffer();
         final thinking = StringBuffer();
         var inThinking = false;
+        // 思考流快照节流推 UI（2026-10-25 用户需求）：简单聊天也显示
+        // 「思考中…」自动展开卡，回合结束收起。
+        final agentUi = _ref.read(agentUiStateProvider.notifier);
+        var lastThinkingPush = DateTime.now();
 
         // Drop a dangling partial thinking-tag fragment at the very end of the
         // output (e.g. the stream ended mid-token with "<thi" or "</think").
@@ -896,6 +900,11 @@ class ChatNotifier extends StateNotifier<bool> {
 
           if (inThinking) {
             thinking.write(token);
+            final nowThink = DateTime.now();
+            if (nowThink.difference(lastThinkingPush).inMilliseconds >= 120) {
+              lastThinkingPush = nowThink;
+              agentUi.setThinking(conversationId, thinking.toString());
+            }
             final closeIdx = thinking.toString().indexOf('</think>');
             if (closeIdx >= 0) {
               // Everything after the closing tag becomes visible output.
