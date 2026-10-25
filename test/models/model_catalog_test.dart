@@ -9,7 +9,8 @@ void main() {
   test('目录可加载且含新增智能体模型', () async {
     final models = await ModelCatalog.load();
 
-    expect(models.length, 17);
+    // 目录随发版增删模型（0.3.5 = 21 个）；数量变动时同步本断言防误删。
+    expect(models.length, 21);
 
     final spark = models.firstWhere((m) => m.id == 'spark-x2.5-4b-q4_k_m');
     expect(spark.name, contains('Spark-X2.5 4B'));
