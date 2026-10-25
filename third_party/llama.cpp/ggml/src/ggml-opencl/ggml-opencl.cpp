@@ -34,6 +34,67 @@ typedef const void * (*get_adreno_bin_kernel_func_t)(
 
 #include <CL/cl.h>
 
+// [tongyi 2026-10-25 arg-cache] Memoizing clSetKernelArg shim. Decode re-sets
+// ~45K kernel args per token, nearly all byte-identical to the previous token;
+// measured ~1.8us per arg on the 740 host path (cl_bw_probe 4b). Args persist on
+// the cl_kernel object, so skipping a byte-identical re-set is semantically a
+// no-op. Macro applies to every clSetKernelArg call site in this file.
+#include <unordered_map>
+#include <dlfcn.h>
+#include <vector>
+#include <cstring>
+static long g_arg_sets = 0, g_arg_skips = 0;
+static long g_add4_fired = 0;
+long g_addchain_dbg_cnt = 0;
+long g_scan_add_seen = 0;
+static const ggml_tensor * g_addchain_in4 = nullptr;   // [tongyi] 4th leaf when chain-3 fires
+long g_cnt_alladd = 0, g_rej_subgraph = 0, g_rej_dtype = 0, g_rej_conn = 0, g_rej_contig = 0, g_rej_shape = 0, g_rej_overlap = 0;
+static cl_int ht_cl_set_kernel_arg(cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void * arg_value);
+#define clSetKernelArg ht_cl_set_kernel_arg
+static cl_int ht_cl_set_kernel_arg(cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void * arg_value) {
+    struct HtKey {
+        uintptr_t k; cl_uint i;
+        bool operator==(const HtKey & o) const { return k == o.k && i == o.i; }
+    };
+    struct HtKeyHash {
+        size_t operator()(const HtKey & x) const { return x.k * 1000003u + x.i; }
+    };
+    static std::unordered_map<HtKey, std::pair<size_t, std::vector<uint8_t>>, HtKeyHash> cache;
+    HtKey key{ (uintptr_t)kernel, arg_index };
+    auto it = cache.find(key);
+    const bool have = it != cache.end();
+    bool same = false;
+    if (have) {
+        const auto & ent = it->second;
+        if (ent.first == arg_size) {
+            if (arg_value == nullptr) {
+                same = ent.second.empty();   // __local arg: size is the value
+            } else if (ent.second.size() == arg_size) {
+                same = memcmp(ent.second.data(), arg_value, arg_size) == 0;
+            }
+        }
+    }
+    if (same) {
+        ++g_arg_skips;
+        return CL_SUCCESS;
+    }
+    // resolve the real symbol through the same path the backend uses (stub/vendor)
+    static cl_int (CL_API_ENTRY * real)(cl_kernel, cl_uint, size_t, const void *) = nullptr;
+    if (!real) {
+        real = (cl_int (CL_API_ENTRY *)(cl_kernel, cl_uint, size_t, const void *)) dlsym(RTLD_DEFAULT, "clSetKernelArg");
+        if (!real) { fprintf(stderr, "FATAL: arg-cache cannot resolve clSetKernelArg\n"); abort(); }
+    }
+    cl_int err = real(kernel, arg_index, arg_size, arg_value);
+    if (err == CL_SUCCESS) {
+        ++g_arg_sets;
+        auto & ent = cache[key];
+        ent.first = arg_size;
+        if (arg_value) ent.second.assign((const uint8_t *)arg_value, (const uint8_t *)arg_value + arg_size);
+        else ent.second.clear();
+    }
+    return err;
+}
+
 #include <inttypes.h>
 #include <string.h>
 
@@ -876,7 +937,8 @@ struct ggml_backend_opencl_context {
     cl_program program_mul_mm_q8_0_f32_l4_lm;
 
     cl_kernel kernel_add, kernel_add_row, kernel_add_f16, kernel_add_row_f16;
-    cl_kernel kernel_add4;   // [tongyi 2026-10-25] fused ADD->ADD->ADD residual chain
+    cl_kernel kernel_add4;   // [tongyi 2026-10-25] fused ADD chain (3-op)
+    cl_kernel kernel_add3;   // [tongyi 2026-10-25] fused ADD chain (2-op)
     cl_kernel kernel_mul, kernel_mul_row, kernel_mul_f16, kernel_mul_row_f16;
     cl_kernel kernel_div, kernel_div_row, kernel_div_f16, kernel_div_row_f16;
     cl_kernel kernel_sub, kernel_sub_row, kernel_sub_f16, kernel_sub_row_f16;
@@ -1859,6 +1921,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_add_f16     = clCreateKernel(backend_ctx->program_add, "kernel_add_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_add_row_f16 = clCreateKernel(backend_ctx->program_add, "kernel_add_row_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_add4        = clCreateKernel(backend_ctx->program_add, "kernel_add4", &err), err));
+        CL_CHECK((backend_ctx->kernel_add3        = clCreateKernel(backend_ctx->program_add, "kernel_add3", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -8915,65 +8978,125 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
 // (bailingmoe3 census); each fusion removes 2 kernel launches. Byte-identical
 // numerics: left-assoc ((a+b)+c)+d order preserved, all operands F32
 // contiguous same-shape (no broadcast), so linear indexing is valid.
+static void addchain_reject(const char * why) {
+    if (strcmp(why, "subgraph") == 0) ++g_rej_subgraph;
+    else if (strcmp(why, "dtype") == 0) ++g_rej_dtype;
+    else if (strcmp(why, "conn1") == 0 || strcmp(why, "conn2") == 0) ++g_rej_conn;
+    else if (strcmp(why, "leaf-contig") == 0) ++g_rej_contig;
+    else if (strcmp(why, "shape") == 0) ++g_rej_shape;
+    else if (strcmp(why, "overlap") == 0) ++g_rej_overlap;
+}
+#define ADDCHAIN_REJECT(why) addchain_reject(why)
+// view-class ops are metadata-only (same buffer, no kernel); the executor scan
+// skips them, so chain resolution must skip them too and connectivity must walk
+// view_src chains. Byte-size+contiguous replaces same-shape: reshaped views of
+// the same linear span are elementwise-equivalent.
+static const ggml_tensor * addchain_next_op(const struct ggml_cgraph * cgraph, int from, int * idx_out) {
+    for (int j = from + 1; j < cgraph->n_nodes; ++j) {
+        const ggml_tensor * n = cgraph->nodes[j];
+        if (ggml_is_empty(n) || n->op == GGML_OP_RESHAPE || n->op == GGML_OP_TRANSPOSE ||
+            n->op == GGML_OP_VIEW || n->op == GGML_OP_PERMUTE || n->op == GGML_OP_NONE) {
+            continue;
+        }
+        *idx_out = j;
+        return n;
+    }
+    *idx_out = cgraph->n_nodes;
+    return nullptr;
+}
+static const ggml_tensor * addchain_root(const ggml_tensor * t) {
+    while (t->view_src) { t = t->view_src; }
+    return t;
+}
 static bool ggml_opencl_can_fuse_add_chain(const ggml_backend_opencl_context * backend_ctx,
                                            const struct ggml_cgraph * cgraph, int node_idx,
-                                           const ggml_tensor ** out_dst) {
+                                           int * mid_idx, int * end_idx, const ggml_tensor ** out_dst,
+                                           bool * four) {
     if (!backend_ctx->fuse_add_chain) {
         return false;
     }
-    if (node_idx + 3 > cgraph->n_nodes) {
-        return false;
-    }
     const ggml_tensor * n0 = cgraph->nodes[node_idx];
-    const ggml_tensor * n1 = cgraph->nodes[node_idx + 1];
-    const ggml_tensor * n2 = cgraph->nodes[node_idx + 2];
-    if (n0->op != GGML_OP_ADD || n1->op != GGML_OP_ADD || n2->op != GGML_OP_ADD) {
+    if (n0->op != GGML_OP_ADD || n0->type != GGML_TYPE_F32) {
         return false;
     }
-    // structure/uses: contiguous subgraph, intermediates consumed only inside
-    const enum ggml_op chain_ops[3] = { GGML_OP_ADD, GGML_OP_ADD, GGML_OP_ADD };
-    const int chain_out[1] = { node_idx + 2 };
-    if (!ggml_can_fuse_subgraph(cgraph, node_idx, 3, chain_ops, chain_out, 1)) {
+    ++g_scan_add_seen;
+    int i1 = -1, i2 = -1, i3 = -1;
+    const ggml_tensor * n1 = addchain_next_op(cgraph, node_idx, &i1);
+    const ggml_tensor * n2 = n1 ? addchain_next_op(cgraph, i1, &i2) : nullptr;
+    const ggml_tensor * n3 = n2 ? addchain_next_op(cgraph, i2, &i3) : nullptr;
+    if (!n1 || n1->op != GGML_OP_ADD) { ADDCHAIN_REJECT("ops"); ++g_cnt_alladd; return false; }
+    // 2-chain: dst = n1 (kernel_add3). 3-chain: n2 also ADD (kernel_add4).
+    const bool has3 = (n2 && n2->op == GGML_OP_ADD);
+    const ggml_tensor * last = has3 ? n2 : n1;
+    const int i_last = has3 ? i2 : i1;
+    const ggml_tensor * n2r = n2;   // only valid when has3
+    if (n1->type != GGML_TYPE_F32 || (has3 && n2->type != GGML_TYPE_F32) ||
+        n0->src[0]->type != GGML_TYPE_F32 || n0->src[1]->type != GGML_TYPE_F32 ||
+        last->type != GGML_TYPE_F32) {
+        ADDCHAIN_REJECT("dtype");
         return false;
     }
-    // all F32
-    if (n0->type != GGML_TYPE_F32 || n1->type != GGML_TYPE_F32 || n2->type != GGML_TYPE_F32 ||
-        n0->src[0]->type != GGML_TYPE_F32 || n0->src[1]->type != GGML_TYPE_F32) {
+    const ggml_tensor * r0 = addchain_root(n0);
+    const ggml_tensor * r1 = addchain_root(n1);
+    if (addchain_root(n1->src[0]) != r0 && addchain_root(n1->src[1]) != r0) { ADDCHAIN_REJECT("conn1"); return false; }
+    const ggml_tensor * in[4] = { n0->src[0], n0->src[1],
+        (addchain_root(n1->src[0]) == r0) ? n1->src[1] : n1->src[0], nullptr };
+    const ggml_tensor * in4 = nullptr;
+    if (has3) {
+        const ggml_tensor * r2 = addchain_root(n2);
+        if (addchain_root(n2->src[0]) != r1 && addchain_root(n2->src[1]) != r1) { ADDCHAIN_REJECT("conn2"); return false; }
+        in[3] = (addchain_root(n2->src[0]) == r1) ? n2->src[1] : n2->src[0];
+    }
+    const ggml_tensor * dst = last;
+    const int n_leaf = has3 ? 4 : 3;
+    for (int k = 0; k < n_leaf; ++k) {
+        if (in[k]->type != GGML_TYPE_F32 || !ggml_is_contiguous(in[k]) ||
+            ggml_nbytes(in[k]) != ggml_nbytes(dst)) {
+            ADDCHAIN_REJECT("shape");
+            return false;
+        }
+    }
+    if (!ggml_is_contiguous(dst)) { ADDCHAIN_REJECT("shape"); return false; }
+    for (int k = 0; k < n_leaf; ++k) {
+        if (!ggml_cl_tensors_overlap(dst, in[k])) { continue; }
+        // exact in-place aliasing (dst IS the leaf, same span) is safe for the
+        // elementwise kernel: each thread reads its element before writing it.
+        ggml_tensor_extra_cl * exd = (ggml_tensor_extra_cl *)dst->extra;
+        ggml_tensor_extra_cl * exk = (ggml_tensor_extra_cl *)in[k]->extra;
+        const cl_ulong doff = exd->offset + dst->view_offs;
+        const cl_ulong koff = exk->offset + in[k]->view_offs;
+        if (exd->data_device == exk->data_device && doff == koff &&
+            ggml_nbytes(dst) == ggml_nbytes(in[k])) {
+            continue;   // in-place accumulate: safe
+        }
+        ADDCHAIN_REJECT("overlap");
         return false;
     }
-    // chain connectivity: each next node consumes the previous result
-    if (n1->src[0] != n0 && n1->src[1] != n0) { return false; }
-    if (n2->src[0] != n1 && n2->src[1] != n1) { return false; }
-    // the four leaf inputs (in evaluation order a, b, c, d)
-    const ggml_tensor * in[4] = { n0->src[0], n0->src[1], nullptr, nullptr };
-    in[2] = (n1->src[0] == n0) ? n1->src[1] : n1->src[0];
-    in[3] = (n2->src[0] == n1) ? n2->src[1] : n2->src[0];
-    for (int k = 0; k < 4; ++k) {
-        if (in[k]->type != GGML_TYPE_F32 || !ggml_is_contiguous(in[k])) { return false; }
-        if (!ggml_are_same_shape(in[k], n2)) { return false; }   // no broadcast anywhere
-    }
-    if (!ggml_is_contiguous(n2)) { return false; }
-    // dst must not alias any leaf input (pool allocator may reuse dead
-    // intermediates, which is fine -- only leaf aliasing would race)
-    for (int k = 0; k < 4; ++k) {
-        if (ggml_cl_tensors_overlap(n2, in[k])) { return false; }
-    }
-    *out_dst = n2;
+    g_addchain_in4 = nullptr;
+    { static int fired_dbg = 0; if (fired_dbg < 10) { ++fired_dbg;
+      fprintf(stderr, "[addchain-FIRE] i=%d n0=%s n1=%s dst=%s four=%d\n",
+          node_idx, n0->name, n1->name, dst->name, (int)has3); } }
+    *mid_idx = i1;
+    *end_idx = i_last;
+    *out_dst = dst;
+    *four = has3;
     return true;
+#undef ADDCHAIN_REJECT
 }
 
-static void ggml_opencl_op_add4_fused(ggml_backend_t backend,
-                                      const ggml_tensor * n0, const ggml_tensor * n1, ggml_tensor * dst) {
+static void ggml_opencl_op_add_fused(ggml_backend_t backend,
+                                      const ggml_tensor * n0, const ggml_tensor * n1, ggml_tensor * dst, bool four) {
     const ggml_tensor * in[4] = { n0->src[0], n0->src[1], nullptr, nullptr };
-    in[2] = (n1->src[0] == n0) ? n1->src[1] : n1->src[0];
-    in[3] = (dst->src[0] == n1) ? dst->src[1] : dst->src[0];
+    in[2] = (addchain_root(n1->src[0]) == addchain_root(n0)) ? n1->src[1] : n1->src[0];
+    in[3] = (addchain_root(dst->src[0]) == addchain_root(n1)) ? dst->src[1] : dst->src[0];
 
     ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *)backend->context;
-    cl_kernel kernel = backend_ctx->kernel_add4;
+    cl_kernel kernel = four ? backend_ctx->kernel_add4 : backend_ctx->kernel_add3;
+    const int n_in = four ? 4 : 3;
 
     cl_ulong offs[4], offd;
     cl_mem bufs[4];
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < n_in; ++k) {
         ggml_tensor_extra_cl * e = (ggml_tensor_extra_cl *)in[k]->extra;
         GGML_ASSERT(e);
         offs[k] = e->offset + in[k]->view_offs;
@@ -8985,7 +9108,7 @@ static void ggml_opencl_op_add4_fused(ggml_backend_t backend,
 
     cl_ulong n = (cl_ulong)ggml_nbytes(dst) / sizeof(float);
     int a = 0;
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < n_in; ++k) {
         CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &bufs[k]));
         CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offs[k]));
     }
@@ -9709,11 +9832,14 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // [tongyi 2026-10-25] Fuse ADD->ADD->ADD residual chains (kernel_add4).
         // Default on, opt-out GGML_OPENCL_FUSE_ADD_CHAIN=0.
         {
+            int add4_mid = -1, add4_end = -1;
+            bool add4_four = false;
             const ggml_tensor * add4_dst = nullptr;
             if (!backend_ctx->disable_fusion &&
-                ggml_opencl_can_fuse_add_chain(backend_ctx, cgraph, i, &add4_dst)) {
-                ggml_opencl_op_add4_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
-                i += 2;
+                ggml_opencl_can_fuse_add_chain(backend_ctx, cgraph, i, &add4_mid, &add4_end, &add4_dst, &add4_four)) {
+                ggml_opencl_op_add_fused(backend, node, cgraph->nodes[add4_mid], cgraph->nodes[add4_end], add4_four);
+                ++g_add4_fired;
+                i = add4_end;
                 continue;
             }
         }
@@ -9890,8 +10016,11 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 
     if (host_timing_en) {
         const double wall_s = (double)clock() / CLOCKS_PER_SEC - ht_wall0;
-        GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f\n",
-                      cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms);
+        GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f add4=%ld scanADD=%ld rej:sg=%ld dt=%ld conn=%ld ctg=%ld shp=%ld ovl=%ld\n",
+                      cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms, g_add4_fired, g_scan_add_seen,
+                      g_rej_subgraph, g_rej_dtype, g_rej_conn, g_rej_contig, g_rej_shape, g_rej_overlap);
+        g_add4_fired = 0; g_scan_add_seen = 0;
+        g_rej_subgraph = 0; g_rej_dtype = 0; g_rej_conn = 0; g_rej_contig = 0; g_rej_shape = 0; g_rej_overlap = 0;
         backend_ctx->n_enqueues = 0;
     }
 

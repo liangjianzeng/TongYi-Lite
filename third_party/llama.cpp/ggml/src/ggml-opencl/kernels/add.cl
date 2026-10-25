@@ -213,3 +213,21 @@ kernel void kernel_add4(
         dst[offd/4 + i] = ((src0[off0/4 + i] + src1[off1/4 + i]) + src2[off2/4 + i]) + src3[off3/4 + i];
     }
 }
+
+// [tongyi 2026-10-25] 2-ADD chain: dst = (a + b) + c. Same contract as
+// kernel_add4 (contiguous F32, byte offsets, left-assoc order preserved).
+kernel void kernel_add3(
+        global float * src0,
+        ulong  off0,
+        global float * src1,
+        ulong  off1,
+        global float * src2,
+        ulong  off2,
+        global float * dst,
+        ulong  offd,
+        ulong  n) {
+    const ulong i = get_global_id(0);
+    if (i < n) {
+        dst[offd/4 + i] = (src0[off0/4 + i] + src1[off1/4 + i]) + src2[off2/4 + i];
+    }
+}
