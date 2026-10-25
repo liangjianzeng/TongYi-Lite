@@ -6,7 +6,7 @@ import 'package:tongyi_lite/agent/skills/skill.dart';
 
 void main() {
   group('内置通用技能（2026-10-01 对齐官方规范重写正文）', () {
-    test('内置技能清单：16 个通用 + skill-creator 元技能', () {
+    test('内置技能清单：16 个通用 + stock-research 专精 + skill-creator 元技能', () {
       final skills = loadBuiltinSkills();
       final names = skills.map((s) => s.name).toSet();
       expect(names, containsAll([
@@ -26,9 +26,10 @@ void main() {
         'social-copy',
         'shopping-compare',
         'tutor',
+        'stock-research',
         'skill-creator',
       ]));
-      expect(skills.length, 17);
+      expect(skills.length, 18);
       // 每个技能都必须有 whenToUse 与非空 body（否则目录注入/正文加载没意义）。
       for (final s in skills) {
         expect(s.whenToUse, isNotEmpty, reason: '${s.name} 缺 whenToUse');
@@ -93,7 +94,7 @@ void main() {
       final skill = provider.byName('translation');
       expect(skill!.rank, kRankUser);
       expect(skill.body, '用户 body');
-      expect(provider.count, 17, reason: '同名覆盖不增加数量');
+      expect(provider.count, 18, reason: '同名覆盖不增加数量');
     });
   });
 }

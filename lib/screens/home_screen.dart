@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -45,7 +44,8 @@ import '../plugins/panel/plugins_screen.dart';
 import 'package:uuid/uuid.dart';
 import '../providers/agent_state_provider.dart'
     show agentUiStateProvider, AgentUiState, ToolActivityUi, ToolUiStatus;
-import '../models/chat_message.dart' show ChatMessage, MessageRole;
+import '../models/chat_message.dart' show ChatMessage;
+import '../widgets/conversation_stats_bar.dart';
 import 'settings_screen.dart';
 // 插件平台（P2）：宿主在这里只"挖洞"，不认识任何具体插件。
 import '../plugins/plugin_host.dart';
@@ -1197,7 +1197,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           style: const TextStyle(
                               fontSize: 12.5, fontWeight: FontWeight.w600)),
                       Text(modelName,
-                          maxLines: 1,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                               fontSize: 11, color: scheme.onSurfaceVariant)),
@@ -2049,8 +2049,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     }
                     _sendMessage();
                   },
-                  maxLines: 6,
-                  minLines: 1,
+                  // 两行起显（2026-10-25 用户反馈）：输入框默认两行高，
+                  // 打长句不用等换行才看到第二行；超过 8 行内部滚动。
+                  minLines: 2,
+                  maxLines: 8,
                 ),
               ),
               const SizedBox(height: 2),
@@ -2088,78 +2090,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ],
           ),
         ),
-        // 会话数据统计条（DSH 参考形态，2026-10-25）：原「底部黑边」位置
-        // 改为常驻读数——轮/步 · token 估算 · 上下文占用，手势条避让在此收口。
-        Builder(builder: (_) {
-          final msgs = ref.watch(messagesProvider(_currentConversationId))
-                  .valueOrNull ??
-              const <ChatMessage>[];
-          return _buildConversationStatsStrip(msgs);
-        }),
+        // 会话数据统计条（2026-10-25 封装为 ConversationStatsBar，DSH
+        // StatsLine 形态：轮/步 | LLM 耗时·tok/s | ≈tok | 上下文%）。
+        // 键盘弹出时整条收起（含避让 padding）：输入卡直接贴住键盘顶，
+        // 否则统计条 + nav inset 会卡在输入卡与键盘之间成一条死空隙。
+        // 用 View.of 读原始 viewInsets——Scaffold(resize) 会把 body 的
+        // MediaQuery.viewInsets 清零，从 body 里读恒为 0 检测不到键盘。
+        if (View.of(context).viewInsets.bottom <= 0)
+          Builder(builder: (_) {
+            final msgs = ref.watch(messagesProvider(_currentConversationId))
+                    .valueOrNull ??
+                const <ChatMessage>[];
+            return ConversationStatsBar(
+                conversationId: _currentConversationId, messages: msgs);
+          }),
       ],
     );
     return PluginDispatcherScope(
       dispatcher: ref.watch(pluginDispatcherProvider),
       child: SlotRegistryScope(registry: slots, child: inputBar),
     );
-  }
-
-  /// 会话数据统计条：对齐 DSH-Phone 底部读数形态。
-  ///
-  /// 三段：`N 轮 · M 步`（轮 = 用户消息数；步 = 🔧 工具活动消息数，与对话内
-  /// 工作流同一判定）、`≈X tok`（[estimateTokens] 全量估算，含用户+答案，
-  /// 不含 🔧/💭 轨迹——它们不入模型上下文）、`上下文 y%`（与 KV 环同源，
-  /// 无数据不显示）。数字为本地估算口径，标题带「约」的语义用 ≈ 表达。
-  Widget _buildConversationStatsStrip(List<ChatMessage> messages) {
-    var rounds = 0;
-    var steps = 0;
-    var tokens = 0;
-    for (final m in messages) {
-      final c = m.content;
-      if (c.startsWith('🔧')) {
-        steps++;
-        continue;
-      }
-      if (c.startsWith('💭')) continue;
-      if (m.role == MessageRole.user) rounds++;
-      tokens += estimateTokens(c);
-    }
-    final fraction =
-        ref.watch(contextUsageProvider)[_currentConversationId]?.fraction;
-    final ctx = fraction == null ? null : (fraction * 100).round();
-    final segStyle = TextStyle(
-        fontSize: 11,
-        color: Theme.of(context).colorScheme.onSurfaceVariant,
-        fontFeatures: const [FontFeature.tabularFigures()]);
-    final sep = Text(' · ',
-        style: TextStyle(
-            fontSize: 11,
-            color: Theme.of(context).colorScheme.outlineVariant));
-    return Padding(
-      // 手势条避让收口（原 composer 卡内容 padding 承担，现移到本条）。
-      padding: EdgeInsets.fromLTRB(14, 0, 14, math.max(
-              MediaQuery.of(context).padding.bottom, 16) +
-          2),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Flexible(child: Text('$rounds 轮 · $steps 步', style: segStyle)),
-          sep,
-          Flexible(child: Text('≈${_fmtTokCompact(tokens)} tok', style: segStyle)),
-          if (ctx != null) ...[
-            sep,
-            Flexible(child: Text('上下文 $ctx%', style: segStyle)),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// token 读数缩写：<1000 原值；<10000 x.xk；否则 x.x万（中文语境）。
-  String _fmtTokCompact(int n) {
-    if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
-    return '$n';
   }
 
   /// 输入框左侧的圆形上下文占用圈（传统进度环形态）：

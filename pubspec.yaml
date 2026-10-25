@@ -56,6 +56,7 @@ dependencies:
   audioplayers: ^6.4.0
   # TTS 缓存 key（sha256，与 vendored edge_tts 同版本约束）
   crypto: ^3.0.0
+  fast_gbk: ^1.0.0
 
 
 dependency_overrides:

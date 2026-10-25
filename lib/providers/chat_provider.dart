@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
+import '../models/turn_trace.dart';
 
 import '../agent/agent.dart';
 import '../agent/dev/dev.dart'
@@ -80,7 +81,8 @@ import '../services/settings_service.dart';
 import '../services/storage_service.dart';
 import 'agent_approval.dart'
     show sandboxApproverProvider, toolPreApproverProvider;
-import 'agent_state_provider.dart' show agentUiStateProvider;
+import 'agent_state_provider.dart'
+    show agentUiStateProvider, UiTimelineThinking, UiTimelineTool;
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
@@ -1911,9 +1913,9 @@ class ChatNotifier extends StateNotifier<bool> {
       // 本地路线：KV 缓存占比（已占用位置 kv_used / 上下文窗口 kv_ctx）。
       _updateLocalContextUsage(conversationId, genStats);
     }
-    // 思考存档落库（💭 前缀，仅 UI 展示不入模型上下文）：turn 事件流结束时
-    // 各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程痕迹消息
-    // ——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
+    // 思考存档落库（kind=thinking，仅 UI 展示不入模型上下文）：turn 事件流
+    // 结束时各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程
+    // 痕迹消息——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
     // timestamp 取回答前偏移，保证排序为 [工具活动] → [思考存档] → [回答]。
     final finishedThinking = List<String>.from(
         agentUi.state[conversationId]?.thinkingHistory ?? const []);
@@ -1928,7 +1930,47 @@ class ChatNotifier extends StateNotifier<bool> {
         isStreaming: false,
         timestamp:
             assistantMsg.timestamp.subtract(Duration(milliseconds: 3 + i)),
+        kind: MessageKind.thinking,
       ));
+    }
+    // turnTrace UI 信封（2026-10-25 重构 P0）：把 live 事件流的**真实交错
+    // 顺序**（timeline：思考/工具）落成一条 notice 消息，历史回合据此走与
+    // live 相同的渲染管线，不再靠散消息重排猜顺序。工具项引用落库的 🔧
+    // 消息 id（toolData 已带结构化数据，无需反解析字符串）。
+    {
+      final uiState = agentUi.state[conversationId];
+      final trace = <TurnUiItem>[];
+      final toolIds = session.writtenIds;
+      for (final marker in uiState?.timeline ?? const []) {
+        switch (marker) {
+          case UiTimelineThinking(:final index):
+            if (index >= 0 && index < finishedThinking.length) {
+              final block = finishedThinking[index].trim();
+              if (block.isNotEmpty) trace.add(TurnUiItem.think(block));
+            }
+          case UiTimelineTool(:final index):
+            // timeline 的工具序号与落库 writtenIds 同序（都按 tool/call 顺序）。
+            if (index >= 0 && index < toolIds.length) {
+              trace.add(TurnUiItem.tool(toolIds[index]));
+            }
+        }
+      }
+      // timeline 之外的兜底：错误行（turn error reason）。
+      final err = uiState?.lastError;
+      if (err != null && err.isNotEmpty) trace.add(TurnUiItem.error(err));
+      final traceContent = encodeTurnUiTrace(trace);
+      if (traceContent != null) {
+        await _storage.saveMessage(ChatMessage(
+          id: '${assistantMsg.id}-uitrace',
+          conversationId: conversationId,
+          role: MessageRole.assistant,
+          content: traceContent,
+          timestamp:
+              assistantMsg.timestamp.subtract(const Duration(milliseconds: 2)),
+          kind: MessageKind.notice,
+          noticeCode: 'turnTrace',
+        ));
+      }
     }
     // WP1a：本轮工具轮轨迹以信封消息落库，下一轮导入时还原为真实
     // assistant(toolCalls)/tool/result 事件——修"turn 间失忆"（模型每轮
@@ -2280,10 +2322,12 @@ class ChatNotifier extends StateNotifier<bool> {
     // 端侧直连引擎 / SearXNG 实例（直连开关打开时优先级最高）。
     applySearXNGProviderFromSettings(settings);
 
-    // 联网类工具（web_search/get_weather）：配置关闭时不可见。
+    // 联网类工具（web_search/get_weather/fetch_url/data_api）：配置关闭时不可见。
     if (!settings.webSearchEnabled) {
       registry.unregister('web_search');
       registry.unregister('get_weather');
+      registry.unregister('fetch_url');
+      registry.unregister('data_api');
     }
 
     // shell 执行：用户设置关闭时不可见（默认开启，能力不设限）。
@@ -2362,11 +2406,12 @@ class ChatNotifier extends StateNotifier<bool> {
 
   /// tells the native engine to set should_stop (or cancels the API SSE
   /// request for the API fallback path), which makes the completion loop
-  /// 是否为智能体过程活动消息（🔧 工具 / 💭 思考存档前缀）。此类消息仅用于
-  /// UI 展示（过程痕迹回看），不入模型上下文（history 构建时排除）。
+  /// 是否为智能体过程活动消息（工具/思考/信封等，仅 UI 展示不入模型上下文）。
+  /// 类型化判定（2026-10-25）：新消息写 kind；旧 DB 行读取层已按前缀推断
+  /// 填充 kind，此处不再做字符串前缀兜底。
   static bool _isToolActivityMessage(ChatMessage msg) =>
       msg.role == MessageRole.assistant &&
-      (msg.content.startsWith('🔧') || msg.content.startsWith('💭'));
+      msg.kind != MessageKind.text;
 
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
@@ -2437,6 +2482,10 @@ class _AgentActivitySession {
   final String conversationId;
   final StorageService storage;
 
+  /// 本回合已落库的工具活动消息 id（按 tool/call 顺序）——turnTrace UI
+  /// 信封的 tool 项引用它，历史回合按 id 取消息渲染。
+  final List<String> writtenIds = [];
+
   var _seq = 0;
 
   _AgentActivitySession({
@@ -2445,6 +2494,8 @@ class _AgentActivitySession {
   });
 
   /// 更新活动消息（executing → 新建独立消息；done/failed → 对位更新）。
+  /// 类型化落库（2026-10-25）：kind=toolActivity + 结构化 toolData；
+  /// content 字符串按旧约定保留（旧版本渲染兼容，解析链路已不走它）。
   Future<void> update(ToolActivity activity) async {
     if (activity.status == 'executing') {
       final n = _seq++;
@@ -2456,7 +2507,11 @@ class _AgentActivitySession {
         content: '🔧 正在调用 ${activity.name}…',
         isStreaming: false,
         timestamp: DateTime.fromMillisecondsSinceEpoch(now + 1000 + n),
+        kind: MessageKind.toolActivity,
+        toolData: ToolActivityData(
+            phase: 'executing', name: activity.name),
       );
+      writtenIds.add(msg.id);
       await storage.saveMessage(msg);
       return;
     }
@@ -2465,7 +2520,11 @@ class _AgentActivitySession {
     // 的 🔧 消息。
     final msgs = await storage.getAllMessages(conversationId);
     for (final m in msgs) {
-      if (m.role == MessageRole.assistant && m.content.startsWith('🔧 正在调用')) {
+      if (m.role == MessageRole.assistant &&
+          m.kind == MessageKind.toolActivity &&
+          // 新行看 toolData.phase；旧版本残留行（toolData 缺失）回退前缀。
+          (m.toolData?.phase == 'executing' ||
+              (m.toolData == null && m.content.startsWith('🔧 正在调用')))) {
         final mark = activity.isFailed ? '⚠️' : '✓';
         // export_file 的摘要必须保留完整 content:// URI——历史回合工具卡
         // 的「打开」按钮靠它（截断到 300 字保路径）。
@@ -2475,6 +2534,13 @@ class _AgentActivitySession {
         await storage.saveMessage(m.copyWith(
           content: '🔧 ${activity.name} $mark$summary',
           isStreaming: false,
+          toolData: ToolActivityData(
+            phase: activity.isFailed ? 'failed' : 'done',
+            name: activity.name,
+            summary: summary,
+            resultText: activity.result,
+            isError: activity.isFailed,
+          ),
         ));
         return;
       }

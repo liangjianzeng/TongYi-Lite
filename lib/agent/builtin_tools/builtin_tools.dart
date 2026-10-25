@@ -18,6 +18,8 @@ export 'file_tools.dart'
         createReadFileTool,
         createSearchTextTool,
         createWriteFileTool;
+export 'data_api/data_api_tool.dart' show createDataApiTool;
+export 'fetch_url_tool.dart' show createFetchUrlTool, kFetchMaxBytes;
 export 'get_time.dart' show createGetTimeTool;
 export 'memory_tool.dart' show createMemoryGetTool, createMemorySetTool;
 export 'note_tool.dart' show createNoteListTool, createNoteTakeTool, resetNoteStore;
@@ -70,6 +72,8 @@ import '../tool_definition.dart';
 import 'calculator.dart';
 import 'export_file_tool.dart';
 import 'file_tools.dart';
+import 'data_api/data_api_tool.dart';
+import 'fetch_url_tool.dart';
 import 'get_time.dart';
 import 'memory_tool.dart';
 import 'note_tool.dart';
@@ -102,6 +106,8 @@ const List<String> kCoreToolNames = [
 /// 网络/系统工具名（默认关闭；设置开启后可见）。
 const List<String> kOptionalToolNames = [
   'web_search',
+  'fetch_url',
+  'data_api',
   'get_weather',
   'shell_exec',
   'python_exec',
@@ -162,6 +168,8 @@ List<ToolDefinition> createBuiltinTools({
       createExportFileTool(),
       createWebSearchTool(
           maxSearchesPerTurn: webSearchMaxSearchesPerTurn),
+      createDataApiTool(),
+      createFetchUrlTool(),
       createGetWeatherTool(),
       createShellExecTool(),
       createPythonExecTool(),

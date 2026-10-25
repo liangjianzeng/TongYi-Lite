@@ -21,7 +21,7 @@ class StorageService {
     final path = join(await getDatabasesPath(), 'tongyilite.db');
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -73,6 +73,17 @@ class StorageService {
         "ALTER TABLE messages ADD COLUMN visionPaths TEXT",
       );
     }
+    // v6：消息类型化（对话区重构 P0）——kind/toolData/noticeCode 三列。
+    // 与版本无关的列级检查（同 visionPaths 的幂等策略）。
+    if (!names.contains('kind')) {
+      await db.execute("ALTER TABLE messages ADD COLUMN kind TEXT");
+    }
+    if (!names.contains('toolData')) {
+      await db.execute("ALTER TABLE messages ADD COLUMN toolData TEXT");
+    }
+    if (!names.contains('noticeCode')) {
+      await db.execute("ALTER TABLE messages ADD COLUMN noticeCode TEXT");
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -101,6 +112,9 @@ class StorageService {
         createdAt INTEGER NOT NULL,
         isStreaming INTEGER DEFAULT 0,
         inferenceStats TEXT,
+        kind TEXT,
+        toolData TEXT,
+        noticeCode TEXT,
         FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
       )
     ''');
@@ -196,7 +210,34 @@ class StorageService {
       inferenceStats: statsJson != null && statsJson.isNotEmpty
           ? InferenceStats.fromMap(jsonDecode(statsJson) as Map<String, dynamic>)
           : null,
+      toolData: _decodeToolData(r['toolData']),
+      noticeCode: r['noticeCode'] as String?,
+      // kind 缺失（旧行）→ 按前缀/工具数据推断后固化到实例。
+      kind: ChatMessage.resolveKind(
+        stored: _kindFromName(r['kind']),
+        toolData: _decodeToolData(r['toolData']),
+        content: r['content'] as String? ?? '',
+      ),
     );
+  }
+
+  static MessageKind? _kindFromName(Object? name) {
+    if (name is! String || name.isEmpty) return null;
+    for (final k in MessageKind.values) {
+      if (k.name == name) return k;
+    }
+    return null;
+  }
+
+  static ToolActivityData? _decodeToolData(Object? raw) {
+    if (raw is! String || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return ToolActivityData.fromMap(decoded);
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// 取某会话最近 [limit] 条消息（时间升序返回）。
@@ -244,6 +285,10 @@ class StorageService {
       'inferenceStats': msg.inferenceStats != null
           ? jsonEncode(msg.inferenceStats!.toMap())
           : null,
+      'kind': msg.kind.name,
+      'toolData':
+          msg.toolData == null ? null : jsonEncode(msg.toolData!.toMap()),
+      'noticeCode': msg.noticeCode,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 

@@ -2,6 +2,98 @@ import 'dart:convert';
 
 enum MessageRole { user, assistant }
 
+/// 消息类型（2026-10-25 对话区重构 P0）：过程痕迹从 content 字符串前缀
+/// （🔧/💭/🔔…）升级为一等类型。**新消息一律写类型**；content 里的前缀串
+/// 仅作旧版本渲染兼容保留。历史脏数据无 kind 列时由 [_inferLegacyKind]
+/// 按前缀推断，推断不出 = text。
+enum MessageKind { text, toolActivity, thinking, notice, error, question }
+
+MessageKind? _messageKindFromName(Object? name) {
+  for (final k in MessageKind.values) {
+    if (k.name == name) return k;
+  }
+  return null;
+}
+
+/// 旧前缀 → 类型推断（仅用于存量 DB 行；新代码不要再依赖前缀）。
+/// 刻意**只映射旧过滤逻辑覆盖的前缀**（🔧/💭）：☑/📋/⚠️/🔔 等历史上按
+/// 普通消息参与上下文/渲染，推断成特殊类型会静默改变行为——它们保持
+/// text，由后续阶段逐步显式化。
+MessageKind inferLegacyKind(String content) {
+  if (content.startsWith('🔧TRACE')) return MessageKind.notice;
+  if (content.startsWith('🔧')) return MessageKind.toolActivity;
+  if (content.startsWith('💭')) return MessageKind.thinking;
+  return MessageKind.text;
+}
+
+/// 工具活动单次调用的结构化数据（替代从 `🔧 name ✓summary` 字符串反解析）。
+class ToolActivityData {
+  /// 活动阶段：executing = 执行中（占位行）；done / failed = 终态。
+  final String phase; // executing | done | failed
+  final String name;
+
+  /// 单行结果/参数摘要（UI 折叠行展示）。
+  final String summary;
+
+  /// 工具调用参数 JSON 原文（展开体 IN 段展示；null = 未捕获/旧数据）。
+  final String? argsJson;
+
+  /// 工具结果原文（展开体 OUT 段展示；截断策略由 UI 决定）。
+  final String? resultText;
+  final bool isError;
+
+  /// 执行耗时（终态才有；null = 未知/旧数据）。
+  final int? durationMs;
+
+  const ToolActivityData({
+    required this.phase,
+    required this.name,
+    this.summary = '',
+    this.argsJson,
+    this.resultText,
+    this.isError = false,
+    this.durationMs,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'phase': phase,
+        'name': name,
+        'summary': summary,
+        'argsJson': argsJson,
+        'resultText': resultText,
+        'isError': isError,
+        'durationMs': durationMs,
+      };
+
+  factory ToolActivityData.fromMap(Map<String, dynamic> map) =>
+      ToolActivityData(
+        phase: map['phase'] as String? ?? 'done',
+        name: map['name'] as String? ?? '',
+        summary: map['summary'] as String? ?? '',
+        argsJson: map['argsJson'] as String?,
+        resultText: map['resultText'] as String?,
+        isError: map['isError'] as bool? ?? false,
+        durationMs: (map['durationMs'] as num?)?.toInt(),
+      );
+
+  ToolActivityData copyWith({
+    String? phase,
+    String? summary,
+    String? resultText,
+    bool? isError,
+    int? durationMs,
+  }) =>
+      ToolActivityData(
+        phase: phase ?? this.phase,
+        name: name,
+        argsJson: argsJson ?? this.argsJson,
+        summary: summary ?? this.summary,
+        resultText: resultText ?? this.resultText,
+        isError: isError ?? this.isError,
+        durationMs: durationMs ?? this.durationMs,
+      );
+}
+
 /// 解析消息 role：未知值（历史脏数据、将来新增的 role 如 system）回落为
 /// user。此前多处用 `.first` 直接反序列化——一条脏消息就能让整个会话
 /// 列表/消息读取抛 StateError 崩溃。
@@ -66,6 +158,16 @@ class ChatMessage {
   final bool isStreaming;
   final InferenceStats? inferenceStats;
 
+  /// 消息类型（过程痕迹一等化，见 [MessageKind]）。
+  final MessageKind kind;
+
+  /// 工具活动结构化数据（kind == toolActivity 时可空 = 旧数据，UI 走
+  /// content 前缀兼容渲染）。
+  final ToolActivityData? toolData;
+
+  /// notice / error 的机器码（turnTrace / compacted / retry / …）。
+  final String? noticeCode;
+
   ChatMessage({
     required this.id,
     required this.conversationId,
@@ -79,13 +181,30 @@ class ChatMessage {
     DateTime? timestamp,
     this.isStreaming = false,
     this.inferenceStats,
-  })  : imagePaths = (imagePaths != null && imagePaths.isNotEmpty)
+    MessageKind? kind,
+    this.toolData,
+    this.noticeCode,
+  })  : kind = kind ??
+            (toolData != null
+                ? MessageKind.toolActivity
+                : MessageKind.text),
+        imagePaths = (imagePaths != null && imagePaths.isNotEmpty)
             ? imagePaths
             : (imagePath != null ? [imagePath] : null),
         visionPaths = (visionPaths != null && visionPaths.isNotEmpty)
             ? visionPaths
             : null,
         timestamp = timestamp ?? DateTime.now();
+
+  /// 展示用类型规则：kind 列缺失的旧 DB 行在**读取层**（fromMap / storage
+  /// 映射）按前缀推断后填充，运行期一律直接用 [kind]，不再做前缀兜底。
+  static MessageKind resolveKind({
+    required MessageKind? stored,
+    required ToolActivityData? toolData,
+    required String content,
+  }) =>
+      stored ??
+      (toolData != null ? MessageKind.toolActivity : inferLegacyKind(content));
 
   /// 模型侧取图入口：有切块序列用切块，否则用原图。UI 展示禁用本 getter。
   List<String>? get modelImagePaths =>
@@ -110,6 +229,9 @@ class ChatMessage {
       'timestamp': timestamp.millisecondsSinceEpoch,
       'isStreaming': isStreaming ? 1 : 0,
       'inferenceStats': inferenceStats?.toMap(),
+      'kind': kind.name,
+      'toolData': toolData == null ? null : jsonEncode(toolData!.toMap()),
+      'noticeCode': noticeCode,
     };
   }
 
@@ -139,7 +261,23 @@ class ChatMessage {
       timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),
       isStreaming: (map['isStreaming'] as int?) == 1,
       inferenceStats: stats is Map<String, dynamic> ? InferenceStats.fromMap(stats) : null,
+      kind: resolveKind(
+        stored: _messageKindFromName(map['kind']),
+        toolData: _decodeToolData(map['toolData']),
+        content: map['content'] as String? ?? '',
+      ),
+      toolData: _decodeToolData(map['toolData']),
+      noticeCode: map['noticeCode'] as String?,
     );
+  }
+
+  static ToolActivityData? _decodeToolData(Object? raw) {
+    if (raw is! String || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return ToolActivityData.fromMap(decoded);
+    } catch (_) {}
+    return null;
   }
 
   ChatMessage copyWith({
@@ -147,6 +285,9 @@ class ChatMessage {
     bool? isStreaming,
     InferenceStats? inferenceStats,
     List<String>? attachments,
+    MessageKind? kind,
+    ToolActivityData? toolData,
+    String? noticeCode,
   }) {
     return ChatMessage(
       id: id,
@@ -161,6 +302,9 @@ class ChatMessage {
       timestamp: timestamp,
       isStreaming: isStreaming ?? this.isStreaming,
       inferenceStats: inferenceStats ?? this.inferenceStats,
+      kind: kind ?? this.kind,
+      toolData: toolData ?? this.toolData,
+      noticeCode: noticeCode ?? this.noticeCode,
     );
   }
 }

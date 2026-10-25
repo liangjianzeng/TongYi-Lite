@@ -31,7 +31,8 @@ void main() {
       );
       expect(m.producedTokens, greaterThanOrEqualTo(100));
       expect(m.label, contains('工具 1'));
-      expect(m.label, contains('第 2 步'));
+      // 「第 X 步」计数已删（2026-10-25 用户指令）：细条不再显示步序号。
+      expect(m.label, isNot(contains('第 2 步')));
       expect(m.label, contains('/1024'));
     });
 

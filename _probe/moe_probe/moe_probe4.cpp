@@ -67,7 +67,9 @@ static std::vector<float> vendor_moe(ggml_backend_dev_t dev, ggml_type qt,
         ggml_backend_tensor_set(xs, x2.data(), 0, x2.size() * sizeof(float));
     }
     ggml_backend_tensor_set(idt, ids.data(), 0, ids.size() * sizeof(int32_t));
+    fprintf(stderr, "[m1p] before compute\n"); fflush(stderr);
     if (ggml_backend_graph_compute(b, gf) != GGML_STATUS_SUCCESS) die("compute");
+    fprintf(stderr, "[m1p] compute done\n"); fflush(stderr);
     std::vector<float> o((size_t)N * n_used * n_tok);
     ggml_backend_tensor_get(moe, o.data(), 0, o.size() * sizeof(float));
     ggml_backend_buffer_free(buf);
@@ -137,7 +139,9 @@ static void run_shape(ggml_backend_dev_t ocl, ggml_backend_dev_t cpu, ggml_type 
     std::vector<float> x(K);
     for (auto & v : x) v = frand();
     std::vector<uint8_t> qdata((size_t)N * E * K * ggml_type_size(qt) / blk);
+    fprintf(stderr, "[m1p] before quantize type=%d\n", (int)qt); fflush(stderr);
     ggml_quantize_chunk(qt, w.data(), qdata.data(), 0, N * E, K, NULL);
+    fprintf(stderr, "[m1p] quantize done\n"); fflush(stderr);
     // MOE_PROBE_SAME=1: replicate expert-0 bytes to all E experts — any per-expert
     // base-offset error then disappears (every es reads identical data).
     if (getenv("MOE_PROBE_SAME")) {
@@ -166,6 +170,10 @@ static void run_shape(ggml_backend_dev_t ocl, ggml_backend_dev_t cpu, ggml_type 
                 } else if (qt == GGML_TYPE_Q4_K) {
                     dequantize_row_q4_K((const block_q4_K *)(qdata.data() + (size_t)e * slice_b),
                                         tmp.data(), (size_t)K * N);
+                } else if (qt == GGML_TYPE_IQ4_XS) {
+                    // [tongyi M1] CPU 参考：dequantize_row_iq4_xs（ggml-quants.c 同源语义）
+                    dequantize_row_iq4_xs((const block_iq4_xs *)(qdata.data() + (size_t)e * slice_b),
+                                          tmp.data(), (size_t)K * N);
                 } else {
                     die("unsupported type");
                 }
@@ -301,6 +309,11 @@ int main() {
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 512, 1536, 128, 8, "REAL-down", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 1536, 512, 128, 8, "PREFILL-gateup-tok4", true, 4);
     }
+    // [tongyi M1 2026-10-25] iq4_xs 首个 sub-3bpw 内核验收（G-733 路线①）：
+    // Ling 真形状（K=1536/512 M%128=0）+ 边界（K=256 单超块）。
+    run_shape(ocl, cpu, GGML_TYPE_IQ4_XS, 1536, 512, 128, 8, "M1-IQ4XS-gateup", true);
+    run_shape(ocl, cpu, GGML_TYPE_IQ4_XS, 512, 1536, 128, 8, "M1-IQ4XS-down", true);
+    run_shape(ocl, cpu, GGML_TYPE_IQ4_XS, 256, 128, 128, 8, "M1-IQ4XS-K256", true);
     if (!only_q40) {
     // [dspark 2026-10-14] q4_K batched kernel bisection (phone garble)
     run_shape(ocl, cpu, GGML_TYPE_Q4_K, 1536, 512, 128, 8, "Q4K-gateup", true);

@@ -273,34 +273,32 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
           elevation: isCached ? 1.5 : 0,
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Stack(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+                    // 头部行：图标 + 模型名 + 角标（默认勾选/状态 chip）。
+                    // 名字允许换两行（2026-10-25 用户反馈：窄栏里大量模型名
+                    // 被截断显示不全）；体积移到下方标签行，不再和名字挤一行；
+                    // 角标走正常 Row 布局，不再 Stack 右上角 + 预留 88px
+                    // （窄栏最挤的就是这块死空间，还遮挡换行后的名字）。
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(modelTypeIcon(model.type)),
                         const SizedBox(width: 8),
-                        // 模型名按系统规则显示：去掉括号内的精度/量化说明，缩短长度。
-                        Flexible(
+                        Expanded(
                           child: Text(
                             cleanModelName(model.name),
                             style: const TextStyle(
                                 fontSize: 14, fontWeight: FontWeight.w600),
-                            maxLines: 1,
+                            maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(width: 8),
-                        // 总下载体积（主 gguf + mmproj 投影器），紧挨模型名。
-                        Text(
-                          _formatSize(model.totalBytes),
-                          style:
-                              const TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
-                        // 右侧预留空间，避免右上角固定的默认勾选/状态 chip 遮挡。
-                        const SizedBox(width: 88),
+                        isCached
+                            ? _buildDefaultToggle(model)
+                            : _buildStatusChip(displayState),
                       ],
                     ),
 
@@ -311,6 +309,11 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        // 总下载体积（主 gguf + mmproj 投影器）：放进标签行，
+                        // 与特性标签同一视觉层级，不再挤模型名那一行。
+                        Text(_formatSize(model.totalBytes),
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.grey)),
                         // 视觉能力标签：支持视觉理解 →「视觉」，否则 →「文本」。
                         // 依据目录里 type==vision（含单文件 VL 与 text+mmproj 两文件形态）。
                         _buildModelTag(
@@ -447,16 +450,6 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
                     const SizedBox(height: 12),
                     _buildActionButtons(model, task, isCached),
                   ],
-                ),
-                // 右上角固定：已缓存显示「设为默认加载」勾选，否则显示状态 chip。
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: isCached
-                      ? _buildDefaultToggle(model)
-                      : _buildStatusChip(displayState),
-                ),
-              ],
             ),
           ),
         );
@@ -1909,8 +1902,9 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
   /// 内置技能清单（常量，取一次避免每次 build 重建）。
   final List<Skill> _builtinSkills = loadBuiltinSkills();
 
-  /// 技能列表展开态：默认收起成一行汇总，展开后限高滚动浏览。
-  bool _skillsExpanded = false;
+  /// 技能列表展开态：默认**展开**（2026-10-25 用户指令：左栏已有独立面板，
+  /// 不许再折叠成一行汇总逼用户多点一次；仍可点标题手动收起）。
+  bool _skillsExpanded = true;
 
   @override
   void initState() {

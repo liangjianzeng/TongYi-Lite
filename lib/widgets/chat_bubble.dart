@@ -15,7 +15,6 @@ class ChatBubble extends StatelessWidget {
   final String content;
   final DateTime timestamp;
   final bool isStreaming;
-  final bool showAvatar;
   final String? imagePath;
   final List<String>? imagePaths;
   final List<String>? attachments;
@@ -28,7 +27,6 @@ class ChatBubble extends StatelessWidget {
     required this.content,
     required this.timestamp,
     this.isStreaming = false,
-    this.showAvatar = true,
     this.imagePath,
     this.imagePaths,
     this.attachments,
@@ -122,51 +120,48 @@ class ChatBubble extends StatelessWidget {
         dark ? const Color(0xFF9B8CFF) : const Color(0xFF6D4FE0);
     final Color userBubbleFg = dark ? Colors.black87 : Colors.white;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       child: Row(
         mainAxisAlignment:
             _isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!showAvatar && !_isUser) const SizedBox(width: 40),
-          if (showAvatar && !_isUser) ...[
-            CircleAvatar(
-              radius: 16,
-              backgroundColor: theme.colorScheme.primaryContainer,
-              child: Icon(Icons.auto_awesome,
-                  size: 16, color: theme.colorScheme.onPrimaryContainer),
-            ),
-            const SizedBox(width: 8),
-          ],
           Flexible(
             child: Column(
               crossAxisAlignment:
                   _isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
+                // DSH 参考形态（2026-10-25）：助手消息**无气泡**——markdown
+                // 直接铺在画布上（去头像同时去掉灰底框，阅读面不缩水）；
+                // 用户消息右对齐圆角 22 气泡（DSH bubble r22）。工具活动
+                // 消息保留浅色卡（在 TurnUnit 里已是紧凑行，此处是兜底）。
                 Container(
-                  constraints: const BoxConstraints(maxWidth: 600),
+                  constraints: _isUser
+                      ? const BoxConstraints(maxWidth: 600)
+                      : null,
                   padding: EdgeInsets.symmetric(
                     horizontal: 16,
-                    vertical: _isToolActivity ? 8 : 12,
+                    vertical: _isToolActivity
+                        ? 8
+                        : _isUser
+                            ? 10
+                            : 0,
                   ),
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _isUser
-                        ? userBubbleColor
-                        : (_isToolActivity
-                            ? theme.colorScheme.tertiaryContainer
-                                .withValues(alpha: 0.5)
-                            : theme.colorScheme.surfaceContainerHighest),
-                    borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(14),
-                      topRight: const Radius.circular(14),
-                      bottomRight: const Radius.circular(14),
-                      bottomLeft: Radius.circular(_isUser ? 14 : 4),
-                    ),
-                    border: _isUser
-                        ? null
-                        : Border.all(color: theme.colorScheme.outlineVariant),
-                  ),
+                  margin: const EdgeInsets.symmetric(vertical: 2),
+                  decoration: _isUser
+                      ? BoxDecoration(
+                          // 用户气泡定值：浅色饱和紫+白字，暗色亮紫+深字
+                          //（primary 在暗色档是浅淡紫，和设计稿差一截）。
+                          color: userBubbleColor,
+                          borderRadius: BorderRadius.circular(22),
+                        )
+                      : _isToolActivity
+                          ? BoxDecoration(
+                              color: theme.colorScheme.tertiaryContainer
+                                  .withValues(alpha: 0.5),
+                              borderRadius: BorderRadius.circular(14),
+                            )
+                          : null,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -344,8 +339,11 @@ class ChatBubble extends StatelessWidget {
                               styleSheet: MarkdownStyleSheet.fromTheme(
                                 theme,
                               ).copyWith(
+                                // 无气泡形态（DSH 参考）：正文铺在画布上，
+                                // 用 onSurface 主文字色（原 onSurfaceVariant
+                                // 是给灰底气泡配的次级色，直接铺开偏灰淡）。
                                 p: TextStyle(
-                                  color: theme.colorScheme.onSurfaceVariant,
+                                  color: theme.colorScheme.onSurface,
                                   fontSize: 15,
                                   height: 1.5,
                                 ),
@@ -526,15 +524,6 @@ class ChatBubble extends StatelessWidget {
               ],
             ),
           ),
-          if (showAvatar && _isUser) ...[
-            const SizedBox(width: 8),
-            CircleAvatar(
-              radius: 16,
-              backgroundColor: theme.colorScheme.secondaryContainer,
-              child: Icon(Icons.person,
-                  size: 16, color: theme.colorScheme.onSecondaryContainer),
-            ),
-          ],
         ],
       ),
     );

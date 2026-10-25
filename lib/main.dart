@@ -147,9 +147,26 @@ class TongYiLiteApp extends ConsumerWidget {
     return MaterialApp(
       builder: (context, child) {
         final mq = MediaQuery.of(context);
-        return MediaQuery(
-          data: mq.copyWith(devicePixelRatio: mq.devicePixelRatio * uiScale),
-          child: child ?? const SizedBox.shrink(),
+        // 系统栏图标明暗跟随主题（2026-10-25 浅色模式状态栏时间看不见根因：
+        // main() 里的全局 overlay 只设了透明背景，图标亮度留空 = Android 默认
+        // 白图标，浅色条带上白字隐身）。AnnotatedRegion 随主题切换自动更新。
+        final barIcons =
+            Theme.of(context).brightness == Brightness.dark
+                ? Brightness.light
+                : Brightness.dark;
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            systemNavigationBarColor: Colors.transparent,
+            systemNavigationBarContrastEnforced: false,
+            statusBarIconBrightness: barIcons,
+            systemNavigationBarIconBrightness: barIcons,
+          ),
+          child: MediaQuery(
+            data:
+                mq.copyWith(devicePixelRatio: mq.devicePixelRatio * uiScale),
+            child: child ?? const SizedBox.shrink(),
+          ),
         );
       },
       title: 'TongYi-Lite',

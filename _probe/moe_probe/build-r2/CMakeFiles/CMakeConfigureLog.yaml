@@ -1,0 +1,1270 @@
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineSystem.cmake:200 (message)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      The target system is: Android - 1 - aarch64
+      The host system is: Windows - 10.0.26300 - AMD64
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCXXCompiler.cmake:126 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+      Compiler: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe 
+      Build flags: -g;-DANDROID;-fdata-sections;-ffunction-sections;-funwind-tables;-fstack-protector-strong;-no-canonical-prefixes;-D_FORTIFY_SOURCE=2;-Wformat;-Werror=format-security;-O3;-DNDEBUG;-fno-omit-frame-pointer
+      Id flags: -c;--target=aarch64-none-linux-android28 
+      
+      The output was:
+      0
+      
+      
+      Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+      
+      The CXX compiler identification is Clang, found in:
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/3.31.6/CompilerIdCXX/CMakeCXXCompilerId.o
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:74 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    checks:
+      - "Detecting CXX compiler ABI info"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_CXX_SCAN_FOR_MODULES: "OFF"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "CMAKE_CXX_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_57107
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat  -O3 -DNDEBUG -fno-omit-frame-pointer  -fPIE   -v -MD -MT CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles\\cmTC_57107.dir\\CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCXXCompilerABI.cpp
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         (in-process)
+         "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64\\\\bin\\\\clang++.exe" -cc1 -triple aarch64-none-linux-android28 -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=non-leaf -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu generic -target-feature +neon -target-feature +v8a -target-feature +fix-cortex-a53-835769 -target-abi aapcs -debug-info-kind=constructor -dwarf-version=4 -debugger-tuning=gdb -fdebug-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh -v -ffunction-sections -fdata-sections -fcoverage-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh -resource-dir "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18" -dependency-file "CMakeFiles\\\\cmTC_57107.dir\\\\CMakeCXXCompilerABI.cpp.o.d" -MT CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -D ANDROID -D _FORTIFY_SOURCE=2 -D NDEBUG -isysroot C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1 -internal-isystem "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/include" -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include -O3 -Wformat -fdeprecated-macro -ferror-limit 19 -femulated-tls -stack-protector 2 -fno-signed-char -fgnuc-version=4.2.1 -fcxx-exceptions -fexceptions -vectorize-loops -vectorize-slp -target-feature +outline-atomics -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -x c++ C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCXXCompilerABI.cpp
+        clang -cc1 version 18.0.1 based upon LLVM 18.0.1 default target x86_64-w64-windows-gnu
+        ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include"
+        ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1\x0d
+         C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64/lib/clang/18/include\x0d
+         C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android\x0d
+         C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include\x0d
+        End of search list.\x0d
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat  -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -v CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_57107   && cd ."
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_57107 C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -Bstatic -lc++ -Bdynamic -lm "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:182 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1]
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include]
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android]
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+        end of search list found
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1]
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include]
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android]
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+        implicit include dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:218 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(\\.[a-z]+)?|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|")?[ 	]*(([^"]*[/\\])?(ld[0-9]*(\\.[a-z]+)?))("|,| |$)]
+        ignore line: [Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh']
+        ignore line: []
+        ignore line: [Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_57107]
+        ignore line: [[1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat  -O3 -DNDEBUG -fno-omit-frame-pointer  -fPIE   -v -MD -MT CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles\\cmTC_57107.dir\\CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        ignore line: [ (in-process)]
+        ignore line: [ "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64\\\\bin\\\\clang++.exe" -cc1 -triple aarch64-none-linux-android28 -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=non-leaf -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu generic -target-feature +neon -target-feature +v8a -target-feature +fix-cortex-a53-835769 -target-abi aapcs -debug-info-kind=constructor -dwarf-version=4 -debugger-tuning=gdb -fdebug-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh -v -ffunction-sections -fdata-sections -fcoverage-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-9u40xh -resource-dir "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18" -dependency-file "CMakeFiles\\\\cmTC_57107.dir\\\\CMakeCXXCompilerABI.cpp.o.d" -MT CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -D ANDROID -D _FORTIFY_SOURCE=2 -D NDEBUG -isysroot C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1 -internal-isystem "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/include" -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include -O3 -Wformat -fdeprecated-macro -ferror-limit 19 -femulated-tls -stack-protector 2 -fno-signed-char -fgnuc-version=4.2.1 -fcxx-exceptions -fexceptions -vectorize-loops -vectorize-slp -target-feature +outline-atomics -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -x c++ C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [clang -cc1 version 18.0.1 based upon LLVM 18.0.1 default target x86_64-w64-windows-gnu]
+        ignore line: [ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include"]
+        ignore line: [ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1\x0d]
+        ignore line: [ C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64/lib/clang/18/include\x0d]
+        ignore line: [ C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android\x0d]
+        ignore line: [ C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include\x0d]
+        ignore line: [End of search list.\x0d]
+        ignore line: [[2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat  -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl --build-id=sha1 -Wl --no-rosegment -Wl --no-undefined-version -Wl --fatal-warnings -Wl --no-undefined -Qunused-arguments   -v CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_57107   && cd ."]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        link line: [ "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_57107 C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o -Bstatic -lc++ -Bdynamic -lm "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld] ==> ignore
+          arg [--sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot] ==> ignore
+          arg [-EL] ==> ignore
+          arg [--fix-cortex-a53-843419] ==> ignore
+          arg [-znow] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [-zmax-page-size=4096] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [aarch64linux] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/system/bin/linker64] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_57107] ==> ignore
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o] ==> obj [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o]
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+          arg [--build-id=sha1] ==> ignore
+          arg [--no-rosegment] ==> ignore
+          arg [--no-undefined-version] ==> ignore
+          arg [--fatal-warnings] ==> ignore
+          arg [--no-undefined] ==> ignore
+          arg [CMakeFiles/cmTC_57107.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [-Bstatic] ==> search static
+          arg [-lc++] ==> lib [c++]
+          arg [-Bdynamic] ==> search dynamic
+          arg [-lm] ==> lib [m]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [-lc] ==> lib [c]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o] ==> obj [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o]
+        linker tool for 'CXX': C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        implicit libs: [c++;m;-l:libunwind.a;dl;c;-l:libunwind.a;dl]
+        implicit objs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o]
+        implicit dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CMakeDetermineLinkerId.cmake:40 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:255 (cmake_determine_linker_id)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Running the CXX compiler's linker: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" "-v"
+      LLD 18.0.1 (compatible with GNU linkers)
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCCompiler.cmake:123 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+      Compiler: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe 
+      Build flags: -g;-DANDROID;-fdata-sections;-ffunction-sections;-funwind-tables;-fstack-protector-strong;-no-canonical-prefixes;-D_FORTIFY_SOURCE=2;-Wformat;-Werror=format-security;-O3;-DNDEBUG;-fno-omit-frame-pointer
+      Id flags: -c;--target=aarch64-none-linux-android28 
+      
+      The output was:
+      0
+      
+      
+      Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+      
+      The C compiler identification is Clang, found in:
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/3.31.6/CompilerIdC/CMakeCCompilerId.o
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:1250 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineASMCompiler.cmake:135 (CMAKE_DETERMINE_COMPILER_ID_VENDOR)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Checking whether the ASM compiler is GNU using "--version" did not match "(GNU assembler)|(GCC)|(Free Software Foundation)":
+      Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+      Target: x86_64-w64-windows-gnu
+      Thread model: posix
+      InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:1250 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineASMCompiler.cmake:135 (CMAKE_DETERMINE_COMPILER_ID_VENDOR)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Checking whether the ASM compiler is AppleClang using "--version" did not match "(Apple (clang|LLVM) version)":
+      Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+      Target: x86_64-w64-windows-gnu
+      Thread model: posix
+      InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:1237 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineASMCompiler.cmake:135 (CMAKE_DETERMINE_COMPILER_ID_VENDOR)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Checking whether the ASM compiler is Clang using "--version" matched "(clang version)":
+      Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+      Target: x86_64-w64-windows-gnu
+      Thread model: posix
+      InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:74 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    checks:
+      - "Detecting C compiler ABI info"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "CMAKE_C_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_15856
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer  -fPIE   -v -MD -MT CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -MF CMakeFiles\\cmTC_15856.dir\\CMakeCCompilerABI.c.o.d -o CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCCompilerABI.c
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         (in-process)
+         "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64\\\\bin\\\\clang.exe" -cc1 -triple aarch64-none-linux-android28 -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCCompilerABI.c -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=non-leaf -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu generic -target-feature +neon -target-feature +v8a -target-feature +fix-cortex-a53-835769 -target-abi aapcs -debug-info-kind=constructor -dwarf-version=4 -debugger-tuning=gdb -fdebug-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq -v -ffunction-sections -fdata-sections -fcoverage-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq -resource-dir "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18" -dependency-file "CMakeFiles\\\\cmTC_15856.dir\\\\CMakeCCompilerABI.c.o.d" -MT CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -sys-header-deps -D ANDROID -D _FORTIFY_SOURCE=2 -D NDEBUG -isysroot C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -internal-isystem "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/include" -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include -O3 -Wformat -ferror-limit 19 -femulated-tls -stack-protector 2 -fno-signed-char -fgnuc-version=4.2.1 -vectorize-loops -vectorize-slp -target-feature +outline-atomics -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -x c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCCompilerABI.c
+        clang -cc1 version 18.0.1 based upon LLVM 18.0.1 default target x86_64-w64-windows-gnu
+        ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include"
+        ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64/lib/clang/18/include
+         C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android
+         C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include\x0d
+        End of search list.\x0d
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -v CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -o cmTC_15856   && cd ."
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_15856 C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:182 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Parsed C implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include]
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android]
+          add: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+        end of search list found
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include]
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android]
+        collapse include dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+        implicit include dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:218 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Parsed C implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(\\.[a-z]+)?|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|")?[ 	]*(([^"]*[/\\])?(ld[0-9]*(\\.[a-z]+)?))("|,| |$)]
+        ignore line: [Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq']
+        ignore line: []
+        ignore line: [Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_15856]
+        ignore line: [[1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer  -fPIE   -v -MD -MT CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -MF CMakeFiles\\cmTC_15856.dir\\CMakeCCompilerABI.c.o.d -o CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCCompilerABI.c]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        ignore line: [ (in-process)]
+        ignore line: [ "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64\\\\bin\\\\clang.exe" -cc1 -triple aarch64-none-linux-android28 -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCCompilerABI.c -mrelocation-model pic -pic-level 2 -pic-is-pie -mframe-pointer=non-leaf -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu generic -target-feature +neon -target-feature +v8a -target-feature +fix-cortex-a53-835769 -target-abi aapcs -debug-info-kind=constructor -dwarf-version=4 -debugger-tuning=gdb -fdebug-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq -v -ffunction-sections -fdata-sections -fcoverage-compilation-dir=E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mcw5nq -resource-dir "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18" -dependency-file "CMakeFiles\\\\cmTC_15856.dir\\\\CMakeCCompilerABI.c.o.d" -MT CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -sys-header-deps -D ANDROID -D _FORTIFY_SOURCE=2 -D NDEBUG -isysroot C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -internal-isystem "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/include" -internal-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include -internal-externc-isystem C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include -O3 -Wformat -ferror-limit 19 -femulated-tls -stack-protector 2 -fno-signed-char -fgnuc-version=4.2.1 -vectorize-loops -vectorize-slp -target-feature +outline-atomics -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -x c C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeCCompilerABI.c]
+        ignore line: [clang -cc1 version 18.0.1 based upon LLVM 18.0.1 default target x86_64-w64-windows-gnu]
+        ignore line: [ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/local/include"]
+        ignore line: [ignoring nonexistent directory "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64/lib/clang/18/include]
+        ignore line: [ C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android]
+        ignore line: [ C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include\x0d]
+        ignore line: [End of search list.\x0d]
+        ignore line: [[2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl --build-id=sha1 -Wl --no-rosegment -Wl --no-undefined-version -Wl --fatal-warnings -Wl --no-undefined -Qunused-arguments   -v CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o -o cmTC_15856   && cd ."]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        link line: [ "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_15856 C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld] ==> ignore
+          arg [--sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot] ==> ignore
+          arg [-EL] ==> ignore
+          arg [--fix-cortex-a53-843419] ==> ignore
+          arg [-znow] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [-zmax-page-size=4096] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [aarch64linux] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/system/bin/linker64] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_15856] ==> ignore
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o] ==> obj [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o]
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+          arg [--build-id=sha1] ==> ignore
+          arg [--no-rosegment] ==> ignore
+          arg [--no-undefined-version] ==> ignore
+          arg [--fatal-warnings] ==> ignore
+          arg [--no-undefined] ==> ignore
+          arg [CMakeFiles/cmTC_15856.dir/CMakeCCompilerABI.c.o] ==> ignore
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [-lc] ==> lib [c]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o] ==> obj [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o]
+        linker tool for 'C': C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        implicit libs: [-l:libunwind.a;dl;c;-l:libunwind.a;dl]
+        implicit objs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o]
+        implicit dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CMakeDetermineLinkerId.cmake:40 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:255 (cmake_determine_linker_id)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:3 (project)"
+    message: |
+      Running the C compiler's linker: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" "-v"
+      LLD 18.0.1 (compatible with GNU linkers)
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:97 (CHECK_C_SOURCE_COMPILES)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:163 (_threads_check_libc)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:297 (find_package)"
+    checks:
+      - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "CMAKE_HAVE_LIBC_PTHREAD"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_fbcf6
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DCMAKE_HAVE_LIBC_PTHREAD  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_fbcf6.dir/src.c.o -MF CMakeFiles\\cmTC_fbcf6.dir\\src.c.o.d -o CMakeFiles/cmTC_fbcf6.dir/src.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa/src.c
+        FAILED: CMakeFiles/cmTC_fbcf6.dir/src.c.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DCMAKE_HAVE_LIBC_PTHREAD  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_fbcf6.dir/src.c.o -MF CMakeFiles\\cmTC_fbcf6.dir\\src.c.o.d -o CMakeFiles/cmTC_fbcf6.dir/src.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa/src.c
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa/src.c:13:3: error: call to undeclared function 'pthread_cancel'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+           13 |   pthread_cancel(thread);
+              |   ^
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-frpzaa/src.c:13:3: note: did you mean 'pthread_once'?
+        C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/pthread.h:264:5: note: 'pthread_once' declared here
+          264 | int pthread_once(pthread_once_t* _Nonnull __once, void (* _Nonnull __init_routine)(void));
+              |     ^
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:136 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:169 (_threads_check_flag_pthread)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/CMakeLists.txt:297 (find_package)"
+    checks:
+      - "Check if compiler accepts -pthread"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-u5cez0"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-u5cez0"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "THREADS_HAVE_PTHREAD_ARG"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-u5cez0'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_f560c
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_f560c.dir/CheckForPthreads.c.o -MF CMakeFiles\\cmTC_f560c.dir\\CheckForPthreads.c.o.d -o CMakeFiles/cmTC_f560c.dir/CheckForPthreads.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-u5cez0/CheckForPthreads.c
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_f560c.dir/CheckForPthreads.c.o -o cmTC_f560c  -pthread  -latomic -lm && cd ."
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:252 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:522 (_OPENMP_GET_FLAGS)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    description: "Detecting C OpenMP compiler info"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "OpenMP_COMPILE_RESULT_C_fopenmplibomp"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_739ad
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -MF CMakeFiles\\cmTC_739ad.dir\\OpenMPTryFlag.c.o.d -o CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p/OpenMPTryFlag.c
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments      -v CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -o cmTC_739ad  -latomic -lm && cd ."
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_739ad C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -latomic -lm -lomp "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib" "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:296 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:522 (_OPENMP_GET_FLAGS)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    message: |
+      Parsed C OpenMP implicit link information from above output:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(\\.[a-z]+)?|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p']
+        ignore line: []
+        ignore line: [Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_739ad]
+        ignore line: [[1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -MF CMakeFiles\\cmTC_739ad.dir\\OpenMPTryFlag.c.o.d -o CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-z0lf3p/OpenMPTryFlag.c]
+        ignore line: [[2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl --build-id=sha1 -Wl --no-rosegment -Wl --no-undefined-version -Wl --fatal-warnings -Wl --no-undefined -Qunused-arguments      -v CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -o cmTC_739ad  -latomic -lm && cd ."]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        link line: [ "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_739ad C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o -latomic -lm -lomp "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib" "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld] ==> ignore
+          arg [--sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot] ==> ignore
+          arg [-EL] ==> ignore
+          arg [--fix-cortex-a53-843419] ==> ignore
+          arg [-znow] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [-zmax-page-size=4096] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [aarch64linux] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/system/bin/linker64] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_739ad] ==> ignore
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+          arg [--build-id=sha1] ==> ignore
+          arg [--no-rosegment] ==> ignore
+          arg [--no-undefined-version] ==> ignore
+          arg [--fatal-warnings] ==> ignore
+          arg [--no-undefined] ==> ignore
+          arg [CMakeFiles/cmTC_739ad.dir/OpenMPTryFlag.c.o] ==> ignore
+          arg [-latomic] ==> lib [atomic]
+          arg [-lm] ==> lib [m]
+          arg [-lomp] ==> lib [omp]
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [-lc] ==> lib [c]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib]
+        implicit libs: [atomic;m;omp;-l:libunwind.a;dl;c;-l:libunwind.a;dl]
+        implicit objs: []
+        implicit dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:252 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:522 (_OPENMP_GET_FLAGS)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    description: "Detecting CXX OpenMP compiler info"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "OpenMP_COMPILE_RESULT_CXX_fopenmplibomp"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_46c9f
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -MF CMakeFiles\\cmTC_46c9f.dir\\OpenMPTryFlag.cpp.o.d -o CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft/OpenMPTryFlag.cpp
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments      -v CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -o cmTC_46c9f  -latomic -lm && cd ."
+        Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)
+        Target: aarch64-none-linux-android28
+        Thread model: posix
+        InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin
+         "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_46c9f C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -latomic -lm -Bstatic -lc++ -Bdynamic -lm -lomp "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib" "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:296 (message)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:522 (_OPENMP_GET_FLAGS)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    message: |
+      Parsed CXX OpenMP implicit link information from above output:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(\\.[a-z]+)?|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        ignore line: [Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft']
+        ignore line: []
+        ignore line: [Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_46c9f]
+        ignore line: [[1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -MF CMakeFiles\\cmTC_46c9f.dir\\OpenMPTryFlag.cpp.o.d -o CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3zazft/OpenMPTryFlag.cpp]
+        ignore line: [[2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl --build-id=sha1 -Wl --no-rosegment -Wl --no-undefined-version -Wl --fatal-warnings -Wl --no-undefined -Qunused-arguments      -v CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -o cmTC_46c9f  -latomic -lm && cd ."]
+        ignore line: [Android (12027248  based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)]
+        ignore line: [Target: aarch64-none-linux-android28]
+        ignore line: [Thread model: posix]
+        ignore line: [InstalledDir: C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin]
+        link line: [ "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld" --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -EL --fix-cortex-a53-843419 -z now -z relro -z max-page-size=4096 --hash-style=gnu --eh-frame-hdr -m aarch64linux -pie -dynamic-linker /system/bin/linker64 -o cmTC_46c9f C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtbegin_dynamic.o "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64" -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28 -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android -LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib --build-id=sha1 --no-rosegment --no-undefined-version --fatal-warnings --no-undefined CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o -latomic -lm -Bstatic -lc++ -Bdynamic -lm -lomp "-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib" "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl -lc "C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a" -l:libunwind.a -ldl C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28/crtend_android.o\x0d]
+          arg [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/ld.lld] ==> ignore
+          arg [--sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot] ==> ignore
+          arg [-EL] ==> ignore
+          arg [--fix-cortex-a53-843419] ==> ignore
+          arg [-znow] ==> ignore
+          arg [-zrelro] ==> ignore
+          arg [-zmax-page-size=4096] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [aarch64linux] ==> ignore
+          arg [-pie] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/system/bin/linker64] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_46c9f] ==> ignore
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+          arg [-LC:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+          arg [--build-id=sha1] ==> ignore
+          arg [--no-rosegment] ==> ignore
+          arg [--no-undefined-version] ==> ignore
+          arg [--fatal-warnings] ==> ignore
+          arg [--no-undefined] ==> ignore
+          arg [CMakeFiles/cmTC_46c9f.dir/OpenMPTryFlag.cpp.o] ==> ignore
+          arg [-latomic] ==> lib [atomic]
+          arg [-lm] ==> lib [m]
+          arg [-Bstatic] ==> search static
+          arg [-lc++] ==> lib [c++]
+          arg [-Bdynamic] ==> search dynamic
+          arg [-lm] ==> lib [m]
+          arg [-lomp] ==> lib [omp]
+          arg [-LC:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib] ==> dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+          arg [-lc] ==> lib [c]
+          arg [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a] ==> lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+          arg [-l:libunwind.a] ==> lib [-l:libunwind.a]
+          arg [-ldl] ==> lib [dl]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        remove lib [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/libclang_rt.builtins-aarch64-android.a]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib/clang/18/lib/linux/aarch64] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android]
+        collapse library dir [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib]
+        collapse library dir [C:\\\\Users\\\\jianz\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\ndk\\\\27.0.12077973\\\\toolchains\\\\llvm\\\\prebuilt\\\\windows-x86_64/lib] ==> [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib]
+        implicit libs: [atomic;m;c++;m;omp;-l:libunwind.a;dl;c;-l:libunwind.a;dl]
+        implicit objs: []
+        implicit dirs: [C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/lib/linux/aarch64;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/28;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib;C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:456 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:596 (_OPENMP_GET_SPEC_DATE)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    description: "Detecting C OpenMP version"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-2438xv"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-2438xv"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "OpenMP_SPECTEST_C_"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-2438xv'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_8df84
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_8df84.dir/OpenMPCheckVersion.c.o -MF CMakeFiles\\cmTC_8df84.dir\\OpenMPCheckVersion.c.o.d -o CMakeFiles/cmTC_8df84.dir/OpenMPCheckVersion.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-2438xv/OpenMPCheckVersion.c
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_8df84.dir/OpenMPCheckVersion.c.o -o cmTC_8df84  -latomic -lm && cd ."
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:456 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenMP.cmake:596 (_OPENMP_GET_SPEC_DATE)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:340 (find_package)"
+    description: "Detecting CXX OpenMP version"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-b3jvlt"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-b3jvlt"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "OpenMP_SPECTEST_CXX_"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-b3jvlt'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_c8d9e
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_c8d9e.dir/OpenMPCheckVersion.cpp.o -MF CMakeFiles\\cmTC_c8d9e.dir\\OpenMPCheckVersion.cpp.o.d -o CMakeFiles/cmTC_c8d9e.dir/OpenMPCheckVersion.cpp.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-b3jvlt/OpenMPCheckVersion.cpp
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -fopenmp=libomp -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_c8d9e.dir/OpenMPCheckVersion.cpp.o -o cmTC_c8d9e  -latomic -lm && cd ."
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckCompilerFlag.cmake:18 (cmake_check_source_compiles)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXCompilerFlag.cmake:55 (cmake_check_compiler_flag)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:121 (check_cxx_compiler_flag)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test GGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-19pfbp"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-19pfbp"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "GGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-19pfbp'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_ec699
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DGGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE   -mfp16-format=ieee -MD -MT CMakeFiles/cmTC_ec699.dir/src.cxx.o -MF CMakeFiles\\cmTC_ec699.dir\\src.cxx.o.d -o CMakeFiles/cmTC_ec699.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-19pfbp/src.cxx
+        FAILED: CMakeFiles/cmTC_ec699.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DGGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE   -mfp16-format=ieee -MD -MT CMakeFiles/cmTC_ec699.dir/src.cxx.o -MF CMakeFiles\\cmTC_ec699.dir\\src.cxx.o.d -o CMakeFiles/cmTC_ec699.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-19pfbp/src.cxx
+        clang++: error: unknown argument: '-mfp16-format=ieee'\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_DOTPROD"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_DOTPROD"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_1fa45
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_DOTPROD  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_1fa45.dir/src.cxx.o -MF CMakeFiles\\cmTC_1fa45.dir\\src.cxx.o.d -o CMakeFiles/cmTC_1fa45.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l/src.cxx
+        FAILED: CMakeFiles/cmTC_1fa45.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_DOTPROD  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_1fa45.dir/src.cxx.o -MF CMakeFiles\\cmTC_1fa45.dir\\src.cxx.o.d -o CMakeFiles/cmTC_1fa45.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l/src.cxx
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-nw8z4l/src.cxx:3:24: error: "Feature DOTPROD is not defined"
+            3 |                     #  error "Feature DOTPROD is not defined"
+              |                        ^\x0d
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_SVE"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_SVE"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_c0b42
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_SVE  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_c0b42.dir/src.cxx.o -MF CMakeFiles\\cmTC_c0b42.dir\\src.cxx.o.d -o CMakeFiles/cmTC_c0b42.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb/src.cxx
+        FAILED: CMakeFiles/cmTC_c0b42.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_SVE  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_c0b42.dir/src.cxx.o -MF CMakeFiles\\cmTC_c0b42.dir\\src.cxx.o.d -o CMakeFiles/cmTC_c0b42.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb/src.cxx
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-3ujgeb/src.cxx:3:24: error: "Feature SVE is not defined"
+            3 |                     #  error "Feature SVE is not defined"
+              |                        ^\x0d
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_MATMUL_INT8"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_MATMUL_INT8"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_d0454
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_MATMUL_INT8  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_d0454.dir/src.cxx.o -MF CMakeFiles\\cmTC_d0454.dir\\src.cxx.o.d -o CMakeFiles/cmTC_d0454.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg/src.cxx
+        FAILED: CMakeFiles/cmTC_d0454.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_MATMUL_INT8  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_d0454.dir/src.cxx.o -MF CMakeFiles\\cmTC_d0454.dir\\src.cxx.o.d -o CMakeFiles/cmTC_d0454.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg/src.cxx
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-yzxrpg/src.cxx:3:24: error: "Feature MATMUL_INT8 is not defined"
+            3 |                     #  error "Feature MATMUL_INT8 is not defined"
+              |                        ^\x0d
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_FMA"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-sb4ud0"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-sb4ud0"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_FMA"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-sb4ud0'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_6c1c2
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_FMA  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_6c1c2.dir/src.cxx.o -MF CMakeFiles\\cmTC_6c1c2.dir\\src.cxx.o.d -o CMakeFiles/cmTC_6c1c2.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-sb4ud0/src.cxx
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_6c1c2.dir/src.cxx.o -o cmTC_6c1c2  -latomic -lm && cd ."
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_FP16_VECTOR_ARITHMETIC"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_FP16_VECTOR_ARITHMETIC"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_6f057
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_FP16_VECTOR_ARITHMETIC  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_6f057.dir/src.cxx.o -MF CMakeFiles\\cmTC_6f057.dir\\src.cxx.o.d -o CMakeFiles/cmTC_6f057.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r/src.cxx
+        FAILED: CMakeFiles/cmTC_6f057.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_FP16_VECTOR_ARITHMETIC  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_6f057.dir/src.cxx.o -MF CMakeFiles\\cmTC_6f057.dir\\src.cxx.o.d -o CMakeFiles/cmTC_6f057.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r/src.cxx
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-oru60r/src.cxx:3:24: error: "Feature FP16_VECTOR_ARITHMETIC is not defined"
+            3 |                     #  error "Feature FP16_VECTOR_ARITHMETIC is not defined"\x0d
+              |                        ^\x0d
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/Internal/CheckSourceCompiles.cmake:108 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckCXXSourceCompiles.cmake:58 (cmake_check_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-cpu/CMakeLists.txt:269 (check_cxx_source_compiles)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/CMakeLists.txt:596 (ggml_add_cpu_backend_variant_impl)"
+    checks:
+      - "Performing Test HAVE_SME"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_CXX_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_CXX_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "HAVE_SME"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_06bfb
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_SME  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_06bfb.dir/src.cxx.o -MF CMakeFiles\\cmTC_06bfb.dir\\src.cxx.o.d -o CMakeFiles/cmTC_06bfb.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt/src.cxx
+        FAILED: CMakeFiles/cmTC_06bfb.dir/src.cxx.o 
+        C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -DHAVE_SME  -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu++17 -fPIE -MD -MT CMakeFiles/cmTC_06bfb.dir/src.cxx.o -MF CMakeFiles\\cmTC_06bfb.dir\\src.cxx.o.d -o CMakeFiles/cmTC_06bfb.dir/src.cxx.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt/src.cxx
+        E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-zavtvt/src.cxx:3:24: error: "Feature SME is not defined"
+            3 |                     #  error "Feature SME is not defined"
+              |                        ^\x0d
+        1 error generated.\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckSymbolExists.cmake:163 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckSymbolExists.cmake:68 (__CHECK_SYMBOL_EXISTS_IMPL)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenCL.cmake:59 (CHECK_SYMBOL_EXISTS)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindOpenCL.cmake:100 (_FIND_OPENCL_VERSION)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/src/ggml-opencl/CMakeLists.txt:1 (find_package)"
+    checks:
+      - "Looking for CL_VERSION_3_0"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-jb0u9g"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-jb0u9g"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/ggml/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "OPENCL_VERSION_3_0"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-jb0u9g'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_8961a
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot  -IE:/Work/DgxSpark/TongYi-Lite/third_party/OpenCL-Headers -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer  -std=gnu11 -fPIE -MD -MT CMakeFiles/cmTC_8961a.dir/CheckSymbolExists.c.o -MF CMakeFiles\\cmTC_8961a.dir\\CheckSymbolExists.c.o.d -o CMakeFiles/cmTC_8961a.dir/CheckSymbolExists.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-jb0u9g/CheckSymbolExists.c
+        In file included from E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-jb0u9g/CheckSymbolExists.c:2:
+        In file included from E:/Work/DgxSpark/TongYi-Lite/third_party/OpenCL-Headers/CL/cl.h:20:
+        E:/Work/DgxSpark/TongYi-Lite/third_party/OpenCL-Headers/CL/cl_version.h:22:9: warning: cl_version.h: CL_TARGET_OPENCL_VERSION is not defined. Defaulting to 310 (OpenCL 3.1) [-W#pragma-messages]
+           22 | #pragma message("cl_version.h: CL_TARGET_OPENCL_VERSION is not defined. Defaulting to 310 (OpenCL 3.1)")\x0d
+              |         ^\x0d
+        1 warning generated.\x0d
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -O3 -DNDEBUG -fno-omit-frame-pointer -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_8961a.dir/CheckSymbolExists.c.o -o cmTC_8961a  -latomic -lm && cd ."
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckLibraryExists.cmake:78 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:112 (CHECK_LIBRARY_EXISTS)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:175 (_threads_check_lib)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/vendor/cpp-httplib/CMakeLists.txt:4 (find_package)"
+    checks:
+      - "Looking for pthread_create in pthreads"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mat7dk"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mat7dk"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "CMAKE_HAVE_PTHREADS_CREATE"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mat7dk'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_42bc3
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -fPIE -MD -MT CMakeFiles/cmTC_42bc3.dir/CheckFunctionExists.c.o -MF CMakeFiles\\cmTC_42bc3.dir\\CheckFunctionExists.c.o.d -o CMakeFiles/cmTC_42bc3.dir/CheckFunctionExists.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-mat7dk/CheckFunctionExists.c
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_42bc3.dir/CheckFunctionExists.c.o -o cmTC_42bc3  -lpthreads  -latomic -lm && cd ."
+        FAILED: cmTC_42bc3 
+        C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_42bc3.dir/CheckFunctionExists.c.o -o cmTC_42bc3  -lpthreads  -latomic -lm && cd ."
+        ld.lld: error: unable to find library -lpthreads\x0d
+        clang: error: linker command failed with exit code 1 (use -v to see invocation)\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/CheckLibraryExists.cmake:78 (try_compile)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:112 (CHECK_LIBRARY_EXISTS)"
+      - "C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/share/cmake-3.31/Modules/FindThreads.cmake:176 (_threads_check_lib)"
+      - "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/vendor/cpp-httplib/CMakeLists.txt:4 (find_package)"
+    checks:
+      - "Looking for pthread_create in pthread"
+    directories:
+      source: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-ee7wva"
+      binary: "E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-ee7wva"
+    cmakeVariables:
+      ANDROID_ABI: "arm64-v8a"
+      ANDROID_ARM_MODE: "thumb"
+      ANDROID_PIE: "TRUE"
+      ANDROID_PLATFORM: "28"
+      ANDROID_STL: "c++_static"
+      ANDROID_TOOLCHAIN: "clang"
+      CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/clang-scan-deps.exe"
+      CMAKE_CXX_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_COMPILER_TARGET: "aarch64-none-linux-android28"
+      CMAKE_C_FLAGS: "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer"
+      CMAKE_C_FLAGS_DEBUG: "-fno-limit-debug-info "
+      CMAKE_EXE_LINKER_FLAGS: "-static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
+      CMAKE_MODULE_PATH: "E:/Work/DgxSpark/TongYi-Lite/wt/r2-main/third_party/llama.cpp/cmake/"
+      CMAKE_POSITION_INDEPENDENT_CODE: "TRUE"
+      CMAKE_SYSROOT: "C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+    buildResult:
+      variable: "CMAKE_HAVE_PTHREAD_CREATE"
+      cached: true
+      stdout: |
+        Change Dir: 'E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-ee7wva'
+        
+        Run Build Command(s): C:/Users/jianz/AppData/Local/Android/Sdk/cmake/3.31.6/bin/ninja.exe -v cmTC_6ac8f
+        [1/2] C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot   -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -fPIE -MD -MT CMakeFiles/cmTC_6ac8f.dir/CheckFunctionExists.c.o -MF CMakeFiles\\cmTC_6ac8f.dir\\CheckFunctionExists.c.o.d -o CMakeFiles/cmTC_6ac8f.dir/CheckFunctionExists.c.o -c E:/Work/DgxSpark/TongYi-Lite/_probe/moe_probe/build-r2/CMakeFiles/CMakeScratch/TryCompile-ee7wva/CheckFunctionExists.c
+        [2/2] C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_6ac8f.dir/CheckFunctionExists.c.o -o cmTC_6ac8f  -lpthread  -latomic -lm && cd ."
+        FAILED: cmTC_6ac8f 
+        C:\\Windows\\system32\\cmd.exe /C "cd . && C:\\Users\\jianz\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/jianz/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -O3 -DNDEBUG -fno-omit-frame-pointer -DCHECK_FUNCTION_EXISTS=pthread_create -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments CMakeFiles/cmTC_6ac8f.dir/CheckFunctionExists.c.o -o cmTC_6ac8f  -lpthread  -latomic -lm && cd ."
+        ld.lld: error: unable to find library -lpthread\x0d
+        clang: error: linker command failed with exit code 1 (use -v to see invocation)\x0d
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...

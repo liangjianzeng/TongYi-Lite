@@ -646,6 +646,101 @@ td,th{border:1px solid #ccc;padding:4px 8px}</style></head>
 ''',
       rank: kRankBuiltin,
     ),
+    // ================= 行业专精 =================
+    Skill(
+      name: 'stock-research',
+      description: '个股调研报告（HTML）。',
+      whenToUse: '给股票代码要调研/分析报告。',
+      invocation: 'tool: data_api + fetch_url',
+      body: r'''
+## 目标
+给一只股票的代码（或名称），产出一份**可直接打开的 HTML 调研报告**：
+数据截至当日、每个关键数字有来源、图表可渲染；初稿按模板全章节生成，
+之后支持对话式增补/修改章节迭代。
+
+## 工作流程
+1. **定标的**：确认代码与市场（6 位数字=沪深，hk 前缀=港股，字母=美股）；
+   只有名称拿不准代码时先问用户，不猜。
+2. **拉行情**：`data_api`（source=stock, action=both, symbol=<代码>, count=320）
+   → 日 K 线 + 实时快照（价/涨跌/PE/PB/市值/营收利润同比）。工具内部三源热备，
+   不需要逐源重试。
+3. **算指标**：MA5/20/60、BOLL(20,2)、MACD(12,26,9)、KDJ(9,3,3)、RSI(6,12,24)
+   一律 python_exec 对 K 线数据计算，**不心算**；技术面章节引用计算结果。
+4. **爬信息源**（fetch_url）：按报告需要的信息类型从下方清单挑 3~6 家，
+   不要全爬。
+   - 反爬纪律：**每站最多 1 次请求；拿到拦截页/空结果立即换站，绝不重试轰炸**；
+   - 每取到一个数字立刻记下来源站 + 日期，后面写 .src 用；
+   - HTML 大页被截断时改抓该站的数据接口（东财 datacenter JSON）或二级页。
+5. **生成初稿**：按报告模板写完整 HTML；暂时没数据的章节保留骨架
+   标"待补充"，让用户后续对话补齐。
+6. **交付**：write_file 写文件 + export_file 交付。
+7. **迭代**：用户追问/要求增补 → read_file 读回已生成报告 →
+   只改对应章节或追加新章节 → 重写文件重新交付。
+   **每次迭代不重爬、不重算已有数据**，只补新信息。
+
+## 候选信息源清单（按类型挑用，不全爬）
+一手公告/财报：
+1. 巨潮资讯 www.cninfo.com.cn/new/fulltextSearch?keyword=<名称> —— 全市场公告/年报/业绩预告
+2. 互动易 irm.cninfo.com.cn —— 深市公司董秘答复（业绩预告线索多）
+3. 上交所 www.sse.com.cn/disclosure/listedinfo/announcement/ —— 沪市公告
+4. 港交所披露易 www.hkexnews.hk —— 港股公告/业绩（H股必查）
+5. 东财业绩预告 data.eastmoney.com/bbsj/yjyg/<code>.html —— 预告/快报汇总
+6. 东财 F10 emweb.securities.eastmoney.com/pc_hsf10/pages/index.html?type=web&code=SZ<code> —— 财务分析
+行情/估值：
+7. 同花顺 F10 basic.10jqka.com.cn/<code>/ —— 主营/股东/财务（静态可爬）
+8. 亿牛网 eniu.com/gu/sz<code>/pe_ttm —— 历史 PE/PB/ROE 走势表（静态）
+9. 乐咕乐股 legulegu.com —— 估值分位
+10. 雪球 xueqiu.com/S/SZ<code> —— 个股页（先 GET xueqiu.com 首页拿 cookie 再访问）
+11. 东财数据中心 data.eastmoney.com —— 业绩/研报/持仓汇总
+研报/预期：
+12. 东财研报中心 data.eastmoney.com/report/<code>.html —— 研报列表（标题含评级/目标价）
+13. 慧博投研 hibor.com.cn —— 研报摘要+评级（正文需登录，摘要够用）
+14. 发现报告 fxbaogao.com/search?q=<名称> —— 研报摘要
+15. 问财 iwencai.com —— 自然语言查财务数据（接口形态多变，失败即弃）
+行业/宏观/快讯：
+16. 财联社 cls.cn/telegraph —— 电报快讯
+17. 证券时报 stcn.com / 中国证券网 cnstock.com —— 新闻
+18. 国家统计局 data.stats.gov.cn —— 宏观行业数据
+19. 行业协会（按标的替换）：销量/价格等高频行业数据优先这里，
+    如工程机械→ccma.org.cn、白酒→中国酒业协会、光伏→CPIA。
+
+## 报告模板（HTML）
+结构（卡片式中文报告，ECharts CDN：cdn.jsdelivr.net/npm/echarts@5）：
+```
+├─ TL;DR 横幅：30 秒结论 + KPI 卡（现价/涨跌幅/PE/PB/总市值/目标价区间）
+├─ 一、市场预期基线（券商一致预期/评级/目标价，注明日期与滞后性）
+├─ 二、行业景气度（销量/价格/开工率，配柱线图）
+├─ 三、驱动因素逐项拆解（量/价/成本/汇兑/政策 × 不确定性）
+├─ 四、核心指标预期与三情景（乐观/中性/悲观：营收与归母净利润，附假设）
+├─ 五、关键风险点（按杀伤力排序）
+├─ 六、需要重点跟踪的信号（财报日/数据日/事项清单）
+├─ 七、估值锚（PE/PB 分位 + 可比公司表）
+├─ 八、技术面（日线 K 线 + MA + BOLL 图；MA/MACD/KDJ/RSI 指标表）
+├─ 九、后市推演（价格情景，注明是推演非预测）
+└─ 免责声明（灰字小号）
+```
+样式骨架要点：max-width:960px 居中、白色圆角卡片、tldr 渐变红横幅、
+h2 左侧红色竖条、三情景卡绿/蓝/橙三色、风险条目红色左边框、
+**每个数据块下方 .src 灰字标"来源：xx，日期"**、移动端 @media 适配
+（表格横向滚动、情景卡单列）。图表数据硬编码进 option（不依赖外部接口）：
+K 线用 candlestick + MA 折线叠加，情景对比用分组柱状图。
+
+## 输出格式
+- 文件名 `<股票名><主题>.html`（如 `中联重科2026Q3业绩前瞻.html`）。
+- 标题下方标"数据截至 YYYY-MM-DD"。
+- 每个关键数字 .src 标来源；爬不到/不确定写"待补充/需核实"，
+  **绝不编造数字**；三情景必须写明假设。
+- 回答正文里只给 30 秒结论与要点，完整内容在 HTML 文件里。
+
+## 验收清单
+- [ ] 行情来自 data_api，指标经 python_exec 计算
+- [ ] 每个关键数字带来源与日期，无编造
+- [ ] ECharts option 数据完整可直接渲染
+- [ ] 移动端可读，文末免责声明
+- [ ] 迭代时只改对应章节，不重爬重算已有数据
+''',
+      rank: kRankBuiltin,
+    ),
     // ================= 元技能 =================
     Skill(
       name: 'skill-creator',

@@ -1007,8 +1007,6 @@ class AgentTurnBlock extends StatelessWidget {
               imagePath: answer!.imagePath,
               audioPath: answer!.audioPath,
               inferenceStats: answer!.inferenceStats,
-              // 智能体回答与普通聊天同款：保留 assistant 头像（用户反馈要求）。
-              showAvatar: true,
             ),
           // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
           if (answer != null && _artifacts.isNotEmpty)
@@ -1051,8 +1049,6 @@ class AgentTurnBlock extends StatelessWidget {
             imagePath: answer!.imagePath,
             audioPath: answer!.audioPath,
             inferenceStats: answer!.inferenceStats,
-            // 智能体回答与普通聊天同款：保留 assistant 头像（用户反馈要求）。
-            showAvatar: true,
           ),
         // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
         if (answer != null && !_answerPending && _artifacts.isNotEmpty)

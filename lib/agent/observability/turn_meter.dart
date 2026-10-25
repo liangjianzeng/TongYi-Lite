@@ -129,9 +129,10 @@ final class TurnMeter {
       retryAttempt == 0;
 
   /// 一行读数（细条用，控制在 ~40 字内，超长由 UI 省略号截断）。
+  /// 「第 X 步」计数已删（2026-10-25 用户指令）：步数本身没有行动价值，
+  /// 产出/预算/思考才值得占这行。
   String get label {
     final parts = <String>[];
-    if (step > 0) parts.add('第 $step 步');
     final tok = fromServerUsage ? '$totalTokens tok' : '约 $totalTokens tok';
     parts.add(fromServerUsage
         ? '产出 $tok'
