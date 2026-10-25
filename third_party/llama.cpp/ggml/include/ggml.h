@@ -609,6 +609,8 @@ extern "C" {
 
         GGML_OP_MOE_TOPK_FUSED,
 
+        GGML_OP_G1_SSM_LAYER,
+
         GGML_OP_COUNT,
     };
 
@@ -2500,6 +2502,46 @@ extern "C" {
             int64_t               n_expert_used, // K
             float                 w_scale);
 
+    // [tongyi A7.2/R-014 2026-10-26] G1 逐层巨核：ling/qwen3next GDN 层 decode 单 token
+    // 三阶段融合（in_proj+ba GEMV、gate/beta、conv1d+silu、q/k l2norm、v/z interleave、
+    // conv_state 滚动 → GDN AR+gated RMSNorm → o_proj GEMV）。26 op → 3 kernel launch。
+    //
+    // 语义契约（数值口径 = kernels/g1_ssm_layer.cl 与 _probe/g1_probe CPU 参考，
+    // 双栈对拍 NMSE 1e-13，R-010）：
+    //   x          [N_EMBD] F32 当前 token 层输入
+    //   w_in       [N_EMBD, QKVZ_DIM] Q4_0，QKVZ_DIM = H_K*(2*S_K + 2*S_V*H_V/H_K)，
+    //              每 k 头混合块 q|k|v|z（qwen3next.cpp build_qkvz legacy 布局）
+    //   w_ba       [N_EMBD, BA_DIM] F32，BA_DIM = 2*H_V，每 k 头 b|a（各 RF=H_V/H_K 列）
+    //   ssm_dt/a   [H_V] F32（gate = softplus(a + ssm_dt) * ssm_a）
+    //   w_conv     [D_CONV, CC] F32（ggml ssm_conv 核约定，ne[0]=D_CONV），CC = 2*H_K*S_K + H_V*S_V
+    //   conv_state [CC, D_CONV-1] F32 常驻，**原地滚动**（out[0]=in[1], out[1]=in[2], out[2]=本 token）
+    //   rms_w      [S_V] F32
+    //   w_out      [H_V*S_V, N_EMBD] Q4_0（o_proj）
+    //   state      [S_V, S_V, H_V] F32 常驻，**原地 RMW**（GDN AR，列主 S(i,j)=s[j*S_V+i]，
+    //              同 GGML_OP_GATED_DELTA_NET 契约）
+    //   dst        [N_EMBD] F32 层输出
+    // 仅 decode（n_tokens=1）；eps = hparams.f_norm_rms_eps（l2norm 与 ssm_norm 同源）。
+    // params: i32[0..5]=N_EMBD,S_K,H_K,H_V,S_V,D_CONV; f32[6..7]=l2_eps,rms_eps。
+    GGML_API struct ggml_tensor * ggml_g1_ssm_layer(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * w_in,
+            struct ggml_tensor  * w_ba,
+            struct ggml_tensor  * ssm_dt,
+            struct ggml_tensor  * ssm_a,
+            struct ggml_tensor  * w_conv,
+            struct ggml_tensor  * conv_state,
+            struct ggml_tensor  * rms_w,
+            struct ggml_tensor  * w_out,
+            struct ggml_tensor  * state,
+            int64_t               n_embd,
+            int64_t               s_k,
+            int64_t               h_k,
+            int64_t               h_v,
+            int64_t               s_v,
+            int64_t               d_conv,
+            float                 l2_eps,
+            float                 rms_eps);
 
     // top k elements per row
     // note: the resulting top k indices are in no particular order

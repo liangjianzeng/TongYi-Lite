@@ -1128,9 +1128,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 
     "MOE_TOPK_FUSED",
+    "G1_SSM_LAYER",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1247,7 +1248,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "moe_topk_fused(x, b)",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5537,6 +5538,62 @@ struct ggml_tensor * ggml_moe_topk_fused(
     ggml_set_op_params_i32(result, 4, (int32_t) n_expert_used);
     ggml_set_op_params_i32(result, 5, bias != NULL);
     ggml_set_op_params_f32(result, 6, w_scale);
+
+    return result;
+}
+
+// ggml_g1_ssm_layer -- [tongyi A7.2/R-014] 见 ggml.h 语义契约
+struct ggml_tensor * ggml_g1_ssm_layer(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * w_in,
+        struct ggml_tensor  * w_ba,
+        struct ggml_tensor  * ssm_dt,
+        struct ggml_tensor  * ssm_a,
+        struct ggml_tensor  * w_conv,
+        struct ggml_tensor  * conv_state,
+        struct ggml_tensor  * rms_w,
+        struct ggml_tensor  * w_out,
+        struct ggml_tensor  * state,
+        int64_t               n_embd,
+        int64_t               s_k,
+        int64_t               h_k,
+        int64_t               h_v,
+        int64_t               s_v,
+        int64_t               d_conv,
+        float                 l2_eps,
+        float                 rms_eps) {
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == n_embd);
+    GGML_ASSERT(w_in->type  == GGML_TYPE_Q4_0 && w_in->ne[0]  == n_embd);
+    GGML_ASSERT(w_out->type == GGML_TYPE_Q4_0 && w_out->ne[0] == h_v * s_v && w_out->ne[1] == n_embd);
+    GGML_ASSERT(w_ba->type  == GGML_TYPE_F32 && w_ba->ne[0]   == n_embd && w_ba->ne[1] == 2 * h_v);
+    GGML_ASSERT(w_conv->type == GGML_TYPE_F32 && w_conv->ne[0] == d_conv);
+    GGML_ASSERT(conv_state->type == GGML_TYPE_F32 && conv_state->ne[0] == 2 * h_k * s_k + h_v * s_v);
+    GGML_ASSERT(state->ne[0] == s_v && state->ne[1] == s_v && state->ne[2] == h_v);
+    GGML_ASSERT(h_v % h_k == 0);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
+
+    result->op     = GGML_OP_G1_SSM_LAYER;
+    result->src[0] = x;
+    result->src[1] = w_in;
+    result->src[2] = w_ba;
+    result->src[3] = ssm_dt;
+    result->src[4] = ssm_a;
+    result->src[5] = w_conv;
+    result->src[6] = conv_state;
+    result->src[7] = rms_w;
+    result->src[8] = w_out;
+    result->src[9] = state;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_embd);
+    ggml_set_op_params_i32(result, 1, (int32_t) s_k);
+    ggml_set_op_params_i32(result, 2, (int32_t) h_k);
+    ggml_set_op_params_i32(result, 3, (int32_t) h_v);
+    ggml_set_op_params_i32(result, 4, (int32_t) s_v);
+    ggml_set_op_params_i32(result, 5, (int32_t) d_conv);
+    ggml_set_op_params_f32(result, 6, l2_eps);
+    ggml_set_op_params_f32(result, 7, rms_eps);
 
     return result;
 }
