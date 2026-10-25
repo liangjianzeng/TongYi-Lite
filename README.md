@@ -42,7 +42,7 @@
 ---
 
 > 📁 **docs/ 已迁移至私有仓库** [`TongYi-Lite-docs`](https://github.com/liangjianzeng/TongYi-Lite-docs)
-> （工程笔记/排障档案/内部文档，仅仓库所有者可见；公开克隆中 docs 为空指针，正文内 docs/ 链接仅限所有者本地有效）。
+> （工程笔记/排障档案/内部文档，仅仓库所有者可见；公开克隆中 docs 为空指针。正文内文档链接均指向该私有仓，公开访问者打不开，所有者登录后直接可点）。
 
 ## 功能概览
 
@@ -103,7 +103,7 @@ flutter run -d <device_id>
 <summary><b>Windows 本机构建细节 / debug APK 装不进最新 Dart？（开发机专用）</b></summary>
 
 构建慢的根因与解法、增量/全量耗时分解、flutter SDK 补丁记录见  
-[`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md)。
+[`docs/BUILD_ENV_NOTES.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/BUILD_ENV_NOTES.md)。
 
 `flutter assemble` 与 gradle 读写的 kernel 路径不一致，每次改 Dart 后必须先同步 assets 再打包：
 
@@ -201,7 +201,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 - **细水长流安全管控**（防引擎风控封禁）：每引擎每 10 分钟窗口请求预算（低风险档默认 6、高风险档  
   sogou/baidu/quark 默认 2，可调）；blocked → 指数熔断（2min×2ⁿ 封顶 15min）+ 清 Cookie + 换池内 UA；  
   引擎可独立开关。实测结论与各引擎坑速查见  
-  [`docs/websearch_direct_2026-10-02.md`](docs/websearch_direct_2026-10-02.md)。
+  [`docs/websearch_direct_2026-10-02.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/websearch_direct_2026-10-02.md)。
 
 **② 自建 SearXNG 实例（可选）**——配置实例地址后自动切换；地址/密钥/引擎白名单/语言/条数/超时全配置化 +  
 一键测试连接 + 保存即热更新（引擎白名单决定延迟：全引擎 21s → 只留可达引擎 2.2s）。
@@ -264,7 +264,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   正文均为真执行手册（工作流 + 模板 + 验收清单），`load_skill` 按需加载不占常驻 prefill；用户技能整段粘贴  
   SKILL.md 一键导入 / 编辑 / 另存内置技能 / 模型对话内 `save_skill` 沉淀；用户同名技能（rank 200）覆盖内置。
 - **插件平台**：「能力」Tab 三层梯队（原生能力 → 插件 → 技能），内置英语听写等插件；插件宿主契约冻结  
-  见 [`docs/插件平台_契约冻结清单_2026-10-23.md`](docs/插件平台_契约冻结清单_2026-10-23.md)。
+  见 [`docs/插件平台_契约冻结清单_2026-10-23.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/插件平台_契约冻结清单_2026-10-23.md)。
 - **上下文工程**：中文加权 token 估算器（压缩判断不再对中文低估 3 倍）；回合内 LLM 摘要压缩（专用便宜模型，  
   失败回退确定性摘要）+ 存储级手动压缩；环境快照按 10 分钟桶化尾部追加（prompt-cache 友好）；技能目录文本  
   会话内冻结（不破缓存前缀）。
@@ -295,7 +295,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 
 - **配置自动化**：SSH 密钥自动生成（ed25519）+ 一键安装命令 + 「自动执行」按钮；用户名自动读取；  
   远端工作区目录自动创建；连接失败人话分类诊断（sshd 未运行 / 被临时拉黑 / 认证不通过 → 各自下一步）。  
-  排障先读 [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](docs/dartssh2_termux_pitfalls_2026-10-01.md)。
+  排障先读 [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/dartssh2_termux_pitfalls_2026-10-01.md)。
 - **SSH 多配置**（按工作区绑定），密钥经 flutter_secure_storage 安全存储；远端 `AGENTS.md`（SFTP，≤64KB）  
   自动叠加注入。
 - **任务与规划**：`task_create` / `task_list` + `plan_create` / `plan_update` / `plan_list`；DevContext 自动注入  
@@ -422,9 +422,9 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   8.07 vs GPU 最优 5.46 t/s）；batched MoE 收益主战场在 **prefill 大分块 GEMM**。Mesa（rusticl + freedreno  
   + kgsl）整图单提交路线已立项：740 正确性战役 op 级全绿、测量接管后 L3 裁决 **Mesa 全 GPU decode ≈ CPU bank  
   的 17.5–20%**（提交层封死，头号嫌疑 = 42% 形状每 token 落 CPU 往返）。  
-  深读：[`docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md`](docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md)、  
-  [`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`](docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md)、  
-  [`docs/全GPU卸载_全景地图与网格计划_2026-10-25.md`](docs/全GPU卸载_全景地图与网格计划_2026-10-25.md)。
+  深读：[`docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_Mesa自研路线总档_2026-10-16.md)、  
+  [`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_Mesa线_状态快照_2026-10-24.md)、  
+  [`docs/全GPU卸载_全景地图与网格计划_2026-10-25.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_全景地图与网格计划_2026-10-25.md)。
 - **KV 精度三档**（Q4/Q8/F16，设置页可选）：混合架构（GDN+注意力，如 Ling）选 Q4 K 会把注意力链踢回 CPU 岛，  
   选 **F16 恢复 decode 3-split 结构**（CPU-embed 头 + GPU 整网 + CPU-lm_head 尾）；V 尺寸不齐建不了 ctx 时  
   JNI 自动回退 F16 重试。
@@ -454,14 +454,14 @@ v0.2.3 起改 **Turnip（Mesa out-of-tree gen8）App 内直载**（免 root）�
 全部裸 Vulkan 调用 dispatcher 化 + 数值三根因修复（subgroupAdd 错编全局门控 / GDN lanes 钳 64 /  
 `libhardware.so` stub 解决 App 命名空间 dlopen 系统 HAL 库）；llama.cpp 升级 0.5.0 时三层回归逐一移植。  
 当前 Adreno 日常 GPU 推理默认走 OpenCL（吞吐等价、无 Turnip 遗留项）。  
-完整根因链见 [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md)。
+完整根因链见 [`docs/vulkan_adreno825_fix_2026-09-26.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/vulkan_adreno825_fix_2026-09-26.md)。
 
 #### OpenCL PTQ1_0 三元量化内核（摘要）
 
 Bonsai-2 27B 的 402 个 PTQ1_0 张量（GGML type 143，-1/0/1 三元）上游只有 Q4/Q5/Q8 内核 → 自研  
 `mul_mv_ptq1_0_f32.cl`（decode）+ `mul_mm_ptq1_0_f32_l4_lm.cl`（prefill GEMM，桌面 Arc 实测 pp128  
 1.14 → 18.89 t/s，16.5×）；根治 Adreno 编译器 `__constant` 数组变址误编与 `half` 保留字坑；  
-真机 test-backend-ops **174/174 通过**。详见 [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md)。
+真机 test-backend-ops **174/174 通过**。详见 [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/ptq1_0_opencl_bonsai2_2026-09-27.md)。
 
 **验证 CPU 内核 / GPU 是否生效**：
 
@@ -504,7 +504,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 - **App tok/s 一键测量**：`tool/measure_toks.sh`（Dart VM service 通道 + `vk_flags.conf` 任意 env 注入：  
   HOST_TIMING / SCHED_DEBUG / UBATCH，免重编免 root）。
 - 编译排错（Gradle plugin 复合构建 / 阿里云镜像 / CMake 路径）见 [常见问题](#常见问题) 与  
-  [`docs/BUILD_AND_DEBUG_GUIDE.md`](docs/BUILD_AND_DEBUG_GUIDE.md)。
+  [`docs/BUILD_AND_DEBUG_GUIDE.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/BUILD_AND_DEBUG_GUIDE.md)。
 
 ---
 
@@ -670,34 +670,34 @@ JGit 进程内 git，Termux/远程 PC 走系统 git。**计划模式（/plan）*
 
 欢迎提交 Issue 和 Pull Request！请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-关键设计文档（过程性深读）：
+关键设计文档（过程性深读，均存于私有仓 [TongYi-Lite-docs](https://github.com/liangjianzeng/TongYi-Lite-docs)，仅所有者可访问）：
 
 **构建 / 环境**
 
-- [`docs/BUILD_AND_DEBUG_GUIDE.md`](docs/BUILD_AND_DEBUG_GUIDE.md) — 编译与调试指南
-- [`docs/BUILD_ENV_NOTES.md`](docs/BUILD_ENV_NOTES.md) — Windows 本机打包构建环境备忘
-- [`docs/python_support.md`](docs/python_support.md) — `python_exec` 支持说明
+- [`docs/BUILD_AND_DEBUG_GUIDE.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/BUILD_AND_DEBUG_GUIDE.md) — 编译与调试指南
+- [`docs/BUILD_ENV_NOTES.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/BUILD_ENV_NOTES.md) — Windows 本机打包构建环境备忘
+- [`docs/python_support.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/python_support.md) — `python_exec` 支持说明
 
 **GPU / 推理引擎专项**
 
-- [`docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md`](docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md) — Mesa（rusticl+freedreno+kgsl）全 GPU 卸载路线总档
-- [`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`](docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md) — Mesa 线当前状态与解锁即动手清单
-- [`docs/全GPU卸载_全景地图与网格计划_2026-10-25.md`](docs/全GPU卸载_全景地图与网格计划_2026-10-25.md) — 三模式×三栈全景地图与 A/B 网格计划
-- [`docs/fork升级v0.7.0主线方案_2026-10-18.md`](docs/fork升级v0.7.0主线方案_2026-10-18.md) — llama.cpp 0.7.0 四道门升级
-- [`docs/vulkan_adreno825_fix_2026-09-26.md`](docs/vulkan_adreno825_fix_2026-09-26.md) — Adreno 825 Vulkan / Turnip 修复全记录
-- [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](docs/ptq1_0_opencl_bonsai2_2026-09-27.md) — PTQ1_0 OpenCL 内核实现机制
-- [`docs/bonsai2_opencl_oom_2026-09-27.md`](docs/bonsai2_opencl_oom_2026-09-27.md) — Bonsai-2 OOM 整机死机定案与守卫
-- [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](docs/vulkan_bonsai2_turnip_verify_2026-09-28.md) — 双驱动真机验证矩阵
-- [`docs/llama_cpp_upgrade_plan_b11267.md`](docs/llama_cpp_upgrade_plan_b11267.md) — llama.cpp b11267 升级计划与四道门验收
+- [`docs/全GPU卸载_Mesa自研路线总档_2026-10-16.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_Mesa自研路线总档_2026-10-16.md) — Mesa（rusticl+freedreno+kgsl）全 GPU 卸载路线总档
+- [`docs/全GPU卸载_Mesa线_状态快照_2026-10-24.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_Mesa线_状态快照_2026-10-24.md) — Mesa 线当前状态与解锁即动手清单
+- [`docs/全GPU卸载_全景地图与网格计划_2026-10-25.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/全GPU卸载_全景地图与网格计划_2026-10-25.md) — 三模式×三栈全景地图与 A/B 网格计划
+- [`docs/fork升级v0.7.0主线方案_2026-10-18.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/fork升级v0.7.0主线方案_2026-10-18.md) — llama.cpp 0.7.0 四道门升级
+- [`docs/vulkan_adreno825_fix_2026-09-26.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/vulkan_adreno825_fix_2026-09-26.md) — Adreno 825 Vulkan / Turnip 修复全记录
+- [`docs/ptq1_0_opencl_bonsai2_2026-09-27.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/ptq1_0_opencl_bonsai2_2026-09-27.md) — PTQ1_0 OpenCL 内核实现机制
+- [`docs/bonsai2_opencl_oom_2026-09-27.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/bonsai2_opencl_oom_2026-09-27.md) — Bonsai-2 OOM 整机死机定案与守卫
+- [`docs/vulkan_bonsai2_turnip_verify_2026-09-28.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/vulkan_bonsai2_turnip_verify_2026-09-28.md) — 双驱动真机验证矩阵
+- [`docs/llama_cpp_upgrade_plan_b11267.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/llama_cpp_upgrade_plan_b11267.md) — llama.cpp b11267 升级计划与四道门验收
 
 **智能体 / 周边**
 
-- [`docs/websearch_direct_2026-10-02.md`](docs/websearch_direct_2026-10-02.md) — 端侧直连搜索引擎模块（实测证据/引擎坑速查）
-- [`docs/termux_integration_plan_2026-10-04.md`](docs/termux_integration_plan_2026-10-04.md) — 三级执行环境（L0/L1/L2）施工方案
-- [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](docs/dartssh2_termux_pitfalls_2026-10-01.md) — dartssh2 / SshKeyGen / Termux sshd 全部坑点（SSH 排障先读）
-- [`docs/插件平台_契约冻结清单_2026-10-23.md`](docs/插件平台_契约冻结清单_2026-10-23.md) — 插件宿主契约冻结清单
-- [`docs/archive/backend_benchmark_2026-08-04.md`](docs/archive/backend_benchmark_2026-08-04.md) — 三后端实测专报
-- [`docs/archive/architecture_design_v2.md`](docs/archive/architecture_design_v2.md) — 架构设计 v2
+- [`docs/websearch_direct_2026-10-02.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/websearch_direct_2026-10-02.md) — 端侧直连搜索引擎模块（实测证据/引擎坑速查）
+- [`docs/termux_integration_plan_2026-10-04.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/termux_integration_plan_2026-10-04.md) — 三级执行环境（L0/L1/L2）施工方案
+- [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/dartssh2_termux_pitfalls_2026-10-01.md) — dartssh2 / SshKeyGen / Termux sshd 全部坑点（SSH 排障先读）
+- [`docs/插件平台_契约冻结清单_2026-10-23.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/插件平台_契约冻结清单_2026-10-23.md) — 插件宿主契约冻结清单
+- [`docs/archive/backend_benchmark_2026-08-04.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/archive/backend_benchmark_2026-08-04.md) — 三后端实测专报
+- [`docs/archive/architecture_design_v2.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/archive/architecture_design_v2.md) — 架构设计 v2
 
 ---
 
