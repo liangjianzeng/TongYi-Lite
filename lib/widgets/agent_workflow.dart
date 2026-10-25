@@ -15,9 +15,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../models/chat_message.dart';
+import '../models/turn_trace.dart';
 import '../providers/agent_state_provider.dart';
 import '../services/device_files_service.dart';
 import 'chat_bubble.dart';
+import 'turn_items.dart';
 
 // ---------------------------------------------------------------------------
 // 消息分组
@@ -47,7 +49,17 @@ class TurnUnit extends RenderUnit {
   /// 存储的 💭 思考存档消息文本（已去前缀；历史回合过程痕迹回看）。
   final List<String> thinking;
 
-  const TurnUnit(this.tools, this.answer, {this.thinking = const []});
+  /// turnTrace UI 信封（2026-10-25 阶段 2）：新回合落库时按 live timeline
+  /// 真实交错顺序写入；历史回合渲染**优先走信封**（与 live 同管线），
+  /// 旧数据为 null 走散消息重排回退。
+  final List<TurnUiItem>? trace;
+
+  /// 信封 tool 项 id → 解析后的卡片数据（优先 toolData 结构化，旧行回退
+  /// 前缀解析）。
+  final Map<String, ToolActivityUi> traceTools;
+
+  const TurnUnit(this.tools, this.answer,
+      {this.thinking = const [], this.trace, this.traceTools = const {}});
 }
 
 /// 把原始消息流按回合重排为展示单元。
@@ -59,49 +71,88 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
   final units = <RenderUnit>[];
   final pendingTools = <ChatMessage>[];
   final pendingThinking = <String>[];
+  final turnMessages = <ChatMessage>[];
   ChatMessage? pendingAnswer;
 
   void flush() {
     if (pendingTools.isEmpty &&
         pendingThinking.isEmpty &&
         pendingAnswer == null) {
+      turnMessages.clear();
       return;
     }
     // 必须拷贝：TurnUnit 保存的列表引用若直接复用 pendingTools，
     // 随后的 pendingTools.clear() 会把已入队的 tools 一并清空。
-    units.add(TurnUnit([...pendingTools], pendingAnswer,
-        thinking: [...pendingThinking]));
+    final toolList = [...pendingTools];
+    final thinkingList = [...pendingThinking];
+    // turnTrace 信封优先：本回合消息里找 noticeCode='turnTrace' 的信封，
+    // 解码成功 → 历史回合按真实交错顺序渲染（与 live 同管线）。
+    List<TurnUiItem>? trace;
+    final Map<String, ToolActivityUi> traceTools = {};
+    for (final m in turnMessages) {
+      if (m.kind == MessageKind.notice && m.noticeCode == 'turnTrace') {
+        trace = decodeTurnUiTrace(m.content);
+        break;
+      }
+    }
+    if (trace != null) {
+      for (final m in turnMessages) {
+        if (m.kind != MessageKind.toolActivity) continue;
+        final byData = m.toolData != null
+            ? ToolActivityUi(
+                callId: m.id,
+                name: m.toolData!.name,
+                arguments: const {},
+                status: (m.toolData!.phase == 'failed' || m.toolData!.isError)
+                    ? ToolUiStatus.failed
+                    : ToolUiStatus.done,
+                result: (m.toolData!.resultText?.isNotEmpty ?? false)
+                    ? m.toolData!.resultText
+                    : m.toolData!.summary,
+                isError: m.toolData!.isError || m.toolData!.phase == 'failed',
+              )
+            : parseToolActivity(m);
+        if (byData != null) traceTools[m.id] = byData;
+      }
+      // 信封引用的工具消息缺失（极端：清理脚本删过）→ 整条回退旧重排。
+      final referenced = trace.where((i) => i.type == 'tool').length;
+      if (referenced > 0 && traceTools.length < referenced) trace = null;
+    }
+    units.add(TurnUnit(toolList, pendingAnswer,
+        thinking: thinkingList, trace: trace, traceTools: traceTools));
     pendingTools.clear();
     pendingThinking.clear();
+    turnMessages.clear();
     pendingAnswer = null;
   }
 
   for (final m in messages) {
+    // 内存构造的消息（测试/临时流）可能未经读取层推断 kind——与
+    // ChatMessage.resolveKind 同口径兜底，再按类型分派。
+    final k = (m.kind == MessageKind.text && m.toolData == null)
+        ? inferLegacyKind(m.content)
+        : m.kind;
     if (m.role == MessageRole.user) {
       flush();
       units.add(UserUnit(m));
-    } else if (_isToolActivityMessage(m)) {
+    } else if (k == MessageKind.toolActivity) {
       pendingTools.add(m);
-    } else if (_isThinkingArchiveMessage(m)) {
+    } else if (k == MessageKind.thinking) {
       final t = m.content.startsWith('💭 ')
           ? m.content.substring('💭 '.length)
           : m.content.substring('💭'.length);
       if (t.trim().isNotEmpty) pendingThinking.add(t);
+    } else if (k == MessageKind.notice || k == MessageKind.error) {
+      // 过程信封/错误行：不进渲染序列（阶段 3 的行族负责回看展示）。
+      turnMessages.add(m);
     } else {
       pendingAnswer = m;
     }
+    if (m.role == MessageRole.assistant) turnMessages.add(m);
   }
   flush();
   return units;
 }
-
-/// 🔧 前缀的 assistant 消息 = 工具活动消息（仅 UI 展示，不入模型上下文）。
-bool _isToolActivityMessage(ChatMessage msg) =>
-    msg.role == MessageRole.assistant && msg.content.startsWith('🔧');
-
-/// 💭 前缀的 assistant 消息 = 思考存档（仅 UI 展示，不入模型上下文）。
-bool _isThinkingArchiveMessage(ChatMessage msg) =>
-    msg.role == MessageRole.assistant && msg.content.startsWith('💭');
 
 /// 把 🔧 活动消息内容解析为卡片数据（历史回合步骤回看）。
 ///
@@ -445,14 +496,31 @@ class _ToolActivityCardState extends State<ToolActivityCard>
   Ticker? _ticker;
   int _lastSec = -1;
 
+  /// 折叠行摘要（2026-10-25 阶段 2）：variant 键优先级取参数首行（DSH
+  /// toolRowModel 同构）；无命中回退参数 JSON 60 字旧口径。
   String get _argsSummary {
-    if (widget.activity.arguments.isEmpty) return '';
+    final a = widget.activity;
+    final variant = toolVariantOf(a.name);
+    final byVariant = toolVariantSummary(variant, a.arguments);
+    if (byVariant != null) return byVariant;
+    if (a.arguments.isEmpty) return '';
     try {
-      final s = jsonEncode(widget.activity.arguments);
+      final s = jsonEncode(a.arguments);
       return s.length > 60 ? '${s.substring(0, 60)}…' : s;
     } catch (_) {
       return '';
     }
+  }
+
+  /// 失败态折叠摘要 = 失败结果首行（DSH errorSummary：错误顶进折叠行，
+  /// 不是靠 ⚠️ 后缀传达）。
+  String? get _errorSummary {
+    final a = widget.activity;
+    if (a.status != ToolUiStatus.failed) return null;
+    final r = a.result?.trim();
+    if (r == null || r.isEmpty) return null;
+    final line = r.split('\n').first.trim();
+    return line.isEmpty ? null : line;
   }
 
   /// WP6：export_file 产物打开目标（复用顶层 [exportTargetOf]）。
@@ -544,10 +612,14 @@ class _ToolActivityCardState extends State<ToolActivityCard>
       ToolUiStatus.failed =>
         (Icons.error, theme.colorScheme.error, false),
     };
-    final summary = _argsSummary;
+    final summary = _errorSummary ?? _argsSummary;
+    // running 态 = 扫光动画（DSH 同款），不再用小转圈——"最多一个 spinner"
+    // 由结构保证：工具行跑起来是光带，不是转圈。
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
-      child: Material(
+      child: SweepHighlight(
+        active: busy,
+        child: Material(
         color:
             theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(6),
@@ -564,12 +636,7 @@ class _ToolActivityCardState extends State<ToolActivityCard>
               children: [
                 Row(
                   children: [
-                    busy
-                        ? const SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(strokeWidth: 1.5))
-                        : Icon(icon, size: 13, color: color),
+                    Icon(icon, size: 13, color: color),
                     const SizedBox(width: 6),
                     Flexible(
                       child: Text(
@@ -586,7 +653,10 @@ class _ToolActivityCardState extends State<ToolActivityCard>
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                              fontSize: 11, color: theme.colorScheme.outline),
+                              fontSize: 11,
+                              color: _errorSummary != null
+                                  ? theme.colorScheme.error
+                                  : theme.colorScheme.outline),
                         ),
                       ),
                     ],
@@ -659,16 +729,21 @@ class _ToolActivityCardState extends State<ToolActivityCard>
                       padding: const EdgeInsets.only(top: 3),
                       child: Align(
                         alignment: Alignment.centerLeft,
-                        child: Text(
-                          activity.result!.length > 800
-                              ? '${activity.result!.substring(0, 800)}…'
-                              : activity.result!,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontFamily: 'monospace',
-                            color: activity.isError
-                                ? theme.colorScheme.error
-                                : theme.colorScheme.onSurfaceVariant,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 150),
+                          child: SingleChildScrollView(
+                            child: Text(
+                              activity.result!.length > 800
+                                  ? '${activity.result!.substring(0, 800)}…'
+                                  : activity.result!,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                                color: activity.isError
+                                    ? theme.colorScheme.error
+                                    : theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -677,6 +752,7 @@ class _ToolActivityCardState extends State<ToolActivityCard>
               ],
             ),
           ),
+        ),
         ),
       ),
     );
@@ -805,7 +881,9 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
         : s.thinking;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
-      child: Container(
+      child: SweepHighlight(
+        active: s.running && expanded,
+        child: Container(
         decoration: BoxDecoration(
           color:
               theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
@@ -834,12 +912,21 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
                       style: TextStyle(
                           fontSize: 12, color: theme.colorScheme.tertiary),
                     ),
-                    if (s.running) ...[
+                    // 折叠态 + running：摘要 = 思考最后一行（DSH latestLine，
+                    // 跟随刷新）；展开态正文自可见，不重复。
+                    if (s.running && !expanded) ...[
                       const SizedBox(width: 6),
-                      const SizedBox(
-                          width: 10,
-                          height: 10,
-                          child: CircularProgressIndicator(strokeWidth: 1.5)),
+                      Expanded(
+                        child: Text(
+                          _latestLine(s.thinking),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontStyle: FontStyle.italic),
+                        ),
+                      ),
                     ],
                     const Spacer(),
                     Icon(
@@ -871,8 +958,18 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
               ),
           ],
         ),
+        ),
       ),
     );
+  }
+
+  /// 思考最后一行（折叠摘要跟随刷新，DSH latestLine 口径）。
+  static String _latestLine(String text) {
+    final visible = text.trimRight();
+    if (visible.isEmpty) return '…';
+    final i = visible.lastIndexOf('\n');
+    final line = i == -1 ? visible : visible.substring(i + 1);
+    return line.trim().isEmpty ? '…' : line.trim();
   }
 }
 
@@ -901,7 +998,13 @@ class AgentTurnBlock extends StatelessWidget {
     required this.ui,
     required this.isLive,
     this.thinking = const [],
+    this.trace,
+    this.traceTools = const {},
   });
+
+  /// 历史回合 turnTrace 信封（null = 旧数据，走散消息重排回退）。
+  final List<TurnUiItem>? trace;
+  final Map<String, ToolActivityUi> traceTools;
 
   /// 答案占位中：live 智能体回合、答案还没有任何文本。
   bool get _answerPending =>
@@ -985,19 +1088,38 @@ class AgentTurnBlock extends StatelessWidget {
 
     // ---- 已完成回合：过程痕迹（工具卡 + 思考存档）收进总折叠区 ----
     if (!running) {
+      // turnTrace 信封优先：按落库时的真实交错顺序渲染（与 live 同管线）。
+      List<Widget>? traceChildren;
+      if (trace != null) {
+        traceChildren = <Widget>[];
+        var thinkN = 0;
+        for (final item in trace!) {
+          switch (item.type) {
+            case 'tool':
+              final t = traceTools[item.toolId];
+              if (t != null) traceChildren.add(ToolActivityCard(activity: t));
+            case 'think':
+              traceChildren.add(_ThinkingBlockCard(
+                  text: item.text ?? '', index: ++thinkN));
+          }
+        }
+        if (traceChildren.isEmpty) traceChildren = null;
+      }
       final historyThinkingWidgets = <Widget>[
         for (var i = 0; i < thinking.length; i++)
           _ThinkingBlockCard(text: thinking[i], index: i + 1),
       ];
+      final processChildren = traceChildren ??
+          [...stepWidgets, ...historyThinkingWidgets];
       return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (stepWidgets.isNotEmpty || historyThinkingWidgets.isNotEmpty)
+          if (processChildren.isNotEmpty)
             _TurnProcessSection(
               toolCount: steps.length,
               thinkingCount: thinking.length,
-              children: [...stepWidgets, ...historyThinkingWidgets],
+              children: processChildren,
             ),
           if (answer != null)
             ChatBubble(

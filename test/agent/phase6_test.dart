@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/session/event.dart';
 import 'package:tongyi_lite/agent/session/log.dart';
 import 'package:tongyi_lite/models/chat_message.dart';
+import 'package:tongyi_lite/models/turn_trace.dart';
 import 'package:tongyi_lite/providers/agent_state_provider.dart';
 import 'package:tongyi_lite/widgets/agent_workflow.dart';
 
@@ -207,6 +208,66 @@ void main() {
   });
 
   group('groupMessages 消息重排（内嵌工作流）', () {
+    test('turnTrace 信封：历史回合按落库真实交错顺序还原', () {
+      ChatMessage tool(String id, String name) => ChatMessage(
+            id: id,
+            conversationId: 'c',
+            role: MessageRole.assistant,
+            content: '🔧 $name ✓ok',
+            kind: MessageKind.toolActivity,
+            toolData: ToolActivityData(phase: 'done', name: name, summary: 'ok'),
+          );
+      final envelope = ChatMessage(
+        id: 'env',
+        conversationId: 'c',
+        role: MessageRole.assistant,
+        content: encodeTurnUiTrace([
+          const TurnUiItem.think('先思考'),
+          const TurnUiItem.tool('tool1'),
+          const TurnUiItem.think('再思考'),
+          const TurnUiItem.tool('tool2'),
+        ])!,
+        kind: MessageKind.notice,
+        noticeCode: 'turnTrace',
+      );
+      // 信封在存储序里位置无关（flush 时扫整回合消息）。
+      final units = groupMessages([
+        userMsg('Q'),
+        envelope,
+        asst('最终答案'),
+        tool('tool1', 'web_search'),
+        tool('tool2', 'get_weather'),
+      ]);
+      final turn = units.last as TurnUnit;
+      expect(turn.trace, isNotNull);
+      expect(turn.trace!.map((i) => i.type).toList(),
+          ['think', 'tool', 'think', 'tool']);
+      expect(turn.trace![0].text, '先思考');
+      expect(turn.traceTools['tool1']?.name, 'web_search');
+      expect(turn.traceTools['tool2']?.name, 'get_weather');
+      expect(turn.traceTools['tool1']?.status, ToolUiStatus.done);
+    });
+
+    test('信封引用的工具消息缺失 → 回退散消息重排（trace=null）', () {
+      final envelope = ChatMessage(
+        id: 'env',
+        conversationId: 'c',
+        role: MessageRole.assistant,
+        content: encodeTurnUiTrace([const TurnUiItem.tool('gone')])!,
+        kind: MessageKind.notice,
+        noticeCode: 'turnTrace',
+      );
+      final units = groupMessages([
+        userMsg('Q'),
+        asst('答案'),
+        asst('🔧 A ✓ok'),
+        envelope,
+      ]);
+      final turn = units.last as TurnUnit;
+      expect(turn.trace, isNull);
+      expect(turn.tools.length, 1);
+    });
+
     test('新存储序 [user, ans, t1, t2] → 块 [t1, t2, ans]', () {
       final units = groupMessages([
         userMsg('Q1'),
@@ -399,7 +460,9 @@ void main() {
       expect(find.textContaining('🔧 shell'), findsOneWidget);
       await tester.tap(find.byType(ToolActivityCard));
       await tester.pump();
-      expect(find.textContaining('exit code=1'), findsOneWidget);
+      // 失败首行顶进折叠摘要 + 展开体 OUT 段 = 至少各一处（DSH errorSummary
+      // 形态：错误不只靠 ⚠️ 后缀传达，折叠行即可读）。
+      expect(find.textContaining('exit code=1'), findsWidgets);
     });
 
     testWidgets('已完成回合：思考存档入总折叠区（展开后可回看）', (tester) async {
@@ -469,18 +532,24 @@ void main() {
     testWidgets('思考流式自动展开：流式中内容可见，答案开始/回合结束自动闭合',
         (tester) async {
       // 流式输出中 → 自动展开（否则用户不知道智能体在干什么）。
-      final streaming = AgentUiState(running: true, thinking: '正在推理的内容');
+      // 两行思考：闭合后折叠行仍显示 latestLine 摘要（DSH 形态），
+      // 但展开体整段隐藏——用首行消失判定"已闭合"。
+      const thinking = '第一行推理\n第二行推理';
+      final streaming = AgentUiState(running: true, thinking: thinking);
       await pump(tester, streaming, isLive: true);
-      expect(find.text('正在推理的内容'), findsOneWidget);
+      // 展开体是整段 Text（多行），用 contains 判定首行可见。
+      expect(find.textContaining('第一行推理'), findsOneWidget);
 
-      // 答案开始 → 自动闭合（内容隐藏，仅剩头部耗时）。
+      // 答案开始 → 自动闭合（展开体隐藏；折叠摘要只剩最后一行）。
       await pump(tester, streaming,
           isLive: true, answer: asst('答案'));
-      expect(find.text('正在推理的内容'), findsNothing);
+      expect(find.textContaining('第一行推理'), findsNothing);
+      expect(find.text('第二行推理'), findsOneWidget);
 
       // 回合结束（running=false）→ 闭合。
-      await pump(tester, AgentUiState(thinking: '正在推理的内容'), isLive: true);
-      expect(find.text('正在推理的内容'), findsNothing);
+      await pump(tester,
+          const AgentUiState(thinking: thinking), isLive: true);
+      expect(find.textContaining('第一行推理'), findsNothing);
     });
 
     testWidgets('思考流式长内容：自动滚动到底部，用户上滑后暂停跟随', (tester) async {

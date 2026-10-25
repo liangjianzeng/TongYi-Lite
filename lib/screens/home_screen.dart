@@ -1933,13 +1933,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     audioPath: message.audioPath,
                     inferenceStats: message.inferenceStats,
                   ),
-                TurnUnit(:final tools, :final answer, :final thinking) =>
+                TurnUnit(:final tools, :final answer, :final thinking,
+                        :final trace, :final traceTools) =>
                   AgentTurnBlock(
                     isLive: isLiveTurn,
                     steps: _stepsFor(uiState, tools, isLiveTurn),
                     answer: answer,
                     ui: uiState,
                     thinking: thinking,
+                    trace: trace,
+                    traceTools: traceTools,
                   ),
               };
             },
