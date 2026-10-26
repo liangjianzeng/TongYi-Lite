@@ -42,17 +42,33 @@
 - [x] 影子 $R/bin → L-A diag async 16tok（乱码复现+统计：nsubs≤2/freed_bos=2713/3000）→ L-B diag OPFLUSH=1 48tok（**e9b88e56 全等**，深合并 7.4/ioctl 反正确）→ 撤影子 → L-C 背书+MESA_DEBUG=sync（仍乱码，后由 SA-1 定案=env 名错，测废）→ 背书复验 q0a0（**e9b88e56 第三次一致**）
 - [x] 首轮落账：台账 leg-039..042 / **R-033 入册** / C2 格回写 / 双仓 push
 - [x] SA-1/SA-2 只读报告验尸（承重断言逐字抽验命中）→ 定案 E1=env 名错（RUSTICL_DEBUG）；R8 改判「未测」；R9 挂账（OCL:15885）
-- [ ] **0032 探针轮（R10 判决）**：P3-B（queue.rs:345-354 FLUSH fence↔nev）+ P3-C（queue.rs:519-527 WAIT ok）+ P3-D（freedreno_pipe.c:178 前 FASTPATH hit）+ P4（IB CRC32 ioctl 时↔环缓存复用点复核，join key=handle/fence 指针）→ L-D diag async / L-E diag OPFLUSH=1 / L-F __tyl_probe__ 阳性对照 / L-G RUSTICL_DEBUG=sync
-- [ ] 判读裁 R10 → 落账 R-034 → 前线②（B0 岛事件化：OCL:11162-11166 三 NULL async 钩子=结构性根因，岛界 OCL:8612-8613 红线）
+- [x] 0032 探针轮（E4VERIFY/E4REUSE/E4FAST/E4FLUSH/E4WAIT，diag2=1a9d8f15）→ e4d-r1 **rc=139 悬垂崩**（保存裸 map 指针教训）
+- [x] 0033 活性查找重设计（fd_bo_e4_lookup + SKIPPED 语义 + heap 分支钩子 + **不持引用**，diag3=1db4c812）→ e4d-r2/e4g/e4e×3/e4f/q0a0×2 全批完跑
+- [x] **R10 证伪**（E4REUSE 双钩子全哑 + 每 submit 全新 gem）+ **E1 闭环**（e4g=RUSTICL_DEBUG=sync ⇒ token 级金标准全等）+ **竞态统一图景**（e4e 三跑漂移 d0044294/678a1e60/d0044294≠e9b88e56，idx2 起分叉=prefill 命中）
+- [x] R-034 入册（1045 行册）/ C2 回写 / 台账 leg-043..051 / 双仓 push
+- [ ] **0034 E4BOREUSE（R11 判决）**：freedreno_bo.c try_recycle 记 {handle→{release 时最后提交 ts,queue}}，BO_CACHE acquire 侧 timeout=0 WAITTIMESTAMP 探活，**reached=0=在飞复用实证**；ts 归因是保守近似→联查 ggml 垫片 clReleaseMemObject→re-alloc 配对计数
+- [ ] **E4FAST 旁路鉴别腿**：给 fastpath 加 `TYL_E4_NOFAST=1` 强制 wait 全走 KMD——async 治好=快路早完成定罪（R11 上游）；仍乱=worker 批处理内部竞态
+- [ ] 漂移概率量化：背书 OPFLUSH=1 大样本 N≥20 钉死「≈0」；前线② B0 岛事件化（OCL:11162-11166 三 NULL async 钩子，岛界 OCL:8612-8613）
 
-## 5b. 判决语义备忘（R-033 后）
-- R10 = 在飞 IB 覆写：环 bo ioctl 前归零→RING_CACHE→CPU 覆写 GPU 未读完的 IB；0030 只持引用到 ioctl 返回（≠退休）故其判决腿未覆盖本窗口。预期指纹：L-D（async）CRC 复用点不一致 + fastpath/KMD 可能不一致；L-E（OPFLUSH=1）应零不一致。
-- P2 语义坑：fd_submit_del 是 unref→ring_del(丢 ring ref)→destroy(丢 table ref) 两步；primary ring 观测窗在 del 前 refcnt=2，判「将释放」要用 ≤2-at-del 语义而非 ==1。
-- fence 通路唯一性（SA-1）：kfence 唯一赋值 kgsl_ringbuffer_sp.c:115；唯一消费 kgsl_pipe.c:121（WAITTIMESTAMP_CTXTID，无轮询无超时）；整批单 fence=queue.rs:519-522；FASTPATH=freedreno_pipe.c:178 GPU 自写 control->fence（R3 裁决唯一非 KMD 观测面）。
+## 5b. 判决语义备忘（R-034 后 —— 覆盖 R-033 版）
+- **R10 已死，勿再引用其预期指纹**。存活嫌疑排序：R11 早完成→BO_CACHE 复用覆写（0.6）> worker 批处理内部竞态（0.2）> R3'快路语义（0.1）> R9 挂账（BANK_GPU 腿再裁）。
+- **字节判据纪律**：字节级金标准对比**只准用于背书库**；diag 腿=扰动放大器（18 万行 stderr/腿），只能比 health+分布量（hist/nev/E4FAST 率/KGSLSUBMIT 计数）。R-033「diag 零扰动」字样作废（e4b 一把全等只是竞态未命中）。
+- **竞态概率谱**：sync=0（金标准全等，唯一 0 概率态）；背书 OPFLUSH=1≈0（e9b88e56 五连庄=leg-034/035/042/048/051）；OPFLUSH=1+diag3=3/3 漂移；async≈1。漂移模态可复现（d0044294×2）⇒ 竞态窗口有偏置，非均匀噪声。
+- E4FAST 实测：async 92%（34224/37231）、OPFLUSH 95%（175396/184549）wait 由 control->fence 自写 stamp 命中不经 KMD；E4VERIFY MISMATCH 签名=全 size 584 尾环（worker 并发重录良性）——**IB 通路无罪**。
+- E4REUSE 语义：hooks 在 bo_new 的 cache-hit 与 heap-hit 两分支（RING_FLAGS）；reached=0 本应=未退休即复用，**实测恒 0 行=无复用事件**（fresh-gem 环），非探针失效（同函数在 e4d/e4e 双态均 0）。
+- P2 语义坑（留档）：fd_submit_del 两步丢引用；primary ring del 前 refcnt=2，==1 判据记 0 属预期。
+- fence 通路唯一性（SA-1）：kfence 唯一赋值 kgsl_ringbuffer_sp.c:115；唯一消费 kgsl_pipe.c:121（WAITTIMESTAMP_CTXTID，无轮询无超时）；整批单 fence=queue.rs:519-522（实测 nev≤50，chunking 存在）；FASTPATH=freedreno_pipe.c:178。
 
-## 6. 坑位备忘（本轮新增）
+## 6. 坑位备忘（累计）
 - 本机 harness 内 sudo=no new privileges 拦死；一律走 `ssh <redacted-tailscale> 'sudo -n ...'`。
-- chroot 跑命令形态：`ssh <redacted-tailscale> "sudo -n chroot /opt/trixie-cl sh -c '...'"`。
-- 外传经 /home/jianzengliang/*_1026* 中转 + scp；ssh stdout 打 tar 会混脏（禁）。
-- 设备 env 必须脚本内 export 或字面绝对路径同行不导出（E1 疑案）。
-- 影子加载=push 到 $R/bin/libRusticlOpenCL.so.1（LP bin 首位遮蔽）；回滚=rm。
+- chroot 跑命令形态：`ssh <redacted-tailscale> "sudo -n chroot /opt/trixie-cl sh -c '...'"`（chroot 内路径=/root/mesa-26.2.4，宿主机加前缀 /opt/trixie-cl）。
+- 外传经 /home/jianzengliang/*_1026* 中转 + scp；ssh stdout 打 tar 会混脏（禁）；root 属主中转文件 chmod 被拒但 world-readable 可直接 scp。
+- 设备 env 必须脚本内 export（Android mksh 把续行后落单 `VAR=值` 当命令 rc=127）；同行赋值前缀合法。
+- 影子加载=push 到 $R/bin/libRusticlOpenCL.so.1（LP bin 首位遮蔽）；回滚=rm；**每轮换库必设备侧 md5sum 复核**。
+- 【R-034 新增】探针**禁保存 bo 映射裸指针**（缓存 shrink→munmap→SIGSEGV，e4d-r1 rc=139 学费）；用 handle→fd_bo_e4_lookup 活性查找 + SKIPPED 语义。
+- 【R-034】**探针禁持被测对象的引用**（持引用=阻止被测复用发生=自宫）；观测 BO 生命周期只能读状态不能续命。
+- 【R-034】新导出/前向 C 函数先写原型再定义（-Werror=missing-prototypes 两轮各咬一次）。
+- 【R-034】`set -e` 下裸 `diff >> patch`（rc=1=有差异）会掐断补丁生成——diff 循环与 set -e 分家。
+- 【R-034】Rust eprintln 字面量在合并 rodata 串里，`strings|grep '^E4X'` 锚定失配，用非锚定计数。
+- 【R-034】腿脚本 FASTHIT 用 `hit=1` 子串计数与 timeout 大数无冲突但偏松；精确判读从 err 原文 `awk '$0 ~ /^E4FAST/ && / hit=1$/'`。
+- **机床现状（R-034 后）**：chroot 树 = 背书态+0031+0032+0033（diag3 源码态）；build-cl 产物=1db4c812；**设备无影子、背书已复验（e9b88e56 第六次）**；回退料 /root/kgsl_ringbuffer_sp.c.orig（bf02f850）+ 快照 /root/mesa-26.2.4_snap_1026 仍在；pre 拷贝 /root/{e4r2_pre,e4r3_pre}/ 供 diff 再生。

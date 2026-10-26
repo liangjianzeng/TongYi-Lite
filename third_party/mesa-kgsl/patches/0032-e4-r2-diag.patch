@@ -1,0 +1,334 @@
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -28,6 +28,152 @@
+     return e4_on;
+ }
+ 
++
++/* [TongYi-Lite 0032 E4 round-2] In-flight IB mutation detector (R10 verdict).
++ * At ioctl submit time we CRC each IB region and remember (handle -> ptr/size/
++ * crc/ts/queue). Two observation points consume the table (TYL_E4 gated):
++ *   E4REUSE  - freedreno_bo.c ring-cache acquire: is the batch that last used
++ *              this ring retired (non-blocking WAITTIMESTAMP timeout=0)?  A
++ *              ring acquired while its batch has NOT retired = CPU about to
++ *              record into memory the GPU may still be reading (R10).
++ *   E4VERIFY - kgsl_pipe.c wait success: bytes must still equal submit time;
++ *              MISMATCH = somebody wrote them without an intervening acquire.
++ */
++#include <time.h>
++
++#define E4_TABLE_SZ 512u
++
++struct e4_save {
++    uint32_t handle;
++    uint32_t ts;         /* 0 = pending ts fill (deferred submits) */
++    uint32_t saved_gen;  /* e4_flushes value used for pending fill */
++    uint64_t gpuaddr;
++    uint32_t size;
++    uint32_t crc;
++    const uint32_t *map;
++    uint32_t queue_id;
++    int valid;
++};
++
++static struct e4_save e4_table[E4_TABLE_SZ];
++
++static unsigned long long
++e4_now_ns(void)
++{
++    struct timespec t;
++    clock_gettime(CLOCK_REALTIME, &t);
++    return (unsigned long long)t.tv_sec * 1000000000ull +
++           (unsigned long long)t.tv_nsec;
++}
++
++static uint32_t
++e4_crc32(const void *data, size_t len)
++{
++    const uint8_t *p = data;
++    uint32_t crc = 0xFFFFFFFFu;
++    for (size_t i = 0; i < len; i++) {
++        crc ^= p[i];
++        for (int b = 0; b < 8; b++)
++            crc = (crc >> 1) ^ (0xEDB88320u & -(int32_t)(crc & 1));
++    }
++    return ~crc;
++}
++
++static void
++e4_save_cmd(struct fd_bo *bo, uint64_t gpuaddr, uint32_t size, uint32_t ts,
++            uint32_t queue_id)
++{
++    if (!bo || !bo->map || size == 0 || size > (1u << 20))
++        return;
++    uint64_t off = gpuaddr - bo->iova;
++    if (off + size > bo->size)
++        return;
++    const uint32_t *ptr = (const uint32_t *)((const uint8_t *)bo->map + off);
++    uint32_t crc = e4_crc32(ptr, size);
++    unsigned i0 = bo->handle & (E4_TABLE_SZ - 1);
++    for (unsigned n = 0; n < 8; n++) {
++        struct e4_save *e = &e4_table[(i0 + n) & (E4_TABLE_SZ - 1)];
++        if (!e->valid || e->handle == bo->handle) {
++            e->handle = bo->handle;
++            e->ts = ts;
++            e->saved_gen = ts ? 0 : e4_flushes + 1;
++            e->gpuaddr = gpuaddr;
++            e->size = size;
++            e->crc = crc;
++            e->map = ptr;
++            e->queue_id = queue_id;
++            e->valid = 1;
++            return;
++        }
++    }
++    struct e4_save *e = &e4_table[i0];
++    e->handle = bo->handle;
++    e->ts = ts;
++    e->saved_gen = ts ? 0 : e4_flushes + 1;
++    e->gpuaddr = gpuaddr;
++    e->size = size;
++    e->crc = crc;
++    e->map = ptr;
++    e->queue_id = queue_id;
++    e->valid = 1;
++}
++
++void kgsl_e4_verify(struct fd_device *dev, uint32_t queue_id, uint32_t ts);
++void kgsl_e4_ring_reused(struct fd_bo *bo);
++
++void
++kgsl_e4_verify(struct fd_device *dev, uint32_t queue_id, uint32_t ts)
++{
++    (void)dev;
++    if (!e4_enabled() || ts == 0)
++        return;
++    for (unsigned i = 0; i < E4_TABLE_SZ; i++) {
++        struct e4_save *e = &e4_table[i];
++        if (!e->valid || e->ts != ts || e->queue_id != queue_id)
++            continue;
++        if (!e->map)
++            continue;
++        uint32_t now = e4_crc32(e->map, e->size);
++        fprintf(stderr,
++            "E4VERIFY ts=%u handle=%u gpuaddr=0x%llx size=%u crc_then=%08x crc_now=%08x %s rt=%llu\n",
++            ts, e->handle, (unsigned long long)e->gpuaddr, e->size,
++            e->crc, now, (now == e->crc) ? "OK" : "MISMATCH", e4_now_ns());
++    }
++}
++
++void __attribute__((weak))
++kgsl_e4_ring_reused(struct fd_bo *bo)
++{
++    if (!e4_enabled() || !bo)
++        return;
++    unsigned i0 = bo->handle & (E4_TABLE_SZ - 1);
++    int seen = 0;
++    for (unsigned n = 0; n < 8; n++) {
++        struct e4_save *e = &e4_table[(i0 + n) & (E4_TABLE_SZ - 1)];
++        if (!e->valid || e->handle != bo->handle)
++            continue;
++        seen = 1;
++        int reached = -1;
++        if (e->ts != 0) {
++            struct kgsl_device_waittimestamp_ctxtid wait = {
++                .context_id = e->queue_id,
++                .timestamp = e->ts,
++                .timeout = 0,
++            };
++            reached = (kgsl_pipe_safe_ioctl(bo->dev->fd,
++                IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, &wait) == 0) ? 1 : 0;
++        }
++        uint32_t now = e->map ? e4_crc32(e->map, e->size) : 0;
++        fprintf(stderr,
++            "E4REUSE handle=%u ts=%u reached=%d crc_then=%08x crc_now=%08x %s rt=%llu\n",
++            bo->handle, e->ts, reached, e->crc, now,
++            (!e->map) ? "NOMAP" : ((now == e->crc) ? "OK" : "MISMATCH"),
++            e4_now_ns());
++    }
++    if (!seen)
++        fprintf(stderr, "E4REUSE handle=%u fresh rt=%llu\n", bo->handle, e4_now_ns());
++}
++
+ static int
+ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+ {
+@@ -72,6 +218,7 @@
+         struct fd_ringbuffer_sp *deferred_primary =
+             to_fd_ringbuffer_sp(submit->primary);
+ 
++        unsigned e4_cmd_start = cmd_idx;
+         for (unsigned i = 0; i < deferred_primary->u.nr_cmds; i++) {
+             struct fd_bo *ring_bo = deferred_primary->u.cmds[i].ring_bo;
+ 
+@@ -130,6 +277,13 @@
+             e4_freed_ring_total += freed_ring;
+             e4_freed_ring_incmds_total += freed_ring_incmds;
+             e4_freed_bo_total += freed_bo;
++            for (unsigned i = 0; i < deferred_primary->u.nr_cmds; i++) {
++                struct fd_bo *rbo = deferred_primary->u.cmds[i].ring_bo;
++                if (rbo && (e4_cmd_start + i) < cmd_idx)
++                    e4_save_cmd(rbo, cmds[e4_cmd_start + i].gpuaddr,
++                                cmds[e4_cmd_start + i].size, 0,
++                                kgsl_pipe->queue_id);
++            }
+         }
+ 
+         list_del(&submit->node);
+@@ -189,10 +343,30 @@
+ 
+     fd_submit->out_fence->kfence = req.timestamp;
+ 
+-    if (e4_enabled())
+-        fprintf(stderr, "E4FENCE flush=%u ts=%u numsyncs=%u usefd=%d\n",
++    if (e4_enabled()) {
++        for (unsigned i2 = 0; i2 < E4_TABLE_SZ; i2++) {
++            struct e4_save *e = &e4_table[i2];
++            if (e->valid && e->ts == 0 && e->saved_gen == e4_flushes) {
++                e->ts = req.timestamp;
++                e->saved_gen = 0;
++            }
++        }
++        struct fd_ringbuffer_sp *last_rb =
++            to_fd_ringbuffer_sp(fd_submit->base.primary);
++        unsigned nlast = last_rb->u.nr_cmds;
++        if (cmd_idx >= nlast) {
++            for (unsigned i = 0; i < nlast; i++) {
++                struct fd_bo *rbo = last_rb->u.cmds[i].ring_bo;
++                if (rbo)
++                    e4_save_cmd(rbo, cmds[cmd_idx - nlast + i].gpuaddr,
++                                cmds[cmd_idx - nlast + i].size,
++                                req.timestamp, kgsl_pipe->queue_id);
++            }
++        }
++        fprintf(stderr, "E4FENCE flush=%u ts=%u numsyncs=%u usefd=%d rt=%llu\n",
+                 e4_flushes, req.timestamp, req.numsyncs,
+-                (int)fd_submit->out_fence->use_fence_fd);
++                (int)fd_submit->out_fence->use_fence_fd, e4_now_ns());
++    }
+ 
+     if  (fd_submit->out_fence->use_fence_fd) {
+         int fd = timestamp_to_fd(pipe, req.timestamp);
+--- a/src/freedreno/drm/kgsl/kgsl_pipe.c
++++ b/src/freedreno/drm/kgsl/kgsl_pipe.c
+@@ -118,7 +118,15 @@
+ kgsl_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence, uint64_t timeout)
+ {
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+-    return wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence, timeout);
++    int ret = wait_timestamp_safe(pipe->dev->fd, kgsl_pipe->queue_id, fence->kfence, timeout);
++    /* [TongYi-Lite 0032 E4] post-completion IB integrity check (TYL_E4 gated):
++     * if the KMD says the batch is done, the IB bytes must still equal what we
++     * CRC'd at submit time — unless the ring was legitimately re-acquired
++     * later (table overwritten on re-submit). */
++    extern void kgsl_e4_verify(struct fd_device *dev, uint32_t queue_id, uint32_t ts);
++    if (ret == 0)
++        kgsl_e4_verify(pipe->dev, kgsl_pipe->queue_id, fence->kfence);
++    return ret;
+ }
+ 
+ static void
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -138,8 +138,15 @@
+       flags &= ~FD_BO_CACHED_COHERENT;
+ 
+    bo = fd_bo_cache_alloc(cache, &size, flags);
+-   if (bo)
++   if (bo) {
++      /* [TongYi-Lite 0032 E4] ring-cache reuse observation (TYL_E4 gated):
++       * fires when a cmdstream BO is pulled from the ring cache; the callee
++       * checks whether the batch that last submitted this ring has retired. */
++      extern void __attribute__((weak)) kgsl_e4_ring_reused(struct fd_bo *bo);
++      if ((flags == RING_FLAGS) && kgsl_e4_ring_reused)
++         kgsl_e4_ring_reused(bo);
+       return bo;
++   }
+ 
+    bo = dev->funcs->bo_new(dev, size, flags);
+    if (!bo)
+--- a/src/freedreno/drm/freedreno_pipe.c
++++ b/src/freedreno/drm/freedreno_pipe.c
+@@ -171,11 +171,32 @@
+    return fd_pipe_wait_timeout(pipe, fence, ~0);
+ }
+ 
++/* [TongYi-Lite 0032 E4] fastpath observation (TYL_E4 gated): this is the only
++ * completion decision in the whole chain that does NOT go through the KMD
++ * (GPU self-writes control->fence via CP_EVENT_WRITE CACHE_FLUSH_TS).
++ * Missing this line makes R3 unadjudicable. */
++static int
++e4_fast_on(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++   return on;
++}
++
+ int
+ fd_pipe_wait_timeout(struct fd_pipe *pipe, const struct fd_fence *fence,
+                      uint64_t timeout)
+ {
+-   if (!fd_fence_after(fence->ufence, pipe->control->fence))
++   if (e4_fast_on()) {
++      int hit = !fd_fence_after(fence->ufence, pipe->control->fence);
++      fprintf(stderr, "E4FAST fence=%p ufence=%u ctrl=%llu hit=%d timeout=%llu\n",
++              (void *)fence, fence->ufence,
++              (unsigned long long)pipe->control->fence, hit,
++              (unsigned long long)timeout);
++      if (hit)
++         return 0;
++   } else if (!fd_fence_after(fence->ufence, pipe->control->fence))
+       return 0;
+ 
+    if (!timeout)
+--- a/src/gallium/frontends/rusticl/core/queue.rs
++++ b/src/gallium/frontends/rusticl/core/queue.rs
+@@ -336,6 +336,11 @@
+ 
+ impl_cl_type_trait!(cl_command_queue, Queue, CL_INVALID_COMMAND_QUEUE);
+ 
++pub fn e4_on() -> bool {
++    static E4: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *E4.get_or_init(|| std::env::var("TYL_E4").map(|v| v == "1").unwrap_or(false))
++}
++
+ fn flush_events(
+     evs: &mut Vec<Arc<Event>>,
+     pipe: &PipeContext,
+@@ -343,6 +348,15 @@
+ ) -> cl_int {
+     if !evs.is_empty() {
+         let fence = pipe.flush();
++        if e4_on() {
++            static FSEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++            let seq = FSEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            let ns = std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap_or_default()
++                .as_nanos();
++            eprintln!("E4FLUSH seq={} nev={} rt={}", seq, evs.len(), ns);
++        }
+         if pipe.device_reset_status() != pipe_reset_status::PIPE_NO_RESET {
+             // if the context reset while executing, simply put all events into error state.
+             evs.drain(..)
+@@ -518,7 +532,17 @@
+                         };
+ 
+                         let evs = events.iter();
+-                        if fence.wait() {
++                        let e4_ok = fence.wait();
++                        if e4_on() {
++                            static WSEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++                            let wseq = WSEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                            let ns = std::time::SystemTime::now()
++                                .duration_since(std::time::UNIX_EPOCH)
++                                .unwrap_or_default()
++                                .as_nanos();
++                            eprintln!("E4WAIT wseq={} nev={} ok={} rt={}", wseq, events.len(), e4_ok, ns);
++                        }
++                        if e4_ok {
+                             evs.for_each(|e| e.signal());
+                         } else {
+                             evs.for_each(|e| e.set_user_status(CL_OUT_OF_RESOURCES));
