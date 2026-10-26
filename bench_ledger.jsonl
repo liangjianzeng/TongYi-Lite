@@ -83,3 +83,5 @@
 {"leg": "082", "case": "g22-nomerge", "build": "c1c1d271", "fl": 16, "env": "TYL_E4_NOMERGE=1 无垫片", "result": "rc0 tok 8a85c184 乱", "note": "每 submit 拆 ioctl 不治——罪不在 ioctl 合批/IB 列表语义", "ts": "2026-10-26T23:55:27+0800"}
 {"leg": "083", "case": "g23-presleep2ms", "build": "c1c1d271", "fl": 16, "env": "shim v6 写前 usleep 2ms", "result": "rc0 tok e19f0cb2 health=1 ★★零等待结构治愈", "note": "H2′ 定罪：retire 后 GPU L2 排空滞后于 host 对 pinned 后备内存的写", "ts": "2026-10-26T23:55:27+0800"}
 {"leg": "084", "case": "g24-presleep500us", "build": "c1c1d271", "fl": 16, "env": "shim v7 500us", "result": "rc0 tok e19f0cb2 health=1 ★", "note": "剂量下限扫描中", "ts": "2026-10-26T23:55:27+0800"}
+{"leg": "085", "case": "g25-presleep100us", "build": "c1c1d271", "fl": 16, "env": "shim v7 100us", "result": "rc0 tok e19f0cb2 health=1 ★", "note": "剂量不敏感（2ms/500/100µs 全愈）→推荐事件等待替代", "ts": "2026-10-27T00:06:09+0800"}
+{"leg": "086", "case": "g26-product-endorse", "build": "endorsed", "fl": 16, "env": "GRP=4 无 TYL_E4", "result": "rc0 tok c7655a56 乱", "note": "⚠️ 垫片门控陷阱：grp_on 解析要求 TYL_E4=1，本腿 sleep 根本没生效——非反证，是 NO-OP 腿（背书 async 依旧乱，自洽）", "ts": "2026-10-27T00:06:09+0800"}

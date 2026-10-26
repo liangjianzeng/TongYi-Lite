@@ -114,6 +114,12 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  g27) # 解耦：背书库 + GRP=4 无 TYL_E4（纯 sleep，零打印）
+    run_leg e4d_g27 "" 16 "TYL_E4_GRP=4"
+    ;;
+  g26) # ★产品化终验：背书库 + 垫片v7 写前 2ms（无 NOMERGE 代码参与）
+    run_leg e4d_g26 "" 16 "TYL_E4_GRP=4" "$R/bin/libtylgrp.so"
+    ;;
   g25) # 治愈剂量扫描：async 16 + 写前 usleep 100us
     run_leg e4d_g25 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=100" "$R/bin/libtylgrp.so"
     ;;
