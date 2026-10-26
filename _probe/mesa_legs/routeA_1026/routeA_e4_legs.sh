@@ -105,6 +105,12 @@ case "$1" in
   g11) # fl1 治愈对照（全代探针在场，验证不扰动金标准）
     run_leg e4f_g11 "" 1 "TYL_E4=1"
     ;;
+  g12) # fastpath 神罪腿：async 16 + TYL_E4_NOFAST=1（等待全走 KMD）
+    run_leg e4d_g12 "" 16 "TYL_E4=1 TYL_E4_NOFAST=1"
+    ;;
+  g13) # 对照：async 16 无 NOFAST（同 diag 快慢分歧复现）
+    run_leg e4d_g13 "" 16 "TYL_E4=1"
+    ;;
   g9) # diag9 乒乓全采腿：async 16 + grp 垫片 + Rusticl E4GMEM 三点（NEW/REL/DROP 身份贯通）
     run_leg e4d_g9 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
     ;;

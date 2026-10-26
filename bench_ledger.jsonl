@@ -71,3 +71,4 @@
 {"leg": "070", "case": "g9-diag12", "build": "8059d04c", "fl": 16, "env": "+max-ts 键修正", "result": "rc0 tok0f15e374 **RINGLIVE=16339 NOTRET=0 UNKNOWN=69**(ts=999 qid=58)", "note": "环轴史上首次真实测净=无罪（含 KMD WAITTIMESTAMP 实证）", "ts": "2026-10-26T22:28:52+0800"}
 {"leg": "071", "case": "g11-fl1-diag12", "build": "8059d04c", "fl": 1, "env": "TYL_E4=1", "result": "rc0 tokbytes=8(8B 前缀,探针打印税拖时截断) err 1.14M 行", "note": "纯 stderr 探针不改语义；fl1 金标准沿用 diag7/8 双证；不追跑", "ts": "2026-10-26T22:28:52+0800"}
 {"leg": "072", "case": "q0a0#9", "build": "endorsed", "fl": "-", "env": "-", "result": "**PASS e9b88e56+135543** temp38.5", "note": "影子撤后背书无损 #9", "ts": "2026-10-26T22:28:52+0800"}
+{"leg": "073", "case": "g12-NOFAST", "build": "8059d04c", "fl": 16, "env": "TYL_E4=1 NOFAST=1", "result": "rc0 tok ad4f5580(新模态) health=0 E4FAST=0 VERIFY=72749 MISMATCH=1", "note": "等待全走 KMD 仍乱=fastpath 无罪定谳；MISMATCH=ring 96 提交后内容被改写（KMD 已拷贝故可能良性）", "ts": "2026-10-26T22:35:19+0800"}
