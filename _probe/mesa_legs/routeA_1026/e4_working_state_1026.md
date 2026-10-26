@@ -43,7 +43,7 @@
 - [x] 首轮落账：台账 leg-039..042 / **R-033 入册** / C2 格回写 / 双仓 push
 - [x] SA-1/SA-2 只读报告验尸（承重断言逐字抽验命中）→ 定案 E1=env 名错（RUSTICL_DEBUG）；R8 改判「未测」；R9 挂账（OCL:15885）
 - [x] 0032 探针轮（E4VERIFY/E4REUSE/E4FAST/E4FLUSH/E4WAIT，diag2=1a9d8f15）→ e4d-r1 **rc=139 悬垂崩**（保存裸 map 指针教训）
-- [x] 0033 活性查找重设计（fd_bo_e4_lookup + SKIPPED 语义 + heap 分支钩子 + **不持引用**，diag3=1db4c812）→ e4d-r2/e4g/e4e×3/e4f/q0a0×2 全批完跑
+- [x] 0033 活性查找重设计（fd_bo_e4_lookup + SKIPPED 语义 + heap 分支钩子 + **不持引用**，diag8=908ece48(=diag7 106c21ec+0038 TYL_UPSZ；diag4 bb401268/diag5 059579c1/diag6 0c0f63cf/diag7 106c21ec 均在 /tmp/e41026)
 - [x] **R10 证伪**（E4REUSE 双钩子全哑 + 每 submit 全新 gem）+ **E1 闭环**（e4g=RUSTICL_DEBUG=sync ⇒ token 级金标准全等）+ **竞态统一图景**（e4e 三跑漂移 d0044294/678a1e60/d0044294≠e9b88e56，idx2 起分叉=prefill 命中）
 - [x] R-034 入册（1045 行册）/ C2 回写 / 台账 leg-043..051 / 双仓 push
 - [ ] **0034 E4BOREUSE（R11 判决）**：freedreno_bo.c try_recycle 记 {handle→{release 时最后提交 ts,queue}}，BO_CACHE acquire 侧 timeout=0 WAITTIMESTAMP 探活，**reached=0=在飞复用实证**；ts 归因是保守近似→联查 ggml 垫片 clReleaseMemObject→re-alloc 配对计数

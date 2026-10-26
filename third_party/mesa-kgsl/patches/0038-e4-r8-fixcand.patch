@@ -1,0 +1,30 @@
+--- a/src/gallium/drivers/freedreno/freedreno_context.c
++++ b/src/gallium/drivers/freedreno/freedreno_context.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "freedreno_context.h"
++#include <stdlib.h>
+ #include "ir3/ir3_cache.h"
+ #include "util/u_upload_mgr.h"
+ #include "freedreno_blitter.h"
+@@ -715,7 +716,18 @@
+       pctx->get_device_reset_status = fd_get_device_reset_status;
+    }
+ 
+-   pctx->stream_uploader = u_upload_create_default(pctx);
++   /* [TongYi-Lite 0038] A/B: TYL_UPSZ overrides stream uploader slab size
++    * (CB0 wraparound-reuse hypothesis test); unset == stock 1MB. */
++   {
++      const char *upsz = getenv("TYL_UPSZ");
++      if (upsz && atoi(upsz) >= 65536) {
++         pctx->stream_uploader = u_upload_create(pctx, (unsigned)atoi(upsz),
++            PIPE_BIND_VERTEX_BUFFER | PIPE_BIND_INDEX_BUFFER |
++            PIPE_BIND_CONSTANT_BUFFER, PIPE_USAGE_STREAM, 0);
++      } else {
++         pctx->stream_uploader = u_upload_create_default(pctx);
++      }
++   }
+    if (!pctx->stream_uploader)
+       goto fail;
+    pctx->const_uploader = pctx->stream_uploader;
