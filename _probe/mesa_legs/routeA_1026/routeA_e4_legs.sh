@@ -60,6 +60,21 @@ run_leg () {
   echo "#### E4LAG=$(grep -ac '^E4LAG' $R/out/$TAG.err) LAG_MAX=$(grep -aoE 'lag=-?[0-9]+' $R/out/$TAG.err | awk '{gsub(/lag=/,"",$1); if($1>m)m=$1; s+=$1; n++} END{print m+0\" avg=\"(n?s/n:0)}') E4CACHEBAD=$(grep -ac '^E4CACHEBAD' $R/out/$TAG.err)"
   echo "#### E4CB0=$(grep -ac '^E4CB0' $R/out/$TAG.err) E4PREP=$(grep -ac '^E4PREP' $R/out/$TAG.err) E4DEFER_d1=$(grep -acE '^E4DEFER .*defer=1' $R/out/$TAG.err) E4DEFER_d0=$(grep -acE '^E4DEFER .*defer=0' $R/out/$TAG.err)"
   echo "#### E4GRELPAIR=$(grep -ac '^E4GRELPAIR' $R/out/$TAG.err) E4GPOL_last=$(grep -a '^E4GPOL' $R/out/$TAG.err | tail -1)"
+  # [R-041b 铁律] 干预腿自证 witness
+  echo "#### E4GSLEEP=$(grep -ac '^E4GSLEEP' $R/out/$TAG.err) E4L2FIX=$(grep -ac '^E4L2FIX' $R/out/$TAG.err) NOMERGE=$(grep -ac '^E4NOMERGE' $R/out/$TAG.err)"
+}
+
+# [R-041] 漂移概率统计：同参数 N 连跑，报 tok md5 分布 + health 计数（治愈候选终验门 N>=20）
+run_drift () {
+  TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4; PRELOAD=$5; N=${6:-20}
+  i=0; : > $R/out/${TAG}_drift.txt
+  while [ $i -lt $N ]; do
+    i=$((i+1))
+    run_leg ${TAG}_r$i "$FL" "$NPRED" "$EXTRAENV" "$PRELOAD" | grep -E "^#### (rc=|tok md5|health=|ABORT_THERMAL)" | tr '\n' ' ' >> $R/out/${TAG}_drift.txt; echo "r$i" >> $R/out/${TAG}_drift.txt
+  done
+  echo "#### DRIFT_SUMMARY $TAG N=$N"
+  awk '{for(j=1;j<=NF;j++) if($j ~ /^md5=[0-9a-f]+$/) print $j}' $R/out/${TAG}_drift.txt | sort | uniq -c | sort -rn
+  echo "#### DRIFT_HEALTH=$(grep -ac 'health=1' $R/out/${TAG}_drift.txt)/$N"
 }
 
 case "$1" in
