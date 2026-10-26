@@ -70,7 +70,11 @@ run_drift () {
   i=0; : > $R/out/${TAG}_drift.txt
   while [ $i -lt $N ]; do
     i=$((i+1))
-    run_leg ${TAG}_r$i "$FL" "$NPRED" "$EXTRAENV" "$PRELOAD" | grep -E "^#### (rc=|tok md5|health=|ABORT_THERMAL)" | tr '\n' ' ' >> $R/out/${TAG}_drift.txt; echo "r$i" >> $R/out/${TAG}_drift.txt
+    # [1027 修] 落文件中转：防管道内 export 污染主 shell（timeout 误吃 LD_PRELOAD）+ 热闸可断
+    run_leg ${TAG}_r$i "$FL" "$NPRED" "$EXTRAENV" "$PRELOAD" > $R/out/${TAG}_r$i.log 2>&1
+    grep -E "^#### (rc=|tok md5|health=|ABORT_THERMAL|GSLEEP|L2FIX)" $R/out/${TAG}_r$i.log | tr '\n' ' ' >> $R/out/${TAG}_drift.txt; echo "r$i" >> $R/out/${TAG}_drift.txt
+    if grep -q "ABORT_THERMAL" $R/out/${TAG}_r$i.log; then echo "#### DRIFT_HALTS_THERMAL at r$i" >> $R/out/${TAG}_drift.txt; break; fi
+    if ! timeout 10 ping -c1 -W3 127.0.0.1 >/dev/null 2>&1; then :; fi
   done
   echo "#### DRIFT_SUMMARY $TAG N=$N"
   awk '{for(j=1;j<=NF;j++) if($j ~ /^md5=[0-9a-f]+$/) print $j}' $R/out/${TAG}_drift.txt | sort | uniq -c | sort -rn
@@ -163,7 +167,7 @@ case "$1" in
     echo "#### L0_SET=$(grep -ac '^\\[set\\]' $R/out/e4d_l0a.err) L0_WATCH=$(grep -ac '^\\[watch\\]' $R/out/e4d_l0a.err)"
     grep -a '^\\[set\\]' $R/out/e4d_l0a.err | awk '{print $2}' | sort | uniq -c | sort -rn | head -25
     ;;
-  g31) # ★路线①真身：ksync 新二件(e2e=04aaa77f lib=ca484fa8)+背书库 KERNEL_SYNC=1
+  g31) # ★路线①真身：七件套同树(e2e=04aaa77f opencl=134bfd9c base=914cc424,shoot 已部)+背书库 KERNEL_SYNC=1
     mkdir -p $R/bin_bak_1027
     cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
     cp -n $R/bin/libggml-opencl.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
@@ -177,8 +181,11 @@ case "$1" in
   g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
     run_leg e4d_g32 "" 16 ""
     ;;
-  grestore1027) # 回滚 bin 到备份（三件）
-    cp $R/bin_bak_1027/minicpm_e2e $R/bin/minicpm_e2e && cp $R/bin_bak_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 && cp $R/bin_bak_1027/libggml-base.so.0.27.0 $R/bin/libggml-base.so.0.27.0 && echo "#### restored: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
+  grestore1027) # 回滚 bin 到备份（七件全量）
+    for f in minicpm_e2e libggml-opencl.so.0.27.0 libggml-base.so.0.27.0 libggml.so.0.27.0 libggml-cpu.so.0.27.0 libllama.so.0.7.0 libllama-common.so.0.7.0; do
+      [ -f $R/bin_bak_1027/$f ] && cp $R/bin_bak_1027/$f $R/bin/$f && echo "restored $f"
+    done
+    echo "#### restored_all: $(md5sum $R/bin/minicpm_e2e 2>/dev/null)"
     ;;
   g30) # ★路线②根修实验：diag17 影子 + async 16 + L2FIX（双 fence，无垫片）
     # [自证铁律] 影子腿必须腿内部署+撤除，防"影子缺席=背书跑 L2FIX 变量"NO-OP 陷阱
