@@ -99,3 +99,10 @@
 - **设备态势（01:0x）**：830 tailscale 层整机 offline（last seen 54m，tx4056/rx0，非热因 30.8°C，历史自愈型，上轮 21:29 自愈于第 10 轮值守）；740=xiaomi-13-1 **tailscale active 但 adbd 5555 拒**（需 USB 主机跑 adb-wifi 脚本，无则不可用）；K40 offline 6h。守望 W2 活。
 - **射击次序（终版）**：shoot_1027 九腿 → q0a0#10 → 判读：①线治愈者 drift N=20 → 背书 OPFLUSH=1 亦 N≥20；②线 g30 看 L2FIX；③线 l0a/l0b 定罪 412MB 张量名（**l3-wire 硬前置**，R-047）→ l3b 三证 → l3-wire 设计定稿。
 - **待办欠账**：ledger g27(hung)+新腿行；C2 地图再回写（治愈落地时）；R-048（射击轮）；drift 全绿后产品化选型报告（三路线 tok/s 对比可选）。
+
+## §8 · 1027 05:30 态（射击轮战果 + 下一队列）
+**战果**：g28/g31 双治愈（背书驱动，e19f0cb2）；g29/g30/g32/l0a/l0b/l3a/g33 全读数；g34 wire 不破坏（e9b88e56）；l3b 三证 FAIL=**L3 直读死刑→map/unmap fallback**；税实测 KERNEL_SYNC 0.37/垫片 0.67/基线 1.09 tok/s；L0 税基线 2400 drains/token；覆写实测 15 写/token（双 extra 乒乓）。
+**指纹更新**：opencl 三代 **0f56e3bf**（WBW 入装 stage_1027）；llama=aecefbd3（wire）。设备 $R/bin 现=七件套（opencl 仍 134bfd9c，g35 会换 0f56e3bf）。
+**进行中**：d31 drift N=20（KERNEL_SYNC 终验，log=/tmp/e41026/recovery_logs/d31.log）。
+**下一队列（设备空闲后）**：`adb push` 新 legs 脚本 → g35（WBW 主验+自证+METRIC 税）→ g36（TH=256K）→ 治愈者 d35 drift 20 → **全部治愈候选定终选（税最低者产品化）** → 背书 OPFLUSH=1 drift20（旧欠账）→ 740 冒烟（若 adbd 开）。
+**l3b 后续设计**：探针 v2=map/unmap 包裹三证（b1: map→写→unmap→GPU 读；b2: GPU 写→map→CPU 读）+ 阳性对照（WriteBuffer/ReadBuffer）；过证则 L3 fallback 定稿。
