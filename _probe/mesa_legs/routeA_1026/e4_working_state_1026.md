@@ -106,3 +106,11 @@
 **进行中**：d31 drift N=20（KERNEL_SYNC 终验，log=/tmp/e41026/recovery_logs/d31.log）。
 **下一队列（设备空闲后）**：`adb push` 新 legs 脚本 → g35（WBW 主验+自证+METRIC 税）→ g36（TH=256K）→ 治愈者 d35 drift 20 → **全部治愈候选定终选（税最低者产品化）** → 背书 OPFLUSH=1 drift20（旧欠账）→ 740 冒烟（若 adbd 开）。
 **l3b 后续设计**：探针 v2=map/unmap 包裹三证（b1: map→写→unmap→GPU 读；b2: GPU 写→map→CPU 读）+ 阳性对照（WriteBuffer/ReadBuffer）；过证则 L3 fallback 定稿。
+
+## §9 · 1027 07:40 态（治愈终局 + 740 待命）
+**治愈候选终局**：g49=NDRANGE_IDLE(2)+GAP0 纯 finish，e19f0cb2+health=1，**0.51 tok/s（冠军）**，d49 终验进行中；KERNEL_SYNC=d31 已过 20/20（0.37，高保障档）；垫片=验证器退役在望；写旁干预（WBW/TH1/gap/POST）R-056 全灭入判伪录。
+**机制定律**：疗效=内核间 GPU 完整排空窗口密度（每 1~2 内核 finish；每 4+ 不治）；GAP 与疗效无关；驱动层清白（探针 v2.2/v2.3 十连绿平反，含持久映射干扰假说亡）。
+**L3**：map/unmap fallback 定稿（CPU→GPU map(WRITE)+unmap ✓；GPU→CPU map(READ) ✓；WriteBuffer/ReadBuffer ✓；裸持久映射写=禁）。
+**指纹**：opencl 七代=**1be75abc**（IDLE 旋钮+WBW 11 站点+POST），设备 bin 现=1be75abc；金标准 e19f0cb2(16tok)/e9b88e56(48tok)。
+**740 队列（待 adbd+模型）**：先 shoot_740.sh 免模型部署+探针五关（a740 复证驱动共性）；模型传入后 q740 基线复现（H2′ 是否跨代）→ g49 治愈腿 → drift。
+**下一批 830 腿（d49 后）**：g50（IDLE=3 边界）→ 若愈=d49 换 3 再验税；不愈=定案 IDLE=2。然后产品化默认值评审（env 默认 2 + 逃生开关）+ 背书 OPFLUSH drift20 旧欠账。
