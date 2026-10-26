@@ -723,6 +723,13 @@ struct ggml_cl_adreno_xmem_attn_state {
 #endif
 
 // backend context
+
+// [TongYi-Lite L0/P2 · R-044] 岛普查计数器前向声明（定义在 synchronize 附近）
+static bool tyl_l0_on();
+static void tyl_l0_note_sync();
+static void tyl_l0_note_write(const char * nm, size_t sz);
+static void tyl_l0_note_read(const char * nm, size_t sz);
+static void tyl_l0_note_enq();
 struct ggml_backend_opencl_context {
     int ref_count;
 
@@ -1355,6 +1362,7 @@ struct ggml_backend_opencl_context {
 
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
         n_enqueues++;
+        tyl_l0_note_enq();
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
         // and global_work_size is NULL or the value in any passed dimension is zero,
@@ -8622,8 +8630,43 @@ static bool ggml_backend_opencl_cpy_tensor_async(ggml_backend_t backend, const g
     return false;
 }
 
+// [TongYi-Lite 2026-10-27 L0/P2 · R-044] 岛边界普查计数器（SA-5 L0；
+// GGML_OPENCL_ISLAND_STATS=1 门控，默认关=零行为扰动；单线程 e2e 前提下不加锁）。
+static bool tyl_l0_on() {
+    static int v = -1;
+    if (v < 0) { const char * e = getenv("GGML_OPENCL_ISLAND_STATS"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v == 1;
+}
+static struct tyl_l0_t {
+    unsigned long sync = 0, wr = 0, rd = 0, wr_bytes = 0, rd_bytes = 0, enq = 0;
+    std::map<std::string, std::pair<unsigned long, unsigned long>> wr_names;
+} * tyl_l0 = nullptr;
+static void tyl_l0_note_sync() { if (tyl_l0_on()) { if (!tyl_l0) tyl_l0 = new tyl_l0_t(); tyl_l0->sync++; } }
+static void tyl_l0_note_write(const char * nm, size_t sz) {
+    if (!tyl_l0_on()) return;
+    if (!tyl_l0) tyl_l0 = new tyl_l0_t();
+    tyl_l0->wr++; tyl_l0->wr_bytes += sz;
+    tyl_l0->wr_names[nm ? nm : "?"].first++; tyl_l0->wr_names[nm ? nm : "?"].second += sz;
+}
+static void tyl_l0_note_read(const char * nm, size_t sz) {
+    if (!tyl_l0_on()) return;
+    if (!tyl_l0) tyl_l0 = new tyl_l0_t();
+    tyl_l0->rd++; tyl_l0->rd_bytes += sz;
+}
+static void tyl_l0_note_enq() { if (tyl_l0_on()) { if (!tyl_l0) tyl_l0 = new tyl_l0_t(); tyl_l0->enq++; } }
+static void tyl_l0_dump() {
+    if (!tyl_l0) return;
+    fprintf(stderr, "[L0O] sync=%lu wr=%lu wr_bytes=%lu rd=%lu rd_bytes=%lu ndrange=%lu\n",
+            tyl_l0->sync, tyl_l0->wr, tyl_l0->wr_bytes, tyl_l0->rd, tyl_l0->rd_bytes, tyl_l0->enq);
+    for (auto & kv : tyl_l0->wr_names)
+        fprintf(stderr, "[L0O] wr_name=%s n=%lu bytes=%lu\n", kv.first.c_str(), kv.second.first, kv.second.second);
+}
+static void tyl_l0_dtor() __attribute__((destructor));
+static void tyl_l0_dtor() { tyl_l0_dump(); }
+
 static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     auto * backend_ctx = static_cast<ggml_backend_opencl_context *>(backend->context);
+    tyl_l0_note_sync();
 
     cl_event evt;
     CL_CHECK(clEnqueueBarrierWithWaitList(backend_ctx->queue, 0, nullptr, &evt));
@@ -13997,6 +14040,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         }
     }
 
+    tyl_l0_note_write(tensor->name, size);
     CL_CHECK(clEnqueueWriteBuffer(
         queue, extra->data_device, CL_TRUE, extra->offset + offset,
         size, data, 0, NULL, NULL));
@@ -14084,6 +14128,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
         cl_event evt;
         CL_CHECK(clEnqueueNDRangeKernel(queue, kernel, 3, NULL, global_work_size, local_work_size, 0, NULL, &evt));
         CL_CHECK(clWaitForEvents(1, &evt));
+        tyl_l0_note_read(nullptr, size);
         CL_CHECK(clEnqueueReadBuffer(queue, data_device, CL_TRUE, offset, size, data, 0, NULL, NULL));
         CL_CHECK(clReleaseMemObject(data_device));
         return;
@@ -16245,6 +16290,8 @@ static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2,
 #include <math.h>
 #ifdef __cplusplus
 #include "half.hpp"
+
+
 #endif
 
 static void dump_tensor(ggml_backend_t backend, const struct ggml_tensor * tensor) {

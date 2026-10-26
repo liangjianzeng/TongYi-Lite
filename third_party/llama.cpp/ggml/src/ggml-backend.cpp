@@ -562,6 +562,24 @@ void ggml_backend_tensor_memset(struct ggml_tensor * tensor, uint8_t value, size
     buf->iface.memset_tensor(buf, tensor, value, offset, size);
 }
 
+// [TongYi-Lite 2026-10-27 L0/P2 · R-044] sched drain 点普查（与 ggml-opencl 侧
+// GGML_OPENCL_ISLAND_STATS 同名门控；默认关=零行为扰动）。站点号=SA-5 设计 §0-3。
+static bool ggml_l0_on() {
+    static int v = -1;
+    if (v < 0) { const char * e = getenv("GGML_OPENCL_ISLAND_STATS"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v == 1;
+}
+static struct { const char * site; unsigned long n; } ggml_l0_sites[] = {
+    {"1816_split_end", 0}, {"1859_input_imm", 0}, {"1869_input_pre", 0},
+    {"1880_copy_src", 0}, {"1884_copy_dst", 0}, {"1928_prev_backend", 0},
+};
+static void ggml_l0_note(int i) { if (ggml_l0_on()) ggml_l0_sites[i].n++; }
+static void ggml_l0_dtor() __attribute__((destructor));
+static void ggml_l0_dtor() {
+    if (!ggml_l0_on()) return;
+    for (auto & s : ggml_l0_sites) fprintf(stderr, "[L0B] site=%s n=%lu\n", s.site, s.n);
+}
+
 void ggml_backend_synchronize(ggml_backend_t backend) {
     GGML_ASSERT(backend);
     if (backend->iface.synchronize == NULL) {
@@ -1813,6 +1831,7 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
         // the re-allocation may cause the split inputs to be moved to a different address
         // synchronize without ggml_backend_sched_synchronize to avoid changing cur_copy
         for (int i = 0; i < sched->n_backends; i++) {
+            ggml_l0_note(0);
             ggml_backend_synchronize(sched->backends[i]);
         }
 
@@ -1856,6 +1875,7 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
         } else {
+            ggml_l0_note(1);
             ggml_backend_synchronize(split_backend);
         }
         ggml_backend_tensor_copy(input, input_cpy);
@@ -1866,6 +1886,7 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
         ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
     } else {
+        ggml_l0_note(2);
         ggml_backend_synchronize(split_backend);
     }
 
@@ -1877,10 +1898,13 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
     if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
+        ggml_l0_note(3);
+        ggml_l0_note(3);
         ggml_backend_synchronize(input_backend);
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
         } else {
+            ggml_l0_note(4);
             ggml_backend_synchronize(split_backend);
         }
         ggml_backend_tensor_copy(input, input_cpy);
@@ -1925,6 +1949,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
                 ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
             } else {
+                ggml_l0_note(5);
                 ggml_backend_synchronize(sched->backends[prev_backend_id]);
             }
         }

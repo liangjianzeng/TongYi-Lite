@@ -129,6 +129,20 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  l0b) # 前线② L0 真身：census 三件(04aaa77f/75a36aa7/914cc424) + ISLAND_STATS=1（P2 进程内计数，图末/exit 打 [L0O]/[L0B]）
+    mkdir -p $R/bin_bak_1027
+    cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
+    cp -n $R/bin/libggml-opencl.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
+    cp -n $R/bin/libggml-base.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
+    cp $R/stage_1027/minicpm_e2e $R/bin/minicpm_e2e
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1027/libggml-base.so.0.27.0 $R/bin/libggml-base.so.0.27.0
+    echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
+    run_leg e4d_l0b "" 16 "GGML_OPENCL_ISLAND_STATS=1"
+    echo "#### L0O=$(grep -a '^\\[L0O\\]' $R/out/e4d_l0b.err | head -1)"
+    grep -a '^\\[L0B\\]' $R/out/e4d_l0b.err
+    grep -a '^\\[L0O\\] wr_name' $R/out/e4d_l0b.err | sort -t= -k3 -rn | head -15
+    ;;
   l0a) # 前线② L0 计数腿：背书+现成 GGML_CL_OFFS_DEBUG=1，岛边界/跨设备传输底数（对照 g14 垫片 census）
     run_leg e4d_l0a "" 16 "GGML_CL_OFFS_DEBUG=1"
     echo "#### L0_SET=$(grep -ac '^\\[set\\]' $R/out/e4d_l0a.err) L0_WATCH=$(grep -ac '^\\[watch\\]' $R/out/e4d_l0a.err)"
@@ -138,16 +152,18 @@ case "$1" in
     mkdir -p $R/bin_bak_1027
     cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
     cp -n $R/bin/libggml-opencl.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
+    cp -n $R/bin/libggml-base.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
     cp $R/stage_1027/minicpm_e2e $R/bin/minicpm_e2e
     cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
-    echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0)"
+    cp $R/stage_1027/libggml-base.so.0.27.0 $R/bin/libggml-base.so.0.27.0
+    echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
     run_leg e4d_g31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1"
     ;;
   g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
     run_leg e4d_g32 "" 16 ""
     ;;
-  grestore1027) # 回滚 bin 到备份
-    cp $R/bin_bak_1027/minicpm_e2e $R/bin/minicpm_e2e && cp $R/bin_bak_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 && echo "#### restored: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0)"
+  grestore1027) # 回滚 bin 到备份（三件）
+    cp $R/bin_bak_1027/minicpm_e2e $R/bin/minicpm_e2e && cp $R/bin_bak_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 && cp $R/bin_bak_1027/libggml-base.so.0.27.0 $R/bin/libggml-base.so.0.27.0 && echo "#### restored: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
     ;;
   g30) # ★路线②根修实验：diag17 影子 + async 16 + L2FIX（双 fence，无垫片）
     run_leg e4d_g30 "" 16 "TYL_E4=1 TYL_E4_L2FIX=1"
