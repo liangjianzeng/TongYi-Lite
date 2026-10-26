@@ -129,6 +129,21 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  g31) # ★路线①真身：ksync 新二件(e2e=04aaa77f lib=ca484fa8)+背书库 KERNEL_SYNC=1
+    mkdir -p $R/bin_bak_1027
+    cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
+    cp -n $R/bin/libggml-opencl.so.0.27.0 $R/bin_bak_1027/ 2>/dev/null
+    cp $R/stage_1027/minicpm_e2e $R/bin/minicpm_e2e
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1"
+    ;;
+  g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
+    run_leg e4d_g32 "" 16 ""
+    ;;
+  grestore1027) # 回滚 bin 到备份
+    cp $R/bin_bak_1027/minicpm_e2e $R/bin/minicpm_e2e && cp $R/bin_bak_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 && echo "#### restored: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0)"
+    ;;
   g30) # ★路线②根修实验：diag17 影子 + async 16 + L2FIX（双 fence，无垫片）
     run_leg e4d_g30 "" 16 "TYL_E4=1 TYL_E4_L2FIX=1"
     ;;

@@ -1424,7 +1424,18 @@ struct ggml_backend_opencl_context {
                     tensor ? tensor->name : "?", kname);
             }
         }
-        cl_int enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+        // [TongYi-Lite 2026-10-27] KERNEL_SYNC: g21-形态产品化——每次 NDRange 发射后
+        // 等待其完成事件再返回，给 GPU 提供 L2 排空窗口（H2′ 竞态：上批 retire 后脏行
+        // 滞后落盘 vs host 覆写 pinned 后备，见全GPU卸载执行记录 R-041）。env 门控
+        // 默认关 = 零行为扰动；垫片交叉实验（g21）证明仅此一处等待即得金标准。
+        static const bool ksync = [] { const char * e = getenv("GGML_OPENCL_KERNEL_SYNC"); return e && e[0] == '1'; }();
+        cl_event evt0 = NULL;
+        cl_int enq_err;
+        if (ksync) {
+            enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt0);
+        } else {
+            enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+        }
         if (enq_err != CL_SUCCESS) {
             // [dspark 2026-10-17] rusticl is stricter than Adreno about local
             // sizes; fall back to driver-picked local and log the offender.
@@ -1432,9 +1443,15 @@ struct ggml_backend_opencl_context {
                 enq_err, tensor ? tensor->name : "?",
                 global_work_size[0], work_dim > 1 ? global_work_size[1] : 0, work_dim > 2 ? global_work_size[2] : 0,
                 local_work_size[0], work_dim > 1 ? local_work_size[1] : 0, work_dim > 2 ? local_work_size[2] : 0, max_wgs);
-            enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, NULL, 0, NULL, NULL);
+            enq_err = ksync
+                ? clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, NULL, 0, NULL, &evt0)
+                : clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, NULL, 0, NULL, NULL);
         }
         CL_CHECK(enq_err);
+        if (ksync && evt0) {
+            clWaitForEvents(1, &evt0);
+            clReleaseEvent(evt0);
+        }
 #endif
     }
 
