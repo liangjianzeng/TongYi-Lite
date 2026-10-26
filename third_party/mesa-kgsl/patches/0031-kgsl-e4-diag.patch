@@ -1,0 +1,138 @@
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -1,6 +1,33 @@
+ #include "kgsl_priv.h"
+ #include "freedreno_ringbuffer_sp.h"
+ 
++#include <stdlib.h>
++
++/* [TongYi-Lite 0031 E4] Diagnostics for the async-garbage battle (rusticl/kgsl).
++ * Everything is gated behind TYL_E4=1 in the environment; with the env unset
++ * this file behaves identically to the endorsed baseline (8de7d05f build).
++ *   P1: per-flush merge stats (E4MERGE) + deferred-depth histogram (E4HIST)
++ *   P2: BO-freed-while-referenced observation before merged fd_submit_del
++ *       (E4DEL summary + E4BO detail lines)
++ *   P3a: fence<->timestamp mapping per submitted batch (E4FENCE); the wait
++ *       side is instrumented separately so the logs can be joined offline.
++ */
++static int e4_on = -1;
++static unsigned e4_flushes = 0;
++static unsigned e4_hist[65];            /* nsubs histogram; bucket 64 == >=64 */
++static unsigned e4_del_submits = 0;
++static unsigned e4_freed_ring_total = 0;
++static unsigned e4_freed_ring_incmds_total = 0;
++static unsigned e4_freed_bo_total = 0;
++
++static inline int
++e4_enabled(void)
++{
++    if (e4_on < 0)
++        e4_on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++    return e4_on;
++}
++
+ static int
+ timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
+ {
+@@ -28,6 +55,7 @@
+     struct fd_pipe *pipe = fd_submit->base.pipe;
+     struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
+     unsigned nr_cmds = 0;
++    unsigned e4_nsubs = 0;
+ 
+ 
+     MESA_TRACE_FUNC();
+@@ -35,6 +63,7 @@
+     foreach_submit (submit, submit_list) {
+         assert(submit->pipe == &kgsl_pipe->base);
+         nr_cmds += to_fd_ringbuffer_sp(submit->primary)->u.nr_cmds;
++        e4_nsubs++;
+     }
+ 
+     struct kgsl_command_object cmds[nr_cmds];
+@@ -60,6 +89,49 @@
+             break;
+         }
+ 
++        if (e4_enabled()) {
++            struct fd_submit_sp *fds = to_fd_submit_sp(submit);
++            unsigned freed_ring = 0, freed_ring_incmds = 0, freed_bo = 0;
++
++            for (unsigned i = 0; i < deferred_primary->u.nr_cmds; i++) {
++                struct fd_bo *rbo = deferred_primary->u.cmds[i].ring_bo;
++                if (rbo && rbo->refcnt == 1) {
++                    int in_cmds = 0;
++                    for (unsigned j = 0; j < cmd_idx; j++) {
++                        if (cmds[j].id == rbo->handle) {
++                            in_cmds = 1;
++                            break;
++                        }
++                    }
++                    freed_ring++;
++                    freed_ring_incmds += in_cmds;
++                    fprintf(stderr,
++                        "E4BO ring handle=%u iova=0x%llx size=%u reuse=%d incmds=%d\n",
++                        rbo->handle, (unsigned long long)rbo->iova, rbo->size,
++                        (int)rbo->bo_reuse, in_cmds);
++                }
++            }
++            for (unsigned i = 0; i < fds->nr_bos; i++) {
++                struct fd_bo *bo = fds->bos[i];
++                if (bo && bo->refcnt == 1) {
++                    freed_bo++;
++                    if (e4_del_submits < 60)
++                        fprintf(stderr,
++                            "E4BO tbl handle=%u iova=0x%llx size=%u reuse=%d\n",
++                            bo->handle, (unsigned long long)bo->iova, bo->size,
++                            (int)bo->bo_reuse);
++                }
++            }
++            fprintf(stderr,
++                "E4DEL delsub=%u ringbos=%u freed_ring=%u freed_ring_incmds=%u bos=%u freed_bos=%u\n",
++                e4_del_submits, deferred_primary->u.nr_cmds, freed_ring,
++                freed_ring_incmds, fds->nr_bos, freed_bo);
++            e4_del_submits++;
++            e4_freed_ring_total += freed_ring;
++            e4_freed_ring_incmds_total += freed_ring_incmds;
++            e4_freed_bo_total += freed_bo;
++        }
++
+         list_del(&submit->node);
+         fd_submit_del(submit);
+     }
+@@ -86,6 +158,23 @@
+         .numsyncs = sync_fence.fd != -1 ? 1 : 0,
+     };
+ 
++    if (e4_enabled()) {
++        e4_flushes++;
++        e4_hist[e4_nsubs >= 64 ? 64 : e4_nsubs]++;
++        fprintf(stderr, "E4MERGE flush=%u nsubs=%u numcmds=%u nr_bos_last=%u\n",
++                e4_flushes, e4_nsubs, cmd_idx, fd_submit->nr_bos);
++        if ((e4_flushes % 1024) == 0) {
++            fprintf(stderr,
++                "E4HIST flushes=%u delsubmits=%u freed_ring=%u freed_ring_incmds=%u freed_bos=%u hist:",
++                e4_flushes, e4_del_submits, e4_freed_ring_total,
++                e4_freed_ring_incmds_total, e4_freed_bo_total);
++            for (unsigned b = 1; b <= 64; b++)
++                if (e4_hist[b])
++                    fprintf(stderr, " %u:%u", b, e4_hist[b]);
++            fprintf(stderr, "\n");
++        }
++    }
++
+     for (unsigned i = 0; i < cmd_idx; i++)
+         fprintf(stderr, "KGSLSUBMIT cmd[%u] gpuaddr=0x%llx size=%u\n", i,
+                 (unsigned long long)cmds[i].gpuaddr, (unsigned)cmds[i].size);
+@@ -100,6 +189,11 @@
+ 
+     fd_submit->out_fence->kfence = req.timestamp;
+ 
++    if (e4_enabled())
++        fprintf(stderr, "E4FENCE flush=%u ts=%u numsyncs=%u usefd=%d\n",
++                e4_flushes, req.timestamp, req.numsyncs,
++                (int)fd_submit->out_fence->use_fence_fd);
++
+     if  (fd_submit->out_fence->use_fence_fd) {
+         int fd = timestamp_to_fd(pipe, req.timestamp);
+         if (fd < 0) {
