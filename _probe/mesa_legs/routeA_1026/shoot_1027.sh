@@ -20,6 +20,7 @@ if ! leg_done stage; then
   adb -s $D push $L/stage_1027/. $R/stage_1027/ >/dev/null
   adb -s $D push $L/shim/libtylgrp_glibc_v8.so $R/bin/libtylgrp.so >/dev/null
   adb -s $D push $L/l3_coherency_probe_1027 $R/bin/l3_coherency_probe >/dev/null
+  adb -s $D push $L/libRusticl_e4r16_1026.so $R/stage_1027/libRusticl_e4r16_1026.so >/dev/null
   adb -s $D push /home/jianzengliang/MyWork/TongYi-Lite/TongYi-Lite/_probe/mesa_legs/routeA_1026/routeA_e4_legs.sh $R/routeA_e4_legs.sh >/dev/null
   # 部署七件（备份先行 + SONAME 软链）
   SH "mkdir -p $R/bin_bak_1027 && for f in minicpm_e2e libggml-opencl.so.0.27.0 libggml-base.so.0.27.0 libggml.so.0.27.0 libggml-cpu.so.0.27.0 libllama.so.0.7.0 libllama-common.so.0.7.0; do cp -n $R/bin/\$f $R/bin_bak_1027/ 2>/dev/null; cp $R/stage_1027/\$f $R/bin/\$f; done && for l in libggml.so.0 libggml-base.so.0 libggml-cpu.so.0 libggml-opencl.so.0 libllama.so.0 libllama-common.so.0; do ln -sf \$l.7.0 $R/bin/\$l 2>/dev/null; true; done && ln -sf libggml.so.0.27.0 $R/bin/libggml.so.0 && ln -sf libggml-base.so.0.27.0 $R/bin/libggml-base.so.0 && ln -sf libggml-cpu.so.0.27.0 $R/bin/libggml-cpu.so.0 && ln -sf libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0 && ln -sf libllama.so.0.7.0 $R/bin/libllama.so.0 && ln -sf libllama-common.so.0.7.0 $R/bin/libllama-common.so.0 && md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0" 2>&1 | tee "$LOG/deploy.txt"
@@ -41,4 +42,6 @@ run_leg_case() {
 }
 
 for c in g28 g29 g30 g31 g32 l0a l0b l3a l3b; do run_leg_case "$c"; done
+# 队列尾检查：影子必须已撤（g30 自撤失败即红牌）
+SH "ls $R/bin/libRusticlOpenCL.so.1" 2>/dev/null | grep -q libRusticl && { echo "HALT: shadow left behind!"; exit 5; } || echo "shadow_clear OK"
 echo "ALL_LEGS_DONE $(date +%H:%M:%S)"

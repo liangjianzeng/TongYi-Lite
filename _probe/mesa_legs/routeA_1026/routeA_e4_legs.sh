@@ -181,7 +181,14 @@ case "$1" in
     cp $R/bin_bak_1027/minicpm_e2e $R/bin/minicpm_e2e && cp $R/bin_bak_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 && cp $R/bin_bak_1027/libggml-base.so.0.27.0 $R/bin/libggml-base.so.0.27.0 && echo "#### restored: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
     ;;
   g30) # ★路线②根修实验：diag17 影子 + async 16 + L2FIX（双 fence，无垫片）
+    # [自证铁律] 影子腿必须腿内部署+撤除，防"影子缺席=背书跑 L2FIX 变量"NO-OP 陷阱
+    if [ ! -f $R/stage_1027/libRusticl_e4r16_1026.so ]; then echo "#### G30_ABORT no diag17 in stage"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1027/libRusticl_e4r16_1026.so $R/bin/libRusticlOpenCL.so.1
+    echo "#### shadow_deployed=$(md5sum $R/bin/libRusticlOpenCL.so.1)"
     run_leg e4d_g30 "" 16 "TYL_E4=1 TYL_E4_L2FIX=1"
+    echo "#### L2FIX_selfproof=$(grep -ac E4L2FIX $R/out/e4d_g30.err)"
+    rm $R/bin/libRusticlOpenCL.so.1
+    echo "#### shadow_removed=$(ls $R/bin/libRusticlOpenCL.so.1 2>/dev/null | wc -l) (must be 0)"
     ;;
   g29) # ★路线①零代码候选：背书库 + 现成 GGML_OPENCL_SET_TENSOR_FINISH=1（set_tensor 入口 clFinish）
     run_leg e4d_g29 "" 16 "GGML_OPENCL_SET_TENSOR_FINISH=1"
