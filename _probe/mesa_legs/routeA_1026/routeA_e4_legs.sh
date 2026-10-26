@@ -114,6 +114,16 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  g30) # ★路线②根修实验：diag17 影子 + async 16 + L2FIX（双 fence，无垫片）
+    run_leg e4d_g30 "" 16 "TYL_E4=1 TYL_E4_L2FIX=1"
+    ;;
+  g29) # ★路线①零代码候选：背书库 + 现成 GGML_OPENCL_SET_TENSOR_FINISH=1（set_tensor 入口 clFinish）
+    run_leg e4d_g29 "" 16 "GGML_OPENCL_SET_TENSOR_FINISH=1"
+    ;;
+  g28) # ★产品化终验真版：背书库 + v8 垫片 GRP=4（门控已解耦；E4GSLEEP 自证）
+    run_leg e4d_g28 "" 16 "TYL_E4_GRP=4" "$R/bin/libtylgrp.so"
+    echo "#### GSLEEP_selfproof=$(grep -ac E4GSLEEP $R/out/e4d_g28.err)"
+    ;;
   g27) # 解耦：背书库 + GRP=4 无 TYL_E4（纯 sleep，零打印）
     run_leg e4d_g27 "" 16 "TYL_E4_GRP=4"
     ;;
