@@ -8664,6 +8664,27 @@ static void tyl_l0_dump() {
 static void tyl_l0_dtor() __attribute__((destructor));
 static void tyl_l0_dtor() { tyl_l0_dump(); }
 
+// [WAIT_BIGWRITE · R-052 · 1027] H2′ 定点解：大 host->BO 写**前** clFinish 等在飞内核 retire，
+// 让 L2 dirty 排空先于后备覆写（g28 垫片语义的原生化：写面选在 clEnqueueWriteBuffer choke point，
+// 同时覆盖 set_tensor 与 pack/raw_stage 两大写面；g29 败因=set_tensor 层盖不到 pack，此处堵住）。
+// GGML_OPENCL_WAIT_BIGWRITE=1 开；GGML_OPENCL_WAIT_BIGWRITE_TH 阈值字节（默认 1MiB）。默认关=零扰动。
+static bool tyl_wbw_on() {
+    static int v = -1;
+    if (v < 0) { const char * e = getenv("GGML_OPENCL_WAIT_BIGWRITE"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v == 1;
+}
+static size_t tyl_wbw_th() {
+    static size_t t = 0;
+    if (t == 0) { const char * e = getenv("GGML_OPENCL_WAIT_BIGWRITE_TH"); t = e ? strtoull(e, NULL, 10) : 0; if (t == 0) t = (size_t)1 << 20; }
+    return t;
+}
+static unsigned long g_wbw_waits = 0; static unsigned long long g_wbw_bytes = 0;
+static void tyl_wbw_before_write(cl_command_queue q, size_t size) {
+    if (tyl_wbw_on() && size >= tyl_wbw_th()) { clFinish(q); g_wbw_waits++; g_wbw_bytes += size; }
+}
+static void tyl_wbw_dtor() __attribute__((destructor));
+static void tyl_wbw_dtor() { if (g_wbw_waits) fprintf(stderr, "[WBW] waits=%lu bytes=%llu\n", g_wbw_waits, g_wbw_bytes); }
+
 static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     auto * backend_ctx = static_cast<ggml_backend_opencl_context *>(backend->context);
     tyl_l0_note_sync();
@@ -11872,6 +11893,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         cl_mem data_device = clCreateBuffer(context, CL_MEM_READ_WRITE,
             ggml_nbytes(tensor), NULL, &err);
         CL_CHECK(err);
+        tyl_wbw_before_write(queue, ggml_nbytes(tensor));   // [R-052]
         CL_CHECK(clEnqueueWriteBuffer(
             queue, data_device, CL_TRUE, 0,
             ggml_nbytes(tensor), data, 0, NULL, NULL));
@@ -14041,6 +14063,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
 
     tyl_l0_note_write(tensor->name, size);
+    tyl_wbw_before_write(queue, size);   // [R-052]
     CL_CHECK(clEnqueueWriteBuffer(
         queue, extra->data_device, CL_TRUE, extra->offset + offset,
         size, data, 0, NULL, NULL));
@@ -16002,6 +16025,7 @@ void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int plane_slot, const v
         // ggml_cl_moe_q3k_stage_pack (main thread, after wave join).
         const size_t slot_bpe = ggml_nbytes(soa) / (size_t) soa->ne[2];
         cl_ulong raw_off = (cl_ulong) plane_slot * slot_bpe;
+        tyl_wbw_before_write(backend_ctx->queue, slot_bpe);   // [R-052] H2′ 主犯写面
         CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage, CL_FALSE,
             (size_t) raw_off, slot_bpe, raw, 0, NULL, NULL));
         moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, raw_off);
@@ -16061,6 +16085,7 @@ static void moe_q3k_stage_pack_impl(struct ggml_tensor * soa, int plane_slot,
     const size_t raw_off = (size_t) plane_slot * slot_bpe;
     cl_event ev = nullptr;
     std::lock_guard<std::mutex> glock(g_svm_enqueue_mutex);
+    tyl_wbw_before_write(backend_ctx->queue, slot_bpe);   // [R-052]
     CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage,
         blocking ? CL_TRUE : CL_FALSE,
         raw_off, slot_bpe, src_host, 0, NULL, ev_out ? &ev : NULL));

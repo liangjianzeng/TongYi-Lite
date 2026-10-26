@@ -190,6 +190,16 @@ case "$1" in
   d31) # g31 终验：KERNEL_SYNC drift N=20（热闸断跑；md5 单一+health 20/20=过门）
     run_drift e4d_d31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1" "" 20
     ;;
+  g35) # ★R-052 主形态：WBW 原生补丁(opencl 0f56e3bf)+背书 async——预期治愈+税≈g28
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### wbw_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g35 "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1"
+    echo "#### WBW_selfproof=$(grep -ac '^\[WBW\]' $R/out/e4d_g35.err) $(grep -a '^\[WBW\]' $R/out/e4d_g35.err)"
+    ;;
+  g36) # WBW 阈值加密 256K（若 g35 漏网则此腿兜底）
+    run_leg e4d_g36 "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1 GGML_OPENCL_WAIT_BIGWRITE_TH=262144"
+    echo "#### WBW_selfproof=$(grep -ac '^\[WBW\]' $R/out/e4d_g36.err) $(grep -a '^\[WBW\]' $R/out/e4d_g36.err)"
+    ;;
   g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
     run_leg e4d_g32 "" 16 ""
     ;;
