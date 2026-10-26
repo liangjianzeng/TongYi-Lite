@@ -1,0 +1,33 @@
+dev[0] = GPUOpenCL (QUALCOMM Adreno(TM) 830)
+dev[1] = CPU (CPU)
+
+===== DENSE sanity-q4_0: type=q4_0 K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = YES
+DENSE worst over 1 tok: GPU NMSE=0.415065  CPU NMSE=0.000013
+
+===== DENSE attn-q-q3K: type=q3_K K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-gate-q3K: type=q3_K K=2048 N=4096 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE shexp-gate-q3K: type=q3_K K=2048 N=512 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE shexp-down-q3K: type=q3_K K=512 N=2048 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-q-q3K-tok4: type=q3_K K=2048 N=8192 n_tok=4 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-v-q4K: type=q4_K K=2048 N=512 n_tok=1 =====
+supports_op(OpenCL) = YES
+DENSE worst over 1 tok: GPU NMSE=0.000007  CPU NMSE=0.000019
+
+===== DENSE out-like-q4K: type=q4_K K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = YES
+DENSE worst over 1 tok: GPU NMSE=0.000005  CPU NMSE=0.000014
+
+===== DENSE out-like-q4K-tok4: type=q4_K K=2048 N=8192 n_tok=4 =====
+supports_op(OpenCL) = YES
+DENSE worst over 4 tok: GPU NMSE=0.000006  CPU NMSE=0.000013

@@ -1,0 +1,6 @@
+ggml_opencl: OpenCL driver: 26.2.4
+ggml_opencl: vector subgroup broadcast support: false
+ggml_opencl: subgroup shuffle support: true
+ggml_opencl: SVM atomics support: false
+ggml_opencl: cl_qcom_subgroup_shuffle support: false
+ggml_opencl: OpenCL driver: 26.2.4

@@ -13400,7 +13400,11 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         }
 
         tensor->extra  = extra;
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    // [R-029 guard-sweep P2 2026-10-26] unguarded: the q4_K GEMV consumer (splitk
+    // :25473 / plain gemv_noshuffle_q4_k_f32) is runtime-gated and runs in the
+    // ADRENO=OFF Mesa build too; keeping this repack guarded fed it un-transposed
+    // planes (probe DENSE out-like-q4K NMSE~2 on 830, e2e 48-token degeneration).
+    // (was: #ifdef GGML_OPENCL_USE_ADRENO_KERNELS)
         if (use_adreno_kernels(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor)) {
 
             int M = tensor->ne[1];
@@ -13433,7 +13437,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             // Transpose s as uchar
             transpose_2d_as_8b(backend_ctx, extra->s, extra->s, size_s, K/256*12, M, true, true);
         }
-#endif // GGML_OPENCL_USE_ADRENO_KERNELS
+    // (R-029: #endif removed together with its #ifdef above)
         return;
     }
     if (tensor->type == GGML_TYPE_Q5_K) {
@@ -14087,7 +14091,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
         const ggml_tensor * extra_src = tensor->view_src != nullptr ? tensor->view_src : tensor;
         ggml_tensor_extra_cl_q4_0 * extra = (ggml_tensor_extra_cl_q4_0 *)extra_src->extra;
 
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS  // R-029b RE-GUARDED: OFF probe showed the dense-loop MoE restore arm corrupts batched q4_0 weights under Mesa (post-readback compute NMSE 0.53 vs 0.0 pre); its readback FAILs in ON too (pre-existing defect). trans4+plane arms as before.
         // [dspark 2026-10-13] Dense-loop MoE: weights are stored as PER-LAYER
         // dense-transposed noshuffle (see set_tensor dense-MoE branch). Undo
         // the per-layer transposes, then restore blocks row-major. The vendor
@@ -14142,6 +14146,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clEnqueueReadBuffer(queue, buf_unpacked.buffer, CL_TRUE, offset, size, data, 0, NULL, NULL));
             return;
         }
+// (R-029b: redundant reopen removed — dense-loop+trans4 share the guard above, closed at the #endif before the dense noshuffle arm)
         if (use_adreno_moe_kernels(backend_ctx, tensor)) {
             cl_kernel kernel = backend_ctx->kernel_restore_block_q4_0_trans4_ns;
 
@@ -14170,6 +14175,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
+#endif // R-029: ADRENO guard closed (trans4/tiled arms above stay guarded)
         if (use_adreno_kernels(backend_ctx, tensor)) {
             ggml_cl_buffer buf_trans_q;
             ggml_cl_buffer buf_trans_d;
@@ -14213,7 +14219,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clEnqueueReadBuffer(queue, buf_unpacked.buffer, CL_TRUE, offset, size, data, 0, NULL, NULL));
             return;
         }
-#endif
+// (was: #endif)  [R-029 guard-sweep P2 2026-10-26] unguarded: set_tensor producer for this layout is runtime-gated (use_adreno_kernels/use_adreno_moe_kernels) and runs in ADRENO=OFF Mesa builds too; keeping the get_tensor restore guarded fed the plane-restore kernel transposed bytes (reverse-direction asymmetry, audit G1/G2/G3). Vendor trans4/tiled arms above stay guarded (their kernels are created inside the ADRENO guard).
 
         cl_mem data_device = ggml_cl_create_temp_download_buffer(context, queue, ggml_nbytes(tensor), tensor->name);
         GGML_ASSERT(data_device != NULL && "get_tensor: temp download buffer alloc failed");
@@ -14792,6 +14798,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
+#endif // R-029: ADRENO guard closed (tiled arm above stays guarded)
         // [dspark 2026-10-13] Dense-loop MoE: weights are stored as PER-LAYER
         // dense-transposed noshuffle (see set_tensor dense-MoE branch). Undo
         // the per-layer transposes, then restore blocks row-major. Mirrors the
@@ -14874,6 +14881,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS  // R-029: reopen for vendor trans4 arm
         if (use_adreno_moe_kernels(backend_ctx, tensor)) {
             cl_mem data_device = ggml_cl_create_temp_download_buffer(context, queue, ggml_nbytes(tensor), tensor->name);
             GGML_ASSERT(data_device != NULL && "get_tensor: temp download buffer alloc failed");
@@ -14906,6 +14914,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
+#endif // R-029: ADRENO guard closed (trans4/tiled arms above stay guarded)
         if (use_adreno_kernels(backend_ctx, tensor) && !use_flat_gemv_for_large_m_q4_K(backend_ctx, tensor)) {
             int M = tensor->ne[1];
             int K = tensor->ne[0];
@@ -14954,7 +14963,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
             CL_CHECK(clReleaseMemObject(data_device));
             return;
         }
-#endif // GGML_OPENCL_USE_ADRENO_KERNELS
+// (was: #endif // GGML_OPENCL_USE_ADRENO_KERNELS)  [R-029 guard-sweep P2 2026-10-26] unguarded: set_tensor producer for this layout is runtime-gated (use_adreno_kernels/use_adreno_moe_kernels) and runs in ADRENO=OFF Mesa builds too; keeping the get_tensor restore guarded fed the plane-restore kernel transposed bytes (reverse-direction asymmetry, audit G1/G2/G3). Vendor trans4/tiled arms above stay guarded (their kernels are created inside the ADRENO guard).
 
         cl_kernel kernel = backend_ctx->kernel_restore_block_q4_K;
         CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &extra->q));

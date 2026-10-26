@@ -1,0 +1,107 @@
+dev[0] = GPUOpenCL (Adreno (TM) 830)
+dev[1] = CPU (CPU)
+
+===== REAL-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=1536 N=512 E=128 nbytes=56623104 mismatch=54889426 (FAIL)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 341.7 us/op   CPU 298.5 us/op   ratio GPU/CPU = 1.14
+
+===== REAL-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=512 N=1536 E=128 nbytes=56623104 mismatch=54889000 (FAIL)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000016
+bench: GPU 427.8 us/op   CPU 123.7 us/op   ratio GPU/CPU = 3.46
+
+===== PREFILL-gateup-tok4: K=1536 N=512 E=128 n_used=8 n_tok=4 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=1536 N=512 E=128 nbytes=56623104 mismatch=54889138 (FAIL)
+worst over 32 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 422.6 us/op   CPU 429.9 us/op   ratio GPU/CPU = 0.98
+
+===== M1-IQ4XS-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=1536 N=512 E=128 nbytes=53477376 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000019
+bench: GPU 5972.2 us/op   CPU 181.9 us/op   ratio GPU/CPU = 32.83
+
+===== M1-IQ4XS-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=512 N=1536 E=128 nbytes=53477376 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000016
+bench: GPU 5416.1 us/op   CPU 146.9 us/op   ratio GPU/CPU = 36.88
+
+===== M1-IQ4XS-K256: K=256 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=256 N=128 E=128 nbytes=2228224 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000030
+bench: GPU 746.4 us/op   CPU 19.1 us/op   ratio GPU/CPU = 39.05
+
+===== Q4K-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=1536 N=512 E=128 nbytes=56623104 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000019
+bench: GPU 326.2 us/op   CPU 188.4 us/op   ratio GPU/CPU = 1.73
+
+===== Q4K-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=512 N=1536 E=128 nbytes=56623104 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000015
+bench: GPU 285.6 us/op   CPU 113.7 us/op   ratio GPU/CPU = 2.51
+
+===== Q4K-PREFILL-tok4: K=1536 N=512 E=128 n_used=8 n_tok=4 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=1536 N=512 E=128 nbytes=56623104 mismatch=0 (ok)
+worst over 32 slots: GPU NMSE=0.000000  CPU NMSE=0.000018
+bench: GPU 733.4 us/op   CPU 414.3 us/op   ratio GPU/CPU = 1.77
+
+===== B1-K256-E1-u1: K=256 N=128 E=1 n_used=1 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=256 N=128 E=1 nbytes=18432 mismatch=0 (ok)
+worst over 1 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 266.1 us/op   CPU 5.3 us/op   ratio GPU/CPU = 50.58
+
+===== B2-K256-E128-u1: K=256 N=128 E=128 n_used=1 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=256 N=128 E=128 nbytes=2359296 mismatch=0 (ok)
+worst over 1 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 268.6 us/op   CPU 6.5 us/op   ratio GPU/CPU = 41.30
+
+===== B3-K256-E128-u8: K=256 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=256 N=128 E=128 nbytes=2359296 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000001  CPU NMSE=0.000018
+bench: GPU 277.1 us/op   CPU 13.4 us/op   ratio GPU/CPU = 20.72
+
+===== B4-K512-E128-u8: K=512 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=512 N=128 E=128 nbytes=4718592 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000020
+bench: GPU 311.4 us/op   CPU 21.5 us/op   ratio GPU/CPU = 14.52
+
+===== B5-K512-E1-u8: K=512 N=128 E=1 n_used=8 n_tok=1 (broadcast=1) =====
+[READBACK-MOE] blk.0.ffn_gate_exps.weight K=512 N=128 E=1 nbytes=36864 mismatch=0 (ok)
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000018
+bench: GPU 303.7 us/op   CPU 18.8 us/op   ratio GPU/CPU = 16.12
+
+===== DENSE sanity-q4_0: type=q4_0 K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = YES
+[READBACK] q4_0 K=2048 N=8192 nbytes=9437184 mismatch=0 (ok)
+DENSE worst over 1 tok: GPU NMSE=0.000000  CPU NMSE=0.000013
+
+===== DENSE attn-q-q3K: type=q3_K K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-gate-q3K: type=q3_K K=2048 N=4096 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE shexp-gate-q3K: type=q3_K K=2048 N=512 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE shexp-down-q3K: type=q3_K K=512 N=2048 n_tok=1 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-q-q3K-tok4: type=q3_K K=2048 N=8192 n_tok=4 =====
+supports_op(OpenCL) = no (CPU fallback in real sched)
+
+===== DENSE attn-v-q4K: type=q4_K K=2048 N=512 n_tok=1 =====
+supports_op(OpenCL) = YES
+[READBACK] q4_K K=2048 N=512 nbytes=589824 mismatch=0 (ok)
+DENSE worst over 1 tok: GPU NMSE=0.000008  CPU NMSE=0.000019
+
+===== DENSE out-like-q4K: type=q4_K K=2048 N=8192 n_tok=1 =====
+supports_op(OpenCL) = YES
+[READBACK] q4_K K=2048 N=8192 nbytes=9437184 mismatch=0 (ok)
+DENSE worst over 1 tok: GPU NMSE=0.000006  CPU NMSE=0.000014
+
+===== DENSE out-like-q4K-tok4: type=q4_K K=2048 N=8192 n_tok=4 =====
+supports_op(OpenCL) = YES
+[READBACK] q4_K K=2048 N=8192 nbytes=9437184 mismatch=0 (ok)
+DENSE worst over 4 tok: GPU NMSE=0.000006  CPU NMSE=0.000014
