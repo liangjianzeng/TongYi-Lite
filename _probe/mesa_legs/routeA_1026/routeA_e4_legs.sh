@@ -11,6 +11,7 @@ EXPERTS=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts
 PROMPT='请详细介绍一下中国的四大发明，分别说明每一项的历史背景、技术要点和对世界文明的影响，分四段展开，每段不少于八十字，不要简短总结'
 
 run_leg () {
+  typeset TAG FL NPRED EXTRAENV PRELOAD PLENV TEMP
   TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4; PRELOAD=$5
   # [教训 1026] LD_PRELOAD 绝不 export：会毒死 timeout/grep 等 bionic 二进制
   # （"CANNOT LINK EXECUTABLE timeout: cannot find verneed..."），只在 exec 行 env 注入
@@ -66,6 +67,7 @@ run_leg () {
 
 # [R-041] 漂移概率统计：同参数 N 连跑，报 tok md5 分布 + health 计数（治愈候选终验门 N>=20）
 run_drift () {
+  typeset TAG FL NPRED EXTRAENV PRELOAD N LINE
   TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4; PRELOAD=$5; N=${6:-20}
   i=0; : > $R/out/${TAG}_drift.txt
   while [ $i -lt $N ]; do
