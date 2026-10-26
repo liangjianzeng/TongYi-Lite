@@ -82,3 +82,6 @@
 - 【R-034】Rust eprintln 字面量在合并 rodata 串里，`strings|grep '^E4X'` 锚定失配，用非锚定计数。
 - 【R-034】腿脚本 FASTHIT 用 `hit=1` 子串计数与 timeout 大数无冲突但偏松；精确判读从 err 原文 `awk '$0 ~ /^E4FAST/ && / hit=1$/'`。
 - **机床现状（R-034 后）**：chroot 树 = 背书态+0031+0032+0033（diag3 源码态）；build-cl 产物=1db4c812；**设备无影子、背书已复验（e9b88e56 第六次）**；回退料 /root/kgsl_ringbuffer_sp.c.orig（bf02f850）+ 快照 /root/mesa-26.2.4_snap_1026 仍在；pre 拷贝 /root/{e4r2_pre,e4r3_pre}/ 供 diff 再生。
+- [x] R-038：SA-6 真报告对账（虚构锚点自破；release 325→ioctl 370 窗口真实）；环盲区破案（flags 等式一位之差=七代全哑真凶）；环轴测净 16339/0（KMD 实证）；跨队列死刑；BOREUSE decode 证据有效性恢复（单队列）。背书 #9。
+- [ ] **0045（diag14）内核参数级审计设计**：kernel.rs 发射点打点（kernel+arg 句柄+rw+ts）join 退休水位；判据=READ-BO 的最后 WRITE 批未退休且同 BO WRITE 批已开跑。全净则转 fl1 产品化+fl2 税 A/B+前线② L0/L3
+- [ ] 教训入册：探针税>2min/token 的对照腿需 2× 超时；提问子智能体前先自查锚点真实性（SA-6 Q1 教训：问题文本自带虚构符号）

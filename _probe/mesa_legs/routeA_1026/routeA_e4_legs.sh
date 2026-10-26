@@ -102,5 +102,11 @@ case "$1" in
   fix8g) # diag8 双探针腿：修复验证 + grp 垫片同开（环绕应消失）
     run_leg e4d_fix8g "" 16 "TYL_E4=1 TYL_UPSZ=4194304 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
     ;;
+  g11) # fl1 治愈对照（全代探针在场，验证不扰动金标准）
+    run_leg e4f_g11 "" 1 "TYL_E4=1"
+    ;;
+  g9) # diag9 乒乓全采腿：async 16 + grp 垫片 + Rusticl E4GMEM 三点（NEW/REL/DROP 身份贯通）
+    run_leg e4d_g9 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
+    ;;
   *) echo "usage: sh routeA_e4_legs.sh e4a|...|e4h|flscan|fl2a|g7|fix8|fix8g"; exit 2;;
 esac
