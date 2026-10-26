@@ -59,29 +59,33 @@ static fn_enqueue_ndrange p_enqueue_ndrange;
 static fn_wait_events p_wait_events;
 static fn_enqueue_read p_enqueue_read;
 
-/* 主变体：shuffle_xor + barrier + reduce_add（ggml 内核 subgroup 面的并集） */
+/* 主变体 = ggml Mesa 内核真实 subgroup 面（1.2 + cl_khr_subgroups 扩展语法：
+ * shuffle_xor / shuffle 广播 / barrier(CLK_*)——rusticl 前端 -cl-std 不生效，
+ * 2.0 核心名（sub_group_barrier(CL_MEMORY_SEQ_CST)/reduce_add）在 CLC 路编不过，
+ * 而这些 KHR 名恰好就是 ggml-opencl 内核在用的那批，卡死复现面更对口） */
 static const char *SRC_FULL =
+"#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
 "__kernel void sg_hang(__global int * out) {\n"
 "  int gid = get_global_id(0);\n"
 "  int v = gid + 1;\n"
 "  int acc = 0;\n"
 "  for (int i = 0; i < 4; i++) {\n"
 "    v = sub_group_shuffle_xor(v, 1);\n"
-"    sub_group_barrier(CL_MEMORY_SEQ_CST);\n"
-"    acc += sub_group_reduce_add(v);\n"
-"    sub_group_barrier(CL_MEMORY_SEQ_CST);\n"
+"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
+"    acc += sub_group_shuffle(v, 0);\n"
+"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
 "  }\n"
 "  out[gid] = acc;\n"
 "}\n";
-/* 降级变体（只为"编译不过"兜底，不为绕挂死）：去掉 reduce_add */
+/* 降级变体（只为"编译不过"兜底，不为绕挂死）：barrier-only */
 static const char *SRC_BASIC =
+"#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
 "__kernel void sg_hang(__global int * out) {\n"
 "  int gid = get_global_id(0);\n"
 "  int v = gid + 1;\n"
 "  int acc = 0;\n"
 "  for (int i = 0; i < 4; i++) {\n"
-"    v = sub_group_shuffle_xor(v, 1);\n"
-"    sub_group_barrier(CL_MEMORY_SEQ_CST);\n"
+"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
 "    acc += v;\n"
 "  }\n"
 "  out[gid] = acc;\n"
@@ -160,9 +164,8 @@ int main(void) {
         variant = attempt == 0 ? "full" : "basic";
         prog = p_create_prog_src(ctx, 1, &src, &srclen, &rc);
         if (!prog) { fprintf(stderr, "[HANGTEST] CreateProgram rc=%d\n", rc); printf("[HANGTEST] VERDICT=BUILD_FAIL\n"); return 3; }
-        /* CL3.0 = rustc 前端原生路（自带 prelude）；1.2 会掉 CLC+上游 libclc（已知带 bug，
-         * 启动时那条 "Patched Mesa libclc not detected" 警告就是它），sub_group 面编不过 */
-        rc = p_build_program(prog, 1, &dev, "-cl-std=CL3.0", NULL, NULL);
+        /* 不加 -cl-std（rusticl 前端不吃该选项）；源本身用 1.2+KHR 名 */
+        rc = p_build_program(prog, 1, &dev, "", NULL, NULL);
         if (rc == CL_SUCCESS) { kn = p_create_kernel(prog, "sg_hang", &rc); if (kn) break; }
         char log[2048] = {0};
         p_get_prog_build_info(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof log - 1, log, NULL);
