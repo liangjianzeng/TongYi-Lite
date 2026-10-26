@@ -111,6 +111,30 @@ case "$1" in
   g16) # 0046 生死括号版内核普查：async 16 + E4
     run_leg e4d_g16 "" 16 "TYL_E4=1"
     ;;
+  g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
+    run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
+    ;;
+  g25) # 治愈剂量扫描：async 16 + 写前 usleep 100us
+    run_leg e4d_g25 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=100" "$R/bin/libtylgrp.so"
+    ;;
+  g23) # H2′ 时延假说：async 16 + 垫片v6（≥1MB 写前 usleep 2ms，GRP=4）
+    run_leg e4d_g23 "" 16 "TYL_E4=1 TYL_E4_GRP=4" "$R/bin/libtylgrp.so"
+    ;;
+  g22) # Mesa 自证：async 16 + E4 + NOMERGE（每 submit 单独 ioctl，无垫片）
+    run_leg e4d_g22 "" 16 "TYL_E4=1 TYL_E4_NOMERGE=1"
+    ;;
+  g21) # kernel 竞态二分：async 16 + 垫片v5（仅 NDRange 后 finish，GRP=3）
+    run_leg e4d_g21 "" 16 "TYL_E4=1 TYL_E4_GRP=3" "$R/bin/libtylgrp.so"
+    ;;
+  g20) # 同二进制金标准：fl1 原生 16 token（无垫片）
+    run_leg e4d_g20 "1" 16 ""
+    ;;
+  g19) # fl1-by-shim：async 16 + 垫片v4（每 op 后 clFinish，GRP=2）
+    run_leg e4d_g19 "" 16 "TYL_E4=1 TYL_E4_GRP=2" "$R/bin/libtylgrp.so"
+    ;;
+  g18) # S1′ 治愈点定位：async 16 + 垫片v3（>1MB 写后注入 clFinish）
+    run_leg e4d_g18 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
+    ;;
   g15) # 内核参数级普查：async 16 + E4（E4KHDR/E4KARG/E4R2BO/id=）
     run_leg e4d_g15 "" 16 "TYL_E4=1"
     ;;

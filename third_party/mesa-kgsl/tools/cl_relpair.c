@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
 #include <CL/cl.h>
@@ -29,6 +30,18 @@ static struct rel rtab[RTAB];
 static unsigned long long ns_now(void) {
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
     return (unsigned long long)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+/* [0047 fl1-by-shim] finish after every enqueued op when TYL_E4_GRP=2. */
+static void grp_maybe_finish(cl_command_queue q)
+{
+    /* [0048] grp_on==3: finish ONLY after NDRange (kernel-race bisection). */
+    if (grp_on == 3) return;
+    if (grp_on >= 2) {
+        static int (*fin)(cl_command_queue) = 0;
+        if (!fin) fin = (int(*)(cl_command_queue))dlsym(RTLD_NEXT, "clFinish");
+        if (fin) fin(q);
+    }
 }
 
 static void rput(cl_mem m, size_t sz) {
@@ -65,7 +78,7 @@ clCreateBuffer(cl_context c, cl_mem_flags f, size_t sz, void *p, cl_int *e) {
     static fn_create r; if (!r) r = (fn_create)dlsym(RTLD_NEXT, "clCreateBuffer");
     cl_mem m = r(c, f, sz, p, e);
     if (grp_on < 0) grp_on = (getenv("TYL_E4") && getenv("TYL_E4_GRP") &&
-        getenv("TYL_E4")[0]=='1' && getenv("TYL_E4_GRP")[0]=='1') ? 1 : 0;
+        getenv("TYL_E4")[0]=='1') ? atoi(getenv("TYL_E4_GRP")) : 0;
     seq++; c_created++;
     if (grp_on && m && e && *e == CL_SUCCESS) {
         struct rel *re = rget(m);
@@ -87,7 +100,7 @@ clCreateBufferWithProperties(cl_context c, const cl_mem_properties *pr,
     if (!r) return NULL;
     cl_mem m = r(c, (cl_mem_properties *)pr, f, sz, p, e);
     if (grp_on < 0) grp_on = (getenv("TYL_E4") && getenv("TYL_E4_GRP") &&
-        getenv("TYL_E4")[0]=='1' && getenv("TYL_E4_GRP")[0]=='1') ? 1 : 0;
+        getenv("TYL_E4")[0]=='1') ? atoi(getenv("TYL_E4_GRP")) : 0;
     seq++; c_created++;
     if (grp_on && m && e && *e == CL_SUCCESS) {
         struct rel *re = rget(m);
@@ -128,6 +141,7 @@ clEnqueueMapBuffer(cl_command_queue q, cl_mem b, cl_bool blocking,
     if (grp_on == 1)
         fprintf(stderr, "E4GMAP mem=%p blk=%d mf=%x off=%zu cb=%zu nev=%u ptr=%p rt=%llu\n",
                 (void *)b, (int)blocking, (unsigned)mf, off, cb, nev, p, ns_now());
+    grp_maybe_finish(q);
     return p;
 }
 
@@ -138,7 +152,9 @@ clEnqueueUnmapMemObject(cl_command_queue q, cl_mem m, void *p, cl_uint nev,
     if (!r) return CL_INVALID_OPERATION;
     if (grp_on == 1)
         fprintf(stderr, "E4GUNMAP mem=%p nev=%u rt=%llu\n", (void *)m, nev, ns_now());
-    return r(q, m, p, nev, ev, pe);
+    cl_int rc_ = r(q, m, p, nev, ev, pe);
+    grp_maybe_finish(q);
+    return rc_;
 }
 
 CL_API_ENTRY cl_int CL_API_CALL
@@ -149,7 +165,9 @@ clEnqueueReadBuffer(cl_command_queue q, cl_mem b, cl_bool blk, size_t off,
     if (grp_on == 1)
         fprintf(stderr, "E4GREAD mem=%p blk=%d cb=%zu nev=%u rt=%llu\n",
                 (void *)b, (int)blk, cb, nev, ns_now());
-    return r(q, b, blk, off, cb, p, nev, ev, pe);
+    cl_int rc_ = r(q, b, blk, off, cb, p, nev, ev, pe);
+    grp_maybe_finish(q);
+    return rc_;
 }
 
 CL_API_ENTRY cl_int CL_API_CALL
@@ -160,5 +178,39 @@ clEnqueueWriteBuffer(cl_command_queue q, cl_mem b, cl_bool blk, size_t off,
     if (grp_on == 1)
         fprintf(stderr, "E4GWRITE mem=%p blk=%d cb=%zu nev=%u rt=%llu\n",
                 (void *)b, (int)blk, cb, nev, ns_now());
-    return r(q, b, blk, off, cb, p, nev, ev, pe);
+    /* [0048 H2'] L2-drain-after-retirement race: pre-write sleep probe. */
+    if (grp_on == 4 && cb >= (size_t)1 << 20) {
+        { static long su = -1;
+          if (su < 0) { const char *e = getenv("TYL_GRP_SLEEPUS"); su = e ? atol(e) : 2000; }
+          if (su > 0) usleep((useconds_t)su); }
+        fprintf(stderr, "E4GSLEEP pre wr cb=%zu rt=%llu\n", cb, ns_now());
+    }
+    cl_int rc = r(q, b, blk, off, cb, p, nev, ev, pe);
+    /* [0047 S1-prime] targeted drain: finish after big host->device writes. */
+    if (grp_on == 1 && cb >= (size_t)1 << 20) {
+        static int (*fin)(cl_command_queue) = 0;
+        if (!fin) fin = (int(*)(cl_command_queue))dlsym(RTLD_NEXT, "clFinish");
+        if (fin) { fin(q);
+            fprintf(stderr, "E4GFINISH wr cb=%zu rt=%llu\n", cb, ns_now()); }
+    }
+    grp_maybe_finish(q);
+    return rc;
+}
+
+CL_API_ENTRY cl_int CL_API_CALL
+clEnqueueNDRangeKernel(cl_command_queue q, cl_kernel k, cl_uint dim,
+                       const size_t *o, const size_t *g, const size_t *l,
+                       cl_uint nev, const cl_event *ev, cl_event *pe) {
+    static int (*r)(cl_command_queue, cl_kernel, cl_uint, const size_t*,
+                    const size_t*, const size_t*, cl_uint, const cl_event*, cl_event*) = 0;
+    if (!r) r = (typeof(r))dlsym(RTLD_NEXT, "clEnqueueNDRangeKernel");
+    if (!r) return CL_INVALID_OPERATION;
+    cl_int rc = r(q, k, dim, o, g, l, nev, ev, pe);
+    grp_maybe_finish(q);
+    if (grp_on == 3) {
+        static int (*fin3)(cl_command_queue) = 0;
+        if (!fin3) fin3 = (int(*)(cl_command_queue))dlsym(RTLD_NEXT, "clFinish");
+        if (fin3) fin3(q);
+    }
+    return rc;
 }
