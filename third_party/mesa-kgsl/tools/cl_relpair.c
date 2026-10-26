@@ -77,8 +77,7 @@ CL_API_ENTRY cl_mem CL_API_CALL
 clCreateBuffer(cl_context c, cl_mem_flags f, size_t sz, void *p, cl_int *e) {
     static fn_create r; if (!r) r = (fn_create)dlsym(RTLD_NEXT, "clCreateBuffer");
     cl_mem m = r(c, f, sz, p, e);
-    if (grp_on < 0) grp_on = (getenv("TYL_E4") && getenv("TYL_E4_GRP") &&
-        getenv("TYL_E4")[0]=='1') ? atoi(getenv("TYL_E4_GRP")) : 0;
+    if (grp_on < 0) grp_on = getenv("TYL_E4_GRP") ? atoi(getenv("TYL_E4_GRP")) : 0;
     seq++; c_created++;
     if (grp_on && m && e && *e == CL_SUCCESS) {
         struct rel *re = rget(m);
@@ -99,8 +98,7 @@ clCreateBufferWithProperties(cl_context c, const cl_mem_properties *pr,
     if (!r) r = (fn_create_props)dlsym(RTLD_NEXT, "clCreateBufferWithProperties");
     if (!r) return NULL;
     cl_mem m = r(c, (cl_mem_properties *)pr, f, sz, p, e);
-    if (grp_on < 0) grp_on = (getenv("TYL_E4") && getenv("TYL_E4_GRP") &&
-        getenv("TYL_E4")[0]=='1') ? atoi(getenv("TYL_E4_GRP")) : 0;
+    if (grp_on < 0) grp_on = getenv("TYL_E4_GRP") ? atoi(getenv("TYL_E4_GRP")) : 0;
     seq++; c_created++;
     if (grp_on && m && e && *e == CL_SUCCESS) {
         struct rel *re = rget(m);
