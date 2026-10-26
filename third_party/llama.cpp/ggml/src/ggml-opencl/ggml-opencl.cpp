@@ -1452,18 +1452,8 @@ struct ggml_backend_opencl_context {
         return kernel_bin;
     }
 
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-    // Transpose kernels
-    cl_program program_transpose;
-
-    cl_kernel kernel_transpose_32;
-    cl_kernel kernel_transpose_32_16;
-    cl_kernel kernel_transpose_16;
-    cl_kernel kernel_transpose_8_buf;
-    cl_kernel kernel_transpose_16_buf;
-    cl_kernel kernel_transpose_32_buf;
-    cl_kernel kernel_transpose_16_4x1;
-
+    // [TYL C1-P2 S2 2026-10-26] batched-MoE family members — hoisted out of the
+    // Adreno guard (used by unguarded set_tensor / batched dispatch paths).
     // Gemm and Gemv related programs, kernels, etc
     cl_kernel kernel_gemm_noshuffle_q4_0_f32;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32;
@@ -1512,6 +1502,24 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_moe_q3k_pack;
     bool   has_fgsvm      = false;
     size_t svm_mem_align  = 128;
+    cl_kernel kernel_gemv_noshuffle_q4_k_f32;
+    cl_kernel kernel_gemv_noshuffle_q4_k_f32_splitk; // split-K across WGs (small-M decode)
+    cl_kernel kernel_gemv_splitk_reduce_f32;         // sums split-K per-slice partials
+    cl_kernel kernel_gemv_noshuffle_q4_k_f32_glu;    // fused gate+up GEMV + GLU (FFN)
+    cl_kernel kernel_gemv_noshuffle_q4_k_f32_mc3;  // multi-column (N=3) verify GEMV
+
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    // Transpose kernels
+    cl_program program_transpose;
+
+    cl_kernel kernel_transpose_32;
+    cl_kernel kernel_transpose_32_16;
+    cl_kernel kernel_transpose_16;
+    cl_kernel kernel_transpose_8_buf;
+    cl_kernel kernel_transpose_16_buf;
+    cl_kernel kernel_transpose_32_buf;
+    cl_kernel kernel_transpose_16_4x1;
+
     cl_kernel kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin;
     cl_kernel kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin;
     cl_kernel kernel_gemv_noshuffle_q4_0_f32_32b_trans;
@@ -1530,14 +1538,9 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_gemv_noshuffle_q8_0_f32_splitk;  // split-K across WGs (small-M decode)
     cl_kernel kernel_gemm_noshuffle_q1_0_f32;
     cl_kernel kernel_gemv_noshuffle_q1_0_f32;
-    cl_kernel kernel_gemv_noshuffle_q4_k_f32;
     cl_kernel kernel_gemv_noshuffle_q4_k_f32_o4;  // 4-output-per-WI, long-vocab lm_head
     cl_kernel kernel_gemv_noshuffle_q4_k_f32_tiled;  // tiled-wide layout (opt-in)
-    cl_kernel kernel_gemv_noshuffle_q4_k_f32_splitk; // split-K across WGs (small-M decode)
-    cl_kernel kernel_gemv_splitk_reduce_f32;         // sums split-K per-slice partials
-    cl_kernel kernel_gemv_noshuffle_q4_k_f32_glu;    // fused gate+up GEMV + GLU (FFN)
     cl_kernel kernel_convert_block_q4_k_tiled_ns;    // tiled-wide convert (opt-in)
-    cl_kernel kernel_gemv_noshuffle_q4_k_f32_mc3;  // multi-column (N=3) verify GEMV
     cl_kernel kernel_gemm_noshuffle_q4_k_f32;
     cl_kernel kernel_gemm_noshuffle_q4_k_f32_32b_trans_ila_a8_bin;
     cl_kernel kernel_gemm_noshuffle_q4_k_q8_1_dp4a_ila_a8_bin;
@@ -4237,44 +4240,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         GGML_LOG_CONT(".");
     }
 
-    // Adreno kernels
-#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-    // transpose
-    {
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src {
-            #include "transpose.cl.h"
-        };
-#else
-        const std::string kernel_src = read_file("transpose.cl");
-#endif
-        backend_ctx->program_transpose =
-            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
-
-        CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err));
-        CL_CHECK((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err));
-        GGML_LOG_CONT(".");
-    }
-
-    // gemm_noshuffle_q1_0_f32
-    {
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src {
-            #include "gemm_noshuffle_q1_0_f32.cl.h"
-        };
-#else
-        const std::string kernel_src = read_file("gemm_noshuffle_q1_0_f32.cl");
-#endif
-        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q1_0_f32", &err), err));
-        CL_CHECK(clReleaseProgram(prog));
-        GGML_LOG_CONT(".");
-    }
+    // [TYL C1-P2 S2 2026-10-26] batched-MoE family hoisted OUT of the Adreno guard:
+    // these kernels are the Mesa-compat path (no shuffle / no dp4a / no required
+    // subgroups; see docs R-011) and MUST build with ADRENO_KERNELS=OFF. Vendor
+    // behavior is unchanged (same code, same order at init).
 
     // gemv_noshuffle_q1_0_f32
     {
@@ -4292,33 +4261,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
-    {
-        std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
-                                       " -cl-mad-enable "
-                                       " -DSIMDGROUP_WIDTH=" +
-                                       std::to_string(backend_ctx->adreno_wave_size);
-
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src_CL_gemv_general {
-            #include "gemv_noshuffle_q1_0_f32.cl.h"
-        };
-#else
-        const std::string kernel_src_CL_gemv_general = read_file("gemv_noshuffle_q1_0_f32.cl");
-#endif
-
-        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
-
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
-        CL_CHECK(clReleaseProgram(prog));
-        GGML_LOG_CONT(".");
-    }
 
     // gemv_noshuffle_general
     {
         std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
                                        " -cl-mad-enable "
                                        " -DSIMDGROUP_WIDTH=" +
-                                       std::to_string(backend_ctx->adreno_wave_size);
+                                       std::to_string(backend_ctx->adreno_wave_size > 0 ? backend_ctx->adreno_wave_size : 64);
         if (backend_ctx->has_vector_subgroup_broadcast) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
@@ -4382,6 +4331,140 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
+
+    // gemv_noshuffle_q4_k_f32
+    {
+        // [dspark 2026-10-14] VECTOR_SUB_GROUP_BROADCAST (_8_ macro variants)
+        // disabled for this program: with the batched MoE kernel the Adreno
+        // E031 compiler produces wrong numbers (probe NMSE 0.27-16.7, bit-
+        // stable across runs; dense-loop with identical planes passes). The
+        // _1_ macro variants are the portable fallback path.
+        std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
+                                       " -cl-mad-enable ";
+        // (VSB intentionally NOT defined here — see note above)
+        if (backend_ctx->has_vector_subgroup_broadcast) {
+            CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
+        }
+        if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A6X) {
+            CL_gemv_compile_opts += " -DGGML_CL_A6X_CONSTFOLD_FIX";
+        }
+        // Opt-in: dequant-once-per-block mc3 verify GEMV (factors q4_K dequant
+        // out of the 3-column loop; byte-identical, lower spill). A/B vs the
+        // shipped inline mc3 in the same binary.
+        if (getenv("GGML_OPENCL_Q4K_MC3_DQ")) {
+            CL_gemv_compile_opts += " -DQ4K_MC3_DEQUANT_ONCE ";
+        }
+        // Opt-in: LDS-staged dequant mc3 verify GEMV (stages the dequantized
+        // q4_K weights in __local instead of private regs that spill to slow
+        // global on Adreno; byte-identical). A/B vs inline + dequant-once.
+        if (getenv("GGML_OPENCL_Q4K_MC3_LDS")) {
+            CL_gemv_compile_opts += " -DQ4K_MC3_DEQUANT_LDS ";
+        }
+
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "gemv_noshuffle_q4_k_f32.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("gemv_noshuffle_q4_k_f32.cl");
+#endif
+
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_splitk", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+    // gemv_noshuffle_q3_k_f32 — [dspark 2026-10-14] q3_K batched MoE (#28).
+    // Same compile opts as the q4_K gemv program; the kernel consumes
+    // host-precomputed effective-scale planes (see ggml_tensor_extra_cl_q3_K),
+    // so the scale path is plain half2 loads exactly like the (NMSE=0) q4_0
+    // batched kernel — the q4_K dodge recipe applied to q3_K's 3-plane
+    // hmask/qs/scales layout.
+    {
+        std::string CL_q3k_compile_opts = std::string("-cl-std=") + opencl_c_std +
+                                       " -cl-mad-enable ";
+
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "gemv_noshuffle_q3_k_f32.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("gemv_noshuffle_q3_k_f32.cl");
+#endif
+
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
+
+    // Adreno kernels
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+    // transpose
+    {
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "transpose.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("transpose.cl");
+#endif
+        backend_ctx->program_transpose =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+
+        CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err));
+        GGML_LOG_CONT(".");
+    }
+
+    // gemm_noshuffle_q1_0_f32
+    {
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src {
+            #include "gemm_noshuffle_q1_0_f32.cl.h"
+        };
+#else
+        const std::string kernel_src = read_file("gemm_noshuffle_q1_0_f32.cl");
+#endif
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q1_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+    {
+        std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
+                                       " -cl-mad-enable "
+                                       " -DSIMDGROUP_WIDTH=" +
+                                       std::to_string(backend_ctx->adreno_wave_size);
+
+#ifdef GGML_OPENCL_EMBED_KERNELS
+        const std::string kernel_src_CL_gemv_general {
+            #include "gemv_noshuffle_q1_0_f32.cl.h"
+        };
+#else
+        const std::string kernel_src_CL_gemv_general = read_file("gemv_noshuffle_q1_0_f32.cl");
+#endif
+
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
+
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        GGML_LOG_CONT(".");
+    }
+
 
     // gemv_noshuffle
     {
@@ -4895,78 +4978,6 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         GGML_LOG_CONT(".");
     }
 
-    // gemv_noshuffle_q4_k_f32
-    {
-        // [dspark 2026-10-14] VECTOR_SUB_GROUP_BROADCAST (_8_ macro variants)
-        // disabled for this program: with the batched MoE kernel the Adreno
-        // E031 compiler produces wrong numbers (probe NMSE 0.27-16.7, bit-
-        // stable across runs; dense-loop with identical planes passes). The
-        // _1_ macro variants are the portable fallback path.
-        std::string CL_gemv_compile_opts = std::string("-cl-std=") + opencl_c_std +
-                                       " -cl-mad-enable ";
-        // (VSB intentionally NOT defined here — see note above)
-        if (backend_ctx->has_vector_subgroup_broadcast) {
-            CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
-        }
-        if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A6X) {
-            CL_gemv_compile_opts += " -DGGML_CL_A6X_CONSTFOLD_FIX";
-        }
-        // Opt-in: dequant-once-per-block mc3 verify GEMV (factors q4_K dequant
-        // out of the 3-column loop; byte-identical, lower spill). A/B vs the
-        // shipped inline mc3 in the same binary.
-        if (getenv("GGML_OPENCL_Q4K_MC3_DQ")) {
-            CL_gemv_compile_opts += " -DQ4K_MC3_DEQUANT_ONCE ";
-        }
-        // Opt-in: LDS-staged dequant mc3 verify GEMV (stages the dequantized
-        // q4_K weights in __local instead of private regs that spill to slow
-        // global on Adreno; byte-identical). A/B vs inline + dequant-once.
-        if (getenv("GGML_OPENCL_Q4K_MC3_LDS")) {
-            CL_gemv_compile_opts += " -DQ4K_MC3_DEQUANT_LDS ";
-        }
-
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src {
-            #include "gemv_noshuffle_q4_k_f32.cl.h"
-        };
-#else
-        const std::string kernel_src = read_file("gemv_noshuffle_q4_k_f32.cl");
-#endif
-
-        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
-
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_mc3", &err), err));
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_splitk", &err), err));
-        CL_CHECK((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
-        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
-        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
-        CL_CHECK(clReleaseProgram(prog));
-        GGML_LOG_CONT(".");
-    }
-
-    // gemv_noshuffle_q3_k_f32 — [dspark 2026-10-14] q3_K batched MoE (#28).
-    // Same compile opts as the q4_K gemv program; the kernel consumes
-    // host-precomputed effective-scale planes (see ggml_tensor_extra_cl_q3_K),
-    // so the scale path is plain half2 loads exactly like the (NMSE=0) q4_0
-    // batched kernel — the q4_K dodge recipe applied to q3_K's 3-plane
-    // hmask/qs/scales layout.
-    {
-        std::string CL_q3k_compile_opts = std::string("-cl-std=") + opencl_c_std +
-                                       " -cl-mad-enable ";
-
-#ifdef GGML_OPENCL_EMBED_KERNELS
-        const std::string kernel_src {
-            #include "gemv_noshuffle_q3_k_f32.cl.h"
-        };
-#else
-        const std::string kernel_src = read_file("gemv_noshuffle_q3_k_f32.cl");
-#endif
-
-        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
-        CL_CHECK((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
-        CL_CHECK(clReleaseProgram(prog));
-        GGML_LOG_CONT(".");
-    }
 
     // gemv_noshuffle_q4_k_f32_o4 — 4-output-per-WI variant for the long-vocab
     // q4_K lm_head/embed GEMV (shares one activation read across 4 output rows).
@@ -30188,7 +30199,9 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
 #ifdef GGML_OPENCL_SOA_Q
             kernel = backend_ctx->kernel_mul_mv_q6_K_f32_flat;
 
+#ifdef GGML_OPENCL_USE_ADRENO_KERNELS  // [TYL C1-P2 S2] definition is Adreno-guarded
             ggml_opencl_debug_dump_q6k_planes(backend_ctx, src0, extra0_q6_K);
+#endif
 
             if (backend_ctx->gpu_family == INTEL) {
                 nth0 = 16;
