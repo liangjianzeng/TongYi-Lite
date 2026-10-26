@@ -15567,6 +15567,8 @@ struct ggml_backend_opencl_svm_buffer_context {
     cl_mem raw_stage = nullptr;
     // lazily created q3_K pack extras, owned by the buffer (freed with it)
     std::vector<ggml_tensor_extra_cl_q3_K *> extras;
+    // [SA-5 L3] hbuft extra_cl 池（岛边界小张量 GPU 寻址；随 buffer 释放）
+    std::vector<ggml_tensor_extra_cl *> extras_cl;
     std::mutex extra_mutex;
 };
 
@@ -15582,6 +15584,9 @@ static void ggml_backend_opencl_svm_buffer_free_buffer(ggml_backend_buffer_t buf
         return;
     }
     for (auto * e : ctx->extras) {
+        delete e;
+    }
+    for (auto * e : ctx->extras_cl) {   // [SA-5 L3]
         delete e;
     }
     if (ctx->raw_stage != nullptr) {
@@ -15634,10 +15639,63 @@ static void ggml_backend_opencl_svm_buffer_clear(ggml_backend_buffer_t buffer, u
     memset(ctx->svm, value, buffer->size);
 }
 
+// [TongYi-Lite 2026-10-27 SA-5 L3 · R-045] svm buft 的 GPU 寻址缺口补全（设计 §3-L3：
+// 这是 L3 唯一要实现的东⻄）。GGML_OPENCL_ISLAND_HBUFT=1 时给「岛边界小张量」补
+// extra{data_device=raw_stage, offset=张量在 BO 内偏移}，GPU 内核即可与宿主同读一个
+// cl_mem（泛化自 pack 读 raw_stage 的既证模式）；宿主可见性走 ctx->svm（get_base/
+// set/get_tensor 已是 memcpy）。窄门防误伤：仅 i32 且 ≤ GGML_OPENCL_ISLAND_MAX（默认
+// 64KiB）的非 view 张量拿 extra——bank 权重/大张量一律维持 NULL 现状。
+// env 关 = 什么都不做 = 与 NULL 逐字节等价的零扰动。
+static bool ggml_backend_opencl_svm_hbuft_on() {
+    static int v = -1;
+    if (v < 0) { const char * e = getenv("GGML_OPENCL_ISLAND_HBUFT"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v == 1;
+}
+static size_t ggml_backend_opencl_svm_hbuft_max() {
+    static size_t v = (size_t)-1;
+    if (v == (size_t)-1) {
+        v = 65536;
+        const char * e = getenv("GGML_OPENCL_ISLAND_MAX");
+        if (e && e[0]) { unsigned long x = strtoul(e, NULL, 10); if (x) v = x; }
+    }
+    return v;
+}
+static enum ggml_status ggml_backend_opencl_svm_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
+    if (!ggml_backend_opencl_svm_hbuft_on()) {
+        return GGML_STATUS_SUCCESS;   // == NULL 臂行为
+    }
+    auto * ctx = (ggml_backend_opencl_svm_buffer_context *) buffer->context;
+    if (tensor->view_src != nullptr) {
+        ggml_tensor_extra_cl * view_extra = (ggml_tensor_extra_cl *) tensor->view_src->extra;
+        if (view_extra) { tensor->extra = view_extra; }   // 镜像 parent extra（view_offs 由使用侧加）
+        return GGML_STATUS_SUCCESS;
+    }
+    if (tensor->type != GGML_TYPE_I32 /*岛张量窄门*/ ||
+        ggml_nbytes(tensor) > ggml_backend_opencl_svm_hbuft_max() ||
+        ctx->raw_stage == nullptr || tensor->data == nullptr) {
+        return GGML_STATUS_SUCCESS;   // 非岛张量：保持 NULL 现状
+    }
+    ggml_tensor_extra_cl * extra = new ggml_tensor_extra_cl();
+    extra->offset = (char *) tensor->data - (char *) ctx->svm;
+    extra->data_device = ctx->raw_stage;
+    extra->actual_size = ggml_nbytes(tensor);
+    {
+        std::lock_guard<std::mutex> lock(ctx->extra_mutex);
+        ctx->extras_cl.push_back(extra);
+    }
+    tensor->extra = extra;
+    if (getenv("GGML_OPENCL_ISLAND_STATS")) {
+        fprintf(stderr, "[L3] hbuft bind %s off=%lu n=%zu dev=%p\n",
+                tensor->name ? tensor->name : "?", (unsigned long)extra->offset,
+                (size_t)extra->actual_size, (void*)extra->data_device);
+    }
+    return GGML_STATUS_SUCCESS;
+}
+
 static ggml_backend_buffer_i ggml_backend_opencl_svm_buffer_interface = {
     /* .free_buffer     = */ ggml_backend_opencl_svm_buffer_free_buffer,
     /* .get_base        = */ ggml_backend_opencl_svm_buffer_get_base,
-    /* .init_tensor     = */ NULL,
+    /* .init_tensor     = */ ggml_backend_opencl_svm_buffer_init_tensor,
     /* .memset_tensor   = */ NULL,
     /* .set_tensor      = */ ggml_backend_opencl_svm_buffer_set_tensor,
     /* .get_tensor      = */ ggml_backend_opencl_svm_buffer_get_tensor,

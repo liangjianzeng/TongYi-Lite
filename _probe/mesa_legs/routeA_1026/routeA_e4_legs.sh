@@ -129,6 +129,12 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  l3a) # L3 观察腿：HBUFT lib(134bfd9c)+STATS，看哪些 i32 小张量自动拿到 extra（[L3] hbuft bind 自证）
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 2>/dev/null
+    run_leg e4d_l3a "" 16 "GGML_OPENCL_ISLAND_STATS=1 GGML_OPENCL_ISLAND_HBUFT=1"
+    echo "#### L3_BIND=$(grep -ac '^\\[L3\\] hbuft bind' $R/out/e4d_l3a.err)"
+    grep -a '^\\[L3\\] hbuft bind' $R/out/e4d_l3a.err | head -12
+    ;;
   l0b) # 前线② L0 真身：census 三件(04aaa77f/75a36aa7/914cc424) + ISLAND_STATS=1（P2 进程内计数，图末/exit 打 [L0O]/[L0B]）
     mkdir -p $R/bin_bak_1027
     cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
