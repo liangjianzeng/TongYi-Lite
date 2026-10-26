@@ -506,6 +506,14 @@ struct lookahead_expert_prefetch {
 };
 
 struct llama_moe_slot_runtime::impl {
+    // [SA-5 L3 wire · 1027] 岛边界 slot_ids 预绑「宿主可见 OpenCL svm buft」：
+    // GGML_OPENCL_ISLAND_WIRE=1 门控（默认关=零扰动，逐字节同现状）。绑上后：
+    //   read/write_i32_ids 自动翻 host_data() memcpy 快路；sched 判 buffer_supported
+    //   放行不建 input_cpy；GPU 经 svm init_tensor 的 extra{raw_stage,off} 直读同一 BO。
+    // 验证门（放行条件）：l0b wr_name 归因 + l3b 三证 b1/b2=0 + 背书库 tok 全等腿。
+    bool wire_failed = false;
+    ggml_backend_buffer_t wire_buf = nullptr;
+    size_t wire_seg = 0;
     struct binding {
         ggml_tensor * tensor = nullptr;
         const llama_moe_experts_entry * entry = nullptr;
@@ -1475,6 +1483,7 @@ struct llama_moe_slot_runtime::impl {
     }
 
     ~impl() {
+        if (wire_buf) { ggml_backend_buffer_free(wire_buf); wire_buf = nullptr; }
         // 兜底：正常路径上 trigger 节点（process_deferred）已把每层批次 join 掉，
         // 这里只防「异常退出图执行」的极端情况 —— 线程体捕获 `this`，析构前必须收干净。
         for (auto & b : defer_batches) {
@@ -2863,10 +2872,34 @@ ggml_tensor * llama_moe_slot_runtime::build_slot_ids_tensor(
     }
     ggml_tensor * pred = pimpl->lookahead_pending;
     pimpl->lookahead_pending = nullptr;
-    if (pimpl->lookahead.enabled && pred) {
-        return ggml_map_custom2(ctx, expert_ids, pred, map_custom_lookahead, 1, &pimpl->userdata[(size_t) layer]);
+    ggml_tensor * out = (pimpl->lookahead.enabled && pred)
+        ? ggml_map_custom2(ctx, expert_ids, pred, map_custom_lookahead, 1, &pimpl->userdata[(size_t) layer])
+        : ggml_map_custom1(ctx, expert_ids, map_custom, 1, &pimpl->userdata[layer]);
+    // [SA-5 L3 wire] 见 impl::wire_buf 注释；单变量 env，关=下面整段旁路。
+    static const bool wire_on = [] { const char * e = getenv("GGML_OPENCL_ISLAND_WIRE"); return e && e[0] == '1'; }();
+    if (wire_on && out != nullptr && out->buffer == nullptr && out->view_src == nullptr &&
+        (size_t) layer < pimpl->userdata.size()) {
+        if (pimpl->wire_buf == nullptr && !pimpl->wire_failed) {
+            ggml_backend_reg_t reg = ggml_backend_reg_by_name("OpenCL");
+            ggml_backend_dev_t dev = reg ? ggml_backend_reg_dev_get(reg, 0) : nullptr;
+            ggml_backend_buffer_type_t sb = dev ? ggml_backend_opencl_svm_buft(dev) : nullptr;
+            size_t nlay = pimpl->userdata.size();
+            size_t seg = ((ggml_nbytes(out) + 255) / 256) * 256;
+            if (sb != nullptr && seg > 0) {
+                ggml_backend_buffer_t b = ggml_backend_buft_alloc_buffer(sb, nlay * seg);
+                if (b != nullptr) { pimpl->wire_buf = b; pimpl->wire_seg = seg;
+                    fprintf(stderr, "[wire] svm island buf attached: %zu layers x %zu B\n", nlay, seg); }
+                else { pimpl->wire_failed = true; fprintf(stderr, "[wire] svm alloc failed -> legacy path\n"); }
+            } else { pimpl->wire_failed = true; fprintf(stderr, "[wire] no svm buft -> legacy path\n"); }
+        }
+        if (pimpl->wire_buf != nullptr) {
+            void * addr = (char *) ggml_backend_buffer_get_base(pimpl->wire_buf) + (size_t) layer * pimpl->wire_seg;
+            if (ggml_backend_tensor_alloc(pimpl->wire_buf, out, addr) != GGML_STATUS_SUCCESS) {
+                out->buffer = nullptr; out->data = nullptr;   // 回退原路（sched 自 alloc）
+            }
+        }
     }
-    return ggml_map_custom1(ctx, expert_ids, map_custom, 1, &pimpl->userdata[layer]);
+    return out;
 }
 
 void llama_moe_slot_runtime::process(
