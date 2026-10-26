@@ -89,4 +89,13 @@
 - [ ] 待设备回线（00:0x 失联，adbd TCP 超时，历史自愈型）：**g28**=背书+v8 垫片 GRP=4（E4GSLEEP 自证）；**g29**=背书+现成 `GGML_OPENCL_SET_TENSOR_FINISH=1`（前人 -54 hunt 遗产 @ggml-opencl.cpp set_tensor 入口，路线①零代码候选）；q0a0 背书复核 #10。
 - [ ] 产品化三路线：①ggml 写前事件等待（g29 若愈=现成 env）②驱动侧 retire 前 L2 屏障（根治，触 KMD 邻域）③SA-5 L3 岛边界 buft 消灭 412MB×40/token 覆写本身（竞态+税双杀，前线②主线）。
 - [ ] 教训入册：探针税>2min/token 的对照腿需 2× 超时；提问子智能体前先自查锚点真实性（SA-6 Q1 教训）；**grep 空返回断 `&&` 链**（rm 后 grep 教训）；**python 步骤别放断链后面**（g26 从未写入教训）；垫片开关独立解析禁借道 TYL_E4。
-- **机床现状（R-041 后）**：chroot 树=背书+0031..0033+0036..0047（diag16=c1c1d271 源码态：NOMERGE/内核打点/E4R2BO/DEL 全 TYL_E4 门控）；垫片 v8（门控解耦版）在 /tmp/e41026/shim/；设备失联中（影子已撤、背书库在位、热 30.8°C 失联前正常）。
+- **机床现状（R-041 后）**：chroot 树=背书+0031..0033+0036..0047+**0048**（diag17=c17d435b 源码态：+L2FIX 双 fence 事件 TYL_E4_L2FIX 门控）；垫片 v8（门控解耦版，md5=199a2061）在 /tmp/e41026/shim/。
+
+## 7. 1027 晨态（R-041~R-047，接管会话滚动）
+- **H2′ 已定罪**（R-041，见上）→ 产品化三路线并进：①**KERNEL_SYNC 原生补丁**（ggml-opencl.cpp enqueue_ndrange_kernel choke point，`GGML_OPENCL_KERNEL_SYNC=1`=g21 形）+现成 `GGML_OPENCL_SET_TENSOR_FINISH=1`（@set/get_tensor 双点已在树，零代码候选）②驱动侧 0048 L2FIX（g30 验）③SA-5 L3。
+- **前线② 新落三件**（全 env 门控默认关）：**L0/P2 census**（ISLAND_STATS=1：BASE 六 drain 站点 [L0B] + OCL wr/rd/sync/ndrange+[L0O] 张量名直方图；l0b 腿）；**L3 svm init_tensor**（ISLAND_HBUFT=1：I32×≤64KiB×非view 三重窄门补 extra{raw_stage,off}；l3a 观察腿）；**L3 三证探针**（l3_coherency_probe=717a85b0：b1 CPU→GPU/b2 GPU→CPU 64 轮金丝雀+bw；l3b 腿；**b1/b2 FAIL=L3 直读死刑，改 map/unmap 包裹**）。
+- **七件套同树部署**（ABI 教训：新 e2e NEEDED={libllama,libllama-common,libggml-base}+dlopen opencl，只部三件会 ABI 漂移）：e2e `04aaa77f`/opencl `134bfd9c`(KERNEL_SYNC+census+L3init)/base `914cc424`(drain census)/ggml `7329a949`/cpu `d3d7df1b`/llama `7c12b339`/llama-common `92726af7`，全在 /tmp/e41026/stage_1027/。
+- **一键射击**：`_probe/mesa_legs/routeA_1026/shoot_1027.sh`（清理→背书 md5→推七件+v8+探针+腿脚本→部署+SONAME 链+**指纹门**→串跑 g28 g29 g30 g31 g32 l0a l0b l3a l3b；done 标记断点续跑；热闸/掉线 HALT；日志 /tmp/e41026/recovery_logs/）。q0a0 复核 #10 在另一脚本 routeA_legs_1026.sh 手动补跑。治愈者→`run_drift TAG FL NPRED EXTRAENV PRELOAD 20`。
+- **设备态势（01:0x）**：830 tailscale 层整机 offline（last seen 54m，tx4056/rx0，非热因 30.8°C，历史自愈型，上轮 21:29 自愈于第 10 轮值守）；740=xiaomi-13-1 **tailscale active 但 adbd 5555 拒**（需 USB 主机跑 adb-wifi 脚本，无则不可用）；K40 offline 6h。守望 W2 活。
+- **射击次序（终版）**：shoot_1027 九腿 → q0a0#10 → 判读：①线治愈者 drift N=20 → 背书 OPFLUSH=1 亦 N≥20；②线 g30 看 L2FIX；③线 l0a/l0b 定罪 412MB 张量名（**l3-wire 硬前置**，R-047）→ l3b 三证 → l3-wire 设计定稿。
+- **待办欠账**：ledger g27(hung)+新腿行；C2 地图再回写（治愈落地时）；R-048（射击轮）；drift 全绿后产品化选型报告（三路线 tok/s 对比可选）。
