@@ -164,6 +164,34 @@ int main(int argc, char ** argv) {
         if (bad2) fails++;
     }
 
+    // ---- (d1/d2) 持久映射干扰假说（H2′ 真身审判）：raw_stage 式"init 期 map 不撤"环境 ----
+    {
+        cl_int e2 = CL_SUCCESS;
+        void * pm = clEnqueueMapBuffer(q, bo, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, n * sizeof(int), 0, nullptr, nullptr, &e2);
+        if (!pm || e2) { printf("PROBE2(d) persistent map fail %d SKIP\n", e2); }
+        else {
+            std::vector<int> h(n);
+            for (size_t i = 0; i < n; i++) h[i] = (int)(i * 5 + 11);
+            CK(clEnqueueWriteBuffer(q, bo, CL_TRUE, 0, n * sizeof(int), h.data(), 0, nullptr, nullptr));
+            CK(clEnqueueNDRangeKernel(q, k_sum, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr));
+            CK(clEnqueueReadBuffer(q, gout, CL_TRUE, 0, cpu.size() * sizeof(int), cpu.data(), 0, nullptr, nullptr));
+            long b_d1 = 0;
+            for (size_t g = 0; g < n / 256; g++) { int sw = 0; for (int i = 0; i < 256; i++) sw += (int)((g * 256 + i) * 5 + 11); if (cpu[g] != sw) b_d1++; }
+            printf("PROBE2(d1) persistent_map+writebuffer->gpu_read mismatch=%ld %s\n", b_d1, b_d1 ? "FAIL" : "OK");
+            if (b_d1) fails++;
+            // d2: 同环境但 kernel 前 unmap（合法维护点）
+            CK(clEnqueueUnmapMemObject(q, bo, pm, 0, nullptr, nullptr));
+            CK(clFinish(q));
+            CK(clEnqueueWriteBuffer(q, bo, CL_TRUE, 0, n * sizeof(int), h.data(), 0, nullptr, nullptr));
+            CK(clEnqueueNDRangeKernel(q, k_sum, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr));
+            CK(clEnqueueReadBuffer(q, gout, CL_TRUE, 0, cpu.size() * sizeof(int), cpu.data(), 0, nullptr, nullptr));
+            long b_d2 = 0;
+            for (size_t g = 0; g < n / 256; g++) { int sw = 0; for (int i = 0; i < 256; i++) sw += (int)((g * 256 + i) * 5 + 11); if (cpu[g] != sw) b_d2++; }
+            printf("PROBE2(d2) after_unmap+writebuffer->gpu_read mismatch=%ld %s\n", b_d2, b_d2 ? "FAIL" : "OK");
+            if (b_d2) fails++;
+        }
+    }
+
     printf("PROBE2 done fails=%d %s\n", fails, fails ? "SEE_ABOVE" : "ALL_OK");
     return fails ? 1 : 0;
 }

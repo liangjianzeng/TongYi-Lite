@@ -1444,6 +1444,18 @@ struct ggml_backend_opencl_context {
         } else {
             enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
         }
+        // [TongYi-Lite 2026-10-27 R-057] NDRANGE_IDLE：疗效机制审判——H2′ 治愈因子若=
+        // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
+        // 后 finish+sleep 应以近零税复现治愈。IDLE=0 关=零扰动；GAP 默认 2000us。
+        static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 0; }();
+        static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 2000; }();
+        static thread_local long idle_ctr = 0;
+        if (idle_n > 0 && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {
+            idle_ctr = 0;
+            clFinish(queue);
+            struct timespec its; its.tv_sec = idle_gap / 1000000; its.tv_nsec = (idle_gap % 1000000) * 1000;
+            nanosleep(&its, nullptr);
+        }
         if (enq_err != CL_SUCCESS) {
             // [dspark 2026-10-17] rusticl is stricter than Adreno about local
             // sizes; fall back to driver-picked local and log the offender.
@@ -8679,8 +8691,33 @@ static size_t tyl_wbw_th() {
     return t;
 }
 static unsigned long g_wbw_waits = 0; static unsigned long long g_wbw_bytes = 0;
+static long tyl_wbw_gap_us() {   // [R-056] g37 判词：等全写仍乱——与垫片唯一差异=BUSY→IDLE 空闲间隙；GAP 默认 2000us（=垫片 2ms 语义）
+    static long g = -1;
+    if (g < 0) { const char * e = getenv("GGML_OPENCL_WAIT_BIGWRITE_GAP"); g = e ? atol(e) : 2000; }
+    return g;
+}
+static int tyl_wbw_post() {   // [R-057] GAP_POST=1：垫片时序复刻——先放行写（不 finish），提交后睡 2ms（垫片 sleep 在 ioctl 之后）
+    static int g = -1;
+    if (g < 0) { const char * e = getenv("GGML_OPENCL_WAIT_BIGWRITE_POST"); g = (e && *e == '1') ? 1 : 0; }
+    return g;
+}
 static void tyl_wbw_before_write(cl_command_queue q, size_t size) {
-    if (tyl_wbw_on() && size >= tyl_wbw_th()) { clFinish(q); g_wbw_waits++; g_wbw_bytes += size; }
+    if (tyl_wbw_on() && size >= tyl_wbw_th()) {
+        if (!tyl_wbw_post()) {
+            clFinish(q);
+            long gap = tyl_wbw_gap_us();
+            if (gap > 0) { struct timespec ts; ts.tv_sec = gap / 1000000; ts.tv_nsec = (gap % 1000000) * 1000; nanosleep(&ts, nullptr); }
+        }
+        g_wbw_waits++; g_wbw_bytes += size;
+    }
+}
+static void tyl_wbw_after_write(cl_command_queue q, size_t size) {   // POST 模式垫片体
+    (void)q;
+    if (tyl_wbw_on() && tyl_wbw_post() && size >= tyl_wbw_th()) {
+        long gap = tyl_wbw_gap_us();
+        if (gap > 0) { struct timespec ts; ts.tv_sec = gap / 1000000; ts.tv_nsec = (gap % 1000000) * 1000; nanosleep(&ts, nullptr); }
+        g_wbw_waits++; g_wbw_bytes += size;
+    }
 }
 static void tyl_wbw_dtor() __attribute__((destructor));
 static void tyl_wbw_dtor() { if (g_wbw_waits) fprintf(stderr, "[WBW] waits=%lu bytes=%llu\n", g_wbw_waits, g_wbw_bytes); }
@@ -13100,10 +13137,13 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             }
         }
 
+        tyl_wbw_before_write(queue, qplane.size() * sizeof(cl_uint));   // [R-056]
         CL_CHECK(clEnqueueWriteBuffer(queue, extra->q, CL_TRUE, 0,
                     qplane.size() * sizeof(cl_uint), qplane.data(), 0, NULL, NULL));
+        tyl_wbw_before_write(queue, se0.size() * sizeof(ggml_fp16_t));   // [R-056]
         CL_CHECK(clEnqueueWriteBuffer(queue, extra->se0, CL_TRUE, 0,
                     se0.size() * sizeof(ggml_fp16_t), se0.data(), 0, NULL, NULL));
+        tyl_wbw_before_write(queue, se1.size() * sizeof(ggml_fp16_t));   // [R-056]
         CL_CHECK(clEnqueueWriteBuffer(queue, extra->se1, CL_TRUE, 0,
                     se1.size() * sizeof(ggml_fp16_t), se1.data(), 0, NULL, NULL));
 
@@ -13283,6 +13323,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                             }
                         }
                     }
+                    tyl_wbw_before_write(queue, pk.size()*sizeof(ggml_fp16_t));   // [R-056]
                     CL_CHECK(clEnqueueWriteBuffer(queue, extra->seff, CL_TRUE, 0, pk.size()*sizeof(ggml_fp16_t), pk.data(), 0, NULL, NULL));
                     for (int e = 0; e < Ec; ++e) {
                         for (size_t k = 0; k < n_blk; ++k) {
@@ -13292,6 +13333,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                             }
                         }
                     }
+                    tyl_wbw_before_write(queue, pk.size()*sizeof(ggml_fp16_t));   // [R-056]
                     CL_CHECK(clEnqueueWriteBuffer(queue, extra->meff, CL_TRUE, 0, pk.size()*sizeof(ggml_fp16_t), pk.data(), 0, NULL, NULL));
                     // [dspark 2026-10-24 G-725] one-time per-process confirmation:
                     // "seff/meff built" is the load-time proof that batched q4_K
@@ -16028,6 +16070,7 @@ void ggml_cl_moe_q3k_pack_slot(struct ggml_tensor * soa, int plane_slot, const v
         tyl_wbw_before_write(backend_ctx->queue, slot_bpe);   // [R-052] H2′ 主犯写面
         CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, bctx->raw_stage, CL_FALSE,
             (size_t) raw_off, slot_bpe, raw, 0, NULL, NULL));
+        tyl_wbw_after_write(backend_ctx->queue, slot_bpe);   // [R-057]
         moe_q3k_pack_enqueue(backend_ctx, soa, extra, plane_slot, true, bctx->raw_stage, nullptr, raw_off);
         return;
     }
@@ -16402,6 +16445,7 @@ static void dump_tensor(ggml_backend_t backend, const struct ggml_tensor * tenso
         buf_d = malloc(size_d);
 
         CL_CHECK(clEnqueueReadBuffer(queue, extra->q, CL_TRUE, 0, size_q, buf_q, 0, NULL, NULL));
+    tyl_wbw_after_write(backend_ctx->queue, slot_bpe);   // [R-057]
         CL_CHECK(clEnqueueReadBuffer(queue, extra->d, CL_TRUE, 0, size_d, buf_d, 0, NULL, NULL));
         CL_CHECK(clFinish(queue));
     } else if (tensor->type == GGML_TYPE_MXFP4) {
@@ -20499,6 +20543,7 @@ static bool ggml_cl_flash_attn_prepare_quantized_tensor(
     cl_int err;
     temp.data = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, buffer_size, NULL, &err);
     CL_CHECK(err);
+    tyl_wbw_before_write(backend_ctx->queue, buffer_size);   // [R-056] temp 大写面
     CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, temp.data, CL_TRUE, 0, buffer_size, host_linear.data(), 0, NULL, NULL));
 
     data_device = temp.data;
@@ -20555,6 +20600,7 @@ static bool ggml_cl_flash_attn_convert_f16_to_f32(
     cl_int err;
     temp.data = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE, f32_bytes, NULL, &err);
     CL_CHECK(err);
+    tyl_wbw_before_write(backend_ctx->queue, f32_bytes);   // [R-056] temp 大写面
     CL_CHECK(clEnqueueWriteBuffer(backend_ctx->queue, temp.data, CL_TRUE, 0,
                                   f32_bytes, host_f32.data(), 0, NULL, NULL));
 

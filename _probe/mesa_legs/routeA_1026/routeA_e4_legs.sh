@@ -202,6 +202,68 @@ case "$1" in
     echo "#### probe3_rc=$? plain=$PT"
     grep -a "PROBE2" $R/out/e4d_l3b3_p$PT.out
     ;;
+  g37) # WBW 极限诊断：TH=1 等所有走四 choke point 的写 + census 同跑对表
+    echo "#### wbw_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g37 "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1 GGML_OPENCL_WAIT_BIGWRITE_TH=1 GGML_OPENCL_L0_CENSUS=1"
+    echo "#### g37_wbw=$(grep -a '^\[WBW\]' $R/out/e4d_g37.err)"
+    echo "#### g37_l0o=$(grep -a '^\[L0O\]' $R/out/e4d_g37.err)"
+    grep -a "^\[L0B\]" $R/out/e4d_g37.err
+    ;;
+  g38) # R-056 垫片等效：11 站点(含 load-temp/seff 面)+GAP2000+TH1MB——预期治愈
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### wbw_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g38 "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1"
+    echo "#### g38_wbw=$(grep -a '^\[WBW\]' $R/out/e4d_g38.err)"
+    ;;
+  g38b) # 隔离实验：同 11 站点但 GAP=0（纯等待无间隙）——若 g38 愈而此不愈=间隙是疗效本体
+    run_leg e4d_g38b "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1 GGML_OPENCL_WAIT_BIGWRITE_GAP=0"
+    echo "#### g38b_wbw=$(grep -a '^\[WBW\]' $R/out/e4d_g38b.err)"
+    ;;
+  g40) # R-057 垫片时序复刻：pack 写放行后睡 2ms（POST=1）——判"间隙位置"假说
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### wbw_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g40 "" 16 "GGML_OPENCL_WAIT_BIGWRITE=1 GGML_OPENCL_WAIT_BIGWRITE_POST=1"
+    echo "#### g40_wbw=$(grep -a '^\[WBW\]' $R/out/e4d_g40.err)"
+    ;;
+  g41) # R-057 机制审判：每 32 NDRange 注入 finish+2ms 空闲（近零税）——愈=间隙本体论
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### idle_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g41 "" 16 "GGML_OPENCL_NDRANGE_IDLE=32"
+    ;;
+  g42) # 机制审判对照：每 1 个 NDRange 都注入（重税=机制上限证明）
+    run_leg e4d_g42 "" 16 "GGML_OPENCL_NDRANGE_IDLE=1"
+    ;;
+  g43) # 密度阶梯：IDLE=4——找最低治愈密度
+    run_leg e4d_g43 "" 16 "GGML_OPENCL_NDRANGE_IDLE=4"
+    grep -a "tok_s=" $R/out/e4d_g43.out | tail -1
+    ;;
+  g44) # IDLE=8 阶梯
+    run_leg e4d_g44 "" 16 "GGML_OPENCL_NDRANGE_IDLE=8"
+    grep -a "tok_s=" $R/out/e4d_g44.out | tail -1
+    ;;
+  g45) # IDLE=2 阶梯
+    run_leg e4d_g45 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2"
+    grep -a "tok_s=" $R/out/e4d_g45.out | tail -1
+    ;;
+  g42s) # g42 速度读数（IDLE=1）
+    grep -a "tok_s=" $R/out/e4d_g42.out | tail -1
+    ;;
+  g46) # GAP 阶梯：IDLE=2 GAP=1000
+    run_leg e4d_g46 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=1000"
+    grep -a "tok_s=" $R/out/e4d_g46.out | tail -1
+    ;;
+  g47) # IDLE=2 GAP=500——近零税窗口
+    run_leg e4d_g47 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=500"
+    grep -a "tok_s=" $R/out/e4d_g47.out | tail -1
+    ;;
+  g48) # IDLE=2 GAP=250 极限压税
+    run_leg e4d_g48 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=250"
+    grep -a "tok_s=" $R/out/e4d_g48.out | tail -1
+    ;;
+  g49) # 机制对照：IDLE=2 GAP=0（纯 finish 无间隙）——愈=密度本体，不愈=间隙本体
+    run_leg e4d_g49 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=0"
+    grep -a "tok_s=" $R/out/e4d_g49.out | tail -1
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
