@@ -129,6 +129,11 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  l0a) # 前线② L0 计数腿：背书+现成 GGML_CL_OFFS_DEBUG=1，岛边界/跨设备传输底数（对照 g14 垫片 census）
+    run_leg e4d_l0a "" 16 "GGML_CL_OFFS_DEBUG=1"
+    echo "#### L0_SET=$(grep -ac '^\\[set\\]' $R/out/e4d_l0a.err) L0_WATCH=$(grep -ac '^\\[watch\\]' $R/out/e4d_l0a.err)"
+    grep -a '^\\[set\\]' $R/out/e4d_l0a.err | awk '{print $2}' | sort | uniq -c | sort -rn | head -25
+    ;;
   g31) # ★路线①真身：ksync 新二件(e2e=04aaa77f lib=ca484fa8)+背书库 KERNEL_SYNC=1
     mkdir -p $R/bin_bak_1027
     cp -n $R/bin/minicpm_e2e $R/bin_bak_1027/ 2>/dev/null
