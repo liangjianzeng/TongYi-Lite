@@ -41,7 +41,7 @@ run_leg_case() {
   mark "$tag"
 }
 
-for c in g28 g29 g30 g31 g32 l0a l0b l3a l3b; do run_leg_case "$c"; done
+for c in g28 g29 g30 g31 g32 l0a l0b l3a l3b g33 g34; do run_leg_case "$c"; done
 # 队列尾检查：影子必须已撤（g30 自撤失败即红牌）
 SH "ls $R/bin/libRusticlOpenCL.so.1" 2>/dev/null | grep -q libRusticl && { echo "HALT: shadow left behind!"; exit 5; } || echo "shadow_clear OK"
 echo "ALL_LEGS_DONE $(date +%H:%M:%S)"

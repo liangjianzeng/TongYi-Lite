@@ -178,6 +178,15 @@ case "$1" in
     echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
     run_leg e4d_g31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1"
     ;;
+  g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
+    run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
+    echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
+    grep -a '^\\[L0O\\] wr_name' $R/out/e4d_g33.err | sort -t= -k3 -rn | head -8
+    ;;
+  g34) # L3-wire 税测：fl1(正确态)+WIRE=1 vs 历史 fl1 基线（tok/s 对拍用）
+    run_leg e4d_g34 "1" 48 "GGML_OPENCL_ISLAND_WIRE=1"
+    echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g34.err) speed=$(grep -aoE '[0-9.]+ tokens/second|[0-9.]+ t/s' $R/out/e4d_g34.out | tail -1)"
+    ;;
   g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
     run_leg e4d_g32 "" 16 ""
     ;;
