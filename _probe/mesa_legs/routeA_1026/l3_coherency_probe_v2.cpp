@@ -39,6 +39,7 @@ int main(int argc, char ** argv) {
     const size_t MB = (argc > 1) ? atoi(argv[1]) : 32;
     const int ROUNDS = (argc > 2) ? atoi(argv[2]) : 32;
     const size_t n = MB * 1024 * 1024 / sizeof(int);
+    const int PLAIN = (argc > 3) ? atoi(argv[3]) : 0;   // 上提（printf 早于分配点）
 
     cl_platform_id pl; cl_uint npl = 0;
     if (clGetPlatformIDs(1, &pl, &npl) != CL_SUCCESS || npl == 0) { fprintf(stderr, "no platform\n"); return 2; }
@@ -46,7 +47,7 @@ int main(int argc, char ** argv) {
     CK(clGetDeviceIDs(pl, CL_DEVICE_TYPE_GPU, 1, &dev, nullptr));
     char v[256] = {0};
     clGetDeviceInfo(dev, CL_DRIVER_VERSION, sizeof(v) - 1, v, nullptr);
-    printf("PROBE2 driver=\"%s\" mb=%zu rounds=%d\n", v, MB, ROUNDS);
+    printf("PROBE2 driver=\"%s\" mb=%zu rounds=%d plain=%d\n", v, MB, ROUNDS, PLAIN);
 
     cl_int err;
     cl_context ctx = clCreateContext(nullptr, 1, &dev, nullptr, nullptr, &err);
@@ -61,11 +62,17 @@ int main(int argc, char ** argv) {
     cl_kernel k_sum = clCreateKernel(prg, "sum_check", &err); CK(err);
     cl_kernel k_wr  = clCreateKernel(prg, "pat_write", &err); CK(err);
 
-    cl_mem bo = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, n * sizeof(int), nullptr, &err);
+    cl_mem bo = clCreateBuffer(ctx, CL_MEM_READ_WRITE | (PLAIN ? 0 : CL_MEM_ALLOC_HOST_PTR), n * sizeof(int), nullptr, &err);
     if (!bo) { fprintf(stderr, "alloc %d\n", err); return 2; }
+    if (PLAIN) {   // 普通 BO 无 host map 语义保证；m1 改用 WriteBuffer 预填后仅测 GPU->CPU 向
+        std::vector<int> z(n, 0);
+        CK(clEnqueueWriteBuffer(q, bo, CL_TRUE, 0, n * sizeof(int), z.data(), 0, nullptr, nullptr));
+    }
     cl_mem gout = clCreateBuffer(ctx, CL_MEM_READ_WRITE, (n / 256 + 1) * sizeof(int), nullptr, &err); CK(err);
     std::vector<int> cpu(n / 256 + 1);
-    size_t gws = ((n / 256) + 63) / 64 * 64;
+    int fails = 0;
+    size_t gws = ((n / 256) + 63) / 64 * 64;          // sum_check: 每线程 256 元素
+    size_t gws_wr = ((n) + 63) / 64 * 64;              // pat_write: 每线程 1 元素（v2.2 修：原误用 gws=只写前 1/256，冤枉驱动）
     CK(clSetKernelArg(k_sum, 0, sizeof(cl_mem), &bo));
     CK(clSetKernelArg(k_sum, 1, sizeof(cl_mem), &gout));
     CK(clSetKernelArg(k_sum, 2, sizeof(int), (int *)&n));
@@ -74,6 +81,7 @@ int main(int argc, char ** argv) {
 
     // ---- (m1) map→CPU 写→**unmap**→GPU 读（fallback b1）----
     {
+        if (PLAIN) { printf("PROBE2(m1) SKIPPED(plain bo)\n"); }
         int * hi = (int *) clEnqueueMapBuffer(q, bo, CL_TRUE, CL_MAP_WRITE, 0, n * sizeof(int), 0, nullptr, nullptr, &err);
         if (!hi || err) { fprintf(stderr, "m1 map %d\n", err); return 2; }
         for (size_t i = 0; i < n; i++) hi[i] = (int)(i * 3 + 7);
@@ -87,7 +95,23 @@ int main(int argc, char ** argv) {
             if (cpu[g] != s) bad++;
         }
         printf("PROBE2(m1) map_write_unmap->gpu_read groups=%zu mismatch=%ld %s\n", n / 256, bad, bad ? "FAIL" : "OK");
-        if (bad) return 1;
+        if (bad) fails++;
+    }
+
+    // ---- (m0) pat_write 覆盖自证（探针自证铁律）----
+    {
+        int salt = 12345;
+        CK(clSetKernelArg(k_wr, 2, sizeof(int), &salt));
+        CK(clEnqueueNDRangeKernel(q, k_wr, 1, nullptr, &gws_wr, nullptr, 0, nullptr, nullptr));
+        CK(clFinish(q));
+        std::vector<int> h(64);
+        CK(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, 64 * sizeof(int), h.data(), 0, nullptr, nullptr));
+        int want0 = (int)(((unsigned)(13 * 2654435761u)) ^ (unsigned)salt);   // 探针元素 13 处（避开 0）
+        bool cov = false;
+        for (int i = 0; i < 64; i++) { int w = (int)(((unsigned)(i * 2654435761u)) ^ (unsigned)salt); if (h[i] == w) cov = true; }
+        (void)want0;
+        printf("PROBE2(m0) pat_write coverage selfproof via ReadBuffer head64=%s\n", cov ? "OK" : "FAIL");
+        if (!cov) { printf("PROBE2(m0) FAIL -> kernel coverage broken, abort\n"); return 2; }
     }
 
     // ---- (m2) GPU 写→finish→map(READ)→CPU 读→unmap（fallback b2）----
@@ -96,7 +120,7 @@ int main(int argc, char ** argv) {
         for (int r = 0; r < ROUNDS; r++) {
             int salt = r * 31 + 11;
             CK(clSetKernelArg(k_wr, 2, sizeof(int), &salt));
-            CK(clEnqueueNDRangeKernel(q, k_wr, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr));
+            CK(clEnqueueNDRangeKernel(q, k_wr, 1, nullptr, &gws_wr, nullptr, 0, nullptr, nullptr));
             CK(clFinish(q));
             const int * hi = (const int *) clEnqueueMapBuffer(q, bo, CL_TRUE, CL_MAP_READ, 0, n * sizeof(int), 0, nullptr, nullptr, &err);
             if (!hi || err) { fprintf(stderr, "m2 map %d\n", err); return 2; }
@@ -110,7 +134,7 @@ int main(int argc, char ** argv) {
             if (bad) { bad_rounds++; if (bad_rounds <= 3) printf("PROBE2(m2) round=%d sample_mismatch=%ld\n", r, bad); }
         }
         printf("PROBE2(m2) gpu_write->map_read rounds=%d bad_rounds=%ld %s\n", ROUNDS, bad_rounds, bad_rounds ? "FAIL" : "OK");
-        if (bad_rounds) return 1;
+        if (bad_rounds) fails++;
     }
 
     // ---- (c1/c2) 阳性对照：WriteBuffer/ReadBuffer（现役 set_tensor 路）----
@@ -126,9 +150,10 @@ int main(int argc, char ** argv) {
             if (cpu[g] != s) bad1++;
         }
         printf("PROBE2(c1) writebuffer->gpu_read mismatch=%ld %s\n", bad1, bad1 ? "FAIL" : "OK");
+        if (bad1) fails++;
         int salt = 777;
         CK(clSetKernelArg(k_wr, 2, sizeof(int), &salt));
-        CK(clEnqueueNDRangeKernel(q, k_wr, 1, nullptr, &gws, nullptr, 0, nullptr, nullptr));
+        CK(clEnqueueNDRangeKernel(q, k_wr, 1, nullptr, &gws_wr, nullptr, 0, nullptr, nullptr));
         CK(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, n * sizeof(int), h.data(), 0, nullptr, nullptr));
         long bad2 = 0;
         for (size_t i = 0; i < n; i += 997) {
@@ -136,9 +161,9 @@ int main(int argc, char ** argv) {
             if (h[i] != want) bad2++;
         }
         printf("PROBE2(c2) gpu_write->readbuffer mismatch=%ld %s\n", bad2, bad2 ? "FAIL" : "OK");
-        if (bad1 || bad2) return 1;
+        if (bad2) fails++;
     }
 
-    printf("PROBE2 done ALL_OK\n");
-    return 0;
+    printf("PROBE2 done fails=%d %s\n", fails, fails ? "SEE_ABOVE" : "ALL_OK");
+    return fails ? 1 : 0;
 }

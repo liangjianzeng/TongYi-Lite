@@ -188,8 +188,19 @@ case "$1" in
     export RUSTICL_ENABLE=kgsl
     export HOME=$R/tmp
     export XDG_CACHE_HOME=$R/tmp
-    timeout 300 $R/bin/l3_coherency_probe_v2 32 32
+    timeout 300 $LOADER --library-path $LP $R/bin/l3_coherency_probe_v2 32 32 > $R/out/e4d_l3b2.out 2>&1
     echo "#### probe2_rc=$?"
+    grep -a "PROBE2" $R/out/e4d_l3b2.out
+    ;;
+  l3b3) # 探针 v3（24dc71e1）：PLAIN=1 普通 cl_mem 对照组（ALLOC_HOST_PTR 双后备假说审判）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    export LD_LIBRARY_PATH=$LP; export OCL_ICD_VENDORS=$ICD; export RUSTICL_ENABLE=kgsl
+    export HOME=$R/tmp; export XDG_CACHE_HOME=$R/tmp
+    PT=${2:-0}
+    timeout 300 $LOADER --library-path $LP $R/bin/l3_probe_v22 32 16 $PT > $R/out/e4d_l3b3_p$PT.out 2>&1
+    echo "#### probe3_rc=$? plain=$PT"
+    grep -a "PROBE2" $R/out/e4d_l3b3_p$PT.out
     ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
