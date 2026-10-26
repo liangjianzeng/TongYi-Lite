@@ -264,6 +264,12 @@ case "$1" in
     run_leg e4d_g49 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=0"
     grep -a "tok_s=" $R/out/e4d_g49.out | tail -1
     ;;
+  d49) # ★IDLE=2 GAP=0 终验：drift N=20（当前最优候选：零 sleep 纯 finish 密度治愈）
+    run_drift e4d_d49 "" 16 "GGML_OPENCL_NDRANGE_IDLE=2 GGML_OPENCL_NDRANGE_IDLE_GAP=0" "" 20
+    ;;
+  d42) # IDLE=1 对照组终验（KERNEL_SYNC 同族，作保险）
+    run_drift e4d_d42 "" 16 "GGML_OPENCL_NDRANGE_IDLE=1" "" 20
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
