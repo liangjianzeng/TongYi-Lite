@@ -1,0 +1,236 @@
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -375,6 +375,12 @@
+     }
+ 
+     fd_submit->out_fence->kfence = req.timestamp;
++    /* [TongYi-Lite 0034 E4] note last submit for BO_CACHE release tagging */
++    {
++        extern void __attribute__((weak)) kgsl_e4_note_submit(uint32_t ts, uint32_t qid);
++        if (e4_enabled() && kgsl_e4_note_submit)
++            kgsl_e4_note_submit(req.timestamp, kgsl_pipe->queue_id);
++    }
+ 
+     if (e4_enabled()) {
+         for (unsigned i2 = 0; i2 < E4_TABLE_SZ; i2++) {
+--- a/src/freedreno/drm/kgsl/kgsl_pipe.c
++++ b/src/freedreno/drm/kgsl/kgsl_pipe.c
+@@ -227,9 +227,49 @@
+ 
+     fd_pipe_sp_ringpool_init(pipe);
+ 
++    /* [TongYi-Lite 0034 E4] init the single async pipe handle for probes: */
++    {
++        extern void kgsl_e4_set_async_pipe(struct fd_pipe *pipe);
++        kgsl_e4_set_async_pipe(pipe);
++    }
++
+     return pipe;
+ fail:
+     if (pipe)
+         fd_pipe_del(pipe);
+     return NULL;
+ }
++
++
++/* [TongYi-Lite 0034 E4] non-blocking retire check used by E4FAST (rk=) and
++ * E4BOREUSE (reached=): 1 = KMD says ts retired, 0 = still in flight,
++ * -1 = no ts, -2 = helper missing (weak). */
++static struct fd_pipe *kgsl_e4_async_pipe;
++
++void kgsl_e4_set_async_pipe(struct fd_pipe *pipe);
++void
++kgsl_e4_set_async_pipe(struct fd_pipe *pipe)
++{
++   kgsl_e4_async_pipe = pipe;
++}
++
++int kgsl_e4_pipe_ts_reached(struct fd_pipe *pipe, uint32_t ts);
++int
++kgsl_e4_pipe_ts_reached(struct fd_pipe *pipe, uint32_t ts)
++{
++   struct kgsl_pipe *kgsl_pipe;
++   struct kgsl_device_waittimestamp_ctxtid wait = { 0 };
++   int fd;
++
++   if (!pipe && kgsl_e4_async_pipe)
++      pipe = kgsl_e4_async_pipe;
++   if (!pipe || ts == 0)
++      return -1;
++   kgsl_pipe = to_kgsl_pipe(pipe);
++   fd = pipe->dev->fd;
++   wait.context_id = kgsl_pipe->queue_id;
++   wait.timestamp = ts;
++   wait.timeout = 0;
++   return (kgsl_pipe_safe_ioctl(fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID,
++                                &wait) == 0) ? 1 : 0;
++}
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -149,8 +149,12 @@
+           * heap and never reach fd_bo_cache_alloc, so the reuse observation
+           * must fire here too. */
+          extern void __attribute__((weak)) kgsl_e4_ring_reused(struct fd_bo *bo);
++         extern void __attribute__((weak)) kgsl_e4_bo_reacquired(struct fd_bo *bo);
+          if ((flags == RING_FLAGS) && kgsl_e4_ring_reused)
+             kgsl_e4_ring_reused(bo);
++         /* [0034] normal (BO_CACHE) allocations come from default_heap: */
++         if ((alloc_flags == 0) && kgsl_e4_bo_reacquired)
++            kgsl_e4_bo_reacquired(bo);
+          return bo;
+       }
+    }
+@@ -165,8 +169,12 @@
+        * fires when a cmdstream BO is pulled from the ring cache; the callee
+        * checks whether the batch that last submitted this ring has retired. */
+       extern void __attribute__((weak)) kgsl_e4_ring_reused(struct fd_bo *bo);
++      extern void __attribute__((weak)) kgsl_e4_bo_reacquired(struct fd_bo *bo);
+       if ((flags == RING_FLAGS) && kgsl_e4_ring_reused)
+          kgsl_e4_ring_reused(bo);
++      /* [0034] BO_CACHE acquire side of the in-flight reuse probe: */
++      if (cache == &dev->bo_cache && kgsl_e4_bo_reacquired)
++         kgsl_e4_bo_reacquired(bo);
+       return bo;
+    }
+ 
+@@ -379,8 +387,13 @@
+    if (suballoc_bo(bo))
+       return false;
+ 
+-   if (bo->bo_reuse == BO_CACHE)
++   if (bo->bo_reuse == BO_CACHE) {
++      /* [TongYi-Lite 0034 E4] tag release with last-submit for R11 probe */
++      extern void __attribute__((weak)) kgsl_e4_bo_released(struct fd_bo *bo);
++      if (kgsl_e4_bo_released)
++         kgsl_e4_bo_released(bo);
+       return fd_bo_cache_free(&dev->bo_cache, bo) == 0;
++   }
+ 
+    if (bo->bo_reuse == RING_CACHE)
+       return fd_bo_cache_free(&dev->ring_cache, bo) == 0;
+@@ -874,3 +887,87 @@
+    return FD_BO_STATE_BUSY;
+ }
+ 
++
++
++#include <stdlib.h>
++#include <stdio.h>
++
++/* === [TongYi-Lite 0034 E4 round-4] BO_CACHE in-flight reuse probe (R11). ===
++ * Release side tags {handle -> last submit ts/qid}; acquire side asks the KMD
++ * (non-blocking WAITTIMESTAMP timeout=0) whether that batch has retired.
++ * reached=0 on reacquire = handed out while some batch was still in flight.
++ * NOTE the ts attribution is approximate (last submit at release time, not
++ * necessarily a batch that touched this bo) — adjudicate by async-vs-control
++ * RATE comparison plus E4FAST rk= data, not by any single line. */
++struct e4_rel {
++   uint32_t handle;
++   uint32_t ts;
++   uint32_t qid;
++   int valid;
++};
++#define E4_REL_SZ 1024
++static struct e4_rel e4_rel_table[E4_REL_SZ];
++
++static uint32_t e4_last_ts, e4_last_qid;
++
++static int
++e4rel_on(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++   return on;
++}
++
++void kgsl_e4_note_submit(uint32_t ts, uint32_t qid);
++void
++kgsl_e4_note_submit(uint32_t ts, uint32_t qid)
++{
++   if (!e4rel_on())
++      return;
++   e4_last_ts = ts;
++   e4_last_qid = qid;
++}
++
++void kgsl_e4_bo_released(struct fd_bo *bo);
++void
++kgsl_e4_bo_released(struct fd_bo *bo)
++{
++   if (!e4rel_on() || !bo)
++      return;
++   unsigned i0 = bo->handle & (E4_REL_SZ - 1);
++   for (unsigned n = 0; n < 8; n++) {
++      struct e4_rel *e = &e4_rel_table[(i0 + n) & (E4_REL_SZ - 1)];
++      if (!e->valid || e->handle == bo->handle) {
++         e->handle = bo->handle;
++         e->ts = e4_last_ts;
++         e->qid = e4_last_qid;
++         e->valid = 1;
++         fprintf(stderr, "E4BOREL handle=%u ts=%u qid=%u\n",
++                 bo->handle, e->ts, e->qid);
++         return;
++      }
++   }
++}
++
++void kgsl_e4_bo_reacquired(struct fd_bo *bo);
++void
++kgsl_e4_bo_reacquired(struct fd_bo *bo)
++{
++   if (!e4rel_on() || !bo)
++      return;
++   extern int __attribute__((weak)) kgsl_e4_pipe_ts_reached(struct fd_pipe *pipe, uint32_t ts);
++   unsigned i0 = bo->handle & (E4_REL_SZ - 1);
++   for (unsigned n = 0; n < 8; n++) {
++      struct e4_rel *e = &e4_rel_table[(i0 + n) & (E4_REL_SZ - 1)];
++      if (!e->valid || e->handle != bo->handle)
++         continue;
++      int reached = -2;
++      if (e->ts != 0 && kgsl_e4_pipe_ts_reached)
++         reached = kgsl_e4_pipe_ts_reached(NULL, e->ts);  /* NULL -> async pipe */
++      fprintf(stderr, "E4BOREUSE handle=%u ts=%u qid=%u reached=%d\n",
++              bo->handle, e->ts, e->qid, reached);
++      e->valid = 0;   /* one-shot: re-acquired, observation consumed */
++      return;
++   }
++}
+--- a/src/freedreno/drm/freedreno_pipe.c
++++ b/src/freedreno/drm/freedreno_pipe.c
+@@ -184,15 +184,32 @@
+    return on;
+ }
+ 
++/* [TongYi-Lite 0034 E4] TYL_E4_NOFAST=1 (requires TYL_E4=1) bypasses BOTH
++ * fast-completion decisions so every wait is adjudicated by the KMD. */
++static int
++e4_nofast(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1' &&
++            getenv("TYL_E4_NOFAST") && getenv("TYL_E4_NOFAST")[0] == '1') ? 1 : 0;
++   return on;
++}
++
+ int
+ fd_pipe_wait_timeout(struct fd_pipe *pipe, const struct fd_fence *fence,
+                      uint64_t timeout)
+ {
+-   if (e4_fast_on()) {
++   if (e4_nofast()) {
++      /* [0034] fall through: KMD-only adjudication. */
++   } else if (e4_fast_on()) {
+       int hit = !fd_fence_after(fence->ufence, pipe->control->fence);
+-      fprintf(stderr, "E4FAST fence=%p ufence=%u ctrl=%llu hit=%d timeout=%llu\n",
++      extern int __attribute__((weak)) kgsl_e4_pipe_ts_reached(struct fd_pipe *pipe, uint32_t ts);
++      int rk = (hit && kgsl_e4_pipe_ts_reached) ?
++               kgsl_e4_pipe_ts_reached(pipe, fence->ufence) : -2;
++      fprintf(stderr, "E4FAST fence=%p ufence=%u ctrl=%llu hit=%d rk=%d timeout=%llu\n",
+               (void *)fence, fence->ufence,
+-              (unsigned long long)pipe->control->fence, hit,
++              (unsigned long long)pipe->control->fence, hit, rk,
+               (unsigned long long)timeout);
+       if (hit)
+          return 0;

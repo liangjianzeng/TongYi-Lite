@@ -48,10 +48,15 @@
 - [x] R-034 入册（1045 行册）/ C2 回写 / 台账 leg-043..051 / 双仓 push
 - [ ] **0034 E4BOREUSE（R11 判决）**：freedreno_bo.c try_recycle 记 {handle→{release 时最后提交 ts,queue}}，BO_CACHE acquire 侧 timeout=0 WAITTIMESTAMP 探活，**reached=0=在飞复用实证**；ts 归因是保守近似→联查 ggml 垫片 clReleaseMemObject→re-alloc 配对计数
 - [ ] **E4FAST 旁路鉴别腿**：给 fastpath 加 `TYL_E4_NOFAST=1` 强制 wait 全走 KMD——async 治好=快路早完成定罪（R11 上游）；仍乱=worker 批处理内部竞态
-- [ ] 漂移概率量化：背书 OPFLUSH=1 大样本 N≥20 钉死「≈0」；前线② B0 岛事件化（OCL:11162-11166 三 NULL async 钩子，岛界 OCL:8612-8613）
+- [x] 0034 diag4（bb401268）+ e4h NOFAST：**快路早完成死刑**（禁快路仍乱）；E4VERIFY OK=0 ⇒ R-034「IB 完好」**撤销**（n=1 空数据；ring submit 即毁=全 regime 共性）
+- [x] 0035 diag5（059579c1）load-gate+tid+RGROW+QFLUSH：BOREUSE_NOTRET 双 regime 归零（**R11 直接形态→0.1**）；三线程分工（22582 录制 submit/22617 等待信号/22579+22593 API 直等）；乱码模态跨代复现（be5a0264=leg-039、d0044294×3）=窗口位置固定
+- [x] R-035 入册（1062 行）/ C2 回写 / 台账 052-056 / 双仓 push；背书复验 #6
+- [ ] SA-4 验尸 → 0036（按锁纪律判定选点：gallium launch/flush 打点+tid / deep_unflushed 序 / E4REC 定版）
+- [ ] ggml 垫片 release→re-alloc 配对计数；OPFLUSH=2/4/8 阈值扫；背书漂移大样本；前线② B0 岛事件化（OCL:11162-11166 三 NULL async 钩子，岛界 OCL:8612-8613）
 
 ## 5b. 判决语义备忘（R-034 后 —— 覆盖 R-033 版）
-- **R10 已死，勿再引用其预期指纹**。存活嫌疑排序：R11 早完成→BO_CACHE 复用覆写（0.6）> worker 批处理内部竞态（0.2）> R3'快路语义（0.1）> R9 挂账（BANK_GPU 腿再裁）。
+- **R10 已死（R-034）；R11 直接形态与快路早完成已死（R-035）**。存活嫌疑排序：worker 批处理内部竞态（0.55，头号——per-event flush 是唯一治愈，NOFAST 不治）> ggml 事件依赖/释放配对缺陷（0.15）> R11 窄窗残党（0.1）> ts 原语谎报（0.05）> R9（BANK_GPU 腿再裁）。
+- E4VERIFY/SKIPPED 语义：OK=0=读者少（ring 提交即毁）；**MISMATCH 缺席≠IB 完好**（可读者才计数）；tid 联查键=E4FENCE(录)/E4FAST(等)/E4FLUSH/E4WAIT(rt+tid)。
 - **字节判据纪律**：字节级金标准对比**只准用于背书库**；diag 腿=扰动放大器（18 万行 stderr/腿），只能比 health+分布量（hist/nev/E4FAST 率/KGSLSUBMIT 计数）。R-033「diag 零扰动」字样作废（e4b 一把全等只是竞态未命中）。
 - **竞态概率谱**：sync=0（金标准全等，唯一 0 概率态）；背书 OPFLUSH=1≈0（e9b88e56 五连庄=leg-034/035/042/048/051）；OPFLUSH=1+diag3=3/3 漂移；async≈1。漂移模态可复现（d0044294×2）⇒ 竞态窗口有偏置，非均匀噪声。
 - E4FAST 实测：async 92%（34224/37231）、OPFLUSH 95%（175396/184549）wait 由 control->fence 自写 stamp 命中不经 KMD；E4VERIFY MISMATCH 签名=全 size 584 尾环（worker 并发重录良性）——**IB 通路无罪**。

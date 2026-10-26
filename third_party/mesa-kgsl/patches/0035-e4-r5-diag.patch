@@ -1,0 +1,127 @@
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -1,3 +1,5 @@
++#include <unistd.h> /* [0035] gettid */
++
+ #include "kgsl_priv.h"
+ #include "freedreno_ringbuffer_sp.h"
+ 
+@@ -402,9 +404,9 @@
+                                 req.timestamp, kgsl_pipe->queue_id);
+             }
+         }
+-        fprintf(stderr, "E4FENCE flush=%u ts=%u numsyncs=%u usefd=%d rt=%llu\n",
++        fprintf(stderr, "E4FENCE flush=%u ts=%u numsyncs=%u usefd=%d rt=%llu tid=%d\n",
+                 e4_flushes, req.timestamp, req.numsyncs,
+-                (int)fd_submit->out_fence->use_fence_fd, e4_now_ns());
++                (int)fd_submit->out_fence->use_fence_fd, e4_now_ns(), (int)gettid());
+     }
+ 
+     if  (fd_submit->out_fence->use_fence_fd) {
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -929,11 +929,15 @@
+    e4_last_qid = qid;
+ }
+ 
++/* [0035] decode-phase gate: load-era (ts<=13) releases produced the
++ * deterministic 835 false baseline; observe only steady-state decode. */
++#define E4_DECODE_TS 300
++
+ void kgsl_e4_bo_released(struct fd_bo *bo);
+ void
+ kgsl_e4_bo_released(struct fd_bo *bo)
+ {
+-   if (!e4rel_on() || !bo)
++   if (!e4rel_on() || !bo || e4_last_ts < E4_DECODE_TS)
+       return;
+    unsigned i0 = bo->handle & (E4_REL_SZ - 1);
+    for (unsigned n = 0; n < 8; n++) {
+--- a/src/freedreno/drm/freedreno_pipe.c
++++ b/src/freedreno/drm/freedreno_pipe.c
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include "freedreno_drmif.h"
++#include <unistd.h> /* [0035] gettid */
++
+ #include "freedreno_priv.h"
+ 
+ /**
+@@ -207,10 +209,10 @@
+       extern int __attribute__((weak)) kgsl_e4_pipe_ts_reached(struct fd_pipe *pipe, uint32_t ts);
+       int rk = (hit && kgsl_e4_pipe_ts_reached) ?
+                kgsl_e4_pipe_ts_reached(pipe, fence->ufence) : -2;
+-      fprintf(stderr, "E4FAST fence=%p ufence=%u ctrl=%llu hit=%d rk=%d timeout=%llu\n",
++      fprintf(stderr, "E4FAST fence=%p ufence=%u ctrl=%llu hit=%d rk=%d timeout=%llu tid=%d\n",
+               (void *)fence, fence->ufence,
+               (unsigned long long)pipe->control->fence, hit, rk,
+-              (unsigned long long)timeout);
++              (unsigned long long)timeout, (int)gettid());
+       if (hit)
+          return 0;
+    } else if (!fd_fence_after(fence->ufence, pipe->control->fence))
+--- a/src/freedreno/drm/freedreno_ringbuffer_sp.c
++++ b/src/freedreno/drm/freedreno_ringbuffer_sp.c
+@@ -9,6 +9,8 @@
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <pthread.h>
++#include <unistd.h> /* [0035] gettid for E4 */
++#include <stdio.h>
+ 
+ #include "util/hash_table.h"
+ #include "util/libsync.h"
+@@ -517,6 +519,19 @@
+ 
+    finalize_current_cmd(ring);
+ 
++   /* [TongYi-Lite 0035 E4] grow events: a brand-new ring gem replaces the
++    * old one (no content copy); outstanding submits keep their own refs —
++    * observe handles/sizes to correlate with E4BO/E4VERIFY nolive stats. */
++   {
++      static int e4g_on = -1;
++      if (e4g_on < 0)
++         e4g_on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++      if (e4g_on)
++         fprintf(stderr, "E4RGROW ring=%p old_bo=%u new_size=%u curdw=%ld tid=%d\n",
++                 (void *)ring, fd_ring->ring_bo ? fd_ring->ring_bo->handle : 0,
++                 size, (long)(ring->cur - ring->start), (int)gettid());
++   }
++
+    fd_bo_del(fd_ring->ring_bo);
+    fd_ring->ring_bo = fd_bo_new_ring(pipe->dev, size);
+ 
+--- a/src/gallium/frontends/rusticl/core/queue.rs
++++ b/src/gallium/frontends/rusticl/core/queue.rs
+@@ -355,7 +355,8 @@
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .unwrap_or_default()
+                 .as_nanos();
+-            eprintln!("E4FLUSH seq={} nev={} rt={}", seq, evs.len(), ns);
++            eprintln!("E4FLUSH seq={} nev={} rt={} tid={:?}", seq, evs.len(), ns,
++                std::thread::current().id());
+         }
+         if pipe.device_reset_status() != pipe_reset_status::PIPE_NO_RESET {
+             // if the context reset while executing, simply put all events into error state.
+@@ -540,7 +541,8 @@
+                                 .duration_since(std::time::UNIX_EPOCH)
+                                 .unwrap_or_default()
+                                 .as_nanos();
+-                            eprintln!("E4WAIT wseq={} nev={} ok={} rt={}", wseq, events.len(), e4_ok, ns);
++                            eprintln!("E4WAIT wseq={} nev={} ok={} rt={} tid={:?}", wseq, events.len(), e4_ok, ns,
++                std::thread::current().id());
+                         }
+                         if e4_ok {
+                             evs.for_each(|e| e.signal());
+@@ -564,6 +566,10 @@
+     pub fn flush(&self, wait: bool) -> CLResult<()> {
+         let mut state = self.state.lock().unwrap();
+         let events = mem::take(&mut state.pending);
++        if e4_on() {
++            eprintln!("E4QFLUSH pend={} wait={} tid={:?}", events.len(), wait,
++                std::thread::current().id());
++        }
+         let mut queues = Event::deep_unflushed_queues(&events);
+ 
+         // Update last if and only if we get new events, this prevents breaking application code
