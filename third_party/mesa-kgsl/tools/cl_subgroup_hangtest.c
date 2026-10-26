@@ -160,7 +160,9 @@ int main(void) {
         variant = attempt == 0 ? "full" : "basic";
         prog = p_create_prog_src(ctx, 1, &src, &srclen, &rc);
         if (!prog) { fprintf(stderr, "[HANGTEST] CreateProgram rc=%d\n", rc); printf("[HANGTEST] VERDICT=BUILD_FAIL\n"); return 3; }
-        rc = p_build_program(prog, 1, &dev, "-cl-std=CL2.0", NULL, NULL);
+        /* CL3.0 = rustc 前端原生路（自带 prelude）；1.2 会掉 CLC+上游 libclc（已知带 bug，
+         * 启动时那条 "Patched Mesa libclc not detected" 警告就是它），sub_group 面编不过 */
+        rc = p_build_program(prog, 1, &dev, "-cl-std=CL3.0", NULL, NULL);
         if (rc == CL_SUCCESS) { kn = p_create_kernel(prog, "sg_hang", &rc); if (kn) break; }
         char log[2048] = {0};
         p_get_prog_build_info(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof log - 1, log, NULL);
