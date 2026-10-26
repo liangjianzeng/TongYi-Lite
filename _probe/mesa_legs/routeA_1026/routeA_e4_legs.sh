@@ -11,7 +11,9 @@ EXPERTS=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts
 PROMPT='请详细介绍一下中国的四大发明，分别说明每一项的历史背景、技术要点和对世界文明的影响，分四段展开，每段不少于八十字，不要简短总结'
 
 run_leg () {
-  TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4
+  TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4; PRELOAD=$5
+  # [教训 1026] LD_PRELOAD 绝不 export：会毒死 timeout/grep 等 bionic 二进制
+  # （"CANNOT LINK EXECUTABLE timeout: cannot find verneed..."），只在 exec 行 env 注入
   mkdir -p $R/tmp $R/out
   TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
   echo "#### $TAG $(date -Iseconds) loadavg=$(cat /proc/loadavg) temp=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -d ' ')"
@@ -35,7 +37,13 @@ run_leg () {
   export E2E_NOMMAP=1
   export E2E_TOKDUMP=$R/out/$TAG.tok
   export GGML_E2E_PROMPT="$PROMPT"
-  timeout 600 $LOADER --library-path $LP $R/bin/minicpm_e2e \
+  if [ "$PRELOAD" != "" ]; then
+    PLENV="LD_PRELOAD=$PRELOAD"
+  else
+    PLENV=""
+  fi
+  # shellcheck disable=SC2086
+  timeout 600 env $PLENV $LOADER --library-path $LP $R/bin/minicpm_e2e \
     $MODEL $EXPERTS 99 $NPRED 512 \
     > $R/out/$TAG.out 2> $R/out/$TAG.err
   echo "#### rc=$? tokbytes=$(ls -l $R/out/$TAG.tok 2>/dev/null | awk '{print $5}')"
@@ -86,13 +94,13 @@ case "$1" in
     run_leg fl2a_48 "" 48 "GGML_OPENCL_OPFLUSH=2 TYL_E4=1"
     ;;
   g7) # diag7 三腿之一：async 16 + grp 垫片（E4LAG/E4CACHEBAD + 垫片 E4GRELPAIR 联合判决）
-    run_leg e4d_g7 "" 16 "TYL_E4=1 TYL_E4_GRP=1 LD_PRELOAD=$R/bin/libtylgrp.so"
+    run_leg e4d_g7 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
     ;;
   fix8) # diag8 修复验证：async 16 + TYL_UPSZ=4MB（cb0 环绕假说的因果判据：health=1 ⇒ 定罪+修复闭环）
     run_leg e4d_fix8 "" 16 "TYL_E4=1 TYL_UPSZ=4194304"
     ;;
   fix8g) # diag8 双探针腿：修复验证 + grp 垫片同开（环绕应消失）
-    run_leg e4d_fix8g "" 16 "TYL_E4=1 TYL_UPSZ=4194304 TYL_E4_GRP=1 LD_PRELOAD=$R/bin/libtylgrp.so"
+    run_leg e4d_fix8g "" 16 "TYL_E4=1 TYL_UPSZ=4194304 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
     ;;
   *) echo "usage: sh routeA_e4_legs.sh e4a|...|e4h|flscan|fl2a|g7|fix8|fix8g"; exit 2;;
 esac
