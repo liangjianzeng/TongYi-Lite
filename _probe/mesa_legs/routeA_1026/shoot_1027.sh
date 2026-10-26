@@ -13,6 +13,16 @@ mark() { touch "$L/done_$1"; echo "#### DONE $1"; }
 
 DEV || { echo "NO_DEVICE"; exit 1; }
 
+# [1027 干跑抓虫] q0a0 金标准 e9b88e56=旧二进制血统，必须在七件套部署之前跑（否则新旧张冠李戴）
+if ! leg_done q0a0_pre; then
+  DEV || { echo "LOST_DEVICE before q0a0_pre"; exit 3; }
+  echo "======== LEG q0a0_pre (old binaries) $(date +%H:%M:%S) ========"
+  SH "sh $R/routeA_legs_1026.sh q0a0" > "$LOG/q0a0_pre.log" 2>&1
+  tail -12 "$LOG/q0a0_pre.log"
+  grep -q "LOST" "$LOG/q0a0_pre.log" && { echo "HALT lost"; exit 4; }
+  mark q0a0_pre
+fi
+
 if ! leg_done stage; then
   # 0) 现场清理 + 推送
   SH "pgrep -f minicpm_e2e | xargs -r kill -9" ; sleep 2
