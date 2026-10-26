@@ -1,0 +1,23 @@
+--- a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -60,6 +60,20 @@
+             break;
+         }
+ 
++        /* [TongYi-Lite 0030] Mirror MSM winsys: migrate ring bos and the
++         * deferred submit's bos table onto the current submit before
++         * dropping it, so nothing can be freed/reused before the ioctl.
++         * Upstream kgsl dropped these refs in fd_submit_del() while the
++         * GPU was about to read those IOVAs -> silent corruption when
++         * flush_submit_list merges deferred submits (async path). */
++        {
++            struct fd_submit_sp *fd_deferred_submit = to_fd_submit_sp(submit);
++            for (unsigned i = 0; i < deferred_primary->u.nr_cmds; i++)
++                fd_submit_append_bo(fd_submit, deferred_primary->u.cmds[i].ring_bo);
++            for (unsigned i = 0; i < fd_deferred_submit->nr_bos; i++)
++                fd_submit_append_bo(fd_submit, fd_deferred_submit->bos[i]);
++        }
++
+         list_del(&submit->node);
+         fd_submit_del(submit);
+     }
