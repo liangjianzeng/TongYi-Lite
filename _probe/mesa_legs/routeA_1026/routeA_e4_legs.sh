@@ -187,6 +187,9 @@ case "$1" in
     run_leg e4d_g34 "1" 48 "GGML_OPENCL_ISLAND_WIRE=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g34.err) speed=$(grep -aoE '[0-9.]+ tokens/second|[0-9.]+ t/s' $R/out/e4d_g34.out | tail -1)"
     ;;
+  d31) # g31 终验：KERNEL_SYNC drift N=20（热闸断跑；md5 单一+health 20/20=过门）
+    run_drift e4d_d31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1" "" 20
+    ;;
   g32) # 对照：同新二件 KERNEL_SYNC 关（预期乱=新二进制自身非混淆变量）
     run_leg e4d_g32 "" 16 ""
     ;;
