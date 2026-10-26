@@ -180,6 +180,17 @@ case "$1" in
     echo "#### deployed: $(md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/libggml-base.so.0.27.0)"
     run_leg e4d_g31 "" 16 "GGML_OPENCL_KERNEL_SYNC=1"
     ;;
+  l3b2) # R-053 fallback 三证 v2（probe 118bee3f）：map/unmap 包裹双向 + WriteBuffer/ReadBuffer 阳性对照
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    export LD_LIBRARY_PATH=$LP
+    export OCL_ICD_VENDORS=$ICD
+    export RUSTICL_ENABLE=kgsl
+    export HOME=$R/tmp
+    export XDG_CACHE_HOME=$R/tmp
+    timeout 300 $R/bin/l3_coherency_probe_v2 32 32
+    echo "#### probe2_rc=$?"
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
