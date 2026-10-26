@@ -109,3 +109,56 @@ clReleaseMemObject(cl_mem m) {
 }
 
 __attribute__((constructor)) static void init(void) { atexit(atexit_report); }
+
+/* ---- [0045-pre / R-039] host-side out-of-queue actor audit: maps & copies ---- */
+typedef void *(CL_API_CALL *fn_mapbuf)(cl_command_queue, cl_mem, cl_bool,
+    cl_map_flags, size_t, size_t, cl_uint, const cl_event *, cl_event *, cl_int *);
+typedef cl_int (CL_API_CALL *fn_unmap)(cl_command_queue, cl_mem, void *,
+    cl_uint, const cl_event *, cl_event *);
+typedef cl_int (CL_API_CALL *fn_rwbuf)(cl_command_queue, cl_mem, cl_bool,
+    size_t, size_t, const void *, cl_uint, const cl_event *, cl_event *);
+
+CL_API_ENTRY void *CL_API_CALL
+clEnqueueMapBuffer(cl_command_queue q, cl_mem b, cl_bool blocking,
+                   cl_map_flags mf, size_t off, size_t cb, cl_uint nev,
+                   const cl_event *ev, cl_event *pe, cl_int *e) {
+    static fn_mapbuf r; if (!r) r = (fn_mapbuf)dlsym(RTLD_NEXT, "clEnqueueMapBuffer");
+    if (!r) return NULL;
+    void *p = r(q, b, blocking, mf, off, cb, nev, ev, pe, e);
+    if (grp_on == 1)
+        fprintf(stderr, "E4GMAP mem=%p blk=%d mf=%x off=%zu cb=%zu nev=%u ptr=%p rt=%llu\n",
+                (void *)b, (int)blocking, (unsigned)mf, off, cb, nev, p, ns_now());
+    return p;
+}
+
+CL_API_ENTRY cl_int CL_API_CALL
+clEnqueueUnmapMemObject(cl_command_queue q, cl_mem m, void *p, cl_uint nev,
+                        const cl_event *ev, cl_event *pe) {
+    static fn_unmap r; if (!r) r = (fn_unmap)dlsym(RTLD_NEXT, "clEnqueueUnmapMemObject");
+    if (!r) return CL_INVALID_OPERATION;
+    if (grp_on == 1)
+        fprintf(stderr, "E4GUNMAP mem=%p nev=%u rt=%llu\n", (void *)m, nev, ns_now());
+    return r(q, m, p, nev, ev, pe);
+}
+
+CL_API_ENTRY cl_int CL_API_CALL
+clEnqueueReadBuffer(cl_command_queue q, cl_mem b, cl_bool blk, size_t off,
+                    size_t cb, void *p, cl_uint nev, const cl_event *ev, cl_event *pe) {
+    static fn_rwbuf r; if (!r) r = (fn_rwbuf)dlsym(RTLD_NEXT, "clEnqueueReadBuffer");
+    if (!r) return CL_INVALID_OPERATION;
+    if (grp_on == 1)
+        fprintf(stderr, "E4GREAD mem=%p blk=%d cb=%zu nev=%u rt=%llu\n",
+                (void *)b, (int)blk, cb, nev, ns_now());
+    return r(q, b, blk, off, cb, p, nev, ev, pe);
+}
+
+CL_API_ENTRY cl_int CL_API_CALL
+clEnqueueWriteBuffer(cl_command_queue q, cl_mem b, cl_bool blk, size_t off,
+                     size_t cb, const void *p, cl_uint nev, const cl_event *ev, cl_event *pe) {
+    static fn_rwbuf r; if (!r) r = (fn_rwbuf)dlsym(RTLD_NEXT, "clEnqueueWriteBuffer");
+    if (!r) return CL_INVALID_OPERATION;
+    if (grp_on == 1)
+        fprintf(stderr, "E4GWRITE mem=%p blk=%d cb=%zu nev=%u rt=%llu\n",
+                (void *)b, (int)blk, cb, nev, ns_now());
+    return r(q, b, blk, off, cb, p, nev, ev, pe);
+}

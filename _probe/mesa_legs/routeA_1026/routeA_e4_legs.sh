@@ -105,6 +105,9 @@ case "$1" in
   g11) # fl1 治愈对照（全代探针在场，验证不扰动金标准）
     run_leg e4f_g11 "" 1 "TYL_E4=1"
     ;;
+  g14) # host 写审计腿：async 16 + 垫片 v2（map/unmap/read/write 全参）
+    run_leg e4d_g14 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
+    ;;
   g12) # fastpath 神罪腿：async 16 + TYL_E4_NOFAST=1（等待全走 KMD）
     run_leg e4d_g12 "" 16 "TYL_E4=1 TYL_E4_NOFAST=1"
     ;;
