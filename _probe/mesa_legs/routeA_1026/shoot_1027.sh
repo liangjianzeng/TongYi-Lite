@@ -17,7 +17,7 @@ DEV || { echo "NO_DEVICE"; exit 1; }
 if ! leg_done q0a0_pre; then
   DEV || { echo "LOST_DEVICE before q0a0_pre"; exit 3; }
   echo "======== LEG q0a0_pre (old binaries) $(date +%H:%M:%S) ========"
-  SH "sh $R/routeA_legs_1026.sh q0a0" > "$LOG/q0a0_pre.log" 2>&1
+  SH "sh $R/routeA_legs.sh q0a0" > "$LOG/q0a0_pre.log" 2>&1
   tail -12 "$LOG/q0a0_pre.log"
   grep -q "LOST" "$LOG/q0a0_pre.log" && { echo "HALT lost"; exit 4; }
   mark q0a0_pre
@@ -26,7 +26,7 @@ fi
 if ! leg_done stage; then
   # 0) 现场清理 + 推送
   SH "pgrep -f minicpm_e2e | xargs -r kill -9" ; sleep 2
-  SH "md5sum $R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt/libRusticlOpenCL.so.1.0.0" | tee "$LOG/endorsed_md5.txt"
+  SH "md5sum $R/opt/mesa-cl/lib/aarch64-linux-gnu/libRusticlOpenCL.so.1.0.0" | tee "$LOG/endorsed_md5.txt"
   adb -s $D push $L/stage_1027/. $R/stage_1027/ >/dev/null
   adb -s $D push $L/shim/libtylgrp_glibc_v8.so $R/bin/libtylgrp.so >/dev/null
   adb -s $D push $L/l3_coherency_probe_1027 $R/bin/l3_coherency_probe >/dev/null
