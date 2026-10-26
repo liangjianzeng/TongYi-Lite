@@ -64,28 +64,26 @@ static fn_enqueue_read p_enqueue_read;
  * 2.0 核心名（sub_group_barrier(CL_MEMORY_SEQ_CST)/reduce_add）在 CLC 路编不过，
  * 而这些 KHR 名恰好就是 ggml-opencl 内核在用的那批，卡死复现面更对口） */
 static const char *SRC_FULL =
-"#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
 "__kernel void sg_hang(__global int * out) {\n"
 "  int gid = get_global_id(0);\n"
 "  int v = gid + 1;\n"
 "  int acc = 0;\n"
 "  for (int i = 0; i < 4; i++) {\n"
 "    v = sub_group_shuffle_xor(v, 1);\n"
-"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
+"    barrier(CLK_GLOBAL_MEM_FENCE);\n"
 "    acc += sub_group_shuffle(v, 0);\n"
-"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
+"    barrier(CLK_GLOBAL_MEM_FENCE);\n"
 "  }\n"
 "  out[gid] = acc;\n"
 "}\n";
-/* 降级变体（只为"编译不过"兜底，不为绕挂死）：barrier-only */
+/* 降级变体（只为"编译不过"兜底，不为绕挂死）：shuffle-only */
 static const char *SRC_BASIC =
-"#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n"
 "__kernel void sg_hang(__global int * out) {\n"
 "  int gid = get_global_id(0);\n"
 "  int v = gid + 1;\n"
 "  int acc = 0;\n"
 "  for (int i = 0; i < 4; i++) {\n"
-"    sub_group_barrier(CLK_GLOBAL_MEM_FENCE);\n"
+"    v = sub_group_shuffle_xor(v, 1);\n"
 "    acc += v;\n"
 "  }\n"
 "  out[gid] = acc;\n"
