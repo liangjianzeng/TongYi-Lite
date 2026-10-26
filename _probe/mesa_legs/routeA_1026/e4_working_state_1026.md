@@ -43,7 +43,8 @@
 - [x] 首轮落账：台账 leg-039..042 / **R-033 入册** / C2 格回写 / 双仓 push
 - [x] SA-1/SA-2 只读报告验尸（承重断言逐字抽验命中）→ 定案 E1=env 名错（RUSTICL_DEBUG）；R8 改判「未测」；R9 挂账（OCL:15885）
 - [x] 0032 探针轮（E4VERIFY/E4REUSE/E4FAST/E4FLUSH/E4WAIT，diag2=1a9d8f15）→ e4d-r1 **rc=139 悬垂崩**（保存裸 map 指针教训）
-- [x] 0033 活性查找重设计（fd_bo_e4_lookup + SKIPPED 语义 + heap 分支钩子 + **不持引用**，diag8=908ece48(=diag7 106c21ec+0038 TYL_UPSZ；diag4 bb401268/diag5 059579c1/diag6 0c0f63cf/diag7 106c21ec 均在 /tmp/e41026)
+- [x] 0033 活性查找重设计（fd_bo_e4_lookup + SKIPPED 语义 + heap 分支钩子 + **不持引用**，diag3=1db4c812）
+- [x] 机床现状：树=背书+0031..0033+0036+0037+0038（diag8=908ece48）；diag4..diag7 md5 见 /tmp/e41026；设备影子=已撤（q0a0#8 背书无损）
 - [x] **R10 证伪**（E4REUSE 双钩子全哑 + 每 submit 全新 gem）+ **E1 闭环**（e4g=RUSTICL_DEBUG=sync ⇒ token 级金标准全等）+ **竞态统一图景**（e4e 三跑漂移 d0044294/678a1e60/d0044294≠e9b88e56，idx2 起分叉=prefill 命中）
 - [x] R-034 入册（1045 行册）/ C2 回写 / 台账 leg-043..051 / 双仓 push
 - [ ] **0034 E4BOREUSE（R11 判决）**：freedreno_bo.c try_recycle 记 {handle→{release 时最后提交 ts,queue}}，BO_CACHE acquire 侧 timeout=0 WAITTIMESTAMP 探活，**reached=0=在飞复用实证**；ts 归因是保守近似→联查 ggml 垫片 clReleaseMemObject→re-alloc 配对计数
@@ -53,8 +54,9 @@
 - [x] R-035 入册（1062 行）/ C2 回写 / 台账 052-056 / 双仓 push；背书复验 #6
 - [x] SA-4 验尸完成（四线程/sq 释放/双 sync 消费点裁定 SA-1/无 50 常量/硬阈值 30·128）→ 0036 diag6（0c0f63cf）三探针跑毕 PREP 燃料非区分量、CB0 环绕复用假说复活（0034 one-shot 降权）、fl 阈值 N≤2/N≥3、fl2=可用非免费
 - [ ] u_upload_mgr 语义定档（读源码）：轮转 `u_upload_alloc_buffer` **无任何 fence/在飞检查**，releasebuf 交调用方处置；map_persistent 走 MAP_PERSISTENT|COHERENT（kgsl caps 值待证）。两条子假说：(a) **字节级环绕**——slab BO 被批 RELOC 引住+有围栏（E4CACHEBAD 预测=0，保护生命周期但不保护字节），CPU 环绕写 offset X 时滞后批仍读 X=乱；(b) **无引用户**——若 CB0 不经 RELOC，轮转释放的旧 slab 零围栏进 BO_CACHE 即刻可被夺（CACHEBAD 预测>0）。E4LAG+E4CACHEBAD 双读数一次分诊：LAG 大+CACHEBAD=0⇒(a)；CACHEBAD>0⇒(b)；LAG≈0 且仍乱⇒转 worker 内部竞态
-- [ ] **diag7（106c21ec，E4LAG+E4CACHEBAD）待跑**：设备 21:0x 热致失联（44°C/ping 全丢），重连循环值守；复活→e4d-r7/e4e-r6/fl2a 三腿→LAG 分布+CACHEBAD 计数→若定罪→u_upload 4MB 修复验证（async health=1=闭环）
-- [ ] 新铁律：温度>42°C 停热跑、腿间冷却；失联处置=后台重连循环，勿动设备侧文件
+- [x] diag7/diag8 夜袭完跑（21:29 设备自恢复，第 10 轮值守命中）：lag async 119/max143、CACHEBAD=0、fix8 4MB 模态逐字不变=cb0 族死刑、lag 非区分量（fl1 avg1932/fl2 1186 均金标准）、ring 轴静态 ref 完备出清（0034 钩子盲区=try_recycle 缓存命中路）、垫片乒乓线索（310/310 dist1-2×13.1MB×47ms）
+- [x] 新铁律已执行：run_leg 热闸>44°C ABORT_THERMAL；失联处置=后台重连循环；垫片双课=routeA 腿须 glibc 构建（bionic 版 rc127）+LD_PRELOAD 禁 export（毒 bionic timeout）
+- [ ] **0040 乒乓审计（diag9）设计**：垫片 release/create 带身份 + rusticl memory.rs:2409 两侧打点带 gallium 资源指针 + BO acquire 退休水位三方 join；定罪=新 buffer 首用 < 旧 buffer 末批退休。SA-6 回传后新记录对账（其初稿段已撤）
 - [ ] ggml 垫片 release→re-alloc 配对计数；OPFLUSH=2/4/8 阈值扫；背书漂移大样本；前线② B0 岛事件化（OCL:11162-11166 三 NULL async 钩子，岛界 OCL:8612-8613）
 
 ## 5b. 判决语义备忘（R-034 后 —— 覆盖 R-033 版）
