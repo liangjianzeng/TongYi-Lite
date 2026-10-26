@@ -51,7 +51,9 @@
 - [x] 0034 diag4（bb401268）+ e4h NOFAST：**快路早完成死刑**（禁快路仍乱）；E4VERIFY OK=0 ⇒ R-034「IB 完好」**撤销**（n=1 空数据；ring submit 即毁=全 regime 共性）
 - [x] 0035 diag5（059579c1）load-gate+tid+RGROW+QFLUSH：BOREUSE_NOTRET 双 regime 归零（**R11 直接形态→0.1**）；三线程分工（22582 录制 submit/22617 等待信号/22579+22593 API 直等）；乱码模态跨代复现（be5a0264=leg-039、d0044294×3）=窗口位置固定
 - [x] R-035 入册（1062 行）/ C2 回写 / 台账 052-056 / 双仓 push；背书复验 #6
-- [ ] SA-4 验尸 → 0036（按锁纪律判定选点：gallium launch/flush 打点+tid / deep_unflushed 序 / E4REC 定版）
+- [x] SA-4 验尸完成（四线程/sq 释放/双 sync 消费点裁定 SA-1/无 50 常量/硬阈值 30·128）→ 0036 diag6（0c0f63cf）三探针跑毕 PREP 燃料非区分量、CB0 环绕复用假说复活（0034 one-shot 降权）、fl 阈值 N≤2/N≥3、fl2=可用非免费
+- [ ] **diag7（106c21ec，E4LAG+E4CACHEBAD）待跑**：设备 21:0x 热致失联（44°C/ping 全丢），重连循环值守；复活→e4d-r7/e4e-r6/fl2a 三腿→LAG 分布+CACHEBAD 计数→若定罪→u_upload 4MB 修复验证（async health=1=闭环）
+- [ ] 新铁律：温度>42°C 停热跑、腿间冷却；失联处置=后台重连循环，勿动设备侧文件
 - [ ] ggml 垫片 release→re-alloc 配对计数；OPFLUSH=2/4/8 阈值扫；背书漂移大样本；前线② B0 岛事件化（OCL:11162-11166 三 NULL async 钩子，岛界 OCL:8612-8613）
 
 ## 5b. 判决语义备忘（R-034 后 —— 覆盖 R-033 版）

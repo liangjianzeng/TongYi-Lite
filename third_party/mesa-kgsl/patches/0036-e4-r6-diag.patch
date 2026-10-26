@@ -1,0 +1,107 @@
+--- a/src/freedreno/drm/freedreno_ringbuffer_sp.c
++++ b/src/freedreno/drm/freedreno_ringbuffer_sp.c
+@@ -384,11 +384,34 @@
+       DEBUG_MSG("defer: %u", submit->fence);
+       dev->deferred_cmds += fd_ringbuffer_cmd_count(submit->primary);
+       assert(dev->deferred_cmds == fd_dev_count_deferred_cmds(dev));
++      /* [TongYi-Lite 0036 E4] defer/merge branch: BOs referenced by this
++       * batch are still nr_fences==0 until prep; observe threshold hits
++       * (nr_bos>30 / deferred_cmds>128) vs the fl>=3 garble cliff. */
++      {
++         static int e4d_on = -1;
++         if (e4d_on < 0)
++            e4d_on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++         if (e4d_on)
++            fprintf(stderr, "E4DEFER take=%u nr_bos=%u dcmds=%u defer=1 tid=%d\n",
++                    submit->fence, to_fd_submit_sp(submit)->nr_bos, dev->deferred_cmds,
++                    (int)gettid());
++      }
+       simple_mtx_unlock(&dev->submit_lock);
+ 
+       return out_fence;
+    }
+ 
++   /* [TongYi-Lite 0036 E4] real-ioctl branch (throttled to avoid double
++    * logging: only when there was a pending deferred backlog). */
++   {
++      static int e4d_on = -1;
++      if (e4d_on < 0)
++         e4d_on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++      if (e4d_on && dev->deferred_cmds > 0)
++         fprintf(stderr, "E4DEFER take=%u nr_bos=%u dcmds=%u defer=0 tid=%d\n",
++                 submit->fence, to_fd_submit_sp(submit)->nr_bos,
++                 dev->deferred_cmds, (int)gettid());
++   }
+    flush_deferred_submits(dev);
+ 
+    simple_mtx_unlock(&dev->submit_lock);
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -722,11 +722,27 @@
+ }
+ 
+ /* a bit odd to take the pipe as an arg, but it's a, umm, quirk of kgsl.. */
++uint32_t kgsl_e4_last_ts_get(void);
++
+ int
+ fd_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
+ {
+    enum fd_bo_state state = fd_bo_state(bo);
+ 
++   /* [TongYi-Lite 0036 E4] unwaited-passthrough probe (SA-4 §3.1): a bo with
++    * nr_fences==0 (still deferred / never submitted) returns from cpu_prep
++    * with zero acquire — decode-phase gated like E4BOREL (300 == E4_DECODE_TS,
++    * literal here because the define lives further down). */
++   {
++      static int e4p_on = -1;
++      if (e4p_on < 0)
++         e4p_on = (getenv("TYL_E4") && getenv("TYL_E4")[0] == '1') ? 1 : 0;
++      if (e4p_on && state == FD_BO_STATE_IDLE && op &&
++          kgsl_e4_last_ts_get() >= 300)
++         fprintf(stderr, "E4PREP bo=%u op=0x%x ts=%u\n", bo->handle, op,
++                 kgsl_e4_last_ts_get());
++   }
++
+    if (state == FD_BO_STATE_IDLE)
+       return 0;
+ 
+@@ -910,6 +926,13 @@
+ 
+ static uint32_t e4_last_ts, e4_last_qid;
+ 
++uint32_t kgsl_e4_last_ts_get(void);
++uint32_t
++kgsl_e4_last_ts_get(void)
++{
++   return e4_last_ts;
++}
++
+ static int
+ e4rel_on(void)
+ {
+--- a/src/gallium/frontends/rusticl/mesa/pipe/context.rs
++++ b/src/gallium/frontends/rusticl/mesa/pipe/context.rs
+@@ -488,6 +488,23 @@
+                 return false;
+             }
+ 
++            /* [TongYi-Lite 0036 E4] cb0 upload identity: repeated (buf,off)
++             * across in-flight launches == stream-uploader self-overwrite;
++             * distinct-buf rotation depth = the fl<=2/fl>=3 mechanism.
++             * Local gate: mesa/ is a separate crate root (mesa/lib.rs), so
++             * core::queue::e4_on is not reachable from here. */
++            {
++                static E4CB0: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++                let on = E4CB0.get_or_init(|| {
++                    std::env::var("TYL_E4").map(|v| v == "1").unwrap_or(false)
++                });
++                if *on {
++                    eprintln!("E4CB0 off={} sz={} buf={:p} tid={:?}",
++                        cb.buffer_offset, data.len(), cb.buffer,
++                        std::thread::current().id());
++                }
++            }
++
+             self.pipe.as_ref().set_constant_buffer.unwrap()(
+                 self.pipe.as_ptr(),
+                 mesa_shader_stage::MESA_SHADER_COMPUTE,
