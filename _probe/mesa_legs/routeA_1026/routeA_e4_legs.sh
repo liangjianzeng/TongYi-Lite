@@ -129,6 +129,15 @@ case "$1" in
   g24) # 治愈剂量扫描：async 16 + 写前 usleep 500us
     run_leg e4d_g24 "" 16 "TYL_E4=1 TYL_E4_GRP=4 TYL_GRP_SLEEPUS=500" "$R/bin/libtylgrp.so"
     ;;
+  l3b) # ★L3 三证探针（717a85b0）：(a)后备归属线索 (b1)CPU写→GPU读 (b2)GPU写→CPU读×64 金丝雀 (c)带宽
+    export LD_LIBRARY_PATH=$LP; export OCL_ICD_VENDORS=$ICD; export RUSTICL_ENABLE=kgsl
+    export HOME=/data/local/tmp/mesa_clrt_1026/tmp; export XDG_CACHE_HOME=/data/local/tmp/mesa_clrt_1026/tmp
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL temp_tenths=$TEMP"; return 1 2>/dev/null || exit 1; fi
+    timeout 300 $LOADER --library-path $LP $R/bin/l3_coherency_probe 32 64 > $R/out/e4d_l3b.out 2>&1
+    echo "#### probe_rc=$?"
+    grep -a "PROBE" $R/out/e4d_l3b.out
+    ;;
   l3a) # L3 观察腿：HBUFT lib(134bfd9c)+STATS，看哪些 i32 小张量自动拿到 extra（[L3] hbuft bind 自证）
     cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 2>/dev/null
     run_leg e4d_l3a "" 16 "GGML_OPENCL_ISLAND_STATS=1 GGML_OPENCL_ISLAND_HBUFT=1"
