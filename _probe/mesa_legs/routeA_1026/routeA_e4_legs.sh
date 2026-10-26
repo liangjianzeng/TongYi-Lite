@@ -105,6 +105,15 @@ case "$1" in
   g11) # fl1 治愈对照（全代探针在场，验证不扰动金标准）
     run_leg e4f_g11 "" 1 "TYL_E4=1"
     ;;
+  g17) # 日程对照：fl1 金标准 + 全内核打点
+    run_leg e4f_g17 "" 1 "TYL_E4=1"
+    ;;
+  g16) # 0046 生死括号版内核普查：async 16 + E4
+    run_leg e4d_g16 "" 16 "TYL_E4=1"
+    ;;
+  g15) # 内核参数级普查：async 16 + E4（E4KHDR/E4KARG/E4R2BO/id=）
+    run_leg e4d_g15 "" 16 "TYL_E4=1"
+    ;;
   g14) # host 写审计腿：async 16 + 垫片 v2（map/unmap/read/write 全参）
     run_leg e4d_g14 "" 16 "TYL_E4=1 TYL_E4_GRP=1" "$R/bin/libtylgrp.so"
     ;;
