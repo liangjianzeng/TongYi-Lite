@@ -560,7 +560,12 @@ llama_context::llama_context(
         sched_reserve();
 
         if (!cparams.flash_attn) {
-            if (ggml_is_quantized(params.type_v)) {
+            // [TongYi-Lite A15/R-012 follow-up 740 buft-probe leg] same MLA exemption as
+            // the sched-params gate above: MLA has no V tensor (has_v=false), type_v is a
+            // type_k shadow, so the quantized-V-requires-FA precondition is vacuous here.
+            // Without this, hybrid+FA-off models (ling/bailingmoe3, app forces FA off) throw
+            // here after resolve_fused_ops() auto-disables FA when OpenCL declines FA nodes.
+            if (ggml_is_quantized(params.type_v) && !model.hparams.is_mla()) {
                 throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
             }
         }
