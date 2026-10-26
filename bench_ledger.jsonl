@@ -103,3 +103,17 @@
 {"leg": "102", "case": "g35-wbw-retry", "build": "WBW lib 0f56e3bf+endorsed", "fl": 16, "env": "WAIT_BIGWRITE=1（retry TH=256K 同读）", "result": "未治愈 tok=a98029ac/cc4fa49b health=0；自证 [WBW] waits=40 bytes=80MB（≥1MB 大写全等待）", "note": "≥1MB clEnqueueWriteBuffer 面等待≠治愈→H2′  culprit 覆写不在四 choke point 覆盖内；垫片 146 sleeps vs WBW 40=漏 ~106 写/token 的写面（SVMMemcpy/svm 裸写/temp-WriteBuffer 20477 系嫌疑）；下一步 l0a×WBW 同跑点名", "record": "R-055"}
 {"leg": "103", "case": "l3b2-probe-v2.0", "build": "probe 118bee3f", "fl": "-", "env": "32MB/32rounds", "result": "m1 OK；m2/c2 FAIL（后证=探针覆盖 bug 冤案）", "note": "v1 b1 判词保留（裸持久映射写 GPU 不可见=H2′ 正主）；m2/c2 误判教训入铁律（探针必自证覆盖）", "record": "R-055"}
 {"leg": "104", "case": "l3b3-probe-v2.2", "build": "probe e2cee291", "fl": "-", "env": "m0 自证+双 BO 型×(alloc_host_ptr/plain)", "result": "★★全绿 BOTH ALL_OK：m1/m2/c1/c2 全 OK×16 轮×两型", "note": "**vendor 驱动合法 CL 语义下 coherency 正常=平反**；L3 fallback 定稿=map(WRITE)+unmap / map(READ)（持久裸映射仍死=H2′ 根再证）；e2e logits 路无恙与探针差异=真 CL 调用 vs 裸指针", "record": "R-055"}
+{"leg": "105", "case": "g37-wbw-TH1", "build": "0f56e3bf", "env": "WAIT_BIGWRITE=1 TH=1 census同跑", "result": "未治愈(6984874c)；waits=8151 bytes=221856192=census 总量（写面全覆盖仍乱）", "note": "四 choke point 覆盖全部 census 写；垫片 146≥1MB vs ggml 40 → 106 笔疑在驱动内部", "record": "R-056", "fl": 16}
+{"leg": "106", "case": "g38-wbw-11site-gap", "build": "a8c3f2d9(11站点+gap2ms)", "env": "WAIT_BIGWRITE=1", "result": "未治愈(002361e8)；waits=40", "record": "R-056", "fl": 16}
+{"leg": "107", "case": "g38b-wbw-11site-nogap", "build": "a8c3f2d9", "env": "同上 GAP=0", "result": "未治愈(e3ae49d7)", "record": "R-056", "fl": 16}
+{"leg": "108", "case": "g40-wbw-POST", "build": "e38a798c(POST 垫片时序)", "env": "WAIT_BIGWRITE=1 POST=1", "result": "未治愈(641e26fc)——写后睡 2ms 也无效", "note": "垫片疗效≠写旁 2ms 本身", "record": "R-056", "fl": 16}
+{"leg": "109", "case": "g41-idle32", "build": "1be75abc(NDRANGE_IDLE 系)", "env": "NDRANGE_IDLE=32 GAP=2000", "result": "未治愈(74ed4073)", "record": "R-057", "fl": 16}
+{"leg": "110", "case": "g42-idle1", "build": "1be75abc", "env": "NDRANGE_IDLE=1 GAP=2000", "result": "★治愈 e19f0cb2 health=1；税 0.13 tok/s(123s)", "record": "R-057", "fl": 16}
+{"leg": "111", "case": "g43-idle4", "build": "1be75abc", "env": "NDRANGE_IDLE=4", "result": "未治愈(408a6b11) 0.38", "record": "R-057", "fl": 16}
+{"leg": "112", "case": "g44-idle8", "build": "1be75abc", "env": "NDRANGE_IDLE=8", "result": "未治愈(15433119) 0.53", "record": "R-057", "fl": 16}
+{"leg": "113", "case": "g45-idle2", "build": "1be75abc", "env": "NDRANGE_IDLE=2 GAP=2000", "result": "★治愈 e19f0cb2 health=1；0.30", "record": "R-057", "fl": 16}
+{"leg": "114", "case": "g46-idle2-gap1000", "build": "1be75abc", "result": "治愈 0.28", "env": "IDLE=2 GAP=1000", "record": "R-057", "fl": 16}
+{"leg": "115", "case": "g47-idle2-gap500", "build": "1be75abc", "result": "治愈 0.28", "env": "IDLE=2 GAP=500", "record": "R-057", "fl": 16}
+{"leg": "116", "case": "g48-idle2-gap250", "build": "1be75abc", "result": "治愈 0.31", "env": "IDLE=2 GAP=250", "record": "R-057", "fl": 16}
+{"leg": "117", "case": "g49-idle2-gap0", "build": "1be75abc", "result": "★★治愈 e19f0cb2 health=1；**0.51 tok/s=当前冠军**（GAP=0 纯 finish——sleep 非疗效本体，密度才是）", "env": "IDLE=2 GAP=0", "record": "R-057", "fl": 16}
+{"leg": "118", "case": "l3b3-v2.3-d1d2", "build": "probe 0509a73e", "result": "持久映射+WriteBuffer 双绿（干扰假说亡）；v2.3 全组 ALL_OK", "record": "R-057", "fl": 16}
