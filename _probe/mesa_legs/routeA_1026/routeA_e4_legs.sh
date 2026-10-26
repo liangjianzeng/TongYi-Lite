@@ -13,7 +13,10 @@ PROMPT='请详细介绍一下中国的四大发明，分别说明每一项的历
 run_leg () {
   TAG=$1; FL=$2; NPRED=$3; EXTRAENV=$4
   mkdir -p $R/tmp $R/out
+  TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
   echo "#### $TAG $(date -Iseconds) loadavg=$(cat /proc/loadavg) temp=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -d ' ')"
+  # [热纪律 1026] 温度>44°C（tenths 单位）拒跑热腿，防 21:0x adbd 猝死事件重演
+  if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL temp_tenths=$TEMP (>440)"; return 1; fi
   echo "#### shadow=$(ls -la $R/bin/libRusticlOpenCL.so.1 2>/dev/null | awk '{print $5}')"
   # Android mksh: 裸 VAR=值 被当命令 → 一律 export（§6-4 铁律的可靠形态）
   export LD_LIBRARY_PATH=$LP
@@ -46,6 +49,9 @@ run_leg () {
   echo "#### E4FLUSH=$(grep -ac '^E4FLUSH' $R/out/$TAG.err) E4WAIT=$(grep -ac '^E4WAIT' $R/out/$TAG.err) WAIT_NEV_MAX=$(grep -aoE 'E4WAIT wseq=[0-9]+ nev=[0-9]+' $R/out/$TAG.err | awk '{gsub(/nev=/,"",$3); if($3>m)m=$3} END{print m+0}') UNKNOWN_DBG=$(grep -ac 'Unknown RUSTICL_DEBUG flag' $R/out/$TAG.err)"
   echo "#### E4HIST_last=$(grep -a '^E4HIST' $R/out/$TAG.err | tail -1)"
   echo "#### nosub=$(grep -ac 'does not support subgroups' $R/out/$TAG.err) drop=$(grep -ac 'drop unsupported device' $R/out/$TAG.err)"
+  echo "#### E4LAG=$(grep -ac '^E4LAG' $R/out/$TAG.err) LAG_MAX=$(grep -aoE 'lag=-?[0-9]+' $R/out/$TAG.err | awk '{gsub(/lag=/,"",$1); if($1>m)m=$1; s+=$1; n++} END{print m+0\" avg=\"(n?s/n:0)}') E4CACHEBAD=$(grep -ac '^E4CACHEBAD' $R/out/$TAG.err)"
+  echo "#### E4CB0=$(grep -ac '^E4CB0' $R/out/$TAG.err) E4PREP=$(grep -ac '^E4PREP' $R/out/$TAG.err) E4DEFER_d1=$(grep -acE '^E4DEFER .*defer=1' $R/out/$TAG.err) E4DEFER_d0=$(grep -acE '^E4DEFER .*defer=0' $R/out/$TAG.err)"
+  echo "#### E4GRELPAIR=$(grep -ac '^E4GRELPAIR' $R/out/$TAG.err) E4GPOL_last=$(grep -a '^E4GPOL' $R/out/$TAG.err | tail -1)"
 }
 
 case "$1" in
@@ -73,5 +79,20 @@ case "$1" in
   e4h) # 0034 diag4 鉴别腿：async NPRED=16 + TYL_E4_NOFAST=1（wait 全走 KMD；health=1 ⇒ 快路早完成定罪）
     run_leg e4h_nofast "" 16 "TYL_E4=1 TYL_E4_NOFAST=1"
     ;;
-  *) echo "usage: sh routeA_e4_legs.sh e4a|...|e4g|e4h"; exit 2;;
+  flscan) # [背书库 1026] OPFLUSH 阈值扫（回档自设备侧 sed 演化版，恢复全列表）：N≤2 对 / N≥3 乱
+    for N in 1 2 4 8 16 32; do run_leg flscan$N "" 48 "GGML_OPENCL_OPFLUSH=$N TYL_E4=1"; done
+    ;;
+  fl2a) # fl2 专项：OPFLUSH=2 NPRED=48（三连金标准 leg-058/059 复测形态；diag7 下即 fl2b）
+    run_leg fl2a_48 "" 48 "GGML_OPENCL_OPFLUSH=2 TYL_E4=1"
+    ;;
+  g7) # diag7 三腿之一：async 16 + grp 垫片（E4LAG/E4CACHEBAD + 垫片 E4GRELPAIR 联合判决）
+    run_leg e4d_g7 "" 16 "TYL_E4=1 TYL_E4_GRP=1 LD_PRELOAD=$R/bin/libtylgrp.so"
+    ;;
+  fix8) # diag8 修复验证：async 16 + TYL_UPSZ=4MB（cb0 环绕假说的因果判据：health=1 ⇒ 定罪+修复闭环）
+    run_leg e4d_fix8 "" 16 "TYL_E4=1 TYL_UPSZ=4194304"
+    ;;
+  fix8g) # diag8 双探针腿：修复验证 + grp 垫片同开（环绕应消失）
+    run_leg e4d_fix8g "" 16 "TYL_E4=1 TYL_UPSZ=4194304 TYL_E4_GRP=1 LD_PRELOAD=$R/bin/libtylgrp.so"
+    ;;
+  *) echo "usage: sh routeA_e4_legs.sh e4a|...|e4h|flscan|fl2a|g7|fix8|fix8g"; exit 2;;
 esac
