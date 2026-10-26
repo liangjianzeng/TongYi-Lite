@@ -1,0 +1,58 @@
+dev[0] = GPUOpenCL (Adreno (TM) 830)
+dev[1] = CPU (CPU)
+
+===== REAL-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 407.7 us/op   CPU 189.9 us/op   ratio GPU/CPU = 2.15
+
+===== REAL-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000016
+bench: GPU 597.0 us/op   CPU 208.0 us/op   ratio GPU/CPU = 2.87
+
+===== PREFILL-gateup-tok4: K=1536 N=512 E=128 n_used=8 n_tok=4 (broadcast=1) =====
+worst over 32 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 1720.2 us/op   CPU 757.1 us/op   ratio GPU/CPU = 2.27
+
+===== M1-IQ4XS-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000019
+bench: GPU 4526.7 us/op   CPU 186.0 us/op   ratio GPU/CPU = 24.34
+
+===== M1-IQ4XS-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000016
+bench: GPU 3675.8 us/op   CPU 154.7 us/op   ratio GPU/CPU = 23.76
+
+===== M1-IQ4XS-K256: K=256 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000030
+bench: GPU 795.1 us/op   CPU 21.5 us/op   ratio GPU/CPU = 36.94
+
+===== Q4K-gateup: K=1536 N=512 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000019
+bench: GPU 270.4 us/op   CPU 185.2 us/op   ratio GPU/CPU = 1.46
+
+===== Q4K-down: K=512 N=1536 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000015
+bench: GPU 268.9 us/op   CPU 142.1 us/op   ratio GPU/CPU = 1.89
+
+===== Q4K-PREFILL-tok4: K=1536 N=512 E=128 n_used=8 n_tok=4 (broadcast=1) =====
+worst over 32 slots: GPU NMSE=0.000000  CPU NMSE=0.000018
+bench: GPU 1325.0 us/op   CPU 749.3 us/op   ratio GPU/CPU = 1.77
+
+===== B1-K256-E1-u1: K=256 N=128 E=1 n_used=1 n_tok=1 (broadcast=1) =====
+worst over 1 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 408.6 us/op   CPU 4.3 us/op   ratio GPU/CPU = 95.24
+
+===== B2-K256-E128-u1: K=256 N=128 E=128 n_used=1 n_tok=1 (broadcast=1) =====
+worst over 1 slots: GPU NMSE=0.000000  CPU NMSE=0.000017
+bench: GPU 741.7 us/op   CPU 4.7 us/op   ratio GPU/CPU = 158.81
+
+===== B3-K256-E128-u8: K=256 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000001  CPU NMSE=0.000018
+bench: GPU 467.6 us/op   CPU 15.5 us/op   ratio GPU/CPU = 30.09
+
+===== B4-K512-E128-u8: K=512 N=128 E=128 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000020
+bench: GPU 382.9 us/op   CPU 23.3 us/op   ratio GPU/CPU = 16.43
+
+===== B5-K512-E1-u8: K=512 N=128 E=1 n_used=8 n_tok=1 (broadcast=1) =====
+worst over 8 slots: GPU NMSE=0.000000  CPU NMSE=0.000018
+bench: GPU 523.1 us/op   CPU 28.7 us/op   ratio GPU/CPU = 18.26

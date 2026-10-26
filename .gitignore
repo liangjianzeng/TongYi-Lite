@@ -169,3 +169,5 @@ _probe/moe_probe/build_v86/
 _probe/moe_probe/build-android/
 _probe/oclstub_build/
 
+_probe/moe_probe/build-android-cli/
+_probe/moe_probe/build-android-cli-noadreno/

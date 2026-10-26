@@ -1,0 +1,130 @@
+{
+  "meta": {
+    "generated": "2026-10-26",
+    "file": "third_party/llama.cpp/ggml/src/ggml-opencl/ggml-opencl.cpp",
+    "git_head": "0d879d4",
+    "method": "strict ^[ \\t]*# directive stack scan (string # ignored); regions verified by ADRENO state transition",
+    "goal": "ADRENO=OFF (Mesa RustiCL) runs the same noshuffle dense q4_0/q4_k kernel set as today's ON build on Mesa ICD (moe_probe4 REAL-gateup / PREFILL / Q4K)"
+  },
+  "task1_adreno_mul_mat_functions": [
+    {"name":"ggml_cl_mul_mat_f16_f32_adreno_xmem","start":22471,"end":22585,"form":"whole-function-in-guard","guard_open":22422,"guard_close":22586,"else_stub":null},
+    {"name":"ggml_cl_mul_mat_kq_kqv_adreno","start":22709,"end":22842,"form":"unguarded (already outside)","guard_open":null,"else_stub":null},
+    {"name":"ggml_cl_mul_mat_q1_0_f32_adreno","start":22844,"end":23039,"form":"signature-outside; body in guard","if_body":[22845,23032],"else_directive":23033,"else_stub_lines":[23034,23035,23036,23037],"else_stub":"GGML_UNUSED(backend/src0/src1/dst)","endif":23038},
+    {"name":"ggml_cl_mul_mat_q4_0_f32_adreno_ila","start":23042,"end":23264,"form":"whole-function-in-guard","guard_open":23041,"guard_close":23265,"else_stub":null},
+    {"name":"ggml_cl_mul_mat_q4_0_f32_adreno","start":23267,"end":23587,"form":"signature-outside; body in guard","if_body":[23268,23580],"else_directive":23581,"else_stub_lines":[23582,23583,23584,23585],"else_stub":"GGML_UNUSED x4","endif":23586},
+    {"name":"ggml_cl_mul_mat_q4_1_f32_adreno","start":23589,"end":23773,"if_body":[23590,23766],"else_directive":23767,"else_stub":"GGML_UNUSED x4 (23768..23771)","endif":23772},
+    {"name":"ggml_cl_mul_mat_q5_0_f32_adreno","start":23775,"end":24035,"if_body":[23776,24028],"else_directive":24029,"else_stub":"GGML_UNUSED x4 (24030..24033)","endif":24034},
+    {"name":"ggml_cl_mul_mat_q5_1_f32_adreno","start":24037,"end":24218,"if_body":[24038,24211],"else_directive":24212,"else_stub":"GGML_UNUSED x4 (24213..24216)","endif":24217},
+    {"name":"ggml_cl_mul_mat_iq4_nl_f32_adreno","start":24220,"end":24443,"if_body":[24221,24436],"else_directive":24437,"else_stub":"GGML_UNUSED x4 (24438..24441)","endif":24442},
+    {"name":"ggml_cl_mul_mat_q8_0_f32_adreno","start":24445,"end":24988,"if_body":[24446,24981],"else_directive":24982,"else_stub":"GGML_UNUSED x4 (24983..24986)","endif":24987},
+    {"name":"ggml_cl_mul_mat_q4_k_f32_adreno_ila","start":25078,"end":25284,"form":"whole-region-in-guard (region also contains ggml_opencl_debug_dump_q4k_planes 24995..25076)","guard_open":24990,"guard_close":25285,"else_stub":null},
+    {"name":"ggml_cl_mul_mat_q4_k_f32_adreno","start":25287,"end":25850,"if_body":[25288,25843],"else_directive":25844,"else_stub":"GGML_UNUSED x4 (25845..25848)","endif":25849},
+    {"name":"ggml_cl_mul_mat_id_batched","start":25927,"end":26524,"form":"signature-outside (bool); body in guard","if_body":[25931,26519],"else_directive":26520,"else_stub":"GGML_UNUSED x5 + return false (26521..26522)","endif":26523},
+    {"name":"ggml_cl_mul_mat_id_dense_loop","start":26531,"end":26678,"form":"signature-outside; body in guard","if_body":[26534,26670],"else_directive":26671,"else_stub":"GGML_UNUSED x5 (26672..26676)","endif":26677},
+    {"name":"ggml_cl_mul_mat_q6_K_f32_adreno_ila","start":26681,"end":26885,"form":"whole-function-in-guard","guard_open":26680,"guard_close":26886},
+    {"name":"ggml_cl_mul_mat_q6_K_f32_adreno","start":26888,"end":27297,"if_body":[26889,27290],"else_directive":27291,"else_stub":"GGML_UNUSED x4 (27292..27295)","endif":27296},
+    {"name":"ggml_cl_mul_mat_q5_K_f32_adreno_ila","start":27300,"end":27508,"form":"whole-function-in-guard","guard_open":27299,"guard_close":27509},
+    {"name":"ggml_cl_mul_mat_q5_K_f32_adreno","start":27511,"end":27785,"if_body":[27512,27778],"else_directive":27779,"else_stub":"GGML_UNUSED x4 (27780..27783)","endif":27784},
+    {"name":"ggml_cl_mul_mat_q4_k_glu_fused","start":9419,"end":9533,"if_body":[9420,9526],"else_directive":9527,"else_stub":"GGML_UNUSED x4 (9528..9531)","endif":9532},
+    {"name":"ggml_cl_mul_mat_q4_0_glu_fused","start":9538,"end":9632,"if_body":[9539,9625],"else_directive":9626,"else_stub":"GGML_UNUSED x4 (9627..9630)","endif":9631}
+  ],
+  "body_moves": [
+    {"function":"ggml_cl_mul_mat_id_dense_loop","action":"delete directives L26534, L26671(#else)..L26677(#endif); body 26535..26670 becomes unconditional","refs_resolved_by":"calls q4_0/q4_k_adreno (moved) + ggml_cl_subbuffer_from_parent (moved) + moe_dense_extras fields (already unguarded 8001/8354)"},
+    {"function":"ggml_cl_mul_mat_q4_0_f32_adreno","action":"delete L23268, L23581..L23586","inner_wraps_required":[[23321,23331],[23416,23465]]},
+    {"function":"ggml_cl_mul_mat_q4_k_f32_adreno","action":"delete L25288, L25844..L25849","inner_wraps_required":[[25365,25375],[25382,25382],[25517,25519],[25528,25537],[25649,25742]]},
+    {"function":"ggml_cl_mul_mat_q4_k_glu_fused","action":"delete L9420, L9527..L9532","note":"only refs kernel_gemv_noshuffle_q4_k_f32_glu (already unguarded)"},
+    {"function":"ggml_cl_mul_mat_q4_0_glu_fused","action":"delete L9539, L9626..L9631","note":"only refs kernel_gemv_noshuffle_q4_0_f32_glu (already unguarded)"},
+    {"function":"helper block transpose_2d/transpose_2d_as_8b/16b/32b/ggml_cl_subbuffer_from_parent","range":[7814,7923],"action":"delete guard (L7814 #ifdef, L7923 #endif). NOTE: 14 call sites today inside guarded code are unaffected"},
+    {"function":"ggml_opencl_debug_dump_q4k_planes","range":[24991,25076],"action":"split guard region 24990..25285: move debug dump out, re-open #ifdef just before ggml_cl_mul_mat_q4_k_f32_adreno_ila (L25077)"},
+    {"function":"graph_compute glu-fused dispatch","range":[9968,9981],"action":"delete guard; dispatch gate (fuse_mm_glu/can_fuse) unguarded already"}
+  ],
+  "member_decl_moves": {
+    "guarded_decl_block":"L1511(#ifdef)..L1585(#endif) inside struct ggml_backend_opencl_context (struct starts L726)",
+    "move_out": [
+      {"member":"program_transpose","decl":1513,"classification":"portable","cl":"kernels/transpose.cl","evidence":"grep qcom in transpose.cl = 0 hits"},
+      {"member":"kernel_transpose_32_16","decl":1516,"classification":"portable","cl":"kernels/transpose.cl"},
+      {"member":"kernel_transpose_32","decl":1515,"classification":"portable","cl":"kernels/transpose.cl"},
+      {"member":"kernel_transpose_16","decl":1517,"classification":"portable","cl":"kernels/transpose.cl"},
+      {"member":"kernel_transpose_8_buf","decl":1518,"classification":"portable","cl":"kernels/transpose.cl (used by transpose_2d_as_8b)"},
+      {"member":"kernel_transpose_16_buf","decl":1519,"classification":"portable","cl":"kernels/transpose.cl (transpose_2d_as_16b)"},
+      {"member":"kernel_transpose_32_buf","decl":1520,"classification":"portable","cl":"kernels/transpose.cl (transpose_2d_as_32b)"},
+      {"member":"kernel_transpose_16_4x1","decl":1521,"classification":"portable","cl":"kernels/transpose.cl (same program; move whole block)"},
+      {"member":"kernel_gemv_noshuffle_q4_0_f32_4096_1_11008","decl":1526,"classification":"portable","cl":"kernels/gemv_noshuffle_q4_0_f32_spec.cl","evidence":"L24 '#ifdef cl_qcom_reqd_sub_group_size' (conditional only)"},
+      {"member":"kernel_gemv_noshuffle_q4_0_f32_4096_1_4096","decl":1527,"classification":"portable","cl":"kernels/gemv_noshuffle_q4_0_f32_spec.cl"},
+      {"member":"kernel_gemv_noshuffle_q4_0_f32_11008_1_4096","decl":1528,"classification":"portable","cl":"kernels/gemv_noshuffle_q4_0_f32_spec.cl"},
+      {"member":"kernel_gemv_noshuffle_q4_0_f32_32000_1_4096","decl":1529,"classification":"portable","cl":"kernels/gemv_noshuffle_q4_0_f32_spec.cl"},
+      {"member":"kernel_gemv_noshuffle_q4_k_f32_o4","decl":1541,"classification":"portable (default-ON on Mesa today)","cl":"kernels/gemv_noshuffle_q4_k_f32_o4.cl","evidence":"L20 qcom only under #ifdef"},
+      {"member":"kernel_gemm_noshuffle_q4_k_f32","decl":1544,"classification":"portable","cl":"kernels/gemm_noshuffle_q4_k_f32.cl","evidence":"L3-L7 qcom only under #ifdef cl_qcom_reqd_sub_group_size"},
+      {"member":"kernel_gemm_noshuffle_q4_k_f32_cok","decl":1555,"classification":"portable (default-ON ne1<=8)","cl":"kernels/gemm_noshuffle_q4_k_f32.cl"},
+      {"member":"kernel_gemm_noshuffle_q4_k_f32_r1","decl":1553,"classification":"portable, opt-in env OFF","cl":"kernels/gemm_noshuffle_q4_k_f32.cl"},
+      {"member":"kernel_gemm_noshuffle_q4_k_f32_kimg","decl":1554,"classification":"portable, opt-in env OFF","cl":"kernels/gemm_noshuffle_q4_k_f32.cl"}
+    ],
+    "already_unguarded_no_action": {
+      "kernel_decls":"kernel_gemm/gemv_noshuffle_q4_0_f32(+mc3,glu) 1458..1461; gemv q4_k set 1505..1509 (base/mc3/glu/splitk/splitk_reduce); convert noshuffle q4_0/q4_K 1045/1053; trans4_ns decls 1025/1032",
+      "kernel_builds":"4288..4290 (gemv q4_0 base/mc3/glu/batched), 4374..4378 (gemv q4_k base/mc3/splitk/reduce/glu/batched), 2115 q4_0_noshuffle cvt, 2166 q4_K_noshuffle cvt — all outside guard",
+      "struct_members":"adreno_gen 745, adreno_wave_size 802, image_max_buffer_size 806, prealloc_act_trans 822, prealloc_moe_qa/da/sa 824..826, prealloc_splitk_partial 833, has_integer_dot 761, has_subgroup_shuffle 760, has_qcom_subgroup_shuffle 762, has_vector_subgroup_broadcast 752, enqueue_ndrange_kernel ~1356, get_kernel_workgroup_size ~1301, fuse_mm_glu (struct), moe_dense_extras 8001/8354, seff/meff 8351/8352",
+      "helpers":"use_adreno_kernels 10115, use_adreno_moe_kernels 10181, moe_use_dense_loop 10221, tiled_gemv_default_on 10269 (returns false on Mesa: gen UNKNOWN), use_q4k_tiled 10306, use_q6k_tiled 10291, enable_adreno_trans_weight 10312, use_flat_gemv_for_large_m_q4_K 10405, use_flat_gemv_for_large_m_q6_K 10425, use_q4_0_bin_kernels 10341(#else return false), use_q4_k_bin_kernels 10485(#else return false), use_q6_k_bin_kernels 10468, use_q5_k_bin_kernels 10503, gemv_ksplit_y 9405 — all compile in OFF (runtime gates, not compile gates)"
+    },
+    "vendor_only_members_stay_guarded": {
+      "dp4a_family":[{"member":"kernel_gemm_noshuffle_q4_0_q8_1_dp4a","decl":1584,"build":[4766,4782],"cl":"kernels/gemm_noshuffle_q4_0_q8_1_dp4a.cl","evidence":"L29 __attribute__((qcom_wave_pair_mode(1))) UNGUARDED + dot_acc_sat_4x8packed_ss_int (cl_khr_integer_dot_product, L3 conditional pragma)","classification":"vendor (uncertain-A: clang may only warn on unknown attr)"},
+                    {"member":"kernel_gemm_noshuffle_q4_k_q8_1_dp4a","decl":1548,"build":[4898,4922],"cl":"kernels/gemm_noshuffle_q4_k_q8_1_dp4a.cl","evidence":"L55 + L171 qcom_wave_pair_mode unguarded","classification":"vendor"},
+                    {"member":"kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg","decl":1549,"build":[4898,4922],"cl":"same","classification":"vendor"},
+                    {"member":"kernel_quant_a_q8_1","decl":1552,"build":[4966,4979],"cl":"kernels/quant_a_q8_1.cl","evidence":"0 qcom hits — portable source but referenced only by wrapped dp4a blocks","classification":"vendor-reachability (stay guarded)"}],
+      "bin_ila_32b_family":[{"members":"kernel_gemv_noshuffle_q4_0_f32_32b_trans 1525, kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin 1523, kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin 1524, and q4_k/q5_k/q6_k analogues 1545/1546/1547, 1572/1573/1574, 1566/1567/1568","classification":"vendor-only (referenced only by use_q*_bin_kernels #ifdef branches + *_adreno_ila functions)"}],
+      "tiled_family":[{"member":"kernel_gemv_noshuffle_q4_k_f32_tiled","decl":1542,"build":[5003,5020],"cl":"kernels/gemv_noshuffle_q4_k_f32_tiled.cl","evidence":"L19-L22 qcom only under #ifdef → portable source, but runtime OFF on Mesa (tiled_gemv_default_on needs X2E/A8X)","classification":"vendor-gated opt-in"},
+                       {"member":"kernel_convert_block_q4_k_tiled_ns","decl":1543,"build":[2141,2142],"cl":"kernels/cvt.cl","evidence":"L13-L17 qcom under #elif defined","classification":"vendor-gated opt-in"}],
+      "other_vendor_families":"gemv/gemm_moe_*_f32_ns (vendor MoE, broken on 830 anyway), 4096_1 already moved, o4_global/tiled q6 family 1558/1559/1560/1561, flash_attn family (struct member fa + kernel_fa_* incl *_bin), xmem (prealloc_adreno_xmem_const 863..865, adreno_xmem_attn 866..868, f16 xmem kernels ~5700-6042), repack/trans4 repack call sites — all referenced only from vendor branches, leave in guard"
+    }
+  },
+  "build_block_moves": [
+    {"block":"transpose program+kernels","range":[4411,4431],"guarded_today":true,"cl":"transpose.cl","classification":"portable","note":"moves whole { } incl program_transpose build"},
+    {"block":"gemv q4_0 special-shape 4 kernels","range":[4469,4544],"guarded_today":true,"cl":"gemv_noshuffle_q4_0_f32_spec.cl","classification":"portable","note":"uses adreno_wave_size (>0?:64) + has_vector_subgroup_broadcast, both unguarded members"},
+    {"block":"gemm noshuffle q4_0","range":[4545,4559],"guarded_today":true,"cl":"gemm_noshuffle_q4_0_f32.cl","classification":"portable"},
+    {"block":"gemm noshuffle q4_k (+r1/kimg/cok)","range":[4880,4896],"guarded_today":true,"cl":"gemm_noshuffle_q4_k_f32.cl","classification":"portable"},
+    {"block":"gemv q4_k o4","range":[4982,5001],"guarded_today":true,"cl":"gemv_noshuffle_q4_k_f32_o4.cl","classification":"portable"}
+  ],
+  "set_tensor_sweep": [
+    {"range":[11952,12040],"split":{"move":[11953,12004],"wrap":[12006,12038]},"note":"dense-MoE q4_0 per-layer noshuffle+transpose store (portable: kernel_convert_block_q4_0_noshuffle + transpose_2d_as_16b + subbuffer helper) moves; trans4_ns repack (vendor MoE) stays wrapped. use_adreno_moe_kernels + moe_use_dense_loop unguarded route-table gates"},
+    {"range":[12042,12051],"split":{"move":[12042,12048],"drop_else":[12049,12051]},"note":"noshuffle kernel selection for dense q4_0 convert — move (use_adreno_kernels gate unchanged)"},
+    {"range":[12073,12111],"split":{"move":[12073,12081,12105,12110],"wrap":[12082,12104]},"note":"non-bin 16b transpose moves; use_q4_0_bin_kernels sub-block (32b trans + q_img/d_img) stays wrapped (helper false in OFF)"},
+    {"range":[13096,13289],"split":{"move":[13097,13248],"wrap":[13250,13288]},"note":"dense-MoE q4_K per-layer noshuffle + seff/meff host precompute (portable) moves; trans4_ns stays wrapped"},
+    {"range":[13291,13331],"split":{"wrap":[13292,13323],"move":[13325,13328],"drop_else":[13329,13331]},"note":"tiled convert block stays wrapped (runtime false on Mesa); noshuffle selection moves"},
+    {"range":[11872,11885],"split":{"keep":"vendor q1_0 trans (enable_adreno_trans_weight)"}}
+  ],
+  "vendor_branch_wraps": [
+    {"where":"ggml_cl_mul_mat_q4_0_f32_adreno","range":[23321,23331],"what":"use_bin -> q4_0_ila dispatch","off_degradation":"use_q4_0_bin_kernels #else returns false -> branch already dead; wrap only because ila is guarded"},
+    {"where":"ggml_cl_mul_mat_q4_0_f32_adreno","range":[23416,23465],"what":"dp4a dense prefill (quant_a_q8_1 + dp4a gemm)","off_degradation":"GGML_OPENCL_Q4_0_DENSE_DP4A unset -> false AND gated by has_integer_dot; never taken on Mesa default"},
+    {"where":"ggml_cl_mul_mat_q4_k_f32_adreno","range":[25365,25375],"what":"use_bin -> q4_k_ila dispatch","off_degradation":"helper false stub; dead branch"},
+    {"where":"ggml_cl_mul_mat_q4_k_f32_adreno","range":[25382,25382],"what":"use_tiled init","off_degradation":"define 'const bool use_tiled = false;' in #else (tiled_gemv_default_on false on Mesa gen UNKNOWN)"},
+    {"where":"ggml_cl_mul_mat_q4_k_f32_adreno","range":[25517,25519],"what":"tiled arm of gemv kernel ternary","off_degradation":"use_tiled==false makes it dead; wrap to drop guarded member ref"},
+    {"where":"ggml_cl_mul_mat_q4_k_f32_adreno","range":[25528,25537],"what":"tiled kernel arg block","off_degradation":"dead when use_tiled=false; wrap"},
+    {"where":"ggml_cl_mul_mat_q4_k_f32_adreno","range":[25649,25742],"what":"dp4a/wimg dense prefill incl texture path","off_degradation":"q4k_dense_dp4a_on default = (gen==X2E) false on Mesa, env unset; has_integer_dot gate; never taken"},
+    {"where":"ggml_cl_mul_mat (MUL_MAT dispatch)","range":[28173,28469],"what":"f16 F32 KQ/KQV + f16 xmem arms","off_degradation":"stays guarded (f16 attention weights not in target set)"},
+    {"where":"ggml_cl_mul_mat","range":[28472,28480],"what":"A/B knobs + 'if(!no_adreno_mm && ne01 && ne1 && use_adreno_kernels(...))' wrapper","off_degradation":"MOVE outside guard (use_adreno_kernels unguarded)"},
+    {"where":"ggml_cl_mul_mat","range":[28481,28491],"what":"q1_0 arm","off_degradation":"keep wrapped (enable_adreno_trans_weight arm; stub would silently skip)"},
+    {"where":"ggml_cl_mul_mat","range":[28492,28498],"what":"q4_0 x f32 arm -> ggml_cl_mul_mat_q4_0_f32_adreno","off_degradation":"MOVE outside guard"},
+    {"where":"ggml_cl_mul_mat","range":[28499,28530],"what":"q4_1/q5_0/q5_1/iq4_nl/q8_0 arms","off_degradation":"keep wrapped (functions stay GGML_UNUSED stubs in OFF)"},
+    {"where":"ggml_cl_mul_mat","range":[28531,28542],"what":"q4_K x f32 arm -> ggml_cl_mul_mat_q4_k_f32_adreno","off_degradation":"MOVE outside guard"},
+    {"where":"ggml_cl_mul_mat","range":[28543,28555],"what":"q6_K/q5_K arms","off_degradation":"keep wrapped"},
+    {"where":"set_tensor q4_0 MoE","range":[12006,12038],"what":"trans4_ns repack + q_img","off_degradation":"use_adreno_moe_kernels true + moe_use_dense_loop true -> already unreachable (dense branch returns first)"},
+    {"where":"set_tensor q4_0 dense","range":[12082,12104],"what":"use_q4_0_bin_kernels 32b repack + images","off_degradation":"helper false in OFF"},
+    {"where":"set_tensor q4_K MoE","range":[13250,13288],"what":"trans4_ns + q_img","off_degradation":"same as q4_0 trans4"},
+    {"where":"set_tensor q4_K dense","range":[13292,13323],"what":"tiled convert","off_degradation":"use_q4k_tiled false on Mesa"},
+    {"where":"load_cl_kernels","range":[4410,6042],"what":"remaining Adreno build section","off_degradation":"stays guarded except the 5 blocks in build_block_moves; note L4560 kernel_gemv_noshuffle_q4_0_f32_32b_trans=nullptr stays guarded"}
+  ],
+  "cross_checks": {
+    "supports_op":"ggml_opencl_supports_op_inner (L10544..~11300): only ADRENO guard is L11046..L11049 (use_fa_bin_kernels_prefill, FA-only). MUL_MAT q4_0/q4_k case (L10842..L10908) and MUL_MAT_ID case (L10918..L10945, tongyi route table) are UNGUARDED and compile in OFF (referenced members adreno_gen/use_adreno_kernels/etc. all unguarded). No OFF-state support blocking.",
+    "graph_compute":"only ADRENO region L9968..L9981 (glu-fused dispatch) -> moved. No other guard in ggml_backend_opencl_graph_compute.",
+    "set_tensor":"regions L11872..L15267 enumerated; only the q4_0/q4_k blocks listed above participate in the closure; bin/ila/tiled/trans4/get_tensor mirror regions (L14025..L15267) stay vendor-guarded (weight-restore path, not needed for inference closure).",
+    "mul_mat_id_dispatch":"L30685..L30694 moe_use_dense_loop branch unguarded (default true for q4_0/q4_k via route table) -> dense_loop is the OFF path. Vendor MoE block L30728..L31002 disappears in OFF; generic kernel_mul_mv_id_q4_0_f32_8x_flat (L31003, unguarded) remains as fallback when dense-loop disabled. No OFF blocking found.",
+    "device_init_and_caps":"adreno_gen detection L7436..L7438, adreno_wave_size L7535/L7540, sgb_float_broken L1954, has_vector_subgroup_broadcast L7571, has_qcom_subgroup_shuffle/has_subgroup_shuffle/has_integer_dot L7600..L7618 — ALL unguarded => OFF capability detection identical to ON.",
+    "ggml_opencl_is_device_supported":"L7457..L7462 guard only REJECTS non-Adreno when ADRENO=ON (ON-side foot-gun); no OFF effect.",
+    "ggml_cl_init":"L7670..L7677 xmem gate (member itself guarded 863..865) and L7750..L7775 eager prealloc (prealloc_act_trans etc.) stay guarded — OFF is fine because ggml_cl_buffer::allocate (L451) allocates lazily on first gemm use.",
+    "MUL_MAT_generic_fallback":"after guarded dispatch (ends L28557) generic GEMV/GEMM remains — unchanged."
+  },
+  "uncertain": [
+    {"item":"dp4a .cl unguarded __attribute__((qcom_wave_pair_mode(1)))","candidates":["A: rusticl clang ignores unknown attribute with warning -> kernel portable if cl_khr_integer_dot_product exposed","B: hard error on unknown attribute -> vendor-only"],"mitigation":"stays wrapped in OFF anyway; revisit only if dp4a wanted on Mesa"},
+    {"item":"o4 kernel on Mesa beyond the shapes exercised today","candidates":["A: default-on since forever in ON-Mesa (ne01>=32768 lm_head) -> proven","B: never exercised if model has no >=32768-row q4_K weight at probe shapes"],"mitigation":"probe runs lm_head; keep in required set, fallback = wrap o4 too and select base gemv"},
+    {"item":"4096_1_spec kernels on rusticl","candidates":["A: shape-hit (M4096/K4096) in ON-Mesa today -> proven","B: never hit if probe model dims differ"],"mitigation":"move (portable source, same -cl-mad-enable opts as proven base gemv); if unsure can be wrapped like tiled with no semantic loss"}
+  ]
+}
