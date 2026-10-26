@@ -83,5 +83,10 @@
 - 【R-034】腿脚本 FASTHIT 用 `hit=1` 子串计数与 timeout 大数无冲突但偏松；精确判读从 err 原文 `awk '$0 ~ /^E4FAST/ && / hit=1$/'`。
 - **机床现状（R-034 后）**：chroot 树 = 背书态+0031+0032+0033（diag3 源码态）；build-cl 产物=1db4c812；**设备无影子、背书已复验（e9b88e56 第六次）**；回退料 /root/kgsl_ringbuffer_sp.c.orig（bf02f850）+ 快照 /root/mesa-26.2.4_snap_1026 仍在；pre 拷贝 /root/{e4r2_pre,e4r3_pre}/ 供 diff 再生。
 - [x] R-038：SA-6 真报告对账（虚构锚点自破；release 325→ioctl 370 窗口真实）；环盲区破案（flags 等式一位之差=七代全哑真凶）；环轴测净 16339/0（KMD 实证）；跨队列死刑；BOREUSE decode 证据有效性恢复（单队列）。背书 #9。
-- [ ] **0045（diag14）内核参数级审计设计**：kernel.rs 发射点打点（kernel+arg 句柄+rw+ts）join 退休水位；判据=READ-BO 的最后 WRITE 批未退休且同 BO WRITE 批已开跑。全净则转 fl1 产品化+fl2 税 A/B+前线② L0/L3
-- [ ] 教训入册：探针税>2min/token 的对照腿需 2× 超时；提问子智能体前先自查锚点真实性（SA-6 Q1 教训：问题文本自带虚构符号）
+- [x] R-040：0045/0046 内核参数级审计（E4KHDR/KARG/R2BO/R2DEL，diag14/15=38fff5c9/cfb5240c）——观测面 15 项穷尽；**日程同构铁证**（async vs fl1 前 63111 发射逐位一致）；{:p} 址复用噪声三度现形（生死括号治愈）；hostptr 多写者合法定性；子分配 ggml 零触达。
+- [x] **R-041 ★战役转折（H2′ 定罪）**：垫片注入五腿交叉（g18-g25）——每 op finish 治愈(e19f0cb2)/仅 NDRange 后 finish 治愈/写后 finish 不治/**NOMERGE 拆 ioctl 不治**(g22)/≥1MB 写**前** usleep 2ms~100µs 全治愈(g23/24/25) ⇒ **罪核=上批 retire 后 GPU L2 dirty 排空滞后于 host 对 pinned 后备的覆写**（纯时延竞态；命令/日程/归属全同构）。金标准在 diag15 树=**e19f0cb2**（随插桩漂移属预期）。
+- [x] R-041b 更正：g26/g27=垫片门控陷阱 NO-OP 腿（grp_on 解析要求 TYL_E4=1）⇒ 非反证；铁律新增：**干预腿必须自证生效**（witness 计数 grep）。垫片 v8 已解耦门控。
+- [ ] 待设备回线（00:0x 失联，adbd TCP 超时，历史自愈型）：**g28**=背书+v8 垫片 GRP=4（E4GSLEEP 自证）；**g29**=背书+现成 `GGML_OPENCL_SET_TENSOR_FINISH=1`（前人 -54 hunt 遗产 @ggml-opencl.cpp set_tensor 入口，路线①零代码候选）；q0a0 背书复核 #10。
+- [ ] 产品化三路线：①ggml 写前事件等待（g29 若愈=现成 env）②驱动侧 retire 前 L2 屏障（根治，触 KMD 邻域）③SA-5 L3 岛边界 buft 消灭 412MB×40/token 覆写本身（竞态+税双杀，前线②主线）。
+- [ ] 教训入册：探针税>2min/token 的对照腿需 2× 超时；提问子智能体前先自查锚点真实性（SA-6 Q1 教训）；**grep 空返回断 `&&` 链**（rm 后 grep 教训）；**python 步骤别放断链后面**（g26 从未写入教训）；垫片开关独立解析禁借道 TYL_E4。
+- **机床现状（R-041 后）**：chroot 树=背书+0031..0033+0036..0047（diag16=c1c1d271 源码态：NOMERGE/内核打点/E4R2BO/DEL 全 TYL_E4 门控）；垫片 v8（门控解耦版）在 /tmp/e41026/shim/；设备失联中（影子已撤、背书库在位、热 30.8°C 失联前正常）。
