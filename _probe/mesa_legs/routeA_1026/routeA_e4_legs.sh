@@ -308,6 +308,20 @@ case "$1" in
     if [ "$D70M" != "1be75abc" ]; then echo "#### D70_REDCARD lib=$D70M want=1be75abc"; exit 3; fi
     run_drift e4d_d70 "GGML_OPENCL_OPFLUSH=1" 16 "GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=0" "" 20
     ;;
+  g80|d80) # R-071 高保证档 740 复标定：十代库 armed + KERNEL_SYNC=1 + IDLE=0（纯 ksync 形，仿 d31）
+    G80_ARMED=0
+    mkdir -p $R/stage_1030
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
+    G80M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$G80M" != "2695a8be" ]; then echo "#### G80_REDCARD lib=$G80M want=2695a8be"; exit 3; fi
+    echo "#### g80_lib=$G80M(armed)"
+    if [ "$1" = "g80" ]; then
+      run_leg e4d_g80 "" 16 "GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1"
+      grep -a 'IDLE' $R/out/e4d_g80.err | tail -1 | sed 's/^/#### g80_idle=/'
+    else
+      run_drift e4d_d80 "" 16 "GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1" "" 20
+    fi
+    ;;
   kq0) # R-061 K40 跨代复现：qwen0.5b CPU 金标准腿（ngl=0）
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
