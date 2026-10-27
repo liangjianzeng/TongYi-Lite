@@ -289,6 +289,67 @@ case "$1" in
   d60) # 默认 ON drift-20 终验（过门=默认档定稿）
     run_drift e4d_d60 "" 16 "" "" 20
     ;;
+  kq0) # R-061 K40 跨代复现：qwen0.5b CPU 金标准腿（ngl=0）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    export LD_LIBRARY_PATH=$LP HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 300 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 0 42 > $R/out/kq0.tok 2> $R/out/kq0.err
+    echo "#### kq0 rc=$? md5=$(md5sum $R/out/kq0.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq0.err | tail -1
+    ;;
+  kq1) # GPU async（显式 IDLE=0 逃生=无治愈态）——复现审判：a650 是否也乱
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq1.tok 2> $R/out/kq1.err
+    echo "#### kq1 rc=$? md5=$(md5sum $R/out/kq1.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq1.err | tail -1; grep -a '\[IDLE\]' $R/out/kq1.err
+    ;;
+  kq2) # GPU 默认 ON（八代治愈态）——同模型应与 kq0 全等或同文
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq2.tok 2> $R/out/kq2.err
+    echo "#### kq2 rc=$? md5=$(md5sum $R/out/kq2.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq2.err | tail -1; grep -a '\[IDLE\]' $R/out/kq2.err
+    ;;
+  kq3) # R-062 Ling-3.0-tiny GPU async 无治愈（IDLE=0）——深模型跨代复现主判
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 99 42 > $R/out/kq3.tok 2> $R/out/kq3.err
+    echo "#### kq3 rc=$? md5=$(md5sum $R/out/kq3.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq3.err | tail -1; grep -a '\[IDLE\]' $R/out/kq3.err
+    ;;
+  kq3c) # R-062 Ling CPU 金标准（ngl=0）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    export LD_LIBRARY_PATH=$LP HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 900 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 0 42 > $R/out/kq3c.tok 2> $R/out/kq3c.err
+    echo "#### kq3c rc=$? md5=$(md5sum $R/out/kq3c.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq3c.err | tail -1
+    ;;
+  kq4) # R-062 Ling 九代默认档（IDLE=2 无 env）——治愈态同判据
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 99 42 > $R/out/kq4.tok 2> $R/out/kq4.err
+    echo "#### kq4 rc=$? md5=$(md5sum $R/out/kq4.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq4.err | tail -1; grep -a '\[IDLE\]' $R/out/kq4.err
+    ;;
+  kq5) # R-062 Ling ngl=40 GPU async 无治愈——map 必超 pinned 顶（H2′ 死亡条件区）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 20 42 256 > $R/out/kq5.tok 2> $R/out/kq5.err
+    echo "#### kq5 rc=$? md5=$(md5sum $R/out/kq5.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq5.err | tail -1; grep -a '\[IDLE\]' $R/out/kq5.err
+    ;;
+  kq6) # R-062 Ling ngl=40 九代默认档治愈态
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 20 42 256 > $R/out/kq6.tok 2> $R/out/kq6.err
+    echo "#### kq6 rc=$? md5=$(md5sum $R/out/kq6.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq6.err | tail -1; grep -a '\[IDLE\]' $R/out/kq6.err
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"

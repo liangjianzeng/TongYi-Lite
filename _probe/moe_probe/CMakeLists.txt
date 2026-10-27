@@ -77,6 +77,14 @@ if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/minicpm_e2e.cpp)
   target_link_libraries(minicpm_e2e PRIVATE llama llama-common)
 endif()
 
+# [R-061 2026-10-27] 通用文本贪心解码探针（跨代 H2′ 复现：K40/Ling-tiny/qwen0.5b，协议对齐 minicpm_e2e 读数面）
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/ling_e2e.cpp)
+  add_executable(ling_e2e ling_e2e.cpp)
+  target_include_directories(ling_e2e PRIVATE
+    ${LLAMA_DIR}/include ${LLAMA_DIR}/src ${LLAMA_DIR} ${LLAMA_DIR}/common)
+  target_link_libraries(ling_e2e PRIVATE llama llama-common)
+endif()
+
 # [Mesa 线 P4] 把上游 tests/test-export-graph-ops.cpp 编出来：它导出**真实 decode/prefill 图**的
 # 算子+形状清单，喂给 test-backend-ops --test-file，就能问 GPUOpenCL "生产图里哪些算子落 CPU"。
 # 上游把 LLAMA_BUILD_TESTS 关了（下面第 60 行），所以在这里点名建，不改上游一行。
