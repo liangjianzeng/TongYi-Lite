@@ -9869,6 +9869,56 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 }
 
+// [vkh 2026-10-27 B-取证] Per-op host-side submit-cost histogram, to drive the last
+// nail on "who eats the decode submit loop": is the ~0.53 ms per launch the driver
+// doorbell itself, or some per-node action inside the submit loop?
+// GGML_OPENCL_VKH_OPTIME=1 to enable (default OFF; with it off the hook reads one
+// bool and returns, so behaviour and instruction flow are unchanged). Dumps the
+// op-class ranking at process exit.
+// Why it exists: measured 2026-10-27, one decode step of Qwen3.5-4B-Q4_K submits
+// 924-1000 kernels costing 0.524-0.533 ms of host CPU each, and that per-kernel
+// figure is the same with GGML_OPENCL_FUSE_MM_GLU on and off => the cost is uniform
+// per launch, not tied to any special site (clCreateImage/clCreateSubBuffer ruled
+// out by that A/B; graph splitting/CPU fallback ruled out by rej:*=0, churn_ms=0).
+static bool g_vkh_optime_on = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
+struct vkh_optime_rec { double ms = 0.0; long n = 0; long kern = 0; };
+static std::map<std::string, vkh_optime_rec> g_vkh_optime;
+struct vkh_op_timer {
+    const char * op; int * enq; double t0; long e0; bool on;
+    explicit vkh_op_timer(const char * o, int * e) : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on) {
+        if (on) { t0 = (double)clock() / CLOCKS_PER_SEC; e0 = *enq; }
+    }
+    ~vkh_op_timer() {
+        if (!on) { return; }
+        vkh_optime_rec & r = g_vkh_optime[op];
+        r.ms += ((double)clock() / CLOCKS_PER_SEC - t0) * 1e3;
+        r.n++;
+        r.kern += *enq - e0;
+    }
+};
+static void vkh_optime_dump() {
+    if (!g_vkh_optime_on || g_vkh_optime.empty()) { return; }
+    std::vector<const std::pair<const std::string, vkh_optime_rec> *> rest;
+    rest.reserve(g_vkh_optime.size());
+    double total = 0.0; long tot_n = 0, tot_k = 0;
+    for (const std::pair<const std::string, vkh_optime_rec> & kv : g_vkh_optime) {
+        rest.push_back(&kv); total += kv.second.ms; tot_n += kv.second.n; tot_k += kv.second.kern;
+    }
+    fprintf(stderr, "[vkh-optime] TOTAL host_ms=%.1f nodes=%ld kernels=%ld ms/kernel=%.3f op_classes=%zu\n",
+            total, tot_n, tot_k, tot_k ? total / (double) tot_k : 0.0, rest.size());
+    for (size_t rank = 0; rank < rest.size(); rank++) {           // selection sort, no <algorithm>
+        size_t bi = rank;
+        for (size_t j = rank + 1; j < rest.size(); j++) { if (rest[j]->second.ms > rest[bi]->second.ms) { bi = j; } }
+        if (bi != rank) { const std::pair<const std::string, vkh_optime_rec> * t = rest[rank]; rest[rank] = rest[bi]; rest[bi] = t; }
+        const vkh_optime_rec & r = rest[rank]->second;
+        fprintf(stderr, "[vkh-optime] #%02zu op=%-24s host_ms=%9.1f nodes=%8ld kernels=%8ld ms/kernel=%7.3f ms/node=%7.3f\n",
+                rank + 1, rest[rank]->first.c_str(), r.ms, r.n, r.kern,
+                r.kern ? r.ms / (double) r.kern : 0.0, r.n ? r.ms / (double) r.n : 0.0);
+    }
+    fflush(stderr);
+}
+__attribute__((destructor)) static void vkh_optime_dtor(void) { vkh_optime_dump(); }
+
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
@@ -10107,6 +10157,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // match so the FFN GLU subgraph stays dormant on Intel/other drivers.
         if (backend_ctx->fuse_mm_glu && !backend_ctx->disable_fusion &&
             ggml_opencl_can_fuse(backend_ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU })) {
+            vkh_op_timer vkh_tf("MUL_MATx2+GLU(fused)", &backend_ctx->n_enqueues);
             if (node->src[0]->type == GGML_TYPE_Q4_0) {
                 ggml_cl_mul_mat_q4_0_glu_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
             } else {
@@ -10116,6 +10167,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             continue;
         }
 
+        vkh_op_timer vkh_tt(ggml_op_name(node->op), &backend_ctx->n_enqueues);
         bool ok = ggml_cl_compute_forward(backend, node);
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
