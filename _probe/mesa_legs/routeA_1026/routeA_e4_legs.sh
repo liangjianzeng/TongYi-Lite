@@ -300,6 +300,8 @@ case "$1" in
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$FP" != "6a668d60" ]; then echo "#### KQ_REDCARD fp=$FP want=6a668d60"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq1.tok 2> $R/out/kq1.err
     echo "#### kq1 rc=$? md5=$(md5sum $R/out/kq1.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq1.err | tail -1; grep -a '\[IDLE\]' $R/out/kq1.err
     ;;
@@ -308,6 +310,8 @@ case "$1" in
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
     cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$FP" != "6a668d60" ]; then echo "#### KQ_REDCARD fp=$FP want=6a668d60"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq2.tok 2> $R/out/kq2.err
     echo "#### kq2 rc=$? md5=$(md5sum $R/out/kq2.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq2.err | tail -1; grep -a '\[IDLE\]' $R/out/kq2.err
     ;;
@@ -355,6 +359,8 @@ case "$1" in
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
     cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$FP" != "6a668d60" ]; then echo "#### KQ_REDCARD fp=$FP want=6a668d60"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq7.tok 2> $R/out/kq7.err
     echo "#### kq7 rc=$? md5=$(md5sum $R/out/kq7.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq7.err | tail -1; grep -a '\[IDLE\]' $R/out/kq7.err
     ;;
