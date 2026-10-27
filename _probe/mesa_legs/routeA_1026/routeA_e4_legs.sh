@@ -275,8 +275,11 @@ case "$1" in
     grep -a "tok_s=" $R/out/e4d_g50.out | tail -1
     ;;
   g60) # R-060 产品化复验：八代 2444b4a4 无 env 部署（默认 ON），预期 e19f0cb2+[IDLE] ticks>0
-    cp $R/stage_1028/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
-    echo "#### g60_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    mkdir -p $R/stage_1028
+    cp $R/stage_1028/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 2>/dev/null
+    G60M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    echo "#### g60_lib=$G60M"
+    if [ "$G60M" != "2444b4a4" ]; then echo "#### G60_REDCARD lib!=2444b4a4（stage_1028 未推送？拒跑防 NO-OP）"; exit 3; fi
     run_leg e4d_g60 "" 16 ""
     echo "#### g60_idle=$(grep -a '^\[IDLE\]' $R/out/e4d_g60.err)"
     ;;
