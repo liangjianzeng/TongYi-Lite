@@ -6,7 +6,7 @@
 # 铁律随行：热闸>440、bin= 自证、ICD driver 串留 .err 可机检、单案单文件、无 && 长链。
 R=/data/local/tmp/mesa_clrt_1026
 LOADER=$R/lib/ld-linux-aarch64.so.1
-LP="$R/lib:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt"
+LP="$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu"
 MODEL=/storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf
 EYE=$R/bin/ling_e2e
 # id|npred|ngl|seed|n_ctx|prompt   （greedy；seed 仅记账用）
@@ -17,7 +17,8 @@ p4_code_fib|48|99|42|1024|写一个 Python 函数 fib(n)，返回第 n 个斐波
 p5_poetry|32|99|42|1024|用「春天」「火车」「信」三个词写一首四行诗。
 p6_greatwall|64|99|42|1024|介绍一下长城的历史和建筑特点，分三段。'
 if [ "$1" = "dump" ]; then echo "$TABLE"; exit 0; fi
-export LD_LIBRARY_PATH=$LP HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+ICD=$R/opt/mesa-cl/etc/OpenCL/vendors
+export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
 BIN=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
 run_one() {
   ID=$(echo "$1" | cut -d'|' -f1); NP=$(echo "$1" | cut -d'|' -f2)
@@ -25,7 +26,8 @@ run_one() {
   NC=$(echo "$1" | cut -d'|' -f5); PR=$(echo "$1" | cut -d'|' -f6-)
   TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
   if [ "${TEMP:-0}" -gt 440 ]; then echo "#### X4ABORT_THERMAL $TEMP id=$ID"; return 1; fi
-  timeout 600 $LOADER --library-path $LP $EYE $MODEL $NP $NG $SD "$PR" $NC \
+  timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 \
+      $LOADER --library-path $LP $EYE $MODEL $NP $NG $SD "$PR" $NC \
       > $R/out/x4_$ID.tok 2> $R/out/x4_$ID.err
   RC=$?
   MD=$(md5sum $R/out/x4_$ID.tok | cut -c1-8)
@@ -36,6 +38,10 @@ run_one() {
 if [ "$1" = "all" ]; then
   echo "$TABLE" | while IFS= read -r row; do [ -n "$row" ] && run_one "$row"; done
   echo "#### X4_ALL_DONE $(date +%H:%M:%S)"
+elif echo "$TABLE" | grep -q "^$1|"; then
+  echo "$TABLE" | while IFS= read -r row; do
+    case "$row" in "$1|"*) run_one "$row";; esac
+  done
 else
-  echo "$TABLE" | grep "^$1|" | IFS= read -r row && [ -n "$row" ] && run_one "$row" || echo "#### X4_NO_SUCH_CASE $1"
+  echo "#### X4_NO_SUCH_CASE $1"
 fi
