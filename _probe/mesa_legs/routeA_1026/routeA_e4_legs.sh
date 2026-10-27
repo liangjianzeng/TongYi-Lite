@@ -278,7 +278,11 @@ case "$1" in
   d42) # IDLE=1 对照组终验（KERNEL_SYNC 同族，作保险）
     run_drift e4d_d42 "" 16 "GGML_OPENCL_NDRANGE_IDLE=1" "" 20
     ;;
-  g50) # R-066 升级：边界补测 IDLE=3 用 drift-20 判据级（单腿统计力不足，密度定律皆 20 连定案）
+  g50) # R-066 判据级 + R-069 自武装：库钉七代 1be75abc（与 d49 认证时代一致，密度定律对照系）
+    mkdir -p $R/stage_1027
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1027 missing"; exit 3; }
+    G50M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$G50M" != "1be75abc" ]; then echo "#### G50_REDCARD lib=$G50M want=1be75abc"; exit 3; fi
     run_drift e4d_g50 "" 16 "GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0" "" 20
     ;;
   g60) # R-060/065/069 十代出厂档终闸（自武装 g60_arm）
