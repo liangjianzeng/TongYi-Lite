@@ -47,7 +47,7 @@ run_leg () {
   timeout 600 env $PLENV $LOADER --library-path $LP $R/bin/minicpm_e2e \
     $MODEL $EXPERTS 99 $NPRED 512 \
     > $R/out/$TAG.out 2> $R/out/$TAG.err
-  echo "#### rc=$? tokbytes=$(ls -l $R/out/$TAG.tok 2>/dev/null | awk '{print $5}')"
+  echo "#### rc=$? tokbytes=$(ls -l $R/out/$TAG.tok 2>/dev/null | awk '{print $5}') bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 2>/dev/null | cut -c1-8)"
   echo "#### tok md5=$(md5sum $R/out/$TAG.tok 2>/dev/null)"
   echo "#### KGSLSUBMIT=$(grep -ac 'KGSLSUBMIT cmd\[' $R/out/$TAG.err)"
   echo "#### driver=$(grep -a 'OpenCL driver:' $R/out/$TAG.err | head -1)"
@@ -306,7 +306,7 @@ case "$1" in
     FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq1.tok 2> $R/out/kq1.err
-    echo "#### kq1 rc=$? md5=$(md5sum $R/out/kq1.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq1.err | tail -1; grep -a '\[IDLE\]' $R/out/kq1.err
+    echo "#### kq1 rc=$? md5=$(md5sum $R/out/kq1.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq1.err | tail -1; grep -a '\[IDLE\]' $R/out/kq1.err
     ;;
   kq2) # GPU 默认 ON（十代出厂档）——同模型应与 kq0 全等或同文
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
@@ -316,7 +316,7 @@ case "$1" in
     FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq2.tok 2> $R/out/kq2.err
-    echo "#### kq2 rc=$? md5=$(md5sum $R/out/kq2.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq2.err | tail -1; grep -a '\[IDLE\]' $R/out/kq2.err
+    echo "#### kq2 rc=$? md5=$(md5sum $R/out/kq2.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq2.err | tail -1; grep -a '\[IDLE\]' $R/out/kq2.err
     ;;
   kq3) # R-062 Ling-3.0-tiny GPU async 无治愈（IDLE=0）——深模型跨代复现主判
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
@@ -365,7 +365,7 @@ case "$1" in
     FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq7.tok 2> $R/out/kq7.err
-    echo "#### kq7 rc=$? md5=$(md5sum $R/out/kq7.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq7.err | tail -1; grep -a '\[IDLE\]' $R/out/kq7.err
+    echo "#### kq7 rc=$? md5=$(md5sum $R/out/kq7.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq7.err | tail -1; grep -a '\[IDLE\]' $R/out/kq7.err
     ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
