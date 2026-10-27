@@ -1450,7 +1450,7 @@ struct ggml_backend_opencl_context {
         // 后 finish+sleep 应以近零税复现治愈。IDLE=0 关=零扰动；GAP 默认 2000us。
         // [R-060 产品化候选] 默认 2=已双验治愈档（g49/d49 20/20）；显式 GGML_OPENCL_NDRANGE_IDLE=0 逃生。
         static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 2; }();
-        static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 2000; }();
+        static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 0; }();  // [R-065] 出厂档=d49 认证形（g49-form GAP=0）：GAP 与疗效无关(R-057)，2ms sleep 是纯税
         static thread_local long idle_ctr = 0;
         if (idle_n > 0 && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {
             idle_ctr = 0;
