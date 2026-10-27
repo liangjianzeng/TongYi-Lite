@@ -3,12 +3,12 @@
 # 前置：arb740 队列 DONE（设备道列 SERIAL）。禁队列中打断。
 R=/data/local/tmp/mesa_clrt_1026
 LOADER=$R/lib/ld-linux-aarch64.so.1
-LP=$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu
+LP=$R/bin/patch78:$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu
 ICD=$R/opt/mesa-cl/etc/OpenCL/vendors
 M=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.gguf
 X=/storage/emulated/0/TongYiLite/models/minicpm-v4.7-35b-a3b-les.experts/manifest.json
-BIN=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
-[ "$BIN" = "2695a8be" ] || { echo "REDCARD bin=$BIN" > $R/out/b0_740_results.log; exit 3; }
+BIN=$(md5sum $R/bin/patch78/libggml-opencl.so.0.27.0 2>/dev/null | cut -c1-8)
+[ "$BIN" = "7f6114b2" ] || [ "$BIN" = "2695a8be" ] || { echo "REDCARD bin=$BIN" > $R/out/b0_740_results.log; exit 3; }
 # 电池热闸（口径=R-077 勘误）
 t=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
 n=0

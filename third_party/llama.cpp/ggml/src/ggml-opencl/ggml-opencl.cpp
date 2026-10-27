@@ -1797,9 +1797,14 @@ static bool probe_float_subgroup_broadcast(cl_context ctx, cl_device_id dev) {
     }
 }
 
-static bool tyl_skip_moe_ns() {   // [R-062] a6xx turnip LLVM 无法编译 moe_ns 族 32 宽向量（K40 历史雷真身）
+static bool tyl_skip_moe_ns(const ggml_backend_opencl_context * ctx) {   // [R-062] a6xx turnip LLVM 无法编译 moe_ns 族 32 宽向量（K40 历史雷真身）
     static const bool v = [] { const char * e = getenv("GGML_OPENCL_SKIP_MOE_KERNELS"); return e && e[0] == '1'; }();
-    return v;
+    // [tongyi R-078 2026-10-27] Mesa/rusticl 面恒跳过：moe_ns 族的 float32（32 元素向量）被 QC
+    // 编译器容忍，但 rusticl-LLVM 硬 abort（"LLVM ERROR: Unsupported vector type with 32
+    // elements"，a650/a740 双机 35B 装载 100% 必死实证）。这些核本就是 QC 编译器专属的
+    // vendor 诊断核（use_adreno_moe_kernels 表闸永不派发它们，Mesa 面无合法消费者），
+    // 跳过预编译 = 去雷且零功能损失；env=1 手动档保留。
+    return v || (ctx != nullptr && ctx->is_mesa_rusticl);
 }   // dense 冒烟模型永不调用 moe 内核；env=1 跳过预编译，init 得以在 a6xx 上存活。
 
 static cl_program build_program_from_source(ggml_backend_opencl_context * backend_ctx, const char* program_buffer, const std::string &compile_opts) {
@@ -5229,7 +5234,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             " -cl-fast-relaxed-math";
 
     // gemv_moe_q4_1_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q4_1_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q4_1_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q4_1_f32_ns.cl.h"
@@ -5245,7 +5250,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_1_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_1_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_1_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q4_1_f32_ns.cl.h"
@@ -5261,7 +5266,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_1_f32_ns_bin
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_1_f32_ns_bin */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_1_f32_ns_bin */
         size_t bin_size = 0;
         backend_ctx->kernel_gemm_moe_q4_1_f32_ns_bin = nullptr;
 
@@ -5311,7 +5316,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q4_0_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q4_0_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q4_0_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q4_0_f32_ns.cl.h"
@@ -5328,7 +5333,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_0_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_0_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_0_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q4_0_f32_ns.cl.h"
@@ -5345,7 +5350,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_0_f32_ns_bin
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_0_f32_ns_bin */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_0_f32_ns_bin */
         size_t bin_size = 0;
         backend_ctx->kernel_gemm_moe_q4_0_f32_ns_bin = nullptr;
 
@@ -5363,7 +5368,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q8_0_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q8_0_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q8_0_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q8_0_f32_ns.cl.h"
@@ -5380,7 +5385,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q5_0_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q5_0_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q5_0_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q5_0_f32_ns.cl.h"
@@ -5397,7 +5402,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q5_0_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q5_0_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q5_0_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q5_0_f32_ns.cl.h"
@@ -5414,7 +5419,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q5_1_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q5_1_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q5_1_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q5_1_f32_ns.cl.h"
@@ -5431,7 +5436,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q5_1_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q5_1_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q5_1_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q5_1_f32_ns.cl.h"
@@ -5448,7 +5453,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q4_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q4_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q4_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q4_k_f32_ns.cl.h"
@@ -5466,7 +5471,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q4_k_f32_ns.cl.h"
@@ -5483,7 +5488,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q4_k_f32_ns_bin
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q4_k_f32_ns_bin */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q4_k_f32_ns_bin */
         size_t bin_size = 0;
         backend_ctx->kernel_gemm_moe_q4_k_f32_ns_bin = nullptr;
 
@@ -5687,7 +5692,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q5_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q5_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q5_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q5_k_f32_ns.cl.h"
@@ -5704,7 +5709,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q5_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q5_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q5_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q5_k_f32_ns.cl.h"
@@ -5721,7 +5726,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_q6_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_q6_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_q6_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_q6_k_f32_ns.cl.h"
@@ -5738,7 +5743,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q6_k_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q6_k_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q6_k_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_q6_k_f32_ns.cl.h"
@@ -5755,7 +5760,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_q6_k_f32_ns_bin
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_q6_k_f32_ns_bin */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_q6_k_f32_ns_bin */
         size_t bin_size = 0;
         backend_ctx->kernel_gemm_moe_q6_k_f32_ns_bin = nullptr;
 
@@ -5808,7 +5813,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemv_moe_mxfp4_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemv_moe_mxfp4_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemv_moe_mxfp4_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemv_moe_mxfp4_f32_ns.cl.h"
@@ -5826,7 +5831,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_mxfp4_f32_ns
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_mxfp4_f32_ns */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_mxfp4_f32_ns */
 #ifdef GGML_OPENCL_EMBED_KERNELS
         const std::string kernel_src {
             #include "gemm_moe_mxfp4_f32_ns.cl.h"
@@ -5843,7 +5848,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     }
 
     // gemm_moe_mxfp4_f32_ns_bin
-    if (!tyl_skip_moe_ns()) { /* gemm_moe_mxfp4_f32_ns_bin */
+    if (!tyl_skip_moe_ns(backend_ctx)) { /* gemm_moe_mxfp4_f32_ns_bin */
         size_t bin_size = 0;
         backend_ctx->kernel_gemm_moe_mxfp4_f32_ns_bin = nullptr;
 
