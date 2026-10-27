@@ -383,6 +383,27 @@ case "$1" in
     timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq7.tok 2> $R/out/kq7.err
     echo "#### kq7 rc=$? md5=$(md5sum $R/out/kq7.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq7.err | tail -1; grep -a '\[IDLE\]' $R/out/kq7.err
     ;;
+  kq8) # R-070 830 g50 机制预验：IDLE=3 GAP=0 十代库（疗效只能 830 判；本腿验机制+输出一致）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
+    FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq8.tok 2> $R/out/kq8.err
+    echo "#### kq8 rc=$? md5=$(md5sum $R/out/kq8.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq8.err | tail -1; grep -a '\[IDLE\]' $R/out/kq8.err
+    ;;
+  kq9) # R-070 830 d70 机制预验：十代库+OPFLUSH=1+IDLE=0（七代无 SKIP_MOE=a650 物理不可跑，首跑空文件定罪；
+    #    OPFLUSH 无伤性在此判，830 d70 仍用七代纯 census）
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
+    FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_OPFLUSH=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq9.tok 2> $R/out/kq9.err
+    echo "#### kq9 rc=$? md5=$(md5sum $R/out/kq9.tok | cut -c1-8) bin=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)"; grep -a tok_s= $R/out/kq9.err | tail -1
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
