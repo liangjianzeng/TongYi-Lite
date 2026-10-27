@@ -64,9 +64,9 @@
 **墙钟下的三条结论（R-091/R-092）**：
 1. **头号成本是自家人**：每 2 发一次的全队列 `clFinish`（2.209 ms/次 × ~450 次/token）吃掉提交循环 83 %，驱动门铃本身只有 **0.2 ms/发**量级 —— 原"门铃定罪 92 %"作废。
 2. **排空之后才是真门铃**：`IDLE=0` 腿 LOOP_TOTAL 的 **94 %** 是 `clEnqueueNDRangeKernel` 自身（1303 ms / 6199 发）⇒ **减发射条数恢复主修位（P1）**，收益 ≈ 0.21 ms × 省下的条数，且这是排空治理之后唯一还能砍的大头。
-3. **暗区独立成立**：490 发非 op 标记发射 = 550 ms（LOOP 的 40 %），单价 1.124 ms 是同腿普通发射的 7×，**排空关掉它纹丝不动** ⇒ 不是通用驱动税，是这 490 发各自贵；与排空无关，须单独立靶（下一步：给暗区发射点分站点标签，看清是哪几处）。
+3. **暗区独立成立（2026-10-28 已结案，见 P3）**：490 发非 op 标记发射 = 550 ms（LOOP 的 40 %），单价 1.124 ms 是同腿普通发射的 7×，**排空关掉它纹丝不动** ⇒ 不是通用驱动税，是这 490 发各自贵；与排空无关，当时判为"须单独立靶"。**后续**：站点标签枪把 490 发全部收束到唯一站点 `graph_compute` **L10119**（= L10118 `ggml_opencl_op_rms_norm_fused` 的续行），并用产品自带 `GGML_OPENCL_FUSE_RMS_MUL=0` 定价 —— 关融合使 LOOP 反而 **+3.6 %**、发射数 +490 ⇒ 暗区是**被位移的工作**而非可删浪费；下一靶改指"单次融合发射 host 侧 4.6–7× 于普通发射"的 image-pool 嫌疑（P5 升格）。
 
-**仪表可信度声明（R-092）**：v1–v3 用 `clock()`（进程 CPU 时间）+ 无锁共享 map，产出过违反可加性的行（内层 8× 父行、`LOOP_TOTAL` > `GRAPH_TOTAL`），其绝对归因全部作废；v4（`vkh_instrument.h` md5 `252ae09d…`，lib `80ab2580…`）换墙钟 + 递归锁，并内建可加性自检：**闭合窗口**（`graph_depth==0`）内层超父行即 `abort()`，中途 dump 只报 `MIDGRAPH_INFO`（dump 点在 `graph_compute` 内部，正在飞的图尚未入账，判它为违规会误杀每一条 GPU 腿 —— 本条已用真机 rc=134 现场验证过）。仪表自身成本单列 `DUMP_COST` 行。
+**仪表可信度声明（R-092）**：v1–v3 用 `clock()`（进程 CPU 时间）+ 无锁共享 map，产出过违反可加性的行（内层 8× 父行、`LOOP_TOTAL` > `GRAPH_TOTAL`），其绝对归因全部作废；v4（`vkh_instrument.h` md5 `252ae09d…`，lib `80ab2580…`）换墙钟 + 递归锁，并内建可加性自检：**闭合窗口**（`graph_depth==0`）内层超父行即 `abort()`，中途 dump 只报 `MIDGRAPH_INFO`（dump 点在 `graph_compute` 内部，正在飞的图尚未入账，判它为违规会误杀每一条 GPU 腿 —— 本条已用真机 rc=134 现场验证过）。仪表自身成本单列 `DUMP_COST` 行。**v5（`vkh_instrument.h` md5 `3a32ff63…`，lib `66b24e4e…`）**在此之上加：闭合窗口 dump 的常开可加性保险（1240 次闭合判定零误杀后转常开）、R-094 三指纹配套字段、以及 **env 门控（`VKH_DZ_TAG=1`，默认关）的站点标签**（`ENQ@+0x<off>` / `DZ@+0x<off>` / `ENQ#<n>` + `STATIONS` banner，含 `STATION_COLLAPSED` 内联坍缩自检）；站点标签的"观察者免费"已由 `vkh_dz_selftest.sh` 双臂证明，关掉时表内一行 station 都不产生 ⇒ 所有 campaign 腿字节级同旧表。
 
 ## 4. 提案（R-091 改判 + R-092 墙钟复核后的优先级）
 
@@ -84,19 +84,31 @@
 **P2 — 包装器内部二分：已结案（v4 墙钟判定，无需再挂第二层钩子）**
 `enqueue_ndrange_kernel` 体内另有 wgs / subgroup 查询与 `tyl_l0_note_enq` 簿记，v1–v3 用 CPU 时间无法把它和驱动调用本体分开。v4 已挂 `ENQ_DRV`（只包真正的 `clEnqueueNDRangeKernel`），墙钟结果：**Σ`ENQ_DRV` = 1303.2 ms 与 Σ`ENQ/<op>` ≈ 1280 ms 相差 <2 %**（`IDLE=0` 腿）⇒ **包装器自有工作不是成本，驱动调用本体铁案**：0.21 ms/发是 Adreno 用户态驱动的价格，唯一杠杆是**减条数（P1）**，"给 wgs/subgroup 加缓存"这类包装器优化可以排除。
 
-**P3 — 未标注发射的暗区（独立第二靶，v4 墙钟坐实）**
-`ENQ/PRE_FORWARD`：`IDLE=0` 腿 **550.6 ms / 490 次 = 1.124 ms/次**，是同腿普通发射 `ENQ/MUL_MAT`（0.161 ms/次）的 **7×**，占 LOOP_TOTAL 的 **40 %**，且排空开关几乎不动它（`IDLE=2` 腿 1.834 ms/次）⇒ 不是通用驱动税，是这 490 发**各自**贵。这些发射发生在"每节点 `LOOP_TOTAL` 计时起点 → 该节点 op 计时器构造点"之间（forward 之前的暗区）。仪表侧两件事：① `vkh_op_timer` 析构恢复上一层 op（save/restore）**已在 v4 实施**，暗区不再被 op 行串标签；② **分站点标签**（在暗区内按发射点细分 `ENQ/PRE_FORWARD@<site>`）待父智能体批准后再做，批准前不挂载以免污染对照。**这 490 × 1.1 ms 若能在 740 复现，其价值可能高于所有单点优化。**
+**P3 — 暗区已结案（2026-10-28 站点标签枪）：唯一站点 = `rms_norm+mul` 融合助手；"砍融合"实测是亏本方向**
+站点标签枪（`VKH_DZ_TAG=1`，env 门控默认关；站点 = `enqueue_ndrange_kernel` 的**调用者 PC** − .so 装载基址，基址由纯 libc 的 `dl_iterate_phdr` 求得，偏移可直接喂 `addr2line -e libggml-opencl.so -f -C`；**故意不用 `dladdr`** —— 它归属 libdl 还是 libc 随 Android API 变，未解析符号会让整个后端加载失败）在 K40 首枪即把暗区收束到一点：`STATIONS rows=25 launches=6199 dz_rows=1 dz_launches=490`，`DZ@+0x2e96c4` → **`ggml_backend_opencl_graph_compute` @ ggml-opencl.cpp:10119**，即 **L10118 `ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);`** 的续行。机制闭环：融合助手自己发射却不设 `g_vkh_current_op`，故其发射全部沉淀在 `ENQ/PRE_FORWARD`（不是"神秘驱动税"，是没挂标签的自有工作）。
+**定价实验**（`vkh_fuse_ab.sh` md5 `7ced440a`，`IDLE=0` 干净归因，用产品自带 `GGML_OPENCL_FUSE_RMS_MUL=0`（L10113-10116），产品码零改动）：
+
+| 臂 | LOOP_TOTAL | `ENQ/PRE_FORWARD` | `ENQ_DRV` 发射数 | `MUL_MAT` | tok/s |
+|---|---|---|---|---|---|
+| 融合开 | 1302.1 ms | 435.9 / 490 = **0.890 ms/发** | 1202.3 / **6199** | 533.4 | 5.8 |
+| 融合关 | **1349.0 ms** | 行消失（`dz_launches=0`） | 1261.1 / **6689** | **730.3** | 5.9 |
+
+⇒ **暗区不是可删除的浪费，而是被位移的工作**：关融合清了 490 发暗区发射，却多发射 490 次、`MUL_MAT` +197 ms、LOOP **+47 ms（≈3.6 %）**，tok/s 在打印量子内不变 ⇒ **砍融合不是修法，反而净亏**。
+（数值诚实：本节早前所记 `IDLE=0` 腿 `550.6 ms/490 = 1.124 ms/发、占 LOOP 40 %` 作为**量级**判据仍成立；两次独立 `IDLE=0` 测量该行为 435.9–550.6 ms，**run-to-run 约 20 % 散布**，引用按量级不按小数。）
+**剩下的唯一锐利问题**：一次融合发射 host 侧 0.890–1.124 ms，是同腿普通发射（0.161–0.194 ms）的 **4.6–7×**，贵在哪。addr2line inline 链露出线索：**`ggml_cl_img_pool_get_or_create` → `std::map<ImagePoolKey>::operator[]`** ⇒ 疑每次融合发射都在 host 侧查/建 image pool（红黑树）。钉死需在 L10118 附近加计时行（被跟踪文件 —— **只提案，父智能体决定挂载**）。
+仪表侧现状：① 析构恢复上一层 op（save/restore）已在 v4 实施；② 分站点标签已在 v5 实施并**自测合格**（`vkh_dz_selftest.sh` md5 `18561841`：观察者免费 —— host_ms Δ **0.18 %**、tok/s 差在打印量子内、结构指纹两臂逐字相同 `idle=n3099 darkzone=n490 drv=n6199`、`txt` 相同、`dz_cross=ok`），**默认关 ⇒ campaign 各腿字节级同旧表**。
 
 **P4 — q5_0 路线（独立案，不入本三口径变量）**
 按 ledger 187 收窄，本案 campaign 4B 无 q5_0，**三口径变量只有 FA 档位 + 暗区**。q5_0 单独走：① 先把 `supports_op` 的 **decline 与 placement 解耦**（`-ngl 0` 时 `-ngl` 仍放 CPU，但能力探针说"能上 GPU"，两件事混在一起导致历史判词误读）；② 白名单 `type_has_gemm`（L11072，现含 Q4_0/Q4_1/IQ4_NL/Q8_0/Q4_K/Q5_K/Q6_K）**加 q5_0/q5_1 作对照腿**，配合 load 期 `m=512` 单口径探针（L11085-11086 `!uses_gemm && !small_weight && src[1]->ne[1] >= 512` → decline）拆成 **decode / prefill 双口径**；③ 厂商 q5_0 GEMM 内核存在性 = 父智能体 ledger 185，数值正确性 = 我的 `vkh_tbo` 闸。
 
-**P5 — CL 对象指纹缓存（定罪后降级为次级）**
-`ggml_cl_subbuffer_from_parent`（L8000，内部 L8017 无缓存 `clCreateSubBuffer`）被 MoE 路径逐 expert 调用（L12178/12179、L13331-13334、L14329），加 `(parent, origin, size)` 指纹缓存 + pending-release-queue（L847 已注明该 TODO）。**门铃定罪后它不再是主靶**：只在观测到 subbuffer 风暴的模型（MoE）上按 P1 同法验收。
+**P5 — CL 对象指纹缓存（2026-10-28 升格：暗区唯一可行修法方向，候 image-pool 定罪）**
+`ggml_cl_subbuffer_from_parent`（L8000，内部 L8017 无缓存 `clCreateSubBuffer`）被 MoE 路径逐 expert 调用（L12178/12179、L13331-13334、L14329），加 `(parent, origin, size)` 指纹缓存 + pending-release-queue（L847 已注明该 TODO）。**门铃定罪后它曾降级为次级**；P3 结案后重新升格：暗区既然已被证实是融合助手自有工作、且砍融合是净亏（见 P3），则暗区剩下唯一可下手的对象就是**其 host 侧准备成本**，addr2line inline 链已指向 `ggml_cl_img_pool_get_or_create` 的 `std::map<ImagePoolKey>::operator[]`（每次融合发射查/建 image pool）—— 与 subbuffer 同属"CL 对象每次重建"家族，**同一把指纹缓存可覆盖**。验收同 P1：`[host-timing] kernels=` 不变而 `DZ@` 行单价下降、LOOP_TOTAL 同幅下降（同温 <4 ℃）。**前置条件**：先在 L10118 附近挂计时行把 image-pool 成本从融合发射总价里切出来（需父智能体挂载）。
 
 ## 5. 明确排除项（勿再投入）
 
 - ❌ **关 FA 当修法**（是仪表，不是药；K40 实测 decode 恶化 34%）。
 - ❌ **优化 `clSetKernelArg` 装填 / 张量簿记缓存**（v4 墙钟复核仍成立：Σ`ENQ_DRV` 与 Σ`ENQ/<op>` 相差 <2 %，包装器自有工作近乎免费 —— 见 P2；v1–v3 的"≤8 %"是 CPU 时间口径，数字作废但结论同向）。
+- ❌ **砍 `rms_norm+mul` 融合当修法**（2026-10-28 实测：`GGML_OPENCL_FUSE_RMS_MUL=0` 使 LOOP_TOTAL 1302→1349 ms、发射 6199→6689，tok/s 量子内不变 —— 见 P3；暗区是位移的工作，不是可删的浪费）。
 - ❌ **本战役加 q5_0 变量**（ledger 187）。
 - ❌ **第二轮带 patch80**（父智能体裁定）；第三轮靶点定案后再复测。
 - ❌ **830 压测**（用户明令；830 只做正常调试，adbd 现仍拒连，等用户侧 `adb-wifi.ps1`）。
@@ -105,6 +117,6 @@
 
 1. **740 掉线**（~23:45，与父智能体 13.58GB adb pull 时点重合）：pass1 完整 + pass2 残腿保留在 `/data/local/tmp/vkh2/out/`，不清不动；恢复后跑 pass2/pass3 取中位。
 2. **CPU 腿污染复核**（§1 ⚠️，头号判词引信）。
-3. **P2 包装器内二分钩子** 挂载 + **P3 暗区标签修复**（均需父智能体挂载；被跟踪文件我零改动）。
+3. **暗区后续**：分站点标签枪已实施并自测合格（v5，`VKH_DZ_TAG=1` 默认关，P3 结案）；剩下唯一未决 = **image-pool 计时行挂载**（被跟踪文件 L10118 附近，候父智能体批准），它决定 P5 是否升格为暗区修法。`ENQ_WAIT` 设计已批但**未挂载**。P0 默认值 `2→0` 与产品化**候金口**。
 4. K40 上无战役 4B（父智能体所记 `/data/local/tmp/g759/qwen35-4b-q4km.gguf` 在 K40 不存在，宿主亦无），如需 4B-on-K40 须先限速传 2.8 GB。
 5. GPU≠CPU 贪心分歧（md5 `36c7d6d7d1e6` vs `0d0858efe9ee`）仍挂账，与本案无关。
