@@ -10115,7 +10115,12 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
                 return !(e && e[0] == '0');
             }();
             if (fuse_rms_mul_en) {
-                ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
+                // [vkh R-096] 暗区定罪=本融合助手(它自己发射不设 g_vkh_current_op)。
+                // VKH_DZ_TAG=1 时给整个融合算子挂 FUSE/RMS_MUL host 墙钟(=发射+image-pool 查询);
+                // 默认关:走原句,字节级零差异。池税=FUSE_TOTAL-ENQ_DRV(暗区腿内自解)。
+                static const bool vkh_fz_en = [] { const char * e = getenv("VKH_DZ_TAG"); return e && e[0] == '1'; }();
+                if (vkh_fz_en) { vkh_op_timer vkh_fz("FUSE/RMS_MUL", nullptr, false); ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]); }
+                else ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
                 i++;
                 // [dspark] nodedump for fused rms output (attn_norm / attn_post_norm chain)
                 static const bool nd_en0 = [] { const char * e = getenv("GGML_OPENCL_NODEDUMP"); return e && e[0] == '1'; }();

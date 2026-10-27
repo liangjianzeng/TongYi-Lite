@@ -53,10 +53,15 @@
 #define GGML_OPENCL_VKH_INSTRUMENT_H
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <link.h>   // dl_iterate_phdr: find this .so's load bias so station offsets are addr2line-ready.
+                    // Chosen over dladdr() on purpose: dladdr's home (libdl vs libc) varies by Android
+                    // API level, and an unresolved symbol here means the whole backend fails to load —
+                    // a build-time-cheap mistake that would burn a 740 leg.
 #include <map>
 #include <mutex>
 #include <string>
@@ -82,6 +87,26 @@ inline std::recursive_mutex g_vkh_tbl_mtx;
 // a node loop genuinely running outside graph_compute (a real code path — warn and keep
 // going), versus the accounting itself being broken (numbers are void — abort on the spot,
 // per R-092: better a dead run than a post-mortem over bad numbers).
+// Dark-zone station labelling (R-095, parent-approved: design + compile + env gate).
+// The dark zone is the window between LOOP_TOTAL's construction and the node's own op timer,
+// where launches fall into ENQ/PRE_FORWARD instead of an op row (R-091: 490 launches, 1.124 ms
+// each, 40 % of the submit loop with drains off — 7x a normal launch). Naming them needs no
+// product-code change: VKH_ENQ_TIMER() is already mounted at the single choke point
+// (ggml-opencl.cpp L1366, first statement of enqueue_ndrange_kernel), and a macro there is
+// expanded inside that function's body, so __builtin_return_address(0) is the CALLER's site —
+// a PC inside graph_compute. It is reported as a file-relative offset so the parent can feed it
+// straight to addr2line. If the compiler inlined the choke point, every label collapses to one
+// offset and the STATIONS banner says STATION_COLLAPSED instead of pretending they mean
+// something. A second, inlining-proof key is the launch's order within the node iteration
+// (ENQ#<n>), taken from the same n_enqueues counter LOOP_TOTAL already reads.
+// OFF BY DEFAULT: every campaign leg (P0/P1/丙-IDLE0/X4) runs without a single extra row until
+// VKH_DZ_TAG=1 is passed on a forensics leg only.
+inline bool g_vkh_dz_tag_on = [] { const char * e = getenv("VKH_DZ_TAG"); return e != nullptr && e[0] != '0' && e[0] != '\0'; }();
+inline void * g_vkh_lib_base       = nullptr;
+inline bool   g_vkh_lib_base_tried = false;
+inline int *  g_vkh_loop_enq_ctr   = nullptr;
+inline int    g_vkh_loop_enq_base  = 0;
+
 inline int  g_vkh_graph_depth       = 0;
 inline long g_vkh_loop_outside_graph = 0;
 
@@ -126,6 +151,25 @@ inline const char * vkh_enq_name(const char * op) {
     return it->second.c_str();
 }
 
+// Load bias of the .so that contains vkh_enq_name, found by walking the program headers of every
+// loaded object until one of its PT_LOAD segments covers that function. libc-only, no libdl.
+struct vkh_base_ctx { uintptr_t target; uintptr_t base; };
+
+inline int vkh_phdr_cb(struct dl_phdr_info * info, size_t size, void * data) {
+    (void) size;
+    vkh_base_ctx * c = (vkh_base_ctx *) data;
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) * ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) { continue; }
+        const uintptr_t lo = (uintptr_t) info->dlpi_addr + (uintptr_t) ph->p_vaddr;
+        if (c->target >= lo && c->target < lo + (uintptr_t) ph->p_memsz) {
+            c->base = (uintptr_t) info->dlpi_addr;
+            return 1;                     // stop the walk
+        }
+    }
+    return 0;
+}
+
 // RAII: times one region of the submit loop and accumulates it under `op`.
 // `enq` points at backend_ctx->n_enqueues to attribute kernel counts; pass nullptr for
 // regions that span the whole graph (GRAPH_TOTAL) or for helper rows, where a delta would
@@ -134,13 +178,15 @@ struct vkh_op_timer {
     const char * op;
     const char * prev;
     int *        enq;
+    void *       ra;
     double       t0;
     long         e0;
     bool         on;
     bool         set_cur;
 
-    explicit vkh_op_timer(const char * o, int * e, bool set_cur_ = true)
-        : op(o), prev(g_vkh_current_op), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on), set_cur(set_cur_) {
+    explicit vkh_op_timer(const char * o, int * e, bool set_cur_ = true, void * ra_ = nullptr)
+        : op(o), prev(g_vkh_current_op), enq(e), ra(g_vkh_dz_tag_on ? ra_ : nullptr), t0(0.0), e0(0),
+          on(g_vkh_optime_on), set_cur(set_cur_) {
         if (on) {
             if (set_cur) { g_vkh_current_op = o; }
             static bool armed_printed = false;
@@ -153,8 +199,12 @@ struct vkh_op_timer {
             e0 = enq ? *enq : 0;
             if (op != nullptr && strcmp(op, "GRAPH_TOTAL") == 0) {
                 g_vkh_graph_depth++;
-            } else if (op != nullptr && strcmp(op, "LOOP_TOTAL") == 0 && g_vkh_graph_depth <= 0) {
-                g_vkh_loop_outside_graph++;
+            } else if (op != nullptr && strcmp(op, "LOOP_TOTAL") == 0) {
+                if (g_vkh_graph_depth <= 0) { g_vkh_loop_outside_graph++; }
+                if (g_vkh_dz_tag_on && enq != nullptr) {
+                    g_vkh_loop_enq_ctr  = enq;    // launch order within this iteration, see ENQ#<n>
+                    g_vkh_loop_enq_base = *enq;
+                }
             }
         }
     }
@@ -173,6 +223,40 @@ struct vkh_op_timer {
         r.ms += t1 - t0;
         r.n++;
         if (enq) { r.kern += *enq - e0; }
+        if (ra != nullptr) {                     // VKH_DZ_TAG=1 only (ra is nulled when off)
+            if (!g_vkh_lib_base_tried) {
+                g_vkh_lib_base_tried = true;
+                vkh_base_ctx bc;
+                bc.target = (uintptr_t) (void *) &vkh_enq_name;   // a function in THIS .so
+                bc.base   = 0;
+                dl_iterate_phdr(vkh_phdr_cb, &bc);
+                g_vkh_lib_base = (void *) bc.base;
+            }
+            const unsigned long long off =
+                (unsigned long long) ((uintptr_t) ra - (uintptr_t) g_vkh_lib_base);
+            char sname[48];
+            snprintf(sname, sizeof sname, "ENQ@+0x%llx", off);
+            vkh_optime_rec & s = vkh_optime_map()[sname];
+            s.ms += t1 - t0;
+            s.n++;
+            // Cross row for the dark zone only (R-091: 490 launches, 1.124 ms each, 40 % of the
+            // submit loop). ENQ@ rows carry every launch and no op label, so on their own they
+            // cannot say WHICH stations make up those 490; DZ@ rows are the same stations
+            // restricted to launches issued while the label was still PRE_FORWARD. Bounded, and
+            // it is the row the parent addr2lines.
+            if (op != nullptr && strncmp(op, "ENQ/PRE_FORWARD", 16) == 0) {
+                snprintf(sname, sizeof sname, "DZ@+0x%llx", off);
+                vkh_optime_rec & d = vkh_optime_map()[sname];
+                d.ms += t1 - t0;
+                d.n++;
+            }
+            if (g_vkh_loop_enq_ctr != nullptr) {
+                snprintf(sname, sizeof sname, "ENQ#%d", *g_vkh_loop_enq_ctr - g_vkh_loop_enq_base);
+                vkh_optime_rec & q = vkh_optime_map()[sname];
+                q.ms += t1 - t0;
+                q.n++;
+            }
+        }
     }
 
     vkh_op_timer(const vkh_op_timer &) = delete;
@@ -252,6 +336,22 @@ inline void vkh_optime_dump() {
         std::map<std::string, vkh_optime_rec>::const_iterator it_gr  = t.find("GRAPH_TOTAL");
         std::map<std::string, vkh_optime_rec>::const_iterator it_dc  = t.find("DUMP_COST");
         const double gap = (it_loop != t.end() && it_gr != t.end()) ? it_loop->second.ms - it_gr->second.ms : 0.0;
+        if (g_vkh_dz_tag_on) {
+            long st_rows = 0, st_launches = 0, dz_rows = 0, dz_launches = 0;
+            for (std::map<std::string, vkh_optime_rec>::const_iterator it = t.begin(); it != t.end(); ++it) {
+                const char * k = it->first.c_str();
+                if (strncmp(k, "ENQ@+0x", 7) == 0) { st_rows++; st_launches += it->second.n; }
+                else if (strncmp(k, "DZ@+0x", 6) == 0) { dz_rows++; dz_launches += it->second.n; }
+            }
+            // One row for hundreds of launches = the choke point was inlined and every label
+            // collapsed onto graph_compute's own return site. Say it out loud rather than let
+            // someone addr2line a number that means nothing.
+            // dz_launches should track the ENQ/PRE_FORWARD row; if it does not, the cross
+            // attribution is lying and the dark-zone verdict built on it is void.
+            fprintf(stderr, "[vkh-optime] STATIONS rows=%ld launches=%ld dz_rows=%ld dz_launches=%ld lib_base=%p%s\n",
+                    st_rows, st_launches, dz_rows, dz_launches, g_vkh_lib_base,
+                    (st_rows == 1 && st_launches > 100) ? " STATION_COLLAPSED(choke point inlined — offsets are meaningless)" : "");
+        }
         fprintf(stderr, "[vkh-optime] SELFCHK graph_depth=%d loop_outside_graph=%ld mode=%s loop_minus_graph=%.1f dump_cost=%.1f/%ld\n",
                 g_vkh_graph_depth, g_vkh_loop_outside_graph,
                 in_graph ? "skip(in-graph)" : (soft ? "soft" : "abort"), gap,
@@ -262,9 +362,9 @@ inline void vkh_optime_dump() {
             if (c == t.end() || p == t.end() || c->second.ms <= p->second.ms * 1.02) { continue; }
             // Explained = the excess has a named owner: node loops outside graph_compute, or
             // the printer's own cost landing in the open LOOP_TOTAL row.
-            const bool explained = in_graph || strcmp(pairs[i][0], "LOOP_TOTAL") == 0 &&
+            const bool explained = in_graph || (strcmp(pairs[i][0], "LOOP_TOTAL") == 0 &&
                 (g_vkh_loop_outside_graph > 0 ||
-                 gap <= (it_dc != t.end() ? it_dc->second.ms : 0.0) * 1.5 + 5.0);
+                 gap <= (it_dc != t.end() ? it_dc->second.ms : 0.0) * 1.5 + 5.0));
             fprintf(stderr, "[vkh-optime] %s child=%s(%.1f) > parent=%s(%.1f)%s\n",
                     in_graph ? "MIDGRAPH_INFO" : "ADDITIVITY_VIOLATION",
                     pairs[i][0], c->second.ms, pairs[i][1], p->second.ms,
@@ -287,7 +387,11 @@ inline void vkh_optime_dump() {
 // or the host marshalling around it (arg setting, wgs/subgroup queries, tensor bookkeeping)?
 // Rows appear as "ENQ/<OP>" and are CHILDREN of the matching "<OP>" row: never sum the two
 // together. Coverage caveat: ~76 direct clEnqueueNDRangeKernel calls bypass the wrapper.
-#define VKH_ENQ_TIMER() vkh_op_timer vkh_enq_guard_(vkh_enq_name(g_vkh_current_op), nullptr, false)
+// The 4th argument is evaluated in the expansion site's frame — i.e. inside
+// enqueue_ndrange_kernel — so it is that function's CALLER address: the station that issued the
+// launch. With VKH_DZ_TAG off the ctor drops it (ra = nullptr) and no station row is ever
+// created, so campaign legs see byte-identical tables.
+#define VKH_ENQ_TIMER() vkh_op_timer vkh_enq_guard_(vkh_enq_name(g_vkh_current_op), nullptr, false, __builtin_return_address(0))
 
 __attribute__((destructor, used)) static void vkh_optime_dtor(void) { vkh_optime_dump(); }
 
