@@ -129,7 +129,7 @@
 ## 6. 未决清单
 
 1. **740 掉线**（~23:45，与父智能体 13.58GB adb pull 时点重合）：pass1 完整 + pass2 残腿保留在 `/data/local/tmp/vkh2/out/`，不清不动；恢复后跑 pass2/pass3 取中位。
-2. **CPU 腿污染复核**（§1 ⚠️，头号判词引信）。
-3. **暗区后续**：站点标签枪已合格（`VKH_DZ_TAG=1` 默认关），两把计时行均已由父智能体挂载（L10122 `FUSE/RMS_MUL` = R-096；L1445 `ENQ_DRV` 补 `__builtin_return_address(0)` = R-097）。剩余唯一未决 = **740 暗区法证腿**（`VKH_DZ_TAG=1` + `GGML_OPENCL_NDRANGE_IDLE=0`），由 `FUSETAX` 自落四档判词当场裁"4.6× 归属"。740 build 定案 = 父侧 **`0cc2855e`**（已离机预检：产物含 `ENQ_DRV@+0x%llx` / `FUSETAX` / `drv_sites=` 字符串 ⇒ 确认携带我方 `e7b8724d` 头，未上机即可证仪表在位）。`ENQ_WAIT` 设计已批但**未挂载**。P0 默认值 `2→0` 与产品化**候金口**。
+2. ~~**CPU 腿污染复核**（§1 ⚠️，头号判词引信）~~ ✅ **已结案（R-099 / ledger 199）**：740/4B `-ngl 0` 参考腿四执行指纹+两独立源全零、txt 与 GPU 控制腿逐字节同 ⇒ `contaminated=no ref_recalc=no`，头版不必重算。
+3. **暗区后续**：站点标签枪已合格（`VKH_DZ_TAG=1` 默认关），两把计时行均已由父智能体挂载（L10122 `FUSE/RMS_MUL` = R-096；L1445 `ENQ_DRV` 补 `__builtin_return_address(0)` = R-097）。剩余唯一未决 = **740 暗区法证腿**（`VKH_DZ_TAG=1` + `GGML_OPENCL_NDRANGE_IDLE=0`），由 `FUSETAX` 自落四档判词当场裁"4.6× 归属"。**⚠️740 主战件定案 = `959cb859`（R-098 裁定：vk-rel/Release 现树，含 L10122/L1445ra/头 `e7b8724d`，**自带 `.debug_line`**，SONAME=`libggml-opencl.so`）**；`0cc2855e` 已退役为交叉校验件并封存 `.x4`——**它无行号表，addr2line 会对它静默吐假符号（实证：`f52adb68` 偏移喂 `0cc2855e` 解析出 `ggml_cl_ssm_scan @ ggml-opencl.cpp:0`），禁入暗区法证腿**；addr2line 只准喂与被测栈同 md5 的件。换件前置 `vkh_artifact_gate.sh`（`56ba3468`）。`ENQ_WAIT` 设计已批但**未挂载**。P0 默认值 `2→0` 与产品化**候金口**（须 740+830 X4 数值闸全绿后）。
 4. K40 上无战役 4B（父智能体所记 `/data/local/tmp/g759/qwen35-4b-q4km.gguf` 在 K40 不存在，宿主亦无），如需 4B-on-K40 须先限速传 2.8 GB。
 5. GPU≠CPU 贪心分歧（md5 `36c7d6d7d1e6` vs `0d0858efe9ee`）仍挂账，与本案无关。
