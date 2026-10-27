@@ -118,3 +118,5 @@
 {"leg": "117", "case": "g49-idle2-gap0", "build": "1be75abc", "result": "★★治愈 e19f0cb2 health=1；**0.51 tok/s=当前冠军**（GAP=0 纯 finish——sleep 非疗效本体，密度才是）", "env": "IDLE=2 GAP=0", "record": "R-057", "fl": 16}
 {"leg": "118", "case": "l3b3-v2.3-d1d2", "build": "probe 0509a73e", "result": "持久映射+WriteBuffer 双绿（干扰假说亡）；v2.3 全组 ALL_OK", "record": "R-057", "fl": 16}
 {"leg": "119", "case": "d49-idle2-drift20", "build": "1be75abc+endorsed", "fl": 16, "env": "NDRANGE_IDLE=2 GAP=0 ×20轮", "result": "★★★终验过：20/20=e19f0cb2 + health 20/20 + 热闸零触发（~35min）", "note": "**NDRANGE_IDLE=2 GAP=0=首个自家原生补丁双过门形态（0.51 tok/s）**；KERNEL_SYNC(d31) 并列在册（高税高保障）；产品化=默认 ON 评审中（g50 IDLE=3 边界在跑）", "record": "R-058"}
+{"leg": "120", "case": "l3b3-740-p0", "build": "probe e2cee291 @740(a740)", "fl": 0, "env": "M2012K11AC/A13, USB 直连, mesa-clrt 免模型部署(九件套指纹全绿)", "result": "★五关全绿 ALL_OK；driver=26.2.4 同版", "record": "R-059续"}
+{"leg": "121", "case": "l3b3-740-p1", "build": "同上 plain=1", "result": "★五关全绿 ALL_OK——**驱动共性跨代成立（a740≡a830 合法 CL 语义），L3 map/unmap 设计免分档**", "record": "R-059续"}
