@@ -24,7 +24,6 @@ import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/capability.dart';
-import '../agent/agent_tier.dart';
 import '../models/model_catalog.dart' show ModelCatalog;
 import '../agent/llm/adapter.dart'
     show LlmAdapter, ProviderKind, GenerateOptions;
@@ -351,6 +350,10 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 同一会话内切换人格必须 resetContext，否则新人格回合会续跑在
   /// 旧人格系统提示词的 KV 前缀上（提示词错配）。
   String? _currentKvPersonaId;
+
+  /// 上次智能体回合的系统提示词档位 key（精简/完整切换 → 必须 resetContext，
+  /// 与人格同一类坑：系统提示前缀变了还续跑旧 KV = 提示词错配答非所问）。
+  String? _currentKvPromptTierKey;
 
   /// 活跃回合表（多会话并发）：convId → 回合句柄。
   /// sendMessage 顶部同步注册占位（防双开竞态），finally 注销。
@@ -733,6 +736,7 @@ class ChatNotifier extends StateNotifier<bool> {
       if (kvReset) _ref.read(contextUsageProvider.notifier).clearLocal();
       _currentKvWasAgentMode = false;
       _currentKvPersonaId = null;
+      _currentKvPromptTierKey = null;
     }
 
     try {
@@ -1225,68 +1229,12 @@ class ChatNotifier extends StateNotifier<bool> {
     turn.started = true;
     _syncRunningState();
 
-    // 会话切换时重置原生 KV 缓存（沿用现有策略）。
-    // 激活人格是系统提示词前缀的组成部分：同会话内切换人格也必须重置。
-    // KV 归属本地引擎：仅本地路线管理（API 回合不动 KV 状态，避免把
-    // 并行运行中的本地回合上下文重置掉）。
-    final personaId = settings.activePersonaId;
-    if (!useApi) {
-      var kvReset = false;
-      if (_currentKvConvId != conversationId) {
-        debugPrint(
-            '[ChatNotifier] new-agent conversation changed: resetContext()');
-        await _inference.resetContext();
-        _currentKvConvId = conversationId;
-        kvReset = true;
-      } else if (!_currentKvWasAgentMode) {
-        // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
-        // 由主循环带系统提示词/工具协议重建。
-        debugPrint('[ChatNotifier] plain→agent mode switch: resetContext()');
-        await _inference.resetContext();
-        kvReset = true;
-      } else if (_currentKvPersonaId != personaId) {
-        // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
-        debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
-            '$personaId): resetContext()');
-        await _inference.resetContext();
-        kvReset = true;
-      }
-      // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
-      if (kvReset) _ref.read(contextUsageProvider.notifier).clearLocal();
-      _currentKvWasAgentMode = true;
-      _currentKvPersonaId = personaId;
-    }
-
     // ---- 构建组件（复用旧路径共享件）----
     // 智能体模型标识：本地=模型 id；API=API 模型名。工具可见性过滤、
     // 协议选择、系统提示渲染、子代理都按它走——此前 API 路线沿用本地模型
     // id，协议指令/工具清单全被本地模型"张冠李戴"。
     final agentModelKey =
         useApi ? (activeApi?.model ?? targetModelId) : targetModelId;
-
-    // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
-    // 提前构建（与 load_skill 工具注册、agent 注入共用同一实例）。
-    final userSkills = await loadUserSkills();
-    final skillProvider = userSkills.isEmpty
-        ? SkillProvider()
-        : SkillProvider(skills: [...loadBuiltinSkills(), ...userSkills]);
-    // P1-D 技能目录冻结：同一会话沿用首次生成的目录文本（系统提示逐字节
-    // 稳定，prompt cache/KV 前缀不因增删技能破掉）；load_skill 注册表用
-    // 实时技能集，新增技能本会话内仍可按名拉取，只是目录不刷新。
-    if (skillProvider.count > 0) {
-      if (_skillDirectoryCache.containsKey(conversationId)) {
-        skillProvider.frozenDirectoryText =
-            _skillDirectoryCache[conversationId];
-      } else {
-        if (_skillDirectoryCache.length >= 32) {
-          _skillDirectoryCache
-              .remove(_skillDirectoryCache.keys.first);
-        }
-        _skillDirectoryCache[conversationId] =
-            skillProvider.availableSkillsText(
-                loadSkillAvailable: true, saveSkillAvailable: true);
-      }
-    }
 
     // ---- 提示词档位（2026-10-27 K90 真机定案）----
     // API 档保持现状（full，逐字节不变）；本地小模型走精简档：短纪律 +
@@ -1312,6 +1260,76 @@ class ChatNotifier extends StateNotifier<bool> {
       sizeBytes: agentModelSizeBytes,
     );
     final compactPrompt = promptTier == AgentPromptTier.compact;
+    // KV 失效判据：档位判定结果 + 用户设置模式一起算 key（同 key = 系统提示
+    // 前缀逐字节相同 = 允许续跑 KV）。
+    final promptTierKey =
+        '${settings.agentPromptTierMode}:${promptTier.name}:${compactPrompt ? 'core' : 'all'}';
+
+    // 会话切换时重置原生 KV 缓存（沿用现有策略）。
+    // 激活人格是系统提示词前缀的组成部分：同会话内切换人格也必须重置。
+    // KV 归属本地引擎：仅本地路线管理（API 回合不动 KV 状态，避免把
+    // 并行运行中的本地回合上下文重置掉）。
+    final personaId = settings.activePersonaId;
+    if (!useApi) {
+      var kvReset = false;
+      if (_currentKvConvId != conversationId) {
+        debugPrint(
+            '[ChatNotifier] new-agent conversation changed: resetContext()');
+        await _inference.resetContext();
+        _currentKvConvId = conversationId;
+        kvReset = true;
+      } else if (!_currentKvWasAgentMode) {
+        // 普通聊天 → 智能体（模式切换）：KV 是纯对话上下文，需重置后
+        // 由主循环带系统提示词/工具协议重建。
+        debugPrint('[ChatNotifier] plain→agent mode switch: resetContext()');
+        await _inference.resetContext();
+        kvReset = true;
+      } else if (_currentKvPromptTierKey != promptTierKey) {
+        // 同会话切换提示词档位（设置里改「提示词档位」或换了判定结果）：
+        // 系统提示前缀整个变了，KV 续跑 = 旧提示词接着生成，必答非所问。
+        debugPrint('[ChatNotifier] prompt tier switch ($_currentKvPromptTierKey '
+            '-> $promptTierKey): resetContext()');
+        await _inference.resetContext();
+        kvReset = true;
+      } else if (_currentKvPersonaId != personaId) {
+        // 同会话切换人格：系统提示词前缀变了，KV 续跑会提示词错配。
+        debugPrint('[ChatNotifier] persona switch ($_currentKvPersonaId -> '
+            '$personaId): resetContext()');
+        await _inference.resetContext();
+        kvReset = true;
+      }
+      // resetContext 后 KV 归零：所有会话的占用快照（含本会话）已失效。
+      if (kvReset) _ref.read(contextUsageProvider.notifier).clearLocal();
+      _currentKvWasAgentMode = true;
+      _currentKvPersonaId = personaId;
+      _currentKvPromptTierKey = promptTierKey;
+    }
+
+
+    // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
+    // 提前构建（与 load_skill 工具注册、agent 注入共用同一实例）。
+    final userSkills = await loadUserSkills();
+    final skillProvider = userSkills.isEmpty
+        ? SkillProvider()
+        : SkillProvider(skills: [...loadBuiltinSkills(), ...userSkills]);
+    // P1-D 技能目录冻结：同一会话沿用首次生成的目录文本（系统提示逐字节
+    // 稳定，prompt cache/KV 前缀不因增删技能破掉）；load_skill 注册表用
+    // 实时技能集，新增技能本会话内仍可按名拉取，只是目录不刷新。
+    if (skillProvider.count > 0) {
+      if (_skillDirectoryCache.containsKey(conversationId)) {
+        skillProvider.frozenDirectoryText =
+            _skillDirectoryCache[conversationId];
+      } else {
+        if (_skillDirectoryCache.length >= 32) {
+          _skillDirectoryCache
+              .remove(_skillDirectoryCache.keys.first);
+        }
+        _skillDirectoryCache[conversationId] =
+            skillProvider.availableSkillsText(
+                loadSkillAvailable: true, saveSkillAvailable: true);
+      }
+    }
+
 
     final registry = _buildAgentRegistry(settings, agentModelKey,
         conversationId: conversationId);
@@ -1809,6 +1827,12 @@ class ChatNotifier extends StateNotifier<bool> {
     // 19507 字符（4580 token）没人看得见，tiny 模型直接答非所问。现在每
     // 回合把"档位 + 字符数 + 工具数 + 技能/AGENTS.md 开关"打进推理日志。
     final mdLen = (agentsMdText ?? '').trim().length;
+    // 同步进 logcat：无线 adb 排障时不必爬 UI 就能看到体量（grep AgentPrompt）。
+    debugPrint('[AgentPrompt] tier=${compactPrompt ? "compact" : "full"} '
+        'systemChars=${systemPrompt.length} '
+        'tools=${registry.visibleFor(agentModelKey).length} '
+        'skills=${compactPrompt ? 0 : skillProvider.count} agentsMd=$mdLen '
+        'model=$agentModelKey');
     logManager.appendInferenceLog(
       '智能体提示词 | 档位=${compactPrompt ? "精简" : "完整"}'
       ' | 系统提示 ${systemPrompt.length} 字符'

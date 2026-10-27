@@ -51,8 +51,9 @@ String buildSystemPrompt({
     // 「纪律越长越不听话」——11 条纪律把它推进"假装在干活"的分布，
     // 编出「已查询到天气」「文件已保存 /home/user/go.py」。只留四条命门：
     // 必须真调工具不许编造、严格按协议格式、必填参数填全、能直接答就直接答。
-    final compactIdentity = hasPersona
-        ? '你是「${personaName!.trim()}」——TongYi-Lite 智能体，由 $modelName 驱动，'
+    final compactPersonaName = (personaName ?? '').trim();
+    final compactIdentity = compactPersonaName.isNotEmpty
+        ? '你是「$compactPersonaName」——TongYi-Lite 智能体，由 $modelName 驱动，'
             '能用工具拿到真实结果。'
         : '你是 TongYi-Lite 智能体，由 $modelName 驱动，能用工具拿到真实结果。';
     return <String>[

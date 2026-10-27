@@ -12,6 +12,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/agent.dart';
+import 'package:tongyi_lite/agent/protocol/native_tool_protocol.dart';
 
 void main() {
   /// 一个"重描述 + 带沙箱升级参数"的工具 —— 模拟 python_exec/shell_exec
@@ -133,6 +134,7 @@ void main() {
         registry: registry(),
         protocol: const PromptJsonProtocol(compact: true),
         modelId: 'ling-3.0-tiny-q4_0',
+        tier: AgentPromptTier.compact,
       );
       expect(compact.length * 2 < full.length, isTrue,
           reason: '精简档 ${compact.length} / 完整档 ${full.length}');
@@ -145,6 +147,7 @@ void main() {
         registry: registry(),
         protocol: const PromptJsonProtocol(compact: true),
         modelId: 'ling-3.0-tiny-q4_0',
+        tier: AgentPromptTier.compact,
       );
       expect(compact, contains('【工具调用规则】'));
       expect(compact, contains('绝不编造结果，也绝不假装已经执行'));
@@ -163,6 +166,7 @@ void main() {
         registry: registry(),
         protocol: const PromptJsonProtocol(compact: true),
         modelId: 'ling-3.0-tiny-q4_0',
+        tier: AgentPromptTier.compact,
         personaName: '写作助手',
         personaPrompt: '简洁、克制。',
       );
@@ -184,8 +188,22 @@ void main() {
       expect(api, contains('9. 生成报告/网页/图表/数据文件等产物'));
       expect(api, contains('python_exec / shell_exec 的 stdin'));
       expect(api, contains('【任务执行纪律】'));
-      // 原生 tools 协议：工具走请求体，不注入文本清单。
+      // 完整档 + 文本协议：工具清单照常注入。
+      expect(api, contains('[可用工具]'));
+      expect(api, contains('[沙箱说明]'));
+    });
+
+    test('API 原生 tools 协议：工具走请求体，绝不注入文本清单', () {
+      final api = buildSystemPrompt(
+        modelName: 'gpt-x',
+        registry: registry(),
+        protocol: NativeToolProtocol(),
+        modelId: 'gpt-x',
+        taskDiscipline: true,
+      );
       expect(api, isNot(contains('[可用工具]')));
+      expect(api, isNot(contains('[工具调用协议]')));
+      expect(api, contains('【任务执行纪律】'));
     });
   });
 
@@ -204,7 +222,10 @@ void main() {
       expect(compact, contains('- get_weather: 查询指定城市当前天气（必填: location: string）'));
       // Ling（Bailing V3）原生格式指令在精简档仍是训练分布格式。
       expect(compact, contains('<arg_key>query</arg_key>'));
-      expect(compact.length * 2 < full.length, isTrue);
+      // 协议指令段（格式示范）两档都必备、体量不变，所以这里只要求
+      // 清单部分显著变小（长描述 + 沙箱说明合计 ≥300 字符）。
+      expect(compact.length < full.length * 0.75, isTrue,
+          reason: '完整 ${full.length} / 精简 ${compact.length}');
     });
 
     test('默认（compact=false）呈现与旧版逐字节一致', () {
