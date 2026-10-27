@@ -10314,6 +10314,13 @@ static bool adreno_e17_compiler_quirks(const ggml_backend_opencl_context *backen
 }
 
 inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
+    // [tongyi R-084 2026-10-27] Mesa/rusticl 面 vendor MoE 内核编译侧已被 tyl_skip_moe_ns 摘除，
+    // 派发/装填侧必须同闸：否则 ggml_cl_mul_mat_id 的 Q4_1 vendor 分支（L31308+）引用未编译的
+    // kernel/extra（extra0_q4_1->q_img）→ clSetKernelArg err=-48 + GGML_ASSERT@~31459
+    // ——B1 ling(bailingmoe3) 首射崩溃根因。返回 false 走树内通用 MUL_MAT_ID 路径。
+    if (backend_ctx && backend_ctx->is_mesa_rusticl) {
+        return false;
+    }
     // [tongyi R2 2026-10-25] 薄包装：判定逻辑唯一实现 = 路由表 moe_admission_gate
     //（名字+代际三态+E17+ne01%32；等价性由 tongyi_route_table_test 18.9 万 case 对拍
     // 钉死。本函数保留原签名，set_tensor/batched/准入各调用点零改动翻转到表）。
