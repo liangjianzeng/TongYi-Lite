@@ -115,6 +115,31 @@ void main() {
       );
     });
 
+    test('auto：>8GB 的大 MoE 不因激活参数命名（a2b/a1b）被误判精简', () {
+      // K90 实机在跑的 lfm2.5-24b-a2b-q4_0 = 13.5GB（总参 24B / 激活 2B）：
+      // id 里含 '2b' 命中关键字，但体量否决必须先放行完整档——削它是过度瘦身。
+      expect(
+        resolveAgentPromptTier(
+            modelId: 'lfm2.5-24b-a2b-q4_0', sizeBytes: 13578190880),
+        AgentPromptTier.full,
+      );
+      // 大小未知时仍按 id 判（保持对 tiny 的默认收紧）。
+      expect(resolveAgentPromptTier(modelId: 'lfm2.5-8b-a1b-q4_0'),
+          AgentPromptTier.compact);
+    });
+    test('auto：总参两位数的 MoE（35b-a3b）即使体量未知也走完整档', () {
+      // K90 上还有 minicpm-v4.7-35b-a3b-les：主 gguf 只有 1.6GB，若只看尺寸
+      // 会被误判成小模型——总参命名否决堵掉这条路。
+      expect(
+        resolveAgentPromptTier(modelId: 'minicpm-v4.7-35b-a3b-les-q4_k_m',
+            sizeBytes: 1662732800),
+        AgentPromptTier.full,
+      );
+      // 单位数总量 / 纯激活命名不受影响，照旧收紧。
+      expect(resolveAgentPromptTier(modelId: 'minicpm5-2b-q4_k_m',
+          sizeBytes: 1500000000), AgentPromptTier.compact);
+    });
+
     test('auto：判不准（未知 id + 大小未知）保守走完整档，行为同旧版', () {
       expect(resolveAgentPromptTier(modelId: 'weird-custom-gguf'),
           AgentPromptTier.full);

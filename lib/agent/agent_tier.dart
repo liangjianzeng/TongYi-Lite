@@ -40,6 +40,18 @@ const int kAgentPromptCompactBudgetChars = 2500;
 /// 模型都落在这里，Bonsai-8B 一类 ≥5GB 的仍走完整档。
 const int kAgentCompactMaxSizeBytes = 3500 * 1024 * 1024;
 
+/// 大参数命名否决：id 里出现**两位以上**参数量级（`24b`/`35b`/`27b`…）一律完整档。
+/// MoE 命名是 `总参-激活`（`lfm2.5-24b-a2b` / `minicpm-v4.7-35b-a3b`），激活虽小
+/// （a2b/a3b）但总参决定它不是"小模型"；单段激活命名（a1b/a2b/a3b）与单位数总量
+/// （`minicpm5-2b`、`qwen3.5-1.5b`）不受此否决。
+final RegExp _kAgentBigParamIdPattern = RegExp(r'[0-9]{2,}b');
+
+/// 大模型否决线（字节）：文件 >8GB 一律走完整档，**即使 id 里有 1b/2b 这类
+/// 激活参数命名**（如 `lfm2.5-24b-a2b-q4_0` = 13.5GB，激活 2B 但总参 24B）。
+/// 真机定案的失败样本是 4.4GB 的 tiny；把 13.5GB 的 MoE 也削成四条纪律属于
+/// 过度瘦身，反而降低它本来具备的工具遵循率。
+const int kAgentFullVetoSizeBytes = 8000 * 1024 * 1024;
+
 /// 精简档默认保留的核心工具（其余既不进系统提示、也调不到）。
 ///
 /// 只留「真话来源」（时间/天气/搜索/计算/换算）+ 用户会明确要求落地的
@@ -102,10 +114,14 @@ AgentPromptTier resolveAgentPromptTier({
   if (mode == kAgentPromptTierCompact) return AgentPromptTier.compact;
   if (mode == kAgentPromptTierFull) return AgentPromptTier.full;
 
+  // 大模型否决先于 id 判据：文件体量与总参命名都说明它不是"小模型"。
+  final tooBig = (sizeBytes != null && sizeBytes >= kAgentFullVetoSizeBytes) ||
+      _kAgentBigParamIdPattern.hasMatch(modelId.toLowerCase());
   final lower = modelId.toLowerCase();
-  if (kAgentCompactIdHints.any(lower.contains)) return AgentPromptTier.compact;
-  if (sizeBytes != null &&
-      sizeBytes > 0 &&
+  if (!tooBig && kAgentCompactIdHints.any(lower.contains)) {
+    return AgentPromptTier.compact;
+  }
+  if (!tooBig && sizeBytes != null && sizeBytes > 0 &&
       sizeBytes <= kAgentCompactMaxSizeBytes) {
     return AgentPromptTier.compact;
   }

@@ -1,0 +1,418 @@
+R"(#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+)"
+R"(#pragma OPENCL EXTENSION cl_khr_subgroups : enable
+)"
+R"(#ifdef cl_khr_integer_dot_product
+)"
+R"(#pragma OPENCL EXTENSION cl_khr_integer_dot_product : enable
+)"
+R"(#endif
+)"
+R"(
+)"
+R"(// q4_K subblock (32 elems): w_i = scale*q_i - minv, q_i in [0,15], scale =
+)"
+R"(// d_super*sv6, minv = dmin_super*mn6. With activation block (a_d, a_s, qa[32]):
+)"
+R"(//   Sum_i w_i * a_i = scale * a_d * dp4a(q, qa) - minv * a_s
+)"
+R"(// where a_s = a_d * Sum(qa) (the q8_1 "s" field)
+)"
+R"(
+)"
+R"(#define TILESIZE_M 64
+)"
+R"(#define TILESIZE_N 32
+)"
+R"(#define QK_K 256
+)"
+R"(#define K_SCALE_SIZE 12
+)"
+R"(
+)"
+R"(inline void get_scale_min_k4(
+)"
+R"(    int j,
+)"
+R"(    global const uchar * q,
+)"
+R"(    uchar * d,
+)"
+R"(    uchar * m
+)"
+R"() {
+)"
+R"(    if (j < 4) {
+)"
+R"(        *d = q[j]   & 63;
+)"
+R"(        *m = q[j+4] & 63;
+)"
+R"(    } else {
+)"
+R"(        *d = (q[j+4] & 0x0F) | ((q[j-4] & 0xC0) >> 2);
+)"
+R"(        *m = ((q[j+4] >> 4) & 0x0F) | ((q[j]   & 0xC0) >> 2);
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(// Expand the 4 nibbles held in the low 16 bits of `u` into 4 bytes (one nibble
+)"
+R"(// per byte, value 0..15), packed for the int8 dp4a.
+)"
+R"(#define EXP4(u)  ( ((uint)((u) & 0x000Fu))        | \
+)"
+R"(                  (((uint)((u) & 0x00F0u)) << 4)  | \
+)"
+R"(                  (((uint)((u) & 0x0F00u)) << 8)  | \
+)"
+R"(                  (((uint)((u) & 0xF000u)) << 12) )
+)"
+R"(
+)"
+R"(// One token's dp4a dot (8 uints = 32 K elems) + q4_K scale/min epilogue into acc[t].
+)"
+R"(// The 8 activation uints are read as two 128-bit uint4 loads staged to private (Adreno
+)"
+R"(// wants 128-bit local reads, and a __local operand fed straight to the dp4a builtin is
+)"
+R"(// slower and can miscompile).
+)"
+R"(#define MOE_Q4K_DP4A_T(t) do {                                       \
+)"
+R"(        uint4 a0 = vload4(0, &sh_qa[t][0]);                          \
+)"
+R"(        uint4 a1 = vload4(0, &sh_qa[t][4]);                          \
+)"
+R"(        int raw = 0;                                                 \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[0], a0.s0, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[1], a0.s1, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[2], a0.s2, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[3], a0.s3, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[4], a1.s0, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[5], a1.s1, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[6], a1.s2, raw);       \
+)"
+R"(        raw = dot_acc_sat_4x8packed_ss_int(qw[7], a1.s3, raw);       \
+)"
+R"(        acc[t] += scale * (float)sh_d[t] * (float)raw - minv * (float)sh_s[t]; \
+)"
+R"(    } while (0)
+)"
+R"(
+)"
+R"(__attribute__((qcom_wave_pair_mode(1)))
+)"
+R"(kernel void kernel_gemm_moe_q4_k_q8_1_dp4a(
+)"
+R"(        __read_only  image1d_buffer_t src0_q,   // q4_K weights (transposed, packed nibbles)
+)"
+R"(        __global     half *           src0_d,   // per-superblock scale
+)"
+R"(        __global     half *           src0_dm,  // per-superblock min
+)"
+R"(        __global     uchar *          src0_s,   // 6-bit scale/min codes
+)"
+R"(        __global     uint *           src1_qa,  // q8_1 activations: int8 quants (as uint, 4/elem)
+)"
+R"(        __global     half *           src1_da,  // q8_1 per-block scale  [tok_slot * ne00/32]
+)"
+R"(        __global     half *           src1_sa,  // q8_1 per-block sum*d  [tok_slot * ne00/32]
+)"
+R"(        __global     uint *           src2,     // post-router (orig out positions)
+)"
+R"(        __global     ushort *         src2_emap,// tile -> expert id
+)"
+R"(        __write_only image1d_buffer_t dst,
+)"
+R"(        __global     int *            total_tiles,
+)"
+R"(        uint ne00,
+)"
+R"(        uint ne01,
+)"
+R"(        int  is_ragged                          // 1: compute only real tokens per tile
+)"
+R"() {
+)"
+R"(    const uint block_id_m = get_global_id(1); // m_tile
+)"
+R"(    const uint block_id_n = get_global_id(2); // n_tile
+)"
+R"(
+)"
+R"(    if (block_id_n >= total_tiles[0]) {
+)"
+R"(        return;
+)"
+R"(    }
+)"
+R"(
+)"
+R"(    const uint lid = get_local_id(0);          // 0..63, == this WI's output row in the M-tile
+)"
+R"(
+)"
+R"(    const ushort expert_id = src2_emap[block_id_n];
+)"
+R"(    const uint   row = block_id_m * TILESIZE_M;
+)"
+R"(    const uint   col = block_id_n * TILESIZE_N;
+)"
+R"(
+)"
+R"(    const uint num_superblocks = ne00 / QK_K;
+)"
+R"(    const uint scales_per_row  = num_superblocks * K_SCALE_SIZE;
+)"
+R"(    const uint row_idx         = row + lid;
+)"
+R"(
+)"
+R"(    const uint ne00_u  = ne00 >> 2;   // ne00 in uint (int8x4) units
+)"
+R"(    const uint ne00_b  = ne00 >> 5;   // blocks-of-32 per token
+)"
+R"(
+)"
+R"(    __local uint sh_qa[TILESIZE_N][8]; // 32 tokens x 8 uints (32 int8) = 1 KiB
+)"
+R"(    __local half sh_d[TILESIZE_N];
+)"
+R"(    __local half sh_s[TILESIZE_N];
+)"
+R"(
+)"
+R"(    // Real token count for this tile
+)"
+R"(    __local uint sh_src2[TILESIZE_N];
+)"
+R"(    __local int  sh_nreal;
+)"
+R"(    if (lid < TILESIZE_N) {
+)"
+R"(        sh_src2[lid] = src2[col + lid];
+)"
+R"(    }
+)"
+R"(    barrier(CLK_LOCAL_MEM_FENCE);
+)"
+R"(    if (lid == 0) {
+)"
+R"(        int nr = TILESIZE_N;
+)"
+R"(        if (is_ragged) {
+)"
+R"(            nr = 0;
+)"
+R"(            #pragma unroll
+)"
+R"(            for (int t = 0; t < TILESIZE_N; ++t) {
+)"
+R"(                if (sh_src2[t] != 0xFFFFFFFFu) ++nr;
+)"
+R"(            }
+)"
+R"(        }
+)"
+R"(        sh_nreal = nr;
+)"
+R"(    }
+)"
+R"(    barrier(CLK_LOCAL_MEM_FENCE);
+)"
+R"(    const int n_real = sh_nreal;
+)"
+R"(
+)"
+R"(    float acc[TILESIZE_N];
+)"
+R"(    #pragma unroll
+)"
+R"(    for (int t = 0; t < TILESIZE_N; ++t) acc[t] = 0.0f;
+)"
+R"(
+)"
+R"(    for (uint step = 0; step < ne00; step += 32) {
+)"
+R"(        const uint sub = step >> 5;        // subblock index along K
+)"
+R"(        const uint sb  = sub >> 3;         // superblock index
+)"
+R"(        const uint j   = sub & 7;          // subblock within superblock
+)"
+R"(
+)"
+R"(        // --- weight scale / min for this WI's row, this subblock ---
+)"
+R"(        const uint d_offset = row + sb * ne01 + expert_id * num_superblocks * ne01 + lid;
+)"
+R"(        const float d_val  = (float)src0_d[d_offset];
+)"
+R"(        const float dm_val = (float)src0_dm[d_offset];
+)"
+R"(
+)"
+R"(        global const uchar * sc = src0_s + (expert_id * ne01 + row_idx) * scales_per_row + sb * K_SCALE_SIZE;
+)"
+R"(        uchar sv, mn;
+)"
+R"(        get_scale_min_k4(j, sc, &sv, &mn);
+)"
+R"(        const float scale = d_val  * (float)sv;
+)"
+R"(        const float minv  = dm_val * (float)mn;
+)"
+R"(
+)"
+R"(        // --- repack this WI's 32 weight nibbles into 8 dp4a uints ---
+)"
+R"(        const uint qoff0 = row + ((ne01 * step) >> 3)        + ((expert_id * ne00 * ne01) >> 3);
+)"
+R"(        const uint qoff1 = row + ((ne01 * (step + 16)) >> 3) + ((expert_id * ne00 * ne01) >> 3);
+)"
+R"(        const uint r0 = read_imageui(src0_q, qoff0 + lid).x;
+)"
+R"(        const uint r1 = read_imageui(src0_q, qoff0 + lid + ne01).x;
+)"
+R"(        const uint r2 = read_imageui(src0_q, qoff1 + lid).x;
+)"
+R"(        const uint r3 = read_imageui(src0_q, qoff1 + lid + ne01).x;
+)"
+R"(        uint qw[8];
+)"
+R"(        qw[0] = EXP4(r0);        qw[1] = EXP4(r0 >> 16);
+)"
+R"(        qw[2] = EXP4(r1);        qw[3] = EXP4(r1 >> 16);
+)"
+R"(        qw[4] = EXP4(r2);        qw[5] = EXP4(r2 >> 16);
+)"
+R"(        qw[6] = EXP4(r3);        qw[7] = EXP4(r3 >> 16);
+)"
+R"(
+)"
+R"(        // cooperatively stage the n_real-token x 32-K int8 activations to lm
+)"
+R"(        // Stage each token's 8 activation uints as two 128-bit uint4 loads/stores.
+)"
+R"(        const uint vlim = (uint)n_real * 2;
+)"
+R"(        for (uint idx = lid; idx < vlim; idx += 64) {
+)"
+R"(            const uint t = idx >> 1;
+)"
+R"(            const uint h = (idx & 1) << 2;   // 0 or 4
+)"
+R"(            uint4 v = vload4(0, &src1_qa[(col + t) * ne00_u + (step >> 2) + h]);
+)"
+R"(            vstore4(v, 0, &sh_qa[t][h]);
+)"
+R"(        }
+)"
+R"(        if (lid < (uint)n_real) {
+)"
+R"(            sh_d[lid] = src1_da[(col + lid) * ne00_b + sub];
+)"
+R"(            sh_s[lid] = src1_sa[(col + lid) * ne00_b + sub];
+)"
+R"(        }
+)"
+R"(        barrier(CLK_LOCAL_MEM_FENCE);
+)"
+R"(
+)"
+R"(        // dp4a - each real token sum over 8 uints (32 K), then scale/min
+)"
+R"(        // Full tiles keep the fully-unrolled 32-wide loop;
+)"
+R"(        // partial tiles run only n_real (saves the padded-slot dp4a + staging).
+)"
+R"(        if (n_real == TILESIZE_N) {
+)"
+R"(            #pragma unroll
+)"
+R"(            for (int t = 0; t < TILESIZE_N; ++t) { MOE_Q4K_DP4A_T(t); }
+)"
+R"(        } else {
+)"
+R"(            #pragma unroll 4
+)"
+R"(            for (int t = 0; t < n_real; ++t) { MOE_Q4K_DP4A_T(t); }
+)"
+R"(        }
+)"
+R"(        barrier(CLK_LOCAL_MEM_FENCE);
+)"
+R"(    }
+)"
+R"(
+)"
+R"(    if (row_idx >= ne01) {
+)"
+R"(        return;
+)"
+R"(    }
+)"
+R"(
+)"
+R"(    // scatter results to original output rows
+)"
+R"(    __local uint out_idx[TILESIZE_N];
+)"
+R"(    if (lid < TILESIZE_N) {
+)"
+R"(        uint idx = sh_src2[lid];
+)"
+R"(        if (idx == 0xFFFFFFFF) {
+)"
+R"(            idx = sh_src2[0];
+)"
+R"(        }
+)"
+R"(        out_idx[lid] = idx * ne01;
+)"
+R"(    }
+)"
+R"(    barrier(CLK_LOCAL_MEM_FENCE);
+)"
+R"(
+)"
+R"(    const uint m_offset = row + lid;
+)"
+R"(    if (n_real == TILESIZE_N) {
+)"
+R"(        #pragma unroll
+)"
+R"(        for (int t = 1; t < TILESIZE_N; ++t) {
+)"
+R"(            write_imagef(dst, out_idx[t] + m_offset, acc[t]);
+)"
+R"(        }
+)"
+R"(        barrier(CLK_GLOBAL_MEM_FENCE);
+)"
+R"(        write_imagef(dst, out_idx[0] + m_offset, acc[0]);
+)"
+R"(    } else {
+)"
+R"(        for (int t = 0; t < n_real; ++t) {
+)"
+R"(            write_imagef(dst, out_idx[t] + m_offset, acc[t]);
+)"
+R"(        }
+)"
+R"(    }
+)"
+R"(}
+)"
