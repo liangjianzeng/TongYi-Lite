@@ -1851,6 +1851,23 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
         // never hand-declare OpenCL builtins for this backend.
     }
 
+    // [tongyi R-089 2026-10-27] env-gated program-name catcher: the 740/patch79 ling load
+    // died inside rusticl-LLVM ("Unsupported vector type with 32 elements") with no program
+    // identity anywhere in the log. Print the first non-empty line + length of every source
+    // program right before its compile, so the next repro names the culprit unambiguously.
+    // Default OFF (one getenv per program, init-time only). Not a perf path.
+    static const bool vkh_srcdbg = [] { const char * e = getenv("GGML_OPENCL_VKH_SRCDBG"); return e && e[0] == '1'; }();
+    if (vkh_srcdbg && program_buffer) {
+        const char * s = program_buffer;
+        while (*s == '\n' || *s == '\r' || *s == ' ' || *s == '\t') { s++; }
+        char head[96] = { 0 };
+        size_t n = 0;
+        while (n < sizeof(head) - 1 && s[n] && s[n] != '\n') { head[n] = s[n]; n++; }
+        head[n] = 0;
+        fprintf(stderr, "\n[vkh-srcdbg] SRC len=%zu head=[%s]\n", strlen(program_buffer), head);
+        fflush(stderr);
+    }
+
     // [dspark 2026-10-19] on rusticl ANY kernel containing printf (even
     // runtime-gated never-firing ones) makes NIR allocate a device printf
     // buffer whose uninitialized header is read back as a bogus length ->
