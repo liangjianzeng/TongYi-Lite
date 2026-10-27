@@ -47,10 +47,17 @@ def main():
         if a.expect_bin and bins[0]!=a.expect_bin: print(f"FAIL bin={bins[0]} want={a.expect_bin}"); sys.exit(1)
     drv=drivers(got)
     if a.cmd=="certify":
-        man={"cases":{c:{"tok_md5":md5(p[0]),"bytes":os.path.getsize(p[0])} for c,p in got.items()},
+        def caseinfo(p):
+            d={"tok_md5":md5(p[0]),"bytes":os.path.getsize(p[0])}
+            return d
+        man={"cases":{c:caseinfo(p) for c,p in got.items()},
              "driver_ok":drv,
              "lib_bin":bins[0] if bins else None,
              "note":"certified on main-tester per user law 10-27"}
+        for c in man["cases"]:
+            lgf=os.path.join(a.pulled,f"x4_{c}.lgf")
+            if os.path.exists(lgf):
+                man["cases"][c]["lgf_md5"]=md5(lgf); man["cases"][c]["lgf_bytes"]=os.path.getsize(lgf)
         json.dump(man,open(a.out,"w"),ensure_ascii=False,indent=1)
         print(f"CERTIFIED {len(man['cases'])} cases drivers={drv} bin={man['lib_bin']} -> {a.out}")
     else:
@@ -61,7 +68,13 @@ def main():
             m=md5(got[c][0])
             if m!=g["cases"][c]["tok_md5"]: print(f"FAIL {c} md5={m[:8]} want={g['cases'][c]['tok_md5'][:8]}"); fail+=1
             elif not drv_re.search(open(got[c][1],errors='ignore').read()): print(f"FAIL {c} driver-missing"); fail+=1
-            else: print(f"PASS {c} md5={m[:8]}"); ok+=1
+            else:
+                gc=g["cases"][c]
+                lgf=os.path.join(a.pulled,f"x4_{c}.lgf")
+                if gc.get("lgf_md5"):
+                    if not os.path.exists(lgf): print(f"FAIL {c} lgf-missing"); fail+=1; continue
+                    if md5(lgf)!=gc["lgf_md5"]: print(f"FAIL {c} lgf={md5(lgf)[:8]} want={gc['lgf_md5'][:8]}"); fail+=1; continue
+                print(f"PASS {c} md5={m[:8]}" + (" lgf=ok" if gc.get("lgf_md5") else "")); ok+=1
         print(f"X4_SUMMARY pass={ok} fail={fail} drivers={drv}")
         sys.exit(0 if fail==0 and ok>=a.min else 1)
 main()

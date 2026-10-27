@@ -36,6 +36,12 @@ int main(int argc, char ** argv) {
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "CTX_FAIL\n"); return 4; }
 
+    // X4 logit 面（R-072）：E2E_LOGITDUMP=<path> 时逐 argmax 站点 dump 全量 fp32 logits。
+    // 铁律：探针=放大器——tok 输出必须零扰动；dump 只做只读 fwrite。
+    FILE * lgf = nullptr;
+    { const char * lgpath = getenv("E2E_LOGITDUMP"); if (lgpath && *lgpath) lgf = fopen(lgpath, "wb"); }
+    const size_t lg_nv = (size_t)llama_vocab_n_tokens(llama_model_get_vocab(model));
+
     auto vocab = llama_model_get_vocab(model);
     std::vector<llama_token> toks(8 + prompt.size());
     int n = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), toks.data(), (int)toks.size(), true, false);
@@ -47,6 +53,7 @@ int main(int argc, char ** argv) {
     if (llama_decode(ctx, b) != 0) { fprintf(stderr, "PREFILL_FAIL\n"); return 6; }
     // greedy sample via logits last-token
     float * logits = llama_get_logits_ith(ctx, n - 1);
+    if (lgf) fwrite(logits, 4, lg_nv, lgf);
     int best = 0; float bv = logits[0];
     for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
     llama_token next = best;
@@ -63,10 +70,12 @@ int main(int argc, char ** argv) {
         llama_batch b1 = llama_batch_get_one(one.data(), 1);
         if (llama_decode(ctx, b1) != 0) { fprintf(stderr, "DECODE_FAIL@%d\n", gen); break; }
         logits = llama_get_logits_ith(ctx, 0);
+        if (lgf) fwrite(logits, 4, lg_nv, lgf);
         best = 0; bv = logits[0];
         for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
         next = best;
     }
+    if (lgf) { fclose(lgf); lgf = nullptr; }
     auto t3 = std::chrono::steady_clock::now();
     double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double wall_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();

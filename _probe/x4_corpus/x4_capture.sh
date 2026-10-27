@@ -8,7 +8,7 @@ R=/data/local/tmp/mesa_clrt_1026
 LOADER=$R/lib/ld-linux-aarch64.so.1
 LP="$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu"
 MODEL=/storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf
-EYE=$R/bin/ling_e2e
+EYE=${X4_EYE:-$R/bin/ling_e2e}
 # id|npred|ngl|seed|n_ctx|prompt   （greedy；seed 仅记账用）
 TABLE='p1_cn_classic|32|99|42|1024|请详细介绍一下中国的四大发明，分别说明历史背景与技术要点，分四段展开。
 p2_en_whyblue|48|99|42|1024|Explain in detail why the sky is blue, in three short paragraphs.
@@ -26,7 +26,9 @@ run_one() {
   NC=$(echo "$1" | cut -d'|' -f5); PR=$(echo "$1" | cut -d'|' -f6-)
   TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
   if [ "${TEMP:-0}" -gt 440 ]; then echo "#### X4ABORT_THERMAL $TEMP id=$ID"; return 1; fi
-  timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 \
+  LGENV=""
+  if [ "${X4_LG:-0}" = "1" ]; then LGENV="E2E_LOGITDUMP=$R/out/x4_$ID.lgf"; fi
+  timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LGENV \
       $LOADER --library-path $LP $EYE $MODEL $NP $NG $SD "$PR" $NC \
       > $R/out/x4_$ID.tok 2> $R/out/x4_$ID.err
   RC=$?
