@@ -98,6 +98,7 @@ inline const char * vkh_enq_name(const char * op) {
 // double count the parent row.
 struct vkh_op_timer {
     const char * op;
+    const char * prev;
     int *        enq;
     double       t0;
     long         e0;
@@ -105,7 +106,7 @@ struct vkh_op_timer {
     bool         set_cur;
 
     explicit vkh_op_timer(const char * o, int * e, bool set_cur_ = true)
-        : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on), set_cur(set_cur_) {
+        : op(o), prev(g_vkh_current_op), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on), set_cur(set_cur_) {
         if (on) {
             if (set_cur) { g_vkh_current_op = o; }
             static bool armed_printed = false;
@@ -121,6 +122,9 @@ struct vkh_op_timer {
 
     ~vkh_op_timer() {
         if (!on) { return; }
+        // Restore the enclosing label so nested rows (FA/bin, ENQ_DRV, a future PRE/<op>)
+        // cannot leak their label into the code that runs after them.
+        if (set_cur) { g_vkh_current_op = prev; }
         vkh_optime_rec & r = vkh_optime_map()[op];
         r.ms += ((double) clock() / CLOCKS_PER_SEC - t0) * 1e3;
         r.n++;

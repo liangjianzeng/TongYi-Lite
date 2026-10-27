@@ -1442,10 +1442,12 @@ struct ggml_backend_opencl_context {
         static const bool ksync = [] { const char * e = getenv("GGML_OPENCL_KERNEL_SYNC"); return e && e[0] == '1'; }();
         cl_event evt0 = NULL;
         cl_int enq_err;
+        { vkh_op_timer vkh_drv("ENQ_DRV", nullptr, false);   // [vkh P2] driver doorbell body only
         if (ksync) {
             enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt0);
         } else {
             enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+        }
         }
         // [TongYi-Lite 2026-10-27 R-057] NDRANGE_IDLE：疗效机制审判——H2′ 治愈因子若=
         // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
@@ -1456,6 +1458,7 @@ struct ggml_backend_opencl_context {
         static thread_local long idle_ctr = 0;
         if (idle_n > 0 && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {
             idle_ctr = 0;
+            vkh_op_timer vkh_idl("ENQ_IDLE", nullptr, false);   // [vkh P2] every-N clFinish drain weigh-in
             static std::atomic<unsigned long> g_idle_ticks{0};
             g_idle_ticks.fetch_add(1, std::memory_order_relaxed);
             tyl_idle_report_bind(&g_idle_ticks);
@@ -9919,6 +9922,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         vkh_op_timer vkh_lt("LOOP_TOTAL", &backend_ctx->n_enqueues);   // [vkh] per-node iteration incl. continue paths
+        vkh_op_timer vkh_dz("PRE_FORWARD", &backend_ctx->n_enqueues);  // [vkh P3] dark-zone label: enqueues here attribute to PRE_FORWARD via g_vkh_current_op
         ggml_tensor * node = cgraph->nodes[i];
 
         // [dspark 2026-10-18] GGML_OPENCL_OPSYNC=1: clFinish before every node —
