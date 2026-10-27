@@ -270,9 +270,8 @@ case "$1" in
   d42) # IDLE=1 对照组终验（KERNEL_SYNC 同族，作保险）
     run_drift e4d_d42 "" 16 "GGML_OPENCL_NDRANGE_IDLE=1" "" 20
     ;;
-  g50) # 边界补测：IDLE=3（4 不愈 2 愈，取中安全档审判）
-    run_leg e4d_g50 "" 16 "GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0"
-    grep -a "tok_s=" $R/out/e4d_g50.out | tail -1
+  g50) # R-066 升级：边界补测 IDLE=3 用 drift-20 判据级（单腿统计力不足，密度定律皆 20 连定案）
+    run_drift e4d_g50 "" 16 "GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0" "" 20
     ;;
   g60) # R-060/R-065 产品化终闸：十代 2695a8be 无 env 部署（出厂档=d49 认证形：IDLE=2 GAP=0 + SKIP_MOE 逃逸口），预期 e19f0cb2+[IDLE] ticks>0
     mkdir -p $R/stage_1030
