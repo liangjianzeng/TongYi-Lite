@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# B 线·全载推进 740 腿 v3（R-084；用户钦定优先级）
+# B 线·全载推进 740 腿 v5（R-084 起家；R-089 双闸；R-095 v5=第三门 runtime loadproof）
 # B1 = ling tiny Q4_0 全载 ngl=99 ×3（同文性+tok/s+TRACE 核族普查）——patch79 Mesa 闸首验收
 # B2 = LFM2.5-24B-a2b in-place split-MoE（配方定案 bank=32/nb=16，R-083；阶梯复核驻留面）
 # 铁律：电池闸>440；bin= 自证 patch79=9cf385a2；$LOADER 显式形态；HOME/XDG 必带；单案单文件；无 && 长链。
@@ -33,7 +33,11 @@ run_eye() {  # $1=tag $2=model $3=npred $4=ngl $5=extra_env
     $LOADER --library-path $LP $EYE "$2" "$3" "$4" 42 \
     > $OUT/$1.tok 2> $OUT/$1.err
   RC=$?
-  echo "#### BRESULT tag=$1 rc=$RC ngl=$4 model=$(basename $2) md5=$(md5sum $OUT/$1.tok | cut -c1-8) bytes=$(wc -c < $OUT/$1.tok | tr -dc '0-9') bin=$BIN $(grep -a tok_s= $OUT/$1.err | tail -1) at=$(date +%H:%M:%S)"
+  # [R-095 v5 第三门] runtime loadproof：md5 测的是盘上文件，测不到 dlopen 实际装载（SONAME 坠金库案 R-089）。
+  # err 里必须出现 vkh 仪表/探针行（本 lib=9cf385a2 带 FA/bin+Mesa 闸探针）；零命中=可能坠库，判词作废候人工。
+  PRF=$(grep -a -i -c 'vkh' $OUT/$1.err)
+  [ "${PRF:-0}" -gt 0 ] || echo "#### B_WARN_PROOF tag=$1 vkh_lines=0 (可能坠金库,判词作废候审)"
+  echo "#### BRESULT tag=$1 rc=$RC ngl=$4 model=$(basename $2) md5=$(md5sum $OUT/$1.tok | cut -c1-8) bytes=$(wc -c < $OUT/$1.tok | tr -dc '0-9') bin=$BIN loadproof=$PRF $(grep -a tok_s= $OUT/$1.err | tail -1) at=$(date +%H:%M:%S)"
 }
 
 case "$1" in
