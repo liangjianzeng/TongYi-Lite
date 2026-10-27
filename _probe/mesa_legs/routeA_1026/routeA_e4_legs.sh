@@ -275,7 +275,7 @@ case "$1" in
     ;;
   g60) # R-060/R-065 产品化终闸：十代 2695a8be 无 env 部署（出厂档=d49 认证形：IDLE=2 GAP=0 + SKIP_MOE 逃逸口），预期 e19f0cb2+[IDLE] ticks>0
     mkdir -p $R/stage_1030
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 2>/dev/null
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     G60M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     echo "#### g60_lib=$G60M"
     if [ "$G60M" != "2695a8be" ]; then echo "#### G60_REDCARD lib!=2695a8be（stage_1030 未推送？拒跑防 NO-OP）"; exit 3; fi
@@ -311,7 +311,7 @@ case "$1" in
   kq2) # GPU 默认 ON（十代出厂档）——同模型应与 kq0 全等或同文
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
@@ -321,7 +321,7 @@ case "$1" in
   kq3) # R-062 Ling-3.0-tiny GPU async 无治愈（IDLE=0）——深模型跨代复现主判
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 99 42 > $R/out/kq3.tok 2> $R/out/kq3.err
     echo "#### kq3 rc=$? md5=$(md5sum $R/out/kq3.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq3.err | tail -1; grep -a '\[IDLE\]' $R/out/kq3.err
@@ -336,7 +336,7 @@ case "$1" in
   kq4) # R-062 Ling 九代默认档（IDLE=2 无 env）——治愈态同判据
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 99 42 > $R/out/kq4.tok 2> $R/out/kq4.err
     echo "#### kq4 rc=$? md5=$(md5sum $R/out/kq4.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq4.err | tail -1; grep -a '\[IDLE\]' $R/out/kq4.err
@@ -344,7 +344,7 @@ case "$1" in
   kq5) # R-062 Ling ngl=40 GPU async 无治愈——map 必超 pinned 顶（H2′ 死亡条件区）
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 20 42 256 > $R/out/kq5.tok 2> $R/out/kq5.err
     echo "#### kq5 rc=$? md5=$(md5sum $R/out/kq5.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq5.err | tail -1; grep -a '\[IDLE\]' $R/out/kq5.err
@@ -352,7 +352,7 @@ case "$1" in
   kq6) # R-062 Ling ngl=40 九代默认档治愈态
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 20 42 256 > $R/out/kq6.tok 2> $R/out/kq6.err
     echo "#### kq6 rc=$? md5=$(md5sum $R/out/kq6.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq6.err | tail -1; grep -a '\[IDLE\]' $R/out/kq6.err
@@ -360,7 +360,7 @@ case "$1" in
   kq7) # R-063 KERNEL_SYNC 纯形态跨代验证（IDLE=0 逃生+KERNEL_SYNC=1）——第三治愈 a650 复验
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
     export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
     FP=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
     if [ "$FP" != "2695a8be" ]; then echo "#### KQ_REDCARD fp=$FP want=2695a8be"; return 1 2>/dev/null || exit 3; fi
