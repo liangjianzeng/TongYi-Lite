@@ -295,9 +295,14 @@ case "$1" in
     g60_arm
     run_drift e4d_d60 "" 16 "" "" 20
     ;;
-  d70) # R-066 旧债清偿：背书栈（driver=libRusticlOpenCL 8de7d05f 机载勿动）OPFLUSH=1 drift-20
-    #    判据非单一 md5——统计漂移分布对照金标准（R-034 降级项"从未观测漂移"的正式补测）
-    run_drift e4d_d70 "GGML_OPENCL_OPFLUSH=1" 16 "" "" 20
+  d70) # R-066 旧债 / R-069 自武装：**时代一致库=七代 1be75abc（IDLE 默认 OFF）**→OPFLUSH 唯一干预；
+    #    混十代 bin 会把 IDLE2 默认档混进 census=非纯。背书栈 driver=libRusticlOpenCL 8de7d05f 机载勿动。
+    #    判据非单一 md5——漂移分布对照金标准（R-034 降级项"从未观测漂移"正式补测）
+    mkdir -p $R/stage_1027
+    cp $R/stage_1027/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1027 missing（7 代库未推？）"; exit 3; }
+    D70M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+    if [ "$D70M" != "1be75abc" ]; then echo "#### D70_REDCARD lib=$D70M want=1be75abc"; exit 3; fi
+    run_drift e4d_d70 "GGML_OPENCL_OPFLUSH=1" 16 "GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=0" "" 20
     ;;
   kq0) # R-061 K40 跨代复现：qwen0.5b CPU 金标准腿（ngl=0）
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
