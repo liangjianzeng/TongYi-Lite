@@ -1811,6 +1811,9 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
     if (backend_ctx->sgb_float_broken) {
         opts += " -DSGB_SCALAR_BROKEN";
     }
+    // [vkh 2026-10-27] A/B hook for kernel-variant experiments (single-variable
+    // driver-miscompile bisection). Appends raw CL options to every program.
+    { const char * x = getenv("GGML_OPENCL_EXTRA_OPTS"); if (x && x[0]) { opts += " "; opts += x; } }
 
     // [dspark 2026-10-16] rusticl/freedreno: .cl kernels select the ADRENO_GPU
     // branch via the compiler-predefined cl_qcom_reqd_sub_group_size macro;
@@ -25549,17 +25552,38 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
     // unified routes batched Q6_K lm_head to CPU). Per-layer mc3 is byte-identical.
     const bool use_mc3 = q4k_mc3 && (ne1 == 3) && (ne01 < 32768);
 
-    // [dspark 2026-10-14] Adreno 830: every q4_K GEMV variant in the ne1==1
-    // branch (plain / splitk at m=4096, bin 32b-trans) is numerically broken
-    // (TBO MUL_MAT q4_K m=4096 n=1 k=1024 ERR 1.7-1.9, nondeterministic), while
-    // the GEMM section (activation transpose + padded_N) passes TBO for all n.
-    // On A8X decode the ne1==1 shape through the GEMM section instead. Opt out
-    // with GGML_OPENCL_Q4K_GEMV=1 after the driver bug is root-caused.
+    // [vkh 2026-10-27] ROOT-CAUSED -- the A8X ne1==1 GEMV bypass is retired.
+    //
+    // The 2026-10-14 note below claimed every q4_K GEMV variant was numerically
+    // broken on Adreno 830. It was a real driver defect, but not in the GEMV:
+    // the E031.47 online compiler miscompiles kernels whose sub_group_broadcast
+    // calls are routed through an *inline wrapper*. That was the form the tree
+    // used before SGB_BC was changed to call the builtin directly (see
+    // kernels/gemv_noshuffle_q4_k_f32.cl:11-22, same day). Reproduced on this
+    // device, ONE binary, same kernel source, same lws {64,8}, only the call
+    // form differing:
+    //     GGML_OPENCL_EXTRA_OPTS=-DSGB_SCALAR_BROKEN (wrapper) ->
+    //         maxabs 15.47 / meanabs 3.24 / 4068 of 4096 rows wrong, and
+    //         bit-reproducible for a fixed seed => a miscompile, not a race
+    //     direct builtin (today's form)                              ->
+    //         maxabs 4.6e-5 / relmax 1.8e-7 / 0 bad rows  => PASS
+    // The rusticl "subgroup spans two y rows" theory does NOT apply to the
+    // vendor path: vkh_sgprobe measures get_sub_group_size()==64 for lws
+    // {64,nsg}, nsg 1..16, get_sub_group_local_id()==get_local_id(0) and a
+    // clean reduceLM aliasing/uninitialised-slot canary.
+    // And the retired bypass was itself the worse path: the GEMM route measures
+    // relmax 2.0e-3 with 3557/4096 rows outside 1e-4 relative -- four orders of
+    // magnitude worse than the GEMV it was hiding, on top of the per-decode-step
+    // activation-transpose + padded_N tax.
+    // Field rollback: GGML_OPENCL_A8X_Q4K_GUARD=1 restores the 2026-10-14
+    // routing (GEMM for ne1==1, forced splitk, bin/xmem n==1 exclusions).
+    static const bool a8x_q4k_guard = getenv("GGML_OPENCL_A8X_Q4K_GUARD") != nullptr;
     static const bool q4k_gemv_a8x = [] {
         const char * e = getenv("GGML_OPENCL_Q4K_GEMV");
         return e && e[0] == '1';
     }();
-    const bool force_gemm_n1 = backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X &&
+    const bool force_gemm_n1 = a8x_q4k_guard &&
+                               backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X &&
                                ne1 == 1 && !q4k_gemv_a8x && !use_mc3 && ne01 < 32768;
 
     const bool use_bin = use_q4_k_bin_kernels(backend_ctx, src0);
@@ -25571,12 +25595,12 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
                       ne01, ne1, ne00, (int) use_bin, (int) force_gemm_n1);
     }
 
-    // [dspark 2026-10-14] Adreno 830: the q4_K bin (32b-trans ila_a8) GEMV is
-    // numerically broken (TBO MUL_MAT q4_K m=4096 n=1 k=1024 ERR=1.75; bin GEMM
-    // n>=2 passes). On A8X route n==1 to the GEMV branch below, where splitk
+    // [vkh 2026-10-27] A8X n==1 exclusion retired with the rest of the
+    // 2026-10-14 q4_K GEMV guard (root cause = the E031.47 sub_group_broadcast
+    // inline-wrapper miscompile, see the force_gemm_n1 note above). Restore
+    // with GGML_OPENCL_A8X_Q4K_GUARD=1.
         #ifdef GGML_OPENCL_USE_ADRENO_KERNELS  // bin path -> guarded ila helper
-    // (TBO-verified on 830) takes over. Bin GEMM for n>=2 is kept.
-    if (use_bin && !(backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X && ne1 == 1)) {
+    if (use_bin && !(a8x_q4k_guard && backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X && ne1 == 1)) {
         if (use_mc3) {
             static bool warned = false;
             if (!warned) {
@@ -25683,12 +25707,17 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         // big-K M=2560 cases (ffn_down K=10240 @182us, attn_output @42us) have a
         // large per-call win that dwarfs the ~5us reduce, so extending to 2560 nets
         // positive end-to-end. ffn_gate/up (M=10240) already fill the CUs -> excluded.
-        // [dspark 2026-10-14] Adreno 830 (A8X, driver V@0800.71 E031) miscompiles
-        // the plain q4_K GEMV at larger M: TBO MUL_MAT q4_K m=4096 n=1 k=1024 gives
-        // ERR=1.93 while m<=1023 passes. Route ALL q4_K decode GEMVs through the
-        // splitk kernel on A8X so the broken plain kernel never runs (splitk passes
-        // TBO on 830, incl. m=4096 after this change). No-op on other gens.
-        const bool use_splitk = (splitk_wg_env || backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X)
+        // [vkh 2026-10-27] A8X was force-pinned to splitk only to dodge the
+        // "plain q4_K GEMV miscompiles at large M" report. That report is the
+        // E031.47 sub_group_broadcast inline-wrapper miscompile (root-caused
+        // and already fixed by calling the builtin directly -- see the
+        // force_gemm_n1 note above), not a property of the plain kernel: it now
+        // measures relmax 1.8e-7 on 830 at m=4096/8192 x k=1024/2048.
+        // Split-K buys GPU time with an extra reduce DISPATCH, which the
+        // measurements above show LOSES on 840/850/X2-85; A8X returns to the
+        // same gen default as everyone else. Restore with
+        // GGML_OPENCL_A8X_Q4K_GUARD=1.
+        const bool use_splitk = (splitk_wg_env || (a8x_q4k_guard && backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X))
             && !use_tiled && !use_q4k_o4 && !use_mc3 && ne01 <= 32768;
 
         if (use_splitk) {

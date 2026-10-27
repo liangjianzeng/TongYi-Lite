@@ -7,10 +7,11 @@ OUT=$R/out
 RES=$OUT/arb740_results.log
 BINMD5=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
 lingmd5() { md5sum $R/bin/ling_e2e | cut -c1-8; }
-hot() {  # 1=过热需等
-  t=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1)
+hot() {  # 1=过热需等 —— 口径=legs 官方 dumpsys battery(centi-°C)，
+         # 充电周边 pmh 区 46°≠电池热(17:4x 定罪: 曾错杀饿队列 35min)
+  t=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
   [ -z "$t" ] && return 0
-  [ "$t" -gt 44000 ]
+  [ "$t" -gt 440 ]
 }
 coldwait() {  # 最多等 60 分钟
   n=0
