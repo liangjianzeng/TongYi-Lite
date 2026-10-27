@@ -95,20 +95,33 @@
 
 ⇒ **暗区不是可删除的浪费，而是被位移的工作**：关融合清了 490 发暗区发射，却多发射 490 次、`MUL_MAT` +197 ms、LOOP **+47 ms（≈3.6 %）**，tok/s 在打印量子内不变 ⇒ **砍融合不是修法，反而净亏**。
 （数值诚实：本节早前所记 `IDLE=0` 腿 `550.6 ms/490 = 1.124 ms/发、占 LOOP 40 %` 作为**量级**判据仍成立；两次独立 `IDLE=0` 测量该行为 435.9–550.6 ms，**run-to-run 约 20 % 散布**，引用按量级不按小数。）
-**剩下的唯一锐利问题**：一次融合发射 host 侧 0.890–1.124 ms，是同腿普通发射（0.161–0.194 ms）的 **4.6–7×**，贵在哪。addr2line inline 链露出线索：**`ggml_cl_img_pool_get_or_create` → `std::map<ImagePoolKey>::operator[]`** ⇒ 疑每次融合发射都在 host 侧查/建 image pool（红黑树）。钉死需在 L10118 附近加计时行（被跟踪文件 —— **只提案，父智能体决定挂载**）。
+**剩下的唯一锐利问题（R-097 已挂完刀，候 740 一发即裁）**：一次融合发射 host 侧 0.890–1.124 ms，是同腿普通发射（0.161–0.194 ms）的 **4.6–7×**，贵在哪。原嫌疑 = addr2line inline 链里的 `ggml_cl_img_pool_get_or_create → std::map<ImagePoolKey>::operator[]`（image pool），**已被 R-097 真机证伪**（见 P5：池税 0.017 ms/发 = 1.9 %）。现场两把计时行均已由父智能体挂载：L10122 `FUSE/RMS_MUL`（R-096，`set_cur=false` ⇒ 融合体内发射仍归 `ENQ/PRE_FORWARD`）、L1445 `ENQ_DRV` 补第 4 参 `__builtin_return_address(0)`（R-097 ⇒ `ENQ_DRV@+0x<site>` 站点行）。判词由仪表自落四档，740 暗区法证腿一发即裁：`TAX_IN_WRAPPER`（包装器 wgs/subgroup/簿记 ⇒ 可按 kernel 缓存）/ `TAX_IN_DRIVER`（门铃本体 ⇒ 只剩减条数/换内核）/ `TAX_INSIDE_ENQUEUE`（L1445 的 ra 未生效）/ `TAX_OUTSIDE_ENQUEUE`（image-pool 类自有工作 ⇒ P5 复燃）。native 双模已验两分支均可达（wrapper 模 `enqueue=2.749 drv=0.678`、driver 模 `enqueue=1.558 drv=1.558`）。
 仪表侧现状：① 析构恢复上一层 op（save/restore）已在 v4 实施；② 分站点标签已在 v5 实施并**自测合格**（`vkh_dz_selftest.sh` md5 `18561841`：观察者免费 —— host_ms Δ **0.18 %**、tok/s 差在打印量子内、结构指纹两臂逐字相同 `idle=n3099 darkzone=n490 drv=n6199`、`txt` 相同、`dz_cross=ok`），**默认关 ⇒ campaign 各腿字节级同旧表**。
 
 **P4 — q5_0 路线（独立案，不入本三口径变量）**
 按 ledger 187 收窄，本案 campaign 4B 无 q5_0，**三口径变量只有 FA 档位 + 暗区**。q5_0 单独走：① 先把 `supports_op` 的 **decline 与 placement 解耦**（`-ngl 0` 时 `-ngl` 仍放 CPU，但能力探针说"能上 GPU"，两件事混在一起导致历史判词误读）；② 白名单 `type_has_gemm`（L11072，现含 Q4_0/Q4_1/IQ4_NL/Q8_0/Q4_K/Q5_K/Q6_K）**加 q5_0/q5_1 作对照腿**，配合 load 期 `m=512` 单口径探针（L11085-11086 `!uses_gemm && !small_weight && src[1]->ne[1] >= 512` → decline）拆成 **decode / prefill 双口径**；③ 厂商 q5_0 GEMM 内核存在性 = 父智能体 ledger 185，数值正确性 = 我的 `vkh_tbo` 闸。
 
-**P5 — CL 对象指纹缓存（2026-10-28 升格：暗区唯一可行修法方向，候 image-pool 定罪）**
-`ggml_cl_subbuffer_from_parent`（L8000，内部 L8017 无缓存 `clCreateSubBuffer`）被 MoE 路径逐 expert 调用（L12178/12179、L13331-13334、L14329），加 `(parent, origin, size)` 指纹缓存 + pending-release-queue（L847 已注明该 TODO）。**门铃定罪后它曾降级为次级**；P3 结案后重新升格：暗区既然已被证实是融合助手自有工作、且砍融合是净亏（见 P3），则暗区剩下唯一可下手的对象就是**其 host 侧准备成本**，addr2line inline 链已指向 `ggml_cl_img_pool_get_or_create` 的 `std::map<ImagePoolKey>::operator[]`（每次融合发射查/建 image pool）—— 与 subbuffer 同属"CL 对象每次重建"家族，**同一把指纹缓存可覆盖**。验收同 P1：`[host-timing] kernels=` 不变而 `DZ@` 行单价下降、LOOP_TOTAL 同幅下降（同温 <4 ℃）。**前置条件**：先在 L10118 附近挂计时行把 image-pool 成本从融合发射总价里切出来（需父智能体挂载）。
+**P5 — CL 对象指纹缓存（R-096 升格 → R-097 自证伪，回原档：定罪后次级）**
+**原档判词（保留）**：`ggml_cl_subbuffer_from_parent`（L8000，内部 L8017 无缓存 `clCreateSubBuffer`）被 MoE 路径逐 expert 调用（L12178/12179、L13331-13334、L14329），加 `(parent, origin, size)` 指纹缓存 + pending-release-queue（L847 已注明该 TODO）。门铃定罪后它不是主靶：**只在观测到 subbuffer 风暴的模型（MoE）上按 P1 同法验收**。
+**R-096 升格文本（保留作证伪记录，已作废）**：当时因暗区被证实是融合助手自有工作、且砍融合是净亏，判"暗区剩下唯一可下手的对象就是其 host 侧准备成本"，并把 addr2line inline 链里的 `ggml_cl_img_pool_get_or_create → std::map<ImagePoolKey>::operator[]` 认作"每次融合发射查/建 image pool"，据此把 P5 升为"暗区唯一可行修法方向"。
+**证伪（真机，K40 / qwen2.5-0.5b-q4_k_m / 丙口径 / `IDLE=0` / `VKH_DZ_TAG=1` / lib `f52adb68`；判词由仪表自落，非人算）**：
+
+```
+[vkh-optime] FUSETAX fuse=430.1/490(0.878/发) enqueue=421.9/490(0.861/发)
+             tax=8.3(0.017/发) rule=FUSE_TOTAL-DZ_site
+             verdict=TAX_INSIDE_ENQUEUE(image-pool 无罪)
+```
+
+⇒ 融合助手在发射之外的自有工作（含 image-pool 查询）合计 **0.017 ms/发 = 单次融合发射的 1.9 %** ⇒ **image-pool 清白，升格撤回，P5 回原档**。
+**复燃条件（写死，免后人凭印象重升）**：仅当某模型/某口径上仪表自动落出 `verdict=TAX_OUTSIDE_ENQUEUE`（即 `ΣDZ@ < 0.85 × FUSE_TOTAL`）时 P5 才重升；判词由仪表落，**禁止人手相减**（`FUSE_TOTAL − 全局 ENQ_DRV` 是负数假账：430.1 − 1170.6 = −740）。
 
 ## 5. 明确排除项（勿再投入）
 
 - ❌ **关 FA 当修法**（是仪表，不是药；K40 实测 decode 恶化 34%）。
 - ❌ **优化 `clSetKernelArg` 装填 / 张量簿记缓存**（v4 墙钟复核仍成立：Σ`ENQ_DRV` 与 Σ`ENQ/<op>` 相差 <2 %，包装器自有工作近乎免费 —— 见 P2；v1–v3 的"≤8 %"是 CPU 时间口径，数字作废但结论同向）。
 - ❌ **砍 `rms_norm+mul` 融合当修法**（2026-10-28 实测：`GGML_OPENCL_FUSE_RMS_MUL=0` 使 LOOP_TOTAL 1302→1349 ms、发射 6199→6689，tok/s 量子内不变 —— 见 P3；暗区是位移的工作，不是可删的浪费）。
+- ❌ **人手相减算池税**（`FUSE_TOTAL − 全局 ENQ_DRV` 是负数假账：`430.1 − 1170.6 = −740`；`ENQ_DRV` 覆盖全部发射而非融合那几百发。减法归仪表 `FUSETAX`（`rule=FUSE_TOTAL-DZ_site`）自落四档判词，人不插手）。
+- ❌ **跨 build 抄偏移喂 addr2line**（实测不报错的假符号：拿 K40 件 `f52adb68` 的 `+0x2ee404` 去解父侧 `0cc2855e`，得到 `ggml_cl_ssm_scan @ :0` —— 该函数在 0.5B decode 路径上根本不参与。同一段代码仅加一行挂载，DZ 站点即从 `+0x2e96c4` 漂到 `+0x2ee404`。**铁律：addr2line 必须喂同 md5 的 .so**，先 `md5sum` 再解）。
 - ❌ **本战役加 q5_0 变量**（ledger 187）。
 - ❌ **第二轮带 patch80**（父智能体裁定）；第三轮靶点定案后再复测。
 - ❌ **830 压测**（用户明令；830 只做正常调试，adbd 现仍拒连，等用户侧 `adb-wifi.ps1`）。
@@ -117,6 +130,6 @@
 
 1. **740 掉线**（~23:45，与父智能体 13.58GB adb pull 时点重合）：pass1 完整 + pass2 残腿保留在 `/data/local/tmp/vkh2/out/`，不清不动；恢复后跑 pass2/pass3 取中位。
 2. **CPU 腿污染复核**（§1 ⚠️，头号判词引信）。
-3. **暗区后续**：分站点标签枪已实施并自测合格（v5，`VKH_DZ_TAG=1` 默认关，P3 结案）；剩下唯一未决 = **image-pool 计时行挂载**（被跟踪文件 L10118 附近，候父智能体批准），它决定 P5 是否升格为暗区修法。`ENQ_WAIT` 设计已批但**未挂载**。P0 默认值 `2→0` 与产品化**候金口**。
+3. **暗区后续**：站点标签枪已合格（`VKH_DZ_TAG=1` 默认关），两把计时行均已由父智能体挂载（L10122 `FUSE/RMS_MUL` = R-096；L1445 `ENQ_DRV` 补 `__builtin_return_address(0)` = R-097）。剩余唯一未决 = **740 暗区法证腿**（`VKH_DZ_TAG=1` + `GGML_OPENCL_NDRANGE_IDLE=0`），由 `FUSETAX` 自落四档判词当场裁"4.6× 归属"。740 build 定案 = 父侧 **`0cc2855e`**（已离机预检：产物含 `ENQ_DRV@+0x%llx` / `FUSETAX` / `drv_sites=` 字符串 ⇒ 确认携带我方 `e7b8724d` 头，未上机即可证仪表在位）。`ENQ_WAIT` 设计已批但**未挂载**。P0 默认值 `2→0` 与产品化**候金口**。
 4. K40 上无战役 4B（父智能体所记 `/data/local/tmp/g759/qwen35-4b-q4km.gguf` 在 K40 不存在，宿主亦无），如需 4B-on-K40 须先限速传 2.8 GB。
 5. GPU≠CPU 贪心分歧（md5 `36c7d6d7d1e6` vs `0d0858efe9ee`）仍挂账，与本案无关。
