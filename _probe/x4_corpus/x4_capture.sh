@@ -6,7 +6,7 @@
 # 铁律随行：热闸>440、bin= 自证、ICD driver 串留 .err 可机检、单案单文件、无 && 长链。
 R=/data/local/tmp/mesa_clrt_1026
 LOADER=$R/lib/ld-linux-aarch64.so.1
-LP="$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu"
+LP="${X4_LDPRE:+$X4_LDPRE:}$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu"
 MODEL=/storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf
 EYE=${X4_EYE:-$R/bin/ling_e2e}
 # id|npred|ngl|seed|n_ctx|prompt   （greedy；seed 仅记账用）
