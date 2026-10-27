@@ -4,8 +4,15 @@
 // with GGML_OPENCL_VKH_OPTIME=1; with the env unset the hooks read one bool and
 // return, so there is no behavioural or numerical change.
 //
-// What it answers (measured with clock() = process CPU time, so blocking waits do NOT
-// count — everything printed here is host-side work, not GPU wait):
+// What it answers — **v4: wall clock (CLOCK_MONOTONIC)**, and that change is itself a
+// finding. v1..v3 timed with clock() = *process CPU time*, which (a) does not count
+// blocking waits, (b) charges whatever the Adreno userspace driver threads burn to
+// whichever row is active on the calling thread, and (c) fed a lock-free shared
+// std::map. That produced rows violating additivity — inner ENQ_DRV (2430 ms) exceeding
+// its own parent rows (~300 ms), and LOOP_TOTAL (5333) > its enclosing GRAPH_TOTAL
+// (4902) — so every absolute "who owns this host time" verdict taken from v1..v3 is
+// void; only wall-clock sources ([host-timing] host_ms, tok/s) were trustworthy. v4
+// measures wall time, so clFinish / clEnqueueNDRangeKernel waits now show up honestly.
 //   * per op class: host time, node count, kernel count, ms/kernel, ms/node — the
 //     per-op split is mandatory before blaming "the launch path": an average
 //     ms/kernel over mixed ops is meaningless (measured spread on Adreno 650:
@@ -48,10 +55,35 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
+
+// Wall clock, monotonic, nanosecond based — see the v4 note above. clock_gettime on
+// Android/Bionic is a vDSO call (no syscall), so it stays affordable at ~900 calls/token.
+inline double vkh_now_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double) ts.tv_sec * 1e3 + (double) ts.tv_nsec * 1e-6;
+}
+
+// The map and the ENQ-name cache are shared by every thread that reaches the hooks; the
+// lock-free version lost updates (rows with few samples, e.g. GRAPH_TOTAL = 1 per graph,
+// lost whole intervals to races). Recursive because the timer dtor locks and then takes
+// the map.
+inline std::recursive_mutex g_vkh_tbl_mtx;
+
+// Self-check bookkeeping (see the dump's SELFCHK block). g_vkh_graph_depth tracks whether we
+// are inside a GRAPH_TOTAL window; g_vkh_loop_outside_graph counts per-node iterations seen
+// while it was zero. That is what separates the two ways "inner row > outer row" can happen:
+// a node loop genuinely running outside graph_compute (a real code path — warn and keep
+// going), versus the accounting itself being broken (numbers are void — abort on the spot,
+// per R-092: better a dead run than a post-mortem over bad numbers).
+inline int  g_vkh_graph_depth       = 0;
+inline long g_vkh_loop_outside_graph = 0;
 
 // C++17 inline variables: one instance shared by every TU that includes this header.
 inline bool g_vkh_optime_on = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
@@ -66,6 +98,7 @@ struct vkh_optime_rec {
 inline std::map<std::string, vkh_optime_rec> * g_vkh_optime_p = nullptr;
 
 inline std::map<std::string, vkh_optime_rec> & vkh_optime_map() {
+    std::lock_guard<std::recursive_mutex> lk(g_vkh_tbl_mtx);
     if (g_vkh_optime_p == nullptr) {
         g_vkh_optime_p = new std::map<std::string, vkh_optime_rec>();
     }
@@ -81,6 +114,7 @@ inline const char * g_vkh_current_op = nullptr;
 // and must not allocate per call.
 inline const char * vkh_enq_name(const char * op) {
     static std::map<std::string, std::string> * names = nullptr;
+    std::lock_guard<std::recursive_mutex> lk(g_vkh_tbl_mtx);
     if (names == nullptr) {
         names = new std::map<std::string, std::string>();
     }
@@ -115,18 +149,28 @@ struct vkh_op_timer {
                 fprintf(stderr, "[vkh-optime] ARMED (first region timed)\n");
                 fflush(stderr);
             }
-            t0 = (double) clock() / CLOCKS_PER_SEC;
+            t0 = vkh_now_ms();
             e0 = enq ? *enq : 0;
+            if (op != nullptr && strcmp(op, "GRAPH_TOTAL") == 0) {
+                g_vkh_graph_depth++;
+            } else if (op != nullptr && strcmp(op, "LOOP_TOTAL") == 0 && g_vkh_graph_depth <= 0) {
+                g_vkh_loop_outside_graph++;
+            }
         }
     }
 
     ~vkh_op_timer() {
         if (!on) { return; }
+        const double t1 = vkh_now_ms();   // read the clock before taking the lock
+        if (op != nullptr && strcmp(op, "GRAPH_TOTAL") == 0 && g_vkh_graph_depth > 0) {
+            g_vkh_graph_depth--;
+        }
         // Restore the enclosing label so nested rows (FA/bin, ENQ_DRV, a future PRE/<op>)
         // cannot leak their label into the code that runs after them.
         if (set_cur) { g_vkh_current_op = prev; }
+        std::lock_guard<std::recursive_mutex> lk(g_vkh_tbl_mtx);
         vkh_optime_rec & r = vkh_optime_map()[op];
-        r.ms += ((double) clock() / CLOCKS_PER_SEC - t0) * 1e3;
+        r.ms += t1 - t0;
         r.n++;
         if (enq) { r.kern += *enq - e0; }
     }
@@ -139,6 +183,8 @@ struct vkh_op_timer {
 // caller resets nothing); the last block before exit is the one to read.
 inline void vkh_optime_dump() {
     if (!g_vkh_optime_on) { return; }
+    const double vkh_dump_t0 = vkh_now_ms();   // the printer is itself a cost the enclosing rows pay
+    std::lock_guard<std::recursive_mutex> lk(g_vkh_tbl_mtx);
     fprintf(stderr, "[vkh-optime] DUMP called (on=1 table=%p n=%zu)\n", (void *) g_vkh_optime_p,
             g_vkh_optime_p ? g_vkh_optime_p->size() : (size_t) 0);
     if (g_vkh_optime_p == nullptr || g_vkh_optime_p->empty()) {
@@ -156,7 +202,7 @@ inline void vkh_optime_dump() {
         tot_n += kv.second.n;
         tot_k += kv.second.kern;
     }
-    fprintf(stderr, "[vkh-optime] TOTAL host_ms=%.1f nodes=%ld kernels=%ld ms/kernel=%.3f op_classes=%zu\n",
+    fprintf(stderr, "[vkh-optime] TOTAL host_ms=%.1f nodes=%ld kernels=%ld ms/kernel=%.3f op_classes=%zu clock=monotonic_v4\n",
             total, tot_n, tot_k, tot_k ? total / (double) tot_k : 0.0, rest.size());
     for (size_t rank = 0; rank < rest.size(); rank++) {   // selection sort: <algorithm> unavailable
         size_t bi = rank;
@@ -172,6 +218,63 @@ inline void vkh_optime_dump() {
         fprintf(stderr, "[vkh-optime] #%02zu op=%-24s host_ms=%9.1f nodes=%8ld kernels=%8ld ms/kernel=%7.3f ms/node=%7.3f\n",
                 rank + 1, rest[rank]->first.c_str(), r.ms, r.n, r.kern,
                 r.kern ? r.ms / (double) r.kern : 0.0, r.n ? r.ms / (double) r.n : 0.0);
+    }
+    // R-092 self-check: a nested row may never exceed its enclosing row. v1..v3 shipped
+    // numbers that violated this (inner ENQ_DRV 8x its parents, LOOP_TOTAL > GRAPH_TOTAL) and
+    // every attribution drawn from them had to be voided. Print the evidence; if the probe
+    // explains it (a node loop really ran outside graph_compute) warn and continue, otherwise
+    // the accounting itself is broken and the numbers are void — abort on the spot rather
+    // than let a post-mortem be built on them. GGML_OPENCL_VKH_SOFT=1 downgrades to warn-only
+    // so an instrument artifact can never brick a campaign leg by itself.
+    {
+        std::map<std::string, vkh_optime_rec> & t = *g_vkh_optime_p;
+        static const char * pairs[][2] = {
+            { "LOOP_TOTAL",  "GRAPH_TOTAL" }, { "MUL_MAT",     "GRAPH_TOTAL" },
+            { "ENQ_DRV",     "LOOP_TOTAL"  }, { "ENQ_IDLE",    "LOOP_TOTAL"  },
+            { "ENQ/MUL_MAT", "MUL_MAT"     }, { "PRE_FORWARD", "LOOP_TOTAL"  },
+        };
+        static const bool soft = getenv("GGML_OPENCL_VKH_SOFT") != nullptr;
+        // Dumps are taken from inside graph_compute (the [host-timing] print site), so while a
+        // graph is in flight its GRAPH_TOTAL window has not been recorded yet and LOOP_TOTAL
+        // legitimately shows ~2x GRAPH. Judging additivity there is a false positive — on
+        // device this rule aborted every GPU leg. Only closed windows (graph_depth == 0, i.e.
+        // the atexit dump) may convict; mid-graph dumps report the numbers as info.
+        const bool in_graph = g_vkh_graph_depth > 0;
+        // The dump is called from inside graph_compute (and, for the last call, from the
+        // destructor), so its own fprintf/fflush lands in whatever rows are open — which is
+        // the leading suspect for LOOP_TOTAL drifting above GRAPH_TOTAL by ~5 ms/graph. Record
+        // it as its own row and print the comparison, so the gap is attributable instead of
+        // mysterious.
+        vkh_optime_rec & dc = vkh_optime_map()["DUMP_COST"];
+        dc.ms += vkh_now_ms() - vkh_dump_t0;
+        dc.n++;
+        std::map<std::string, vkh_optime_rec>::const_iterator it_loop = t.find("LOOP_TOTAL");
+        std::map<std::string, vkh_optime_rec>::const_iterator it_gr  = t.find("GRAPH_TOTAL");
+        std::map<std::string, vkh_optime_rec>::const_iterator it_dc  = t.find("DUMP_COST");
+        const double gap = (it_loop != t.end() && it_gr != t.end()) ? it_loop->second.ms - it_gr->second.ms : 0.0;
+        fprintf(stderr, "[vkh-optime] SELFCHK graph_depth=%d loop_outside_graph=%ld mode=%s loop_minus_graph=%.1f dump_cost=%.1f/%ld\n",
+                g_vkh_graph_depth, g_vkh_loop_outside_graph,
+                in_graph ? "skip(in-graph)" : (soft ? "soft" : "abort"), gap,
+                it_dc != t.end() ? it_dc->second.ms : 0.0, it_dc != t.end() ? it_dc->second.n : 0);
+        for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
+            std::map<std::string, vkh_optime_rec>::const_iterator c = t.find(pairs[i][0]);
+            std::map<std::string, vkh_optime_rec>::const_iterator p = t.find(pairs[i][1]);
+            if (c == t.end() || p == t.end() || c->second.ms <= p->second.ms * 1.02) { continue; }
+            // Explained = the excess has a named owner: node loops outside graph_compute, or
+            // the printer's own cost landing in the open LOOP_TOTAL row.
+            const bool explained = in_graph || strcmp(pairs[i][0], "LOOP_TOTAL") == 0 &&
+                (g_vkh_loop_outside_graph > 0 ||
+                 gap <= (it_dc != t.end() ? it_dc->second.ms : 0.0) * 1.5 + 5.0);
+            fprintf(stderr, "[vkh-optime] %s child=%s(%.1f) > parent=%s(%.1f)%s\n",
+                    in_graph ? "MIDGRAPH_INFO" : "ADDITIVITY_VIOLATION",
+                    pairs[i][0], c->second.ms, pairs[i][1], p->second.ms,
+                    explained ? " (explained: excess has a named owner — in-graph dump, loop outside graph, or the printer's own cost)" : "");
+            if (!explained && !soft) {
+                fprintf(stderr, "[vkh-optime] ABORT: accounting hole, table is void (set GGML_OPENCL_VKH_SOFT=1 to continue anyway)\n");
+                fflush(stderr);
+                abort();
+            }
+        }
     }
     fflush(stderr);
 }

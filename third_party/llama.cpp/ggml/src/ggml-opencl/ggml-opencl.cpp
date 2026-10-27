@@ -8795,6 +8795,7 @@ static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     CL_CHECK(clEnqueueBarrierWithWaitList(backend_ctx->queue, 0, nullptr, &evt));
     CL_CHECK(clWaitForEvents(1, &evt));
     CL_CHECK(clReleaseEvent(evt));
+    if (g_vkh_optime_on) { vkh_optime_dump(); }   // [vkh R-093] closed-window dump: every step's sync runs after graph_compute returns (graph_depth==0)
 }
 
 // Synchronizes the 'backend_ctx's device with others so that commands
