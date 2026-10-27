@@ -72,18 +72,42 @@ inline std::map<std::string, vkh_optime_rec> & vkh_optime_map() {
     return *g_vkh_optime_p;
 }
 
+// The op whose forward we are inside, so a hook deep in a shared helper can label its row
+// with the owning op class. Set by vkh_op_timer unless the timer is itself a helper row
+// (see set_cur); read by VKH_ENQ_TIMER.
+inline const char * g_vkh_current_op = nullptr;
+
+// "ENQ/<op>" row names, built once per op and cached: the launch hook runs ~900x/token
+// and must not allocate per call.
+inline const char * vkh_enq_name(const char * op) {
+    static std::map<std::string, std::string> * names = nullptr;
+    if (names == nullptr) {
+        names = new std::map<std::string, std::string>();
+    }
+    const std::string key(op ? op : "?");
+    std::map<std::string, std::string>::iterator it = names->find(key);
+    if (it == names->end()) {
+        it = names->insert(std::make_pair(key, "ENQ/" + key)).first;
+    }
+    return it->second.c_str();
+}
+
 // RAII: times one region of the submit loop and accumulates it under `op`.
 // `enq` points at backend_ctx->n_enqueues to attribute kernel counts; pass nullptr for
-// regions that span the whole graph (GRAPH_TOTAL) where a delta would double count.
+// regions that span the whole graph (GRAPH_TOTAL) or for helper rows, where a delta would
+// double count the parent row.
 struct vkh_op_timer {
     const char * op;
     int *        enq;
     double       t0;
     long         e0;
     bool         on;
+    bool         set_cur;
 
-    explicit vkh_op_timer(const char * o, int * e) : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on) {
+    explicit vkh_op_timer(const char * o, int * e, bool set_cur_ = true)
+        : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on), set_cur(set_cur_) {
         if (on) {
+            if (set_cur) { g_vkh_current_op = o; }
             static bool armed_printed = false;
             if (!armed_printed) {
                 armed_printed = true;
@@ -147,6 +171,16 @@ inline void vkh_optime_dump() {
     }
     fflush(stderr);
 }
+
+// ---- single choke-point launch hook -----------------------------------------------------
+// Put VKH_ENQ_TIMER(); as the first statement of
+// ggml_backend_opencl_context::enqueue_ndrange_kernel. It answers the question this whole
+// case hangs on: in the App frame (FA off) every op class measures 0.45-0.61 ms per node,
+// i.e. a fixed ~0.5 ms per launch — is that the driver's clEnqueueNDRangeKernel doorbell,
+// or the host marshalling around it (arg setting, wgs/subgroup queries, tensor bookkeeping)?
+// Rows appear as "ENQ/<OP>" and are CHILDREN of the matching "<OP>" row: never sum the two
+// together. Coverage caveat: ~76 direct clEnqueueNDRangeKernel calls bypass the wrapper.
+#define VKH_ENQ_TIMER() vkh_op_timer vkh_enq_guard_(vkh_enq_name(g_vkh_current_op), nullptr, false)
 
 __attribute__((destructor, used)) static void vkh_optime_dtor(void) { vkh_optime_dump(); }
 

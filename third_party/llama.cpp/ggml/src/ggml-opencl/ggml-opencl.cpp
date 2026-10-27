@@ -1363,6 +1363,7 @@ struct ggml_backend_opencl_context {
     }
 
     void enqueue_ndrange_kernel(cl_kernel kernel, cl_uint work_dim, size_t *global_work_size, size_t *local_work_size, const ggml_tensor * tensor) {
+        VKH_ENQ_TIMER();   // [vkh] per-op launch cost at the single choke point
         n_enqueues++;
         tyl_l0_note_enq();
         // From the spec on clEnqueueNDRangeKernel:
@@ -1694,6 +1695,22 @@ inline std::string read_file(const std::string &path) {
 // if retry_queue is provided
 static cl_program build_program_from_source_ex(cl_context ctx, cl_device_id dev, const char* program_buffer, const std::string &compile_opts, bool fatal, const char *tag = nullptr, cl_command_queue retry_queue = nullptr) {
     if (tag) { GGML_LOG_INFO("ggml_opencl: compiling %s\n", tag); }
+    // [tongyi R-089] same env-gated catcher as build_program_from_source: the ling/patch79
+    // LLVM-32vec abort bypassed that function entirely — FA variant programs (L6336.. ensure_*)
+    // compile through THIS path. Print tag + first source line before every compile. Default OFF.
+    {
+        static const bool vkh_srcdbg_ex = [] { const char * e = getenv("GGML_OPENCL_VKH_SRCDBG"); return e && e[0] == '1'; }();
+        if (vkh_srcdbg_ex && program_buffer) {
+            const char * s = program_buffer;
+            while (*s == '\n' || *s == '\r' || *s == ' ' || *s == '\t') { s++; }
+            char head[96] = { 0 };
+            size_t n = 0;
+            while (n < sizeof(head) - 1 && s[n] && s[n] != '\n') { head[n] = s[n]; n++; }
+            head[n] = 0;
+            fprintf(stderr, "\n[vkh-srcdbg] EX tag=[%s] len=%zu head=[%s]\n", tag ? tag : "-", strlen(program_buffer), head);
+            fflush(stderr);
+        }
+    }
     cl_program p;
     char *program_log;
     size_t program_size;
@@ -21733,7 +21750,9 @@ static void ggml_cl_flash_attn(ggml_backend_t backend, const ggml_tensor * q, co
     const bool is_q4_0 = q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_Q4_0 && v->type == GGML_TYPE_Q4_0;
 
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
-    if (use_fa_bin_kernels_prefill(backend_ctx, q, k, v)) {
+    bool vkh_fa_bin_hit;
+    { vkh_op_timer vkh_fa_bin("FA/bin", nullptr, false); vkh_fa_bin_hit = use_fa_bin_kernels_prefill(backend_ctx, q, k, v); }
+    if (vkh_fa_bin_hit) {
         // We support the prefill path of flash attn with a specialized d_head = 64/128/256
         ggml_cl_flash_attn_prefill_bin(backend, q, k, dst);
         return;
