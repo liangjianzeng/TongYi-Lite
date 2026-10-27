@@ -38,8 +38,10 @@ while [ "$rep" -le "$REPS" ]; do
         B=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc "0-9")
         if [ -n "$B" ] && [ "$B" -gt 440 ]; then echo "#### IDLEAB_THERMAL_ABORT rep=$rep leg=$leg $B"; exit 4; fi
         echo "#### IDLEAB_BEGIN rep=$rep leg=$leg fa=$FA $NG idle=${GGML_OPENCL_NDRANGE_IDLE:-default2} batt=$B $(date +%H:%M:%S)"
+        # -p was hardcoded, which silently made the PROMPT knob a no-op (the multi-prompt numeric
+        # gate would not have been exercisable). Honour $P.
         timeout 900 ./llama-cli -m $M $NG --flash-attn $FA \
-            -p "The capital of France is" -n $N --temp 0 --no-display-prompt -v \
+            -p "$P" -n $N --temp 0 --no-display-prompt -v \
             > out/ab_${TAG}_${leg}_r$rep.raw 2> out/ab_${TAG}_${leg}_r$rep.err
         RC=$?
         GEN=$(tr '\r' '\n' < out/ab_${TAG}_${leg}_r$rep.raw | grep -E "Generation:" | tail -1)
@@ -51,7 +53,9 @@ while [ "$rep" -le "$REPS" ]; do
         # The table is re-dumped on every graph; take the LAST dump's rows, not the first.
         IDL=$(grep "op=ENQ_IDLE" out/ab_${TAG}_${leg}_r$rep.err | tail -1)
         DRV=$(grep "op=ENQ_DRV" out/ab_${TAG}_${leg}_r$rep.err | tail -1)
-        PRF=$(grep "op=PRE_FORWARD" out/ab_${TAG}_${leg}_r$rep.err | tail -1)
+        # The row is named "ENQ/PRE_FORWARD" (the dark zone) — matching "op=PRE_FORWARD" never hit
+        # it, so the dark-zone column of the A/B table silently stayed empty. Keep the full name.
+        PRF=$(grep "op=ENQ/PRE_FORWARD" out/ab_${TAG}_${leg}_r$rep.err | tail -1)
         TOT=$(grep "op=TOTAL\|TOTAL host_ms" out/ab_${TAG}_${leg}_r$rep.err | tail -1)
         echo "#### IDLEAB_RESULT rep=$rep leg=$leg rc=$RC | $GEN | txt=$TXT"
         echo "#### IDLEAB_HT   rep=$rep leg=$leg $HT"
