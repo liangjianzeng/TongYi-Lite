@@ -83,6 +83,14 @@ run_drift () {
   echo "#### DRIFT_HEALTH=$(grep -ac 'health=1' $R/out/${TAG}_drift.txt)/$N"
 }
 
+g60_arm () {
+  # [R-069] 十代终闸三连腿(g60/g60q/d60)各自自武装：cp fail-closed + 红卡，禁依赖前腿残留态(R-067 教训)
+  mkdir -p $R/stage_1030
+  cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
+  G60M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
+  if [ "$G60M" != "2695a8be" ]; then echo "#### G60_REDCARD lib=$G60M want=2695a8be"; exit 3; fi
+}
+
 case "$1" in
   e4a) # diag 库 async NPRED=16：复现乱码 + 采 E4 统计（预期 health=0，tok≠金标准）
     run_leg e4a_async "" 16 "TYL_E4=1"
@@ -273,19 +281,18 @@ case "$1" in
   g50) # R-066 升级：边界补测 IDLE=3 用 drift-20 判据级（单腿统计力不足，密度定律皆 20 连定案）
     run_drift e4d_g50 "" 16 "GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0" "" 20
     ;;
-  g60) # R-060/R-065 产品化终闸：十代 2695a8be 无 env 部署（出厂档=d49 认证形：IDLE=2 GAP=0 + SKIP_MOE 逃逸口），预期 e19f0cb2+[IDLE] ticks>0
-    mkdir -p $R/stage_1030
-    cp $R/stage_1030/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0 || { echo "#### CP_FAIL stage_1030 missing"; exit 3; }
-    G60M=$(md5sum $R/bin/libggml-opencl.so.0.27.0 | cut -c1-8)
-    echo "#### g60_lib=$G60M"
-    if [ "$G60M" != "2695a8be" ]; then echo "#### G60_REDCARD lib!=2695a8be（stage_1030 未推送？拒跑防 NO-OP）"; exit 3; fi
+  g60) # R-060/065/069 十代出厂档终闸（自武装 g60_arm）
+    g60_arm
+    echo "#### g60_lib=2695a8be(armed)"
     run_leg e4d_g60 "" 16 ""
     echo "#### g60_idle=$(grep -a '^\[IDLE\]' $R/out/e4d_g60.err)"
     ;;
-  g60q) # 默认 ON 下 48tok 金标准复验（预期 e9b88e56）
+  g60q) # 默认 ON 下 48tok 金标准复验（预期 e9b88e56）——自武装
+    g60_arm
     run_leg e4d_g60q "" 48 ""
     ;;
-  d60) # 默认 ON drift-20 终验（过门=默认档定稿）
+  d60) # 默认 ON drift-20 终验（过门=默认档定稿）——自武装（R-069：禁裸跑）
+    g60_arm
     run_drift e4d_d60 "" 16 "" "" 20
     ;;
   d70) # R-066 旧债清偿：背书栈（driver=libRusticlOpenCL 8de7d05f 机载勿动）OPFLUSH=1 drift-20
