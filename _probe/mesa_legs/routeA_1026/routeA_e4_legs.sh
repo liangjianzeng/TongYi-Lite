@@ -289,6 +289,10 @@ case "$1" in
   d60) # 默认 ON drift-20 终验（过门=默认档定稿）
     run_drift e4d_d60 "" 16 "" "" 20
     ;;
+  d70) # R-066 旧债清偿：背书栈（driver=libRusticlOpenCL 8de7d05f 机载勿动）OPFLUSH=1 drift-20
+    #    判据非单一 md5——统计漂移分布对照金标准（R-034 降级项"从未观测漂移"的正式补测）
+    run_drift e4d_d70 "GGML_OPENCL_OPFLUSH=1" 16 "" "" 20
+    ;;
   kq0) # R-061 K40 跨代复现：qwen0.5b CPU 金标准腿（ngl=0）
     TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
     if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
