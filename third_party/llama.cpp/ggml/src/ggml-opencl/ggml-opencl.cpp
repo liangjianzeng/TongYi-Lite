@@ -9882,7 +9882,14 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
 // out by that A/B; graph splitting/CPU fallback ruled out by rej:*=0, churn_ms=0).
 static bool g_vkh_optime_on = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
 struct vkh_optime_rec { double ms = 0.0; long n = 0; long kern = 0; };
-static std::map<std::string, vkh_optime_rec> g_vkh_optime;
+// Deliberately heap-allocated and never freed: a static std::map would be destroyed
+// by its own .fini_array entry, which can run BEFORE the dump below, silently
+// emptying the table (that is why the first version printed nothing on device).
+static std::map<std::string, vkh_optime_rec> * g_vkh_optime_p = nullptr;
+static std::map<std::string, vkh_optime_rec> & vkh_optime_map() {
+    if (g_vkh_optime_p == nullptr) { g_vkh_optime_p = new std::map<std::string, vkh_optime_rec>(); }
+    return *g_vkh_optime_p;
+}
 struct vkh_op_timer {
     const char * op; int * enq; double t0; long e0; bool on;
     explicit vkh_op_timer(const char * o, int * e) : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on) {
@@ -9890,18 +9897,24 @@ struct vkh_op_timer {
     }
     ~vkh_op_timer() {
         if (!on) { return; }
-        vkh_optime_rec & r = g_vkh_optime[op];
+        static bool armed_printed = false;
+        if (!armed_printed) { armed_printed = true; fprintf(stderr, "[vkh-optime] ARMED (first node timed)\n"); fflush(stderr); }
+        vkh_optime_rec & r = vkh_optime_map()[op];
         r.ms += ((double)clock() / CLOCKS_PER_SEC - t0) * 1e3;
         r.n++;
         r.kern += *enq - e0;
     }
 };
 static void vkh_optime_dump() {
-    if (!g_vkh_optime_on || g_vkh_optime.empty()) { return; }
+    if (!g_vkh_optime_on) { return; }
+    fprintf(stderr, "[vkh-optime] DUMP called (on=1 table=%p n=%zu)\n", (void *) g_vkh_optime_p,
+            g_vkh_optime_p ? g_vkh_optime_p->size() : (size_t) 0);
+    if (g_vkh_optime_p == nullptr || g_vkh_optime_p->empty()) { fflush(stderr); return; }
+    std::map<std::string, vkh_optime_rec> & tbl = *g_vkh_optime_p;
     std::vector<const std::pair<const std::string, vkh_optime_rec> *> rest;
-    rest.reserve(g_vkh_optime.size());
+    rest.reserve(tbl.size());
     double total = 0.0; long tot_n = 0, tot_k = 0;
-    for (const std::pair<const std::string, vkh_optime_rec> & kv : g_vkh_optime) {
+    for (const std::pair<const std::string, vkh_optime_rec> & kv : tbl) {
         rest.push_back(&kv); total += kv.second.ms; tot_n += kv.second.n; tot_k += kv.second.kern;
     }
     fprintf(stderr, "[vkh-optime] TOTAL host_ms=%.1f nodes=%ld kernels=%ld ms/kernel=%.3f op_classes=%zu\n",
@@ -10289,6 +10302,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f add4=%ld scanADD=%ld rej:sg=%ld dt=%ld conn=%ld ctg=%ld shp=%ld ovl=%ld\n",
                       cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms, g_add4_fired, g_scan_add_seen,
                       g_rej_subgraph, g_rej_dtype, g_rej_conn, g_rej_contig, g_rej_shape, g_rej_overlap);
+        if (g_vkh_optime_on) { vkh_optime_dump(); }   // [vkh] also dump here: never trust .fini_array ordering
         g_add4_fired = 0; g_scan_add_seen = 0;
         g_rej_subgraph = 0; g_rej_dtype = 0; g_rej_conn = 0; g_rej_contig = 0; g_rej_shape = 0; g_rej_overlap = 0;
         backend_ctx->n_enqueues = 0;
