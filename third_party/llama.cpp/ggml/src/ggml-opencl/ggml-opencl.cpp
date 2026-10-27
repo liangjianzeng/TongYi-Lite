@@ -103,6 +103,7 @@ static cl_int ht_cl_set_kernel_arg(cl_kernel kernel, cl_uint arg_index, size_t a
 #include <fstream>
 #include <vector>
 #include <atomic>
+static void tyl_idle_report_bind(std::atomic<unsigned long> * c);   // [R-060] fwd
 #include <string>
 #include <cmath>
 #include <map>
@@ -1447,11 +1448,15 @@ struct ggml_backend_opencl_context {
         // [TongYi-Lite 2026-10-27 R-057] NDRANGE_IDLE：疗效机制审判——H2′ 治愈因子若=
         // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
         // 后 finish+sleep 应以近零税复现治愈。IDLE=0 关=零扰动；GAP 默认 2000us。
-        static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 0; }();
+        // [R-060 产品化候选] 默认 2=已双验治愈档（g49/d49 20/20）；显式 GGML_OPENCL_NDRANGE_IDLE=0 逃生。
+        static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 2; }();
         static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 2000; }();
         static thread_local long idle_ctr = 0;
         if (idle_n > 0 && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {
             idle_ctr = 0;
+            static std::atomic<unsigned long> g_idle_ticks{0};
+            g_idle_ticks.fetch_add(1, std::memory_order_relaxed);
+            tyl_idle_report_bind(&g_idle_ticks);
             clFinish(queue);
             struct timespec its; its.tv_sec = idle_gap / 1000000; its.tv_nsec = (idle_gap % 1000000) * 1000;
             nanosleep(&its, nullptr);
@@ -8721,6 +8726,15 @@ static void tyl_wbw_after_write(cl_command_queue q, size_t size) {   // POST 模
 }
 static void tyl_wbw_dtor() __attribute__((destructor));
 static void tyl_wbw_dtor() { if (g_wbw_waits) fprintf(stderr, "[WBW] waits=%lu bytes=%llu\n", g_wbw_waits, g_wbw_bytes); }
+static std::atomic<unsigned long> * g_idle_counter = nullptr;   // [R-060] NDRANGE_IDLE 自证
+static void tyl_idle_report_bind(std::atomic<unsigned long> * c) { if (!g_idle_counter) g_idle_counter = c; }
+static void tyl_idle_dtor() __attribute__((destructor));
+static void tyl_idle_dtor() {
+    if (g_idle_counter) {
+        unsigned long n = g_idle_counter->load(std::memory_order_relaxed);
+        if (n) fprintf(stderr, "[IDLE] ticks=%lu\n", n);
+    }
+}
 
 static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     auto * backend_ctx = static_cast<ggml_backend_opencl_context *>(backend->context);
