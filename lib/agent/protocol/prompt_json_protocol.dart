@@ -22,6 +22,13 @@ import 'tool_protocol.dart';
 class PromptJsonProtocol implements ToolProtocol {
   static const String kId = 'prompt-json';
 
+  /// 精简档渲染（见 `agent_tier.dart`）：true 时工具清单压成"一行一名 +
+  /// 描述首句"，并省掉 [沙箱说明] 段。只影响呈现，不影响解析侧。
+  /// 默认 false = 与旧版逐字节一致。
+  final bool compact;
+
+  const PromptJsonProtocol({this.compact = false});
+
   /// 协议指令（模型看到的部分）：XML 格式（贴近端侧模型训练分布）。
   static const String kProtocolInstruction =
       '当你要调用工具时，输出以下 XML 格式（不要任何多余文字、不要思考过程、'
@@ -88,12 +95,18 @@ class PromptJsonProtocol implements ToolProtocol {
       // 而非完整 JSON Schema（小模型更易理解）。
       // 关键：列出必填参数名（对照 DSH 的 schema 呈现），
       // 让模型知道带参数工具必须给出哪些参数——根治「只调工具不带参数」。
-      lines.add('- ${tool.name}: ${tool.description}${_requiredParamsHint(tool)}');
+      // 精简档只留描述首句（python_exec 295 字/shell_exec 273 字这类长描述
+      // 是 tiny 档 prefill 的大头，且 tiny 模型并不会因为描述更细就填对参数）。
+      final desc =
+          compact ? _briefDescription(tool.description) : tool.description;
+      lines.add('- ${tool.name}: $desc${_requiredParamsHint(tool)}');
     }
 
     // 沙箱升级说明（对照 DSH bashDescription）：带升级能力的工具默认在
     // workspace 沙盒内运行；确需完整文件系统访问时请求用户批准。
-    if (tools.any(_hasEscalation)) {
+    // 精简档不注入：能触发升级的只有 python/shell/文件类工具，它们已被
+    // 精简档工具白名单挡在门外，留着纯属白烧 token。
+    if (!compact && tools.any(_hasEscalation)) {
       lines.add('');
       lines.add('[沙箱说明]');
       lines.add('文件/命令类工具默认在 app workspace 沙盒内运行，'
@@ -443,6 +456,26 @@ class PromptJsonProtocol implements ToolProtocol {
   bool _hasEscalation(ToolDefinition tool) {
     final props = tool.parameters['properties'];
     return props is Map && props['sandbox_permissions'] != null;
+  }
+
+  /// 精简档描述压缩：只留描述首句（按换行/。/；/括号断句，保底 12 字不被切没，
+  /// 上限 48 字）。必填参数标注由 [_requiredParamsHint] 单独追加，不受瘦身影响
+  /// ——「参数填不全」是端侧头号失败模式，宁可砍描述也不砍必填提示。
+  static const int _kBriefDescriptionMaxChars = 48;
+
+  String _briefDescription(String description) {
+    var s = description.trim();
+    final nl = s.indexOf('\n');
+    if (nl > 0) s = s.substring(0, nl);
+    for (final sep in const ['。', '；', ';', '（必填', '（注意', '(必填']) {
+      final i = s.indexOf(sep);
+      if (i >= 12) s = s.substring(0, i);
+    }
+    s = s.trim();
+    if (s.length > _kBriefDescriptionMaxChars) {
+      s = s.substring(0, _kBriefDescriptionMaxChars).trim();
+    }
+    return s.isEmpty ? description.trim() : s;
   }
 
   /// 生成必填参数提示（对照 DSH schema 呈现）：`（必填: command: string）`。

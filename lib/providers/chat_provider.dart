@@ -24,6 +24,8 @@ import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/capability.dart';
+import '../agent/agent_tier.dart';
+import '../models/model_catalog.dart' show ModelCatalog;
 import '../agent/llm/adapter.dart'
     show LlmAdapter, ProviderKind, GenerateOptions;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
@@ -1286,8 +1288,40 @@ class ChatNotifier extends StateNotifier<bool> {
       }
     }
 
+    // ---- 提示词档位（2026-10-27 K90 真机定案）----
+    // API 档保持现状（full，逐字节不变）；本地小模型走精简档：短纪律 +
+    // 工具白名单 + 不注入技能目录/AGENTS.md。真机教训：Ling-3.0-tiny 在
+    // 4580 token 系统提示下整回合不调工具、编造「已查询到天气/文件已保存」。
+    // 判不准（目录里没有该模型、大小未知）时保守走 full —— 宁可不瘦，
+    // 也不悄悄改坏大模型的表现。
+    int? agentModelSizeBytes;
+    if (!useApi) {
+      try {
+        for (final c in await ModelCatalog.load()) {
+          if (c.id == targetModelId) {
+            agentModelSizeBytes = c.sizeBytes;
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+    final promptTier = resolveAgentPromptTier(
+      modelId: agentModelKey,
+      useApi: useApi,
+      mode: settings.agentPromptTierMode,
+      sizeBytes: agentModelSizeBytes,
+    );
+    final compactPrompt = promptTier == AgentPromptTier.compact;
+
     final registry = _buildAgentRegistry(settings, agentModelKey,
         conversationId: conversationId);
+    // 精简档工具白名单：用户没为该模型显式配过工具时才自动收窄
+    // （配过 = 尊重用户选择，不越权改写）。收窄后 python/shell/run_code
+    // 这类"把 tiny 带成假装在 Linux 干活"的重型工具既不进提示也调不到。
+    if (compactPrompt && settings.agentToolsFor(agentModelKey).isEmpty) {
+      registry.restrictModel(agentModelKey,
+          allow: kAgentCompactCoreTools.toSet());
+    }
     // P2-B MCP：远程 server 工具注册（仅 API 档；enabled 逐个拉取，
     // 失败 server 静默跳过不阻断回合）。注册在计划模式收窄之前，
     // 只读 MCP 工具可进计划模式白名单。
@@ -1319,7 +1353,8 @@ class ChatNotifier extends StateNotifier<bool> {
     // - load_skill：本地档此前"省 prefill 不开"导致技能目录可见却拿不到
     //   正文（技能=装饰品）；工具定义 prefill 成本远小于技能失效。
     // - save_skill：模型自主沉淀可复用流程（对话内创建，即时生效）。
-    if (skillProvider.count > 0) {
+    // 精简档例外（2026-10-27）：目录本身就不注入，双工具留着只是白烧 prefill。
+    if (!compactPrompt && skillProvider.count > 0) {
       registry.register(createLoadSkillTool(skillProvider));
       registry.register(createSaveSkillTool(skillProvider));
     }
@@ -1405,9 +1440,15 @@ class ChatNotifier extends StateNotifier<bool> {
 
     // 能力快照（Phase 3）：API 声明原生工具调用 → selectProtocol 选出
     // NativeToolProtocol（tools 进请求体）；本地走 prompt-json 文本协议。
-    final caps = _engineCapabilitiesFor(agentModelKey, activeApi);
-    final protocol =
-        selectProtocol([NativeToolProtocol(), PromptJsonProtocol()], caps);
+    final capsBase = _engineCapabilitiesFor(agentModelKey, activeApi);
+    // 精简档：一步只发一个工具调用（tiny 同时吐两个调用块基本必解析失败），
+    // 并把工具清单渲染切成"一行一名 + 描述首句"。
+    final caps = compactPrompt
+        ? capsBase.copyWith(maxParallelToolCalls: 1)
+        : capsBase;
+    final protocol = selectProtocol(
+        [NativeToolProtocol(), PromptJsonProtocol(compact: compactPrompt)],
+        caps);
     // 激活人格（标准 = null，行为不变）；注入系统提示词身份段与人设段。
     final persona = settings.activePersona();
     var systemPrompt = buildSystemPrompt(
@@ -1420,6 +1461,8 @@ class ChatNotifier extends StateNotifier<bool> {
       // 任务执行纪律段（P2-A2）：仅 API 档——local 档系统提示必须逐字节
       // 稳定保 KV 前缀复用（与环境快照同一取舍）。
       taskDiscipline: useApi,
+      // 档位：full 与旧版逐字节一致；compact 是本地小模型精简档。
+      tier: promptTier,
     );
     // P1-A 计划模式系统段：只读规划纪律（exit_plan 前不动任何修改类操作）。
     if (planMode) {
@@ -1736,8 +1779,10 @@ class ChatNotifier extends StateNotifier<bool> {
       // Phase 6：pre-execute `ask` → 审批确认框（ApprovalDialog）。
       preApprover: _ref.read(toolPreApproverProvider),
       hooks: hooks,
-      skills: skillProvider,
-      agentsMd: agentsMdText,
+      // 精简档（本地小模型）不注入技能目录与 AGENTS.md：两者都是常驻
+      // prefill，tiny 模型从中得到的收益为负（实测：注入即答非所问）。
+      skills: compactPrompt ? null : skillProvider,
+      agentsMd: compactPrompt ? null : agentsMdText,
       // 环境快照（当前时间）：仅 API 档。P1-C 改为**尾部注入**形态——
       // provider 每 step 取一次，内容变化才以尾部 user 消息追加；系统提示
       // 逐字节稳定，API prompt cache 不再因时间快照每回合全段破缓存。
@@ -1760,6 +1805,25 @@ class ChatNotifier extends StateNotifier<bool> {
       '智能体请求 | ${useApi ? "API(${activeApi?.name})" : "本地($targetModelId)"} '
       '事件数=${sessionLog.eventsCount}',
     );
+    // 提示词体量可观测（2026-10-27 K90 事故复盘）：此前系统提示无声涨到
+    // 19507 字符（4580 token）没人看得见，tiny 模型直接答非所问。现在每
+    // 回合把"档位 + 字符数 + 工具数 + 技能/AGENTS.md 开关"打进推理日志。
+    final mdLen = (agentsMdText ?? '').trim().length;
+    logManager.appendInferenceLog(
+      '智能体提示词 | 档位=${compactPrompt ? "精简" : "完整"}'
+      ' | 系统提示 ${systemPrompt.length} 字符'
+      ' | 工具 ${registry.visibleFor(agentModelKey).length}'
+      ' | 技能=${compactPrompt ? "关" : skillProvider.count}'
+      ' | AGENTS.md=${compactPrompt ? "关" : (mdLen == 0 ? "无" : "$mdLen 字")}',
+    );
+    if (compactPrompt &&
+        systemPrompt.length > kAgentPromptCompactBudgetChars) {
+      logManager.appendInferenceLog(
+        '⚠️ 精简档系统提示 ${systemPrompt.length} 字符，已超预算 '
+        '${kAgentPromptCompactBudgetChars}——小模型会重新滑向答非所问，'
+        '请检查人格设定/工具白名单/技能与 AGENTS.md 是否被手动打开',
+      );
+    }
     try {
       reason = await agent.kick(
         effectivePrompt,

@@ -5,6 +5,7 @@
 /// 此处先做最简拼接。
 library;
 
+import 'agent_tier.dart';
 import 'protocol/tool_protocol.dart';
 import 'tool_registry.dart';
 
@@ -19,6 +20,10 @@ import 'tool_registry.dart';
 /// [taskDiscipline] 任务执行纪律段（P2-A2，对照 DSH goal/wrapup grounding）：
 /// 规划→推进→验证→诚实汇报→停止 五条纪律。仅 API 档开启——local 档
 /// 系统提示必须逐字节稳定（KV 前缀复用）。
+/// [tier] 提示词档位（见 `agent_tier.dart`）：[AgentPromptTier.full] 与旧版
+/// **逐字节一致**（API 档与大模型保持现状）；[AgentPromptTier.compact] 是本地
+/// 小模型精简档——短身份 + 4 条工具纪律 + 精简工具清单，砍掉的是 tiny 模型
+/// 根本遵循不动、却吃掉 4k+ token prefill 的长篇纪律。
 ///
 /// 环境快照（当前时间）不在这里注入——由 ReactLoopAgent 构造器追加到
 /// 系统提示**最末**（skills/AGENTS.md 之后），保证稳定前缀在前。
@@ -30,7 +35,9 @@ String buildSystemPrompt({
   String? personaName,
   String? personaPrompt,
   bool taskDiscipline = false,
+  AgentPromptTier tier = AgentPromptTier.full,
 }) {
+  final compact = tier == AgentPromptTier.compact;
   final toolSection = protocol.buildToolSection(registry, modelId: modelId);
   final hasPersona = personaName != null && personaName.trim().isNotEmpty;
   final identity = hasPersona
@@ -39,6 +46,29 @@ String buildSystemPrompt({
       : '你是 TongYi-Lite 智能体，由 $modelName 模型驱动。'
           '你能调用工具获取真实信息或精确计算结果。';
   final personaSection = (personaPrompt ?? '').trim();
+  if (compact) {
+    // 精简档：tiny 模型（如 Ling-3.0-tiny，1.3B 激活）的实测教训是
+    // 「纪律越长越不听话」——11 条纪律把它推进"假装在干活"的分布，
+    // 编出「已查询到天气」「文件已保存 /home/user/go.py」。只留四条命门：
+    // 必须真调工具不许编造、严格按协议格式、必填参数填全、能直接答就直接答。
+    final compactIdentity = hasPersona
+        ? '你是「${personaName!.trim()}」——TongYi-Lite 智能体，由 $modelName 驱动，'
+            '能用工具拿到真实结果。'
+        : '你是 TongYi-Lite 智能体，由 $modelName 驱动，能用工具拿到真实结果。';
+    return <String>[
+      compactIdentity,
+      if (personaSection.isNotEmpty) '【人格设定】\n$personaSection',
+      '【工具调用规则】\n'
+      '1. 需要实时信息（时间/天气/搜索）、算术、单位换算、待办/便签/记忆、'
+      '读写文件时，必须先调用工具，拿到真实结果再回答；'
+      '绝不编造结果，也绝不假装已经执行。\n'
+      '2. 要调用工具时，只按下方【工具调用协议】输出一个工具调用块，'
+      '不要写多余文字。\n'
+      '3. 必填参数（清单里已标注）一次填全；信息不足就先问用户，不要猜。\n'
+      '4. 不需要工具时，直接简短回答用户。',
+      if (toolSection.isNotEmpty) toolSection,
+    ].join('\n\n');
+  }
   final sections = <String>[
     // 身份段：明确「工具型智能体」定位；自定义人格时以人格自称开头。
     identity,

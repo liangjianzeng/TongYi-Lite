@@ -1,0 +1,726 @@
+R"(#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+)"
+R"(
+)"
+R"(//------------------------------------------------------------------------------
+)"
+R"(// cpy
+)"
+R"(//------------------------------------------------------------------------------
+)"
+R"(
+)"
+R"(kernel void kernel_cpy_f16_f16(
+)"
+R"(        global half * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global half * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global half*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global half*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global half * dst_data = (global half *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global const half * src = (global half *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(kernel void kernel_cpy_f16_f32(
+)"
+R"(        global half * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global float * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(
+)"
+R"(    src0 = (global half*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global float*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global float * dst_data = (global float *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global half * src = (global half *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(kernel void kernel_cpy_f32_f16(
+)"
+R"(        global float * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global half * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global float*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global half*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global half * dst_data = (global half *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global const float * src = (global float *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(kernel void kernel_cpy_f32_f32(
+)"
+R"(        global float * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global float * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global float*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global float*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global float * dst_data = (global float *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global const float * src = (global float *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(#ifndef GGML_CL_NO_CPY_PACK
+)"
+R"(kernel void kernel_cpy_f32_f32_pack(
+)"
+R"(        global float * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global float * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global float*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global float*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int lsz = get_local_size(0);
+)"
+R"(    int tpr = min(ne00, lsz);          // threads per row
+)"
+R"(    int rpw = lsz / tpr;               // rows per workgroup
+)"
+R"(    int lid = get_local_id(0);
+)"
+R"(    int row = get_group_id(0)*rpw + lid / tpr;
+)"
+R"(    int lane = lid - (lid / tpr) * tpr;
+)"
+R"(
+)"
+R"(    int nrows = ne01*ne02*ne03;
+)"
+R"(    if (row >= nrows) {
+)"
+R"(        return;
+)"
+R"(    }
+)"
+R"(
+)"
+R"(    int i01 = row % ne01;
+)"
+R"(    int t   = row / ne01;
+)"
+R"(    int i02 = t % ne02;
+)"
+R"(    int i03 = t / ne02;
+)"
+R"(
+)"
+R"(    // linear index of the first element of this row, unflattened over dst dims
+)"
+R"(    long n  = (long)row * ne00;
+)"
+R"(    int i3  = (int)(n / ((long)ne2*ne1*ne0));
+)"
+R"(    long rm = n - (long)i3*ne2*ne1*ne0;
+)"
+R"(    int i2  = (int)(rm / ((long)ne1*ne0));
+)"
+R"(    rm     -= (long)i2*ne1*ne0;
+)"
+R"(    int i1  = (int)(rm / ne0);
+)"
+R"(    int i0  = (int)(rm - (long)i1*ne0);
+)"
+R"(
+)"
+R"(    global float * dst_data = (global float *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = lane; i00 < ne00; i00 += tpr) {
+)"
+R"(        global const float * src = (global float *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(#endif // GGML_CL_NO_CPY_PACK
+)"
+R"(
+)"
+R"(kernel void kernel_cpy_i32_i32(
+)"
+R"(        global int * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global int * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global int*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global int*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global int * dst_data = (global int *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global const int * src = (global int *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(
+)"
+R"(        dst_data[i00] = src[0];
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(// Contiguous f32 copy, one work item per float4 over the whole tensor. The kernels above map
+)"
+R"(// one workgroup to each row, which leaves a tensor with few long rows on a single compute unit.
+)"
+R"(// vload4/vstore4 rather than a float4 cast: these buffers carry an arbitrary 4-byte view offset.
+)"
+R"(kernel void kernel_cpy_f32_f32_flat(
+)"
+R"(        global float * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global float * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        ulong ne,
+)"
+R"(        ulong n4
+)"
+R"() {
+)"
+R"(    src0 = (global float*)((global char*)src0 + offset0);
+)"
+R"(    dst  = (global float*)((global char*)dst  + offsetd);
+)"
+R"(
+)"
+R"(    const ulong i = get_global_id(0);
+)"
+R"(
+)"
+R"(    if (i < n4) {
+)"
+R"(        vstore4(vload4(i, src0), i, dst);
+)"
+R"(    } else if (i == n4) {
+)"
+R"(        for (ulong t = n4 * 4; t < ne; ++t) {
+)"
+R"(            dst[t] = src0[t];
+)"
+R"(        }
+)"
+R"(    }
+)"
+R"(}
+)"
+R"(
+)"
+R"(// [tongyi M-R1 2026-10-25] f32 -> i32 numeric cast (ggml_cast wiring for the
+)"
+R"(// fused MoE router ids plane). Matches the CPU f32_to_i32 semantics
+)"
+R"(// (common.h: x -> (int32_t) x, truncation); exact for integral float values.
+)"
+R"(kernel void kernel_cpy_f32_i32(
+)"
+R"(        global float * src0,
+)"
+R"(        ulong offset0,
+)"
+R"(        global int * dst,
+)"
+R"(        ulong offsetd,
+)"
+R"(        int ne00,
+)"
+R"(        int ne01,
+)"
+R"(        int ne02,
+)"
+R"(        int ne03,
+)"
+R"(        ulong nb00,
+)"
+R"(        ulong nb01,
+)"
+R"(        ulong nb02,
+)"
+R"(        ulong nb03,
+)"
+R"(        int ne0,
+)"
+R"(        int ne1,
+)"
+R"(        int ne2,
+)"
+R"(        int ne3,
+)"
+R"(        ulong nb0,
+)"
+R"(        ulong nb1,
+)"
+R"(        ulong nb2,
+)"
+R"(        ulong nb3
+)"
+R"() {
+)"
+R"(    src0 = (global float*)((global char*)src0 + offset0);
+)"
+R"(    dst = (global int*)((global char*)dst + offsetd);
+)"
+R"(
+)"
+R"(    int i03 = get_group_id(2);
+)"
+R"(    int i02 = get_group_id(1);
+)"
+R"(    int i01 = get_group_id(0);
+)"
+R"(
+)"
+R"(    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
+)"
+R"(
+)"
+R"(    int i3 = n / (ne2*ne1*ne0);
+)"
+R"(    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
+)"
+R"(    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
+)"
+R"(    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
+)"
+R"(
+)"
+R"(    global int * dst_data = (global int *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
+)"
+R"(
+)"
+R"(    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+)"
+R"(        global const float * src = (global float *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
+)"
+R"(
+)"
+R"(        dst_data[i00] = (int) src[0];
+)"
+R"(    }
+)"
+R"(}
+)"

@@ -2,27 +2,39 @@
  "cases": {
   "p1_cn_classic": {
    "tok_md5": "c89ba51f0e5b339c85cdea7ece4eb63e",
-   "bytes": 160
+   "bytes": 160,
+   "lgf_md5": "19cc42e8b88fe3aa856d4bbf18b602a7",
+   "lgf_bytes": 20055552
   },
   "p2_en_whyblue": {
    "tok_md5": "5700b4b030a70674178fd07384462c81",
-   "bytes": 263
+   "bytes": 263,
+   "lgf_md5": "382e5b11c929922cd7c5c3cfdca37ac6",
+   "lgf_bytes": 29779456
   },
   "p3_math_17x23": {
    "tok_md5": "209cdbad84c4f767d1453099d3a21f41",
-   "bytes": 74
+   "bytes": 74,
+   "lgf_md5": "b9f5da008deee65bad1d2ee278f718b8",
+   "lgf_bytes": 20055552
   },
   "p4_code_fib": {
    "tok_md5": "a7a29bad4cc5cb97b59a22f87bf4f563",
-   "bytes": 181
+   "bytes": 181,
+   "lgf_md5": "1a1b9bae366c4d96127cb972a03037bd",
+   "lgf_bytes": 29779456
   },
   "p5_poetry": {
    "tok_md5": "29961740152522d66de6e775b0455649",
-   "bytes": 147
+   "bytes": 147,
+   "lgf_md5": "5ac446545881b3974da775e98e5ba9fc",
+   "lgf_bytes": 20055552
   },
   "p6_greatwall": {
    "tok_md5": "7c6869797461da7998194b751a6d74e9",
-   "bytes": 255
+   "bytes": 255,
+   "lgf_md5": "c89c25c828cb1b5fb7cd1116f15a116e",
+   "lgf_bytes": 39503360
   }
  },
  "driver_ok": [

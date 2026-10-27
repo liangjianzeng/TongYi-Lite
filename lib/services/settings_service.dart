@@ -250,6 +250,12 @@ class InferenceSettings {
   final String agentCompressionApiModelId;
 
   /// 上下文超限自动压缩（默认开；关闭后超限直接报错终止）??
+  /// 智能体提示词档位（2026-10-27 K90 真机定案）：'auto' = API 恒完整档、本地按
+  /// 模型 id/文件大小自动判精简档；'compact' = 强制精简；'full' = 强制完整。
+  /// 精简档只给本地小模型瘦身系统提示（实测 Ling-3.0-tiny 在 4580 token 系统提示
+  /// 下整回合不调工具、编造「已查询到天气」）；API 档恒完整，不受此项影响。
+  final String agentPromptTierMode;
+
   final bool agentCompactEnabled;
 
   /// 超长工具输出溢写落盘（默认开；模型侧只留摘要与文件定位）??
@@ -520,6 +526,7 @@ class InferenceSettings {
     this.agentSubagentEnabled = true,
     this.agentSubagentApiModelId = '',
     this.agentCompressionApiModelId = '',
+    this.agentPromptTierMode = 'auto',
     this.agentCompactEnabled = true,
     this.agentSpillEnabled = true,
     this.edgeTtsEnabled = false,
@@ -714,6 +721,7 @@ class InferenceSettings {
     bool? agentSubagentEnabled,
     String? agentSubagentApiModelId,
     String? agentCompressionApiModelId,
+    String? agentPromptTierMode,
     bool? agentCompactEnabled,
     bool? agentSpillEnabled,
     bool? edgeTtsEnabled,
@@ -834,6 +842,7 @@ class InferenceSettings {
           agentSubagentApiModelId ?? this.agentSubagentApiModelId,
       agentCompressionApiModelId:
           agentCompressionApiModelId ?? this.agentCompressionApiModelId,
+      agentPromptTierMode: agentPromptTierMode ?? this.agentPromptTierMode,
       agentCompactEnabled: agentCompactEnabled ?? this.agentCompactEnabled,
       agentSpillEnabled: agentSpillEnabled ?? this.agentSpillEnabled,
       edgeTtsEnabled: edgeTtsEnabled ?? this.edgeTtsEnabled,
@@ -955,6 +964,7 @@ class InferenceSettings {
         'agentSubagentEnabled': agentSubagentEnabled,
         'agentSubagentApiModelId': agentSubagentApiModelId,
         'agentCompressionApiModelId': agentCompressionApiModelId,
+        'agentPromptTierMode': agentPromptTierMode,
         'agentCompactEnabled': agentCompactEnabled,
         'agentSpillEnabled': agentSpillEnabled,
         'edgeTtsEnabled': edgeTtsEnabled,
@@ -1115,6 +1125,10 @@ class InferenceSettings {
       agentSubagentApiModelId: json['agentSubagentApiModelId'] as String? ?? '',
       agentCompressionApiModelId:
           json['agentCompressionApiModelId'] as String? ?? '',
+      agentPromptTierMode: const ['auto', 'compact', 'full']
+              .contains(json['agentPromptTierMode'])
+          ? json['agentPromptTierMode'] as String
+          : 'auto',
       agentCompactEnabled: json['agentCompactEnabled'] as bool? ?? true,
       agentSpillEnabled: json['agentSpillEnabled'] as bool? ?? true,
       edgeTtsEnabled: json['edgeTtsEnabled'] as bool? ?? false,

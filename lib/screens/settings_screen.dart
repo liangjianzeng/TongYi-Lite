@@ -2624,6 +2624,8 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
                                   ok: settings.agentSubagentEnabled),
                             ],
                           ),
+                          const SizedBox(height: 12),
+                          _buildPromptTierRow(settings, notifier, isApi: isApi),
                         ],
                       ),
                     ),
@@ -3222,6 +3224,51 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
   // ---------------- 小部件 ----------------
 
   /// 能力徽标：绿=支持/开，灰=关或不可用。
+  /// 智能体提示词档位（2026-10-27 K90 真机定案）。
+  ///
+  /// 精简档是给**本地小模型**的：短身份 + 4 条工具纪律 + 核心工具白名单，
+  /// 技能目录与 AGENTS.md 不再常驻 prefill。真机（K90/Adreno 830 +
+  /// Ling-3.0-tiny Q4_0 OpenCL）实测：完整档系统提示 19507 字符 / 4580 token
+  /// 时，tiny 模型整回合不调工具却输出「已查询到当前天气」「文件已保存
+  /// /home/user/go.py」——答非所问的根因是提示词体量，不是后端。
+  /// API 档恒为完整档（大模型扛得住完整纪律，瘦身反降工具遵循率）。
+  Widget _buildPromptTierRow(InferenceSettings settings,
+      SettingsNotifier notifier, {required bool isApi}) {
+    const labels = {'auto': '自动（推荐）', 'compact': '精简', 'full': '完整'};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('提示词档位', style: TextStyle(fontSize: 13)),
+        const SizedBox(height: 2),
+        Text(
+          isApi
+              ? 'API 档恒用完整提示词（11 条工具纪律 + 任务执行纪律 + 全量工具'
+                  '清单 + 技能目录），本项不影响 API。'
+              : '本地小模型（tiny / 2B 级）建议自动：系统提示只留短身份与 4 条'
+                  '工具纪律，工具收进核心白名单，技能目录与 AGENTS.md 不再常驻'
+                  '——实测完整档 4.5k token 会把 tiny 逼成「不调工具、编造已执行」。',
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final mode in const ['auto', 'compact', 'full'])
+              ChoiceChip(
+                label: Text(labels[mode]!),
+                selected: settings.agentPromptTierMode == mode,
+                onSelected: (_) async {
+                  await notifier.setAgentPromptTierMode(mode);
+                  if (mounted) setState(() {});
+                },
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _capChip(String label, {required bool ok}) {
     final color = ok ? Colors.teal : Colors.grey;
     return Container(

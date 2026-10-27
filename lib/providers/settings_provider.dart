@@ -580,6 +580,15 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   }
 
   /// 上下文超限自动压缩开关??
+  /// 智能体提示词档位（auto/compact/full）：auto = API 恒完整、本地按模型
+  /// id/大小自动判精简档（2026-10-27 K90 真机定案，见 agent_tier.dart）。
+  Future<void> setAgentPromptTierMode(String value) async {
+    state = state.copyWith(
+        agentPromptTierMode:
+            const ['auto', 'compact', 'full'].contains(value) ? value : 'auto');
+    await _persist();
+  }
+
   Future<void> setAgentCompactEnabled(bool value) async {
     state = state.copyWith(agentCompactEnabled: value);
     await _persist();

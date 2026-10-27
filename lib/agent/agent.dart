@@ -3,6 +3,7 @@ library;
 
 export 'tool_activity.dart';
 export 'agent_prompt.dart';
+export 'agent_tier.dart';
 export 'capability.dart';
 export 'sandbox.dart';
 export 'tool_definition.dart';
