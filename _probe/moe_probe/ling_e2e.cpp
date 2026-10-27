@@ -33,6 +33,10 @@ int main(int argc, char ** argv) {
     llama_context_params cp = llama_context_default_params();
     const int nctx = (argc > 6) ? atoi(argv[6]) : 1024;
     cp.n_ctx = nctx; cp.n_batch = nctx < 512 ? nctx : 512; (void)seed; // 贪心 argmax 与 seed 无关
+    // [tongyi 1027] E2E_NB: ubatch 覆盖（split-MoE in-place 的 prefill 唯一专家数控制：
+    // runtime 抛 "requires more than N unique experts in one graph; reduce ubatch"——
+    // 唯一专家数 ~ chunk × n_expert_used，chunk 即本值。默认不设=旧行为逐字节不变。）
+    { const char * e_nb = getenv("E2E_NB"); if (e_nb && e_nb[0]) { cp.n_batch = atoi(e_nb); fprintf(stderr, "[e2e] E2E_NB ubatch=%d\n", cp.n_batch); } }
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "CTX_FAIL\n"); return 4; }
 
