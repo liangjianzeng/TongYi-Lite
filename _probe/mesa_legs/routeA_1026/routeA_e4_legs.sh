@@ -350,6 +350,14 @@ case "$1" in
     timeout 900 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/Ling-3.0-tiny-Q4_0.gguf 32 20 42 256 > $R/out/kq6.tok 2> $R/out/kq6.err
     echo "#### kq6 rc=$? md5=$(md5sum $R/out/kq6.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq6.err | tail -1; grep -a '\[IDLE\]' $R/out/kq6.err
     ;;
+  kq7) # R-063 KERNEL_SYNC 纯形态跨代验证（IDLE=0 逃生+KERNEL_SYNC=1）——第三治愈 a650 复验
+    TEMP=$(dumpsys battery 2>/dev/null | grep -m1 temperature | tr -dc '0-9')
+    if [ "${TEMP:-0}" -gt 440 ]; then echo "#### ABORT_THERMAL $TEMP"; return 1 2>/dev/null || exit 1; fi
+    cp $R/stage_1029/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    export LD_LIBRARY_PATH=$LP OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl HOME=$R/tmp XDG_CACHE_HOME=$R/tmp
+    timeout 600 env GGML_OPENCL_SKIP_MOE_KERNELS=1 GGML_OPENCL_FAKE_QCOM_REQD=1 GGML_OPENCL_NDRANGE_IDLE=0 GGML_OPENCL_KERNEL_SYNC=1 $LOADER --library-path $LP $R/bin/ling_e2e /storage/emulated/0/TongYiLite/models/qwen2.5-0.5b-q4_k_m.gguf 32 99 42 > $R/out/kq7.tok 2> $R/out/kq7.err
+    echo "#### kq7 rc=$? md5=$(md5sum $R/out/kq7.tok | cut -c1-8)"; grep -a tok_s= $R/out/kq7.err | tail -1; grep -a '\[IDLE\]' $R/out/kq7.err
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
