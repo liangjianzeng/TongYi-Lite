@@ -114,6 +114,7 @@ static void tyl_idle_report_bind(std::atomic<unsigned long> * c);   // [R-060] f
 #include <set>
 #include <tuple>
 #include <unordered_set>
+#include "vkh_instrument.h"
 
 #undef MIN
 #undef MAX
@@ -9869,71 +9870,9 @@ static void ggml_opencl_op_rms_norm_mul_add_fused(ggml_backend_t backend, ggml_t
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 }
 
-// [vkh 2026-10-27 B-取证] Per-op host-side submit-cost histogram, to drive the last
-// nail on "who eats the decode submit loop": is the ~0.53 ms per launch the driver
-// doorbell itself, or some per-node action inside the submit loop?
-// GGML_OPENCL_VKH_OPTIME=1 to enable (default OFF; with it off the hook reads one
-// bool and returns, so behaviour and instruction flow are unchanged). Dumps the
-// op-class ranking at process exit.
-// Why it exists: measured 2026-10-27, one decode step of Qwen3.5-4B-Q4_K submits
-// 924-1000 kernels costing 0.524-0.533 ms of host CPU each, and that per-kernel
-// figure is the same with GGML_OPENCL_FUSE_MM_GLU on and off => the cost is uniform
-// per launch, not tied to any special site (clCreateImage/clCreateSubBuffer ruled
-// out by that A/B; graph splitting/CPU fallback ruled out by rej:*=0, churn_ms=0).
-static bool g_vkh_optime_on = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
-struct vkh_optime_rec { double ms = 0.0; long n = 0; long kern = 0; };
-// Deliberately heap-allocated and never freed: a static std::map would be destroyed
-// by its own .fini_array entry, which can run BEFORE the dump below, silently
-// emptying the table (that is why the first version printed nothing on device).
-static std::map<std::string, vkh_optime_rec> * g_vkh_optime_p = nullptr;
-static std::map<std::string, vkh_optime_rec> & vkh_optime_map() {
-    if (g_vkh_optime_p == nullptr) { g_vkh_optime_p = new std::map<std::string, vkh_optime_rec>(); }
-    return *g_vkh_optime_p;
-}
-struct vkh_op_timer {
-    const char * op; int * enq; double t0; long e0; bool on;
-    explicit vkh_op_timer(const char * o, int * e) : op(o), enq(e), t0(0.0), e0(0), on(g_vkh_optime_on) {
-        if (on) { t0 = (double)clock() / CLOCKS_PER_SEC; e0 = *enq; }
-    }
-    ~vkh_op_timer() {
-        if (!on) { return; }
-        static bool armed_printed = false;
-        if (!armed_printed) { armed_printed = true; fprintf(stderr, "[vkh-optime] ARMED (first node timed)\n"); fflush(stderr); }
-        vkh_optime_rec & r = vkh_optime_map()[op];
-        r.ms += ((double)clock() / CLOCKS_PER_SEC - t0) * 1e3;
-        r.n++;
-        r.kern += *enq - e0;
-    }
-};
-static void vkh_optime_dump() {
-    if (!g_vkh_optime_on) { return; }
-    fprintf(stderr, "[vkh-optime] DUMP called (on=1 table=%p n=%zu)\n", (void *) g_vkh_optime_p,
-            g_vkh_optime_p ? g_vkh_optime_p->size() : (size_t) 0);
-    if (g_vkh_optime_p == nullptr || g_vkh_optime_p->empty()) { fflush(stderr); return; }
-    std::map<std::string, vkh_optime_rec> & tbl = *g_vkh_optime_p;
-    std::vector<const std::pair<const std::string, vkh_optime_rec> *> rest;
-    rest.reserve(tbl.size());
-    double total = 0.0; long tot_n = 0, tot_k = 0;
-    for (const std::pair<const std::string, vkh_optime_rec> & kv : tbl) {
-        rest.push_back(&kv); total += kv.second.ms; tot_n += kv.second.n; tot_k += kv.second.kern;
-    }
-    fprintf(stderr, "[vkh-optime] TOTAL host_ms=%.1f nodes=%ld kernels=%ld ms/kernel=%.3f op_classes=%zu\n",
-            total, tot_n, tot_k, tot_k ? total / (double) tot_k : 0.0, rest.size());
-    for (size_t rank = 0; rank < rest.size(); rank++) {           // selection sort, no <algorithm>
-        size_t bi = rank;
-        for (size_t j = rank + 1; j < rest.size(); j++) { if (rest[j]->second.ms > rest[bi]->second.ms) { bi = j; } }
-        if (bi != rank) { const std::pair<const std::string, vkh_optime_rec> * t = rest[rank]; rest[rank] = rest[bi]; rest[bi] = t; }
-        const vkh_optime_rec & r = rest[rank]->second;
-        fprintf(stderr, "[vkh-optime] #%02zu op=%-24s host_ms=%9.1f nodes=%8ld kernels=%8ld ms/kernel=%7.3f ms/node=%7.3f\n",
-                rank + 1, rest[rank]->first.c_str(), r.ms, r.n, r.kern,
-                r.kern ? r.ms / (double) r.kern : 0.0, r.n ? r.ms / (double) r.n : 0.0);
-    }
-    fflush(stderr);
-}
-__attribute__((destructor)) static void vkh_optime_dtor(void) { vkh_optime_dump(); }
-
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    vkh_op_timer vkh_gt("GRAPH_TOTAL", nullptr);   // [vkh] whole graph_compute, host CPU
 
     // [tongyi 2026-10-25 host-timing] decode bottleneck adjudicator: process CPU time
     // of the submit loop (no sync waits) + kernel count. GGML_OPENCL_HOST_TIMING=1.
@@ -9945,6 +9884,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     if (host_timing_en) { backend_ctx->n_enqueues = 0; backend_ctx->ht_sub_ms = 0; }
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
+        vkh_op_timer vkh_lt("LOOP_TOTAL", &backend_ctx->n_enqueues);   // [vkh] per-node iteration incl. continue paths
         ggml_tensor * node = cgraph->nodes[i];
 
         // [dspark 2026-10-18] GGML_OPENCL_OPSYNC=1: clFinish before every node —
