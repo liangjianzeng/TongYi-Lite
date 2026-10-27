@@ -2,7 +2,7 @@
 # B 线·全载推进 740 腿 v3（R-084；用户钦定优先级）
 # B1 = ling tiny Q4_0 全载 ngl=99 ×3（同文性+tok/s+TRACE 核族普查）——patch79 Mesa 闸首验收
 # B2 = LFM2.5-24B-a2b in-place split-MoE（配方定案 bank=32/nb=16，R-083；阶梯复核驻留面）
-# 铁律：电池闸>440；bin= 自证 patch79=39a6524d；$LOADER 显式形态；HOME/XDG 必带；单案单文件；无 && 长链。
+# 铁律：电池闸>440；bin= 自证 patch79=eee6638d；$LOADER 显式形态；HOME/XDG 必带；单案单文件；无 && 长链。
 # 用法（设备端）：sh b_line_740.sh b1 | b2 | all
 R=/data/local/tmp/mesa_clrt_1026
 LOADER=$R/lib/ld-linux-aarch64.so.1
@@ -14,7 +14,7 @@ LING=/data/local/tmp/g759/Ling-3.0-tiny-Q4_0.gguf
 LFM=$(ls $MD/lfm2.5-24b-a2b-q4_0*.gguf 2>/dev/null | head -1)
 OUT=$R/out
 BIN=$(md5sum $R/bin/patch79/libggml-opencl.so.0.27.0 2>/dev/null | cut -c1-8)
-if [ "$BIN" != "39a6524d" ]; then echo "#### B_ABORT_REDCARD bin=$BIN"; exit 1; fi
+if [ "$BIN" != "eee6638d" ]; then echo "#### B_ABORT_REDCARD bin=$BIN"; exit 1; fi
 EYE=$R/bin/ling_e2e_v4ld
 [ -x "$EYE" ] || { echo "#### B_ABORT_NOEYE"; exit 1; }
 
