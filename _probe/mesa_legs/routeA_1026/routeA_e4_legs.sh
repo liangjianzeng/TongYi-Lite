@@ -274,6 +274,18 @@ case "$1" in
     run_leg e4d_g50 "" 16 "GGML_OPENCL_NDRANGE_IDLE=3 GGML_OPENCL_NDRANGE_IDLE_GAP=0"
     grep -a "tok_s=" $R/out/e4d_g50.out | tail -1
     ;;
+  g60) # R-060 产品化复验：八代 2444b4a4 无 env 部署（默认 ON），预期 e19f0cb2+[IDLE] ticks>0
+    cp $R/stage_1028/libggml-opencl.so.0.27.0 $R/bin/libggml-opencl.so.0.27.0
+    echo "#### g60_lib=$(md5sum $R/bin/libggml-opencl.so.0.27.0)"
+    run_leg e4d_g60 "" 16 ""
+    echo "#### g60_idle=$(grep -a '^\[IDLE\]' $R/out/e4d_g60.err)"
+    ;;
+  g60q) # 默认 ON 下 48tok 金标准复验（预期 e9b88e56）
+    run_leg e4d_g60q "" 48 ""
+    ;;
+  d60) # 默认 ON drift-20 终验（过门=默认档定稿）
+    run_drift e4d_d60 "" 16 "" "" 20
+    ;;
   g33) # L3-wire 首验：七件套+WIRE=1+STATS（async）。witness=[wire] attached；对照 g32（同件 WIRE 关乱）
     run_leg e4d_g33 "" 16 "GGML_OPENCL_ISLAND_WIRE=1 GGML_OPENCL_ISLAND_STATS=1"
     echo "#### WIRE_selfproof=$(grep -ac '\[wire\]' $R/out/e4d_g33.err) L0O=$(grep -a '^\\[L0O\\] ' $R/out/e4d_g33.err | head -1)"
