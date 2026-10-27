@@ -1442,7 +1442,7 @@ struct ggml_backend_opencl_context {
         static const bool ksync = [] { const char * e = getenv("GGML_OPENCL_KERNEL_SYNC"); return e && e[0] == '1'; }();
         cl_event evt0 = NULL;
         cl_int enq_err;
-        { vkh_op_timer vkh_drv("ENQ_DRV", nullptr, false);   // [vkh P2] driver doorbell body only
+        { vkh_op_timer vkh_drv("ENQ_DRV", nullptr, false, __builtin_return_address(0));   // [vkh P2][R-097] driver doorbell body + 站点 ra(同帧=调用者站点;VKH_DZ_TAG 关时 ctor 丢 ra 零差异)
         if (ksync) {
             enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, &evt0);
         } else {

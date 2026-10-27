@@ -235,7 +235,12 @@ struct vkh_op_timer {
             const unsigned long long off =
                 (unsigned long long) ((uintptr_t) ra - (uintptr_t) g_vkh_lib_base);
             char sname[48];
-            snprintf(sname, sizeof sname, "ENQ@+0x%llx", off);
+            // The driver row (L1445 "ENQ_DRV") gets its OWN station key so the last split —
+            // wrapper work vs the driver call itself — becomes per-site. It stays dark until the
+            // caller passes a return address into that timer (one-line ask: add
+            // ", __builtin_return_address(0)" at L1445); with ra == nullptr nothing is recorded.
+            const bool is_drv = (op != nullptr && strncmp(op, "ENQ_DRV", 7) == 0);
+            snprintf(sname, sizeof sname, is_drv ? "ENQ_DRV@+0x%llx" : "ENQ@+0x%llx", off);
             vkh_optime_rec & s = vkh_optime_map()[sname];
             s.ms += t1 - t0;
             s.n++;
@@ -244,7 +249,8 @@ struct vkh_op_timer {
             // cannot say WHICH stations make up those 490; DZ@ rows are the same stations
             // restricted to launches issued while the label was still PRE_FORWARD. Bounded, and
             // it is the row the parent addr2lines.
-            if (op != nullptr && strncmp(op, "ENQ/PRE_FORWARD", 16) == 0) {
+            if (op != nullptr && (strncmp(op, "ENQ/PRE_FORWARD", 16) == 0 ||
+                                 strncmp(op, "ENQ/FUSE/", 9) == 0)) {
                 snprintf(sname, sizeof sname, "DZ@+0x%llx", off);
                 vkh_optime_rec & d = vkh_optime_map()[sname];
                 d.ms += t1 - t0;
@@ -316,6 +322,10 @@ inline void vkh_optime_dump() {
             { "LOOP_TOTAL",  "GRAPH_TOTAL" }, { "MUL_MAT",     "GRAPH_TOTAL" },
             { "ENQ_DRV",     "LOOP_TOTAL"  }, { "ENQ_IDLE",    "LOOP_TOTAL"  },
             { "ENQ/MUL_MAT", "MUL_MAT"     }, { "PRE_FORWARD", "LOOP_TOTAL"  },
+            // R-096: the fuse timer (ggml-opencl.cpp L10122) is constructed inside the node loop,
+            // so it can never exceed LOOP_TOTAL. Absent rows are skipped below, so this pair is
+            // inert while VKH_DZ_TAG is off — campaign legs pay nothing for it.
+            { "FUSE/RMS_MUL","LOOP_TOTAL"  },
         };
         static const bool soft = getenv("GGML_OPENCL_VKH_SOFT") != nullptr;
         // Dumps are taken from inside graph_compute (the [host-timing] print site), so while a
@@ -337,20 +347,70 @@ inline void vkh_optime_dump() {
         std::map<std::string, vkh_optime_rec>::const_iterator it_dc  = t.find("DUMP_COST");
         const double gap = (it_loop != t.end() && it_gr != t.end()) ? it_loop->second.ms - it_gr->second.ms : 0.0;
         if (g_vkh_dz_tag_on) {
-            long st_rows = 0, st_launches = 0, dz_rows = 0, dz_launches = 0;
+            long st_rows = 0, st_launches = 0, dz_rows = 0, dz_launches = 0, dv_rows = 0, dv_launches = 0;
+            double dz_ms = 0.0;
             for (std::map<std::string, vkh_optime_rec>::const_iterator it = t.begin(); it != t.end(); ++it) {
                 const char * k = it->first.c_str();
                 if (strncmp(k, "ENQ@+0x", 7) == 0) { st_rows++; st_launches += it->second.n; }
-                else if (strncmp(k, "DZ@+0x", 6) == 0) { dz_rows++; dz_launches += it->second.n; }
+                else if (strncmp(k, "ENQ_DRV@+0x", 11) == 0) { dv_rows++; dv_launches += it->second.n; }
+                else if (strncmp(k, "DZ@+0x", 6) == 0) { dz_rows++; dz_launches += it->second.n; dz_ms += it->second.ms; }
             }
             // One row for hundreds of launches = the choke point was inlined and every label
             // collapsed onto graph_compute's own return site. Say it out loud rather than let
             // someone addr2line a number that means nothing.
             // dz_launches should track the ENQ/PRE_FORWARD row; if it does not, the cross
             // attribution is lying and the dark-zone verdict built on it is void.
-            fprintf(stderr, "[vkh-optime] STATIONS rows=%ld launches=%ld dz_rows=%ld dz_launches=%ld lib_base=%p%s\n",
-                    st_rows, st_launches, dz_rows, dz_launches, g_vkh_lib_base,
+            fprintf(stderr, "[vkh-optime] STATIONS rows=%ld launches=%ld dz_rows=%ld dz_launches=%ld drv_sites=%ld drv_launches=%ld lib_base=%p%s\n",
+                    st_rows, st_launches, dz_rows, dz_launches, dv_rows, dv_launches, g_vkh_lib_base,
                     (st_rows == 1 && st_launches > 100) ? " STATION_COLLAPSED(choke point inlined — offsets are meaningless)" : "");
+            // R-096 pool tax, computed HERE rather than by hand. The tempting formula
+            // "FUSE_TOTAL − ENQ_DRV" is wrong: ENQ_DRV is one global row covering EVERY launch
+            // (thousands), while the fuse accounts for a few hundred — subtracting it buries the
+            // tax in a meaningless negative. The enqueue-side term must be the cost of the fuse's
+            // own launches, which the DZ@ station rows already hold (same wall clock, same leg,
+            // same table):  tax = FUSE_TOTAL − Σ DZ@<site>.
+            //   tax ≈ 0  → the whole fused call IS its enqueue: the price sits inside
+            //              enqueue_ndrange_kernel (wgs/subgroup queries, bookkeeping) and the
+            //              image pool is innocent → re-examine the wrapper with site granularity.
+            //   tax ≫ 0  → money is spent in the fuse helper OUTSIDE the enqueue → image-pool
+            //              (std::map<ImagePoolKey>) is the prime suspect → P5 earns its keep.
+            std::map<std::string, vkh_optime_rec>::const_iterator fz = t.find("FUSE/RMS_MUL");
+            if (fz != t.end() && fz->second.n > 0) {
+                const double per_fz  = fz->second.ms / (double) fz->second.n;
+                const double per_enq = dz_launches > 0 ? dz_ms / (double) dz_launches : 0.0;
+                const double tax     = fz->second.ms - dz_ms;
+                // Second knife: the SAME site's driver row, if L1445 passes a return address —
+                // ENQ_DRV@+0x… carries the very suffix the DZ@ row does. Without it the split
+                // between the wrapper's own work (wgs/subgroup queries, bookkeeping) and the
+                // driver call stays dark, so say so in the verdict instead of guessing.
+                std::string drv_key;
+                for (std::map<std::string, vkh_optime_rec>::const_iterator it = t.begin(); it != t.end(); ++it) {
+                    if (strncmp(it->first.c_str(), "DZ@+0x", 6) == 0) { drv_key = "ENQ_DRV" + it->first.substr(2); break; }
+                }
+                std::map<std::string, vkh_optime_rec>::const_iterator ds =
+                    drv_key.empty() ? t.end() : t.find(drv_key);
+                const bool have_drv = (ds != t.end() && ds->second.n > 0 && dz_launches > 0);
+                const double per_drv = have_drv ? ds->second.ms / (double) ds->second.n : 0.0;
+                char dsbuf[64];
+                if (have_drv) {
+                    snprintf(dsbuf, sizeof dsbuf, "%.1f/%ld(%.3f/发)", ds->second.ms, ds->second.n, per_drv);
+                } else {
+                    snprintf(dsbuf, sizeof dsbuf, "%.25s", "none(L1445_未传ra)");
+                }
+                const char * verdict = "UNKNOWN";
+                if (dz_ms >= fz->second.ms * 0.85) {
+                    verdict = have_drv
+                        ? (per_drv >= per_enq * 0.85 ? "TAX_IN_DRIVER(clEnqueueNDRangeKernel 本体，减条数/换内核是唯一杠杆)"
+                                                     : "TAX_IN_WRAPPER(包装器 wgs/subgroup/簿记，可按 kernel 缓存)")
+                        : "TAX_INSIDE_ENQUEUE(挂 L1445 的 __builtin_return_address 可再切包装器/驱动一刀)";
+                } else {
+                    verdict = "TAX_OUTSIDE_ENQUEUE(image-pool 等融合助手自有工作，P5 方向)";
+                }
+                fprintf(stderr, "[vkh-optime] FUSETAX fuse=%.1f/%ld(%.3f/发) enqueue=%.1f/%ld(%.3f/发) drv_at_site=%s tax=%.1f(%.3f/发) rule=FUSE_TOTAL-DZ_site verdict=%s\n",
+                        fz->second.ms, fz->second.n, per_fz,
+                        dz_ms, dz_launches, per_enq, dsbuf,
+                        tax, fz->second.n > 0 ? tax / (double) fz->second.n : 0.0, verdict);
+            }
         }
         fprintf(stderr, "[vkh-optime] SELFCHK graph_depth=%d loop_outside_graph=%ld mode=%s loop_minus_graph=%.1f dump_cost=%.1f/%ld\n",
                 g_vkh_graph_depth, g_vkh_loop_outside_graph,
