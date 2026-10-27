@@ -1,3 +1,8 @@
+// 冻结副本：来自 git 7aabe65c^（提示词分档改动之前）的 lib/agent/agent_prompt.dart。
+// **禁止改动本文件** —— 它是「API 路线 / 完整档系统提示词逐字节不许变」的对照组。
+// 消费方：test/agent/api_prompt_byte_identity_test.dart（逐字节比对当前实现）。
+// 除两行 import 改写成 package: 形态外，正文与 git show 7aabe65c^:lib/agent/agent_prompt.dart 一致。
+// ignore_for_file: type=lint
 /// 系统提示分段组装 —— 参照 DSH `system-prompt` 的分段思想，简化为三段：
 /// 身份(identity) → 工具指引 → 工具清单（由协议呈现）。
 ///
@@ -5,8 +10,8 @@
 /// 此处先做最简拼接。
 library;
 
-import '../protocol/tool_protocol.dart';
-import '../tool_registry.dart';
+import 'package:tongyi_lite/agent/protocol/tool_protocol.dart';
+import 'package:tongyi_lite/agent/tool_registry.dart';
 
 /// 组装系统提示。
 ///

@@ -1,15 +1,15 @@
-// [TYL-LINGFIX-1027 / 临时取证用，跑完即删]
-// 目的：证明「提示词分档」那次改动对 **完整档（=API 路线）逐字节零扰动**。
-// 做法：把 7aabe65c^（改动前）的 buildSystemPrompt 原样搬进
-//       lib/agent/_tmp_pre/agent_prompt_pre.dart 作前缀库，与当前实现同进程
-//       对同一批输入产出逐字节比对。旧实现即 API 路线的既有事实。
+/// 「API 路线 / 完整档系统提示词逐字节不许变」守门测试。
+///
+/// 背景：用户要求「API 能力强保持现状，本地做好别」——提示词分档只准动本地小模型。
+/// 断言方式不是字符串片段抽查，而是把改动前（git 7aabe65c^）的实现冻结在
+/// test/agent/frozen/agent_prompt_pre_7aabe65c.dart，同进程对同一批输入产出
+/// **逐字节比对**：任何一次对完整档/API 分支的顺带改写都会在这里当场红。
+/// 同时交叉验证精简档必须严格短于完整档（否则分档形同虚设）。
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/agent.dart';
 import 'package:tongyi_lite/agent/protocol/native_tool_protocol.dart';
-import 'package:tongyi_lite/agent/agent_prompt.dart';
-// ignore: unused_import
-import 'package:tongyi_lite/agent/_tmp_pre/agent_prompt_pre.dart' as pre;
+import 'frozen/agent_prompt_pre_7aabe65c.dart' as pre;
 
 void main() {
   ToolDefinition heavy(String name) => ToolDefinition(
@@ -57,7 +57,7 @@ void main() {
       'personaName': null,
       'personaPrompt': null,
       'taskDiscipline': false,
-      'protocol': const NativeToolProtocol(),
+      'protocol': NativeToolProtocol(),
     },
     'API + 任务执行纪律段': <String, Object?>{
       'modelName': 'gpt-4o',
@@ -65,7 +65,7 @@ void main() {
       'personaName': null,
       'personaPrompt': null,
       'taskDiscipline': true,
-      'protocol': const NativeToolProtocol(),
+      'protocol': NativeToolProtocol(),
     },
     'API + 标准人格（有名字有设定）': <String, Object?>{
       'modelName': 'claude',
@@ -73,7 +73,7 @@ void main() {
       'personaName': '小舟',
       'personaPrompt': '说话简洁，先结论后理由。',
       'taskDiscipline': true,
-      'protocol': const NativeToolProtocol(),
+      'protocol': NativeToolProtocol(),
     },
     'API + 人格名为空串（必须走无身份段）': <String, Object?>{
       'modelName': 'claude',
@@ -81,7 +81,7 @@ void main() {
       'personaName': '   ',
       'personaPrompt': '   ',
       'taskDiscipline': true,
-      'protocol': const NativeToolProtocol(),
+      'protocol': NativeToolProtocol(),
     },
     '本地 prompt-json（完整档 = 改动前默认）': <String, Object?>{
       'modelName': 'Ling 3.0 Tiny',
