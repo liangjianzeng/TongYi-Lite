@@ -20,6 +20,7 @@ A push $KIT/usr/share/khronos $R/usr/share/ >/dev/null && echo "  ICD ok"
 echo "== [3/6] ten-piece + probe + legs + clinfo + stage_1030"
 A push $BIN/. $R/bin/ >/dev/null && A shell "mv $R/bin/routeA_e4_legs.sh $R/ 2>/dev/null; chmod 755 $R/bin/minicpm_e2e $R/bin/l3_probe_v22 $R/bin/hangtest $R/routeA_e4_legs.sh $R/lib/ld-linux-aarch64.so.1 $R/usr/bin/clinfo; cd $R/bin; ln -sf libggml.so.0.27.0 libggml.so.0; ln -sf libggml-base.so.0.27.0 libggml-base.so.0; ln -sf libggml-cpu.so.0.27.0 libggml-cpu.so.0; ln -sf libggml-opencl.so.0.27.0 libggml-opencl.so.0; ln -sf libllama.so.0.7.0 libllama.so.0; ln -sf libllama-common.so.0.7.0 libllama-common.so.0 2>/dev/null; true"
 A shell "mkdir -p $R/usr/bin" && A push $KIT/usr/bin/clinfo $R/usr/bin/clinfo >/dev/null && A shell "chmod 755 $R/usr/bin/clinfo"
+A push /tmp/e41027/libgomp1 $R/lib/aarch64-linux-gnu/libgomp.so.1 2>&1 | tail -1 && A shell "chmod 755 $R/lib/aarch64-linux-gnu/libgomp.so.1"
 A shell "mkdir -p $R/stage_1030" && A push /tmp/e41026/stage_1030_lib.so $R/stage_1030/libggml-opencl.so.0.27.0 >/dev/null && echo "  clinfo+stage_1030 ok"
 echo "== [4/5] 指纹门（不符即停）"
 A shell "md5sum $R/bin/minicpm_e2e $R/bin/libggml-opencl.so.0.27.0 $R/bin/l3_probe_v22" | cut -c1-9,42-
