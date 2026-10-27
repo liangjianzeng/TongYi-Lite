@@ -14121,7 +14121,16 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     GGML_ASSERT(extra);
 
     // [dspark 2026-10-18] write-side offset probe for the rs_s_copy idx slot.
-    if (tensor->name && strstr(tensor->name, "rs_s_copy")) {
+    // [vkh 2026-10-27] now gated behind GGML_OPENCL_RSS_COPY_READBACK=1. The
+    // readback half below issued an UNBOUNDED clEnqueueReadBuffer(CL_TRUE) on
+    // every set_tensor of any tensor named *rs_s_copy* -- a blocking GPU
+    // round-trip inside the decode loop (the fprintf halves were capped at
+    // 200/40, the sync was not). Measured: 4B Q4_K dense decode pinned at
+    // 1.0-2.8 t/s on both Adreno 830 and 740 instead of the expected 20-35.
+    // Probe kept intact, just off by default, for whoever is chasing the
+    // shared rs_s_copy idx scratch clobber (tyl_wbw / rs_s_copy notes below).
+    static const bool rss_copy_probe = getenv("GGML_OPENCL_RSS_COPY_READBACK") != nullptr;
+    if (rss_copy_probe && tensor->name && strstr(tensor->name, "rs_s_copy")) {
         static int wr_cnt = 0;
         if (wr_cnt < 200) {
             ++wr_cnt;
@@ -14138,7 +14147,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         size, data, 0, NULL, NULL));
 
     // [dspark 2026-10-18] immediate readback: is the write visible right after?
-    if (tensor->name && strstr(tensor->name, "rs_s_copy") && size >= 4) {
+    if (rss_copy_probe && tensor->name && strstr(tensor->name, "rs_s_copy") && size >= 4) {
         int32_t rb = 0;
         clEnqueueReadBuffer(queue, extra->data_device, CL_TRUE, extra->offset + offset,
                             4, &rb, 0, nullptr, nullptr);
