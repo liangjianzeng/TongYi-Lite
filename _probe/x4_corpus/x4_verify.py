@@ -24,7 +24,8 @@ def pull_dir(d):
 
 def drivers(errs):
     out=set()
-    for _,e in errs.items():
+    for pair in errs.values():
+        e=pair[1]
         m=drv_re.search(open(e,encoding='utf-8',errors='ignore').read())
         out.add(m.group(1) if m else "MISSING")
     return sorted(out)
