@@ -1443,11 +1443,7 @@ struct ggml_backend_opencl_context {
     // 保险丝, 压 in dspark 实证 118586-submit 丢失区之下)。同步锚点(get_tensor/async
     // readback/lm_head/15xxx 系 clFinish)一律保留——乱文案 GPU 侧定罪在案, 正确性锚点
     // 不连坐。显式 OPFLUSH/OPBATCH/NDRANGE_IDLE 保留调试覆写。
-    static const bool tyl_smart_drain_on = [] {
-        const char * e = getenv("GGML_OPENCL_SMART_DRAIN");
-        return e && e[0] == '1';
-    }();
-    const bool smart = tyl_smart_drain_on && !getenv("GGML_OPENCL_NDRANGE_IDLE");
+    const bool smart = tyl_smart_drain_enabled() && !getenv("GGML_OPENCL_NDRANGE_IDLE");
         // [TongYi-Lite 2026-10-27] KERNEL_SYNC: g21-形态产品化——每次 NDRange 发射后
         // 等待其完成事件再返回，给 GPU 提供 L2 排空窗口（H2′ 竞态：上批 retire 后脏行
         // 滞后落盘 vs host 覆写 pinned 后备，见全GPU卸载执行记录 R-041）。env 门控
@@ -9973,7 +9969,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // "每 sd_flush 节点 clFlush + 每 sd_finish 节点 clFinish"。retire 边界语义保 H2'
         // 治愈(R-065 GAP=0 认证), 深队列保险丝压 in kgsl submit 丢失区。opsync 调试档在场
         // 时让位(不叠乘)。
-        if (tyl_smart_drain_on && !opsync_en) {
+        if (tyl_smart_drain_enabled() && !opsync_en) {
             static const int sd_flush = [] { const char * e = getenv("GGML_OPENCL_SD_FLUSH");  return e ? atoi(e) : 16;  }();
             static const int sd_fin   = [] { const char * e = getenv("GGML_OPENCL_SD_FINISH"); return e ? atoi(e) : 256; }();
             static int sd_fc = 0, sd_kc = 0;
@@ -16601,6 +16597,13 @@ static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2,
 #include <math.h>
 #ifdef __cplusplus
 #include "half.hpp"
+// [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空总闸 file-scope 一处真源（shim 与
+// graph_compute 共用; 默认关=逐字节零扰动）。
+inline bool tyl_smart_drain_enabled() {
+    static const bool v = [] { const char * e = getenv("GGML_OPENCL_SMART_DRAIN"); return e && e[0] == '1'; }();
+    return v;
+}
+
 
 
 #endif
