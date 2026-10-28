@@ -10382,6 +10382,41 @@ inline bool use_adreno_moe_kernels(const ggml_backend_opencl_context *backend_ct
     return tongyi::moe_admission_gate(q, tongyi_route_context(backend_ctx), &why);
 }
 
+// [tongyi TYL-UNLOCK 2026-10-28 R-112 用户令] Mesa 面自研 MoE 解封闸（一处真源）。
+// 背景（R-110/L5 普查）：R-084 的 is_mesa_rusticl 恒 false 闸把 **dense-loop 平面装填**
+// （noshuffle convert + transpose_2d_as_16b 等自研纯 CL 内核，dspark 10-19 已做 rusticl
+// -54 workgroup 适配）在 Mesa 面一起锁死，而计算派发侧（:31006）不看该闸 ⇒「装填按通用
+// 布局、计算按 batched/dense_loop 布局」劈叉态：96 CPU split + 56-split 图乒乓。batched
+// single-dispatch gather（kernel_mul_mat_id_q4_0_f32_batched，gemv_general/moe_sort 自有
+// program，非 vendor trans4_ns）今日在 Mesa init 即编译成功（CL_CHECK fail-fast 在场）。
+// env GGML_OPENCL_MOE_SELFBUILD：未设/0 = 逐字节零扰动；'1' = 仅 q4_0（ling 第一拍）；
+// '2' = +q4_K/q3_K（LFM 第二拍，候令）。
+// **读回臂（get_tensor dense restore @14321/@15020，#ifdef ADRENO，R-029b Mesa NMSE 0.53
+// 血案）保持封闭不动**——batched 解封后 MoE CPU 岛消失即读回路自然消失；残余共享专家岛若
+// 触读回，b19 三案对拍 + txt fail-closed 兜底，出事撤 env 即零扰动回退。
+// vendor trans4_ns / gemv_moe_*_ns 族（tyl_skip_moe_ns 辖区）一字不碰，R-084/B1 崩溃点不复活。
+inline bool moe_selfbuild_unlock(const ggml_backend_opencl_context *backend_ctx, ggml_type type) {
+    static const char * lvl = getenv("GGML_OPENCL_MOE_SELFBUILD");
+    if (!lvl || !lvl[0] || lvl[0] == '0') return false;
+    if (!backend_ctx || !backend_ctx->is_mesa_rusticl) return false;
+    if (type == GGML_TYPE_Q4_0) return true;
+    return lvl[0] == '2' && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q3_K);
+}
+
+// [tongyi TYL-UNLOCK-R2 2026-10-28] A7X FA 混合 KV 防 crash 闸的 Mesa 面豁免（一处真源）。
+// 现场（R-114 d2 op 级普查）：ling 混合模型 6 个 attention 层 FLASH_ATTN 全坠 CPU 岛。
+// 判据链：本闸把 is_f32_f16（=f32 q + f16 KV cache，** llama.cpp 标准配置**）连同 q8_0/q4_0
+// 一并拒予 A7X——依据是闭源 E031 驱动 clBuildProgram SIGSEGV。Mesa/rusticl 面驱动 =
+// Mesa 26.2.4 freedreno/kgsl，与 E031 系列**无同源关系**，防 crash 泛化从未在 Mesa 面复核。
+// env GGML_OPENCL_FA_A7X_GUARD=0 仅 Mesa 面豁免（默认/1 = 逐字节零扰动）；若真 SIGSEGV =
+// clBuildProgram fail-fast 断腿（撤 env 即回原状），定罪"防 crash 在 Mesa 亦真"。
+inline bool fa_a7x_kv_guard(const ggml_backend_opencl_context *backend_ctx) {
+    if (!backend_ctx || backend_ctx->adreno_gen != ADRENO_GPU_GEN::A7X) return false;
+    static const char * e = getenv("GGML_OPENCL_FA_A7X_GUARD");
+    if (e && e[0] == '0' && backend_ctx->is_mesa_rusticl) return false;
+    return true;
+}
+
 // [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
 // (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830 (SM8750,
 // OpenCL 0800.71 / E031.47.18.49): probe + test-backend-ops show systematic
@@ -11293,8 +11328,8 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // those (f16-KV / quant-KV) attention layers on the CPU backend.
             // Negative compiler carve-out, same idiom as the Intel DK=512 decline
             // below and the X1E driver-quirk guards.
-            if (backend_ctx && backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X &&
-                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {
+            if (fa_a7x_kv_guard(backend_ctx) &&
+                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {  // [tongyi TYL-UNLOCK-R2] A7X 判定入 helper, Mesa 面 env 豁免
                 return false;
             }
 
@@ -11316,8 +11351,8 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // Some compilers for A7x (Adreno 740, compiler E031.41) crashes when
             // building FA kernels with mixed or quant types (f32_f16, f32_q8_0, f32_q4_0)
             // Here we skip all A7x for these kernels to avoid crash
-            if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X &&
-                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {
+            if (fa_a7x_kv_guard(backend_ctx) &&
+                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {  // [tongyi TYL-UNLOCK-R2] 同上, helper 单点
                 return false;
             }
 
@@ -12143,7 +12178,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         CL_CHECK(err);
 
         // Adreno moe q4_0 kernel needs special transpose and unshuffling
-        if (use_adreno_moe_kernels(backend_ctx, tensor) && moe_use_dense_loop(tensor->type)) {
+        // [tongyi TYL-UNLOCK R-112] 配对闸①: q4_0 平面装填 (与 batched 派发 gate4 同闸同布局)
+        if ((use_adreno_moe_kernels(backend_ctx, tensor) || moe_selfbuild_unlock(backend_ctx, tensor->type)) && moe_use_dense_loop(tensor->type)) {
             // [TYL sweep] dense-loop storage layout hoisted OUT of the Adreno
             // guard: matches the unguarded dense_loop dispatch at MUL_MAT_ID.
             // [dspark] Dense-loop MoE: store the SAME layout a dense 2D [K, N]
@@ -13289,7 +13325,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
         CL_CHECK(err);
 
-        if (use_adreno_moe_kernels(backend_ctx, tensor) && moe_use_dense_loop(tensor->type)) {
+        // [tongyi TYL-UNLOCK R-112] 配对闸②: q4_K 平面装填 (lvl>=2 才激活; 与 gate4 同闸同布局)
+        if ((use_adreno_moe_kernels(backend_ctx, tensor) || moe_selfbuild_unlock(backend_ctx, tensor->type)) && moe_use_dense_loop(tensor->type)) {
             // [TYL sweep] dense-loop storage layout hoisted OUT of the Adreno
             // guard: matches the unguarded dense_loop dispatch at MUL_MAT_ID.
             // [dspark] Dense-loop MoE: per-layer noshuffle convert + 2D
@@ -26454,7 +26491,9 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     cl_mem * wq_img_slot = is_q4_0 ? &pextra40->q_img : (is_q4_k ? &pextra4k->q_img : (is_iq4xs ? nullptr : &pextra3k->q_img));
     // the per-expert transposed layout only exists when set_tensor's dense-MoE
     // branch ran — same name/shape gate, both sides stay consistent
-    if (!use_adreno_moe_kernels(backend_ctx, soa0)) {
+    // [tongyi TYL-UNLOCK R-112] 配对闸③: batched 派发与平面装填同闸 (解封后 R-084 的 gen/shape
+    // 连带拒消失; planes 闸②前置在场, GATE-FAIL 计数即机检)
+    if (!(use_adreno_moe_kernels(backend_ctx, soa0) || moe_selfbuild_unlock(backend_ctx, soa0->type))) {
         ggml_cl_mmid_gate_fail(4, "adreno_moe_gate", src0, src1, src2, "use_adreno_moe_kernels refused (gen/shape)");
         return false;
     }
