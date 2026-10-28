@@ -11,8 +11,13 @@ G=/data/local/tmp/gemm
 ADB="adb -P $PORT -s $DEV"
 
 if [ ! -f "$BD/build.ninja" ]; then
+    # 配置方子 = 逐字抄 build-x4/CMakeCache(仓内 OpenCL stub + EMBED_KERNELS + ADRENO=ON)
     cmake -S "$REPO/third_party/llama.cpp" -B "$BD" -G Ninja \
-        -DGGML_OPENCL=ON -DCMAKE_BUILD_TYPE=Release || { echo "#### G0_CONFIGURE_FAIL"; exit 2; }
+        -DGGML_OPENCL=ON -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON \
+        -DGGML_OPENCL_TARGET_VERSION=300 -DGGML_OPENCL_PROFILING=OFF \
+        -DOpenCL_INCLUDE_DIR="$REPO/third_party/OpenCL-Headers" \
+        -DOpenCL_LIBRARY="$REPO/_probe/oclstub_build/opencl-stub/libopencl_stub.so" \
+        -DGGML_CCACHE=OFF -DCMAKE_BUILD_TYPE=Release || { echo "#### G0_CONFIGURE_FAIL"; exit 2; }
 fi
 ninja -C "$BD" ggml-opencl || { echo "#### G0_BUILD_FAIL"; exit 2; }
 SO=$BD/ggml/src/ggml-opencl/libggml-opencl.so.0.27.0
