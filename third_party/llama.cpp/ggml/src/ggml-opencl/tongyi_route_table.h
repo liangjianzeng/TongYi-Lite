@@ -131,6 +131,14 @@ struct RouteContext {
     bool     dense_off;      // GGML_OPENCL_DENSE_MOE=0
     bool     dense_force;    // GGML_OPENCL_DENSE_MOE=1
     bool     batched_off;    // GGML_OPENCL_BATCHED_MOE=0
+    // [tongyi TYL-UNLOCK-R4 2026-10-28] A 路 view 槽位平移（GGML_OPENCL_MOE_VIEW_SLOT=1，
+    // 仅 Mesa/rusticl；一处真源 = ggml-opencl.cpp moe_view_slot_unlock）。
+    // true = q4_0/q4_K 的 view 允许 batched，但**必须**槽位对齐（view_slot_aligned）：
+    // es_base 由派发侧"子缓冲 origin 平移"承担，语义母本 = q3_K 的
+    // kernels/gemv_noshuffle_q3_k_f32.cl:196 (esb = es + es_base)。零内核零新参数。
+    // false（默认/未设 env）= 逐字节零扰动，G-740 原判据原样保留。
+    // q4_1（环2 挂起）与 iq4_xs（M1 领地，m1 分支自带 src0_off）不受本字段影响，恒拒。
+    bool     moe_view_slot;  // GGML_OPENCL_MOE_VIEW_SLOT=1
 };
 
 struct RouteResult {

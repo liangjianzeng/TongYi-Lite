@@ -18,11 +18,12 @@ namespace tongyi {
 // batched 行的静态门 = legacy batched gate 0/1/4/5/6/7/8（平面/extras/对齐是运行时门，
 // R1 留给旧门，R2 并入 plane 需求检查）。
 static const RouteSpec kSpecs[] = {
-    {   // q4_0 batched：K%32 + M%128 + 名字/代际/E17 门；view 禁入（G-740 无 es_base）
+    {   // q4_0 batched：K%32 + M%128 + 名字/代际/E17 门；view 见 ctx.moe_view_slot
+        //（[TYL-UNLOCK-R4] 默认禁入 = G-740 原判据；解锁 env 下要求槽位对齐）
         "mmid_q4_0_batched", BATCHED_MOE, RTYPE_Q4_0,
         { /*k_mult*/ 32, /*m_mult*/ 128, /*n_mult_dense*/ 0, /*need_e_gt1*/ false,
           NAME_FFN_EXPS_OR_AS, /*moe_gen_policy*/ true, /*reject_e17*/ true,
-          /*forbid_view*/ true, /*view_slot_align*/ false, /*max_cols*/ 1LL << 20 },
+          /*forbid_view*/ false, /*view_slot_align*/ true, /*max_cols*/ 1LL << 20 },
         "mmid_q4_0_dense", "dspark",
     },
     {   // [tongyi 2026-10-25] q4_1 batched：故意扩展（非 legacy 等价）。executor 内核
@@ -38,7 +39,8 @@ static const RouteSpec kSpecs[] = {
     },
     {   // q4_K batched：多一道 K%256（superblock scales）；seff/meff 平面是运行时门
         "mmid_q4_k_batched", BATCHED_MOE, RTYPE_Q4_K,
-        { 256, 128, 0, false, NAME_FFN_EXPS_OR_AS, true, true, true, false, 1LL << 20 },
+        // [TYL-UNLOCK-R4] view: 默认禁入（G-740）；GGML_OPENCL_MOE_VIEW_SLOT=1 下要求对齐
+        { 256, 128, 0, false, NAME_FFN_EXPS_OR_AS, true, true, /*forbid_view*/ false, /*view_slot_align*/ true, 1LL << 20 },
         "mmid_q4_k_dense", "dspark",
     },
     {   // q3_K batched-only：K%256 + M%128 + E>1（supports_op:10398 显式门）；
@@ -173,8 +175,15 @@ static bool batched_static_ok(RType t, const RouteQuery & q, const RouteContext 
     if (q.is_view) {
         if (t == RTYPE_Q3_K) {
             if (!q.view_slot_aligned) { if (why) *why = "view_slot_q3k"; return false; }
+        } else if ((t == RTYPE_Q4_0 || t == RTYPE_Q4_K) && ctx.moe_view_slot) {
+            // [tongyi TYL-UNLOCK-R4 2026-10-28] A 路（父批 15:2x）：q4_0/q4_K 的 view 由
+            // 派发侧子缓冲 origin 平移承担 es_base ⇒ 与 q3_K 同门，只卡槽位对齐。
+            // 生死前置已由 740 镜像生死枪射毕（IMAGE_MAX_BUFFER_SIZE=134 217 727 px，
+            // 子缓冲之上 clCreateImage rc=0；非对齐 origin rc=-13 ⇒ 本门是真门）。
+            if (!q.view_slot_aligned) { if (why) *why = "view_slot_align"; return false; }
         } else {
-            // q4_0/q4_K 无 es_base view 处理（G-740）
+            // G-740 原判据：未解锁（默认 ctx）逐字节保留。q4_1（环2 挂起）与
+            // iq4_xs（M1 领地，其 m1 分支自带 src0_off 不走族平面）恒拒，勿顺带解冻。
             if (why) *why = "view_slot (q4_0/q4_K lack es_base, G-740)";
             return false;
         }

@@ -384,6 +384,34 @@ static void family_c() {
         q.view_slot_aligned = true;
         RouteResult r3 = resolve(q, c);
         CHECK(r3.admitted() && r3.spec->kind == BATCHED_MOE, "C3g q3_K view 对齐放行（M2 slot bank）");
+
+        // C3h..C3l: [TYL-UNLOCK-R4 2026-10-28] A 路 view 槽位平移（q4_0/q4_K）。
+        //   C3h 钉"默认 ctx 零扰动"（G-740 原判据不许被 env-off 路径松动）——这就是
+        //   AGENTS.md:3326 说的 G-740 漂移 pin 的新半边；C3i/C3k 钉解锁后放行；
+        //   C3j 钉"槽位对齐门是真门"（对齐门失效 = 读 slot 0 静默错值，G-740 刑场）；
+        //   C3l 钉 q4_1 恒拒（环2 挂起，禁止被本闸顺带解冻）。
+        {
+            RouteQuery q0 = q; q0.type = RTYPE_Q4_0; q0.is_view = true; q0.view_slot_aligned = true;
+            RouteResult r0 = resolve(q0, c);
+            CHECK(!r0.admitted() || r0.spec->kind != BATCHED_MOE,
+                  "C3h 默认 ctx 下 q4_0 view 仍不得 batched（G-740 零扰动）");
+            RouteContext cv = c; cv.moe_view_slot = true;
+            RouteResult rv1 = resolve(q0, cv);
+            CHECK(rv1.admitted() && rv1.spec->kind == BATCHED_MOE,
+                  "C3i 解锁 ctx 下 q4_0 对齐 view 放行 batched（A 路）");
+            q0.view_slot_aligned = false;
+            RouteResult rv2 = resolve(q0, cv);
+            CHECK(!rv2.admitted() || rv2.spec->kind != BATCHED_MOE,
+                  "C3j 解锁 ctx 下未对齐 view 仍拒（槽位门必须是真门）");
+            q0.view_slot_aligned = true;
+            RouteQuery q1 = q0; q1.type = RTYPE_Q4_K;
+            RouteResult rv3 = resolve(q1, cv);
+            CHECK(rv3.admitted() && rv3.spec->kind == BATCHED_MOE, "C3k q4_K 对齐 view 解锁放行");
+            RouteQuery q2 = q0; q2.type = RTYPE_Q4_1;
+            RouteResult rv4 = resolve(q2, cv);
+            CHECK(!rv4.admitted() || rv4.spec->kind != BATCHED_MOE,
+                  "C3l q4_1 view 恒拒（环2 挂起，勿顺带解冻）");
+        }
     }
 
     // C4: G-740 漂移点显式 pin——dense 分支不查名字/代际：

@@ -1551,6 +1551,23 @@ struct ggml_backend_opencl_context {
     moe_b_cache_entry moe_b_cache[160];
     int moe_b_cache_next = 0;
 
+    // [tongyi TYL-UNLOCK-R4 2026-10-28] A 路 view 平面缓存：键 = (parent, origin, size, want_img)。
+    // 与 moe_b_cache 同族同生命周期（驱逐时释放，随 ctx 消亡；那边也无析构循环 = 既有先例）。
+    // **绝不复用 moe_b_cache**：那边的键 (src,origin,size) 不含 image 格式，CL_R/UINT32 的 q
+    // 平面与 CL_RGBA/FLOAT 的激活平面会同键撞车 = 静默错值（与 G-740 同一刑场）。
+    struct moe_vq_cache_entry {
+        cl_mem  sub       = nullptr;
+        cl_mem  img       = nullptr;
+        cl_mem  parent    = nullptr;
+        size_t  origin    = 0;
+        size_t  size      = 0;
+        bool    want_img  = false;
+    };
+    // LFM: 38 MoE 块 × {q,d,se,se?} ≤ 152 键/窗口集；窗口数 = 每族的窗口数。64 槽按
+    // LRU-循环驱逐（与 moe_b_cache 同策略），未命中即重建（子缓冲+image 建立成本见 P4 注释）。
+    moe_vq_cache_entry moe_vq_cache[64];
+    int moe_vq_cache_next = 0;
+
     // [dspark 2026-10-14] P3: expert bucket-sort scratch (see moe_sort kernels).
     // Layout: [0, E+1) hist/cursors, [E+1, E+1+n_cols) permuted column indices.
     // Grown lazily to max(E+1+n_cols) ints seen so far (~4MB at the 2^20 cap).
@@ -10359,6 +10376,99 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
 }
 
 // [tongyi R1 2026-10-25] 路由表上下文（env 一次性快照，逐字对应旧门读法）。
+// [tongyi TYL-UNLOCK-R4 2026-10-28] A 路 view 槽位平移闸（一处真源；父批 15:2x，B 路永久搁置）。
+// 现场（子 R-116 件证 + 父 R-119 740 镜像生死枪全绿）：LFM2.5-24B 的 split-MoE 把每块专家
+// 做成"基座上的窗口"（src/models/lfm2moe.cpp: "one base per family, layers become windows on
+// it"），派发期 src0 是带 view_offs 的 view；batched q4_0/q4_K 无 es_base ⇒ gate 6 恒拒
+// （原注释："reading the parent planes from slot 0 would silently produce wrong results"）
+// ⇒ 38 块 × 3 枚每 token 坠 CPU 岛。q3_K 早已支持（es_base 内核参数，母本
+// kernels/gemv_noshuffle_q3_k_f32.cl:168,196: esb = es + es_base）。
+// A 路 = 把 wq/wd/we 换成 origin = es_base*层字节 的**子缓冲**，核内 es 自 0 起算 ⇒
+// 绝对字节 = (es_base+es)*layer，与 q3_K 语义逐字节等价；**零内核改动、零新参数**
+// （B 路给这两个内核加参数有 E031.47 miscompile 前科，见 :26826 注释，父令永久搁置）。
+// env GGML_OPENCL_MOE_VIEW_SLOT：未设/0 = 逐字节零扰动（G-740 原判据原样，表侧同门）；
+// '1' = 仅 Mesa/rusticl 面、仅 q4_0/q4_K，且必须槽位对齐 + 平面覆盖 + 子缓冲对齐合法。
+// 生死前置已射毕（ic_run3）：740 IMAGE_MAX_BUFFER_SIZE=134 217 727 px（LFM 需 25 165 824
+// px = 5.3× 余量）；"子缓冲之上 clCreateImage" rc=0（tag=a_route_qimg）；origin=1 非对齐
+// 实测 rc=-13 被拒 ⇒ 下面的 alignment 门是真门不是摆设。
+inline bool moe_view_slot_unlock(const ggml_backend_opencl_context *backend_ctx) {
+    static const char * e = getenv("GGML_OPENCL_MOE_VIEW_SLOT");
+    if (!e || e[0] != '1') return false;
+    if (!backend_ctx || !backend_ctx->is_mesa_rusticl) return false;
+    return true;
+}
+
+// [tongyi TYL-UNLOCK-R4] view 平面取用：在 parent 上取 [origin, origin+size) 子缓冲；
+// want_img 时在其上建 CL_R/UINT32 IMAGE1D_BUFFER（width = size/4 = 与 q_layer_pix 同尺）。
+// 缓存键含 origin —— 现 q_img 缓存在 extra 上且注释自陈 "view-independent"（:26662），
+// 两窗口共用一张 image = 静默错值（子 R-116 §2.3 前置③，阳性对照枪正是抓它的）。
+// 返 nullptr = 取用失败（调用方 gate_fail 后落 dense-loop，绝不静默降级读 slot 0）。
+static cl_mem ggml_cl_moe_view_plane(ggml_backend_opencl_context * backend_ctx,
+                                     cl_mem parent, size_t origin, size_t size,
+                                     cl_int * err_out) {
+    if (!parent || size == 0) { return nullptr; }
+    for (int i = 0; i < 64; ++i) {
+        auto & c = backend_ctx->moe_vq_cache[i];
+        if (c.sub && c.parent == parent && c.origin == origin && c.size == size && !c.want_img) {
+            if (err_out) *err_out = CL_SUCCESS;
+            return c.sub;
+        }
+    }
+    cl_int err = CL_SUCCESS;
+    cl_buffer_region reg = { origin, size };
+    cl_mem sub = clCreateSubBuffer(parent, 0, CL_BUFFER_CREATE_TYPE_REGION, &reg, &err);
+    if (err != CL_SUCCESS || !sub) { if (err_out) *err_out = err; return nullptr; }
+    int slot = backend_ctx->moe_vq_cache_next;
+    backend_ctx->moe_vq_cache_next = (backend_ctx->moe_vq_cache_next + 1) % 64;
+    auto & c = backend_ctx->moe_vq_cache[slot];
+    if (c.sub) {
+        if (c.img) { clReleaseMemObject(c.img); }
+        clReleaseMemObject(c.sub);
+    }
+    c.sub = sub; c.img = nullptr; c.parent = parent; c.origin = origin; c.size = size; c.want_img = false;
+    if (err_out) *err_out = CL_SUCCESS;
+    return sub;
+}
+
+// [tongyi TYL-UNLOCK-R4] 同上，但要 image（q 平面专用；独立槽，不与无图版本共键）。
+static cl_mem ggml_cl_moe_view_image(ggml_backend_opencl_context * backend_ctx,
+                                     cl_mem parent, size_t origin, size_t size,
+                                     cl_int * err_out) {
+    if (!parent || size == 0 || (size % 4) != 0) { return nullptr; }
+    for (int i = 0; i < 64; ++i) {
+        auto & c = backend_ctx->moe_vq_cache[i];
+        if (c.sub && c.img && c.parent == parent && c.origin == origin && c.size == size && c.want_img) {
+            if (err_out) *err_out = CL_SUCCESS;
+            return c.img;
+        }
+    }
+    cl_int err = CL_SUCCESS;
+    cl_buffer_region reg = { origin, size };
+    cl_mem sub = clCreateSubBuffer(parent, 0, CL_BUFFER_CREATE_TYPE_REGION, &reg, &err);
+    if (err != CL_SUCCESS || !sub) { if (err_out) *err_out = err; return nullptr; }
+    cl_image_format fmt = { CL_R, CL_UNSIGNED_INT32 };
+    cl_image_desc   desc; memset(&desc, 0, sizeof(desc));
+    desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    desc.image_width = size / 4;                       // uint 像素（与 q_layer_pix 同尺）
+    desc.buffer      = sub;
+    cl_mem img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &fmt, &desc, NULL, &err);
+    if (err != CL_SUCCESS || !img) {
+        clReleaseMemObject(sub);
+        if (err_out) *err_out = err;
+        return nullptr;
+    }
+    int slot = backend_ctx->moe_vq_cache_next;
+    backend_ctx->moe_vq_cache_next = (backend_ctx->moe_vq_cache_next + 1) % 64;
+    auto & c = backend_ctx->moe_vq_cache[slot];
+    if (c.sub) {
+        if (c.img) { clReleaseMemObject(c.img); }
+        clReleaseMemObject(c.sub);
+    }
+    c.sub = sub; c.img = img; c.parent = parent; c.origin = origin; c.size = size; c.want_img = true;
+    if (err_out) *err_out = CL_SUCCESS;
+    return img;
+}
+
 static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_context * backend_ctx) {
     static const int  a7x_mode   = [] { const char * e = getenv("GGML_OPENCL_MOE_FORCE_A7X");     return e ? ((e[0] == '0') ? 0 : 1) : -1; }();
     static const bool e17_off    = [] { const char * e = getenv("GGML_OPENCL_ADRENO_E17_QUIRKS"); return e && e[0] == '0'; }();
@@ -10378,6 +10488,8 @@ static tongyi::RouteContext tongyi_route_context(const ggml_backend_opencl_conte
     c.dense_off = dense_off;
     c.dense_force = dense_on;
     c.batched_off = batched_off;
+    // [TYL-UNLOCK-R4] A 路 view 闸（默认 false = G-740 原判据；仅 Mesa + env=1）
+    c.moe_view_slot = moe_view_slot_unlock(backend_ctx);
     return c;
 }
 
@@ -26581,10 +26693,37 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         }
         es_base = (int)(src0->view_offs / slot_bpe);
     } else if (src0->view_src != nullptr) {
-        // q4_0/q4_K batched path has no view-slot offset handling: reading the
-        // parent planes from slot 0 would silently produce wrong results
-        ggml_cl_mmid_gate_fail(6, "view_slot", src0, src1, src2, "q4_0/q4_K lack es_base view handling (grid G-740)");
-        return false;
+        // [tongyi TYL-UNLOCK-R4 2026-10-28] A 路（父批 15:2x）：q4_0/q4_K 的 view 用
+        // **子缓冲 origin 平移**（见下方 wq/wd/we 取用处）承担 es_base，语义与 q3_K 的
+        // esb = es + es_base 逐字节等价（母本 kernels/gemv_noshuffle_q3_k_f32.cl:196）。
+        // 三重机检前置，任一不过即维持原判据拒入（**绝不允许静默读 slot 0**）：
+        //   ① view_offs 槽位对齐（与 q3_K 同门）
+        //   ② 平面覆盖：es_base + E <= 基座槽数（planes cover ALL base slots）
+        //   ③ 子缓冲 origin 合法：slot_bpe % alignment == 0（740 实测非对齐 origin rc=-13）
+        if (!moe_view_slot_unlock(backend_ctx) || (!is_q4_0 && !is_q4_k)) {
+            ggml_cl_mmid_gate_fail(6, "view_slot", src0, src1, src2, "q4_0/q4_K lack es_base view handling (grid G-740)");
+            return false;
+        }
+        const size_t slot_bpe = ggml_nbytes(src0) / (size_t)src0->ne[2];
+        if (slot_bpe == 0 || (src0->view_offs % slot_bpe) != 0) {
+            ggml_cl_mmid_gate_fail(6, "view_slot_align", src0, src1, src2, "view_offs not slot-aligned (A route)");
+            return false;
+        }
+        es_base = (int)(src0->view_offs / slot_bpe);
+        const int E_base = (int)soa0->ne[2];
+        if (es_base < 0 || (long long)es_base + E > (long long)E_base) {
+            char det[64];
+            snprintf(det, sizeof(det), "es_base=%d + E=%d > E_base=%d", es_base, E, E_base);
+            ggml_cl_mmid_gate_fail(6, "view_slot_cover", src0, src1, src2, det);
+            return false;
+        }
+        const size_t align_bytes = (size_t)(backend_ctx->alignment > 0 ? backend_ctx->alignment : 1024);
+        if ((slot_bpe % align_bytes) != 0) {
+            char det[64];
+            snprintf(det, sizeof(det), "slot_bpe=%zu %% align=%zu != 0", slot_bpe, align_bytes);
+            ggml_cl_mmid_gate_fail(6, "view_slot_align", src0, src1, src2, det);
+            return false;
+        }
     }
     if (K % 32 != 0 || M % 128 != 0) {
         char det[64];
@@ -26654,18 +26793,49 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     // of a ~50MB image costs more than the kernel itself, so cache it on the
     // extra: the dense-MoE set_tensor branch never sets q_img, and the dense
     // GEMV builds its own local images, so ownership here is exclusive.
-    cl_mem q_img = *wq_img_slot;
-    if (q_img == nullptr) {
-        img_fmt = { CL_R, CL_UNSIGNED_INT32 };
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        // [dspark M2] width covers the WHOLE base plane (view-independent so
-        // the per-extra cache stays valid across prefill/decode views)
-        const int E_base = (int)soa0->ne[2];
-        img_desc.image_width = (size_t)E_base * q_layer / 4;
-        img_desc.buffer      = wq;
-        CL_CHECK((q_img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
-        *wq_img_slot = q_img;
+    // [tongyi TYL-UNLOCK-R4] A 路 view 平面：核内 es 自 0 起算，故把 mem 对象的 origin
+    // 平到 es_base 槽 —— 与 q3_K 传 es_base 参数等价（母本 .cl:196）。非 view（es_base==0）
+    // 路径与原来逐字节相同：image 仍缓存在 extra 上、仍覆盖整基座。
+    cl_mem wd_arg = wd;
+    cl_mem we_arg = we;
+    cl_mem q_img  = nullptr;
+    if (es_base > 0 && (is_q4_0 || is_q4_k)) {
+        const size_t d_layer_eff = is_q4_0 ? d_layer : se_layer;   // q4_0 单 d 平面；q4_K 双 se 平面
+        cl_int verr = CL_SUCCESS;
+        q_img = ggml_cl_moe_view_image(backend_ctx, wq, (size_t)es_base * q_layer,
+                                       (size_t)E * q_layer, &verr);
+        if (q_img == nullptr) {
+            ggml_cl_mmid_gate_fail(6, "view_plane_img", src0, src1, src2, "sub-buffer/image over view slot failed");
+            return false;
+        }
+        wd_arg = ggml_cl_moe_view_plane(backend_ctx, wd, (size_t)es_base * d_layer_eff,
+                                        (size_t)E * d_layer_eff, &verr);
+        if (wd_arg == nullptr) {
+            ggml_cl_mmid_gate_fail(6, "view_plane_d", src0, src1, src2, "d/se sub-buffer over view slot failed");
+            return false;
+        }
+        if (is_q4_k) {
+            we_arg = ggml_cl_moe_view_plane(backend_ctx, we, (size_t)es_base * se_layer,
+                                            (size_t)E * se_layer, &verr);
+            if (we_arg == nullptr) {
+                ggml_cl_mmid_gate_fail(6, "view_plane_e", src0, src1, src2, "meff sub-buffer over view slot failed");
+                return false;
+            }
+        }
+    } else {
+        q_img = *wq_img_slot;
+        if (q_img == nullptr) {
+            img_fmt = { CL_R, CL_UNSIGNED_INT32 };
+            memset(&img_desc, 0, sizeof(img_desc));
+            img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+            // [dspark M2] width covers the WHOLE base plane (view-independent so
+            // the per-extra cache stays valid across prefill/decode views)
+            const int E_base = (int)soa0->ne[2];
+            img_desc.image_width = (size_t)E_base * q_layer / 4;
+            img_desc.buffer      = wq;
+            CL_CHECK((q_img = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+            *wq_img_slot = q_img;
+        }
     }
 
     // one sub-buffer + image over the whole activation tensor ([K, ne11, n_tok]).
@@ -26815,9 +26985,11 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     cl_uint k_arg = 0;
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &q_img));
     // q4_0: [d] ; q4_K: [seff, meff] ; q3_K: [se0, se1] (precomputed effective scales)
-    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &wd));
+    // [TYL-UNLOCK-R4] wd_arg/we_arg：非 view 时就是 wd/we（逐字节等价）；view 时是平移到
+    // es_base 槽的子缓冲 ⇒ 核内 es*layer 偏移自动落在正确窗口上
+    CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &wd_arg));
     if (is_q4_k || is_q3_k) {
-        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &we));
+        CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &we_arg));
     }
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &b_img));
     CL_CHECK(clSetKernelArg(kernel, k_arg++, sizeof(cl_mem),  &extra2->data_device));
@@ -26869,13 +27041,13 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
     if (moe_debug) {
         GGML_LOG_INFO("batched MoE dump: type=%s K=%d M=%d E=%d n_used=%d n_tok=%d ne11=%d "
                       "ids_off=%d ids_row=%d grid=%d q_pix=%llu d_by=%llu se_by=%llu "
-                      "b_base=%llu dst_base=%llu nb1=%llu nb2=%llu\n",
+                      "b_base=%llu dst_base=%llu nb1=%llu nb2=%llu es_base=%d\n",
                       is_q4_0 ? "q4_0" : (is_q4_k ? "q4_K" : "q3_K"), K, M, E, n_used, n_tok, ne11,
                       ids_elem_off, ids_row, grid_x_per_col,
                       (unsigned long long)q_layer_pix, (unsigned long long)d_layer,
                       (unsigned long long)se_layer,
                       (unsigned long long)b_base, (unsigned long long)dst_base,
-                      (unsigned long long)dst->nb[1], (unsigned long long)dst->nb[2]);
+                      (unsigned long long)dst->nb[1], (unsigned long long)dst->nb[2], es_base);
     }
     size_t global_work_size[2] = { (size_t)grid_x_per_col * (size_t)n_cols, 4 };
     size_t local_work_size[2]  = { 64, 4 };
