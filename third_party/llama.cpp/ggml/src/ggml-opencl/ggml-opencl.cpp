@@ -732,6 +732,13 @@ static void tyl_l0_note_sync();
 static void tyl_l0_note_write(const char * nm, size_t sz);
 static void tyl_l0_note_read(const char * nm, size_t sz);
 static void tyl_l0_note_enq();
+// [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空总闸 file-scope 一处真源（shim 与
+// graph_compute 共用; 默认关=逐字节零扰动）。位置: 所有 include 之后、首个使用前。
+inline bool tyl_smart_drain_enabled() {
+    static const bool v = [] { const char * e = getenv("GGML_OPENCL_SMART_DRAIN"); return e && e[0] == '1'; }();
+    return v;
+}
+
 struct ggml_backend_opencl_context {
     int ref_count;
 
@@ -16597,12 +16604,6 @@ static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2,
 #include <math.h>
 #ifdef __cplusplus
 #include "half.hpp"
-// [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空总闸 file-scope 一处真源（shim 与
-// graph_compute 共用; 默认关=逐字节零扰动）。
-inline bool tyl_smart_drain_enabled() {
-    static const bool v = [] { const char * e = getenv("GGML_OPENCL_SMART_DRAIN"); return e && e[0] == '1'; }();
-    return v;
-}
 
 
 
