@@ -103,7 +103,7 @@ class InferenceLogScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           const Text(
-            '点击"加载到内存"后开始显示日志',
+            '点击模型列表里的「加载」后开始显示日志',
             style: TextStyle(color: Colors.grey, fontSize: 14),
           ),
           const SizedBox(height: 24),

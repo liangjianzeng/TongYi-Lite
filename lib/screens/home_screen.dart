@@ -772,22 +772,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final color = !isRemote
         ? Theme.of(context).colorScheme.primary
         : (connected ? Colors.green : Colors.orange);
+    // 连接状态**只用图标颜色**说（绿=已连 / 橙=未连 / 主色=本地）：胶囊里再
+    // 挂「· 已连接 / 未连接」是把工作区名字挤没的纯冗余（2026-10-28 用户指令），
+    // 状态与后端类型收进 tooltip，点开的切换列表里也各有一行。
     return Padding(
       padding: const EdgeInsets.only(right: 2),
       child: ActionChip(
         avatar: Icon(_workspaceIcon(ws.backend), size: 15, color: color),
         label: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 150),
+          constraints: const BoxConstraints(maxWidth: 120),
           child: Text(
-            isRemote ? '${ws.name} · ${connected ? '已连接' : '未连接'}' : ws.name,
+            ws.name,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 12),
           ),
         ),
+        labelPadding: const EdgeInsets.symmetric(horizontal: 4),
         visualDensity: VisualDensity.compact,
         padding: EdgeInsets.zero,
-        tooltip: '当前工作区：${ws.name}（${workspaceBackendLabel(ws.backend)}）\n'
+        tooltip: '当前工作区：${ws.name}（${workspaceBackendLabel(ws.backend)}'
+            '${isRemote ? (connected ? ' · 已连接' : ' · 未连接') : ''}）\n'
             '智能体只在这个工作区里读写文件与执行命令，点按可切换',
         onPressed: _showWorkspaceSheet,
       ),
