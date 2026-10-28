@@ -20,7 +20,9 @@ if [ ! -f "$BD/build.ninja" ]; then
         -DGGML_CCACHE=OFF -DCMAKE_BUILD_TYPE=Release || { echo "#### G0_CONFIGURE_FAIL"; exit 2; }
 fi
 ninja -C "$BD" ggml-opencl || { echo "#### G0_BUILD_FAIL"; exit 2; }
-SO=$BD/ggml/src/ggml-opencl/libggml-opencl.so.0.27.0
+# 产物寻径: 本 build 把 .so 归置到 bin/(build-x4 旧方不同), 不猜路径
+SO=$(find "$BD" -name 'libggml-opencl.so.0.27.0' -type f 2>/dev/null | head -1)
+[ -n "$SO" ] || { echo "#### G0_NO_ARTIFACT"; exit 2; }
 MD5=$(md5sum "$SO" | cut -c1-8)
 echo "#### G0_BUILT md5=$MD5 size=$(stat -c%s "$SO")"
 
