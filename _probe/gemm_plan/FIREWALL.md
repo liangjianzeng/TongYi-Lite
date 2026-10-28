@@ -55,11 +55,12 @@
 | GEMM 拍2(重定义) | 军械普查发现:GEMM 派发段入口(`src1t==F32 && ne00%16==0 && ne11>1`)**无 use_adreno_kernels 守卫**,q5_x/q4_1 系 l4_lm 读 SOA 平面(无 trans-repack 牵连)且无条件创建 ⇒ Mesa 面 R3 准入后 512 腿**可能已走 GEMM**,"GEMV 挨大 N"候测疑为过时预言 ⇒ 拍2 转为**测量+认证腿**(见枪单) |
 | 配置债取证(host) | **TYL-DRAIN smart drain = opt-in**(`GGML_OPENCL_SMART_DRAIN` 需 `=1`,:738)⇒ 出厂默认仍在"每2发令一 clFinish"旧道,agent prefill 深队列吃满排空税;排空件属 **GEMV 侧辖区(第8条),GEMM 侧只记债不动**;默认翻档与 P1 同列为需金口 |
 | GEMV 侧战报(引自 #219) | A 路 MOE_VIEW_SLOT 编成 `6827dbc16c`,env-off 逐字节零扰动(tokmd5=50c7a28b, 3.73 t/s, gatefail=0);4B 四档:legacy 0.49 / SMART 1.68 / idle0 2.16 / flush128 2.69~2.85 t/s,排空税速度恢复独立成立;LFM 24B 开火线铺开(vkh_lfm 新 build dir,13.58GB 正主 EXPECT_SIZE ✓) |
+| **GEMM 首射战报(830, 18:1x, ledger-222/223)** | **G1 双臂:岛 1008→0(env OFF/ON,`libggml-opencl.so`=64daede0 NDK 系),prefill 134.69→152.72 tok/s,decode 1.83 两臂逐位同(GEMV 零扰动铁证)**;岛主犯实拍 `blk.N.ffn_{gate,up,down}_shexp.weight type=q5_0 → CPU`。**G2 四臂×3**:C(l4_lm GEMM)prefill 均值 138.4 vs A 112.9(**+22.6%**,热漂序不利 C);B≈A ⇒ `MESA_LARGE_N_GEMV` vendor 路 no-op 实证;**数值闸:首站 top-1=198 9/9 全臂合金标,逐站 greedy 3/33 first_split_row=2 三 GPU 臂逐位同形 ⇒ GPU↔CPU 家族分歧与生俱来(#219 案素材),P1 零引入**;tiny 模型 GPU decode(1.5~2.2)反慢 CPU 金标(6.87)= GEMV/排空辖区记债。**@GEMV 侧:15 分钟安静已过,且岛账 1008→0 属 P1 预期污染请按 env 臂分记(第 1 条)** |
 
 ## GEMM 侧待射枪单(候车道,全部 env 默认 OFF)
 
-1. **q5x 岛 census 腿(830)**:`GGML_OPENCL_Q5X_GEMM=1` vs OFF,ling 装载 GGML_SCHED_DEBUG 岛计数 36→个位;同 stack `f0d564da2` 起,升件重拍。
-2. **prefill 四臂(830)**:3K-token agent prompt,TTFT/prefill tok/s:CPU 岛现状 / R3-GEMV / l4_lm-GEMM / `ngl=0` 金标。
-3. **数值闸**:logits tensor-diff + greedy top-k 一致率×3(第 11 条修订版)+ NMSE 三形状。
-4. **配置腿**:split-MoE `bank≥n_exp` 免 clamp(bank=64 vs 32)× 3K prompt TTFT;logcat `n_ubatch = %d` + `split-MoE: n_ubatch 512 -> 8` 参数门。
-5. proof-of-load:影子双名律(设备件双命名,md5 红牌)。
+1. ~~**q5x 岛 census 腿(830)**~~ ✅ **已射 18:0x(ledger-222):1008→0**。
+2. ~~**prefill 四臂(830)**~~ ✅ **已射 18:1x(ledger-223):C +22.6%**。
+3. ~~**数值闸**~~ ✅ **已跑(同 223):top-1 9/9,家族分歧甄别毕**。
+4. **配置腿(待用户 app 触发)**:split-MoE `bank≥n_exp` 免 clamp(bank=64 vs 32)× 3K prompt TTFT;logcat `n_ubatch = %d` + `split-MoE: n_ubatch 512 -> 8` 参数门(GC 枪已备)。
+5. ~~proof-of-load~~ ✅ 影子双名已落(`/data/local/tmp/gemm/libggml-opencl.so.0.27.0` + `.shadow` 隐名,md5 红卡 64daede0)。
