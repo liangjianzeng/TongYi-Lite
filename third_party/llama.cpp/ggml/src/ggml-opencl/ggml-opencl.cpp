@@ -29538,6 +29538,18 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 }
 
                 kernel = backend_ctx->kernel_mul_mm_q5_0_f32_l4_lm;
+                // [tongyi TYL-GEMM-P2 ledger-221] fail-closed 布局验断(R-111 劈叉防律:机器验
+                // 断言取代注释信任)。l4_lm q5_0 内核吃 SOA qs/qh/d,无 trans-repack 牵连 ⇒
+                // 进核四前提: 内核已创建 / SOA 三件在场 / ne00 块对齐(QK=32)。任一缺 = 布局
+                // 劈叉 = 当场 abort,不放行读错内存算垃圾(哑火档案防法)。
+                // env GGML_OPENCL_GEMM_LAYOUT_ASSERT=0 关闭;健康路径默认开 = 零行为扰动。
+                static const bool tyl_l4lm_assert_off = [] {
+                    const char * e = getenv("GGML_OPENCL_GEMM_LAYOUT_ASSERT");
+                    return e && e[0] == '0';
+                }();
+                GGML_ASSERT(tyl_l4lm_assert_off ||
+                            (kernel && extra0_q5_0 && extra0_q5_0->qs && extra0_q5_0->qh &&
+                             extra0_q5_0->d && src0->ne[0] % 32 == 0));
                 nth0 = 128; // calculated as (BM*BN)/(TM*TN)
 
                 int batch_stride_a = ne00*ne01;
@@ -29581,6 +29593,14 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 }
 
                 kernel = backend_ctx->kernel_mul_mm_q5_1_f32_l4_lm;
+                // [tongyi TYL-GEMM-P2 ledger-221] fail-closed 布局验断(同 q5_0 臂; q5_1 多一块 m)。
+                static const bool tyl_l4lm_assert_off_1 = [] {
+                    const char * e = getenv("GGML_OPENCL_GEMM_LAYOUT_ASSERT");
+                    return e && e[0] == '0';
+                }();
+                GGML_ASSERT(tyl_l4lm_assert_off_1 ||
+                            (kernel && extra0_q5_1 && extra0_q5_1->qs && extra0_q5_1->qh &&
+                             extra0_q5_1->d && extra0_q5_1->m && src0->ne[0] % 32 == 0));
                 nth0 = 128; // calculated as (BM*BN)/(TM*TN)
 
                 int batch_stride_a = ne00*ne01;
