@@ -1,0 +1,209 @@
+--- a/third_party/llama.cpp/ggml/src/ggml-opencl/tongyi_route_table.cpp
++++ b/third_party/llama.cpp/ggml/src/ggml-opencl/tongyi_route_table.cpp
+@@ -10,6 +10,7 @@
+ #include "tongyi_route_table.h"
+ 
+ #include <string.h>
++#include <stdlib.h>   // [vkh R-115] dense_loop_type 读 GGML_OPENCL_MOE_Q4_1
+ 
+ namespace tongyi {
+ 
+@@ -33,7 +34,7 @@
+         { /*k_mult*/ 32, /*m_mult*/ 128, /*n_mult_dense*/ 0, /*need_e_gt1*/ false,
+           NAME_FFN_EXPS_OR_AS, /*moe_gen_policy*/ true, /*reject_e17*/ true,
+           /*forbid_view*/ true, /*view_slot_align*/ false, /*max_cols*/ 1LL << 20 },
+-        "cpu",  // 无 q4_1 dense 行（dense GEMV 家族无 q4_1 内核，勿猜）
++        "mmid_q4_1_dense",  // [vkh R-115] q4_1 dense 行已补（件证见该行注）；batched 被拒时有兜底
+         "tongyi-q41",
+     },
+     {   // q4_K batched：多一道 K%256（superblock scales）；seff/meff 平面是运行时门
+@@ -66,6 +67,18 @@
+         { 256, 0, 4, false, NAME_ANY, false, false, false, false, 0 },
+         "cpu", "dspark",
+     },
++    {   // [vkh R-115 第二拍 2026-10-28] q4_1 dense-loop：混合量化模型的 MoE down 投影
++        // （Ling-3.0-tiny blk.1/2.ffn_down_exps = q4_1 [512,1536,128]）。
++        // **纠正本表旧行注**（"dense GEMV 家族无 q4_1 内核，勿猜"）：件证在树——
++        //   kernel_gemv_noshuffle_q4_1_f32(+_mc3) 声明 :1586/创建 :4782-4783，
++        //   且已被 ggml_cl_mul_mat_q4_1_f32_adreno(:23932) 消费、dense 派发 :28873 在用；
++        //   repack 侧 kernel_convert_block_q4_1_noshuffle 声明 :1056/创建 :2218。
++        // 即"缺的不是内核，是这条路线的表行 + 装载布局 + 派发 arm"。门集逐字镜像
++        // mmid_q4_0_dense（K%32/N%4/名字不查/代际不查）；owner=vkh-q41。
++        "mmid_q4_1_dense", DENSE_LOOP, RTYPE_Q4_1,
++        { 32, 0, 4, false, NAME_ANY, false, false, false, false, 0 },
++        "cpu", "vkh-q41",
++    },
+     {   // vendor 诊断行：仅 GGML_OPENCL_MUL_MAT_ID=1；E031.47 损坏证据见 known_bad
+         "mmid_vendor_q4_0_diag", VENDOR_KERNEL, RTYPE_Q4_0,
+         { 0, 0, 0, false, NAME_ANY, false, false, false, false, 0 },
+@@ -126,6 +139,17 @@
+     if (ctx.dense_off)   return false;
+     if (ctx.dense_force) return true;
+     if (ctx.vendor_diag) return false;
++    if (t == RTYPE_Q4_1) {
++        // [vkh R-115 第二拍] q4_1 MoE down 走 dense-loop。默认关（逐字节零扰动）：
++        // GGML_OPENCL_MOE_Q4_1=1 显式开，或沿用既有总闸 GGML_OPENCL_DENSE_MOE=1（dense_force）。
++        // 与 set_tensor 装填布局/派发 arm 三处**同源于本函数**，不可能出现"派发按新路、
++        // 装填按旧路"的错布局（那是本环最危险的静默错值形态）。
++        static const bool q41 = [] {
++            const char * e = getenv("GGML_OPENCL_MOE_Q4_1");
++            return e && e[0] && e[0] != '0';
++        }();
++        return q41;
++    }
+     return t == RTYPE_Q4_K || t == RTYPE_Q4_0;
+ }
+ 
+@@ -135,6 +159,12 @@
+     if (t == RTYPE_Q4_0) {
+         *s_q = (size_t)M * (K / 4)  * 2;
+         *s_d = (size_t)M * (K / 32) * 2;
++    } else if (t == RTYPE_Q4_1) {
++        // q4_1 块 = 16B quants + **d 与 m 两根 f16**（比 q4_0 多一根 min 面）；
++        // 尺寸公式与 set_tensor q4_1 支 (:12367-12370) 的 size_d/size_m/size_q 同源。
++        *s_q  = (size_t)M * (K / 4)  * 2;
++        *s_d  = (size_t)M * (K / 32) * 2;
++        *s_dm = (size_t)M * (K / 32) * 2;   // m 面（min），走 s_dm 通道做对齐检查
+     } else if (t == RTYPE_Q4_K) {
+         *s_q  = (size_t)M * (K / 4)   * 2;
+         *s_d  = (size_t)M * (K / 256) * 2;
+@@ -149,7 +179,8 @@
+ static bool dense_static_ok(RType t, const RouteQuery & q, const char ** why) {
+     if (!q.src1_f32 || !q.src2_i32)            { if (why) *why = "src_types"; return false; }
+     if (!q.contiguous0 || !q.contiguous1)      { if (why) *why = "contiguity"; return false; }
+-    const bool shape_ok = (t == RTYPE_Q4_0) ? (q.K % 32 == 0) : (q.K % 256 == 0);
++    // q4_1 与 q4_0 同为 32 元素块（K%32）；只有 K-quant 族才要 K%256。
++    const bool shape_ok = (t == RTYPE_Q4_0 || t == RTYPE_Q4_1) ? (q.K % 32 == 0) : (q.K % 256 == 0);
+     if (!shape_ok)                             { if (why) *why = "k_mult"; return false; }
+     if (q.M % 4 != 0)                          { if (why) *why = "n_mult_dense"; return false; }
+     size_t s_q = 0, s_d = 0, s_dm = 0, s_s = 0;
+@@ -208,7 +239,9 @@
+ 
+ RouteResult resolve_admission(const RouteQuery & q, const RouteContext & ctx) {
+     // 1) dense 分支：moe_use_dense_loop(type) && type∈{Q4_0,Q4_K}（:10354-10355）
+-    if ((q.type == RTYPE_Q4_0 || q.type == RTYPE_Q4_K) && dense_loop_type(q.type, ctx)) {
++    // [vkh R-115 第二拍] q4_1 纳入 dense 分支：准入与否仍完全由 dense_loop_type 决定
++    // （默认关 ⇒ 本行对今日行为零扰动）。
++    if ((q.type == RTYPE_Q4_0 || q.type == RTYPE_Q4_K || q.type == RTYPE_Q4_1) && dense_loop_type(q.type, ctx)) {
+         const RouteSpec * s = find_spec(q.type, DENSE_LOOP);
+         const char * why = nullptr;
+         if (dense_static_ok(q.type, q, &why)) {
+--- a/third_party/llama.cpp/ggml/src/ggml-opencl/ggml-opencl.cpp
++++ b/third_party/llama.cpp/ggml/src/ggml-opencl/ggml-opencl.cpp
+@@ -8152,7 +8152,16 @@
+     // Size of min values.
+     size_t size_m = 0;
+ 
++    // [vkh R-115 第二拍] dense-loop MoE 用：每专家一片子缓冲 extra（镜像
++    // ggml_tensor_extra_cl_q4_0::moe_dense_extras :8100）。所有权归本片 extra，
++    // 随权重 buffer 一起释放。
++    std::vector<ggml_tensor_extra_cl_q4_1 *> moe_dense_extras;
++
+     ~ggml_tensor_extra_cl_q4_1() {
++        // 子 extra 的 q/d/m 是 parent 大 buffer 的 subbuffer，必须各自 release
++        // （delete 触发其 reset()），否则 parent buffer 无法干净释放（泄漏类）。
++        for (ggml_tensor_extra_cl_q4_1 * ee : moe_dense_extras) { delete ee; }
++        moe_dense_extras.clear();
+         reset();
+     }
+ 
+@@ -12441,6 +12450,59 @@
+         }
+ #endif // GGML_OPENCL_USE_ADRENO_KERNELS
+ 
++        // [vkh R-115 第二拍] q4_1 3D MoE 权重（ffn_*_exps，ne[2]=E）：按"dense 2D
++        // [K,N] 权重的同款布局"装填 —— 整块 noshuffle convert + **逐专家就地
++        // transpose**，使既有且已验证的 dense q4_1 GEMV 能以逐专家子缓冲运行。
++        // 装填母本 = q4_0 MoE 支 (:12198-12248)；唯一差别 = q4_1 多一根 m(min) 面。
++        // 准入(路由表 dense_loop_type)/装填(本块)/派发(dense-loop arm) 三处**同读
++        // moe_use_dense_loop(Q4_1)** ⇒ 不可能出现"派发按新路、装填按旧路"的错布局
++        // （那是本环最危险的静默错值形态）。默认关 ⇒ 今日行为逐字节不变。
++        if (tensor->ne[2] > 1 && moe_use_dense_loop(GGML_TYPE_Q4_1)) {
++            cl_kernel kq1 = backend_ctx->kernel_convert_block_q4_1_noshuffle;
++            GGML_ASSERT(kq1 && "q4_1 dense-loop: noshuffle convert kernel missing");
++            CL_CHECK(clSetKernelArg(kq1, 0, sizeof(cl_mem), &data_device));
++            CL_CHECK(clSetKernelArg(kq1, 1, sizeof(cl_mem), &extra->q));
++            CL_CHECK(clSetKernelArg(kq1, 2, sizeof(cl_mem), &extra->d));
++            CL_CHECK(clSetKernelArg(kq1, 3, sizeof(cl_mem), &extra->m));
++
++            size_t gws[] = {(size_t)ggml_nelements(tensor)/ggml_blck_size(tensor->type), 1, 1};
++            size_t lws[] = {64, 1, 1};
++            // rusticl 对非整除 NDRange 回 -54（CL_INVALID_WORK_GROUP_SIZE）⇒ 不可整除时交运行时选
++            size_t * lws_u = (gws[0] % 64 == 0) ? lws : NULL;
++            cl_event evt;
++            CL_CHECK(clEnqueueNDRangeKernel(queue, kq1, 3, NULL, gws, lws_u, 0, NULL, &evt));
++            CL_CHECK(clWaitForEvents(1, &evt));
++            CL_CHECK(clReleaseMemObject(data_device));
++            tensor->extra = extra;
++
++            const int  Kc = tensor->ne[0];
++            const int  Mc = tensor->ne[1];
++            const int  Ec = tensor->ne[2];
++            const size_t q_layer = (size_t)Mc * (Kc/4)  * 2;
++            const size_t d_layer = (size_t)Mc * (Kc/32) * 2;
++            const size_t m_layer = (size_t)Mc * (Kc/32) * 2;   // q4_1 独有：min 面
++            // 逐专家切片必须 expert-aligned（同 q4_0 支守卫）。不满足则**保留整块
++            // row-major 布局不 transpose**，由路由表 dense_static_ok 的 subbuf_align
++            // 在准入期拒之 —— 绝不让派发期读到"半 transpose"的错布局。
++            if (Mc % 4 == 0 &&
++                q_layer % backend_ctx->alignment == 0 &&
++                d_layer % backend_ctx->alignment == 0 &&
++                m_layer % backend_ctx->alignment == 0) {
++                for (int e = 0; e < Ec; ++e) {
++                    cl_mem q_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->q, (size_t)e * q_layer, q_layer);
++                    cl_mem d_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->d, (size_t)e * d_layer, d_layer);
++                    cl_mem m_e = ggml_cl_subbuffer_from_parent(backend_ctx, extra->m, (size_t)e * m_layer, m_layer);
++                    transpose_2d_as_16b(backend_ctx, q_e, q_e, q_layer, Kc/4,  Mc);
++                    transpose_2d_as_16b(backend_ctx, d_e, d_e, d_layer, Kc/32, Mc);
++                    transpose_2d_as_16b(backend_ctx, m_e, m_e, m_layer, Kc/32, Mc);
++                    CL_CHECK(clReleaseMemObject(q_e));
++                    CL_CHECK(clReleaseMemObject(d_e));
++                    CL_CHECK(clReleaseMemObject(m_e));
++                }
++            }
++            return;
++        }
++
+         // normal q4_1 repack
+ #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+         cl_kernel kernel = backend_ctx->kernel_convert_block_q4_1;
+@@ -26950,6 +27012,24 @@
+                 pextra->moe_dense_extras.push_back(ee);
+             }
+         }
++    } else if (src0->type == GGML_TYPE_Q4_1) {
++        // [vkh R-115 第二拍] q4_1 逐专家子缓冲（q/d/m 三面；q4_0 只有 q/d）。
++        // 片尺寸公式与 set_tensor 装填支同源（:12367-12370 / 本函数上方法）。
++        ggml_tensor_extra_cl_q4_1 * pextra = (ggml_tensor_extra_cl_q4_1 *)soa0->extra;
++        GGML_ASSERT(pextra && pextra->q && pextra->d && pextra->m && "dense-loop MoE: parent q4_1 SoA extra missing");
++        if (pextra->moe_dense_extras.empty()) {
++            const size_t q_layer = (size_t)N * (K/4)  * 2;
++            const size_t d_layer = (size_t)N * (K/32) * 2;
++            const size_t m_layer = (size_t)N * (K/32) * 2;
++            pextra->moe_dense_extras.reserve(E);
++            for (int e = 0; e < E; ++e) {
++                ggml_tensor_extra_cl_q4_1 * ee = new ggml_tensor_extra_cl_q4_1();
++                ee->q = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->q, (size_t)e * q_layer, q_layer);
++                ee->d = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->d, (size_t)e * d_layer, d_layer);
++                ee->m = ggml_cl_subbuffer_from_parent(backend_ctx, pextra->m, (size_t)e * m_layer, m_layer);
++                pextra->moe_dense_extras.push_back(ee);
++            }
++        }
+     } else if (src0->type == GGML_TYPE_Q4_K) {
+         ggml_tensor_extra_cl_q4_K * pextra = (ggml_tensor_extra_cl_q4_K *)soa0->extra;
+         GGML_ASSERT(pextra && pextra->q && pextra->d && pextra->dm && pextra->s && "dense-loop MoE: parent SoA extra missing");
+@@ -27035,6 +27115,14 @@
+                 // no accumulation (accumulating would pollute the slot with its
+                 // initial contents).
+                 ggml_cl_mul_mat_q4_0_f32_adreno(backend, &f0, &f1, &fd);
++            } else if (src0->type == GGML_TYPE_Q4_1) {
++                // [vkh R-115 第二拍] 走**既有件**：ggml_cl_mul_mat_q4_1_f32_adreno
++                // (:23932，顶层函数，dense 派发 :28873 今日就在用) → 其 ne1==1 分支
++                // 取 kernel_gemv_noshuffle_q4_1_f32(+mc3 :23973)。零新内核。
++                ggml_tensor_extra_cl_q4_1 * ee =
++                    ((ggml_tensor_extra_cl_q4_1 *)soa0->extra)->moe_dense_extras[e];
++                f0.extra = ee;
++                ggml_cl_mul_mat_q4_1_f32_adreno(backend, &f0, &f1, &fd);
+             } else { // GGML_TYPE_Q4_K
+                 ggml_tensor_extra_cl_q4_K * ee =
+                     ((ggml_tensor_extra_cl_q4_K *)soa0->extra)->moe_dense_extras[e];

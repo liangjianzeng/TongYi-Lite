@@ -10420,16 +10420,31 @@ inline bool fa_a7x_kv_guard(const ggml_backend_opencl_context *backend_ctx) {
 // [tongyi TYL-UNLOCK-R3 2026-10-28] Mesa 面大-N GEMV 准入豁免（一处真源）。
 // supports_op 的 :11131 按「generic mul_mv 在大 batch prefill 上是错的」(vendor 驱动 era
 // 史案) 在 !uses_gemm 时拒收大型量化权重；Mesa 面 use_adreno_kernels 恒 false ⇒
-// use_adreno_kernels 系 GEMM 永不可得 ⇒ **装载期 m=512 假想探针**把 ling dense
-// ffn_gate/up(q4_1, K=1536/N≥512) 整批流放 CPU 缓冲——R-115 d2 普查 37 枚 MUL_MAT CPU 岛
-// 即此（运行期 eye/ling ubatch=16，512 那条腿从未被真实执行过 = 为假想 N 流放真权重）。
+// use_adreno_kernels 系 GEMM 永不可得 ⇒ **装载期 m=512 假想探针**把 ling 共享专家
+// 权重(q5_0×36: 12 块×{gate,up,down}_shexp——子 526 枚 GGUF 普查件证, 父初标"q4_1"已纠)
+// 整批流放 CPU 缓冲——R-115 d2 普查 37 枚 MUL_MAT CPU 岛即此（运行期 eye/ling ubatch=16，512 那条腿从未被真实执行过 = 为假想 N 流放真权重）。
 // dspark 2026-10-16 的 small_weight 豁免是同一刑场的先例。通用 kernel_mul_mv_q4_1_f32
 // 今日在 Mesa 已编译（:2544/:2561 创建无守卫，CL_CHECK fail-fast 在场）。
 // env GGML_OPENCL_MESA_LARGE_N_GEMV=1 仅 Mesa 面准入（未设/0 = 逐字节零扰动）；
 // 风险入账：app 线 ubatch=512 真走大 N 时 GEMV 慢 = prefill 回退候测（与 L3 排空税案合表）。
-inline bool mesa_large_n_gemv_ok(const ggml_backend_opencl_context *backend_ctx) {
+// 类型白名单（子件证+父复验 14:0x, 防"装进 GPU 派发期发空内核/abort"）: 通用 mul_mv
+// switch 的 clCreateKernel 实证在场 = q4_1/q5_0/q5_1/q8_0/iq4_nl/mxfp4；K-quant
+// (q4_K/q5_K/q6_K)无 mv kernel 但 L8 实证 q6_K lm_head 在 Mesa GPU 走通(可用派发路在场)
+// ⇒ 限 2D(ne[2]==1)准入。**禁入**: q4_0(通用 switch 无 kernel_mul_mv_q4_0_f32 = 空内核
+// 雷; 其自有分支不受此影响)、q2_K/q3_K(kernel=0 无实证)、q1_0(仅 trans-weight 路未验)。
+inline bool mesa_large_n_gemv_ok(const ggml_backend_opencl_context *backend_ctx,
+                                 ggml_type t, int64_t ne02) {
     static const char * e = getenv("GGML_OPENCL_MESA_LARGE_N_GEMV");
-    return e && e[0] == '1' && backend_ctx && backend_ctx->is_mesa_rusticl;
+    if (!e || e[0] != '1' || !backend_ctx || !backend_ctx->is_mesa_rusticl) return false;
+    switch (t) {
+        case GGML_TYPE_Q4_1: case GGML_TYPE_Q5_0: case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q8_0: case GGML_TYPE_IQ4_NL: case GGML_TYPE_MXFP4:
+            return true;
+        case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q6_K:
+            return ne02 == 1;   // L8 实证路仅证 2D 稠密权重
+        default:
+            return false;
+    }
 }
 
 // [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
@@ -11144,7 +11159,7 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
                     // microseconds either way.
                     const bool small_weight = op->src[0]->ne[0] < 512 || op->src[0]->ne[1] < 512;
                     if (!uses_gemm && !small_weight && op->src[1]->ne[1] >= 512
-                        && !mesa_large_n_gemv_ok(backend_ctx)) {  // [tongyi TYL-UNLOCK-R3] Mesa 面假想-N 流放豁免
+                        && !mesa_large_n_gemv_ok(backend_ctx, t, op->src[0]->ne[2])) {  // [tongyi TYL-UNLOCK-R3+白名单] 假想-N 流放豁免(类型白名单防派发期空内核)
                         return false;
                     }
                 }
