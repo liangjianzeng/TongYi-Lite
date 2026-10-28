@@ -52,6 +52,7 @@
 |---|---|
 | GEMM-P1 | q5_0/q5_1 `type_has_gemm` 白名单 diff 已入库候审:supports_op 门 env `GGML_OPENCL_Q5X_GEMM=1` 准入 + 内核成员指针在场机检;**build-x4 增量编译 EXIT=0**;ledger-220 |
 | GEMM 拍2(重定义) | 军械普查发现:GEMM 派发段入口(`src1t==F32 && ne00%16==0 && ne11>1`)**无 use_adreno_kernels 守卫**,q5_x/q4_1 系 l4_lm 读 SOA 平面(无 trans-repack 牵连)且无条件创建 ⇒ Mesa 面 R3 准入后 512 腿**可能已走 GEMM**,"GEMV 挨大 N"候测疑为过时预言 ⇒ 拍2 转为**测量+认证腿**(见枪单) |
+| 配置债取证(host) | **TYL-DRAIN smart drain = opt-in**(`GGML_OPENCL_SMART_DRAIN` 需 `=1`,:738)⇒ 出厂默认仍在"每2发令一 clFinish"旧道,agent prefill 深队列吃满排空税;排空件属 **GEMV 侧辖区(第8条),GEMM 侧只记债不动**;默认翻档与 P1 同列为需金口 |
 | GEMV 侧战报(引自 #219) | A 路 MOE_VIEW_SLOT 编成 `6827dbc16c`,env-off 逐字节零扰动(tokmd5=50c7a28b, 3.73 t/s, gatefail=0);4B 四档:legacy 0.49 / SMART 1.68 / idle0 2.16 / flush128 2.69~2.85 t/s,排空税速度恢复独立成立;LFM 24B 开火线铺开(vkh_lfm 新 build dir,13.58GB 正主 EXPECT_SIZE ✓) |
 
 ## GEMM 侧待射枪单(候车道,全部 env 默认 OFF)
