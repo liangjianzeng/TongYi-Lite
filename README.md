@@ -524,12 +524,10 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
-> [⬇️ 下载 `TongYi-Lite-v0.3.5.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.5.apk)  
-> v0.3.5+23 · 72,114,350 B（2026-10-25，GPU 全卸载产品化第一轮 + UI rail 重构 + 单主线收敛；  
-> 追加：外观浅色/深色/跟随系统、产物另存到任意目录（SAF）、简单聊天流式思考卡、  
-> 滚动焦点拖拽仲裁（上翻释放/回底截获）、API 档占用窗口路由修复、  
-> 占用环窗口「压缩预算」兜底 + 统计条输出 tok 估算兜底、docs 迁私有仓 submodule）  
-> `SHA-256: 5f3f2f7bf7da9c54044e984ef6425ce2fe1d11901d195fbcd646ccf72cafdab2`
+> [⬇️ 下载 `TongYi-Lite-v0.3.6.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.6.apk)  
+> v0.3.6+24 · 68,628,713 B（2026-10-28，**远程控制（ADB）**纯 Dart 协议栈 + **Dev Agent SSH 面**：  
+> 远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口、SSH 诊断目标×认证分流）  
+> `SHA-256: 7a32a6daff4503bbdd124dada5b2ecc88c7fd4548ab8b99eeec3f6aac424d85d`
 
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
 > 模型缓存，切勿先卸载。历史版本见 [`releases/`](releases/) 目录或按[构建与开发](#构建与开发)自行构建。
