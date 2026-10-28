@@ -16,16 +16,20 @@
 // [tongyi 1028 R-120 解剖刀] SIGILL/SIGSEGV 取证：backtrace 落 stderr（无缓冲），
 // 崩溃不再吞进度。E2E_LOADONLY=1 只加载即退（分相定位）。零扰动：不改任何推理路径。
 #include <csignal>
-#include <execinfo.h>
+#if !defined(__BIONIC__)
+#include <execinfo.h>   // [gemm_plan 1028] NDK android-28 无 execinfo: bionic 崩溃行走 tombstone 补栈
+#endif
 #include <unistd.h>
 static void tyl_crash(int sig, siginfo_t * si, void * uc) {
     (void)uc;
     char b[128];
     int n = snprintf(b, sizeof(b), "\n[e2e][CRASH] sig=%d addr=%p\n", sig, (void *)si->si_addr);
     ssize_t w = write(2, b, n); (void)w;
+#if !defined(__BIONIC__)
     void * frames[64];
     int f = backtrace(frames, 64);
     backtrace_symbols_fd(frames, f, 2);
+#endif
     _exit(100 + sig);
 }
 
@@ -50,12 +54,6 @@ int main(int argc, char ** argv) {
     if (!model) { fprintf(stderr, "LOAD_FAIL\n"); return 3; }
     auto t1 = std::chrono::steady_clock::now();
     fprintf(stderr, "[e2e][PHASE] model_loaded\n");
-    if (const char * lo = getenv("E2E_LOADONLY"); lo && *lo) {
-        llama_model_free(model);
-        fprintf(stderr, "[e2e][PHASE] loadonly_done\n");
-        return 0;
-    }
-
     llama_context_params cp = llama_context_default_params();
     const int nctx = (argc > 6) ? atoi(argv[6]) : 1024;
     cp.n_ctx = nctx; cp.n_batch = nctx < 512 ? nctx : 512; (void)seed; // 贪心 argmax 与 seed 无关
@@ -65,6 +63,14 @@ int main(int argc, char ** argv) {
     { const char * e_nb = getenv("E2E_NB"); if (e_nb && e_nb[0]) { cp.n_batch = atoi(e_nb); fprintf(stderr, "[e2e] E2E_NB ubatch=%d\n", cp.n_batch); } }
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "CTX_FAIL\n"); return 4; }
+    fprintf(stderr, "[e2e][PHASE] ctx_ready\n");
+    // [tongyi 1028 R-122] 分相点后移到 ctx 之后：opencl 核编译/装载发生在 ctx 期，
+    // 停在 model_loaded 会漏测整个 kernel 面（N_DST 案教训）。
+    if (const char * lo = getenv("E2E_LOADONLY"); lo && *lo) {
+        llama_free(ctx); llama_model_free(model);
+        fprintf(stderr, "[e2e][PHASE] loadonly_done\n");
+        return 0;
+    }
 
     // X4 logit 面（R-072）：E2E_LOGITDUMP=<path> 时逐 argmax 站点 dump 全量 fp32 logits。
     // 铁律：探针=放大器——tok 输出必须零扰动；dump 只做只读 fwrite。
@@ -79,14 +85,20 @@ int main(int argc, char ** argv) {
     toks.resize(n);
 
     // prefill
-    // [gemm_plan ledger-222] prefill 计时出口(TTFT 口径): 纯增 stderr METRIC 行, tok 零扰动。
+    // [gemm_plan ledger-222] prefill 计时出口 + 3K agent prompt 分块 decode:
+    // 单批 n>n_batch 撞 llama-context.cpp:1944 PROBE 腿血案(830 实录 rc=134), 与 app
+    // 线同款分块姿势(E2E_NB=块宽)。纯增 stderr METRIC 行, tok 零扰动。
     auto t_pf0 = std::chrono::steady_clock::now();
-    llama_batch b = llama_batch_get_one(toks.data(), n);
-    int pf_rc = llama_decode(ctx, b);
+    int pf_rc = 0; int last_cnt = n;
+    for (int i = 0; i < n && pf_rc == 0; i += cp.n_batch) {
+        last_cnt = (n - i < cp.n_batch) ? (n - i) : cp.n_batch;
+        llama_batch bc = llama_batch_get_one(toks.data() + i, last_cnt);
+        pf_rc = llama_decode(ctx, bc);
+    }
     auto t_pf1 = std::chrono::steady_clock::now();
     if (pf_rc != 0) { fprintf(stderr, "PREFILL_FAIL\n"); return 6; }
     // greedy sample via logits last-token
-    float * logits = llama_get_logits_ith(ctx, n - 1);
+    float * logits = llama_get_logits_ith(ctx, last_cnt - 1);
     if (lgf) fwrite(logits, 4, lg_nv, lgf);
     int best = 0; float bv = logits[0];
     for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
