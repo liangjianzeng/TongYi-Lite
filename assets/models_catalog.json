@@ -321,6 +321,69 @@
       }
     },
     {
+      "id": "lfm3-vl-2b-qad-q4_0",
+      "name": "LFM3-VL 2B (QAD Q4_0 视觉)",
+      "type": "vision",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/LiquidAI/LFM3-VL-2B-GGUF/resolve/master/LFM3-VL-2B-QAD-Q4_0.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/LFM3-VL-2B-QAD-Q4_0.gguf",
+          "source": "hf-mirror"
+        },
+        {
+          "url": "https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/LFM3-VL-2B-QAD-Q4_0.gguf",
+          "source": "huggingface"
+        }
+      ],
+      "sizeGB": 0.98,
+      "sizeMBDisplay": "1.0 GB",
+      "recommended": false,
+      "minRamMB": 3072,
+      "sha256Hash": "621c455376cb96a20891697deb9975c6fb47dd5ea98ed3ad1f3b7e8f24f0b1e6",
+      "tags": [
+        "视觉",
+        "官方量化",
+        "QAD 抗量化",
+        "需新版引擎"
+      ],
+      "mmproj": {
+        "mirrors": [
+          {
+            "url": "https://modelscope.cn/models/LiquidAI/LFM3-VL-2B-GGUF/resolve/master/mmproj-LFM3-VL-2B-F16.gguf",
+            "source": "modelscope"
+          },
+          {
+            "url": "https://hf-mirror.com/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/mmproj-LFM3-VL-2B-F16.gguf",
+            "source": "hf-mirror"
+          },
+          {
+            "url": "https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/main/mmproj-LFM3-VL-2B-F16.gguf",
+            "source": "huggingface"
+          }
+        ],
+        "sizeMB": 361.4,
+        "sizeMBDisplay": "361 MB",
+        "sha256Hash": "1d8e6e58eefc093e09d6332f081516e1ddbd5b35cfca7f35463fb270db230b1e"
+      },
+      "agentCapabilities": {
+        "nativeToolCall": false,
+        "maxContextTokens": 128000,
+        "recommendedNctx": 8192,
+        "mtpSupported": false
+      },
+      "agentDefaults": {
+        "maxRounds": 4,
+        "tokensPerRound": 512,
+        "enabledTools": [
+          "get_time",
+          "calculator"
+        ]
+      }
+    },
+    {
       "id": "lfm2.5-2.6b-q4_k_m",
       "name": "LFM 2.5 2.6B (Q4_K_M)",
       "type": "text",

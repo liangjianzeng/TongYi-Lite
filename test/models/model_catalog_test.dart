@@ -9,8 +9,8 @@ void main() {
   test('目录可加载且含新增智能体模型', () async {
     final models = await ModelCatalog.load();
 
-    // 目录随发版增删模型（0.3.5 = 21 个）；数量变动时同步本断言防误删。
-    expect(models.length, 21);
+    // 目录随发版增删模型（0.3.6 = 22 个）；数量变动时同步本断言防误删。
+    expect(models.length, 22);
 
     final spark = models.firstWhere((m) => m.id == 'spark-x2.5-4b-q4_k_m');
     expect(spark.name, contains('Spark-X2.5 4B'));
@@ -29,6 +29,20 @@ void main() {
     expect(ling30.type, ModelType.text);
     expect(ling30.bestMirrorUrl, contains('Ling-3.0-tiny-Q4_K_M.gguf'));
     expect(ling30.sizeMB, greaterThan(4400));
+
+    // LFM3-VL 2B（Liquid AI 官方 QAD Q4_0 + F16 投影器，两文件形态视觉模型）。
+    final lfm3vl = models.firstWhere((m) => m.id == 'lfm3-vl-2b-qad-q4_0');
+    expect(lfm3vl.name, contains('LFM3-VL 2B'));
+    expect(lfm3vl.type, ModelType.vision);
+    expect(lfm3vl.supportsVision, isTrue);
+    expect(lfm3vl.bestMirrorUrl, contains('LFM3-VL-2B-QAD-Q4_0.gguf'));
+    expect(lfm3vl.sizeMB, greaterThan(950));
+    expect(lfm3vl.sha256Hash, isNotNull);
+    // mmproj 非空 → 走「text + mmproj 两文件」加载路径，总字节含投影器。
+    expect(lfm3vl.mmproj, isNotNull);
+    expect(lfm3vl.mmproj!.bestMirrorUrl, contains('mmproj-LFM3-VL-2B-F16.gguf'));
+    expect(lfm3vl.mmproj!.sizeMB, greaterThan(340));
+    expect(lfm3vl.totalBytes, greaterThan(lfm3vl.sizeBytes));
 
     final bonsai27b = models.firstWhere((m) => m.id == 'bonsai-27b-q1_0');
     expect(bonsai27b.name, contains('Bonsai 27B'));
