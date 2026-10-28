@@ -2289,6 +2289,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     attachments: message.attachments,
                     audioPath: message.audioPath,
                     inferenceStats: message.inferenceStats,
+                    conversationId: _currentConversationId,
                   ),
                 TurnUnit(:final tools, :final answer, :final thinking,
                         :final trace, :final traceTools) =>

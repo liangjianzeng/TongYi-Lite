@@ -1315,6 +1315,7 @@ class AgentTurnBlock extends StatelessWidget {
                 isUser: false,
                 canSpeak:
                     answer!.kind == MessageKind.text && !_answerPending,
+                conversationId: answer!.conversationId,
               ),
             ),
           // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。
@@ -1378,6 +1379,7 @@ class AgentTurnBlock extends StatelessWidget {
               stats: answer!.inferenceStats,
               isUser: false,
               canSpeak: answer!.kind == MessageKind.text,
+              conversationId: answer!.conversationId,
             ),
           ),
         // WP-C：本轮产物汇总（export_file 成功项去重）——快捷打开链接。

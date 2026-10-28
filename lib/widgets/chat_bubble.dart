@@ -10,6 +10,18 @@ import '../tts/edge_tts_service.dart' show EdgeTtsService;
 import 'image_preview.dart';
 import 'todo_card.dart';
 
+/// 消息的 TTS 播放按钮是否正控当前这场播报（决定图标显示停止态、点按即停）。
+///
+/// 播报有两路 key：本按钮/手动试听用 `content.hashCode`，自动播报用会话级
+/// `auto-$conversationId`——两者不同。任一命中 = 本按钮正控这场：图标改停止、
+/// 点按调用 stop()；否则起播本条。漏判这层就是「自动播报时按钮不变停止态、
+/// 点了反而重播」的根因（2026-10 修复）。纯函数，单测钉死。
+bool isThisMessagePlaying(String? playing, String messageKey, String? conversationId) {
+  if (playing == null) return false;
+  if (playing == messageKey) return true;
+  return conversationId != null && playing == 'auto-$conversationId';
+}
+
 class ChatBubble extends StatelessWidget {
   final String role; // 'user' or 'assistant' or 'system'
   final String content;
@@ -26,6 +38,13 @@ class ChatBubble extends StatelessWidget {
   final String? audioPath;
   final InferenceStats? inferenceStats;
 
+  /// 本气泡所属会话 id（普通聊天/用户消息带，智能体回合气泡通常 null）。
+  ///
+  /// 用于识别「本会话自动播报」：自动播报用 key `auto-$conversationId`，
+  /// 与按钮自用的 `content.hashCode` 不同；不带会话 id 时按钮无法判断当前
+  /// 出声是不是在播自己，图标就不改停止态、点按也会重新播（二次播放 bug）。
+  final String? conversationId;
+
   const ChatBubble({
     super.key,
     required this.role,
@@ -38,6 +57,7 @@ class ChatBubble extends StatelessWidget {
     this.attachments,
     this.audioPath,
     this.inferenceStats,
+    this.conversationId,
   });
 
   bool get _isUser => role == 'user';
@@ -381,6 +401,7 @@ class ChatBubble extends StatelessWidget {
                     stats: inferenceStats,
                     isUser: _isUser,
                     canSpeak: _canSpeak,
+                    conversationId: conversationId,
                   ),
               ],
             ),
@@ -404,6 +425,10 @@ class MessageActionsRow extends StatelessWidget {
   /// TTS 播报按钮可见性（调用方按消息类型判定，工具/思考/卡片不给）。
   final bool canSpeak;
 
+  /// 本消息所属会话 id（用于识别本会话自动播报，见 [MessageActionsRow] 的
+  /// TTS 播放按钮）。普通聊天/用户消息带，智能体回合气泡通常 null。
+  final String? conversationId;
+
   const MessageActionsRow({
     super.key,
     required this.content,
@@ -411,6 +436,7 @@ class MessageActionsRow extends StatelessWidget {
     this.stats,
     required this.isUser,
     this.canSpeak = false,
+    this.conversationId,
   });
 
   @override
@@ -515,10 +541,19 @@ class MessageActionsRow extends StatelessWidget {
         return ValueListenableBuilder<String?>(
           valueListenable: tts.playingKey,
           builder: (context, playing, _) {
-            final isThis = playing == content.hashCode.toString();
+            final isThis = isThisMessagePlaying(
+              playing,
+              content.hashCode.toString(),
+              conversationId,
+            );
             return InkWell(
               borderRadius: BorderRadius.circular(12),
               onTap: () async {
+                // 正在播本条（手动或自动）= 点按停止；否则起播本条。
+                if (isThis) {
+                  await tts.stop();
+                  return;
+                }
                 final ok = await tts.speak(
                   content,
                   key: content.hashCode.toString(),

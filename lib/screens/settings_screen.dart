@@ -518,67 +518,69 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
           final isLoadingHere = ms.isLoading && ms.modelId == model.id;
           final isLoadedHere = ms.modelId == model.id && ms.isLoaded;
 
+          // 主动作按钮（已加载 / 加载中 / 加载到内存）：把转圈从独立小.widget
+          // 收进按钮的 icon 位，整体包 Expanded，与卸载/删除等分共享宽度——
+          // 否则三固定宽按钮在窄面板（内容区约 192dp）会横向溢出黄条。
+          Widget loadButton;
+          if (isLoadedHere) {
+            loadButton = ElevatedButton.icon(
+              onPressed: null,
+              icon: const Icon(Icons.check_circle, size: 18),
+              label: const Text('已加载'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green.shade50,
+                foregroundColor: Colors.green.shade700,
+              ),
+            );
+          } else if (isLoadingHere) {
+            loadButton = ElevatedButton.icon(
+              onPressed: null,
+              icon: const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              label: const Text('加载中...'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue.shade50,
+                foregroundColor: Colors.blue.shade700,
+              ),
+            );
+          } else {
+            loadButton = ElevatedButton.icon(
+              onPressed: manager.isBusy ? null : () => _handleLoadModel(model),
+              icon: const Icon(Icons.memory, size: 18),
+              label: const Text('加载到内存'),
+            );
+          }
+
           return Row(
             children: [
-              // Load / Loading / Loaded button
-              if (isLoadedHere) ...[
-                ElevatedButton.icon(
-                  onPressed: null,
-                  icon: const Icon(Icons.check_circle, size: 18),
-                  label: const Text('已加载'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green.shade50,
-                    foregroundColor: Colors.green.shade700,
-                  ),
-                ),
-              ] else if (isLoadingHere) ...[
-                const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: null,
-                  icon: const SizedBox.shrink(),
-                  label: const Text('加载中...'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue.shade50,
-                    foregroundColor: Colors.blue.shade700,
-                  ),
-                ),
-              ] else ...[
-                ElevatedButton.icon(
-                  onPressed:
-                      manager.isBusy ? null : () => _handleLoadModel(model),
-                  icon: const Icon(Icons.memory, size: 18),
-                  label: const Text('加载到内存'),
-                ),
-              ],
-
+              Expanded(child: loadButton),
               const SizedBox(width: 8),
-
-              // Unload button
-              if (isLoadedHere) ...[
-                OutlinedButton.icon(
-                  onPressed: manager.isBusy
-                      ? null
-                      : () => unloadModelAndNotify(ref, context, model.name),
-                  icon: const Icon(Icons.close, size: 18),
-                  label: const Text('卸载'),
-                  style: OutlinedButton.styleFrom(
-                      backgroundColor: Colors.red.shade700,
-                      foregroundColor: Colors.white),
+              if (isLoadedHere)
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: manager.isBusy
+                        ? null
+                        : () => unloadModelAndNotify(ref, context, model.name),
+                    icon: const Icon(Icons.close, size: 18),
+                    label: const Text('卸载'),
+                    style: OutlinedButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                        foregroundColor: Colors.white),
+                  ),
                 ),
-              ],
-
+              const SizedBox(width: 8),
               // Delete button — 删除会移除已下载的模型文件（重新下载很费劲），
               // 必须先弹确认框，避免误删。确认后真正删除。
-              OutlinedButton.icon(
-                onPressed: () => _confirmDeleteModel(model, context),
-                icon: const Icon(Icons.delete, size: 18),
-                label: const Text('删除'),
-                style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red.shade700),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _confirmDeleteModel(model, context),
+                  icon: const Icon(Icons.delete, size: 18),
+                  label: const Text('删除'),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red.shade700),
+                ),
               ),
             ],
           );
@@ -1872,8 +1874,14 @@ Widget _buildToggleTitle(
       ),
       if (subtitle != null) ...[
         const SizedBox(height: 2),
-        Text(subtitle,
-            style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        // 副题限高两行 + 省略号：窄面板（内容区约 192dp）里长说明不再折三五行
+        // 占满整行；头部信息在前、尾部补充说明超出部分省略（全 8 处 toggle 行共用）。
+        Text(
+          subtitle,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
       ],
     ],
   );
@@ -2756,6 +2764,8 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
                               '默认关：智能体的工具决策步不思考（只需产出一次工具调用），'
                               '端侧思考失控（动辄几万字独白把预算吃光）几乎都发生在那一步；'
                               '组织最终答案时仍允许思考。打开 = 每步都允许（同旧版行为）',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                   fontSize: 11, color: Colors.grey[600]),
                             ),
@@ -8339,6 +8349,8 @@ class _VoiceSettingsBodyState extends ConsumerState<VoiceSettingsBody> {
               subtitle: Text(
                   '${hotwordCategories.length} 个分类，共 '
                   '${hotwordCategories.fold<int>(0, (n, c) => n + effectiveCategoryWords(c.id, settings.asrHotwordAdded, settings.asrHotwordRemoved).length)} 个生效词；点分类可增删词',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12)),
               children: [
                 for (final cat in hotwordCategories)
