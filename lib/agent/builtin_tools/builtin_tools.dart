@@ -60,7 +60,12 @@ export '../dev/tools/ssh_tools.dart'
         createSshWriteFileTool;
 export '../dev/tools/sync_tools.dart' show createWorkspaceSyncTool;
 export '../dev/tools/verify_tool.dart' show createRunTestsTool;
+// ADB 远程控制（独立开关，不属于 Dev 组 —— 用户定案：设置里开一下就能用）。
+export '../adb/adb_tool.dart' show createAdbTool, kAdbActionNames, AdbAction;
+export '../adb/adb_targets.dart' show AdbTarget, AdbSecretStore;
 
+import '../adb/adb_targets.dart' show AdbSecretStore, AdbTarget;
+import '../adb/adb_tool.dart';
 import '../dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../dev/tools/embedded_tools.dart';
 import '../dev/tools/git_tools.dart';
@@ -139,6 +144,8 @@ const List<String> kDevToolNames = [
 /// [webSearchMaxSearchesPerTurn]：web_search 每回合调用上限（DSH max_uses
 /// 语义，默认 5），接入层按设置传入。
 /// [includeDevTools]：Dev Agent 工具组（开发模式开启时 true）。
+/// [adbEnabled] / [adbTargets] / [adbKeyStore]：ADB 远程控制（独立开关，
+/// 与 Dev 模式无关；目标机白名单 + 授权密钥托管见 lib/agent/adb/adb_targets.dart）。
 /// [devSshConfigs]：SSH 连接配置快照（回合级），Dev 工具据此自动连接。
 /// [onTodosChanged]：todo_write 成功后的 UI 通知（对话内任务清单活卡 upsert）。
 /// [conversationId]：todo 清单按会话隔离的存储键（todo_v3；null 回退
@@ -147,6 +154,9 @@ List<ToolDefinition> createBuiltinTools({
     int webSearchMaxSearchesPerTurn = 5,
     bool includeDevTools = false,
     List<SshConfig> devSshConfigs = const [],
+    bool adbEnabled = false,
+    List<AdbTarget> adbTargets = const [],
+    AdbSecretStore? adbKeyStore,
     String? conversationId,
     void Function(List<Map<String, String>> items)? onTodosChanged}) => [
       createGetTimeTool(),
@@ -193,4 +203,10 @@ List<ToolDefinition> createBuiltinTools({
         createRunTestsTool(sshConfigs: devSshConfigs),
         createWorkspaceSyncTool(sshConfigs: devSshConfigs),
       ],
+      // ADB 远程控制：独立于 Dev 模式，只看「设置 → 智能体 → 远程控制（ADB）」
+      // 这一个开关（用户定案：不做逐次审批）。关掉即完全不注册，模型看不见；
+      // 工具体内还有同样的门禁，防的是"注册表被别处复用"时的漏网。
+      if (adbEnabled)
+        createAdbTool(
+            targets: adbTargets, keyStore: adbKeyStore, adbEnabled: adbEnabled),
     ];

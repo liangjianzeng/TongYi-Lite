@@ -9,12 +9,18 @@ library;
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../../builtin_tools/shell_tool.dart'
     show kShellOutputLimit; // 复用同一截断上限语义
 import '../../sandbox.dart' show withEscalationFields;
 import '../../tool_definition.dart';
+import '../dev_workspace_actions.dart'
+    show defaultRemoteProjectPathPlaceholder, ensureWorkspaceRemoteDir;
 import '../safety.dart';
+import '../ssh/secret_store.dart' show resolveSshSecretsAll;
 import '../ssh/ssh_credentials.dart' show SshConfig;
+import '../ssh/ssh_diagnostics.dart';
 import '../ssh/ssh_environment.dart';
 import '../termux_intent.dart';
 import '../workspace.dart';
@@ -29,7 +35,10 @@ const int kSshWriteFileLimit = 65536;
 /// 解析远端工作区根目录。
 ///
 /// - workspaceId 缺失/默认 → 错误（默认工作区是本地，无远端路径）；
-/// - 工作区不存在 → 错误；backend 非远端 → 错误；remotePath 空 → 错误。
+/// - 工作区不存在 / backend 非远端 → 错误；
+/// - **remotePath 空 → 不再报错**，给占位 `~/projects/<安全名>`，由
+///   `ensureWorkspaceRemoteDir` 在连上后绝对化并 `mkdir -p`（2026-10-27 用户定案：
+///   目录"有就用、没有就建"，不该每条消息都甩个 No such file or directory）。
 /// 返回 `(root, workspace)`。
 Future<({String root, DevWorkspace workspace})> resolveRemoteRoot(
     String? workspaceId) async {
@@ -47,11 +56,31 @@ Future<({String root, DevWorkspace workspace})> resolveRemoteRoot(
     throw StateError('工作区「${ws.name}」是本地后端，无远端路径');
   }
   final root = (ws.remotePath ?? '').trim();
-  if (root.isEmpty) {
-    throw StateError('工作区「${ws.name}」未配置远端路径（remotePath）');
-  }
-  return (root: root, workspace: ws);
+  return (
+    root: root.isEmpty ? defaultRemoteProjectPathPlaceholder(ws.name) : root,
+    workspace: ws
+  );
 }
+
+/// 远端「进目录」前缀：**目录不存在就地创建**。
+///
+/// 两条独立防线里的第二条（第一条是 [ensureSshConnectionFor] 里的一次性 mkdir）：
+/// 会话中途目录被删、或 intent 免 SSH 通道（没连接也可用）时，
+/// `cd 不存在的目录` 仍会让整条命令以 errno 收场，模型只会反复重试。
+/// `~` 开头的路径**不能加引号**（引号里波浪号不展开），名称已由
+/// `sanitizeWorkspaceDirName` 约束，无注入面。
+String remoteCdPrefix(String root) {
+  final dir = root.startsWith('~') ? root : sq(root);
+  return 'mkdir -p $dir && cd $dir';
+}
+
+/// 远端路径的父目录（SFTP 写文件前建父目录用；无 `/` 时返回空串）。
+String remoteParentDir(String path) {
+  final i = path.lastIndexOf('/');
+  if (i <= 0) return '';
+  return path.substring(0, i);
+}
+
 
 /// 相对路径 → 远端绝对路径（相对基于工作区远端根目录）。
 String toRemotePath(String root, String rawPath) {
@@ -70,6 +99,10 @@ String sq(String s) => "'${s.replaceAll("'", r"'\''")}'";
 /// 确保 SSH 连接（按工作区绑定的配置自动连接/切换）。
 ///
 /// 返回错误信息（null = 已连接可用）。
+///
+/// ⚠️ 完整性必须在**回填凭据之后**判：私钥/登录密码被 secret_store 搬进
+/// 安全存储后，settings 里的配置只剩空槽位，直接判 `isComplete` 恒为 false
+/// （密码登录尤其致命——密码正是被剥离的字段），表现为"配好了却报未配置"。
 Future<String?> ensureSshConnectionFor(
     SshEnvironmentService ssh, DevWorkspace ws, List<SshConfig> sshConfigs) async {
   // 已连接且配置匹配（都未绑定或绑定相同）：直接复用。
@@ -79,34 +112,44 @@ Future<String?> ensureSshConnectionFor(
     if (wsId == null || wsId.isEmpty || activeId == wsId) return null;
     // 绑定不同配置：需要切换。
   }
+  final resolved = await resolveSshSecretsAll(sshConfigs);
   SshConfig? cfg;
   final wsId = ws.sshConfigId;
   if (wsId == null || wsId.isEmpty) {
     // 未绑定配置：自动取列表里第一份完整配置。
-    for (final c in sshConfigs) {
+    for (final c in resolved) {
       if (c.isComplete) {
         cfg = c;
         break;
       }
     }
     if (cfg == null) {
-      return 'SSH 未配置：请在「设置 → 开发者」中配置 Termux/远程电脑连接（自动生成密钥即可）';
+      return 'SSH 未配置：请在「设置 → 开发者」中配置 Termux/远程电脑连接'
+          '（远程电脑可用账号密码直接登录，不必装公钥）';
     }
   } else {
-    for (final c in sshConfigs) {
+    for (final c in resolved) {
       if (c.id == wsId) {
         cfg = c;
         break;
       }
     }
     if (cfg == null || !cfg.isComplete) {
-      return 'SSH 配置不完整：工作区「${ws.name}」绑定的连接配置缺失或未填完整，请在「设置 → 开发者」中补全';
+      return 'SSH 配置不完整：工作区「${ws.name}」绑定的连接配置缺失或未填完整，'
+          '请在「设置 → 开发者」补全（用户名 + 私钥或登录密码）';
     }
   }
   if (!await ssh.ensureConnected(cfg)) {
-    return 'SSH 连接失败：${ssh.lastError ?? '未知原因'}'
-        '（请确认 Termux 已安装 openssh 且已执行 sshd）';
+    final target = ws.backend == WorkspaceBackend.remotePc
+        ? SshTargetKind.remotePc
+        : sshTargetKindOf(cfg);
+    return 'SSH 连接失败：'
+        '${classifySshFailure(ssh.lastError, target: target, passwordAuth: cfg.usesPassword, keyAuth: cfg.usesKey)}';
   }
+  // 连上 ≠ 能干活：工作区目录不在，后面每个工具都会撞 `cd: No such file`。
+  // 这里一次性「有就用、没有就建」（含 ~ 绝对化 + 路径回填），后续调用命中缓存。
+  final dir = await ensureWorkspaceRemoteDir(ws);
+  if (dir.error != null) return dir.error;
   return null;
 }
 
@@ -120,13 +163,20 @@ Future<String?> readRemoteAgentsMd(
     final sshErr = await ensureSshConnectionFor(
         SshEnvironmentService.instance, remote.workspace, sshConfigs);
     if (sshErr != null) return null;
-    final path = toRemotePath(remote.root, 'AGENTS.md');
+    // SFTP 不认 `~`：用确保过的绝对根目录（ensureSshConnectionFor 内已建目录）。
+    final ready = await ensureWorkspaceRemoteDir(remote.workspace);
+    final root = ready.root ?? remote.root;
+    if (root.startsWith('~')) return null;
+    final path = toRemotePath(root, 'AGENTS.md');
     final bytes = await SshEnvironmentService.instance
         .readFileBytes(path, maxBytes: 65536);
     return utf8.decode(bytes, allowMalformed: true);
-  } on Exception {
-    return null;
-  } on StateError {
+  } catch (e) {
+    // 必须是裸 catch：以前写 `on Exception`，而 dartssh2 的 SftpStatusError
+    // 不实现 Exception ⇒ 远端没有 AGENTS.md 就能把**整条消息发送**打死
+    // （真机「发送失败: SftpStatusError: No such file(code 2)」）。
+    // 这个函数是"锦上添花"的上下文注入，任何失败都必须静默降级。
+    debugPrint('[Dev] 读远端 AGENTS.md 失败（忽略）: $e');
     return null;
   }
 }
@@ -210,11 +260,13 @@ Future<ToolResult> sshRunInWorkspace(
 }) async {
   String fullCommand;
   DevWorkspace ws;
+  String root;
   try {
     final wsId = effectiveWorkspaceOf(args);
     final remote = await resolveRemoteRoot(wsId);
     ws = remote.workspace;
-    fullCommand = buildCommand(remote.root);
+    root = remote.root;
+    fullCommand = buildCommand(root);
   } on StateError catch (e) {
     return ToolResult.error('${e.message}（ssh 工具需要远端工作区）');
   }
@@ -229,6 +281,14 @@ Future<ToolResult> sshRunInWorkspace(
   final connError = await ensureSshConnectionFor(ssh, ws, sshConfigs);
   if (connError != null) {
     return ToolResult.error('[SSH] $connError');
+  }
+  // 连上后根目录可能刚被"补全 + 建好"（空路径 / `~` → 绝对路径）：重建命令，
+  // 让 git 等工具拿到与工作区记录一致的绝对目录（此处必然命中 mkdir 缓存）。
+  final ready = await ensureWorkspaceRemoteDir(ws);
+  if (ready.error != null) return ToolResult.error('[SSH] ${ready.error}');
+  if (ready.root != null && ready.root != root) {
+    root = ready.root!;
+    fullCommand = buildCommand(root);
   }
   // 执行；连接类失败自动重连一次。
   for (var attempt = 0; attempt < 2; attempt++) {
@@ -283,12 +343,13 @@ ToolDefinition createSshExecTool({List<SshConfig> sshConfigs = const []}) {
       if (danger != null) {
         return ToolResult.error('危险命令被拒绝：$danger');
       }
-      // 工作区 → 远端根目录映射。
+      // 工作区 → 远端根目录映射。前缀自带 mkdir：目录没建过也直接开工。
       String fullCommand;
       try {
         final wsId = effectiveWorkspaceOf(args);
         final remote = await resolveRemoteRoot(wsId);
-        fullCommand = 'cd ${sq(toRemotePath(remote.root, cwd))} && $command';
+        fullCommand =
+            '${remoteCdPrefix(toRemotePath(remote.root, cwd))} && $command';
         final ssh = SshEnvironmentService.instance;
         // termux 后端：intent 优先（免 SSH）。
         //
@@ -368,6 +429,10 @@ ToolDefinition createSshReadFileTool({List<SshConfig> sshConfigs = const []}) {
         return ToolResult.error('[SSH] $connError');
       }
       try {
+        // SFTP 不认 `~`，且工作区目录可能压根没建过：连上后绝对化 + 确保存在。
+        final ready = await ensureWorkspaceRemoteDir(ws);
+        if (ready.error != null) return ToolResult.error('[SSH] ${ready.error}');
+        if (ready.root != null) remotePath = toRemotePath(ready.root!, rawPath);
         final bytes = await ssh.readFileBytes(remotePath);
         final content = utf8.decode(bytes, allowMalformed: true);
         return ToolResult(
@@ -426,6 +491,16 @@ ToolDefinition createSshWriteFileTool({List<SshConfig> sshConfigs = const []}) {
         return ToolResult.error('[SSH] $connError');
       }
       try {
+        // 描述里承诺的「目录自动创建」这次才真正兑现：SFTP open 不会自己建目录，
+        // 工作区根目录没建过 / 写到子目录都会撞 `No such path`。
+        final ready = await ensureWorkspaceRemoteDir(ws);
+        if (ready.error != null) return ToolResult.error('[SSH] ${ready.error}');
+        if (ready.root != null) remotePath = toRemotePath(ready.root!, rawPath);
+        final parent = remoteParentDir(remotePath);
+        if (parent.isNotEmpty) {
+          await ssh.run('mkdir -p ${sq(parent)}',
+              timeout: const Duration(seconds: 20));
+        }
         await ssh.writeFileBytes(remotePath, utf8.encode(content));
         return ToolResult(content: '已写入 $rawPath（${content.length} 字符）');
       } catch (e) {

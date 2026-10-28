@@ -1497,7 +1497,10 @@ class ChatNotifier extends StateNotifier<bool> {
     // 注入失败静默跳过（不阻断回合）；关闭 = 零注入零回归。
     if (settings.devModeEnabled) {
       try {
-        await DevSessionController.instance.init();
+        // devWorkspaceId 是历史上的"只写不读"存放位，这里当恢复种子传进去，
+        // 老用户配过的激活工作区不会因换了落盘位置而丢（DevStore 值优先）。
+        await DevSessionController.instance.init(
+            preferredActiveId: settings.devWorkspaceId);
         final devContext = await buildDevContext(
           workspaceId: DevSessionController.instance.activeWorkspaceId,
           taskId: DevSessionController.instance.activeTaskId,
@@ -1735,7 +1738,12 @@ class ChatNotifier extends StateNotifier<bool> {
             ? remoteMd
             : '$agentsMdText\n\n$remoteMd';
       }
-    } on Exception catch (_) {}
+    } catch (_) {
+      // 上下文注入是"锦上添花"，任何失败都必须静默降级、照常发送。
+      // **必须裸 catch**：dartssh2 的 SftpStatusError 不实现 Exception，
+      // 旧版写 `on Exception` ⇒ 远端没有 AGENTS.md 就把整条消息发送打死
+      // （真机「发送失败: SftpStatusError: No such file(code 2)」+ 对话区空气泡）。
+    }
     // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
     final hooks = AgentHooks();
     // ---- P1-B：压缩摘要走便宜模型（按步模型路由的压缩分支）----
@@ -2476,6 +2484,9 @@ class ChatNotifier extends StateNotifier<bool> {
         webSearchMaxSearchesPerTurn: settings.agentMaxSearchesPerTurn,
         includeDevTools: settings.devModeEnabled,
         devSshConfigs: settings.sshConfigs,
+        // ADB 远程控制：独立开关（不受开发模式影响），目标机白名单来自设置。
+        adbEnabled: settings.adbEnabled,
+        adbTargets: settings.adbTargets,
         conversationId: conversationId,
         // todo_write 成功 → 对话内固定 id 的「☑ 任务清单」活卡 upsert
         //（用户有地方看进度；固定 id 反复重写不刷屏，模型历史可见）。
@@ -2538,6 +2549,12 @@ class ChatNotifier extends StateNotifier<bool> {
     // shell 执行：用户设置关闭时不可见（默认开启，能力不设限）。
     if (!settings.agentShellEnabled) {
       registry.unregister('shell_exec');
+    }
+
+    // ADB 远程控制：关闭时彻底不可见（注册处已按开关过滤，这里兜底 ——
+    // 与本文件其它能力开关同构，双保险成本为零）。
+    if (!settings.adbEnabled) {
+      registry.unregister('adb');
     }
 
     // python_exec：用户设置关闭时不可见（默认开启；无 Chaquopy 时工具优雅降级）。

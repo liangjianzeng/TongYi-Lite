@@ -6,6 +6,62 @@
 
 ---
 
+## [0.3.6] — 2026-10-28（versionCode 24）
+
+### 📱 远程控制（ADB）：App 内纯 Dart ADB 客户端，直接控制另一台手机
+
+用户诉求：「增加 adb 这个命令工具能力，在需要的时候可以直接控制其他手机」——并明确要求
+**在 app 里直接集成实现**（不是调 Termux 的 adb、不是 SSH 到 PC 借 adb、不打包 adb 二进制）。
+
+- **零依赖协议栈**（`lib/agent/adb/`）：`adb_protocol.dart`（24B 小端帧 + CNXN/AUTH/OPEN/OKAY/WRTE/CLSE +
+  shell_v2 子帧 + sync 变长记录）、`adb_rsa.dart`（自研 PKCS#1 v1.5 签名 + AOSP 524B 公钥 blob，
+  与真 `adb` 的 `adbkey` 字节级同构，可直接导入 `~/.android/adbkey`）、`adb_connection.dart`
+  （握手状态机 + 流多路复用）、`adb_client.dart`（shell/execOut/push/pull/ls/stat/install/logcat/screenshot）、
+  `adb_targets.dart`（目标机白名单 + 密钥托管）、`adb_tool.dart`（**单工具 + `action` 枚举**，16 个动作）。
+- **传输 = Wi-Fi TCP + RSA 经典模式**：目标机 `adb tcpip 5555` 或开启无线调试即可；首连上送公钥，
+  目标机弹「允许 USB 调试」一次即长期有效。不做 TLS-PSK/SPAKE2、不做 USB-OTG、不做 scrcpy 镜像。
+- **门禁 = 设置页开关**（用户定案：开启即免审批，不设逐次确认框）：目标机只能来自
+  「设置 → 开发者 → 远程控制（ADB）」白名单（模型无法现编 IP）；`uninstall` / `pm clear` /
+  `reboot` / 系统目录 `rm -rf` / `dd` / `mkfs` 在 `execute` 体内直接拒绝（护住已下载端侧模型缓存，
+  安装固定 `install -r -t` 覆盖安装）；`adb` **不属于 Dev 工具组**，由自己的 `adbEnabled` 注册。
+- **测试即验收**：`test/agent/adb_protocol_test.dart`（真机抓到的字节作向量）、`adb_rsa_test.dart`
+  （签名/公钥 blob 与 AOSP 逐字段对齐）、`test/agent/fake_adbd.dart` + `adb_client_test.dart`
+  （**进程内假 adbd 全链路**：复现"入站帧 data_check=0""子进程已退出时不再 ack 最后一次 WRTE"
+  "STAT 回复 16 字节 mode 在头部字""sync 请求 a0 含义随 id 变"等真机取证结论）、`adb_tool_test.dart`
+  （门禁 / 黑名单 / 输入转义 / 端到端打假 adbd）。共 56 项，全量回归 **882 通过 + 4 skip**。
+- **测试反过来抓到两个真 bug**（都是真机上会偶发/致命的）：
+  ① `AdbConnection.sendRaw` 里 `await flush()` 与另一路 `add()` 并发 → dart:io 抛
+  `Bad state: StreamSink is bound to a stream`（`flush()` 内部就是 `addStream(空流)`，会把 sink 绑住；
+  我们的 OKAY 是在收包回调里 unawaited 发的）→ 出站改为**单条串行链**；
+  ② 命令黑名单 `pm clear` 的正则误写成 `\npm\s+clear\b`（`\n` 是**字面换行**不是 `\b`）→
+  行首 `pm clear 包名` 一条都不拦，正是会清掉模型缓存的那条 → 改 `\b`，并留测试钉死。
+- **验收状态**：真机侧此前已对小米13（2211133C / Adreno 740）逐帧取证并复验握手/shell/截图；
+  push-pull/ls/stat/logcat/install 的真机跑测受设备离线阻塞（`<redacted-tailscale>` Tailscale 离线），
+  复跑入口：`TONGYI_LIVE_ADB=1 dart run tool/adb_probe.dart <ip>:5555 --selftest`
+  （失败现在给可读结论而非未捕获异常）。
+
+### 🖥️ Dev Agent：远程电脑密码登录 + 工作区激活/目录自愈 + dartssh2 错误收口
+
+- **远程电脑密码登录 + 工作区激活（A/B/C/D）**：SSH 配置支持密码认证；连接成功后的引导
+  （建远端目录 / 建并激活工作区 / 浏览远端目录）从设置页私有方法抽成共享动作层
+  `dev_workspace_actions.dart`——设置页向导、聊天页工作区面板、目录浏览对话框三处复用同一套，
+  不再各抄一份漂移；激活态落 `active_workspace.json` 唯一真源，文件损坏回落默认、绝不因坏文件起不来。
+- **工作区目录「有就用、没有就建」**：远端路径一律 `mkdir -p` 幂等创建（ensureRemoteProjectDir /
+  ensureWorkspaceRemoteDir / remoteCdPrefix / write_file 父目录四处），消灭「未配置远端路径」硬抛；
+  家目录读不到时明确报因（不再指向 Termux 话术）。
+- **dartssh2 错误收口（修「发送失败: SftpStatusError: No such file(code 2)」整条消息被打死）**：
+  dartssh2 的 `SSHError`/`SftpError` **不实现 Exception**，本模块所有 `on Exception` 兜底对其一条不生效——
+  现在只有 `SshEnvironmentService` 可碰 dartssh2，出口统一换型 `SshServiceException implements Exception`
+  （SFTP code 2/3/4/7/8 各有中文指引，类名不进气泡、原始对象进 `cause`）；直接触 SFTP 的 `sync_tools`
+  改**裸 catch**；哨兵测试 `ssh_error_surface_test` 钉死该类型学，上游若修复用例会红并提醒删包装层。
+- **SSH 诊断分流话术**（`ssh_diagnostics.dart`）：按**目标类型（手机 Termux / 远程电脑）× 认证方式
+  （密钥 / 密码）**分流失败话术与修复动作——密钥失败不讲密码，电脑失败不讲 Termux；
+  根治旧版只有一套 Termux 话术、连"远程电脑"失败也教人"打开 Termux 重装"的跑偏。
+- **测试**：新增 `ssh_password_auth_test` / `dev_workspace_active_test` / `dev_workspace_dir_test` /
+  `ssh_error_surface_test`（四套 53 项）连同 ADB 56 项，全量回归 **882 通过 + 4 skip**。
+
+---
+
 ## [0.3.5] — 2026-10-25
 
 ### 🚀 GPU 全卸载产品化第一轮（740 主线）+ 仓库单主线收敛

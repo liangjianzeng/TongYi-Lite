@@ -1,9 +1,14 @@
 /// SSH 开发环境配置（Dev Agent Phase B）—— 多目标（Termux / 远程 PC）。
 ///
 /// 每个配置带 id + name（如 "Termux" / "远程电脑"），工作区通过
-/// [DevWorkspace.sshConfigId] 绑定。认证：ed25519 密钥优先（app 可自动
-/// 生成，见 [SshKeyGen]），密码兜底。密钥/密码明文存 settings JSON
-/// （对齐现有 apiModels 密钥明文先例；后续可迁移 flutter_secure_storage）。
+/// [DevWorkspace.sshConfigId] 绑定。认证三种模式（[SshAuthType]）：
+/// - [SshAuthType.key]：ed25519 密钥（app 可自动生成，见 [SshKeyGen]）；
+/// - [SshAuthType.password]：**账号密码登录**（远程电脑最常见，无需往对端
+///   装公钥；服务端需开 `PasswordAuthentication yes`）；
+/// - [SshAuthType.keyThenPassword]：密钥优先、失败自动回落密码（两套凭据）。
+///
+/// 密钥/密码明文只在内存与向导流程里存在；落 settings JSON 前由
+/// `secret_store.dart` 搬进 flutter_secure_storage（不可用时 fail-open 保留明文）。
 library;
 
 import 'dart:convert';
@@ -13,7 +18,16 @@ import 'dart:typed_data';
 import 'package:pinenacl/ed25519.dart';
 
 /// SSH 认证类型。
-enum SshAuthType { key, password }
+enum SshAuthType {
+  /// 仅密钥（ed25519）。
+  key,
+
+  /// 仅密码（用户名 + 登录密码）。
+  password,
+
+  /// 密钥优先，认证失败自动回落密码（需同时配好密钥与密码）。
+  keyThenPassword,
+}
 
 /// SSH 连接配置。
 final class SshConfig {
@@ -52,10 +66,14 @@ final class SshConfig {
   );
 
   /// 远程电脑模板（OpenSSH 默认 22）。
+  ///
+  /// host 故意留空：真机评估记录里，预填的占位 IP 常被用户原样提交，
+  /// 得到一句"连不上 192.168.1.100"的死胡同报错——地址必须由用户填，
+  /// 空 host 会被 `isComplete` 当场拦下（向导按钮就点不动）。
   static const SshConfig remotePcTemplate = SshConfig(
     id: 'remote-pc',
     name: '远程电脑',
-    host: '192.168.1.100',
+    host: '',
     port: 22,
   );
 
@@ -63,9 +81,40 @@ final class SshConfig {
       host.trim().isNotEmpty &&
       port > 0 &&
       username.trim().isNotEmpty &&
-      (authType == SshAuthType.password
-          ? (password ?? '').isNotEmpty
-          : (privateKeyPem ?? '').isNotEmpty);
+      switch (authType) {
+        SshAuthType.key => hasKey,
+        SshAuthType.password => hasPassword,
+        SshAuthType.keyThenPassword => hasKey && hasPassword,
+      };
+
+  /// 是否带私钥（PEM 非空）。
+  bool get hasKey => (privateKeyPem ?? '').trim().isNotEmpty;
+
+  /// 是否带登录密码。
+  bool get hasPassword => (password ?? '').isNotEmpty;
+
+  /// 本次认证是否需要用密钥。
+  bool get usesKey =>
+      (authType == SshAuthType.key || authType == SshAuthType.keyThenPassword) &&
+      hasKey;
+
+  /// 本次认证是否需要用密码。
+  bool get usesPassword =>
+      (authType == SshAuthType.password ||
+          authType == SshAuthType.keyThenPassword) &&
+      hasPassword;
+
+  /// 切到另一种认证方式，并清掉该方式用不到的凭据（避免旧凭据残留复用）。
+  SshConfig withAuth(SshAuthType type) => copyWith(
+        authType: type,
+        clearPrivateKey: !switch (type) {
+          SshAuthType.key => true,
+          SshAuthType.password => false,
+          SshAuthType.keyThenPassword => true,
+        },
+        clearPassword: type != SshAuthType.password &&
+            type != SshAuthType.keyThenPassword,
+      );
 
   SshConfig copyWith({
     String? id,
@@ -77,6 +126,9 @@ final class SshConfig {
     String? privateKeyPem,
     String? keyPassphrase,
     String? password,
+    bool clearPrivateKey = false,
+    bool clearKeyPassphrase = false,
+    bool clearPassword = false,
   }) {
     return SshConfig(
       id: id ?? this.id,
@@ -85,9 +137,12 @@ final class SshConfig {
       port: port ?? this.port,
       username: username ?? this.username,
       authType: authType ?? this.authType,
-      privateKeyPem: privateKeyPem ?? this.privateKeyPem,
-      keyPassphrase: keyPassphrase ?? this.keyPassphrase,
-      password: password ?? this.password,
+      privateKeyPem:
+          clearPrivateKey ? null : (privateKeyPem ?? this.privateKeyPem),
+      keyPassphrase: clearKeyPassphrase
+          ? null
+          : (keyPassphrase ?? this.keyPassphrase),
+      password: clearPassword ? null : (password ?? this.password),
     );
   }
 
@@ -115,7 +170,13 @@ final class SshConfig {
       host: host,
       port: (json['port'] as num?)?.toInt() ?? 8022,
       username: (json['username'] as String?)?.trim() ?? '',
-      authType: auth ?? SshAuthType.key,
+      // 旧版 JSON 缺 authType 且带 password → 识别为密码登录，别回落成密钥。
+      authType: auth ??
+          ((json['privateKeyPem'] as String?)?.trim().isNotEmpty ?? false
+              ? SshAuthType.key
+              : ((json['password'] as String?)?.isNotEmpty ?? false
+                  ? SshAuthType.password
+                  : SshAuthType.key)),
       privateKeyPem: (json['privateKeyPem'] as String?)?.trim(),
       keyPassphrase: (json['keyPassphrase'] as String?)?.trim(),
       password: (json['password'] as String?)?.trim(),

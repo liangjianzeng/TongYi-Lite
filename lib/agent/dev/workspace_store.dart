@@ -9,6 +9,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -83,21 +84,72 @@ final class DevStore {
     if (f.existsSync()) f.deleteSync();
   }
 
+  /// 激活工作区 id 落盘位置：`ApplicationSupport/dev/active_workspace.json`。
+  Future<String> _activeFile() async =>
+      p.join(await _devDir(), 'active_workspace.json');
+
+  /// 读「上次激活的工作区」（跨启动记住"我在哪儿干活"；无/坏 → null）。
+  Future<String?> loadActiveWorkspaceId() async {
+    try {
+      final f = File(await _activeFile());
+      if (!f.existsSync()) return null;
+      final decoded = jsonDecode(f.readAsStringSync());
+      if (decoded is Map<String, dynamic>) {
+        final id = (decoded['activeWorkspaceId'] as String?)?.trim();
+        return (id == null || id.isEmpty) ? null : id;
+      }
+    } catch (e) {
+      debugPrint('[Dev] 激活工作区读取失败: $e');
+    }
+    return null;
+  }
+
+  /// 落盘「当前激活的工作区」。
+  ///
+  /// 实锤修复：`InferenceSettings.devWorkspaceId` 只写不读，而
+  /// `DevSessionController._activeWorkspaceId` 只在内存 → 杀 App 重开就悄悄
+  /// 回落「本地沙盒」，注入给模型的 `<workspace:context>` 变成本地，
+  /// 表现就是"连上了远程电脑，它却不肯在电脑上干活"。
+  Future<void> saveActiveWorkspaceId(String id) async {
+    try {
+      final path = await _activeFile();
+      await _ensureDir(p.dirname(path));
+      File(path).writeAsStringSync(jsonEncode({'activeWorkspaceId': id}));
+    } catch (e) {
+      debugPrint('[Dev] 激活工作区落盘失败: $e');
+    }
+  }
+
+  /// 删掉激活标记（激活的工作区被删除时调用，避免下次启动指向幽灵 id）。
+  Future<void> clearActiveWorkspaceId() async {
+    try {
+      final f = File(await _activeFile());
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
   /// 工作区本地镜像目录：`documents/workspace/projects/<safe-id>/`。
   /// 测试（baseDirOverride）下 = `<override>/projects/<safe-id>`（不触 path_provider）。
+  ///
+  /// **取目录即建目录**：dev_shell / 本地 git 都是"进目录再干活"，目录不存在时
+  /// 每条消息都会撞 `No such file or directory`（与远端"有就用、没有就建"同一条策略）。
   Future<String> workspaceLocalMirror(String id) async {
-    if (baseDirOverride != null) {
-      return p.join(baseDirOverride!, 'projects', _safe(id));
-    }
-    final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'workspace', 'projects', _safe(id));
+    final dir = baseDirOverride != null
+        ? p.join(baseDirOverride!, 'projects', _safe(id))
+        : p.join((await getApplicationDocumentsDirectory()).path, 'workspace',
+            'projects', _safe(id));
+    await _ensureDir(dir);
+    return dir;
   }
 
   /// 默认工作区根目录（documents/workspace；测试 override 下 = <override>/workspace）。
+  /// 同 [workspaceLocalMirror]：取目录即建目录，dev_shell 才不会一进门就撞空目录。
   Future<String> defaultWorkspaceDir() async {
-    if (baseDirOverride != null) return p.join(baseDirOverride!, 'workspace');
-    final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'workspace');
+    final dir = baseDirOverride != null
+        ? p.join(baseDirOverride!, 'workspace')
+        : p.join((await getApplicationDocumentsDirectory()).path, 'workspace');
+    await _ensureDir(dir);
+    return dir;
   }
 
   // ---------------------------------------------------------------------------

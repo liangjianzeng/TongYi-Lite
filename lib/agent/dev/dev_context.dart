@@ -14,6 +14,7 @@ import 'package:path/path.dart' as p;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import 'dev_workspace_actions.dart' show defaultRemoteProjectPathPlaceholder;
 import 'workspace.dart';
 import 'workspace_store.dart';
 
@@ -46,8 +47,15 @@ Future<String> buildWorkspaceContextSection(
   };
   final buf = StringBuffer('<workspace:context>\n');
   buf.write('当前工作区：「${ws.name}」（$backendName）');
-  if (ws.isRemote && ws.remotePath != null) {
-    buf.write('，远端路径 ${ws.remotePath}');
+  if (ws.isRemote) {
+    final path = (ws.remotePath ?? '').trim();
+    // 没填路径也要给模型一个明确落点：工具层首次使用时会自动建这个目录。
+    // 以前这里直接省略路径 → 模型以为"没有工作区"而拒绝动手（真机表现 =
+    // 连上远程电脑却只在手机上忙），现在必须看得见路径 + 「会自动创建」。
+    buf.write(path.isEmpty
+        ? '，远端路径 ${defaultRemoteProjectPathPlaceholder(ws.name)}'
+            '（未指定，首次使用时自动创建，直接开始即可）'
+        : '，远端路径 $path');
   }
   if (ws.currentBranch != null) {
     buf.write('，分支 ${ws.currentBranch}');

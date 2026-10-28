@@ -34,12 +34,21 @@ import '../agent/dev/dev.dart'
         SshEnvironmentService,
         SshKeyGen,
         SshStatus,
+        SshTargetKind,
         TermuxIntentService,
         WorkspaceBackend,
+        classifySshFailure,
+        createWorkspaceOnActiveConnection,
+        ensureRemoteProjectDir,
+        listRemoteDirs,
         newDevTaskId,
-        sanitizeWorkspaceDirName,
+        resolveSshSecrets,
+        sshTargetKindOf,
+        sshUsesPasswordAuth,
         taskBelongsToWorkspace;
 import '../services/app_bridge.dart' show AppBridge;
+import '../agent/adb/adb_client.dart';
+import '../agent/adb/adb_targets.dart';
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../asr/asr_model_manager.dart' show AsrModelManager;
 import '../asr/hold_to_talk.dart' show AsrModelGate;
@@ -3643,9 +3652,9 @@ class _buildAboutTab extends StatelessWidget {
 }
 
 // About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
-// versionName（0.3.2 / versionCode 20）保持一致。离线沙箱无法下载
-// package_info_plus 的 AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.3.5';
+// versionName/versionCode 保持一致。离线沙箱无法下载 package_info_plus 的
+// AGP 依赖，故不引插件动态读取，直接用此常量。
+const _appVersion = '0.3.6';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';
@@ -4735,6 +4744,8 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
           const SizedBox(height: 10),
           _buildConnectionsCard(settings, notifier),
           const SizedBox(height: 10),
+          _buildAdbCard(settings, notifier),
+          const SizedBox(height: 10),
           _buildWorkspacesCard(settings, notifier),
           const SizedBox(height: 10),
           _buildDevTasksCard(settings, notifier),
@@ -4743,6 +4754,354 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ],
       ),
     );
+  }
+
+  // ---------------- ADB 远程控制（另一台手机）----------------
+
+  /// 「远程控制（ADB）」卡：总开关 + 目标机白名单 + 设备授权密钥。
+  ///
+  /// 放在开发者 Tab 与「连接」卡同区（都是"连别的机器"），但**不受开发模式开关
+  /// 约束** —— adb 工具的注册只看 [InferenceSettings.adbEnabled]（用户定案：
+  /// 设置里开一下就能用，不做逐次审批）。
+  Widget _buildAdbCard(InferenceSettings settings, SettingsNotifier notifier) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildToggleTitle(
+              '📱 远程控制（ADB）',
+              settings.adbEnabled,
+              (v) async {
+                await notifier.setAdbEnabled(v);
+                if (mounted) setState(() {});
+              },
+              subtitle: settings.adbEnabled
+                  ? '开：智能体可用 adb 工具直连下面白名单里的手机（点击/滑动/输入/截屏/装包/日志）'
+                  : '关：adb 工具不注册，模型完全看不见（默认）',
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'app 内置 ADB 客户端，走 Wi-Fi 直连，无需电脑也无需安装 adb。\n'
+              '目标手机需先进入 TCP 模式（电脑上 `adb tcpip 5555`，重启后失效；或开发者选项里'
+              '的「无线调试」——注意无线调试端口走 TLS，本版不支持，请用 tcpip 那种）。\n'
+              '首次连接时目标机屏幕会弹「允许 USB 调试」，勾选"一律允许"后点确定。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600, height: 1.35),
+            ),
+            const Divider(height: 18),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('目标手机（${settings.adbTargets.length}）',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                          fontWeight: FontWeight.w600)),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showAdbTargetDialog(notifier, null),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('添加', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+            if (settings.adbTargets.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 4),
+                child: Text('还没添加目标机。添加时填 ip:5555（Tailscale 网段可直接 ping 通）。',
+                    style:
+                        TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              ),
+            for (final t in settings.adbTargets)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: Switch(
+                  value: t.enabled,
+                  onChanged: (v) =>
+                      notifier.upsertAdbTarget(t.copyWith(enabled: v)),
+                ),
+                title: Text(t.name.isEmpty ? t.serial : t.name,
+                    style: const TextStyle(fontSize: 13)),
+                subtitle: Text(
+                    '${t.serial}${t.port == 5555 ? '' : '  ⚠️ 非常规端口'}',
+                    style:
+                        TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.edit_outlined, size: 18),
+                      tooltip: '编辑',
+                      onPressed: () => _showAdbTargetDialog(notifier, t),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      tooltip: '删除',
+                      onPressed: () async {
+                        final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text('删除目标机'),
+                            content: Text('删除「${t.name.isEmpty ? t.serial : t.name}」？'),
+                            actions: [
+                              TextButton(
+                                  onPressed: () => Navigator.pop(ctx, false),
+                                  child: const Text('取消')),
+                              TextButton(
+                                  onPressed: () => Navigator.pop(ctx, true),
+                                  child: const Text('删除')),
+                            ],
+                          ),
+                        );
+                        if (ok == true) await notifier.removeAdbTarget(t.id);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(height: 18),
+            FutureBuilder<String>(
+              // 密钥只在读到时才生成（进设置页不该顺手做 2048 位生成）。
+              future: _adbKeyFingerprintFuture,
+              builder: (context, snap) {
+                return Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        snap.hasError
+                            ? '授权密钥异常：${snap.error}'
+                            : (snap.data == null || snap.data!.isEmpty
+                                ? '设备授权密钥：尚未生成'
+                                : '设备授权密钥：指纹 ${snap.data}'),
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: snap.hasError
+                                ? Colors.red.shade700
+                                : Colors.grey.shade600),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => _showAdbKeyDialog(),
+                      child: const Text('公钥/导入', style: TextStyle(fontSize: 12)),
+                    ),
+                    TextButton(
+                      onPressed: () => _regenAdbKey(),
+                      child: const Text('重新生成', style: TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                );
+              },
+            ),
+            if (settings.adbEnabled && settings.adbTargets.isNotEmpty) ...[
+              const Divider(height: 18),
+              TextButton.icon(
+                onPressed: _adbSelfTest,
+                icon: const Icon(Icons.network_check, size: 16),
+                label: const Text('连接自检（逐台握手，验证是否已授权）',
+                    style: TextStyle(fontSize: 12)),
+              ),
+              for (final line in _adbSelfTestLines)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(line,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: line.startsWith('✓')
+                              ? Colors.green.shade700
+                              : Colors.red.shade700)),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String? _adbKeyFingerprintCache;
+
+  Future<String> get _adbKeyFingerprintFuture async {
+    if (_adbKeyFingerprintCache != null) return _adbKeyFingerprintCache!;
+    final key = await loadOrCreateAdbKey(FlutterAdbSecretStore());
+    return _adbKeyFingerprintCache = adbKeyFingerprint(key);
+  }
+
+  Future<void> _regenAdbKey() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重新生成授权密钥'),
+        content: const Text(
+            '所有已授权过的手机都会**掉授权**，需要在每台手机上重新点一次「允许 USB 调试」'
+            '（或先在手机上撤销本机的授权记录）。确定要继续？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('重新生成')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final store = FlutterAdbSecretStore();
+    await store.delete(kAdbKeySlot);
+    _adbKeyFingerprintCache = null;
+    await _adbKeyFingerprintFuture;
+    if (mounted) setState(() {});
+  }
+
+  /// 公钥查看 / 导入已有 `~/.android/adbkey`。
+  ///
+  /// 导入的价值：那台电脑上早已授权过手机时，用同一把私钥可**免掉重新弹框**。
+  Future<void> _showAdbKeyDialog() async {
+    final store = FlutterAdbSecretStore();
+    final key = await loadOrCreateAdbKey(store);
+    if (!mounted) return;
+    final pub = adbPublicKeyLine(key);
+    final ctrl = TextEditingController();
+    final choice = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设备授权密钥'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SelectableText(pub,
+                  style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+              const SizedBox(height: 10),
+              Text('粘贴电脑上 ~/.android/adbkey 的内容可导入（导入后这些电脑授权过的手机免重新弹框）：',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: ctrl,
+                maxLines: 4,
+                style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    hintText: '-----BEGIN RSA PRIVATE KEY-----'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, 1),
+              child: const Text('复制公钥')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, 2),
+              child: const Text('导入私钥')),
+        ],
+      ),
+    );
+    if (choice == 1) {
+      await Clipboard.setData(ClipboardData(text: pub));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('公钥已复制（与 adbkey.pub 首段应完全一致）')));
+      }
+    } else if (choice == 2) {
+      final pem = ctrl.text.trim();
+      if (pem.isEmpty) return;
+      try {
+        await importAdbPrivateKeyPem(store, pem);
+        _adbKeyFingerprintCache = null;
+        await _adbKeyFingerprintFuture;
+        if (mounted) setState(() {});
+      } on FormatException catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('导入失败：${e.message}')));
+        }
+      }
+    }
+  }
+
+  final List<String> _adbSelfTestLines = [];
+
+  /// 逐台握手自检：把"连不上到底是没开 tcpip、没授权，还是 IP 变了"说清。
+  Future<void> _adbSelfTest() async {
+    setState(() {
+      _adbSelfTestLines.clear();
+    });
+    final store = FlutterAdbSecretStore();
+    final key = await loadOrCreateAdbKey(store);
+    for (final t in ref.read(settingsProvider).adbTargets.where((e) => e.enabled)) {
+      final sw = Stopwatch()..start();
+      try {
+        final c = await AdbClient.connect(host: t.host, port: t.port, key: key);
+        final id = c.identity();
+        await c.close();
+        _adbSelfTestLines.add('✓ ${t.serial}  ${id.model}  ${sw.elapsedMilliseconds}ms');
+      } catch (e) {
+        _adbSelfTestLines.add('✗ ${t.serial}  ${e.toString().split('\n').first}');
+      }
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// 添加/编辑目标机（名称 + `ip:port` 一行输入，端口可省）。
+  Future<void> _showAdbTargetDialog(
+      SettingsNotifier notifier, AdbTarget? existing) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final serialCtrl =
+        TextEditingController(text: existing == null ? '' : existing.serial);
+    var errorText = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(existing == null ? '添加目标手机' : '编辑目标手机'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                    isDense: true, labelText: '名称（如 小米13 主力机）'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: serialCtrl,
+                autofocus: true,
+                decoration: InputDecoration(
+                    isDense: true,
+                    labelText: '地址（ip:5555，端口可省略）',
+                    errorText: errorText.isEmpty ? null : errorText),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            TextButton(
+              onPressed: () {
+                final parsed = AdbTarget.parseSerial(serialCtrl.text);
+                if (parsed == null) {
+                  setDialogState(() => errorText = '填 ip:5555 这种形式');
+                  return;
+                }
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final parsed = AdbTarget.parseSerial(serialCtrl.text)!;
+    await notifier.upsertAdbTarget((existing ??
+            const AdbTarget(id: '', name: '', host: '', port: 5555))
+        .copyWith(
+            name: nameCtrl.text.trim().isEmpty
+                ? parsed.host
+                : nameCtrl.text.trim(),
+            host: parsed.host,
+            port: parsed.port));
   }
 
   // ---------------- 总开关 ----------------
@@ -4768,7 +5127,8 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
             const SizedBox(height: 4),
             Text(
               '开启后：对话里的智能体可直接读写手机 Termux / 远程电脑上的项目，'
-              '执行 git 提交、跑测试。连接与密钥由下方向导自动完成。',
+              '执行 git 提交、跑测试。连接由下方向导完成：'
+              '远程电脑填账号密码即可，Termux 走自动密钥。',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
             ),
             // P2-D1：Dev 工具逐组开关（默认全开 = 旧行为）。
@@ -4870,8 +5230,9 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
             ),
             const SizedBox(height: 6),
             Text(
-              '自动生成密钥，一条命令完成，无需 root；'
-              '连接失败会给诊断和修复动作。',
+              '远程电脑可用「账号密码」直接连（电脑开好 SSH 服务即可，不必装公钥）；'
+              'Termux 走自动生成密钥，一条命令完成，无需 root。'
+              '连接失败会给针对性诊断和修复动作。',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
             ),
             // 免 SSH 通道（RUN_COMMAND intent，L2）：工具执行优先走这里，
@@ -5009,7 +5370,11 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
                         child: Text(
                           '${cfg.name.isEmpty ? '配置' : cfg.name} · '
                           '${cfg.username.isEmpty ? '?' : cfg.username}@'
-                          '${cfg.host}:${cfg.port}',
+                          '${cfg.host}:${cfg.port} · ${switch (cfg.authType) {
+                            SshAuthType.key => '密钥',
+                            SshAuthType.password => '密码',
+                            SshAuthType.keyThenPassword => '密钥+密码',
+                          }}',
                           style: const TextStyle(fontSize: 12),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -5070,26 +5435,109 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     );
   }
 
-  /// 连接（保持连接；配置相同幂等复用，不同自动切换）。
+  /// 连接（保持连接；[force] = 用户手点按钮 → 强制重新握手）。
   ///
-  /// 注意：`SshEnvironmentService.connect` 失败只置内部状态不抛异常，
+  /// 注意 1：`SshEnvironmentService.connect` 失败只置内部状态不抛异常，
   /// 必须用 `isConnected` 判定结果，不能依赖 try/catch（否则永远弹"已连接"）。
-  Future<void> _connectTo(SshConfig cfg) async {
-    if (!cfg.isComplete) {
+  /// 注意 2：完整性判定必须在**回填凭据之后**——私钥/密码保存在安全存储里，
+  /// settings 里的配置是空槽位，直接判 `isComplete` 会永远提示"配置不完整"。
+  Future<bool> _connectTo(SshConfig cfg,
+      {bool force = true, bool offerWorkspace = true}) async {
+    SshConfig resolved = cfg;
+    try {
+      resolved = await resolveSshSecrets(cfg);
+    } on Exception catch (_) {}
+    if (!resolved.isComplete) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('配置不完整：请先编辑补全用户名/密钥或密码')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(resolved.usesPassword
+                ? '配置不完整：请填写「用户名 + 电脑登录密码」后再连接'
+                : '配置不完整：请先编辑补全用户名/私钥（或改用密码登录）')));
       }
-      return;
+      return false;
     }
     final ssh = SshEnvironmentService.instance;
-    await ssh.connect(cfg);
-    if (!mounted) return;
+    await ssh.connect(resolved, force: force);
+    if (!mounted) return false;
     final ok = ssh.isConnected;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(ok
-            ? '✅ 已连接 ${cfg.name}'
-            : '❌ ${_classifySshError(ssh.lastError)}')));
+            ? '✅ 已连接 ${cfg.name.isEmpty ? cfg.host : cfg.name}'
+            : '❌ ${_classifySshError(ssh.lastError, cfg: resolved)}')));
+    // 连上 ≠ 能干活：没有激活的远端工作区，智能体收到的上下文仍是本地沙盒。
+    // 所以连成功后顺势问一句要不要就地建工作区（已绑定的不再打扰）。
+    if (ok && offerWorkspace) await _offerWorkspaceFor(cfg);
+    return ok;
+  }
+
+  /// 连接成功后的"开工引导"：给这份连接建远端工作区并激活。
+  /// 该配置已有绑定的工作区 → 静默跳过（不重复打扰）。
+  Future<void> _offerWorkspaceFor(SshConfig cfg) async {
+    final dev = DevSessionController.instance;
+    await dev.init(preferredActiveId: ref.read(settingsProvider).devWorkspaceId);
+    if (dev.workspaces.any((w) => w.isRemote && w.sshConfigId == cfg.id)) {
+      return; // 已有绑定这份工作区的远端工作区 → 不再打扰。
+    }
+    if (!mounted) return;
+    final what = cfg.name.trim().isEmpty ? cfg.host : cfg.name.trim();
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('在「$what」上开工？'),
+        content: Text('已连上 $what。\n\n'
+            '要不要为它建个工作区（会在电脑上建 ~/projects/<名称> 并设为当前工作区）？'
+            '建好后，对话里的智能体就直接在这台电脑上读写代码、跑测试——'
+            '否则它仍在手机本地目录里干活。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('先不用')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('建工作区并切过去')),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    final ctrl = TextEditingController(text: '我的项目');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('在「$what」上开工'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '项目/工作区名称',
+            helperText: '会在电脑上建 ~/projects/<名称> 作为工作区目录',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('创建并切过去')),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    final r = await createWorkspaceOnActiveConnection(name);
+    if (r.ws == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('❌ ${r.dir}')));
+      }
+      return;
+    }
+    await ref
+        .read(settingsProvider.notifier)
+        .setDevWorkspaceId(r.ws!.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('✅ 已切到工作区「${r.ws!.name}」（${r.dir}）：'
+            '现在让它「看项目 / 改代码 / 跑测试」都会在这台电脑上执行')));
   }
 
   // ---------------- Termux 自动向导 ----------------
@@ -5110,6 +5558,10 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     var userName = '';
     var connecting = false;
     var probeStarted = false;
+    // 向导内「免 SSH 通道」自检结果（allow-external-apps 是否生效 / Termux 是否可执行）。
+    String? _wizardMsg;
+    bool? _wizardOk;
+    var _wizardTesting = false;
 
     await showDialog<void>(
       context: context,
@@ -5243,12 +5695,90 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
                           label: Text(probing ? '检测中…' : '重新检测'),
                         ),
                       ]),
-                      const SizedBox(height: 6),
-                      const Text(
-                          '自动执行需 Termux 一次性开启：'
-                          '~/.termux/termux.properties 写 allow-external-apps=true 后重启 Termux；'
-                          '未开启请用复制粘贴。',
-                          style: TextStyle(fontSize: 10, color: Colors.grey)),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '⚠️ 最关键的一步（绝大多数「不行」都卡在这）：'
+                          'RUN_COMMAND 免 SSH 通道要求 Termux 开启 '
+                          'allow-external-apps 并【彻底重启 Termux】（不是切后台再回来）。'
+                          '上面这条命令已写好该开关，但 Termux 只在启动时读 '
+                          'termux.properties——没重启前，App 发来的命令会被 Termux '
+                          '静默忽略，表现就是"测试超时 / 通道不可用"。'
+                          '另外若未在 Termux 里跑过 termux-setup-storage，'
+                          '交换文件写不进、同样会超时。请满足这两点再测。',
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.red.shade800),
+                        ),
+                      ),
+                      // 向导内自检：直接经 RUN_COMMAND 跑 echo ok。
+                      // 通过=allow-external-apps 已生效（绿）；不通=明确指引去补重启/存储权限。
+                      OutlinedButton.icon(
+                        onPressed: _wizardTesting
+                            ? null
+                            : () async {
+                                setState(() {
+                                  _wizardTesting = true;
+                                  _wizardMsg = null;
+                                  _wizardOk = null;
+                                });
+                                try {
+                                  final res = await TermuxIntentService.instance
+                                      .run('echo ok',
+                                          timeout: const Duration(
+                                              seconds: 10));
+                                  final ok = res.output.trim() == 'ok'
+                                      && res.exit == 0;
+                                  setState(() {
+                                    _wizardTesting = false;
+                                    _wizardOk = ok;
+                                    _wizardMsg = ok
+                                        ? '✅ 免 SSH 通道可用（RUN_COMMAND 往返成功），可继续。'
+                                        : '❌ RUN_COMMAND 通道不通——请先：① 确认 '
+                                            'termux.properties 有 '
+                                            'allow-external-apps=true，② 彻底重启 '
+                                            'Termux（不是切后台），③ 已在 Termux 跑过 '
+                                            'termux-setup-storage；然后回来再点测试。';
+                                  });
+                                } on StateError catch (e) {
+                                  setState(() {
+                                    _wizardTesting = false;
+                                    _wizardOk = false;
+                                    _wizardMsg = '❌ 通道不可用：'
+                                        '${e.message.replaceAll('StateError: ', '')}'
+                                        '（多半是 Termux 未装 / 未开 '
+                                        'allow-external-apps / 未重启）。';
+                                  });
+                                } catch (e) {
+                                  setState(() {
+                                    _wizardTesting = false;
+                                    _wizardOk = false;
+                                    _wizardMsg = '❌ 测试异常：$e';
+                                  });
+                                }
+                              },
+                        icon: Icon(_wizardTesting
+                            ? Icons.hourglass_top
+                            : Icons.bolt,
+                            size: 16),
+                        label: Text(_wizardTesting
+                            ? '测试中…'
+                            : '测试免SSH通道'),
+                      ),
+                      if (_wizardMsg != null) ...[
+                        const SizedBox(height: 6),
+                        Text(_wizardMsg!,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: _wizardOk == true
+                                  ? FontWeight.w500
+                                  : FontWeight.w600,
+                              color: _wizardOk == true ? Colors.green : Colors.red,
+                            )),
+                      ],
                       if (step == 2) ...[
                         const SizedBox(height: 12),
                         TextField(
@@ -5298,112 +5828,256 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     if (mounted) setState(() {});
   }
 
-  /// 远程电脑向导：host/port（唯一必填）+ 自动密钥 + 公钥命令 + 连接。
+  /// 远程电脑向导：host/port/用户名 + **认证方式（密码 或 密钥）** + 连接。
+  ///
+  /// 密码登录是远程电脑最常见也最省事的路径（无需往对端装公钥），设为默认；
+  /// 密钥模式仍可「自动生成密钥」并给出装公钥命令，另可选填「密码兜底」
+  /// —— 填了就变成密钥优先、失败自动回落密码（[SshAuthType.keyThenPassword]）。
   Future<void> _showRemotePcSetupDialog(
       BuildContext context, SettingsNotifier notifier) async {
-    final hostCtrl = TextEditingController(text: '192.168.1.100');
+    final hostCtrl = TextEditingController();
     final portCtrl = TextEditingController(text: '22');
     final userCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
     var generated = false;
     String? publicKey;
     String? privateKeyPem;
     var command = '';
+    // 默认走密码登录：远程电脑九成 scenario 是"我知道账号密码，不想折腾公钥"。
+    var usePasswordLogin = true;
+    var showPwd = false;
+    var busy = false;
 
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setState) => AlertDialog(
-          title: const Text('💻 远程电脑自动配置'),
-          content: SizedBox(
-            width: 460,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: hostCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '电脑地址（唯一必填）',
-                      hintText: '局域网 IP 或主机名，如 192.168.1.100',
-                      border: OutlineInputBorder(),
+        builder: (ctx, setState) {
+          final pwd = passCtrl.text.trim();
+          // 密钥模式下填了密码 = 密钥优先 + 密码兜底。
+          final effectiveType = usePasswordLogin
+              ? SshAuthType.password
+              : (pwd.isNotEmpty
+                  ? SshAuthType.keyThenPassword
+                  : SshAuthType.key);
+          final ready = hostCtrl.text.trim().isNotEmpty &&
+              userCtrl.text.trim().isNotEmpty &&
+              switch (effectiveType) {
+                SshAuthType.password => pwd.isNotEmpty,
+                SshAuthType.key => generated,
+                SshAuthType.keyThenPassword => generated && pwd.isNotEmpty,
+              };
+          return AlertDialog(
+            title: const Text('💻 连接远程电脑'),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: hostCtrl,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: '电脑地址（必填）',
+                        hintText: '局域网 IP 或主机名，如 192.168.1.100',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextFormField(
-                    controller: portCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '端口（默认 22）',
-                      border: OutlineInputBorder(),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 110,
+                          child: TextFormField(
+                            controller: portCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: '端口',
+                              hintText: '22',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextFormField(
+                            controller: userCtrl,
+                            decoration: const InputDecoration(
+                              labelText: '电脑用户名（必填）',
+                              hintText: '登录电脑用的账号名',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextFormField(
-                    controller: userCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '电脑用户名',
-                      hintText: '如：yourname（登录电脑的用户名）',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (!generated)
-                    FilledButton.icon(
-                      onPressed: () {
-                        final keys = SshKeyGen.generate();
-                        if (keys != null) {
-                          generated = true;
-                          publicKey = keys.publicKey;
-                          privateKeyPem = keys.privateKeyPem;
-                          command = _buildRemoteInstallCommand(keys.publicKey);
-                          setState(() {});
-                        }
-                      },
-                      icon: const Icon(Icons.key, size: 16),
-                      label: const Text('🔑 自动生成密钥'),
-                    )
-                  else ...[
-                    Text('在电脑上执行这条命令（添加公钥到 authorized_keys）：',
-                        style: const TextStyle(fontSize: 12)),
+                    const SizedBox(height: 12),
+                    Text('登录方式',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade600)),
                     const SizedBox(height: 6),
-                    _copyableCommand(ctx, command),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ChoiceChip(
+                          avatar: Icon(usePasswordLogin
+                              ? Icons.check_circle
+                              : Icons.radio_button_unchecked,
+                              size: 18),
+                          label: const Text('🔑 密码登录（最简单）'),
+                          selected: usePasswordLogin,
+                          onSelected: (_) => setState(() {
+                            usePasswordLogin = true;
+                            showPwd = false;
+                          }),
+                        ),
+                        ChoiceChip(
+                          avatar: Icon(!usePasswordLogin
+                              ? Icons.check_circle
+                              : Icons.radio_button_unchecked,
+                              size: 18),
+                          label: const Text('🗝️ 密钥登录（免密）'),
+                          selected: !usePasswordLogin,
+                          onSelected: (_) => setState(() {
+                            usePasswordLogin = false;
+                            showPwd = false;
+                          }),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    if (usePasswordLogin) ...[
+                      TextField(
+                        controller: passCtrl,
+                        obscureText: !showPwd,
+                        onChanged: (_) => setState(() {}),
+                        decoration: InputDecoration(
+                          labelText: '电脑登录密码（必填）',
+                          helperText: '就是你在电脑上输的那个密码；'
+                              'Windows 用微软账户登录时填该账户的密码',
+                          helperMaxLines: 2,
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(showPwd
+                                ? Icons.visibility_off
+                                : Icons.visibility),
+                            onPressed: () => setState(() => showPwd = !showPwd),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '电脑需先开启 SSH 服务：Windows「设置 → 系统 → 可选功能 → OpenSSH 服务器」'
+                        '并启动 sshd 服务；Linux `sudo apt install openssh-server`；'
+                        'macOS「通用 → 共享 → 远程登录」。连不上多半是防火墙没放行 22 端口。',
+                        style: TextStyle(
+                            fontSize: 10.5, color: Colors.grey.shade600),
+                      ),
+                    ] else ...[
+                      if (!generated)
+                        FilledButton.icon(
+                          onPressed: () {
+                            final keys = SshKeyGen.generate();
+                            if (keys != null) {
+                              setState(() {
+                                generated = true;
+                                publicKey = keys.publicKey;
+                                privateKeyPem = keys.privateKeyPem;
+                                command =
+                                    _buildRemoteInstallCommand(keys.publicKey);
+                              });
+                            }
+                          },
+                          icon: const Icon(Icons.key, size: 16),
+                          label: const Text('🔑 自动生成密钥'),
+                        )
+                      else ...[
+                        Text('① 在电脑上执行这条命令（把公钥装进 authorized_keys）：',
+                            style: const TextStyle(fontSize: 12)),
+                        const SizedBox(height: 6),
+                        _copyableCommand(ctx, command),
+                        const SizedBox(height: 4),
+                        Text(
+                          '公钥：$publicKey',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 10, color: Colors.grey.shade600),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: passCtrl,
+                        obscureText: !showPwd,
+                        onChanged: (_) => setState(() {}),
+                        decoration: InputDecoration(
+                          labelText: '密码兜底（可选）',
+                          helperText: '填了则密钥认证失败时自动改用密码，两条腿走路',
+                          helperMaxLines: 2,
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(showPwd
+                                ? Icons.visibility_off
+                                : Icons.visibility),
+                            onPressed: () => setState(() => showPwd = !showPwd),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (busy)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 10),
+                        child: Row(children: [
+                          SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2)),
+                          SizedBox(width: 8),
+                          Text('正在连接…', style: TextStyle(fontSize: 12)),
+                        ]),
+                      ),
                   ],
-                ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: generated
-                  ? () async {
-                      final host = hostCtrl.text.trim();
-                      final user = userCtrl.text.trim();
-                      if (host.isEmpty || user.isEmpty) {
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                            const SnackBar(content: Text('请填写电脑地址与用户名')));
-                        return;
-                      }
-                      final cfg = SshConfig.remotePcTemplate.copyWith(
-                        host: host,
-                        port: int.tryParse(portCtrl.text.trim()) ?? 22,
-                        username: user,
-                        privateKeyPem: privateKeyPem,
-                        authType: SshAuthType.key,
-                      );
-                      await notifier.upsertSshConfig(cfg);
-                      Navigator.pop(ctx);
-                      await _connectTo(cfg);
-                    }
-                  : null,
-              child: const Text('保存并连接'),
-            ),
-          ],
-        ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: (busy || !ready)
+                    ? null
+                    : () async {
+                        setState(() => busy = true);
+                        final host = hostCtrl.text.trim();
+                        final user = userCtrl.text.trim();
+                        final cfg = SshConfig.remotePcTemplate.copyWith(
+                          name: '远程电脑',
+                          host: host,
+                          port: int.tryParse(portCtrl.text.trim()) ?? 22,
+                          username: user,
+                          authType: effectiveType,
+                          privateKeyPem:
+                              usePasswordLogin ? null : privateKeyPem,
+                          password: pwd.isEmpty ? null : pwd,
+                        );
+                        await notifier.upsertSshConfig(cfg);
+                        if (!ctx.mounted) return;
+                        Navigator.pop(ctx);
+                        await _connectTo(cfg);
+                      },
+                child: Text(busy
+                    ? '连接中…'
+                    : (ready
+                        ? '保存并连接'
+                        : (usePasswordLogin ? '填写地址/用户名/密码' : '先生成密钥'))),
+              ),
+            ],
+          );
+        },
       ),
     );
     if (mounted) setState(() {});
@@ -5464,24 +6138,17 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
   }
 
   /// SSH 连接失败 → 人话 + 下一步动作（不甩原始异常）。
-  String _classifySshError(String? raw) {
-    final msg = raw ?? '';
-    final lower = msg.toLowerCase();
-    if (lower.contains('refused')) {
-      return '连接失败：Termux 的 sshd 没在运行。'
-          '打开 Termux 重新执行安装命令（会自动重启 sshd），再点连接';
-    }
-    if (lower.contains('timed out') || lower.contains('timeout')) {
-      return '连接失败：端口无响应——多半是多次失败后被 Termux OpenSSH '
-          '临时拉黑。在 Termux 重新执行安装命令（自带重启 sshd 清拉黑），再点连接';
-    }
-    if (lower.contains('auth') ||
-        lower.contains('denied') ||
-        lower.contains('permission')) {
-      return '连接失败：认证不通过——公钥没装上或用户名不对。'
-          '重新执行安装命令，用户名以命令输出 USER= 为准';
-    }
-    return '连接失败：$msg';
+  ///
+  /// 可用性评估实锤：旧版一套 **Termux 话术** 通吃所有失败，连远程电脑失败
+  /// 也在教用户"打开 Termux 重新执行安装命令"。现按目标类型（Termux/电脑）
+  /// 与认证方式（密钥/密码）分流；不传 cfg（Termux 向导）按 Termux+密钥。
+  String _classifySshError(String? raw, {SshConfig? cfg}) {
+    return classifySshFailure(
+      raw,
+      target: cfg == null ? SshTargetKind.termux : sshTargetKindOf(cfg),
+      passwordAuth: cfg == null ? false : sshUsesPasswordAuth(cfg),
+      keyAuth: cfg == null ? true : cfg.usesKey,
+    );
   }
 
   /// 读取 Termux 写入共享文件的用户名（/sdcard/tongyilite_ssh_user.txt）。
@@ -5537,19 +6204,35 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
   // ---------------- SSH 配置编辑 ----------------
 
   /// 编辑指定配置（existing 为空则新建）。
+  ///
+  /// 凭据（私钥/登录密码）平时只存在安全存储里，settings 里是空槽位 ——
+  /// 所以打开编辑框前要先 [resolveSshSecrets] 回填，否则"编辑一下主机名再保存
+  /// 就把密码清空了"。留空提交 = 保持原凭据不变（不会误删）。
   Future<void> _showSshConfigDialog(
       BuildContext context, SettingsNotifier notifier,
       {SshConfig? existing}) async {
-    final cfg = existing;
+    SshConfig? cfg = existing;
+    if (cfg != null) {
+      try {
+        cfg = await resolveSshSecrets(cfg);
+      } on Exception catch (_) {}
+      if (!mounted) return; // 异步回填凭据后可能已离开页面。
+    }
+    final storedPassword = cfg?.password ?? '';
+    final storedKeyPem = cfg?.privateKeyPem ?? '';
     final nameCtrl = TextEditingController(text: cfg?.name ?? '');
     final hostCtrl = TextEditingController(text: cfg?.host ?? '127.0.0.1');
     final portCtrl =
         TextEditingController(text: (cfg?.port ?? 8022).toString());
     final userCtrl = TextEditingController(text: cfg?.username ?? '');
-    final passCtrl = TextEditingController(text: cfg?.password ?? '');
-    final keyCtrl = TextEditingController(text: cfg?.privateKeyPem ?? '');
+    final passCtrl = TextEditingController(text: storedPassword);
+    final keyCtrl = TextEditingController(text: storedKeyPem);
+    final passPhraseCtrl = TextEditingController(text: cfg?.keyPassphrase ?? '');
     final formKey = GlobalKey<FormState>();
     var authType = cfg?.authType ?? SshAuthType.key;
+    var showPwd = false;
+    String? generatedPublicKey;
+    var genCommand = '';
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -5608,46 +6291,126 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
                         ChoiceChip(
                           label: const Text('密钥'),
                           selected: authType == SshAuthType.key,
-                          onSelected: (_) =>
-                              setState(() => authType = SshAuthType.key),
+                          onSelected: (_) => setState(() {
+                            authType = SshAuthType.key;
+                            showPwd = false;
+                          }),
                         ),
                         const SizedBox(width: 8),
                         ChoiceChip(
                           label: const Text('密码'),
                           selected: authType == SshAuthType.password,
-                          onSelected: (_) =>
-                              setState(() => authType = SshAuthType.password),
+                          onSelected: (_) => setState(() {
+                            authType = SshAuthType.password;
+                            showPwd = false;
+                          }),
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('密钥+密码兜底'),
+                          selected: authType == SshAuthType.keyThenPassword,
+                          onSelected: (_) => setState(() {
+                            authType = SshAuthType.keyThenPassword;
+                            showPwd = false;
+                          }),
                         ),
                       ],
                     ),
                     const SizedBox(height: 10),
-                    if (authType == SshAuthType.key)
+                    if (authType != SshAuthType.password) ...[
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text('私钥（PEM / OpenSSH）',
+                                style: const TextStyle(fontSize: 13)),
+                          ),
+                          TextButton.icon(
+                            onPressed: () {
+                              final keys = SshKeyGen.generate();
+                              if (keys == null) return;
+                              setState(() {
+                                generatedPublicKey = keys.publicKey;
+                                genCommand =
+                                    _buildRemoteInstallCommand(keys.publicKey);
+                                keyCtrl.text = keys.privateKeyPem;
+                              });
+                            },
+                            icon: const Icon(Icons.auto_awesome, size: 16),
+                            label: const Text('自动生成',
+                                style: TextStyle(fontSize: 12)),
+                          ),
+                        ],
+                      ),
                       TextFormField(
                         controller: keyCtrl,
-                        minLines: 4,
+                        minLines: 3,
                         maxLines: 8,
                         decoration: const InputDecoration(
-                          labelText: '私钥（PEM / OpenSSH）',
+                          hintText: '-----BEGIN OPENSSH PRIVATE KEY-----',
                           border: OutlineInputBorder(),
                           alignLabelWithHint: true,
                         ),
-                        validator: (v) =>
-                            (v == null || v.trim().isEmpty) ? '请填写私钥' : null,
-                      )
-                    else
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? '请填写私钥，或点「自动生成」'
+                            : null,
+                      ),
+                      if (generatedPublicKey != null) ...[
+                        const SizedBox(height: 6),
+                        Text('把这条命令在目标机器上执行一次（装公钥）：',
+                            style: const TextStyle(fontSize: 11)),
+                        const SizedBox(height: 4),
+                        _copyableCommand(ctx, genCommand),
+                      ],
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: passPhraseCtrl,
+                        obscureText: !showPwd,
+                        decoration: InputDecoration(
+                          labelText: '私钥口令（无则留空）',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(showPwd
+                                ? Icons.visibility_off
+                                : Icons.visibility),
+                            onPressed: () => setState(() => showPwd = !showPwd),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (authType != SshAuthType.key) ...[
+                      const SizedBox(height: 10),
                       TextFormField(
                         controller: passCtrl,
-                        decoration: const InputDecoration(
-                          labelText: '密码',
-                          border: OutlineInputBorder(),
+                        obscureText: !showPwd,
+                        decoration: InputDecoration(
+                          labelText: '登录密码',
+                          hintText: storedPassword.isEmpty
+                              ? '电脑/Termux 的账号登录密码'
+                              : '已保存，留空保持不变',
+                          helperText: authType == SshAuthType.keyThenPassword
+                              ? '密钥认证失败时自动改用这个密码'
+                              : '服务端需允许密码登录（sshd_config：'
+                                  'PasswordAuthentication yes）',
+                          helperMaxLines: 2,
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(showPwd
+                                ? Icons.visibility_off
+                                : Icons.visibility),
+                            onPressed: () => setState(() => showPwd = !showPwd),
+                          ),
                         ),
                         validator: (v) =>
-                            (v == null || v.trim().isEmpty) ? '请填写密码' : null,
+                            (v == null || v.trim().isEmpty) &&
+                                    storedPassword.isEmpty
+                                ? '请填写密码（或改用密钥认证）'
+                                : null,
                       ),
+                    ],
                     const SizedBox(height: 8),
                     Text(
-                      '提示：密钥认证更安全。也可点「自动生成」让 app 生成 ed25519 密钥，'
-                      '再用向导里的命令把公钥装到对端。',
+                      '密码/私钥保存在系统安全存储中，不会明文写进设置文件；'
+                      '留空提交表示保持原凭据不变。',
                       style:
                           TextStyle(fontSize: 11, color: Colors.grey.shade600),
                     ),
@@ -5674,9 +6437,12 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     );
     if (saved != true) return;
     // 兜底：existing 无稳定 id（旧配置迁移遗漏）→ 分配新 id，避免 upsert 追加。
-    final stableId = (existing?.id.trim().isNotEmpty ?? false)
-        ? existing!.id.trim()
+    final stableId = (cfg?.id.trim().isNotEmpty ?? false)
+        ? cfg!.id.trim()
         : 'ssh_${DateTime.now().millisecondsSinceEpoch}';
+    final needKey = authType != SshAuthType.password;
+    final needPassword = authType != SshAuthType.key;
+    final typedPwd = passCtrl.text.trim();
     await notifier.upsertSshConfig(SshConfig(
       id: stableId,
       name: nameCtrl.text.trim(),
@@ -5684,8 +6450,13 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
       port: int.tryParse(portCtrl.text.trim()) ?? 8022,
       username: userCtrl.text.trim(),
       authType: authType,
-      privateKeyPem: authType == SshAuthType.key ? keyCtrl.text.trim() : null,
-      password: authType == SshAuthType.password ? passCtrl.text.trim() : null,
+      privateKeyPem: needKey ? keyCtrl.text.trim() : null,
+      keyPassphrase:
+          needKey && passPhraseCtrl.text.isNotEmpty ? passPhraseCtrl.text : null,
+      // 留空 = 保持安全存储里的原密码（编辑别的字段不该把密码清了）。
+      password: needPassword
+          ? (typedPwd.isEmpty ? storedPassword : typedPwd)
+          : null,
     ));
     if (mounted) setState(() {});
   }
@@ -5746,6 +6517,7 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     var backend = existing?.backend ?? WorkspaceBackend.localApp;
     var sshConfigId = existing?.sshConfigId;
     var creatingDir = false;
+    var browsingDir = false;
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -5832,29 +6604,61 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
                           (v == null || v.trim().isEmpty) ? '远端路径必填' : null,
                     ),
                     const SizedBox(height: 8),
-                    // 自动创建：连接后建 ~/projects/<名称> 并把路径填上。
-                    FilledButton.icon(
-                      onPressed: creatingDir
-                          ? null
-                          : () async {
-                              setState(() => creatingDir = true);
-                              try {
-                                final dir =
-                                    await _autoCreateRemoteDir(nameCtrl.text);
-                                if (dir != null && ctx.mounted) {
-                                  pathCtrl.text = dir;
-                                } else if (ctx.mounted) {
-                                  ScaffoldMessenger.of(ctx)
-                                      .showSnackBar(const SnackBar(
-                                          content: Text('自动创建失败：请先连接开发环境，'
-                                              '或检查用户名/密钥')));
-                                }
-                              } finally {
-                                setState(() => creatingDir = false);
-                              }
-                            },
-                      icon: const Icon(Icons.folder_open, size: 16),
-                      label: Text(creatingDir ? '创建中…' : '🔍 自动创建目录'),
+                    // 两条路：自动建一个 ~/projects/<名称>，或直接浏览远端已有目录。
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: creatingDir
+                                ? null
+                                : () async {
+                                    setState(() => creatingDir = true);
+                                    try {
+                                      final dir = await _autoCreateRemoteDir(
+                                          nameCtrl.text);
+                                      if (dir != null && ctx.mounted) {
+                                        pathCtrl.text = dir;
+                                      } else if (ctx.mounted) {
+                                        ScaffoldMessenger.of(ctx).showSnackBar(
+                                            const SnackBar(
+                                                content: Text('自动创建失败：请先连接开发环境，'
+                                                    '或检查用户名/密码')));
+                                      }
+                                    } finally {
+                                      setState(() => creatingDir = false);
+                                    }
+                                  },
+                            icon: const Icon(Icons.create_new_folder, size: 16),
+                            label: Text(creatingDir
+                                ? '创建中…'
+                                : '🔍 自动创建 ~/projects/<名称>'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: browsingDir
+                                ? null
+                                : () async {
+                                    setState(() => browsingDir = true);
+                                    try {
+                                      final dir = await _browseRemoteDir();
+                                      if (dir != null && ctx.mounted) {
+                                        pathCtrl.text = dir;
+                                      }
+                                    } finally {
+                                      if (mounted) {
+                                        setState(() => browsingDir = false);
+                                      }
+                                    }
+                                  },
+                            icon: const Icon(Icons.folder_open, size: 16),
+                            label: Text(browsingDir
+                                ? '读取中…'
+                                : '📂 浏览远端目录'),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ],
@@ -5892,34 +6696,111 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
   }
 
   /// 自动创建远端目录：连接后 `echo $HOME` + `mkdir -p ~/projects/<safe>`。
+  /// （建目录本体在 `ensureRemoteProjectDir`，与聊天页的"一键开工"共用同一条路。）
   Future<String?> _autoCreateRemoteDir(String name) async {
-    final settings = ref.read(settingsProvider);
     final ssh = SshEnvironmentService.instance;
-    // 找一份可用配置（已连接优先）。
-    SshConfig? cfg;
-    if (ssh.isConnected) {
-      cfg = ssh.activeConfig;
-    } else {
-      for (final c in settings.sshConfigs) {
-        if (c.isComplete) {
-          cfg = c;
-          break;
-        }
-      }
-    }
+    var cfg = ssh.isConnected ? ssh.activeConfig : null;
+    cfg ??= ref
+        .read(settingsProvider)
+        .sshConfigs
+        .where((c) => c.isComplete)
+        .firstOrNull;
     if (cfg == null) return null;
     if (!await ssh.ensureConnected(cfg)) return null;
-    final safe = sanitizeWorkspaceDirName(name);
-    final home =
-        (await ssh.run('echo \$HOME', timeout: const Duration(seconds: 30)))
-                ?.trim() ??
-            '';
-    if (home.isEmpty) return null;
-    final dir = '$home/projects/$safe';
-    final out = await ssh.run('mkdir -p "$dir" && echo OK',
-        timeout: const Duration(seconds: 30));
-    if ((out?.trim() ?? '') != 'OK') return null;
-    return dir;
+    return ensureRemoteProjectDir(name);
+  }
+
+  /// 远端目录浏览器：`ls -1p` 列子目录 → 点进去/上一级 → 「选中此目录」回填。
+  /// 返回**绝对路径**（`~` 会解析成远端家目录）；取消返回 null。
+  Future<String?> _browseRemoteDir() async {
+    final ssh = SshEnvironmentService.instance;
+    var path = '~';
+    for (;;) {
+      List<String> dirs;
+      try {
+        dirs = await listRemoteDirs(path: path);
+      } on Exception catch (e) {
+        if (!mounted) return null;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('列目录失败：$e（可先点「连接」）')));
+        return null;
+      }
+      if (!mounted) return null;
+      final at = path == '~' ? '家目录 ~' : path;
+      final picked = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('选择远端项目目录'),
+          content: SizedBox(
+            width: 420,
+            height: 320,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前：$at',
+                    style: const TextStyle(
+                        fontSize: 12, fontFamily: 'monospace')),
+                const SizedBox(height: 6),
+                if (path != '~')
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(ctx, '__up__$path'),
+                    icon: const Icon(Icons.arrow_upward, size: 16),
+                    label: const Text('上一级', style: TextStyle(fontSize: 12)),
+                  ),
+                Expanded(
+                  child: dirs.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text('这个目录下没有子目录（或不可读）。',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey.shade600)),
+                        )
+                      : ListView.builder(
+                          itemCount: dirs.length,
+                          itemBuilder: (_, i) {
+                            final d = dirs[i];
+                            return ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.folder, size: 18),
+                              title: Text(d.split('/').last,
+                                  style: const TextStyle(fontSize: 13)),
+                              onTap: () => Navigator.pop(ctx, '__in__$d'),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, path),
+                child: const Text('选中此目录')),
+          ],
+        ),
+      );
+      if (picked == null) return null;
+      if (picked.startsWith('__in__')) {
+        path = picked.substring(6);
+        continue;
+      }
+      if (picked.startsWith('__up__')) {
+        final cur = picked.substring(6);
+        final i = cur.lastIndexOf('/');
+        path = i <= 0 ? '~' : cur.substring(0, i);
+        continue;
+      }
+      if (picked == '~' || picked == r'$HOME') {
+        final home = await ssh.run('echo \$HOME',
+            timeout: const Duration(seconds: 30));
+        final h = home?.trim() ?? '';
+        return h.isEmpty ? null : h;
+      }
+      return picked;
+    }
   }
 
   // ---------------- 任务与规划 ----------------

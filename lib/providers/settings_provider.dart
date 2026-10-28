@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
-import '../agent/dev/ssh/secret_store.dart' show migrateSshSecrets;
+import '../agent/dev/ssh/secret_store.dart'
+    show deleteSshSecrets, migrateSshSecrets, saveSshSecrets;
 
+import '../agent/adb/adb_targets.dart';
 import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/agent_persona.dart';
@@ -299,30 +301,90 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   }
 
   /// 保存/覆盖一条 SSH 配置（按 id 匹配；id 为空则追加）。
+  ///
+  /// 私钥/登录密码**不落 settings JSON**：先写进安全存储（saveSshSecrets），
+  /// state/磁盘只留空槽位；连接前由 resolveSshSecrets 回填。
+  /// 安全存储不可用时 fail-open（保留明文，连接照旧可用）。
   Future<void> upsertSshConfig(SshConfig config) async {
+    var stored = config;
+    try {
+      stored = await saveSshSecrets(config);
+    } on Exception catch (_) {}
     var list = [...state.sshConfigs];
     final index = list.indexWhere((c) => c.id.isNotEmpty && c.id == config.id);
     if (index >= 0) {
-      list[index] = config;
+      list[index] = stored;
     } else {
-      list.add(config);
+      list.add(stored);
     }
     state = state.copyWith(sshConfigs: list);
     await _persist();
   }
 
-  /// 删除一条 SSH 配置（按 id）。
+  /// 删除一条 SSH 配置（按 id）；同步清掉安全存储里的凭据。
   Future<void> removeSshConfig(String id) async {
     if (id.isEmpty) return;
     state = state.copyWith(
         sshConfigs: state.sshConfigs.where((c) => c.id != id).toList());
     await _persist();
+    await deleteSshSecrets(id);
   }
 
-  /// 清除全部 SSH 配置。
+  // ---------------------------------------------------------------- ADB 远程控制
+
+  /// ADB 远程控制总开关。
+  ///
+  /// 用户定案：**放行只看这个开关，不做逐次审批**，所以这里不弹确认框；
+  /// 边界由"只能连白名单里的目标机 + 命令黑名单"承担（见 adb_tool.dart）。
+  Future<void> setAdbEnabled(bool value) async {
+    state = state.copyWith(adbEnabled: value);
+    await _persist();
+  }
+
+  /// 保存/覆盖一台 ADB 目标机（按 id 匹配，id 为空则追加）。
+  ///
+  /// 同一 ip:port 只留一条：手滑重复添加会让"默认目标机"（取第一条）变得不可预期。
+  Future<void> upsertAdbTarget(AdbTarget target) async {
+    var list = [...state.adbTargets];
+    final byId = list.indexWhere((t) => t.id.isNotEmpty && t.id == target.id);
+    if (byId >= 0) {
+      list[byId] = target;
+    } else {
+      final dup = list.indexWhere((t) => t.serial == target.serial);
+      if (dup >= 0) {
+        list[dup] = target.copyWith(id: list[dup].id);
+      } else {
+        list.add(target.id.isEmpty
+            ? target.copyWith(id: 'adb-${DateTime.now().millisecondsSinceEpoch}')
+            : target);
+      }
+    }
+    state = state.copyWith(adbTargets: list);
+    await _persist();
+  }
+
+  /// 删除一台 ADB 目标机（只删配置；授权密钥是全局一把，保留）。
+  Future<void> removeAdbTarget(String id) async {
+    if (id.isEmpty) return;
+    state = state.copyWith(
+        adbTargets: state.adbTargets.where((t) => t.id != id).toList());
+    await _persist();
+  }
+
+  /// 清除全部 ADB 目标机（同样保留密钥；密钥重置在设置页单独做）。
+  Future<void> clearAdbTargets() async {
+    state = state.copyWith(adbTargets: const []);
+    await _persist();
+  }
+
+  /// 清除全部 SSH 配置（含安全存储里的凭据）。
   Future<void> clearSshConfig() async {
+    final ids = state.sshConfigs.map((c) => c.id).toList();
     state = state.copyWith(clearSshConfig: true);
     await _persist();
+    for (final id in ids) {
+      await deleteSshSecrets(id);
+    }
   }
 
   /// 危险命令策略：'deny'（黑名单直接拒绝）/ 'ask'（转用户审批）。

@@ -22,6 +22,7 @@ ToolVariant toolVariantOf(String name) {
   switch (name) {
     case 'shell_exec':
     case 'run_code':
+    case 'adb': // 远程 shell/注入：与本机 shell 同一形态（图标=终端）
       return ToolVariant.shell;
     case 'read_file':
       return ToolVariant.read;
@@ -46,7 +47,9 @@ ToolVariant toolVariantOf(String name) {
 
 /// 每类 variant 的摘要参数键优先级（命中第一个非空字符串参数）。
 const Map<ToolVariant, List<String>> _kSummaryKeys = {
-  ToolVariant.shell: ['description', 'command', 'script'],
+  // 'action' 给 adb（一个工具槽 + 动作枚举）：adb shell 有 command 优先显命令，
+  // tap/screenshot 这类无 command 的动作退回显动作名。其余 shell 类工具无此参数。
+  ToolVariant.shell: ['description', 'command', 'action', 'script'],
   ToolVariant.read: ['path', 'file_path', 'url'],
   ToolVariant.write: ['path', 'file_path', 'name'],
   ToolVariant.edit: ['path', 'file_path'],

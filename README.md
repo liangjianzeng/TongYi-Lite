@@ -1,7 +1,7 @@
 # TongYi-Lite 端侧离线 AI 智能体
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![v0.3.5](https://img.shields.io/badge/v0.3.5-8B5CF6)
+![v0.3.6](https://img.shields.io/badge/v0.3.6-8B5CF6)
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)
 ![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)
@@ -66,7 +66,8 @@ TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应�
 | **🔊 语音播报（Edge TTS）** | 微软 Edge 免费 neural 音色（免 key，**Sec-MS-GEC v2** token 本地算、**IPv4 优先**连接），气泡 🔊 点按播报 / 回复后自动播报；音色/语速/音调/音量可配 + 试听；markdown 清洗 + 按句分段播放；手动失败上 SnackBar（自动播报保持静默） |
 | **上下文占用圈 + 压缩** | 输入框圆形占用环（API `prompt_tokens/n_ctx` 实测 · 本地 KV `kv_used/kv_ctx`），阈值变色；**回合内 LLM 摘要压缩**（失败回退确定性摘要）+ **存储级手动压缩** |
 | **🌐 联网搜索** | **端侧直连国内六引擎**（必应/百度/搜狗/360/夸克/中国搜索）——零配置默认可用，每 10 分钟窗口请求预算、指数熔断、UA 池、引擎开关；配置自建 **SearXNG** 自动切换；`web_search` 并发多关键词、每回合上限、同内容去重 |
-| **🛠️ Dev Agent 开发模式** | 工作区四级后端 + `dev_shell`（jniLibs busybox）+ **JGit 进程内 git** + Termux **RUN_COMMAND 免 SSH** + SSH 多配置向导（密钥自动生成、secure storage 存储）+ 任务/规划管理 + `workspace_sync` 双向同步 |
+| **🛠️ Dev Agent 开发模式** | 工作区四级后端 + `dev_shell`（jniLibs busybox）+ **JGit 进程内 git** + Termux **RUN_COMMAND 免 SSH** + SSH 多配置向导（密钥自动生成 / **密码认证**、secure storage 存凭据、失败按目标×认证方式分流诊断）+ 聊天页工作区面板（激活/浏览/自愈建目录）+ 任务/规划管理 + `workspace_sync` 双向同步 |
+| **📱 远程控制（ADB）** | **App 内纯 Dart ADB 客户端**直连另一台手机的 adbd：Wi-Fi TCP + RSA 经典授权，**不需要 PC / Termux / 打包 adb 二进制**。设备发现、shell、GUI 注入（tap/长按/swipe/key/text）、截屏、push/pull、覆盖安装、logcat/dumpsys/性能采样；设置页目标机白名单 + 密钥指纹 + 连接自检，开关即授权（不设逐次审批） |
 | **远程 API 接入** | OpenAI 兼容 `{baseUrl}/chat/completions`，本地优先、API 后备；每条 API 配置独立**「思考强度」档位**（OpenAI/Claude/Gemini/DeepSeek/GLM/Qwen/vLLM 一族一字段，被拒自动去字段重发） |
 | **多会话并发** | 并发会话槽位（1~4）：API 会话真正并行执行回合，本地回合互斥；会话抽屉「● 执行中」徽标 |
 | **质量度量** | 回合指标纯派生自事件日志（步数/工具调用/重复/重试/终止原因）落 JSONL；轨迹导出 + 离线 eval 评分（12 个基线任务） |
@@ -227,6 +228,12 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   （提问卡片：选项 chip / 自由回答 / 跳过）/ `run_code`（PTC 编排，仅 API 档）。
 - **API 档专属**：`exit_plan` / `goal_set` / `goal_complete` / `goal_cancel` / `plan_step_update` /  
   **MCP 远程工具**（`mcp_<server>_<名>`，Streamable HTTP JSON-RPC 2.0）。Dev 工具组见下文。
+- **📱 远程控制工具**（独立开关，不属于 Dev 组）：`adb` —— 单工具 + `action` 枚举
+  （`devices` / `shell` / `tap` / `long_press` / `swipe` / `key` / `text` / `screenshot` / `push` / `pull` /
+  `ls` / `stat` / `install` / `logcat` / `dumpsys` / `perf`），协议全部由 `lib/agent/adb/` 的纯 Dart 实现
+  （24B 帧 + RSA 经典授权 + shell_v2 + sync）。目标机只能来自设置里的白名单，模型无法现编 IP；
+  `uninstall` / `pm clear` / `reboot` / 系统目录 `rm -rf` / `dd` 在 execute 内直接拒绝（护住已下载模型缓存）。
+  真机验收脚本：`dart run tool/adb_probe.dart <ip>:5555 --selftest`（需 `TONGYI_LIVE_ADB=1`）。
 - **沙箱授权**：文件/命令类工具默认在 app workspace 沙盒内；确需访问公共目录时模型携带  
   `sandbox_permissions` + `justification` 请求升级，执行前经用户确认框逐次批准，拒绝不绕过。
 
@@ -293,8 +300,13 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 | `termux`（L2 免 SSH） | **RUN_COMMAND intent** 直达 Termux shell（一次性配置 `allow-external-apps=true` 后零粘贴全流程）；intent 优先、SSH 回落；设置页可一键下载安装 Termux |
 | `remotePc` | SSH（dartssh2 fork vendored）远程开发机；SFTP 文件读写 + 远程命令 |
 
-- **配置自动化**：SSH 密钥自动生成（ed25519）+ 一键安装命令 + 「自动执行」按钮；用户名自动读取；  
-  远端工作区目录自动创建；连接失败人话分类诊断（sshd 未运行 / 被临时拉黑 / 认证不通过 → 各自下一步）。  
+- **配置自动化**：SSH 密钥自动生成（ed25519）+ 一键安装命令 + 「自动执行」按钮；用户名自动读取；支持**密码认证**  
+  （凭据与密钥统一走安全存储，不落设置 JSON）；远端工作区目录「有就用、没有就建」（`mkdir -p` 幂等 +  
+  激活态 `active_workspace.json` 唯一真源，坏文件自愈回落默认）；连接成功后的引导（建目录/建并激活工作区/  
+  浏览远端目录）由 `dev_workspace_actions.dart` 共享动作层统一，设置页向导与聊天页工作区面板复用同一套。  
+- **失败诊断分流**：按**目标类型（手机 Termux / 远程电脑）× 认证方式（密钥 / 密码）**给人话话术与下一步动作  
+  （密钥失败不讲密码、电脑失败不讲 Termux）；dartssh2 错误类型不实现 Exception 的坑已在服务层统一换型  
+  `SshServiceException`（SFTP code 各有中文指引）+ 哨兵测试钉死。  
   排障先读 [`docs/dartssh2_termux_pitfalls_2026-10-01.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/dartssh2_termux_pitfalls_2026-10-01.md)。
 - **SSH 多配置**（按工作区绑定），密钥经 flutter_secure_storage 安全存储；远端 `AGENTS.md`（SFTP，≤64KB）  
   自动叠加注入。
@@ -495,7 +507,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 - **改 CMakeLists / 工具链后必须清 `.cxx` 缓存**，否则 Gradle 判定 up-to-date 不重编；**合并/checkout 带来  
   native 改动时**同样要 `touch` 源文件强制重编（git 操作不保证 mtime 前进），构建后字符串级验证 APK 内  
   `libtongyilite_jni.so` 含新增日志串。
-- **回归防线**：动智能体循环/协议先跑 `flutter test test/agent`；全量 `flutter test` 当前 **700+ 项**  
+- **回归防线**：动智能体循环/协议先跑 `flutter test test/agent`；全量 `flutter test` 当前 **880+ 项**  
   （test/agent · providers · services · websearch · tts · asr）。
 - **一键打包**：Windows `tool/build_apk.ps1`，DGX Spark（Linux aarch64）`tool/build_apk.sh`——默认 debug +  
   release 一起打，自带环境自检（`--check`）、apksigner 签名验收（非 `CN=TongYiLite` 直接判失败）、  
@@ -533,7 +545,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.5**（当前） | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
+| **v0.3.6**（当前） | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（进程内假 adbd 全链路 56 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
+| v0.3.5 | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
 | v0.3.4+ | 2026-10-20~24 | Mesa 测量接管 + L3 裁决（Mesa ≈ CPU bank 17.5–20%，提交层封死）；智能体思考失控根治（跨块累计守卫）；API「思考强度」档位 + 实时 token 读数 + 停止按钮三洞修复；调试机型分级定案（740 主力 / 830 参考 / 650 冒烟） |
 | v0.3.4+ | 2026-10-20 | Edge TTS 恢复播报（Sec-MS-GEC v2 强制 + 手机 IPv6 半死通道 → v2 token 移植 + IPv4 优先） |
 | v0.3.4 | 2026-10-18 | llama.cpp 0.5.0 → **0.7.0 四道门升级**（47 冲突 hunk、KleidiAI v1.31、REGC 宏守卫修复）；740 基准 decode +27%、首 Tok -49% |

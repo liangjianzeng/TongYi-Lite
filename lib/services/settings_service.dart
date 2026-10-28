@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../agent/adb/adb_targets.dart';
 import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../models/agent_persona.dart';
@@ -444,6 +445,16 @@ class InferenceSettings {
   /// 空列表 = 未配置。旧版单配置 [SshConfig] 自动迁移为列表首项。
   final List<SshConfig> sshConfigs;
 
+  /// ADB 远程控制总开关（app 内置纯 Dart ADB 客户端，直连另一台手机）。
+  ///
+  /// 用户定案：**放行只看这一个开关，不做逐次审批** —— 关闭时 `adb` 工具在
+  /// execute 体内直接拒绝；开启后也**只允许连 [adbTargets] 白名单里的机器**
+  /// （模型无权指定任意 host，否则一次提示词注入就能把手机当跳板）。
+  final bool adbEnabled;
+
+  /// 可控制的手机白名单（ip:port）。空列表 = 一台都没配，工具会引导去设置添加。
+  final List<AdbTarget> adbTargets;
+
   /// 危险命令策略：'deny'（默认，黑名单直接拒绝）/ 'ask'（转用户审批）。
   final String dangerousCommandPolicy;
 
@@ -574,11 +585,14 @@ class InferenceSettings {
     this.activePersonaId = kStandardPersonaId,
     // ---- 开发模式（Dev Agent）----
     this.devModeEnabled = false,
+    this.adbEnabled = false,
     this.devWorkspaceId = 'default',
     List<SshConfig>? sshConfigs,
+    List<AdbTarget>? adbTargets,
     this.dangerousCommandPolicy = 'deny',
     this.devToolToggles = const {},
   })  : sshConfigs = sshConfigs ?? const [],
+        adbTargets = adbTargets ?? const [],
         mtpEnabledByModel = mtpEnabledByModel ?? const {},
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         moeBankOverrideByModel = moeBankOverrideByModel ?? const {},
@@ -766,8 +780,10 @@ class InferenceSettings {
     String? activePersonaId,
     // ---- 开发模式（Dev Agent）----
     bool? devModeEnabled,
+    bool? adbEnabled,
     String? devWorkspaceId,
     List<SshConfig>? sshConfigs,
+    List<AdbTarget>? adbTargets,
     String? dangerousCommandPolicy,
     Map<String, bool>? devToolToggles,
     bool clearSshConfig = false,
@@ -899,6 +915,8 @@ class InferenceSettings {
       agentPersonas: agentPersonas ?? this.agentPersonas,
       activePersonaId: activePersonaId ?? this.activePersonaId,
       devModeEnabled: devModeEnabled ?? this.devModeEnabled,
+      adbEnabled: adbEnabled ?? this.adbEnabled,
+      adbTargets: adbTargets ?? this.adbTargets,
       devWorkspaceId: devWorkspaceId ?? this.devWorkspaceId,
       sshConfigs: clearSshConfig ? const [] : (sshConfigs ?? this.sshConfigs),
       dangerousCommandPolicy:
@@ -1011,6 +1029,8 @@ class InferenceSettings {
         'activePersonaId': activePersonaId,
         // ---- 开发模式（Dev Agent）----
         'devModeEnabled': devModeEnabled,
+        'adbEnabled': adbEnabled,
+        'adbTargets': [for (final t in adbTargets) t.toJson()],
         'devWorkspaceId': devWorkspaceId,
         'sshConfigs': [for (final c in sshConfigs) c.toJson()],
         'dangerousCommandPolicy': dangerousCommandPolicy,
@@ -1192,6 +1212,8 @@ class InferenceSettings {
       activePersonaId: json['activePersonaId'] as String? ?? kStandardPersonaId,
       // ---- 开发模式（Dev Agent）：旧配置缺字段时默认关闭（向后兼容）----
       devModeEnabled: json['devModeEnabled'] as bool? ?? false,
+      adbEnabled: json['adbEnabled'] as bool? ?? false,
+      adbTargets: parseAdbTargets(json['adbTargets']),
       devWorkspaceId: json['devWorkspaceId'] as String? ?? 'default',
       // 新版列表优先；旧版单配置自动迁移为列表首项。
       sshConfigs: _parseSshConfigs(json['sshConfigs'], json['sshConfig']),

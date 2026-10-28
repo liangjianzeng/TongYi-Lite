@@ -18,7 +18,8 @@ import '../ssh/ssh_credentials.dart' show SshConfig;
 import '../workspace.dart';
 import '../workspace_store.dart';
 import 'embedded_git.dart' show LocalGit;
-import 'ssh_tools.dart' show sshRunInWorkspace;
+import '../dev_workspace_actions.dart' show defaultRemoteProjectPathPlaceholder;
+import 'ssh_tools.dart' show remoteCdPrefix, sshRunInWorkspace;
 
 /// bash 单引号转义（message 安全入 `git commit -m '...'`）。
 String _singleQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
@@ -39,11 +40,14 @@ Future<({bool remote, String root, DevWorkspace? ws})> _resolveGitRoot(
   final ws = workspaces.where((w) => w.id == wsId).firstOrNull;
   if (ws == null) throw StateError('工作区不存在：$wsId');
   if (ws.isRemote) {
+    // 目录「有就用、没有就建」：未填路径时给占位 ~/projects/<安全名>，
+    // 由工具层在连上后绝对化 + mkdir（不再一上来就甩「未配置远端路径」）。
     final root = (ws.remotePath ?? '').trim();
-    if (root.isEmpty) {
-      throw StateError('工作区「${ws.name}」未配置远端路径（remotePath）');
-    }
-    return (remote: true, root: root, ws: ws);
+    return (
+      remote: true,
+      root: root.isEmpty ? defaultRemoteProjectPathPlaceholder(ws.name) : root,
+      ws: ws
+    );
   }
   return (remote: false, root: await store.workspaceLocalMirror(wsId), ws: ws);
 }
@@ -102,7 +106,7 @@ ToolDefinition createGitStatusTool({List<SshConfig> sshConfigs = const []}) {
     execute: (args) => _gitTool(args, (remote, root) async {
       if (remote) {
         return sshRunInWorkspace(args, (r) {
-          return 'cd $root && git status --short --branch 2>/dev/null || '
+          return '${remoteCdPrefix(root)} && git status --short --branch 2>/dev/null || '
               'echo "NOT_A_GIT_REPO"';
         }, sshConfigs: sshConfigs);
       }
@@ -146,7 +150,7 @@ ToolDefinition createGitDiffTool({List<SshConfig> sshConfigs = const []}) {
           return sshRunInWorkspace(args, (r) {
             final scope = staged ? '--staged' : '';
             final fileArg = file.isEmpty ? '' : ' $file';
-            return 'cd $root && git diff $scope$fileArg --stat && '
+            return '${remoteCdPrefix(root)} && git diff $scope$fileArg --stat && '
                 'echo "---" && git diff $scope$fileArg';
           }, sshConfigs: sshConfigs);
         }
@@ -184,7 +188,7 @@ ToolDefinition createGitLogTool({List<SshConfig> sshConfigs = const []}) {
       return _gitTool(args, (remote, root) async {
         if (remote) {
           return sshRunInWorkspace(args, (r) {
-            return 'cd $root && git log --oneline -$n 2>/dev/null || '
+            return '${remoteCdPrefix(root)} && git log --oneline -$n 2>/dev/null || '
                 'echo "NOT_A_GIT_REPO"';
           }, sshConfigs: sshConfigs);
         }
@@ -240,7 +244,7 @@ ToolDefinition createGitCommitTool({List<SshConfig> sshConfigs = const []}) {
         if (remote) {
           return sshRunInWorkspace(args, (r) {
             final addArgs = files.join(' ');
-            return 'cd $root && git add $addArgs && git commit -m ${_singleQuote(message)}';
+            return '${remoteCdPrefix(root)} && git add $addArgs && git commit -m ${_singleQuote(message)}';
           }, sshConfigs: sshConfigs);
         }
         final res = await LocalGit.commit(root, files: files, message: message);
@@ -282,7 +286,7 @@ ToolDefinition createGitPushTool({List<SshConfig> sshConfigs = const []}) {
         if (remoteFlag) {
           return sshRunInWorkspace(args, (r) {
             final branchArg = branch.isEmpty ? '' : ' $branch';
-            return 'cd $root && git push $remote$branchArg';
+            return '${remoteCdPrefix(root)} && git push $remote$branchArg';
           },
               timeout: const Duration(seconds: 30),
               sshConfigs: sshConfigs);

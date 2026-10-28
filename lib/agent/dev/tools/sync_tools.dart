@@ -20,6 +20,7 @@ import '../../tool_definition.dart';
 import '../ssh/ssh_credentials.dart' show SshConfig;
 import '../ssh/ssh_environment.dart';
 import '../workspace.dart';
+import '../dev_workspace_actions.dart' show ensureWorkspaceRemoteDir;
 import 'ssh_tools.dart'
     show ensureSshConnectionFor, resolveRemoteRoot, toRemotePath;
 
@@ -68,8 +69,10 @@ Future<List<String>> _walkRemote(SftpClient sftp, String root) async {
     List<SftpName> entries;
     try {
       entries = await sftp.listdir(abs);
-    } on Exception {
-      continue; // 目录不存在/无权限 → 跳过
+    } catch (_) {
+      // 目录不存在/无权限 → 跳过。**必须裸 catch**：dartssh2 的 SftpStatusError
+      // 不实现 Exception，`on Exception` 抓不到 ⇒ 远端目录缺失能打死整条消息。
+      continue;
     }
     for (final e in entries) {
       if (out.length >= kSyncMaxFiles) break;
@@ -132,6 +135,10 @@ ToolDefinition createWorkspaceSyncTool(
         return ToolResult.error('[SSH] $connErr');
       }
       final ssh = SshEnvironmentService.instance;
+      // 目录「有就用、没有就建」，并把 `~`/占位路径换成绝对路径（SFTP 只认绝对路径）。
+      final ready = await ensureWorkspaceRemoteDir(remote.workspace);
+      if (ready.error != null) return ToolResult.error('[SSH] ${ready.error}');
+      final root = ready.root ?? remote.root;
       final localDir = await _localWorkspaceDir(wsId);
       if (!await localDir.exists()) {
         await localDir.create(recursive: true);
@@ -140,7 +147,7 @@ ToolDefinition createWorkspaceSyncTool(
       try {
         final sftp = await ssh.openSftp();
         final localFiles = await _walkLocal(localDir);
-        final remoteFiles = await _walkRemote(sftp, remote.root);
+        final remoteFiles = await _walkRemote(sftp, root);
         final localSet = localFiles.toSet();
         final remoteSet = remoteFiles.toSet();
         final all = {...localSet, ...remoteSet};
@@ -156,16 +163,16 @@ ToolDefinition createWorkspaceSyncTool(
             skipped.add('$rel（超单文件上限 $kSyncMaxFileBytes 字节）');
             return;
           }
-          final abs = toRemotePath(remote.root, rel);
+          final abs = toRemotePath(root, rel);
           // 逐级建远端目录（mkdir 失败=已存在，忽略）。
           final segs = rel.split('/')..removeLast();
-          var cur = remote.root;
+          var cur = root;
           for (final s in segs) {
             cur = '$cur/$s';
             try {
               await sftp.mkdir(cur);
-            } on Exception {
-              // 已存在。
+            } catch (_) {
+              // 已存在（SftpStatusError 不实现 Exception ⇒ 只能裸 catch）。
             }
           }
           await ssh.writeFileBytes(abs, bytes);
@@ -173,7 +180,7 @@ ToolDefinition createWorkspaceSyncTool(
         }
 
         Future<void> download(String rel) async {
-          final bytes = await ssh.readFileBytes(toRemotePath(remote.root, rel),
+          final bytes = await ssh.readFileBytes(toRemotePath(root, rel),
               maxBytes: kSyncMaxFileBytes);
           final f = File(p.join(localDir.path, rel));
           await f.parent.create(recursive: true);
@@ -210,7 +217,7 @@ ToolDefinition createWorkspaceSyncTool(
           // 双方都有：比 mtime。
           final localStat = await localF.stat();
           final remoteAttr =
-              await sftp.stat(toRemotePath(remote.root, rel));
+              await sftp.stat(toRemotePath(root, rel));
           final lm = localStat.modified.millisecondsSinceEpoch ~/ 1000;
           final rm = remoteAttr.modifyTime;
           if (rm == null || lm == rm) {
@@ -246,7 +253,7 @@ ToolDefinition createWorkspaceSyncTool(
           buf.writeln('⚠️ 另有 $unprocessed 个文件超出单次处理上限，未处理');
         }
         return ToolResult(content: buf.toString());
-      } on Exception catch (e) {
+      } catch (e) {
         debugPrint('[sync] failed: $e');
         return ToolResult.error('[SSH] 同步失败: $e');
       }
