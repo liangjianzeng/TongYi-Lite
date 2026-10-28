@@ -19,7 +19,8 @@ LOADER=$R/lib/ld-linux-aarch64.so.1
 LP="$R/bin:$R/lib/aarch64-linux-gnu:$R/opt/mesa-cl/lib/aarch64-linux-gnu/clrt:$R/opt/mesa-cl/lib/aarch64-linux-gnu"
 ICD=$R/opt/mesa-cl/etc/OpenCL/vendors
 LIB=$G/libggml-opencl.so.0.27.0            # 影子件(P1 编成后 push 到此, 双名律见 G0)
-EYE=$R/bin/ling_e2e_v4ld                   # 装载/判决探针用 ling 件
+EYE=${EYE:-$R/bin/ling_e2e_v4ld}           # 装载/判决探针用 ling 件(K40 冒烟可 EYE= 覆盖)
+DTAG=${DTAG:-830}                          # 档位标签(合同:结论必须标机型;K40 冒烟跑 DTAG=K40)
 LING=${LING:-/data/local/tmp/ling/bailingmoe3-q5_0-ling.gguf}   # 正主路径 PROBE 腿确认后钉死
 OUT=$G/out
 EXPECT_LIB=${EXPECT_LIB:-f0d564da2}        # 同 stack 律红卡前缀
@@ -48,11 +49,11 @@ run_arm() { # $1=arm名 $2=env串
         $LOADER $EYE --model $LING --ngl 99 --seed 42 --eos 151645 --temp 0 --npred 32" \
         >$OUT/g1_${STAMP}.log 2>&1
     RC=$?
-    ISLANDS=$(grep -c "offloaded to CPU" $OUT/g1_${STAMP}.log 2>/dev/null || echo NA)
-    MULMAT_CPU=$(grep "MUL_MAT" $OUT/g1_${STAMP}.log 2>/dev/null | grep -c "CPU" || echo NA)
-    TOKBYTES=$(grep -c "^tok " $OUT/g1_${STAMP}.log 2>/dev/null || echo 0)
+    ISLANDS=$(grep -c "offloaded to CPU" $OUT/g1_${STAMP}.log 2>/dev/null; true)
+    MULMAT_CPU=$(grep "MUL_MAT" $OUT/g1_${STAMP}.log 2>/dev/null | grep -c "CPU"; true)
+    TOKBYTES=$(grep -c "^tok " $OUT/g1_${STAMP}.log 2>/dev/null; true)
     TOKMD5=$(grep "^tok " $OUT/g1_${STAMP}.log 2>/dev/null | md5sum | cut -c1-8)
-    echo "#### G1_METRIC leg=prefill device=830 arm=$STAMP rc=$RC islands=$ISLANDS mulmat_cpu=$MULMAT_CPU tokbytes=$TOKBYTES tokmd5=$TOKMD5 lib=$M"
+    echo "#### G1_METRIC leg=prefill device=$DTAG arm=$STAMP rc=$RC islands=$ISLANDS mulmat_cpu=$MULMAT_CPU tokbytes=$TOKBYTES tokmd5=$TOKMD5 lib=$M"
 }
 
 if [ "$PROBE" = 1 ]; then
