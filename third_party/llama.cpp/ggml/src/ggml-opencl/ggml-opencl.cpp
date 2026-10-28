@@ -1435,6 +1435,19 @@ struct ggml_backend_opencl_context {
                     tensor ? tensor->name : "?", kname);
             }
         }
+    // [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空总闸（一处真源, 默认关=零扰动）。
+    // 现场: ling 线 NDRANGE_IDLE=2(R-060 H2' 防挂治愈档)每 2 发令一 clFinish = 9.3×decode
+    // 墙(82s→8.8s 实证)。金口方案 = 拆"盲目每2排空", 保"提交边界"(治愈本质=驱动 retire
+    // 边界, R-065 GAP=0 认证 sleep 无关): shim 侧免每2 + graph 循环侧 每16节点 clFlush
+    // (轻量边界, dspark "production-grade candidate" 论) + 每256节点 clFinish(深队列挂死
+    // 保险丝, 压 in dspark 实证 118586-submit 丢失区之下)。同步锚点(get_tensor/async
+    // readback/lm_head/15xxx 系 clFinish)一律保留——乱文案 GPU 侧定罪在案, 正确性锚点
+    // 不连坐。显式 OPFLUSH/OPBATCH/NDRANGE_IDLE 保留调试覆写。
+    static const bool tyl_smart_drain_on = [] {
+        const char * e = getenv("GGML_OPENCL_SMART_DRAIN");
+        return e && e[0] == '1';
+    }();
+    const bool smart = tyl_smart_drain_on && !getenv("GGML_OPENCL_NDRANGE_IDLE");
         // [TongYi-Lite 2026-10-27] KERNEL_SYNC: g21-形态产品化——每次 NDRange 发射后
         // 等待其完成事件再返回，给 GPU 提供 L2 排空窗口（H2′ 竞态：上批 retire 后脏行
         // 滞后落盘 vs host 覆写 pinned 后备，见全GPU卸载执行记录 R-041）。env 门控
@@ -1456,7 +1469,7 @@ struct ggml_backend_opencl_context {
         static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 2; }();
         static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 0; }();  // [R-065] 出厂档=d49 认证形（g49-form GAP=0）：GAP 与疗效无关(R-057)，2ms sleep 是纯税
         static thread_local long idle_ctr = 0;
-        if (idle_n > 0 && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {
+        if (idle_n > 0 && !smart && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {  // [tongyi TYL-DRAIN] 智能档免每2
             idle_ctr = 0;
             vkh_op_timer vkh_idl("ENQ_IDLE", nullptr, false);   // [vkh P2] every-N clFinish drain weigh-in
             static std::atomic<unsigned long> g_idle_ticks{0};
@@ -9955,6 +9968,17 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         if (opflush > 0 && ++opflush_cnt >= opflush) {
             clFlush(backend_ctx->queue);
             opflush_cnt = 0;
+        }
+        // [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空档: 边界从"每2发令 clFinish"改为
+        // "每 sd_flush 节点 clFlush + 每 sd_finish 节点 clFinish"。retire 边界语义保 H2'
+        // 治愈(R-065 GAP=0 认证), 深队列保险丝压 in kgsl submit 丢失区。opsync 调试档在场
+        // 时让位(不叠乘)。
+        if (tyl_smart_drain_on && !opsync_en) {
+            static const int sd_flush = [] { const char * e = getenv("GGML_OPENCL_SD_FLUSH");  return e ? atoi(e) : 16;  }();
+            static const int sd_fin   = [] { const char * e = getenv("GGML_OPENCL_SD_FINISH"); return e ? atoi(e) : 256; }();
+            static int sd_fc = 0, sd_kc = 0;
+            if (sd_flush > 0 && ++sd_fc >= sd_flush) { clFlush(backend_ctx->queue); sd_fc = 0; }
+            if (sd_fin  > 0 && ++sd_kc >= sd_fin)   { clFinish(backend_ctx->queue); sd_kc = 0; }
         }
         if (opsync_en || opbatch > 1) {
             if (opsync_en || ++opbatch_cnt >= opbatch) {
