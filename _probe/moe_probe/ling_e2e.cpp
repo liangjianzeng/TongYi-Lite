@@ -13,7 +13,27 @@
 #include <vector>
 #include <chrono>
 
+// [tongyi 1028 R-120 解剖刀] SIGILL/SIGSEGV 取证：backtrace 落 stderr（无缓冲），
+// 崩溃不再吞进度。E2E_LOADONLY=1 只加载即退（分相定位）。零扰动：不改任何推理路径。
+#include <csignal>
+#include <execinfo.h>
+#include <unistd.h>
+static void tyl_crash(int sig, siginfo_t * si, void * uc) {
+    (void)uc;
+    char b[128];
+    int n = snprintf(b, sizeof(b), "\n[e2e][CRASH] sig=%d addr=%p\n", sig, (void *)si->si_addr);
+    ssize_t w = write(2, b, n); (void)w;
+    void * frames[64];
+    int f = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, f, 2);
+    _exit(100 + sig);
+}
+
 int main(int argc, char ** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    { struct sigaction sa; memset(&sa, 0, sizeof(sa)); sa.sa_sigaction = tyl_crash;
+      sa.sa_flags = SA_SIGINFO; sigaction(SIGILL, &sa, nullptr); sigaction(SIGSEGV, &sa, nullptr);
+      sigaction(SIGBUS, &sa, nullptr); }
     if (argc < 5) { fprintf(stderr, "usage: ling_e2e model npred ngl seed [prompt]\n"); return 2; }
     const char * model_path = argv[1];
     const int npred = atoi(argv[2]);
@@ -29,6 +49,12 @@ int main(int argc, char ** argv) {
     llama_model * model = llama_model_load_from_file(model_path, mp);
     if (!model) { fprintf(stderr, "LOAD_FAIL\n"); return 3; }
     auto t1 = std::chrono::steady_clock::now();
+    fprintf(stderr, "[e2e][PHASE] model_loaded\n");
+    if (const char * lo = getenv("E2E_LOADONLY"); lo && *lo) {
+        llama_model_free(model);
+        fprintf(stderr, "[e2e][PHASE] loadonly_done\n");
+        return 0;
+    }
 
     llama_context_params cp = llama_context_default_params();
     const int nctx = (argc > 6) ? atoi(argv[6]) : 1024;
@@ -53,14 +79,23 @@ int main(int argc, char ** argv) {
     toks.resize(n);
 
     // prefill
+    // [gemm_plan ledger-222] prefill 计时出口(TTFT 口径): 纯增 stderr METRIC 行, tok 零扰动。
+    auto t_pf0 = std::chrono::steady_clock::now();
     llama_batch b = llama_batch_get_one(toks.data(), n);
-    if (llama_decode(ctx, b) != 0) { fprintf(stderr, "PREFILL_FAIL\n"); return 6; }
+    int pf_rc = llama_decode(ctx, b);
+    auto t_pf1 = std::chrono::steady_clock::now();
+    if (pf_rc != 0) { fprintf(stderr, "PREFILL_FAIL\n"); return 6; }
     // greedy sample via logits last-token
     float * logits = llama_get_logits_ith(ctx, n - 1);
     if (lgf) fwrite(logits, 4, lg_nv, lgf);
     int best = 0; float bv = logits[0];
     for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
     llama_token next = best;
+    {
+        double pf_ms = std::chrono::duration<double, std::milli>(t_pf1 - t_pf0).count();
+        fprintf(stderr, "[e2e][METRIC] leg=prefill device=probe n_prompt=%d pf_ms=%.0f prefill_tok_s=%.2f\n",
+                n, pf_ms, pf_ms > 0 ? n * 1000.0 / pf_ms : 0.0);
+    }
 
     auto t2 = std::chrono::steady_clock::now();
     std::string text;
