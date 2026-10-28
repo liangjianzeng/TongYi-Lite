@@ -23,7 +23,7 @@ BASELIB=$R/bin/libggml-base.so.0.27.0
 OUT=$R/out
 LING=/data/local/tmp/g759/Ling-3.0-tiny-Q4_0.gguf
 EXPECT_LING=4623917248
-EXPECT_SHLIB=aee4f87da
+EXPECT_SHLIB=${EXPECT_SHLIB:-2d610603}
 NP=${NP:-32}
 NGL=${NGL:-99}
 SD=${SD:-42}
@@ -49,6 +49,10 @@ SM=$(md5sum "$SHLIB" 2>/dev/null | cut -c1-8)
 # 装载证明（双保险，禁猜）：①影子件自带唯一仪表串（arena 959 件无此串）grep 实证；
 #   ②行为差分 = on1 臂 GATE-FAIL 掉零/off 臂在场——影子未被选中则双臂全同, 由对照腿戳穿。
 SEL=$(grep -acF GGML_OPENCL_MOE_SELFBUILD $SHLIB 2>/dev/null | tr -dc '0-9'); [ "${SEL:-0}" -ge 1 ] || { echo "#### L6_RED_CARD shadow_missing_instrument_str"; exit 12; }
+# 哑火#23入律: loader 按 DT_NEEDED 名(=.so.0)解析——影子目录必须两枚同名件齐在, 缺即红卡
+[ -f "$SHADOW/libggml-opencl.so.0" ] || { echo "#### L6_RED_CARD shadow_missing_dtneeded_name(.so.0) ⇒ 必哑火, 停腿"; exit 13; }
+DTSEL=$(LD_DEBUG=libs $LOADER --library-path $LP true 2>&1 | grep -F "trying file=$SHADOW/libggml-opencl.so.0" | grep -c trying)
+echo "#### L6_LOADPROOF dtneeded_try=$DTSEL (须≥1: loader 首选影子 .so.0)"
 BM=$(md5sum "$BASELIB" 2>/dev/null | cut -c1-8)
 [ -n "$BM" ] || { echo "#### L6_ABORT reason=no_ggml_base"; exit 6; }
 echo "#### L6_BEGIN $(date +%H:%M:%S) shadow=$SM baselib=$BM eye=$(md5sum $EYE|cut -c1-8) ling=$LSZ npred=$NP ngl=$NGL seed=$SD batt=$T stayon=$SO arms=\"$ARMS\" ldselect=$SEL"

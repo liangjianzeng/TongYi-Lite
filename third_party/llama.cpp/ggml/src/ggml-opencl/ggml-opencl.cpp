@@ -10403,6 +10403,20 @@ inline bool moe_selfbuild_unlock(const ggml_backend_opencl_context *backend_ctx,
     return lvl[0] == '2' && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q3_K);
 }
 
+// [tongyi TYL-UNLOCK-R2 2026-10-28] A7X FA 混合 KV 防 crash 闸的 Mesa 面豁免（一处真源）。
+// 现场（R-114 d2 op 级普查）：ling 混合模型 6 个 attention 层 FLASH_ATTN 全坠 CPU 岛。
+// 判据链：本闸把 is_f32_f16（=f32 q + f16 KV cache，** llama.cpp 标准配置**）连同 q8_0/q4_0
+// 一并拒予 A7X——依据是闭源 E031 驱动 clBuildProgram SIGSEGV。Mesa/rusticl 面驱动 =
+// Mesa 26.2.4 freedreno/kgsl，与 E031 系列**无同源关系**，防 crash 泛化从未在 Mesa 面复核。
+// env GGML_OPENCL_FA_A7X_GUARD=0 仅 Mesa 面豁免（默认/1 = 逐字节零扰动）；若真 SIGSEGV =
+// clBuildProgram fail-fast 断腿（撤 env 即回原状），定罪"防 crash 在 Mesa 亦真"。
+inline bool fa_a7x_kv_guard(const ggml_backend_opencl_context *backend_ctx) {
+    if (!backend_ctx || backend_ctx->adreno_gen != ADRENO_GPU_GEN::A7X) return false;
+    static const char * e = getenv("GGML_OPENCL_FA_A7X_GUARD");
+    if (e && e[0] == '0' && backend_ctx->is_mesa_rusticl) return false;
+    return true;
+}
+
 // [dspark 2026-10-13] Dense-loop MUL_MAT_ID. The vendor Adreno MoE kernels
 // (gemv_moe/gemm_moe *_f32_ns) are numerically broken on Adreno 830 (SM8750,
 // OpenCL 0800.71 / E031.47.18.49): probe + test-backend-ops show systematic
@@ -11314,8 +11328,8 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // those (f16-KV / quant-KV) attention layers on the CPU backend.
             // Negative compiler carve-out, same idiom as the Intel DK=512 decline
             // below and the X1E driver-quirk guards.
-            if (backend_ctx && backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X &&
-                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {
+            if (fa_a7x_kv_guard(backend_ctx) &&
+                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {  // [tongyi TYL-UNLOCK-R2] A7X 判定入 helper, Mesa 面 env 豁免
                 return false;
             }
 
@@ -11337,8 +11351,8 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // Some compilers for A7x (Adreno 740, compiler E031.41) crashes when
             // building FA kernels with mixed or quant types (f32_f16, f32_q8_0, f32_q4_0)
             // Here we skip all A7x for these kernels to avoid crash
-            if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X &&
-                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {
+            if (fa_a7x_kv_guard(backend_ctx) &&
+                (is_f32_f16 || is_f32_q8_0 || is_f32_q4_0)) {  // [tongyi TYL-UNLOCK-R2] 同上, helper 单点
                 return false;
             }
 
