@@ -11283,10 +11283,30 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
                 // fall through to the GEMV.
                 {
                     const ggml_type t = op->src[0]->type;
+                    // [tongyi TYL-GEMM-P1 2026-10-28 ledger-220] q5_0/q5_1 白名单疏漏修复
+                    // (ledger#185 "疏漏性质实锤":kernel_mul_mm_q5_0/1_f32_l4_lm 与 q4_0/q4_1
+                    // 同族在册)。三要素机检:创建=本文件无条件创建块 CL_CHECK fail-fast
+                    // (ADRENO=OFF 也建);派发=GEMM 段 case Q5_0/Q5_1(读 SOA qs/qh/d 平面,
+                    // 无 trans-repack 牵连;ne11<32 break → decode 零扰动);准入=本处。
+                    // "在场"以内核成员指针非空判定(make_unique 值初始化保证零)
+                    // = 机器验断言取代注释信任(R-104/R-111 前科律)。
+                    // env GGML_OPENCL_Q5X_GEMM=1 准入;未设/0 = 逐字节零扰动。
+                    // ⚠ q5_0/q5_1 l4_lm 在 vendor 路创建在场但派发历史不可达,数值从未跑过;
+                    //   设备腿(740 底线/830 参考:岛 census 36→个位、prefill 四臂 3K-token、
+                    //   NMSE、greedy md5 对 CPU 金标)全绿前不翻默认;翻默认需金口。
+                    static const bool q5x_gem = [] {
+                        const char * e = getenv("GGML_OPENCL_Q5X_GEMM");
+                        return e && e[0] == '1';
+                    }();
+                    const bool q5x_gem_ok = q5x_gem &&
+                        backend_ctx->kernel_mul_mm_q5_0_f32_l4_lm != nullptr &&
+                        backend_ctx->kernel_mul_mm_q5_1_f32_l4_lm != nullptr;
                     const bool type_has_gemm = (t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q4_1 ||
                                                 t == GGML_TYPE_IQ4_NL || t == GGML_TYPE_Q8_0 ||
                                                 t == GGML_TYPE_Q4_K  || t == GGML_TYPE_Q5_K  ||
-                                                t == GGML_TYPE_Q6_K);
+                                                t == GGML_TYPE_Q6_K  ||
+                                                (q5x_gem_ok &&
+                                                 (t == GGML_TYPE_Q5_0 || t == GGML_TYPE_Q5_1)));
                     const bool uses_gemm = type_has_gemm && use_adreno_kernels(backend_ctx, op->src[0]);
                     // [dspark 2026-10-16] Small weights (use_adreno_kernels declines
                     // them: ne < 512) must NOT be declined here — the load-time
