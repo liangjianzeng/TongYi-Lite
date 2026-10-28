@@ -15,6 +15,8 @@ echo "#### CHAIN start $(date +%T)" > $LOG
 echo "preflight temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1) stayon=$(settings get global stay_on_while_plugged_in)" >> $LOG
 echo "mem: $(grep -E 'MemTotal|MemAvailable' /proc/meminfo | tr '\n' ' ')" >> $LOG
 logcat -c -b crash 2>/dev/null
+# ling 双件核身（兄弟830"真主vkl"案 vs 我 g759 基线族；md5 相同=同物零争议）
+echo "lingid g759=$(md5sum /data/local/tmp/g759/Ling-3.0-tiny-Q4_0.gguf 2>/dev/null | cut -c1-8) vkl=$(md5sum /data/local/tmp/vkl/Ling-3.0-tiny-Q4_0.gguf 2>/dev/null | cut -c1-8)" >> $LOG
 # ① ling CPU gold 新栈（子令②判别器）
 run_leg l16 0 32 $LGM
 # ② ling GPU 全武新栈回归
