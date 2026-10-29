@@ -29224,7 +29224,14 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         ne11 > 1 &&
         !(a7x_f32lm_bypass && src0t == GGML_TYPE_F32 && ne11 > 8 &&
           backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X)) {
-        switch(src0t) {
+            // [vkh R-138 c23弹] 主假说:官方 mul_mv 核族在 740 Mesa/rusticl-kgsl 数值异变(lm_head inf 同族)。
+    // env GGML_OPENCL_MESA_FORCE_GEMM=1 令量化 mul_mat 的 ne11<32 break(坠官方 mul_mv)失效
+    // →强制 l4_lm GEMM 族(本 switch 内实证路);未设/0 = 逐字节零扰动。定罪差分专用。
+    static const bool mesa_force_gemm = [] {
+        const char * e = getenv("GGML_OPENCL_MESA_FORCE_GEMM");
+        return e && e[0] == '1';
+    }();
+switch(src0t) {
             case GGML_TYPE_F32: {
                 // Small-N f32 GEMV for the spec/MTP verify batch: the tiled GEMM
                 // below always computes a full 64x64 tile, so at ne11=3 with a
@@ -29395,7 +29402,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q1_0: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29489,7 +29496,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q4_0: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29531,7 +29538,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q4_1: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29574,7 +29581,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q5_0: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29629,7 +29636,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q5_1: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29681,7 +29688,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q8_0: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29723,7 +29730,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_IQ4_NL: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29765,7 +29772,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q4_K: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29810,7 +29817,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q5_K: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
@@ -29855,7 +29862,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
             }
             case GGML_TYPE_Q6_K: {
-                if (ne11 < 32) {
+                if (ne11 < 32 && !mesa_force_gemm) {
                     break;
                 }
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
