@@ -8,3 +8,9 @@ lingid g759=a7a20639 vkl=
 [e2e][METRIC] leg=prefill device=probe n_prompt=17 pf_ms=760 prefill_tok_s=22.38
 [e2e][METRIC] leg=decode gen=32 wall_ms=1273 tok_s=25.14 load_ms=10394
 l16 kcerr=0
+#### l15 rc=0 tokmd5=50c7a28b
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+[e2e][METRIC] leg=prefill device=probe n_prompt=17 pf_ms=852 prefill_tok_s=19.95
+[e2e][METRIC] leg=decode gen=32 wall_ms=12148 tok_s=2.63 load_ms=70437
+l15 kcerr=0
