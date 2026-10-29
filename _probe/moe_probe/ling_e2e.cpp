@@ -6,6 +6,7 @@
 // 用法：ling_e2e <model.gguf> <npred> <ngl> <seed> "prompt"
 #include "llama.h"
 #include "ggml.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -124,6 +125,16 @@ int main(int argc, char ** argv) {
         if (lgf) fwrite(logits, 4, lg_nv, lgf);
         best = 0; bv = logits[0];
         for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
+        { // [vkh R-126] 轻量 argmax 指纹：定罪 logits 全零/未写回（'!'×N 假说）——log-only 无 dump
+            static const bool amdbg = getenv("E2E_ARGMAX_DEBUG") != nullptr;
+            if (amdbg) {
+                long nz = 0; double asum = 0.0;
+                const int n_t = (int)llama_vocab_n_tokens(vocab);
+                for (int i = 0; i < n_t; ++i) { if (logits[i] == 0.0f) ++nz; asum += std::fabs(logits[i]); }
+                fprintf(stderr, "[e2e][ARGMAX] gen=%d id=%d val=%.5f zeros=%ld/%d absum=%.3f\n",
+                        gen, best, bv, nz, n_t, asum);
+            }
+        }
         next = best;
     }
     if (lgf) { fclose(lgf); lgf = nullptr; }
