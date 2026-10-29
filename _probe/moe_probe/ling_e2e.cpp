@@ -103,6 +103,13 @@ int main(int argc, char ** argv) {
     if (lgf) fwrite(logits, 4, lg_nv, lgf);
     int best = 0; float bv = logits[0];
     for (int i = 1; i < (int)llama_vocab_n_tokens(vocab); ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
+    { // [vkh R-129] prefill argmax 无条件一行尸检: NaN 是否 prefill 期已染(分叉共享权重面 vs decode 核)
+        long nz = 0; double asum = 0.0;
+        const int n_t = (int)llama_vocab_n_tokens(vocab);
+        for (int i = 0; i < n_t; ++i) { if (logits[i] == 0.0f) ++nz; asum += std::fabs(logits[i]); }
+        fprintf(stderr, "[e2e][ARGMAX] gen=PRE id=%d val=%.5f zeros=%ld/%d absum=%.3f\n",
+                best, bv, nz, n_t, asum);
+    }
     llama_token next = best;
     {
         double pf_ms = std::chrono::duration<double, std::milli>(t_pf1 - t_pf0).count();
