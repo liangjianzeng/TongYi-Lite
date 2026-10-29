@@ -14,7 +14,6 @@ LINES=$(grep -ac 'batched MoE dump' "$ERR" 2>/dev/null); LINES=${LINES:-0}
 # kprobe 分型（R-161）：空发射(zero-grid) vs l4_lm 真发射算错
 KP=$(grep -ac '\[kprobe\]' "$ERR" 2>/dev/null); KP=${KP:-0}
 KZ=$(grep -a '\[kprobe\]' "$ERR" 2>/dev/null | grep -ac 'gw=\[0,'); KZ=${KZ:-0}
-KLM=$(grep -a '\[kprobe\]' "$ERR" 2>/dev/null | grep -ac 'l4_lm'); KLM=${KZ:+$KLM}
 KLM=$(grep -a '\[kprobe\]' "$ERR" 2>/dev/null | grep -ac 'l4_lm'); KLM=${KLM:-0}
 NZ=$(grep -a 'batched MoE dump' "$ERR" 2>/dev/null | grep -acv 'es_base=0'); NZ=${NZ:-0}
 DIST=$(grep -a 'batched MoE dump' "$ERR" 2>/dev/null | grep -oE 'b_base=[0-9]+ .*es_base=[0-9]+' | sed -E 's/.*b_base=([0-9]+).*es_base=([0-9]+)/\1 \2/' | sort -u | awk '{c[$1]++} END{n=0;for(k in c){if(c[k]>1)n++};print n}')
