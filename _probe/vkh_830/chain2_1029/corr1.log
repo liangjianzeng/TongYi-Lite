@@ -11,3 +11,134 @@
 c1 kcerr=0 route=12 esb=0
 ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
 ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c2 gate temp=42000 mem=7103876 stayon=0 12:37:21
+#### c2 rc=0 tokmd5=6fa90482 12:38:36
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c2 kcerr=0 route=12 esb=0
+RSGB res=0x5584e45630 offset=0ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+RSARG dead=falseggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c3 gate temp=38000 mem=7191680 stayon=0 12:40:21
+#### c3 rc=0 tokmd5=6fa90482 12:42:04
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c3 kcerr=0 route=12 esb=0
+ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c4 gate temp=40400 mem=7290708 stayon=0 12:48:50
+#### c4 rc=0 tokmd5=6fa90482 12:50:46
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c4 kcerr=0 route=12 esb=0
+ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c5 gate temp=41600 mem=7429728 stayon=0 12:52:28
+#### c5 rc=0 tokmd5=6fa90482 12:53:42
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c5 kcerr=0 route=12 esb=0
+ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+RSARG dead=false boff=ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c6 gate temp=38800 mem=7563164 stayon=0 12:57:04
+#### c6 rc=0 tokmd5=8f410db3 12:57:16
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c6 kcerr=0 route=0 esb=0
+#### c7 gate temp=43200 mem=7710388 stayon=0 12:58:15
+#### c7 rc=0 tokmd5=06c776f0 12:58:27
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c7 kcerr=0 route=0 esb=0
+#### c8 gate temp=51500 mem=7348648 stayon=0 13:02:07
+#### c8 ABORT_HOT
+#### c8 gate temp=42400 mem=7110692 stayon=0 13:17:36
+#### c8 rc=0 tokmd5=4dbf6bbc 13:17:54
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c8 kcerr=0 route=0 esb=0
+#### c7r gate temp=38400 mem=7639124 stayon=0 13:26:07
+#### c7r rc=0 tokmd5=06c776f0 13:26:18
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c7r kcerr=0 route=0 esb=0
+#### c9 gate temp=46300 mem=7383196 stayon=0 13:26:37
+#### c9 ABORT_HOT
+#### c10 gate temp=42400 mem=7199968 stayon=0 13:47:19
+#### c10 rc=0 tokmd5=0eb2b345 13:47:35
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c10 kcerr=0 route=0 esb=0
+#### c11 gate temp=38200 mem=7504800 stayon=0 14:06:23
+#### c11 rc=0 tokmd5=6fa90482 14:07:39
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c11 kcerr=0 route=12 esb=603
+ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+RSGB res=0x558a797630ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c12 gate temp=38400 mem=7395016 stayon=0 14:09:30
+#### c12 rc=134 tokmd5=d41d8cd9 14:09:54
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c12 kcerr=0 route=2 esb=0
+ggml_opencl: route[blk.1.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.1.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c13 gate temp=38800 mem=7584376 stayon=0 14:11:19
+#### c13 rc=0 tokmd5=42ea9664 14:11:59
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c13 kcerr=0 route=12 esb=0
+RSGB res=0xggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c14 gate temp=40800 mem=7619476 stayon=0 14:12:23
+#### c14 rc=0 tokmd5=44549507 14:13:03
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c14 kcerr=0 route=12 esb=0
+RSNONE dead=ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c15 gate temp=41600 mem=7620108 stayon=0 14:15:29
+#### c15 rc=0 tokmd5=6fa90482 14:16:10
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c15 kcerr=0 route=12 esb=0
+RSGB res=0x5590d30b70ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+#### c16 gate temp=47500 mem=7479376 stayon=0 14:16:32
+#### c16 ABORT_HOT
+#### c17 gate temp=38800 mem=6722052 stayon=0 14:32:39
+#### c17 rc=0 tokmd5=6fa90482 14:33:42
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c17 kcerr=0 route=0 esb=0
+#### c18 gate temp=42000 mem=7364584 stayon=0 14:38:52
+#### c18 rc=0 tokmd5=feea31be 14:39:46
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c18 kcerr=0 route=0 esb=0
+#### c19 gate temp=40400 mem=7189652 stayon=0 14:47:41
+#### c19 rc=0 tokmd5=97bcae07 14:48:08
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c19 kcerr=0 route=0 esb=0
+#### c20 gate temp=40800 mem=7679392 stayon=0 14:49:29
+#### c20 rc=0 tokmd5=238460a5 14:49:56
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c20 kcerr=0 route=0 esb=0
+#### l0 gate temp=40400 mem=7183668 stayon=0 14:51:59
+#### l0 rc=0 tokmd5=06c776f0 14:52:09
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+l0 kcerr=0 route=0 esb=0
+#### c21 gate temp=39000 mem=7246372 stayon=0 14:56:36
+#### c21 rc=0 tokmd5=1946516d 14:57:01
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c21 kcerr=0 route=0 esb=0
+#### c22 gate temp=43800 mem=1742692 stayon=0 15:08:35
+#### c22 ABORT_MEM mem=1742692 req=5000000
+#### c22 gate temp=41600 mem=6799184 stayon=0 17:12:02
+#### c22 rc=0 tokmd5=0f5b06ee 17:12:24
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c22 kcerr=0 route=0 esb=0
