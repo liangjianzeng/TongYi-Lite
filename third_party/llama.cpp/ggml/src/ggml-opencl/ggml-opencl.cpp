@@ -11294,6 +11294,12 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             if (a7x_prefill_cpu_types && op->ne[1] > 1) {
                 // [R-140] 'ALL'/裸'1' = 全量化类型通配（buft-probe 尸检证类型谱含 q6_K/q4_1，
                 // 手写清单必漏项毒混判读）；其余按 ggml_type_name 子串命中。
+                // [R-142 c25弹] 'ALLM' = 全 MUL_MAT 无差别→CPU（含 f32/f16 与 decode 列），
+                // GPU 只剩 emb/elementwise 原始核——终极算子二分钳。
+                if (a7x_prefill_cpu_types[0] == 'A' && a7x_prefill_cpu_types[1] == 'L' &&
+                    a7x_prefill_cpu_types[2] == 'L' && a7x_prefill_cpu_types[3] == 'M') {
+                    return false;
+                }
                 const bool wildcard = a7x_prefill_cpu_types[0] == '1' ||
                                       (a7x_prefill_cpu_types[0] == 'A' && a7x_prefill_cpu_types[1] == 'L' &&
                                        a7x_prefill_cpu_types[2] == 'L');
