@@ -1,0 +1,10 @@
+#### CHAIN start 09:45:27
+preflight temp=49392 stayon=0
+mem: MemTotal:       11459000 kB MemAvailable:    5562048 kB 
+lingid g759=a7a20639 vkl=
+#### l16 rc=0 tokmd5=159a697e
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+[e2e][METRIC] leg=prefill device=probe n_prompt=17 pf_ms=760 prefill_tok_s=22.38
+[e2e][METRIC] leg=decode gen=32 wall_ms=1273 tok_s=25.14 load_ms=10394
+l16 kcerr=0
