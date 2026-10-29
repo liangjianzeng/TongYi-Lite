@@ -1,0 +1,13 @@
+#### c1 gate temp=40400 mem=6325652 stayon=0 12:22:19
+#### c1 ABORT_MEM mem=6325652 req=9000000
+#### c1 gate temp=41600 mem=6322436 stayon=0 12:28:27
+#### c1 ABORT_MEM mem=6322436 req=9000000
+#### c1 gate temp=42000 mem=6270644 stayon=0 12:30:06
+#### c1 ABORT_MEM mem=6270644 req=9000000
+#### c1 gate temp=37200 mem=6217568 stayon=0 12:33:19
+#### c1 rc=0 tokmd5=6fa90482 12:35:02
+[e2e][PHASE] model_loaded
+[e2e][PHASE] ctx_ready
+c1 kcerr=0 route=12 esb=0
+ggml_opencl: route[blk.5.ffn_gate_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
+ggml_opencl: route[blk.5.ffn_up_exps.weight] type=q4_0 K=1536 M=512 E=128 -> BATCHED_MOE (mmid_q4_0_batched)
