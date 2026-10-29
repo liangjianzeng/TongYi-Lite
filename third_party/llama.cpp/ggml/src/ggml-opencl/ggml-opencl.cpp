@@ -1373,6 +1373,26 @@ struct ggml_backend_opencl_context {
         VKH_ENQ_TIMER();   // [vkh] per-op launch cost at the single choke point
         n_enqueues++;
         tyl_l0_note_enq();
+        // [vkh R-159] E2E_KERNEL_PROBE: kernel-path probe at the launch throat.
+        // env unset/0 = zero perturbation. env=1 = one log line per MUL_MAT* launch:
+        // kernel name + grid + operand — catches the "trivial-success empty launch"
+        // (gw=0 before the zero-grid early-return below) that would leave dst zeros.
+        if ([] { const char * e = getenv("E2E_KERNEL_PROBE"); return e && e[0] == '1'; }()) {
+            static int kp_budget = 6000;
+            if (kp_budget-- > 0 && tensor &&
+                (tensor->op == GGML_OP_MUL_MAT || tensor->op == GGML_OP_MUL_MAT_ID)) {
+                char kn[96] = "?";
+                clGetKernelInfo(kernel, CL_KERNEL_FUNCTION_NAME, sizeof(kn), kn, nullptr);
+                char gw[64] = ""; size_t o = 0;
+                for (cl_uint i = 0; i < work_dim && o + 12 < sizeof(gw); i++)
+                    o += snprintf(gw + o, sizeof(gw) - o, "%zu,", global_work_size[i]);
+                GGML_LOG_INFO("[kprobe] %s op=%s ne=[%lld,%lld,%lld,%lld] gw=[%s] w=%s\n",
+                    kn, ggml_op_name(tensor->op),
+                    (long long)tensor->ne[0], (long long)tensor->ne[1],
+                    (long long)tensor->ne[2], (long long)tensor->ne[3], gw,
+                    tensor->src[0] ? ggml_get_name(tensor->src[0]) : "-");
+            }
+        }
         // From the spec on clEnqueueNDRangeKernel:
         // If the device associated with command_queue is an OpenCL 2.1 or newer device,
         // and global_work_size is NULL or the value in any passed dimension is zero,
