@@ -11154,8 +11154,19 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
         case GGML_OP_SOFT_MAX:
         case GGML_OP_NORM:
             return true;
-        case GGML_OP_RMS_NORM:
+        case GGML_OP_RMS_NORM: {
+            // [vkh R-132 c8案] c8(ngl=1, output 已流放 CPU) 仍 inf ⇒ 最后 RMS_NORM 的 GPU 路
+            // （final hidden 生产面）＝lm_head 案后剩余唯一 GPU 嫌疑。env=1 拒收→CPU 正核，
+            // 单变量差分定罪用（默认关＝逐字节零扰动）。
+            static const bool a7x_norm_cpu = [] {
+                const char * e = getenv("GGML_OPENCL_A7X_NORM_CPU");
+                return e && e[0] == '1';
+            }();
+            if (a7x_norm_cpu) {
+                return false;
+            }
             return op->ne[0] % 4 == 0 && ggml_is_contiguous_rows(op->src[0]);
+        }
         case GGML_OP_L2_NORM:
             return ggml_is_contiguous_rows(op->src[0]);
         case GGML_OP_REPEAT:
@@ -11241,6 +11252,39 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // (correct, just slower).
             if (ggml_get_op_params_i32(op, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
                 return false;
+            }
+            // [vkh R-135 c17案] c17(experts→CPU) 仍 prefill 全零, 岛图余 GPU 面唯一 MoE 嫌疑
+            // = ling 共享专家 ffn_{gate,up,down}_shexp(q5_0×24+q8_0×22, probe4 史案 vendor
+            // q5_0 专家 NMSE 0.4-2.4 同族)。env=1 拒收 shexp MUL_MAT→CPU 正核;
+            // 未设/0 = 逐字节零扰动。
+            static const bool a7x_shexp_cpu = [] {
+                const char * e = getenv("GGML_OPENCL_A7X_SHEXP_CPU");
+                return e && e[0] == '1';
+            }();
+            if (a7x_shexp_cpu && op->src[0]->name &&
+                strstr(op->src[0]->name, "_shexp.") != nullptr) {
+                return false;
+            }
+            // [vkh R-135 c18案] c18(experts+shexp→CPU) prefill 健康而 decode 全零 ⇒
+            // decode 面残余零源=q4_0 attn/ffn 权重 GPU 核(n_rows==1 臂)。env=1 令量化权重
+            // 的 n_rows==1 MUL_MAT 全拒→CPU 正核（CPU 金标 25.14 t/s 路, 正确性无罪）;
+            // 未设/0 = 逐字节零扰动。prefill(n_rows>1) 不动, GPU 面元素级/f32 路不动。
+            static const bool a7x_decode_cpu = [] {
+                const char * e = getenv("GGML_OPENCL_A7X_DECODE_CPU");
+                return e && e[0] == '1';
+            }();
+            if (a7x_decode_cpu && op->ne[1] == 1 && ggml_is_quantized(op->src[0]->type)) {
+                return false;
+            }
+            // [vkh R-136 l0案] l0 金锚 06c776f0 vs c19/c20 乱码＝毒面收口 prefill(n>1) 量化
+            // mul_mat 大 N 路。逗号分隔类型清单（如 "q4_0,q8_0"）命中 ggml_type_name 即拒→CPU；
+            // 未设 = 逐字节零扰动。二分定罪 kernel_mul_mm_*_f32_l4_lm 族用。
+            static const char * a7x_prefill_cpu_types = getenv("GGML_OPENCL_A7X_PREFILL_CPU_TYPES");
+            if (a7x_prefill_cpu_types && op->ne[1] > 1) {
+                const char * tn = ggml_type_name(op->src[0]->type);
+                if (tn && tn[0] && strstr(a7x_prefill_cpu_types, tn) != nullptr) {
+                    return false;
+                }
             }
             if (op->src[0]->type == GGML_TYPE_F16) {
                 return true;
@@ -31313,8 +31357,17 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
         const char * e = getenv("GGML_OPENCL_BATCHED_MOE");
         return !e || e[0] != '0';
     }();
+    // [vkh R-135 c13/c14案] batched 核 decode 臂(n_tok==1)产零（prefill 臂 n_tok>=8 实证健康,
+    // PRE 尸检 val=10.6/11.4 有限值×2 腿复现）。env GGML_OPENCL_MOE_BATCHED_DECODE=0 令
+    // n_tok==1 绕 batched 落位精确 dense-loop 祖产;未设/1=逐字节零扰动。
+    static const bool batched_decode_ok = [] {
+        const char * e = getenv("GGML_OPENCL_MOE_BATCHED_DECODE");
+        return !e || e[0] != '0';
+    }();
+    const bool n_tok_1 = (ne21 == 1);
     if (moe_use_dense_loop(src0->type)) {
-        if (batched_moe_enabled && ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
+        if (batched_moe_enabled && (batched_decode_ok || !n_tok_1) &&
+            ggml_cl_mul_mat_id_batched(backend, src0, src1, src2, dst)) {
             return;
         }
         ggml_cl_mul_mat_id_dense_loop(backend, src0, src1, src2, dst);
