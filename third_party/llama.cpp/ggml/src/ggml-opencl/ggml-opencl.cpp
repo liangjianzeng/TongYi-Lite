@@ -11400,6 +11400,15 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             }
             return false;
         case GGML_OP_MUL_MAT_ID: {
+            // [vkh R-143 c26弹] c25 buft 尸检定罪面:MUL_MAT_ID 支持门旁路 ALLM(独立 case),
+            // q4_1 down_exps 漏网→GPU。env=1 全 MUL_MAT_ID 拒收→CPU;未设/0=零扰动。
+            static const bool a7x_moe_id_cpu = [] {
+                const char * e = getenv("GGML_OPENCL_A7X_MOE_ID_CPU");
+                return e && e[0] == '1';
+            }();
+            if (a7x_moe_id_cpu) {
+                return false;
+            }
             // [tongyi R2 2026-10-25] 准入判定唯一实现 = 路由表 resolve_admission
             //（dense 分支/q3_K batched 分支/vendor 诊断分支全部并入表行；语义与 legacy
             // 逐字等价，tongyi_route_table_test 族 A 18.9 万 case 对拍钉死。准入门集
