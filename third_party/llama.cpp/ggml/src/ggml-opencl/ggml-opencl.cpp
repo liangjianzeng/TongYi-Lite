@@ -11292,8 +11292,14 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // 未设 = 逐字节零扰动。二分定罪 kernel_mul_mm_*_f32_l4_lm 族用。
             static const char * a7x_prefill_cpu_types = getenv("GGML_OPENCL_A7X_PREFILL_CPU_TYPES");
             if (a7x_prefill_cpu_types && op->ne[1] > 1) {
+                // [R-140] 'ALL'/裸'1' = 全量化类型通配（buft-probe 尸检证类型谱含 q6_K/q4_1，
+                // 手写清单必漏项毒混判读）；其余按 ggml_type_name 子串命中。
+                const bool wildcard = a7x_prefill_cpu_types[0] == '1' ||
+                                      (a7x_prefill_cpu_types[0] == 'A' && a7x_prefill_cpu_types[1] == 'L' &&
+                                       a7x_prefill_cpu_types[2] == 'L');
                 const char * tn = ggml_type_name(op->src[0]->type);
-                if (tn && tn[0] && strstr(a7x_prefill_cpu_types, tn) != nullptr) {
+                if (wildcard ? ggml_is_quantized(op->src[0]->type)
+                             : (tn && tn[0] && strstr(a7x_prefill_cpu_types, tn) != nullptr)) {
                     return false;
                 }
             }
