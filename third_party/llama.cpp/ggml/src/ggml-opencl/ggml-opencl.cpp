@@ -11003,6 +11003,10 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
         case GGML_OP_NONE:
             return true;
         case GGML_OP_GET_ROWS:
+            // [vkh R-144 c27弹] 原始算子差分刀 GET_ROWS:env=1 拒 GPU;未设/0=零扰动。
+            if ([] { const char * e = getenv("GGML_OPENCL_A7X_RAWOPS_CPU"); return e && e[0] == '1'; }()) {
+                return false;
+            }
             switch (op->src[0]->type) {
                 case GGML_TYPE_F32:
                 case GGML_TYPE_F16:
@@ -11085,6 +11089,11 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
         case GGML_OP_SCALE:
             return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]);
         case GGML_OP_ADD:
+            // [vkh R-144 c27弹] 原始算子差分刀 ADD(共享体 type-guard 只斩 ADD)。
+            if ([] { const char * e = getenv("GGML_OPENCL_A7X_RAWOPS_CPU"); return e && e[0] == '1'; }()
+                && op->type == GGML_OP_ADD) {
+                return false;
+            }
             if (op->type == GGML_TYPE_F16) {
                 const bool src0_ok = op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32;
                 const bool src1_ok = op->src[1]->type == GGML_TYPE_F16 || op->src[1]->type == GGML_TYPE_F32;

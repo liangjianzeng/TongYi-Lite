@@ -18,7 +18,7 @@ echo "tag=$TAG tokmd5=$MD5 head=[$HEAD] argmax_lines=$AM finite_lines=$FIN nan/i
 if [ "${AM:-0}" = "0" ]; then
   if [ "$MD5" = "06c776f0" ]; then echo "VERDICT=SANE (gold md5, no probe)"; exit 0; fi
   case "$HEAD" in
-    *好的*|*中国*|*发明*) echo "VERDICT=SANE (gold text, no probe)"; exit 0;;
+    *好的，用户**好的,用户*|*中国*|*发明*) echo "VERDICT=SANE (gold text, no probe)"; exit 0;;
   esac
   [ -s "$TOK" ] || { echo "VERDICT=CRASHED (empty tok)"; exit 0; }
   echo "VERDICT=UNKNOWN (no probe, tok non-gold)"; exit 0
@@ -26,7 +26,7 @@ fi
 if [ "${NAN:-0}" != "0" ]; then echo "VERDICT=INFECTED (nan/inf)"; exit 0; fi
 if [ "${ZFULL:-0}" != "0" ] && [ "${ZFULL:-0}" = "${AM:-0}" ]; then echo "VERDICT=ZEROED"; exit 0; fi
 case "$HEAD" in
-  *好的*|*中国*|*发明*) echo "VERDICT=SANE (gold text)"; exit 0;;
+  *好的，用户**好的,用户*|*中国*|*发明*) echo "VERDICT=SANE (gold text)"; exit 0;;
 esac
 if [ "$MD5" = "06c776f0" ]; then echo "VERDICT=SANE (gold md5)"; exit 0; fi
 if [ "$PREID" = "198" ]; then echo "VERDICT=NEAR (PRE id matches gold, decode off)"; exit 0; fi
