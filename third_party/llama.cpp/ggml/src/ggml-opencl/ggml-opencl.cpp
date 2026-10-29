@@ -11038,6 +11038,11 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
         case GGML_OP_CPY:
         case GGML_OP_DUP:
         case GGML_OP_CONT:
+            // [vkh R-138 c24弹] 注意力链差分刀(共享体,type-guard 只斩 CPY,DUP/CONT 不受)。
+            if ([] { const char * e = getenv("GGML_OPENCL_A7X_ATTNOPS_CPU"); return e && e[0] == '1'; }()
+                && op->type == GGML_OP_CPY) {
+                return false;
+            }
             switch (op->src[0]->type) {
                 case GGML_TYPE_F32:
                     // [tongyi M-R1] numeric f32->i32 cast (ggml_cast wiring for
@@ -11153,6 +11158,12 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_SOFT_MAX:
         case GGML_OP_NORM:
+            // [vkh R-138 c24弹] 注意力链差分刀(本体兼 SOFT_MAX fallthrough 落点):
+            // env=1 仅令 SOFT_MAX 拒 GPU(ROPE/CPY 各案同闸),NORM 本体不受影响。
+            if ([] { const char * e = getenv("GGML_OPENCL_A7X_ATTNOPS_CPU"); return e && e[0] == '1'; }()
+                && op->type == GGML_OP_SOFT_MAX) {
+                return false;
+            }
             return true;
         case GGML_OP_RMS_NORM: {
             // [vkh R-132 c8案] c8(ngl=1, output 已流放 CPU) 仍 inf ⇒ 最后 RMS_NORM 的 GPU 路
@@ -11411,7 +11422,16 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             return true;
         case GGML_OP_DIAG_MASK_INF:
             return op->ne[3] == 1;
-        case GGML_OP_ROPE: {
+                case GGML_OP_ROPE: {
+            // [vkh R-138 c24弹] c22 分叉备胎:全量化 mul_mat→CPU 仍乱码时,毒＝注意力链算子
+            // (ROPE/SOFT_MAX/CPY)。env=1 三算子同拒→CPU 正核;未设/0 = 逐字节零扰动。
+            static const bool a7x_attnops_cpu = [] {
+                const char * e = getenv("GGML_OPENCL_A7X_ATTNOPS_CPU");
+                return e && e[0] == '1';
+            }();
+            if (a7x_attnops_cpu) {
+                return false;
+            }
             const int mode = ((const int32_t *) op->op_params)[2];
             const bool is_mrope = mode & GGML_ROPE_TYPE_MROPE;
             const bool is_vision = mode == GGML_ROPE_TYPE_VISION;
