@@ -811,6 +811,18 @@ struct ggml_backend_opencl_context {
     // string is a Mesa version (e.g. "26.2.4") that parses to the E031 0.0.0 default,
     // which must NOT be treated as "old QC compiler".
     bool is_mesa_rusticl;
+    // [tongyi dense4b 2026-10-30] 排空（clFinish）政策按**驱动面**定档，成员化以免 vendor 面
+    // 跟着 Mesa 面交税。原状：`GGML_OPENCL_NDRANGE_IDLE` 缺省 2 = 每 2 发令一 clFinish，
+    // 对**所有**驱动生效（R-060 为 rusticl H2′ 竞态所设的治愈档，R-065 只把 GAP 归零）。
+    // 同轮同二进制 A/B（740 / Qwen3.5-4B Q4_K_M / pp512-tg96）判词：
+    //   默认(2) 27.66/1.35 t/s · IDLE=0 33.20/5.49 · SMART_DRAIN 32.64/5.34 ⇒ decode ×4.1、
+    //   prefill +20% 被这档税吃掉；vendor 面（QC E031/E17/DX）从未观测到 H2′ 竞态。
+    // 取档：Mesa/rusticl → idle_n=2（逐字保留 R-060 g49/d49 20/20 认证形）；
+    //       vendor → 智能排空（clFlush/16 + clFinish/256，实测零税，保留提交边界与深队列保险丝）。
+    // 两侧均可用 env 覆写：GGML_OPENCL_NDRANGE_IDLE=<n> 强制排空档（并让智能档让位），
+    //       GGML_OPENCL_SMART_DRAIN=1/0 强制开/关智能档。init 处打印生效档（自证）。
+    long drain_idle_n = 2;
+    bool drain_smart  = false;
     // The q6_K flat mul_mat codegen workarounds are needed by old E031 compilers only.
     bool q6_k_flat_old_compiler;
 
@@ -1470,7 +1482,9 @@ struct ggml_backend_opencl_context {
     // 保险丝, 压 in dspark 实证 118586-submit 丢失区之下)。同步锚点(get_tensor/async
     // readback/lm_head/15xxx 系 clFinish)一律保留——乱文案 GPU 侧定罪在案, 正确性锚点
     // 不连坐。显式 OPFLUSH/OPBATCH/NDRANGE_IDLE 保留调试覆写。
-    const bool smart = tyl_smart_drain_enabled() && !getenv("GGML_OPENCL_NDRANGE_IDLE");
+    // [tongyi dense4b 2026-10-30] 政策改由 ctx 成员承载（init 处按驱动面取档，见 struct 注释）：
+    // vendor 面默认智能排空、Mesa/rusticl 面默认每 2 发令一 clFinish；热路径不再 getenv。
+    const bool smart = drain_smart;
         // [TongYi-Lite 2026-10-27] KERNEL_SYNC: g21-形态产品化——每次 NDRange 发射后
         // 等待其完成事件再返回，给 GPU 提供 L2 排空窗口（H2′ 竞态：上批 retire 后脏行
         // 滞后落盘 vs host 覆写 pinned 后备，见全GPU卸载执行记录 R-041）。env 门控
@@ -1489,7 +1503,9 @@ struct ggml_backend_opencl_context {
         // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
         // 后 finish+sleep 应以近零税复现治愈。IDLE=0 关=零扰动；GAP 默认 2000us。
         // [R-060 产品化候选] 默认 2=已双验治愈档（g49/d49 20/20）；显式 GGML_OPENCL_NDRANGE_IDLE=0 逃生。
-        static const long idle_n = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE"); return e ? atol(e) : 2; }();
+        const long idle_n = drain_idle_n;  // [tongyi dense4b 2026-10-30] 原为硬编码缺省 2 的进程级
+        // static：Mesa 面 R-060 治愈档被一并带给了 vendor 面，4B 稠密 decode 1.35 vs 5.49 t/s。
+        // 现按驱动面在 init 取档（见 struct ggml_backend_opencl_context 注释）。
         static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 0; }();  // [R-065] 出厂档=d49 认证形（g49-form GAP=0）：GAP 与疗效无关(R-057)，2ms sleep 是纯税
         static thread_local long idle_ctr = 0;
         if (idle_n > 0 && !smart && enq_err == CL_SUCCESS && ++idle_ctr >= idle_n) {  // [tongyi TYL-DRAIN] 智能档免每2
@@ -7722,6 +7738,23 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
         strstr(driver_version.data(), "E031") == NULL &&
         strstr(driver_version.data(), "E17") == NULL &&
         strstr(driver_version.data(), "DX") == NULL;
+    // [tongyi dense4b 2026-10-30] 排空政策取档（见 struct 内注释）。env 显式值优先；
+    // 未设时 Mesa/rusticl 保持 R-060 认证形（2），vendor 走智能排空（税≈0 且保保险丝）。
+    // 自证：打印生效档——"后台显示 OpenCL 其实跑 CPU"与"排空档没吃到"同形，必须留痕。
+    {
+        const char * e_idle  = getenv("GGML_OPENCL_NDRANGE_IDLE");
+        const char * e_smart = getenv("GGML_OPENCL_SMART_DRAIN");
+        backend_ctx->drain_idle_n = e_idle ? atol(e_idle)
+                                           : (backend_ctx->is_mesa_rusticl ? 2 : 0);
+        backend_ctx->drain_smart  = e_idle ? false
+                            : (e_smart ? (e_smart[0] == '1') : !backend_ctx->is_mesa_rusticl);
+        // WARN 级：本行是"排空档到底吃到没有"的唯一留痕（ggml INFO 在 llama.cpp 侧被级别
+        // 过滤，实测同函数上下文里 INFO 不出、只有更早的枚举期 INFO 出——不升级别=自证失效）。
+        GGML_LOG_WARN("ggml_opencl: drain policy idle_n=%ld smart=%d [%s driver]%s\n",
+                      (long) backend_ctx->drain_idle_n, (int) backend_ctx->drain_smart,
+                      backend_ctx->is_mesa_rusticl ? "Mesa/rusticl" : "vendor",
+                      (e_idle || e_smart) ? " (env override)" : "");
+    }
     backend_ctx->has_vector_subgroup_broadcast =
         (backend_ctx->adreno_cl_compiler_version.type == E031 && backend_ctx->adreno_cl_compiler_version.major >= 47) ||
         (backend_ctx->adreno_cl_compiler_version.type == DX   && backend_ctx->adreno_cl_compiler_version.major >= 17) ||
@@ -10013,7 +10046,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // "每 sd_flush 节点 clFlush + 每 sd_finish 节点 clFinish"。retire 边界语义保 H2'
         // 治愈(R-065 GAP=0 认证), 深队列保险丝压 in kgsl submit 丢失区。opsync 调试档在场
         // 时让位(不叠乘)。
-        if (tyl_smart_drain_enabled() && !opsync_en) {
+        if (backend_ctx->drain_smart && !opsync_en) {  // [tongyi dense4b 2026-10-30] 与 shim 侧同源政策
             static const int sd_flush = [] { const char * e = getenv("GGML_OPENCL_SD_FLUSH");  return e ? atoi(e) : 16;  }();
             static const int sd_fin   = [] { const char * e = getenv("GGML_OPENCL_SD_FINISH"); return e ? atoi(e) : 256; }();
             static int sd_fc = 0, sd_kc = 0;
