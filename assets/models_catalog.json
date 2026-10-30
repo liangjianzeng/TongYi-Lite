@@ -418,24 +418,28 @@
       }
     },
     {
-      "id": "spark-x2.5-4b-q4_k_m",
-      "name": "Spark-X2.5 4B (Q4_K_M 智能体)",
+      "id": "spark-x2.6-4b-q4_k_m",
+      "name": "Spark-X2.6 4B (Q4_K_M 智能体)",
       "type": "text",
       "mirrors": [
         {
-          "url": "https://hf-mirror.com/abenzerps/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q4_K_M.gguf",
+          "url": "https://modelscope.cn/models/XHToken/Spark-X2.6-4B-GGUF/resolve/master/Spark-X2.6-4B-Q4_K_M.gguf",
+          "source": "modelscope"
+        },
+        {
+          "url": "https://hf-mirror.com/XHToken/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
           "source": "hf-mirror"
         },
         {
-          "url": "https://huggingface.co/abenzerps/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/XHToken/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
           "source": "huggingface"
         }
       ],
-      "sizeGB": 2.42,
-      "sizeMBDisplay": "2.4 GB",
+      "sizeGB": 3.3,
+      "sizeMBDisplay": "3.3 GB",
       "recommended": true,
-      "minRamMB": 4096,
-      "sha256Hash": null,
+      "minRamMB": 6144,
+      "sha256Hash": "91cb2811aebb47ac916aa619d27d4cdd7f4143106b7917accb8ead4cd7f5cbd9",
       "tags": [
         "推荐",
         "智能体",
@@ -877,6 +881,33 @@
           "get_time",
           "calculator"
         ]
+      }
+    },
+    {
+      "id": "Clover-35B-A3B-Preview-Q3Kexp",
+      "name": "Clover 35B A3B (Q3_K experts 热专家 · 扩散实验)",
+      "type": "text",
+      "mirrors": [
+        {
+          "url": "https://modelscope.cn/models/Rhinos/Clover-35B-A3B-Preview-GGUF-GPT-Judge/resolve/master/Clover-35B-A3B-Preview-Q3Kexp.gguf",
+          "source": "local-preplaced"
+        }
+      ],
+      "sizeGB": 14.44,
+      "sizeMBDisplay": "14.4 GB (Q3_K experts 整包，专家原地流式读，已本机预置)",
+      "recommended": false,
+      "minRamMB": 13312,
+      "sha256Hash": "339b6379b85952e9b0343c9df277b07480a711d4bf24dbb790ec7d5a53daaebc",
+      "tags": [
+        "超大MoE",
+        "热专家",
+        "扩散实验",
+        "256e-top8"
+      ],
+      "splitMoe": {
+        "inplaceFullGguf": true,
+        "slotBytesAllLayersMB": 51.6,
+        "expertsBytesMB": 13200.0
       }
     }
   ]

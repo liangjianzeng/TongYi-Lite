@@ -349,7 +349,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 | Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | 2 GB | 推荐 · 视觉 · MTP |
 | Qwen3.5-4B (Q4_K_M MTP 视觉) | 2.8 GB | 3.5 GB | 推荐 · 视觉 · MTP |
 | LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | 2 GB | 推荐 · 速度快 |
-| Spark-X2.5 4B (Q4_K_M 智能体) | 2.4 GB | 4 GB | 推荐 · 智能体 · 百万上下文 |
+| Spark-X2.6 4B (Q4_K_M 智能体) | 3.3 GB | 6 GB | 推荐 · 智能体 · 百万上下文 |
 | LFM 2.5 8B-A1B (Q4_K_M 智能体) | 4.8 GB | 8 GB | 推荐 · 智能体 · MoE 高效 |
 | Ling 3.0 Tiny (Q4_K_M) | 4.5 GB | 8 GB | 推荐 · MoE 高效 |
 | Ling 3.0 Tiny (Q4_0 GPU加速) | 4.4 GB | 8 GB | GPU 加速 · MoE 高效（batched MoE） |

@@ -225,6 +225,88 @@ class ModelStorageService {
     return Directory(p.join(dir.path, '$modelId.experts'));
   }
 
+  // ---------------------------------------------------------------------
+  // 删除：模型产物清单 + 多目录清扫
+  // ---------------------------------------------------------------------
+
+  /// 一个模型在磁盘上的**全部产物文件名**（含下载残留 `.tmp`）。
+  ///
+  /// 删除 / 取消下载必须按这份清单清扫。旧实现手写四个后缀
+  /// `['.gguf', '.gguf.tmp', '.mmproj', '.mmproj.tmp']`，**漏了 dspark 草稿头**
+  /// `{id}.dspark.gguf`（Bonsai-27B 一个就是 1.7GB），删完还留一地孤儿文件。
+  static List<String> modelArtifactFileNames(String modelId) => [
+        '$modelId.gguf',
+        '$modelId.gguf.tmp',
+        '$modelId.mmproj',
+        '$modelId.mmproj.tmp',
+        '$modelId.dspark.gguf',
+        '$modelId.dspark.gguf.tmp',
+      ];
+
+  /// 拆分 MoE 专家包目录名（`{modelId}.experts/`）。
+  static String modelExpertsDirName(String modelId) => '$modelId.experts';
+
+  /// 在**单个**目录内按清单删除模型产物，返回真正删掉的路径。
+  /// 单个文件删不掉（权限/占用）只跳过它，不影响其余文件。
+  static Future<List<String>> deleteArtifactsIn(
+      Directory dir, String modelId) async {
+    final removed = <String>[];
+    for (final name in modelArtifactFileNames(modelId)) {
+      final path = p.join(dir.path, name);
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+          removed.add(path);
+        }
+      } catch (e) {
+        debugPrint('[ModelStorage] 删除失败 $path: $e');
+      }
+    }
+    final expertsPath = p.join(dir.path, modelExpertsDirName(modelId));
+    try {
+      final experts = Directory(expertsPath);
+      if (await experts.exists()) {
+        await experts.delete(recursive: true);
+        removed.add(expertsPath);
+      }
+    } catch (e) {
+      debugPrint('[ModelStorage] 删除专家包失败 $expertsPath: $e');
+    }
+    return removed;
+  }
+
+  /// 删除模型的全部产物（主 gguf + mmproj + dspark + 专家包目录），
+  /// **遍历全部候选目录**——与 [isFullyCached] / [scanExistingModels] 用同一套
+  /// 查找范围。
+  ///
+  /// 为什么必须多目录（2026-10-30 用户反馈「删除点了没反应，再进列表还在」）：
+  /// 判「已缓存」走 [isFullyCached] 的多目录判据，而旧 `deleteModel` 只删
+  /// `getModelsRootDir()` 一个目录 —— 预置/历史遗留在 `app_flutter/models`、
+  /// `Download`、`DCIM` 里的文件根本删不到，下次进页面 [ModelStorageService]
+  /// 的多目录校验又把它认回「已缓存」，看起来就像删除按钮坏了。
+  ///
+  /// 返回已删除的路径列表（空 = 一个都没删掉，通常意味着文件不在候选目录内
+  /// 或没有存储权限），调用方可据此给用户真实反馈。
+  Future<List<String>> deleteModelArtifacts(String modelId) async {
+    final paths = <String>[];
+    try {
+      paths.add((await getModelsRootDir()).path);
+    } catch (_) {}
+    try {
+      paths.addAll((await _allCandidateDirs()).map((d) => d.path));
+    } catch (_) {}
+    final dirs = await _dedupeDirs(paths);
+
+    final removed = <String>[];
+    for (final dir in dirs) {
+      removed.addAll(await deleteArtifactsIn(dir, modelId));
+    }
+    debugPrint('[ModelStorage] 删除 $modelId：${removed.length} 项 '
+        '（扫过 ${dirs.length} 个候选目录）');
+    return removed;
+  }
+
   /// Check if model file exists locally
   Future<bool> isModelCached(String modelId) async {
     try {

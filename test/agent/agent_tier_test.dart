@@ -256,9 +256,9 @@ void main() {
     test('默认（compact=false）呈现与旧版逐字节一致', () {
       final r = registry();
       const legacy = PromptJsonProtocol();
-      expect(legacy.buildToolSection(r, modelId: 'spark-x2.5-4b'),
-          PromptJsonProtocol().buildToolSection(r, modelId: 'spark-x2.5-4b'));
-      expect(legacy.buildToolSection(r, modelId: 'spark-x2.5-4b'),
+      expect(legacy.buildToolSection(r, modelId: 'spark-x2.6-4b'),
+          PromptJsonProtocol().buildToolSection(r, modelId: 'spark-x2.6-4b'));
+      expect(legacy.buildToolSection(r, modelId: 'spark-x2.6-4b'),
           contains('- python_exec: 在沙盒内执行 Python 代码：注意 stdin 是一次性喂入并关闭的批次输入'));
     });
 

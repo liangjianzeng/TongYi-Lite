@@ -33,6 +33,35 @@ String cleanModelName(String name) {
   return trimmed.substring(0, match.start).trim();
 }
 
+/// 模型列表里由**图标**而不是 chip 表达的特性标签。渲染特性标签时必须剔掉，
+/// 否则和主行的眼睛图标撞车（视觉模型一行里出现两个「视觉」）。
+const Set<String> kModelIconCoveredTags = {'视觉', '视觉+语音'};
+
+/// 模型管理页的特性标签清洗 —— 折叠态次行与展开区共用（渲染点见
+/// `settings_screen` 的 `_modelMetaLine`），保证同一行里一条信息只出现一次。
+///
+/// 去掉：空串、目录里重复配置的、由主行眼睛图标表达的（[kModelIconCoveredTags]）、
+/// 以及模型名（去括号后 [cleanModelName]）里已经写明的那部分。
+/// [limit] 非空时只留前 N 条（折叠态只放最要紧的几个，全量留给展开区）。
+List<String> modelFeatureTags(
+  ModelConfig model, {
+  int? limit,
+  Set<String>? coveredTags,
+}) {
+  final covered = coveredTags ?? kModelIconCoveredTags;
+  final name = cleanModelName(model.name).toLowerCase();
+  final picked = <String>[];
+  for (final raw in model.tags) {
+    final tag = raw.trim();
+    if (tag.isEmpty || covered.contains(tag)) continue;
+    if (picked.contains(tag)) continue; // 同一标签在目录里配了两次
+    if (tag.length > 1 && name.contains(tag.toLowerCase())) continue; // 名字里已有
+    picked.add(tag);
+    if (limit != null && picked.length >= limit) break;
+  }
+  return picked;
+}
+
 class MirrorEntry {
   final String url;
   final String source;

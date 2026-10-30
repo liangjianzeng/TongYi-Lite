@@ -9,14 +9,23 @@ void main() {
   test('目录可加载且含新增智能体模型', () async {
     final models = await ModelCatalog.load();
 
-    // 目录随发版增删模型（0.3.6 = 22 个）；数量变动时同步本断言防误删。
-    expect(models.length, 22);
+    // 目录随发版增删模型（当前 23 个，含本机预置的 Clover 实验条目）；
+    // 数量变动时同步本断言防误删。
+    expect(models.length, 23);
 
-    final spark = models.firstWhere((m) => m.id == 'spark-x2.5-4b-q4_k_m');
-    expect(spark.name, contains('Spark-X2.5 4B'));
+    // Spark-X2.6-4B（2026-10-30 替换 X2.5）：架构与 X2.5 逐字相同，官方 GGUF
+    // general.architecture = spark2_5，本仓 llama.cpp（b11267 ≥ 官方门槛 b10828）
+    // 原生支持，无需改引擎。
+    final spark = models.firstWhere((m) => m.id == 'spark-x2.6-4b-q4_k_m');
+    expect(spark.name, contains('Spark-X2.6 4B'));
     expect(spark.type, ModelType.text);
-    expect(spark.bestMirrorUrl, contains('Spark-X2.5-4B-Q4_K_M.gguf'));
-    expect(spark.sizeMB, greaterThan(2400));
+    expect(spark.bestMirrorUrl, contains('Spark-X2.6-4B-Q4_K_M.gguf'));
+    expect(spark.mirrors.map((m) => m.source).toList(),
+        containsAll(<String>['modelscope', 'hf-mirror', 'huggingface']));
+    expect(spark.sizeMB, greaterThan(3300));
+    // 官方发布的 LFS sha256（ModelScope 与 HuggingFace 双源核对一致）。
+    expect(spark.sha256Hash,
+        '91cb2811aebb47ac916aa619d27d4cdd7f4143106b7917accb8ead4cd7f5cbd9');
 
     final lfm8b = models.firstWhere((m) => m.id == 'lfm2.5-8b-a1b-q4_k_m');
     expect(lfm8b.name, contains('LFM 2.5 8B-A1B'));
