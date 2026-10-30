@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -12,6 +13,7 @@ import 'providers/agent_approval.dart'
 import 'providers/settings_provider.dart' show settingsProvider;
 import 'screens/home_screen.dart';
 import 'services/inference_service.dart';
+import 'services/measure_cmd.dart';
 import 'services/model_manager.dart';
 import 'asr/sherpa_streaming_asr.dart';
 
@@ -171,7 +173,29 @@ class TongYiLiteApp extends ConsumerWidget {
           child: MediaQuery(
             data:
                 mq.copyWith(devicePixelRatio: mq.devicePixelRatio * uiScale),
-            child: child ?? const SizedBox.shrink(),
+            // 测量通道（决策档 §12.17，仅 debug）：零尺寸挂件挂在 ProviderScope
+            // 之下，轮询 /storage/emulated/0/TongYiLite/measure_cmd.json 执行
+            // 「加载模型 + 发一条 prompt」，宿主机 adb 免点击取证（见
+            // services/measure_cmd.dart 的判读说明）。
+            // kDebugMode 是编译期常量：release 下这行折叠成与今天逐字一致的
+            // `child ?? const SizedBox.shrink()`，挂件本身也不起 Timer。
+            child: kDebugMode
+                ? Stack(
+                    // passthrough：非定位子节点沿用父级约束（根视图给的是紧约束），
+                    // 与今天「MediaQuery 直接套 Navigator」的布局逐像素一致。
+                    fit: StackFit.passthrough,
+                    children: [
+                      child ?? const SizedBox.shrink(),
+                      const Positioned(
+                        left: 0,
+                        top: 0,
+                        width: 0,
+                        height: 0,
+                        child: MeasureCmdProbe(),
+                      ),
+                    ],
+                  )
+                : (child ?? const SizedBox.shrink()),
           ),
         );
       },

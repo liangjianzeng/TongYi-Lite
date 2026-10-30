@@ -379,9 +379,17 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
             // 常驻主权重：packed = -les 主文件；in-place = 整包 − 专家区。
             final memAvailMb = _readMemAvailableMb();
             final geo = sm.inplaceFullGguf ? null : await _moeManifestBankGeo(mf);
+            // [守卫口径修正 2026-10-30 · 决策档 §12.9/§12.17] JNI 的 oom-guard 公式是
+            // `bank × moe_slot_bytes`，其缺省常量 1351680（1.289 MiB）= **每层每专家**字节
+            // ⇒ 它要的是 perLayer。这里曾传 total（全层和；35B-A3B = 40×1.29MB ≈ 51.6MB），
+            // 于是 bank=256 时权重估算被抬到 14.69 GB（真值 ≈ dense 1.55GB + 256×1.29MB
+            // + 0.25GB ≈ 2.12GB），740（MemAvailable 6.0GB）**被自己的守卫拒绝加载 35B**。
+            // 与下方 :427「用 perLayer 判定形态，不能用 total」是同一颗雷，只是没修到守卫这路。
+            // bank 选取本来就用 geo.perLayer（见下），故此改动不影响 bank，只修守卫读数。
+            // in-place 整包形态维持旧口径（原地读专家区，见 :417 else 分支注释）。
             final slotBytes = sm.inplaceFullGguf
                 ? (sm.slotBytesAllLayers > 0 ? sm.slotBytesAllLayers : null)
-                : geo?.total;
+                : (geo != null && geo.perLayer > 0 ? geo.perLayer : geo?.total);
             moeSlotBytes = slotBytes ?? 0;
             moeExpertsBytes = sm.inplaceFullGguf ? sm.expertsBytes : 0;
             var autoBank = 16; // 兜底：读不到内存/manifest 时维持旧稳态值

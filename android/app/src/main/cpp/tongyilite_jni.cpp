@@ -280,6 +280,11 @@ static std::atomic<int> g_flash_attn{0};
 // guard's inputs and math stay visible to the user.
 static bool oom_guard_disabled() {
     const char *e = getenv("TONGYILITE_NO_OOM_GUARD");
+    // [测量口 2026-10-30] vk_flags.conf 写 TONGYI_OOM_GUARD_FORCE=1 ⇒ 无视 App 开关强制启用守卫。
+    // 用途：守卫口径修好后，需要在"开关被人工关掉"的机器上证明**开着守卫也能加载**（否则取证
+    // 只能跑在旁路态，等于没验收）。仅影响本进程本次启动，不改任何持久设置。
+    const char *fw = getenv("TONGYI_OOM_GUARD_FORCE");
+    if (fw && fw[0] == '1') return false;
     return e && e[0] == '1';
 }
 static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
@@ -756,7 +761,7 @@ struct InferenceEngine {
                         }
                     }
                 }
-                const int64_t pre_headroom = oom_headroom_bytes("TONGYILITE_OOM_PRE_HEADROOM_MB", 768);
+                const int64_t pre_headroom = oom_headroom_bytes("TONGYILITE_OOM_PRE_HEADROOM_MB", 1024);
                 char cmsg[256];
                 snprintf(cmsg, sizeof(cmsg),
                          "oom-guard 预检：可用 %.2f GB，权重估算 %.2f GB，预检余量 %.0f MB，旁路=%s",
@@ -1083,7 +1088,27 @@ struct InferenceEngine {
                 LOGW("TONGYI_UBATCH=%s ignored (out of range 32..2048)", ub);
             }
         }
-        LOGI("n_ubatch = %d (%s backend)", ctx_params.n_ubatch,
+        // [测量通道二修 2026-10-30 · 为什么 n_batch 也必须跟着抬]
+        // llama_context 构造把 n_ubatch 再夹一次：
+        //   third_party/llama.cpp/src/llama-context.cpp:339
+        //   cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch);
+        // 这里 n_batch 一直是上面的硬编码 512 ⇒ 只写 TONGYI_UBATCH=2048 时，本文件
+        // 的 "n_ubatch = 2048" 日志照打、split-MoE 也报 unclamped，但真正建出来的
+        // context 仍是 n_ubatch=512（真机实证 1030 11:13 pid 7507：
+        // llama_context: n_batch=512 / n_ubatch=512、sched_reserve pp bs=512、
+        // [moe-ssd] prefill tok=512）⇒ K-0a 臂 B 与臂 A 逐字同配置，配对作废。
+        // 故 conf 抬 ubatch 时同步把 n_batch 抬到 n_ubatch 的整数倍（llama.cpp 以
+        // n_ubatch 切 n_batch，须整除；见 llama-context.cpp:3847-3848 同款 assert）。
+        // 出货路径无影响：滑条被 UI/notifier 双向夹在 [32,512]（settings_screen.dart:1378
+        // / settings_provider.dart:881），恒 <= n_batch=512 ⇒ 本分支永不进，逐字不变。
+        if ((int) ctx_params.n_ubatch > (int) ctx_params.n_batch) {
+            const int nb   = (int) ctx_params.n_batch;
+            const int up   = ((int) ctx_params.n_ubatch + nb - 1) / nb * nb;
+            LOGW("n_batch %d -> %d（须 >= 且整除 n_ubatch=%d，否则 llama-context.cpp:339 "
+                 "把 n_ubatch 夹回 %d）", nb, up, (int) ctx_params.n_ubatch, nb);
+            ctx_params.n_batch = up;
+        }
+        LOGI("n_batch = %d, n_ubatch = %d (%s backend)", ctx_params.n_batch, ctx_params.n_ubatch,
              enable_gpu ? "GPU" : "CPU");
         // split-MoE: one physical ubatch's unique experts must fit the slot bank
         // while dspark's split_equal assert needs n_ubatch > n_rs_seq+1
@@ -3148,11 +3173,24 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     // 2026-10-16: CPU 档 ubatch=16 强制已废除（旧 GEMM garbage 故障证伪，
     // 见 n_ubatch 注释），设置项对任意后端生效。
     if (j_n_ubatch >= 32) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", (int)j_n_ubatch);
-        setenv("TONGYI_UBATCH", buf, 1);
-        LOGI("tuning: TONGYI_UBATCH=%d (%s backend)", (int)j_n_ubatch,
-             j_enable_gpu == JNI_TRUE ? "GPU" : "CPU");
+        // [测量通道 2026-10-30 · 决策档 §12.17] 滑条在 UI(settings_screen max:512) 与
+        // notifier(settings_provider clamp(32,512)) 两处硬夹 512 ⇒ K-0a 枪榜第一档 2048
+        // 只能走 vk_flags.conf；而下面的 setenv(...,1) 按「App 显式 > conf」把它覆盖回
+        // 滑条值（1030 06:51 真机实证：conf=2048 -> n_ubatch=512, pp bs=512）。
+        // 故加显式开关：conf 里写 TONGYI_UBATCH_CONF_WINS=1 才让 conf 赢。
+        // **没这个键时与出货逐字一致**，普通用户优先级不变。
+        const char * conf_wins = getenv("TONGYI_UBATCH_CONF_WINS");
+        const char * conf_ub   = getenv("TONGYI_UBATCH");
+        if (conf_wins && conf_wins[0] == '1' && conf_ub && conf_ub[0]) {
+            LOGI("tuning: conf-wins 生效，保留 TONGYI_UBATCH=%s（滑条 %d 让位）",
+                 conf_ub, (int)j_n_ubatch);
+        } else {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", (int)j_n_ubatch);
+            setenv("TONGYI_UBATCH", buf, 1);
+            LOGI("tuning: TONGYI_UBATCH=%d (%s backend)", (int)j_n_ubatch,
+                 j_enable_gpu == JNI_TRUE ? "GPU" : "CPU");
+        }
     } else {
         // [tongyi 2026-10-25 A3/R-003] App「自动」(nUbatch=0) 时保留 vk_flags.conf
         // 注入的 TONGYI_UBATCH（测量/调试通道），不再 unsetenv 抹掉——A3 腿实测
