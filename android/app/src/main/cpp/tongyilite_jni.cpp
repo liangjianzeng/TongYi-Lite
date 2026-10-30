@@ -9,6 +9,9 @@
 
 #include <android/log.h>
 #include <jni.h>
+#include <sys/system_properties.h>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -829,12 +832,25 @@ struct InferenceEngine {
             const int32_t arch_len = llama_model_meta_val_str(
                 model, "general.architecture", arch_buf, sizeof(arch_buf));
             const bool is_clover = arch_len > 0 && std::strcmp(arch_buf, "clover_moe") == 0;
-            clover_self_enabled = is_clover &&
+            // 2026-10-30 真机判卷（740/830 双机，ledger dllm-CLOVER-APP-D/E）：
+            // draft-self + 熵接受在 Clover-35B 上 100% 假接受（高熵行阈值
+            // min(ratio, delta*e^-H)→0，草稿不与目标 argmax 对表，mask 块
+            // argmax 的占位 token 全量放行 → 输出 '<' 空转）；去熵接受的普通
+            // 匹配则正确（等价 AR 速度）。产品路径必须走普通 AR；draft-self
+            // 只留作实验开关（TONGYILITE_CLOVER_DRAFT_SELF=1 时启用，配
+            // --temp 0 语义的贪心宿主采样器）。
+            // Toggle for experiments: adb shell setprop debug.dllm.clover_ds 1
+            // (or the env var, for CLI-side parity). Default off = plain AR.
+            char ds_buf[8] = {0};
+            __system_property_get("debug.dllm.clover_ds", ds_buf);
+            const char * ds = getenv("TONGYILITE_CLOVER_DRAFT_SELF");
+            const bool ds_on = ds_buf[0] == '1' || (ds && ds[0] == '1');
+            clover_self_enabled = is_clover && ds_on &&
                 llama_vocab_mask(vocab) != LLAMA_TOKEN_NULL;
-            LOGI("clover block-diffusion probe: arch=%s len=%d mask=%d -> enabled=%d",
+            LOGI("clover block-diffusion probe: arch=%s len=%d mask=%d ds_prop=%s ds_env=%s -> enabled=%d",
                  arch_len > 0 ? arch_buf : "(none)", (int)arch_len,
                  (int)(is_clover && llama_vocab_mask(vocab) != LLAMA_TOKEN_NULL),
-                 (int)clover_self_enabled);
+                 ds_buf, ds ? ds : "(unset)", (int)clover_self_enabled);
             if (clover_self_enabled) {
                 // Lab-validated draft-self configuration: 15 drafted tokens per
                 // masked block (block width n_max+1=16 fits the CPU n_ubatch=16;
