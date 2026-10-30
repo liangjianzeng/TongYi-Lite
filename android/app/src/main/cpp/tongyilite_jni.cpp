@@ -2303,6 +2303,21 @@ struct InferenceEngine {
                         // --spec-accept-delta 0.6).
                         sparams.spec_accept_ratio = 0.9f;
                         sparams.spec_accept_delta = 0.6f;
+                        // Hard gate in common_sampler_init: entropy acceptance
+                        // "requires unconstrained greedy host sampling" — any
+                        // penalty, temp != 0 or non-empty sampler chain throws
+                        // std::invalid_argument (uncaught in JNI = abort). The
+                        // Clover GGUF itself ships general.sampling.penalty_repeat
+                        // = 1.05, so the CLI needs explicit overrides too; the app
+                        // builds sparams directly (no GGUF override pass), so we
+                        // simply pin the greedy configuration here.
+                        sparams.penalty_repeat  = 1.0f;
+                        sparams.penalty_freq    = 0.0f;
+                        sparams.penalty_present = 0.0f;
+                        sparams.temp            = 0.0f;
+                        sparams.samplers        = {};   // pure argmax host
+                        LOGI("clover draft-self: host sampler forced to greedy "
+                             "(temp=0, no penalties, empty chain)");
                     }
                     mtp_smpl = common_sampler_init(model, sparams);
                     mtp_prompt_tgt.assign(prompt_tokens.begin(), prompt_tokens.end() - 1);
