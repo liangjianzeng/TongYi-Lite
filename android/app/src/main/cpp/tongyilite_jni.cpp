@@ -37,6 +37,7 @@
 #include "common.h"
 #include "speculative.h"   // official MTP/NextN speculative decoding driver
 #include "sampling.h"      // common_sampler / common_sampler_sample_and_accept_n
+#include "chat.h"          // common_chat_templates_* — GGUF 内嵌 jinja 模板（CLI --jinja 同路径）
 #include "ggml-backend.h"
 
 // mtmd — llama.cpp mainline vision/multimodal library (mmproj + image encoding)
@@ -441,6 +442,10 @@ struct InferenceEngine {
     // scheduler (common_speculative DRAFT_SELF + entropy acceptance) — the same
     // path validated in the lab CLI (PR #31306 commit 2) — never by plain AR.
     bool clover_self_enabled = false;
+    // Clover 架构标志（独立于 draft-self 实验开关）：completion 路径据此
+    // 走 GGUF 内嵌 jinja 模板（dllm-CLOVER-APP-G，真机 830 乱码定罪：
+    // 内置 chatml 回退+Qwen3 空 think 注入 → 偏离训练分布 → 空/乱码）。
+    bool is_clover_model = false;
     int  n_draft_max = 2;   // how many tokens the MTP head drafts per step (upper bound).
                             // Default 2 (was 3): on compute-bound 4B the verify batch
                             // (1+n_draft) must be repaid by acceptance a>=n_draft, so a
@@ -832,6 +837,7 @@ struct InferenceEngine {
             const int32_t arch_len = llama_model_meta_val_str(
                 model, "general.architecture", arch_buf, sizeof(arch_buf));
             const bool is_clover = arch_len > 0 && std::strcmp(arch_buf, "clover_moe") == 0;
+            is_clover_model = is_clover;   // 模板路径判据（与 draft-self 开关无关）
             // 2026-10-30 真机判卷（740/830 双机，ledger dllm-CLOVER-APP-D/E）：
             // draft-self + 熵接受在 Clover-35B 上 100% 假接受（高熵行阈值
             // min(ratio, delta*e^-H)→0，草稿不与目标 argmax 对表，mask 块
@@ -2030,12 +2036,48 @@ struct InferenceEngine {
                 // Use the history vector as-is (its last entry is the live prompt).
                 std::vector<llama_chat_message> chat_vec = *history;
 
+                // dllm-CLOVER-APP-G（2026-10-30 真机 830 定罪）：Clover 此前走
+                // 内置 chatml 回退模板 + Qwen3 式空 think 块注入 → 偏离训练分布
+                // → 首 token 即 EOS（空回答）或中英碎片乱码（用户两轮实锤）。
+                // CLI --jinja（GGUF 内嵌模板，common_chat_templates_* 同一
+                // mini-jinja 引擎）同模型同采样双通道全干净（ledger E/F）。
+                // Clover 改走 CLI 同路径；enable_thinking 直通模板变量；渲染
+                // 失败才回退 chatml。其余模型保持 chatml 原路径完全不动。
+                bool jinja_rendered = false;
+                if (is_clover_model && llama_model_chat_template(model, nullptr)) {
+                    common_chat_templates_inputs cinputs;
+                    for (const auto & m : chat_vec) {
+                        common_chat_msg msg;
+                        msg.role    = m.role    ? m.role    : "";
+                        msg.content = m.content ? m.content : "";
+                        cinputs.messages.push_back(std::move(msg));
+                    }
+                    cinputs.add_generation_prompt = true;
+                    cinputs.use_jinja             = true;
+                    cinputs.enable_thinking       = enable_thinking.load();
+                    common_chat_templates_ptr tmpls =
+                        common_chat_templates_init(model, "");
+                    if (tmpls) {
+                        common_chat_params cparams =
+                            common_chat_templates_apply(tmpls.get(), cinputs);
+                        std::string rendered = cparams.prompt.str();
+                        if (!rendered.empty()) {
+                            formatted_prompt = std::move(rendered);
+                            jinja_rendered   = true;
+                            LOGI("clover jinja template applied (CLI --jinja parity): %d chars thinking=%d",
+                                 (int)formatted_prompt.size(), (int)enable_thinking.load());
+                        }
+                    }
+                }
+
                 // 动态扩容渲染（旧 16KB 栈缓冲被智能体系统提示撑爆 →
                 // "returned 18880, falling back" → 空 prompt → 空响应）。
-                formatted_prompt =
-                    apply_chat_template_grown(chat_vec, true, "gen");
+                if (!jinja_rendered) {
+                    formatted_prompt =
+                        apply_chat_template_grown(chat_vec, true, "gen");
+                }
 
-                if (!formatted_prompt.empty()) {
+                if (!jinja_rendered && !formatted_prompt.empty()) {
                     // The built-in chatml template with add_ass=true already
                     // appends "<|im_start|>assistant\n", which is the correct
                     // generation trigger for Qwen2.5 / Qwen3. Do NOT inject an
@@ -2100,7 +2142,7 @@ struct InferenceEngine {
                     }
                     LOGI("chatml template applied: %d chars, %zu history msgs",
                          (int)formatted_prompt.size(), history->size());
-                } else {
+                } else if (!jinja_rendered) {
                     LOGW("chat template render failed -> falling back to raw prompt");
                     formatted_prompt = prompt;
                 }
