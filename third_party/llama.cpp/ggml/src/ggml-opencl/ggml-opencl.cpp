@@ -821,6 +821,11 @@ struct ggml_backend_opencl_context {
     //       vendor → 智能排空（clFlush/16 + clFinish/256，实测零税，保留提交边界与深队列保险丝）。
     // 两侧均可用 env 覆写：GGML_OPENCL_NDRANGE_IDLE=<n> 强制排空档（并让智能档让位），
     //       GGML_OPENCL_SMART_DRAIN=1/0 强制开/关智能档。init 处打印生效档（自证）。
+    // 【错误引入史——勿再重演】"每 2 发令一 clFinish"本为 Mesa/rusticl 面 H2′ 竞态所设的治愈档（R-060），却在 2c29a5e0（2026-10-27，八代默认档 lib 入树）被写成**所有驱动面**的缺省 2，
+    // R-065 只归零 GAP 未动缺省 ⇒ vendor（QC E031/E17/DX）面自 2026-10-27 起白白交税：4B 稠密 decode 被压 ×4.1（740: 1.35 vs 5.49 t/s）、×2.7（a650），prefill ~20%；
+    // 且真机 App 与 bench 同档（App 不设任何 GGML_OPENCL_* env，APK 同树构建）——真实用户在交税。
+    // 案卷：主仓《稠密4B_OpenCL排空税_交接_2026-10-30.md》 + 台账 273-276 + docs R-197；
+    // 修复 = edc01bc1 起（本政策分档），数值闸 corr_4b_v2.sh 18/18 全绿。
     long drain_idle_n = 2;
     bool drain_smart  = false;
     // The q6_K flat mul_mat codegen workarounds are needed by old E031 compilers only.
@@ -1503,7 +1508,7 @@ struct ggml_backend_opencl_context {
         // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
         // 后 finish+sleep 应以近零税复现治愈。IDLE=0 关=零扰动；GAP 默认 2000us。
         // [R-060 产品化候选] 默认 2=已双验治愈档（g49/d49 20/20）；显式 GGML_OPENCL_NDRANGE_IDLE=0 逃生。
-        const long idle_n = drain_idle_n;  // [tongyi dense4b 2026-10-30] 原为硬编码缺省 2 的进程级
+        const long idle_n = drain_idle_n;  // [tongyi dense4b 2026-10-30] 原为硬编码缺省 2 的进程级（排空税案情与取档表见 struct 内 drain_idle_n 注释）
         // static：Mesa 面 R-060 治愈档被一并带给了 vendor 面，4B 稠密 decode 1.35 vs 5.49 t/s。
         // 现按驱动面在 init 取档（见 struct ggml_backend_opencl_context 注释）。
         static const long idle_gap = [] { const char * e = getenv("GGML_OPENCL_NDRANGE_IDLE_GAP"); return e ? atol(e) : 0; }();  // [R-065] 出厂档=d49 认证形（g49-form GAP=0）：GAP 与疗效无关(R-057)，2ms sleep 是纯税
@@ -10046,7 +10051,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // "每 sd_flush 节点 clFlush + 每 sd_finish 节点 clFinish"。retire 边界语义保 H2'
         // 治愈(R-065 GAP=0 认证), 深队列保险丝压 in kgsl submit 丢失区。opsync 调试档在场
         // 时让位(不叠乘)。
-        if (backend_ctx->drain_smart && !opsync_en) {  // [tongyi dense4b 2026-10-30] 与 shim 侧同源政策
+        if (backend_ctx->drain_smart && !opsync_en) {  // [tongyi dense4b 2026-10-30] 与 shim 侧同源政策（vendor 智能排空；案情见 struct 内 drain_idle_n 注释）
             static const int sd_flush = [] { const char * e = getenv("GGML_OPENCL_SD_FLUSH");  return e ? atoi(e) : 16;  }();
             static const int sd_fin   = [] { const char * e = getenv("GGML_OPENCL_SD_FINISH"); return e ? atoi(e) : 256; }();
             static int sd_fc = 0, sd_kc = 0;
