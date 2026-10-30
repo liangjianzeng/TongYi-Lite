@@ -6,6 +6,29 @@
 
 ---
 
+## [0.3.7] — 2026-10-30（versionCode 25）
+
+### 🧩 扩散 LLM 推理能力支持（dLLM 实验线 · Clover-35B-A3B 上机）
+
+块扩散 dLLM 试验线（独立 fork 方案 `docs/试验线方案_块扩散dLLM独立fork_2026-10-29.md`）首个产品化里程碑：
+
+- **llama 层并入 `clover_moe` 架构**：Clover-35B-A3B（GDN recurrent ×30 + full attention ×10，
+  interval=4；256 专家 top-8 MoE + `moe_block_coreset`(top_p 0.9) + `block_size=32`）模型类与
+  arch/KV/tensor 全表接线（`llama-arch` ×2 / `llama-hparams` / `llama-model` ×2 / `llama-context` /
+  `llama-model-saver` / `models.h` / `models/clover-moe.cpp`），与上游 PR #31306 同源移植。
+- **split-MoE 热专家同源复用**：in-place GGUF 整包直读（免剥离，Q3_K 专家 13.2 GiB 不驻留），
+  slot bank 分组基座 + prefill/decode 双视图（3 组 family×quant / 866.25 MiB 常驻 /
+  120 prefill + 120 decode 窗口，per-slot 450,560 B 与张量表精算分毫不差）。
+- **OpenCL q3_K batched MoE**：批量路由表纳入 q3_K（设备派发 + 数值双验通过），Q3_K 专家可进
+  batched gather 内核。
+- **catalog 实验条目**：`Clover-35B-A3B-Preview-Q3Kexp`（Q3_K 专家整包 14.44 GB，
+  `inplaceFullGguf` 热专家形态，本地预置直读）。
+- **真机证据（830）**：纯 CPU 自回归端到端语义正确（greedy/seed42 完整答案，thinking 链 8 事实点
+  零幻觉）；App 侧块扩散窗口解码联调中（A/B 判卷矩阵推进，详见交接文档「当前问题」）。
+- 状态：**实验级**（catalog `recommended:false`），性能结论待 830 静默窗终测（平台铁律：手机端定 GO/NO-GO）。
+
+---
+
 ## [0.3.6] — 2026-10-28（versionCode 24）
 
 ### 📱 远程控制（ADB）：App 内纯 Dart ADB 客户端，直接控制另一台手机

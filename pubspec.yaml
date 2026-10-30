@@ -3,7 +3,7 @@ description: 端侧离线 AI 智能体
 # 版本号以 android/app/build.gradle.kts 的 versionName/versionCode 为准，
 # 此处同步保持一致；About 页版本号是 Dart 常量（settings_screen.dart 的 _appVersion），
 # 与 gradle 同步；离线沙箱无法下载 package_info_plus 的 AGP 依赖，故不引插件读取。
-version: 0.3.6+24
+version: 0.3.7+25
 publish_to: 'none'
 
 environment:

@@ -78,3 +78,6 @@ if (BUILD_SHARED_LIBS)
     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
     target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
 endif()
+
+# dllm-clover-port: content bump to force cmake reconfigure (GLOB pickup clover-moe.cpp)
+
