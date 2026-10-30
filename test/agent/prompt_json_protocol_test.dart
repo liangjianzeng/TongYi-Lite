@@ -401,7 +401,7 @@ void main() {
 
       // 其它（Spark/Qwen 系）：半开标签 XML 格式指令不变。
       final generic =
-          protocol.buildToolSection(registry, modelId: 'spark-x2.5-4b');
+          protocol.buildToolSection(registry, modelId: 'spark-x2.6-4b');
       expect(generic, contains('<tool_call>web_search<arg_key>query'));
     });
   });

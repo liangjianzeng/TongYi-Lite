@@ -45,7 +45,7 @@ void main() {
       const s = InferenceSettings(
         agentEnabled: false,
         agentModelSource: 'local',
-        agentModelId: 'spark-x2.5-4b-q4_k_m',
+        agentModelId: 'spark-x2.6-4b-q4_k_m',
         agentNctx: 16384,
         agentMaxRounds: 8,
         agentTokensPerRound: 768,
@@ -60,17 +60,17 @@ void main() {
         showResourceMonitor: false,
         resourceSampleIntervalSec: 10,
         agentToolsByModel: {
-          'spark-x2.5-4b-q4_k_m': ['get_time', 'calculator'],
+          'spark-x2.6-4b-q4_k_m': ['get_time', 'calculator'],
         },
         agentByModel: {
-          'spark-x2.5-4b-q4_k_m': {'maxRounds': 4, 'nctx': 32768},
+          'spark-x2.6-4b-q4_k_m': {'maxRounds': 4, 'nctx': 32768},
         },
       );
 
       final restored = InferenceSettings.fromJson(s.toJson());
       expect(restored.agentEnabled, isFalse);
       expect(restored.agentModelSource, 'local');
-      expect(restored.agentModelId, 'spark-x2.5-4b-q4_k_m');
+      expect(restored.agentModelId, 'spark-x2.6-4b-q4_k_m');
       expect(restored.agentNctx, 16384);
       expect(restored.agentMaxRounds, 8);
       expect(restored.agentTokensPerRound, 768);
@@ -84,9 +84,9 @@ void main() {
       expect(restored.autoLoadMmproj, isFalse);
       expect(restored.showResourceMonitor, isFalse);
       expect(restored.resourceSampleIntervalSec, 10);
-      expect(restored.agentToolsFor('spark-x2.5-4b-q4_k_m'),
+      expect(restored.agentToolsFor('spark-x2.6-4b-q4_k_m'),
           ['get_time', 'calculator']);
-      expect(restored.agentConfigFor('spark-x2.5-4b-q4_k_m'),
+      expect(restored.agentConfigFor('spark-x2.6-4b-q4_k_m'),
           {'maxRounds': 4, 'nctx': 32768});
     });
 

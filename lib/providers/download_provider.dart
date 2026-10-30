@@ -158,22 +158,42 @@ class DownloadNotifier extends StateNotifier<Map<String, DownloadTask>> {
     });
   }
 
-  Future<void> cancelDownload(String modelId) async {
-    await _downloadService.cancel(modelId);
-    state = {...state, modelId: DownloadTask(modelId: modelId)};
+  /// 删除「下载中/已暂停/失败」的任务：取消传输并清掉全部产物与残留 .tmp。
+  Future<({List<String> removed, String? error})> cancelDownload(
+      String modelId) async {
+    try {
+      final removed = await _downloadService.cancel(modelId);
+      state = {...state, modelId: DownloadTask(modelId: modelId)};
+      return (removed: removed, error: null);
+    } catch (e) {
+      return (
+        removed: const <String>[],
+        error: e is DownloadException ? e.message : '$e'
+      );
+    }
   }
 
-  Future<bool> deleteModel(String modelId) async {
+  /// 删除模型的全部产物（主 gguf / mmproj / dspark 草稿头 / 拆分专家包）。
+  ///
+  /// 返回 `removed` = 真正删掉的文件路径，`error` = 失败原因（null = 没抛异常）。
+  /// 由调用方（模型管理页）据此如实反馈，并立刻用磁盘真值校正列表：以前这里
+  /// 只把内存态清成 idle，**磁盘上没删净的文件要等下次进页面才被发现**，
+  /// 用户看到的就是「删除点了没反应，再进列表还在」（2026-10-30 反馈）。
+  Future<({List<String> removed, String? error})> deleteModel(
+      String modelId) async {
     try {
       final task = state[modelId];
       if (task != null && task.state == DownloadState.downloading) {
         await _downloadService.cancel(modelId);
       }
-      await _downloadService.deleteModel(modelId);
+      final removed = await _downloadService.deleteModel(modelId);
       state = {...state, modelId: DownloadTask(modelId: modelId)};
-      return true;
-    } catch (_) {
-      return false;
+      return (removed: removed, error: null);
+    } catch (e) {
+      return (
+        removed: const <String>[],
+        error: e is DownloadException ? e.message : '$e'
+      );
     }
   }
 

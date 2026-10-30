@@ -568,17 +568,6 @@ class DownloadService {
               ))
           .toList();
 
-  /// 删除拆分专家包子目录 `{modelId}.experts/`（cancel/deleteModel 共用）。
-  Future<void> _deleteExpertsDir(String modelId) async {
-    try {
-      final dir = await _getModelsDir();
-      final expertsDir = Directory(p.join(dir.path, '$modelId.experts'));
-      if (await expertsDir.exists()) {
-        await expertsDir.delete(recursive: true);
-      }
-    } catch (_) {}
-  }
-
   /// 标记任务失败并（可选）清理残留 .tmp。
   Future<void> _fail(DownloadTask task, String message, String modelId, {bool deletePartial = true}) async {
     task.state = DownloadState.failed;
@@ -588,9 +577,9 @@ class DownloadService {
     if (deletePartial) {
       try {
         final dir = await _getModelsDir();
-        // 同时清理主模型与 mmproj 的残留 .tmp（已重命名的最终文件不删，
-        // 以便 mmproj 失败时主 gguf 仍可文本推理）。
-        for (final suffix in ['.gguf.tmp', '.mmproj.tmp']) {
+        // 同时清理主模型 / mmproj / dspark 草稿头的残留 .tmp（已重命名的最终
+        // 文件不删，以便 mmproj 失败时主 gguf 仍可文本推理）。
+        for (final suffix in ['.gguf.tmp', '.mmproj.tmp', '.dspark.gguf.tmp']) {
           final tmp = File(p.join(dir.path, modelId + suffix));
           if (await tmp.exists()) await tmp.delete();
         }
@@ -695,7 +684,8 @@ class DownloadService {
     await download(model, existingTask: task, onProgress: onProgress);
   }
 
-  Future<void> cancel(String modelId) async {
+  /// 取消下载：中止传输 + 清掉该模型的全部产物（不可续传，显式取消即放弃）。
+  Future<List<String>> cancel(String modelId) async {
     final active = _activeDownloads[modelId];
     if (active != null) {
       try { active.cancelToken?.cancel('Cancelled by user'); } catch (_) {}
@@ -703,27 +693,20 @@ class DownloadService {
       _activeDownloads.remove(modelId);
     }
 
-    // Delete ALL files on cancel — no resume possible after explicit cancel
-    final dir = await _getModelsDir();
-    for (final suffix in ['.gguf.tmp', '.gguf', '.mmproj.tmp', '.mmproj']) {
-      final file = File(p.join(dir.path, modelId + suffix));
-      if (await file.exists()) {
-        try { await file.delete(); } catch (_) {}
-      }
-    }
-    await _deleteExpertsDir(modelId);
+    // Delete ALL files on cancel — no resume possible after explicit cancel.
+    // 走 [ModelStorageService.deleteModelArtifacts]：遍历全部候选目录 + 含
+    // dspark 草稿头与拆分专家包目录（旧实现只删主目录、且漏删草稿头）。
+    return ModelStorageService().deleteModelArtifacts(modelId);
   }
 
-  Future<void> deleteModel(String modelId) async {
-    final dir = await _getModelsDir();
-    // 主模型 + mmproj 投影器 + 拆分专家包一并删除。
-    for (final suffix in ['.gguf', '.gguf.tmp', '.mmproj', '.mmproj.tmp']) {
-      final file = File(p.join(dir.path, modelId + suffix));
-      if (await file.exists()) {
-        try { await file.delete(); } catch (_) {}
-      }
-    }
-    await _deleteExpertsDir(modelId);
+  /// 删除模型的全部产物（主 gguf / mmproj / dspark 草稿头 / 拆分专家包目录）。
+  ///
+  /// **多目录**清扫，判据与「是否已缓存」一致——旧实现只删 `getModelsRootDir()`
+  /// 一个目录，别的候选目录（`app_flutter/models`、`Download`、`DCIM`）里的
+  /// 文件删不掉，界面上就是「删除点了没反应，再进列表还在」（2026-10-30 反馈）。
+  /// 返回真正删掉的路径，供 UI 如实反馈。
+  Future<List<String>> deleteModel(String modelId) async {
+    return ModelStorageService().deleteModelArtifacts(modelId);
   }
 
   /// Resolve a reachable mirror, returning whether it supports HTTP Range.

@@ -420,31 +420,19 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
           ),
 
           // ---- 次行（只在该说点什么时出现）----
+          // 展开态让位给展开区：那里用**同一个**渲染点画体积+标签，两边都画
+          // 就是上下两行一模一样的内容（2026-10-30 反馈：未下载模型描述重复）。
           if (!isCached &&
+                !expanded &&
                 (state == DownloadState.idle ||
                     state == DownloadState.failed)) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(36, 0, 12, 7),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 2,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(_formatSize(model.totalBytes),
-                      style: TextStyle(
-                          fontSize: 11, color: scheme.onSurfaceVariant)),
-                  if (state == DownloadState.failed)
-                    Text(
-                      task?.errorMessage ?? '下载失败',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          TextStyle(fontSize: 11, color: Colors.red.shade600),
-                    )
-                  else
-                    for (final tag in _visibleTags(model))
-                      _buildModelTag(tag),
-                ],
+              child: _modelMetaLine(
+                model,
+                failedMessage: state == DownloadState.failed
+                    ? (task?.errorMessage ?? '下载失败')
+                    : null,
               ),
             ),
           ] else if (state == DownloadState.downloading ||
@@ -622,15 +610,10 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 特性标签全量 + 体积（主行只放得下最要紧的三个）。
-          Wrap(
-            spacing: 5,
-            runSpacing: 5,
-            children: [
-              _buildModelTag(_formatSize(model.totalBytes), neutral: true),
-              for (final tag in model.tags) _buildModelTag(tag),
-            ],
-          ),
+          // 体积 + 特性标签全量：折叠态那行在这里接管（同一渲染点、同一缩进），
+          // 展开只是把标签补全，不再重复画一遍。
+          _modelMetaLine(model, expanded: true),
+          const SizedBox(height: 4),
           if (isCached)
             _switchRow(
               label: '设为默认',
@@ -737,8 +720,22 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
 
   /// 删除已缓存模型前先弹确认框，避免误删（模型文件移除后需重新下载）。
   /// 确认后才真正调用 deleteModel。
+  ///
+  /// 两道以前没有的收尾（2026-10-30 反馈「删除点了没反应，再进列表还在」）：
+  /// ① 正在内存里用的模型不许删——文件被 mmap，删掉后再次缺页就是 SIGBUS
+  ///    直接崩进程，先让用户「卸载」；
+  /// ② 删完立刻用磁盘真值校正列表并如实播报删了几项，不再只把内存态清成
+  ///    idle（那样文件没删净时要等下次进页面才被发现，看着像按钮坏了）。
   Future<void> _confirmDeleteModel(
       ModelConfig model, BuildContext context) async {
+    final ms = ref.read(modelManagerProvider);
+    if (ms.modelId == model.id && ms.isLoaded) {
+      _showDeleteToast(
+          '「${model.name}」正在使用中，请先点「卸载」再删除（删除正在使用的模型文件会导致应用崩溃）',
+          warn: true);
+      return;
+    }
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -760,13 +757,51 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
         ],
       ),
     );
-    if (confirmed == true) {
-      ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
-      // 若删除的是默认模型，同时清除默认设置，避免启动时指向已不存在的模型。
-      if (ref.read(settingsProvider).defaultModelId == model.id) {
-        await ref.read(settingsProvider.notifier).setDefaultModel(null);
-      }
+    if (confirmed != true) return;
+
+    final res =
+        await ref.read(downloadNotifierProvider.notifier).deleteModel(model.id);
+    // 若删除的是默认模型，同时清除默认设置，避免启动时指向已不存在的模型。
+    if (ref.read(settingsProvider).defaultModelId == model.id) {
+      await ref.read(settingsProvider.notifier).setDefaultModel(null);
     }
+    await _afterDelete(model, res);
+  }
+
+  /// 删除/取消下载之后的统一收尾：磁盘真值校正 + 存储占用刷新 + 如实播报。
+  Future<void> _afterDelete(
+      ModelConfig model, ({List<String> removed, String? error}) res) async {
+    // 用磁盘真值校正：文件真没了才显示「未下载」，没删净就继续显示「已缓存」，
+    // 免得界面先装作删好了、下次进来又冒出来。
+    await _refreshCacheStatus();
+    if (!mounted) return;
+    setState(() => _storageTick++);
+
+    final stillCached = ref
+            .read(downloadNotifierProvider)[model.id]
+            ?.state ==
+        DownloadState.completed;
+    if (res.error != null) {
+      _showDeleteToast('删除「${model.name}」失败：${res.error}', warn: true);
+    } else if (stillCached) {
+      _showDeleteToast(
+        '「${model.name}」文件仍在磁盘上（已删 ${res.removed.length} 项）——'
+        '请到「存储空间」确认目录权限后重试',
+        warn: true,
+      );
+    } else if (res.removed.isEmpty) {
+      _showDeleteToast('「${model.name}」没有需要清理的文件');
+    } else {
+      _showDeleteToast('已删除「${model.name}」（${res.removed.length} 个文件）');
+    }
+  }
+
+  void _showDeleteToast(String message, {bool warn = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message),
+      backgroundColor: warn ? Colors.orange : null,
+    ));
   }
 
   /// 删除「下载中」的模型任务：先弹确认框（会丢失已下载的半成品，需重下），
@@ -795,25 +830,54 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
         ],
       ),
     );
-    if (confirmed == true) {
-      // cancelDownload 会取消进行中的传输并清理 gguf/mmproj 及其 .tmp。
-      await ref
-          .read(downloadNotifierProvider.notifier)
-          .cancelDownload(model.id);
-    }
+    if (confirmed != true) return;
+    // cancelDownload 会取消进行中的传输并清理全部产物与 .tmp（多目录清扫），
+    // 收尾与「删除已缓存模型」一致：磁盘真值校正 + 如实播报。
+    final res = await ref
+        .read(downloadNotifierProvider.notifier)
+        .cancelDownload(model.id);
+    await _afterDelete(model, res);
   }
 
-  /// 主行次行只放「最影响选型」的三个标签；全量在展开区，不丢信息。
-  /// 「视觉 / 视觉+语音」由主行的眼睛图标承担，不再重复成 chip。
-  List<String> _visibleTags(ModelConfig model) {
-    const covered = {'视觉', '视觉+语音'};
-    final picked = <String>[];
-    for (final t in model.tags) {
-      if (covered.contains(t)) continue;
-      picked.add(t);
-      if (picked.length == 3) break;
-    }
-    return picked;
+  /// 折叠态次行最多展示的特性标签数（全量在展开区，不丢信息）。
+  static const int _kCollapsedTagLimit = 3;
+
+  /// 体积 + 特性标签描述行 —— **唯一渲染点**。
+  ///
+  /// 折叠态的次行与展开区都调它，只按 [expanded] 决定标签放几条（折叠 = 前
+  /// [_kCollapsedTagLimit] 条，展开 = 全量），两处缩进一致，点开即原地补全。
+  ///
+  /// 2026-10-30 修复：未下载模型原先「次行」与「展开区」各画一遍体积+前三个
+  /// 标签，点开就是上下两行一模一样的内容。
+  Widget _modelMetaLine(
+    ModelConfig model, {
+    bool expanded = false,
+    String? failedMessage,
+  }) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        _buildModelTag(_formatSize(model.totalBytes), neutral: true),
+        if (failedMessage != null)
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: Text(
+              failedMessage,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 10.5, color: Colors.red.shade600),
+            ),
+          )
+        else
+          for (final tag in modelFeatureTags(
+            model,
+            limit: expanded ? null : _kCollapsedTagLimit,
+          ))
+            _buildModelTag(tag),
+      ],
+    );
   }
 
   String _formatSize(int bytes) {
@@ -3859,14 +3923,31 @@ class StorageInfoWidget extends ConsumerStatefulWidget {
 
 /// 存储卡（新 UI 形态）：一行摘要「N 个 · 共 X」，明细点开才展开——
 /// 模型行自己就带体积，这里再平铺一份模型名/体积是重复信息。
+///
+/// 明细行带**按行删除**：这一行可能就是模型目录里没有的孤儿文件（换过 id 的
+/// 旧模型、手工预置的包），模型管理列表里根本没有它，没有这个按钮就没人能清掉
+/// 那几 GB（2026-10-30 换 Spark-X2.5→X2.6 后就留下一个 2.4GB 孤儿）。
 class _StorageInfoWidgetState extends ConsumerState<StorageInfoWidget> {
   bool _detail = false;
+
+  /// 扫描结果缓存在 state 里：以前 `future:` 直接写 `_loadStorageInfo()`，
+  /// 父级每次重建都重新全盘扫一遍（删完文件想刷新还得靠重建）。
+  /// 父级换 key（`_storageTick`）时本 State 重建，扫描自然跟着重来。
+  late Future<Map<String, dynamic>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _loadStorageInfo();
+  }
+
+  void _reload() => setState(() => _future = _loadStorageInfo());
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return FutureBuilder<Map<String, dynamic>>(
-      future: _loadStorageInfo(),
+      future: _future,
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
           return const Padding(
@@ -3914,16 +3995,34 @@ class _StorageInfoWidgetState extends ConsumerState<StorageInfoWidget> {
               if (_detail)
                 for (final m in cachedModels)
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(36, 0, 16, 6),
+                    padding: const EdgeInsets.fromLTRB(36, 0, 6, 6),
                     child: Row(children: [
                       Expanded(
                           child: Text(m['name'] as String,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(fontSize: 12))),
+                      if (m['orphan'] == true)
+                        Tooltip(
+                          message: '不在模型目录里（换过 id 的旧模型 / 手工预置包）。\n'
+                              '模型管理列表里没有它，只能从这里删。',
+                          child: Icon(Icons.help_outline,
+                              size: 14, color: scheme.outline),
+                        ),
                       Text(_formatSize(m['sizeBytes'] as int),
                           style: TextStyle(
                               fontSize: 11, color: scheme.onSurfaceVariant)),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        iconSize: 17,
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        constraints:
+                            const BoxConstraints(minWidth: 30, minHeight: 26),
+                        color: scheme.onSurfaceVariant,
+                        tooltip: '删除该模型文件（含投影器/草稿头/专家包）',
+                        onPressed: () => _deleteStoredModel(m),
+                      ),
                     ]),
                   ),
             ],
@@ -3937,6 +4036,84 @@ class _StorageInfoWidgetState extends ConsumerState<StorageInfoWidget> {
     if (bytes >= 1024 * 1024 * 1024)
       return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
     return '${(bytes / 1024 / 1024).toStringAsFixed(0)} MB';
+  }
+
+  /// 按行删除一个模型文件：先删它本身，再按 id 清扫附属文件（mmproj 投影器 /
+  /// dspark 草稿头 / 拆分专家包 / 残留 .tmp），最后让模型管理列表的「已缓存」
+  /// 跟着磁盘真值走。
+  ///
+  /// 这一行可能是**目录里没有的孤儿文件**（换过 id 的旧模型、手工预置包），
+  /// 模型管理列表里没有它 —— 这个按钮是唯一能把那几 GB 清掉的入口。
+  Future<void> _deleteStoredModel(Map<String, dynamic> row) async {
+    final path = row['path'] as String? ?? '';
+    final id = row['id'] as String? ?? '';
+    final name = row['name'] as String? ?? id;
+    if (path.isEmpty || !mounted) return;
+
+    final ms = ref.read(modelManagerProvider);
+    if (id.isNotEmpty && ms.modelId == id && ms.isLoaded) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('该模型正在使用中，请先在模型管理里点「卸载」再删除'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除模型文件？'),
+        content: Text(
+          '将移除：\n${p.basename(path)}'
+          '（${_formatSize(row['sizeBytes'] as int? ?? 0)}）\n\n'
+          '以及它的投影器 / 草稿头 / 专家包等附属文件。之后需要重新下载才能再用。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    int removed = 0;
+    String? error;
+    try {
+      final f = File(path);
+      if (await f.exists()) {
+        await f.delete();
+        removed++;
+      }
+      if (id.isNotEmpty) {
+        removed += (await ModelStorageService().deleteModelArtifacts(id)).length;
+      }
+    } catch (e) {
+      error = '$e';
+    }
+    if (!mounted) return;
+
+    // 模型管理列表的「已缓存」跟着磁盘真值走（删的也可能是目录里的正常模型）。
+    try {
+      await ref
+          .read(downloadNotifierProvider.notifier)
+          .refreshCacheStatus(await loadModelCatalog());
+    } catch (_) {}
+    if (!mounted) return;
+
+    _reload();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(error != null
+          ? '删除失败：$error'
+          : '已删除「$name」（$removed 个文件）'),
+      backgroundColor: error != null ? Colors.orange : null,
+    ));
   }
 
   Future<Map<String, dynamic>> _loadStorageInfo() async {
@@ -3979,14 +4156,26 @@ class _StorageInfoWidgetState extends ConsumerState<StorageInfoWidget> {
           final fileName = p.basenameWithoutExtension(entity.path);
 
           String displayName = fileName;
+          // 「目录里没有」= 孤儿文件（换过 id 的旧模型 / 手工预置包），明细行
+          // 给个 ? 角标，说明它为什么在模型管理列表里找不到。
+          var orphan = false;
           try {
             final allModels = await loadModelCatalog();
             final match = allModels.where((m) => m.id == fileName).toList();
-            if (match.isNotEmpty) displayName = match.first.name;
+            if (match.isNotEmpty) {
+              displayName = match.first.name;
+            } else {
+              orphan = true;
+            }
           } catch (_) {}
 
-          cachedModels.add(
-              {'name': displayName, 'id': fileName, 'sizeBytes': sizeBytes});
+          cachedModels.add({
+            'name': displayName,
+            'id': fileName,
+            'path': entity.path,
+            'sizeBytes': sizeBytes,
+            'orphan': orphan,
+          });
         }
       }
     } catch (e) {
