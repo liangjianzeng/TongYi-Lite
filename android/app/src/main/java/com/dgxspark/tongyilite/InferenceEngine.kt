@@ -72,7 +72,7 @@ class InferenceEngine(private val context: Context) {
     // --- JNI native methods (implemented in tongyilite_jni.cpp) ---
 
     private external fun nativeInit(): Boolean
-    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean, mmprojPath: String?, draftPath: String?, nUbatch: Int, vkNoSubgroup: Boolean, moeManifest: String?, moeBank: Int, moeSlotBytes: Long, moeExpertsBytes: Long): Boolean
+    private external fun nativeLoadModel(path: String, nCtx: Int, enableGpu: Boolean, gpuLayers: Int, gpuBackend: String, enableMtp: Boolean, mmprojPath: String?, draftPath: String?, nUbatch: Int, vkNoSubgroup: Boolean, moeManifest: String?, moeBank: Int, moeSlotBytes: Long, moeExpertsBytes: Long, moeResidentBytes: Long): Boolean
     private external fun nativeSetLoadingCallback(callback: LoadingLogCallback?)
     private external fun nativeUnloadModel()
     private external fun nativeIsLoaded(): Boolean
@@ -151,6 +151,7 @@ class InferenceEngine(private val context: Context) {
         moeBank: Int = 0,
         moeSlotBytes: Long = 0,
         moeExpertsBytes: Long = 0,
+        moeResidentBytes: Long = 0,
         loadingCallback: LoadingLogCallback? = null
     ): Boolean {
         checkNotDestroyed()
@@ -169,7 +170,7 @@ class InferenceEngine(private val context: Context) {
         }
 
         Log.i(TAG, "loadModel: $modelPath (enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, moe=$moeManifest/$moeBank/$moeSlotBytes/$moeExpertsBytes)")
-        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, moeSlotBytes, moeExpertsBytes)
+        val ok = nativeLoadModel(modelPath, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, moeSlotBytes, moeExpertsBytes, moeResidentBytes)
         Log.i(TAG, "loadModel result: $ok")
 
         if (ok) {

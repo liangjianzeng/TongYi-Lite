@@ -341,7 +341,12 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
       // 但 -les 剥离版主文件不含专家张量，预期失败，加载日志明示原因。
       String? moeManifest;
       int moeBank = 0;
-      int moeSlotBytes = 0; // 单槽全层驻留字节（manifest Σ bytes_per_expert）
+      int moeSlotBytes = 0; // 每层每专家字节（packed=geo.perLayer；in-place=全层和旧口径）
+// [守卫常驻口径 2026-10-30 · 决策档 §12.18] 守卫只算 bank×perLayer 会漏掉 decode 窗口
+// （预取配方 8+6/层 × n_moe_layers ⇒ 14×层数 个槽），11 GB 档机型上因此放过载、真机放机过。
+// 常驻由知道 manifest 几何的 Dart 侧算准后显式传给 JNI（JNI 预检时拿不到层数），
+// 口径 = (bank + 14×层数) × perLayer，与 K90 实测峰值 RSS 2812 MB 对表（估 2.85 GB，差 1.5 %）。
+      int moeResidentBytes = 0; // split-MoE 常驻（bank 槽 + decode 窗口），0=交回 JNI 旧公式
       int moeExpertsBytes = 0; // in-place 整包：gguf 内专家区字节（oom 预检扣减）
       String smartMoeLog = '';
       final sm = config?.splitMoe;
@@ -442,6 +447,9 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
             moeBank = (manual != null && manual >= 8 && manual <= manualCap)
                 ? manual
                 : autoBank;
+            if (geo != null && geo.perLayer > 0) {
+              moeResidentBytes = (moeBank + 14 * geo.layers) * geo.perLayer;
+            }
             smartMoeLog = sm.inplaceFullGguf
                 ? '智能 MoE 加载: 开启 ✓（官方整包原地读专家 '
                     '${SplitMoeConfig.formatBytes(sm.expertsBytes)}，bank=$moeBank ${manual != null ? '手动覆写' : bankLog}）'
@@ -524,6 +532,7 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         moeBank: moeBank,
         moeSlotBytes: moeSlotBytes,
         moeExpertsBytes: moeExpertsBytes,
+        moeResidentBytes: moeResidentBytes,
       );
 
       if (ok) {

@@ -543,7 +543,8 @@ struct InferenceEngine {
               const char *mmproj_path = nullptr,
               const char *draft_path = nullptr,
               const char *moe_manifest = nullptr, int moe_bank = 0,
-              int64_t moe_slot_bytes = 0, int64_t moe_experts_bytes = 0) {
+              int64_t moe_slot_bytes = 0, int64_t moe_experts_bytes = 0,
+              int64_t moe_resident_bytes = 0) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
         unload();
 
@@ -750,7 +751,12 @@ struct InferenceEngine {
                 int64_t weights_est = (int64_t)pst.st_size;
                 if (split_moe) {
                     const int64_t slot_bytes = moe_slot_bytes > 0 ? moe_slot_bytes : 1351680;
-                    weights_est += (int64_t)moe_bank * slot_bytes + 268435456;
+                    if (moe_resident_bytes > 0) {
+                        // 显式常驻口径（含 bank 槽 + decode 窗口），由 Dart 按 manifest 几何算准。
+                        weights_est += moe_resident_bytes + 268435456;
+                    } else {
+                        weights_est += (int64_t)moe_bank * slot_bytes + 268435456;
+                    }
                     // in-place 整包 split（manifest=模型 gguf 本身）：文件含专家区，
                     // 但引擎只 mmap dense + slot 按需读，常驻估算扣掉专家字节
                     // （Dart 按目录元数据传入）。
@@ -3154,7 +3160,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     jstring j_gpu_backend, jboolean j_enable_mtp, jstring j_mmproj_path,
     jstring j_draft_path, jint j_n_ubatch, jboolean j_vk_no_subgroup,
     jstring j_moe_manifest, jint j_moe_bank, jlong j_moe_slot_bytes,
-    jlong j_moe_experts_bytes
+    jlong j_moe_experts_bytes,
+    jlong j_moe_resident_bytes
 ) {
     std::string path = jstring_to_std(env, jpath);
     std::string gpu_backend = j_gpu_backend ? jstring_to_std(env, j_gpu_backend) : "auto";
@@ -3223,7 +3230,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
                             mmproj_path.c_str(), draft_path.c_str(),
                             moe_manifest.c_str(), (int)j_moe_bank,
                             (int64_t)j_moe_slot_bytes,
-                            (int64_t)j_moe_experts_bytes);
+                            (int64_t)j_moe_experts_bytes,
+                            (int64_t)j_moe_resident_bytes);
 
     // Cleanup callback ref after load completes (success or failure)
     if (g_loading_callback_obj) {

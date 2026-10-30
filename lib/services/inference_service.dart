@@ -102,6 +102,7 @@ class InferenceService {
     /// in-place 整包 split：整包 gguf 内专家区总字节，oom 预检从常驻估算中扣除。
     /// packed-bins 形态传 0（主文件本就不含专家）。
     int moeExpertsBytes = 0,
+    int moeResidentBytes = 0,
   }) async {
     debugPrint('[InferenceService] Loading model from: $path '
         '(nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp'
@@ -123,6 +124,7 @@ class InferenceService {
         'moeBank': moeBank,
         'moeSlotBytes': moeSlotBytes,
         'moeExpertsBytes': moeExpertsBytes,
+        'moeResidentBytes': moeResidentBytes,
       });
       debugPrint('[InferenceService] Model load result: $result');
       return result == true;

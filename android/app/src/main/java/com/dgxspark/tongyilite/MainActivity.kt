@@ -874,12 +874,14 @@ class MainActivity : FlutterActivity() {
         // 直接 argument<Long> 会在小值时 ClassCastException → 按 Number 收
         val moeSlotBytes = (call.argument<Number>("moeSlotBytes"))?.toLong() ?: 0L
         val moeExpertsBytes = (call.argument<Number>("moeExpertsBytes"))?.toLong() ?: 0L
+        // split-MoE 常驻（bank 槽 + decode 窗口），Dart 侧按 manifest 几何算准；0 = 交回 JNI 旧公式
+        val moeResidentBytes = (call.argument<Number>("moeResidentBytes"))?.toLong() ?: 0L
 
         logI("handleLoadModel", "path=$path, nCtx=$nCtx, enableGpu=$enableGpu, gpuLayers=$gpuLayers, gpuBackend=$gpuBackend, enableMtp=$enableMtp, mmproj=$mmprojPath, draft=$draftPath, nUbatch=$nUbatch, vkNoSubgroup=$vkNoSubgroup, moe=$moeManifest/$moeBank/$moeSlotBytes")
 
         Thread {
             try {
-                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, moeSlotBytes, moeExpertsBytes, object : LoadingLogCallback {
+                val ok = engine.loadModel(path, nCtx, enableGpu, gpuLayers, gpuBackend, enableMtp, mmprojPath, draftPath, nUbatch, vkNoSubgroup, moeManifest, moeBank, moeSlotBytes, moeExpertsBytes, moeResidentBytes, object : LoadingLogCallback {
                     override fun onLoadingLog(message: String) {
                         logI("onLoadingLog", message)
                         mainHandler.post {
