@@ -432,6 +432,12 @@ struct InferenceEngine {
     // drafts several tokens cheaply; the target model then verifies them all in a
     // single forward pass, so one decode step yields several accepted tokens.
     bool mtp_enabled = false;
+    // Clover (diffusion LLM) block-diffusion decode. Enabled at load time iff the
+    // GGUF reports general.architecture == "clover_moe" and the vocab carries a
+    // mask token. The answer is then produced by the masked-block self-speculative
+    // scheduler (common_speculative DRAFT_SELF + entropy acceptance) — the same
+    // path validated in the lab CLI (PR #31306 commit 2) — never by plain AR.
+    bool clover_self_enabled = false;
     int  n_draft_max = 2;   // how many tokens the MTP head drafts per step (upper bound).
                             // Default 2 (was 3): on compute-bound 4B the verify batch
                             // (1+n_draft) must be repaid by acceptance a>=n_draft, so a
@@ -812,6 +818,31 @@ struct InferenceEngine {
         // speculative driver. Keep mtp_enabled false if no head or no user opt-in.
         mtp_enabled = enable_mtp && (n_nextn > 0);
 
+        // Clover block diffusion: detect via GGUF metadata (there is no public
+        // llama_model_arch() in this tree) and require a mask token — the
+        // DRAFT_SELF scheduler drafts a masked block inside the TARGET context,
+        // so without <|mask|> it cannot run and we must fall back to plain AR.
+        // Clover has no NextN head, so mtp_enabled stays false here; the two
+        // speculative paths are mutually exclusive by architecture.
+        {
+            char arch_buf[64] = {0};
+            const int32_t arch_len = llama_model_meta_val_str(
+                model, "general.architecture", arch_buf, sizeof(arch_buf));
+            const bool is_clover = arch_len > 0 && std::strcmp(arch_buf, "clover_moe") == 0;
+            clover_self_enabled = is_clover &&
+                llama_vocab_mask(vocab) != LLAMA_TOKEN_NULL;
+            LOGI("clover block-diffusion probe: arch=%s len=%d mask=%d -> enabled=%d",
+                 arch_len > 0 ? arch_buf : "(none)", (int)arch_len,
+                 (int)(is_clover && llama_vocab_mask(vocab) != LLAMA_TOKEN_NULL),
+                 (int)clover_self_enabled);
+            if (clover_self_enabled) {
+                // Lab-validated draft-self configuration: 15 drafted tokens per
+                // masked block (block width n_max+1=16 fits the CPU n_ubatch=16;
+                // the draft-self ctor clamps n_max to min(n_batch,n_ubatch)-1).
+                n_draft_max = 15;
+            }
+        }
+
         char buf[256];
         snprintf(buf, sizeof(buf), "模型文件加载完成 (%.1fM 参数)", n_params / 1'000'000.0);
 
@@ -1182,7 +1213,11 @@ struct InferenceEngine {
         // without RS slots, so rejected drafts are never removed and the next verify
         // decodes over stale compressed state. Reserve enough RS slots for the worst
         // case (all drafts rejected); harmless when no speculative path is active.
-        ctx_params.n_rs_seq = (mtp_enabled || draft_model != nullptr) ? (n_draft_max + 1) : 0;
+        // Clover DRAFT_SELF uses the same RS rollback for the verify batch (and the
+        // draft stage's checkpoint restore), so it needs RS slots too — clover is a
+        // hybrid arch and its seq_rm() refuses to roll back without them.
+        ctx_params.n_rs_seq = (mtp_enabled || draft_model != nullptr || clover_self_enabled)
+                                  ? (n_draft_max + 1) : 0;
 
         if (effective_n_ctx > trained_ctx) {
             LOGW("Requested n_ctx=%d > trained=%d, capping.", effective_n_ctx, requested_n_ctx);
@@ -2198,11 +2233,15 @@ struct InferenceEngine {
             llama_tokens mtp_prompt_tgt;      // all prompt tokens EXCEPT the last
             llama_token  mtp_id_last = 0;
             int mtp_n_past = 0;
-            if ((mtp_enabled || dspark_enabled) && n_prompt > 1) {
+            if ((mtp_enabled || dspark_enabled || clover_self_enabled) && n_prompt > 1) {
                 common_params_speculative spec_params;
-                // MTP: head lives inside the target model; DSpark: independent
-                // draft model (DFlash + Markov head). Mutually exclusive at load.
-                if (mtp_enabled) {
+                // Clover: masked-block self-speculation inside the target ctx
+                // (DRAFT_SELF, PR #31306 commit 2). MTP: head lives inside the
+                // target model; DSpark: independent draft model (DFlash + Markov
+                // head). The three are mutually exclusive at load.
+                if (clover_self_enabled) {
+                    spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_SELF };
+                } else if (mtp_enabled) {
                     spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
                 } else {
                     spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK };
@@ -2218,17 +2257,25 @@ struct InferenceEngine {
                 //   draft (fewer verified tokens per fixed-cost forward) without
                 //   saving the forward itself -> keep 0 (draft the full block and let
                 //   the target verification decide acceptance).
+                // - Clover (draft-self): same reasoning as DSpark — the masked block
+                //   is decoded in one non-causal forward; keep 0.
                 spec_params.draft.p_min   = mtp_enabled ? 0.3f : 0.0f;
                 spec_params.draft.ctx_tgt = context;
-                spec_params.draft.ctx_dft = mtp_enabled ? mtp_ctx : dspark_ctx;
+                // DRAFT_SELF drafts in the TARGET context (it restores the state
+                // itself via the checkpoint mechanism), so it has no draft ctx.
+                spec_params.draft.ctx_dft =
+                    clover_self_enabled ? nullptr : (mtp_enabled ? mtp_ctx : dspark_ctx);
                 mtp_spec = common_speculative_init(spec_params, /*n_seq=*/1);
                 if (!mtp_spec) {
                     LOGW("Speculative init failed -> falling back to plain decoding");
                     reportLoadingLog("投机解码初始化失败 → 回退普通推理");
                     mtp_enabled = false;
                     dspark_enabled = false;
+                    clover_self_enabled = false;
                 } else {
-                    reportLoadingLog(mtp_enabled ? "投机解码已接上草稿引擎 (MTP)" : "投机解码已接上草稿引擎 (dspark)");
+                    reportLoadingLog(clover_self_enabled ? "块扩散草稿引擎已接上 (draft-self)"
+                                       : mtp_enabled       ? "投机解码已接上草稿引擎 (MTP)"
+                                                           : "投机解码已接上草稿引擎 (dspark)");
                     // Target-side sampler for the verification step. Mirrors the
                     // raw llama_sampler_chain in the plain path below: repeat
                     // penalty (critical against repetition loops) + top_k + top_p
@@ -2246,6 +2293,17 @@ struct InferenceEngine {
                                          COMMON_SAMPLER_TYPE_TOP_K,
                                          COMMON_SAMPLER_TYPE_TOP_P,
                                          COMMON_SAMPLER_TYPE_TEMPERATURE };
+                    if (clover_self_enabled) {
+                        // Entropy-gated acceptance for the masked-block drafts:
+                        // spec_accept_ratio >= 0 switches common_sampler_sample_
+                        // and_accept_n from greedy match to the raw-logit entropy
+                        // rule p >= min(ratio, delta*exp(-H)). 0.9/0.6 is the
+                        // lab-validated draft-self setting (README of
+                        // examples/speculative-simple, --spec-accept-ratio 0.9
+                        // --spec-accept-delta 0.6).
+                        sparams.spec_accept_ratio = 0.9f;
+                        sparams.spec_accept_delta = 0.6f;
+                    }
                     mtp_smpl = common_sampler_init(model, sparams);
                     mtp_prompt_tgt.assign(prompt_tokens.begin(), prompt_tokens.end() - 1);
                     mtp_id_last = prompt_tokens.back();
@@ -2526,7 +2584,7 @@ struct InferenceEngine {
                         } else {
                             mtp_empty_streak = 0;
                         }
-                        if (!draft.empty()) {
+                        if (!draft.empty() && dft_ctx) {
                             // Trim the draft context back to the pre-draft base. The
                             // draft stage decoded id_last at mtp_n_past plus the draft
                             // tokens after it; we must wipe ALL of that (>= mtp_n_past)
@@ -2534,7 +2592,8 @@ struct InferenceEngine {
                             // id_last at mtp_n_past as a fresh position. Keeping id_last
                             // here made that re-decode collide with an already-filled KV
                             // slot, so process() returned false and produced an empty
-                            // reply.
+                            // reply. (DRAFT_SELF needs no trim: the impl restores the
+                            // target state itself; dft_ctx is null on that path.)
                             llama_memory_seq_rm(llama_get_memory(dft_ctx), seq_id, mtp_n_past, -1);
                         }
                     }
@@ -2627,7 +2686,13 @@ struct InferenceEngine {
 
                     // 6) roll back any unaccepted draft tokens (RS) on BOTH contexts
                     llama_memory_seq_rm(llama_get_memory(context), seq_id, mtp_n_past, -1);
-                    llama_memory_seq_rm(llama_get_memory(dft_ctx),  seq_id, mtp_n_past, -1);
+                    // DRAFT_SELF has no separate draft ctx — the masked block was
+                    // decoded inside the target and already restored by the impl's
+                    // own checkpoint (load_tgt + seq_rm), so only the target needs
+                    // the rollback here. (dft_ctx is null on the clover path.)
+                    if (dft_ctx) {
+                        llama_memory_seq_rm(llama_get_memory(dft_ctx), seq_id, mtp_n_past, -1);
+                    }
 
                     if (hit_eos)  { LOGI("[%s] EOS at gen=%d", driver_tag, n_gen); break; }
                     if (gen_stopped) { LOGI("[%s] stopped by callback at gen=%d", driver_tag, n_gen); break; }
