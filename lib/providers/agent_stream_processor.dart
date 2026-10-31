@@ -136,8 +136,14 @@ class AgentStreamProcessor {
     }
   }
 
-  /// 流结束收尾：把未闭合的 XML 工具块 / JSON 试探恢复为普通文本
-  /// （思考块未闭合则丢弃——思考不该出现在最终回答）。
+  /// 流结束收尾：把未闭合的 XML 工具块 / JSON 试探恢复为普通文本。
+  /// 思考块未闭合：**短块恢复为可见文本**（dllm-CLOVER-APP-FIX，2026-10-30）。
+  /// 旧策略一律丢弃是为 Qwen 系"think  runaway 兜底"设计的，但 Clover 一类
+  /// 混合中英文输出会在正文中途吐出 ` think`/` response` 碎片触发思考态，
+  /// 答案尾部整段被吞进 thinking 再在 finish 丢弃 → 用户看到"输出截断/乱码"
+  /// （真机 830 实锤：'你是谁'→'我是m 一pu/kleysiies'，CLI 同模型输出干净）。
+  /// 短未闭合块几乎必然是误触发的正文字符，恢复可见；长块仍丢弃保住
+  /// 思考失控止损（thinkingRunaway 预算远大于此阈值）。
   void finish() {
     if (_xmlTool != null) {
       visible.write(_xmlTool!.toString());
@@ -148,9 +154,15 @@ class AgentStreamProcessor {
       probe.clear();
       _inProbe = false;
     }
+    if (_thinkKind != null && thinking.length <= _recoverUnclosedThinkingMaxChars) {
+      visible.write(thinking.toString());
+    }
     thinking.clear();
     _thinkKind = null;
   }
+
+  /// 未闭合思考块恢复为可见文本的长度上限（ runaway 兜底阈值以下才恢复）。
+  static const int _recoverUnclosedThinkingMaxChars = 4096;
 
   void _addChar(String ch) {
     // ---- 思考块内：只收集，检测闭合 ----
@@ -309,6 +321,15 @@ class AgentStreamProcessor {
   /// 标签（用户要求：只标注"思考"，标签是协议记号不是内容）。
   void _enterThink(_ThinkKind kind, String v, String tag) {
     final before = v.substring(0, v.length - tag.length);
+    // 位置门（dllm-CLOVER-APP-FIX，2026-10-30）：思考只在回答**开头**出现一次，
+    // 这是全部端侧思考模型的真实分布。正文中途冒出的 ` think`/` response`
+    // 碎片（Clover 混合输出高发，真机 830 实锤切碎答案：每命中一次就吞掉
+    // 一段正文直到下一个闭合记号）一律按**字面文本**保留，不再进思考态。
+    // 判据：触发点前的可见文本 ≤ 16 字符（容忍开头空白）且本轮还没闭合过
+    // 任何思考块。二者任一不满足 → 视为正文，原样可见。
+    if (_totalThinkingChars > 0 || before.trim().length > 16) {
+      return; // 正文中途的伪触发：保持字面文本，不回退、不吞后续。
+    }
     visible
       ..clear()
       ..write(before);

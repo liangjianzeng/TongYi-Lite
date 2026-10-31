@@ -68,6 +68,8 @@ add_library(${TARGET}
     chat-peg-parser.h
     chat.cpp
     chat.h
+    clover_block.cpp
+    clover_block.h
     common.cpp
     common.h
     console.cpp
