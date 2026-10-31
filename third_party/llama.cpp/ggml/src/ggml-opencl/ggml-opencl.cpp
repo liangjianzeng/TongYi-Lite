@@ -12134,6 +12134,10 @@ struct ggml_backend_opencl_buffer_context {
 
         q8_0_soa_tensors.clear();
         q4_0_soa_tensors.clear();
+        // [TYL-OPENCL-FIX 2026-10-28] The temp-extra pools are handed back here,
+        // so every "already converted" verdict made against them is stale; drop
+        // it together with the SoA registration sets above.
+        soa_converted_tensors.clear();
     }
 
     // Pools for extras. Available extras are in `temp_tensor_extras`. Extras
@@ -12178,6 +12182,20 @@ struct ggml_backend_opencl_buffer_context {
     // through set_tensor, so they stay AoS and aren't in this set.
     // In Q4_0's case, in addition to normal weights, we have MoE weights.
     std::unordered_set<const ggml_tensor *> q4_0_soa_tensors;
+
+    // [TYL-OPENCL-FIX 2026-10-28] Tensors whose AoS->SoA conversion already ran
+    // in set_tensor. Weight bytes are immutable, so a second set_tensor on the
+    // same tensor must be a no-op. Re-running a branch would cast tensor->extra
+    // back to a base ggml_tensor_extra_cl while it actually points at a qX temp
+    // extra (ggml_tensor_extra_cl_q4_0 & friends share no layout with the base
+    // one, so extra_orig->data_device aliases extra->q) and hand a null or
+    // released cl_mem to clCreateSubBuffer(). That answers
+    // CL_INVALID_MEM_OBJECT (-38), and CL_CHECK turns any CL error into
+    // GGML_ASSERT(0) -> ggml_abort -> SIGABRT in the middle of llama_decode.
+    // Seen 3x on Adreno 830 (K90/warsaw) with ling-3.0-tiny-q4_0 (bailingmoe3
+    // MoE) at the 3rd decode step; the CPU backend is unaffected because it
+    // never enters this file. Cleared alongside the pools in reset().
+    std::unordered_set<const ggml_tensor *> soa_converted_tensors;
 
     // The buffer_context is initially created by ggml_backend_buft_alloc_buffer
     // before any tensor is initialized (at the beginning of alloc_tensor_range).
@@ -12336,6 +12354,77 @@ static cl_mem ggml_cl_create_temp_download_buffer(
     return buf;
 }
 
+// [TYL-OPENCL-FIX 2026-10-28] ----------------------------------------------------------------
+// ggml_backend_opencl_buffer_set_tensor() is not idempotent for quantized weights.
+// Each SoA branch casts tensor->extra to the *base* ggml_tensor_extra_cl, derives
+// d/q subbuffers from extra_orig->data_device, and then *replaces* tensor->extra
+// with a per-type temp extra. ggml_backend_sched re-enters set_tensor for the same
+// tensor while building CPU->GPU input copies (ggml_backend_tensor_copy(input,
+// input_cpy) reuses copy slots across ubatches inside graph_compute_async), and
+// ggml_backend_opencl_buffer_context::reset() returns temp extras to their pool,
+// where reset() nulls their q/d handles. Either way the second pass feeds a null
+// or released cl_mem to clCreateSubBuffer(), the driver answers
+// CL_INVALID_MEM_OBJECT (-38), and CL_CHECK escalates that to GGML_ASSERT(0) --
+// killing the app inside llama_decode.
+//
+// Only the SKIP verdict is a real fix: the tensor was already converted, its SoA
+// planes are intact and weight bytes are immutable, so the re-entry is a no-op.
+// That is exactly the observed crash (3x on Adreno 830, ling-3.0-tiny-q4_0, dying
+// at the 3rd decode step).
+//
+// An unusable parent *aborts*. There is deliberately no soft fallback here:
+//  - GGML_OPENCL_SOA_Q is defined unconditionally
+//    (ggml/src/ggml-opencl/CMakeLists.txt:28), so the "AoS" branches of this file
+//    are not even compiled into our build -- "keep AoS" is not a real state;
+//  - bailing out also skips the tail clEnqueueWriteBuffer() of set_tensor, which
+//    would leave the device slot uninitialised;
+//  - ggml_cl_mul_mat(), ggml_cl_mul_mat_id() and the adreno GEMV/GEMM helpers hold
+//    zero SoA predicates: they cast tensor->extra to the per-type struct on
+//    type+shape+kernel-pointer alone. The base ggml_tensor_extra_cl is 24 bytes,
+//    so reading q5_0's qh/d runs past its end and hands the driver type-confused
+//    cl_mem -- another abort, or worse, silence.
+// Naming the tensor here still beats the old "Tesnors in OpenCL backend..."
+// assert, which could not even say which tensor died.
+// -------------------------------------------------------------------------------------------
+enum tyl_soa_upload_result {
+    TYL_SOA_UPLOAD_PROCEED = 0,  // parent is a usable base extra -- convert
+    TYL_SOA_UPLOAD_SKIP,         // already converted -- the one safe early return
+    TYL_SOA_UPLOAD_BAIL,         // unusable parent -- never returned: aborts below
+};
+
+static tyl_soa_upload_result ggml_opencl_soa_check_parent(
+        ggml_backend_opencl_buffer_context * ctx, const ggml_tensor * tensor,
+        const char * branch) {
+    if (ctx->soa_converted_tensors.count(tensor) > 0) {
+        return TYL_SOA_UPLOAD_SKIP;
+    }
+    const ggml_tensor_extra_cl * extra_orig = (const ggml_tensor_extra_cl *) tensor->extra;
+    if (!extra_orig) {
+        GGML_LOG_ERROR("ggml_opencl: %s SoA upload impossible - tensor '%s' has no extra"
+                       " (type=%d ne={%ld,%ld,%ld,%ld})\n",
+                       branch, tensor->name, tensor->type,
+                       (long) tensor->ne[0], (long) tensor->ne[1],
+                       (long) tensor->ne[2], (long) tensor->ne[3]);
+        GGML_ABORT("ggml_opencl: %s SoA upload with tensor->extra == NULL (tensor '%s')",
+                   branch, tensor->name);
+    }
+    if (!extra_orig->data_device) {
+        GGML_LOG_ERROR("ggml_opencl: %s SoA upload impossible - tensor '%s' has a null or"
+                       " recycled parent cl_mem (extra=%p type=%d ne={%ld,%ld,%ld,%ld});"
+                       " tensor->extra is most likely a pooled temp extra whose fields"
+                       " reset() already nulled, i.e. set_tensor was re-entered on an"
+                       " already-converted tensor that was NOT registered in"
+                       " soa_converted_tensors. Registering every conversion is what"
+                       " keeps this from ever firing.\n",
+                       branch, tensor->name, (const void *) extra_orig, tensor->type,
+                       (long) tensor->ne[0], (long) tensor->ne[1],
+                       (long) tensor->ne[2], (long) tensor->ne[3]);
+        GGML_ABORT("ggml_opencl: %s SoA upload with dead parent cl_mem (tensor '%s')",
+                   branch, tensor->name);
+    }
+    return TYL_SOA_UPLOAD_PROCEED;
+}
+
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     // [dspark 2026-10-18] CPU->GPU write probe: catch every sched input_cpy /
     // tensor_set destination (cl_mem + offset). Correlates with [watch] to
@@ -12376,10 +12465,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 #ifdef GGML_OPENCL_SOA_Q
     if (tensor->type == GGML_TYPE_Q1_0) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q1_0");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q1_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q1_0();
 
         // q1_0 block = ggml_half d + (QK1_0/8) quant bytes = 2 + 16 = 18 bytes
@@ -12469,10 +12568,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         // Tensors should have been preallocated, therefore they should
         // already have ggml_tensor_extra_cl as extra.
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q4_0");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_0();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -12547,6 +12656,9 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
                 tensor->extra = extra;
                 ctx->q4_0_soa_tensors.insert(tensor);
+                // [TYL-OPENCL-FIX 2026-10-28] Conversion completed; a later
+                // set_tensor on this tensor must not re-derive subbuffers.
+                ctx->soa_converted_tensors.insert(tensor);
 
                 const int  Kc = tensor->ne[0];
                 const int  Mc = tensor->ne[1];
@@ -12608,6 +12720,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             tensor->extra = extra;
             // MoE tensors are also SOA'ed
             ctx->q4_0_soa_tensors.insert(tensor);
+            // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent().
+            ctx->soa_converted_tensors.insert(tensor);
 
             return;
         }
@@ -12638,6 +12752,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
         tensor->extra = extra;
         ctx->q4_0_soa_tensors.insert(tensor);
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent().
+        ctx->soa_converted_tensors.insert(tensor);
 
         // transpose the weights and scales
         // Only do transpose for large, non batched matrix
@@ -12684,10 +12800,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q4_1) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q4_1");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_1 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_1();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -12817,10 +12943,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q5_0) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q5_0");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q5_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q5_0();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -12999,10 +13135,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q5_1) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q5_1");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q5_1 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q5_1();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -13153,10 +13299,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_MXFP4) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "mxfp4");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_mxfp4 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_mxfp4();
 
         size_t size_e = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(char);
@@ -13264,10 +13420,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         }
 
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q8_0");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q8_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q8_0();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -13320,6 +13486,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
         tensor->extra = extra;
         ctx->q8_0_soa_tensors.insert(tensor);
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent().
+        ctx->soa_converted_tensors.insert(tensor);
 
         // Generic dp4a MoE path (opt-in GGML_OPENCL_Q8_MOE_DP4A)
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
@@ -13405,9 +13573,18 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_IQ4_NL) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tensors in OpenCL backend should have been allocated and initialized");
-
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it, so a re-entered
+        // set_tensor degrades to AoS instead of aborting the app.
         ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "iq4_nl");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
+
         ggml_tensor_extra_cl_iq4_nl * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_iq4_nl();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -13614,10 +13791,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q4_K) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q4_K");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_K();
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -14029,10 +14216,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q5_K) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q5_K");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q5_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q5_K();
 
         size_t size_q  = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*ggml_blck_size(tensor->type)/2;
@@ -14243,10 +14440,20 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
     }
     if (tensor->type == GGML_TYPE_Q6_K) {
         ggml_tensor_extra_cl * extra_orig = (ggml_tensor_extra_cl *)tensor->extra;
-        GGML_ASSERT(extra_orig && "Tesnors in OpenCL backend should have been allocated and initialized");
+        // [TYL-OPENCL-FIX 2026-10-28] See ggml_opencl_soa_check_parent(): validate
+        // the SoA parent before deriving subbuffers from it. This replaces the bare
+        // null-pointer assert, which could not catch the real failure -- a non-null
+        // extra whose data_device is no longer a valid cl_mem.
+        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
+        {
+            const tyl_soa_upload_result tyl_res = ggml_opencl_soa_check_parent(ctx, tensor, "q6_K");
+            if (tyl_res == TYL_SOA_UPLOAD_SKIP) {
+                return;  // already converted -- re-running would read a recycled parent
+            }
+            // BAIL never lands here: ggml_opencl_soa_check_parent() aborts.
+        }
 
         // Allocate the new extra and create aliases from the original.
-        ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q6_K * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q6_K();
 
         size_t size_ql = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*ggml_blck_size(tensor->type)/2;

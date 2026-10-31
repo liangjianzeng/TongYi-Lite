@@ -234,6 +234,12 @@ endif()
 option(GGML_OPENCL "ggml: use OpenCL" OFF)
 if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     set(GGML_OPENCL ON CACHE BOOL "" FORCE)
+    # [tongyi dense4b 2026-10-31] Match the perf-kit build flags: without these the
+    # APK lib ships generic kernels (4.0 MB vs 12.3 MB with Adreno-optimized
+    # matmul) and app GPU decode loses to CPU even where llama-bench wins.
+    set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
+    set(GGML_OPENCL_TARGET_VERSION 300 CACHE STRING "" FORCE)
     message(STATUS "OpenCL ENABLED (GPU backend) for arm64-v8a")
 
     # Android NDK has no OpenCL SDK; vendor the Khronos headers (header-only)
