@@ -423,23 +423,23 @@
       "type": "text",
       "mirrors": [
         {
-          "url": "https://modelscope.cn/models/XHToken/Spark-X2.6-4B-GGUF/resolve/master/Spark-X2.6-4B-Q4_K_M.gguf",
+          "url": "https://modelscope.cn/models/bartowski/Spark-X2.6-4B-GGUF/resolve/master/Spark-X2.6-4B-Q4_K_M.gguf",
           "source": "modelscope"
         },
         {
-          "url": "https://hf-mirror.com/XHToken/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
+          "url": "https://hf-mirror.com/bartowski/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
           "source": "hf-mirror"
         },
         {
-          "url": "https://huggingface.co/XHToken/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q4_K_M.gguf",
           "source": "huggingface"
         }
       ],
-      "sizeGB": 3.3,
-      "sizeMBDisplay": "3.3 GB",
+      "sizeGB": 2.44,
+      "sizeMBDisplay": "2.4 GB",
       "recommended": true,
       "minRamMB": 6144,
-      "sha256Hash": "91cb2811aebb47ac916aa619d27d4cdd7f4143106b7917accb8ead4cd7f5cbd9",
+      "sha256Hash": "30b77e2ede85c37da7071048c91fcf47c3e8cbfad51971640530f8ba9753301a",
       "tags": [
         "推荐",
         "智能体",
