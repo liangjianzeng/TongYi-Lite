@@ -731,7 +731,10 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
 
     size_t i = 0;
     for (; i < draft.size(); i++) {
+        // A mask draft must never be entropy-accepted: masked positions have
+        // entropy ~ 0, so the gate would always pass it and it would self-replicate.
         const bool accept = gsmpl->params.spec_accept_ratio >= 0.0f &&
+                draft[i] != llama_vocab_mask(vocab) &&
                 common_sampler_accept_entropy(llama_get_logits_ith(ctx, idxs[i]), llama_vocab_n_tokens(vocab),
                         draft[i], gsmpl->params.spec_accept_ratio, gsmpl->params.spec_accept_delta);
         const llama_token id = accept ? draft[i] : common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);

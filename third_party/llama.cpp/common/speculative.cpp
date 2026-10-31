@@ -1510,9 +1510,19 @@ struct common_speculative_impl_draft_self : public common_speculative_impl {
             const int ret = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
             llama_set_causal_attn(ctx, true);
             if (ret == 0) {
+                // The model is trained to emit the mask token itself at masked
+                // positions (entropy ~ 0), but a mask draft can never be verified
+                // in autoregressive decoding and would self-replicate via the
+                // entropy acceptance gate.
+                const llama_token ds_mask_id = llama_vocab_mask(vocab);
                 for (int i = 0; i < count; ++i) {
                     const float * logits = llama_get_logits_ith(ctx, i + 1);
-                    const llama_token token = std::max_element(logits, logits + llama_vocab_n_tokens(vocab)) - logits;
+                    llama_token token = -1;
+                    for (int t = 0; t < llama_vocab_n_tokens(vocab); ++t) {
+                        if (t != ds_mask_id && (token < 0 || logits[t] > logits[token])) {
+                            token = t;
+                        }
+                    }
                     dp.result->push_back(token);
                     if (dp.result_q) {
                         dp.result_q->push_back({{token, 0.0f, 1.0f}});

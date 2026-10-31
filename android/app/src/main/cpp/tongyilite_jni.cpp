@@ -1218,6 +1218,16 @@ struct InferenceEngine {
             case 2:  ctx_params.type_k = GGML_TYPE_F16;  break;
             default: ctx_params.type_k = GGML_TYPE_Q4_0; break;
         }
+        // [dllm-CLOVER-APP-I] Clover (dLLM hybrid GDN+attention) degrades badly on a
+        // quantized K cache: with the q4_0 default the App emitted garbage after ~2
+        // tokens on BOTH backends (raw-token DIAG evidence, 830 2026-10-31), while
+        // every CLI leg ran f16 KV and stayed clean. Hybrid archs never hit the MLA
+        // type_k==type_v rejection, so the bad default applied silently. Force F16 K
+        // for Clover regardless of the user KV setting; other models keep the setting.
+        if (is_clover_model && ctx_params.type_k != GGML_TYPE_F16) {
+            LOGI("KV cache: clover dLLM arch - forcing type_k=F16 (quantized K garbles output)");
+            ctx_params.type_k = GGML_TYPE_F16;
+        }
         const bool model_is_mla = llama_model_is_mla(model);
         ctx_params.type_v = (model_is_mla ||
                              ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
