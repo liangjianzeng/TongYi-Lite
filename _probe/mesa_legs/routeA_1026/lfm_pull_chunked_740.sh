@@ -1,8 +1,8 @@
 #!/bin/bash
 # R-090 制度化：>1GB 设备搬运一律分块+限速（13.58GB 整拉压垮 adbd 血案后立规）
-# 用法: ANDROID_ADB_SERVER_PORT=15037 bash lfm_pull_chunked_740.sh [dev=100.109.138.2:5555]
+# 用法: ANDROID_ADB_SERVER_PORT=15037 bash lfm_pull_chunked_740.sh [dev=<redacted-tailscale-740>:5555]
 set -u
-DEV=${1:-100.109.138.2:5555}
+DEV=${1:-<redacted-tailscale-740>:5555}
 SRC=/storage/emulated/0/TongYiLite/models/lfm2.5-24b-a2b-q4_0.gguf
 DST=/home/jianzengliang/MyWork/TongYi-Lite/.modelxfer
 SP=/data/local/tmp/lfmsplit

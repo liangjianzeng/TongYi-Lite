@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # [TongYi-Lite 2026-10-27 R-068] 小米12（a730）回插即打：K40 同款回归田克隆（kq 三门 + hangtest）。
-# 前置：USB 回插（98fc9410）。目的=a730 跨代数据点 + K40 试验田备份。
+# 前置：USB 回插（<redacted-serial-740>）。目的=a730 跨代数据点 + K40 试验田备份。
 # 【R-067 铁律：无 && 长链；每步独立回显；push 后设备端 md5 复验】
 set -u
 DEV=${1:?usage: shoot_mi12.sh <serial|ip:5555>}

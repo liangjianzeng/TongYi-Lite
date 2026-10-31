@@ -11,10 +11,10 @@
 #
 # 用法：  bash vkh_imagecap_740.sh            # 真跑
 #         DRY=1 bash vkh_imagecap_740.sh      # 排练（只打印，不碰设备）
-#   覆盖：ADB="adb -P 15037 -s 100.109.138.2:5555"  TEMP_GATE=400  FIX_STAYON=1
+#   覆盖：ADB="adb -P 15037 -s <redacted-tailscale-740>:5555"  TEMP_GATE=400  FIX_STAYON=1
 #         VKH_IC_LFM_W=25165824 VKH_IC_LING_W=12582912 VKH_IC_Q_LAYER=1572864 VKH_IC_E=64 VKH_IC_ES_BASE=32
 set -uo pipefail
-ADB=${ADB:-"adb -P 15037 -s 100.109.138.2:5555"}
+ADB=${ADB:-"adb -P 15037 -s <redacted-tailscale-740>:5555"}
 DRY=${DRY:-0}
 TEMP_GATE=${TEMP_GATE:-400}          # 纯 I/O 档
 FIX_STAYON=${FIX_STAYON:-0}

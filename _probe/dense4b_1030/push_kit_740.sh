@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # [dense4b_1030] host 侧：把 bench 套件 + 4B 模型推到指定设备影子目录并 md5 机检。
 # 用法: bash push_kit_740.sh <port> <serial> [model_path]
-#   port/serial 例：5037 98fc9410  (740)   |   15037 8b1e8747  (K40)
+#   port/serial 例：5037 <redacted-serial-740>  (740)   |   15037 <redacted-serial-k40>  (K40)
 set -u
 PORT=${1:?port}; DEV=${2:?serial}; MODEL=${3:-/home/jianzengliang/MyWork/TongYi-Lite/models-4b/Qwen3.5-4B-Q4_K_M.gguf}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

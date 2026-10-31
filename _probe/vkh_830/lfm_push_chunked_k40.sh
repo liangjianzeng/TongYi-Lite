@@ -14,7 +14,7 @@
 # Verdict lines:  #### LFMPUSH_START|RESUME|TRUNCATE|CHUNK|VERIFY|VERDICT …   exit 0 ok, 非 0 = abort
 set -u
 
-DEV="${DEV:-adb -P 15037 -s 8b1e8747}"                  # K40（USB，私有 server 15037）
+DEV="${DEV:-adb -P 15037 -s <redacted-serial-k40>}"                  # K40（USB，私有 server 15037）
 SRC="${SRC:-/home/jianzengliang/MyWork/TongYi-Lite/.modelxfer/lfm2.5-24b-a2b-q4_0.gguf}"
 DST="${DST:-/data/local/tmp/lfmb2/lfm2.5-24b-a2b-q4_0.gguf}"   # 父裁：新辟专用 arena
 EXPECT_SIZE="${EXPECT_SIZE:-13578190880}"
