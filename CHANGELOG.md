@@ -6,7 +6,7 @@
 
 ---
 
-## [0.3.7] — 2026-10-30（versionCode 25）
+## [0.3.7] — 2026-10-31（versionCode 27；26 被 dense4b-drainfix 现场包占用，跳号）
 
 ### 🧩 扩散 LLM 推理能力支持（dLLM 实验线 · Clover-35B-A3B 上机）
 

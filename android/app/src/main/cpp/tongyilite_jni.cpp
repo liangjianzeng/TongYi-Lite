@@ -2054,6 +2054,18 @@ struct InferenceEngine {
                 // Clover 改走 CLI 同路径；enable_thinking 直通模板变量；渲染
                 // 失败才回退 chatml。其余模型保持 chatml 原路径完全不动。
                 bool jinja_rendered = false;
+                // dllm-CLOVER-APP-J：岔路留痕——此前 v25 取证只见「无 jinja 日志行」
+                // 但无法区分是 is_clover=false / 内嵌模板 NULL / tmpls init 失败 /
+                // 渲染空 四条静默回退中的哪一条。此处把岔路决策全部显式打点。
+                {
+                    const char *emb_tmpl = llama_model_chat_template(model, nullptr);
+                    LOGI("[clover-tmpl] fork: is_clover=%d history=%zu embedded_template=%s thinking=%d",
+                         (int)is_clover_model, history->size(),
+                         emb_tmpl ? "present" : "NULL", (int)enable_thinking.load());
+                    if (emb_tmpl) {
+                        LOGI("[clover-tmpl] embedded template head: %.120s", emb_tmpl);
+                    }
+                }
                 if (is_clover_model && llama_model_chat_template(model, nullptr)) {
                     common_chat_templates_inputs cinputs;
                     for (const auto & m : chat_vec) {
@@ -2076,7 +2088,11 @@ struct InferenceEngine {
                             jinja_rendered   = true;
                             LOGI("clover jinja template applied (CLI --jinja parity): %d chars thinking=%d",
                                  (int)formatted_prompt.size(), (int)enable_thinking.load());
+                        } else {
+                            LOGW("[clover-tmpl] jinja rendered EMPTY -> fallback chatml");
                         }
+                    } else {
+                        LOGW("[clover-tmpl] common_chat_templates_init FAILED -> fallback chatml");
                     }
                 }
 
@@ -2158,6 +2174,8 @@ struct InferenceEngine {
                 }
             } else {
                 formatted_prompt = prompt;
+                LOGI("[clover-tmpl] no history -> raw prompt used (no template path), %zu chars",
+                     strlen(prompt));
             }
 
             // 1. Tokenize formatted prompt

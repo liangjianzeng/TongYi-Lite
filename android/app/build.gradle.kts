@@ -29,7 +29,7 @@ android {
         applicationId = "com.dgxspark.tongyilite"
         minSdk = 33
         targetSdk = 34
-        versionCode = 25
+        versionCode = 27
         versionName = "0.3.7"
 
         ndk {
