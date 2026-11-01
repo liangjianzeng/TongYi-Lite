@@ -732,6 +732,28 @@ static void tyl_l0_note_sync();
 static void tyl_l0_note_write(const char * nm, size_t sz);
 static void tyl_l0_note_read(const char * nm, size_t sz);
 static void tyl_l0_note_enq();
+// [TongYi-Lite 2026-11-01 S1 发射税] file-scope 计时资产（GPU发射税减税专项_2026-11-01.md）。
+// env GGML_OPENCL_LAUNCH_TAX=1 才启用，未设/0 = 所有使用点恒 false = 逐字节零扰动。
+inline bool tyl_launch_tax_en() {
+    static const bool v = [] { const char * e = getenv("GGML_OPENCL_LAUNCH_TAX"); return e && e[0] == '1'; }();
+    return v;
+}
+inline double tyl_now_us() {
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return double(ts.tv_sec) * 1e6 + double(ts.tv_nsec) / 1e3;
+}
+struct tyl_launch_tax_t {
+    long  enq_n  = 0;
+    double enq_us = 0.0;   // 中央发射点 clEnqueueNDRangeKernel 纯耗时
+    // q4_K GEMV 路分段（S1 成分表）：建子缓冲+建 image / 参数设置 / 释放。
+    long   gemv_n = 0;
+    double gemv_subimg_us = 0.0;
+    double gemv_arg_us    = 0.0;
+    double gemv_rel_us    = 0.0;
+};
+static tyl_launch_tax_t g_tax;
+static double tyl_tax_enq_t0 = 0.0;
+static bool   tyl_tax_in_enq = false;
 // [tongyi TYL-DRAIN 2026-10-28 金口P0] 智能排空总闸 file-scope 一处真源（shim 与
 // graph_compute 共用; 默认关=逐字节零扰动）。位置: 所有 include 之后、首个使用前。
 inline bool tyl_smart_drain_enabled() {
@@ -1283,6 +1305,10 @@ struct ggml_backend_opencl_context {
             std::make_move_iterator(profiling_info.begin()),
             std::make_move_iterator(profiling_info.end()));
         profiling_info.clear();
+        // [TongYi-Lite 2026-11-01 S1] 原本 write_profiling_info() 只挂在后端析构——
+        // App 场景进程被杀永远走不到，CSV 永远不落盘。改为每次 flush 立即落盘。
+        write_profiling_info();
+        profiling_results.clear();
     }
 
     void write_profiling_info() {
@@ -1291,13 +1317,18 @@ struct ggml_backend_opencl_context {
         }
 
         // Dump a csv
-        FILE * fperf = fopen("cl_profiling.csv", "w");
+        // [TongYi-Lite 2026-11-01 S1] 落盘路径改 /sdcard：App 进程 cwd 不可写，相对路径必败；
+        // 同批还写 cl_trace.json（同款改法，见下）。
+        // 追加模式：flush 每 2048 内核一次，每次落一批；表头只在文件起始写一次。
+        FILE * fperf = fopen("/sdcard/TongYiLite/cl_profiling.csv", "a");
         if (!fperf) {
             GGML_LOG_ERROR("Failed to open cl_profiling.csv\n");
             return;
         }
 
-        fprintf(fperf, "op name, kernel name, exec duration (ms), global size, local size, output size\n");
+        if (ftell(fperf) == 0) {
+            fprintf(fperf, "op name, kernel name, exec duration (ms), global size, local size, output size\n");
+        }
         for (const ProfilingInfo & info : profiling_results) {
             fprintf(fperf, "%s,%s,%f,%zux%zux%zu,%zux%zux%zu,%zux%zux%zux%zu\n",
                 info.op_name.c_str(), info.kernel_name.c_str(),
@@ -1309,7 +1340,7 @@ struct ggml_backend_opencl_context {
         fclose(fperf);
 
         // Dump a simple chrome trace
-        FILE * ftrace = fopen("cl_trace.json", "w");
+        FILE * ftrace = fopen("/sdcard/TongYiLite/cl_trace.json", "w");
         if (!ftrace) {
             GGML_LOG_ERROR("Failed to open cl_trace.json\n");
             return;
@@ -1390,6 +1421,14 @@ struct ggml_backend_opencl_context {
         VKH_ENQ_TIMER();   // [vkh] per-op launch cost at the single choke point
         n_enqueues++;
         tyl_l0_note_enq();
+        // [TongYi-Lite 2026-11-01 S1 发射税] 中央发射点的 enqueue 纯耗时累计。
+        // env GGML_OPENCL_LAUNCH_TAX=1 才生效，未设=逐字节零扰动。
+        // 与 S1 专项配套（GPU发射税减税专项_2026-11-01.md）：区分 enqueue 驱动纯成本
+        // 与外围（arg/建image/release）成分，为「减发射次数 vs 减单次成本」定优先级。
+        if (tyl_launch_tax_en()) {
+            tyl_tax_enq_t0 = tyl_now_us();
+            tyl_tax_in_enq = true;
+        }
         // [vkh R-159] E2E_KERNEL_PROBE: kernel-path probe at the launch throat.
         // env unset/0 = zero perturbation. env=1 = one log line per MUL_MAT* launch:
         // kernel name + grid + operand — catches the "trivial-success empty launch"
@@ -1419,6 +1458,7 @@ struct ggml_backend_opencl_context {
         // case of an older device.
         for (cl_uint i = 0; i < work_dim; i++) {
             if (global_work_size[i] == 0) {
+                if (tyl_launch_tax_en()) { tyl_tax_in_enq = false; }  // [S1] 零网格早退不计时
                 return;
             }
         }
@@ -1503,6 +1543,15 @@ struct ggml_backend_opencl_context {
         } else {
             enq_err = clEnqueueNDRangeKernel(queue, kernel, work_dim, NULL, global_work_size, local_work_size, 0, NULL, NULL);
         }
+        }
+        // [TongYi-Lite 2026-11-01 S1 发射税] enqueue 纯耗时收口 + 周期汇总（env 门控）。
+        if (tyl_launch_tax_en() && tyl_tax_in_enq) {
+            tyl_tax_in_enq = false;
+            g_tax.enq_us += tyl_now_us() - tyl_tax_enq_t0;
+            if (++g_tax.enq_n % 500 == 0) {
+                GGML_LOG_INFO("[launch-tax] enqueue n=%d avg=%.1fus total=%.1fms (all-kernel 中央发射点)\n",
+                              g_tax.enq_n, g_tax.enq_us / g_tax.enq_n, g_tax.enq_us / 1e3);
+            }
         }
         // [TongYi-Lite 2026-10-27 R-057] NDRANGE_IDLE：疗效机制审判——H2′ 治愈因子若=
         // "内核间 GPU 空闲间隙"（垫片 sleep/KERNEL_SYNC retire 的共性），则每 N 个 NDRange
@@ -8886,7 +8935,7 @@ static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     CL_CHECK(clEnqueueBarrierWithWaitList(backend_ctx->queue, 0, nullptr, &evt));
     CL_CHECK(clWaitForEvents(1, &evt));
     CL_CHECK(clReleaseEvent(evt));
-    if (g_vkh_optime_on) { vkh_optime_dump(); }   // [vkh R-093] closed-window dump: every step's sync runs after graph_compute returns (graph_depth==0)
+    if (g_vkh_optime_on()) { vkh_optime_dump(); }   // [vkh R-093] closed-window dump: every step's sync runs after graph_compute returns (graph_depth==0)
 }
 
 // Synchronizes the 'backend_ctx's device with others so that commands
@@ -10385,10 +10434,17 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 
     if (host_timing_en) {
         const double wall_s = (double)clock() / CLOCKS_PER_SEC - ht_wall0;
-        GGML_LOG_INFO("[host-timing] nodes=%d kernels=%d host_ms=%.2f churn_ms=%.2f add4=%ld scanADD=%ld rej:sg=%ld dt=%ld conn=%ld ctg=%ld shp=%ld ovl=%ld\n",
-                      cgraph->n_nodes, backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms, g_add4_fired, g_scan_add_seen,
+        // [TongYi-Lite 2026-11-01] split-boundary census: name the first/last node
+        // of every graph_compute call so the sched's split structure (which nodes
+        // land in which call) is directly visible in the log.
+        static long ht_call_cnt = 0;
+        const char * ht_first = cgraph->n_nodes > 0 ? cgraph->nodes[0]->name : "?";
+        const char * ht_last  = cgraph->n_nodes > 0 ? cgraph->nodes[cgraph->n_nodes-1]->name : "?";
+        GGML_LOG_INFO("[host-timing] call=%ld nodes=%d first='%s' last='%s' kernels=%d host_ms=%.2f churn_ms=%.2f add4=%ld scanADD=%ld rej:sg=%ld dt=%ld conn=%ld ctg=%ld shp=%ld ovl=%ld\n",
+                      ++ht_call_cnt, cgraph->n_nodes, ht_first, ht_last,
+                      backend_ctx->n_enqueues, wall_s * 1e3, backend_ctx->ht_sub_ms, g_add4_fired, g_scan_add_seen,
                       g_rej_subgraph, g_rej_dtype, g_rej_conn, g_rej_contig, g_rej_shape, g_rej_overlap);
-        if (g_vkh_optime_on) { vkh_optime_dump(); }   // [vkh] also dump here: never trust .fini_array ordering
+        if (g_vkh_optime_on()) { vkh_optime_dump(); }   // [vkh] also dump here: never trust .fini_array ordering
         g_add4_fired = 0; g_scan_add_seen = 0;
         g_rej_subgraph = 0; g_rej_dtype = 0; g_rej_conn = 0; g_rej_contig = 0; g_rej_shape = 0; g_rej_overlap = 0;
         backend_ctx->n_enqueues = 0;
@@ -25993,6 +26049,10 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         cl_mem b_sub_buf = nullptr;
         cl_mem b_img     = nullptr;
 
+        // [TongYi-Lite 2026-11-01 S1 发射税] GEMV 分段计时：建子缓冲+image / 参数设置 / 释放。
+        // decode 主发射路径（约 196 次/步），与中央 enqueue 计时（g_tax.enq_*）互补成全成分表。
+        const double tyl_gv_t0 = tyl_launch_tax_en() ? tyl_now_us() : 0.0;
+
         region.origin = offset1;
         region.size   = (size_t)K * N * sizeof(float);
         CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
@@ -26003,6 +26063,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         img_desc.image_width = (size_t)K * N / 4;
         img_desc.buffer      = b_sub_buf;
         CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+        const double tyl_gv_t1 = tyl_launch_tax_en() ? tyl_now_us() : 0.0;
 
         kernel = backend_ctx->kernel_gemv_noshuffle_q4_k_f32_32b_trans;
         ggml_opencl_debug_dump_q4k_planes(backend_ctx, src0, extra0_q4_k);
@@ -26016,6 +26078,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_int),   &ne00));
         CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_int),   &ne01));
 
+        const double tyl_gv_t2 = tyl_launch_tax_en() ? tyl_now_us() : 0.0;
+
         size_t q4k32_nsg = gemv_ksplit_y(8);
         size_t local_work_size[3]  = { 64, q4k32_nsg, 1 };
         size_t global_work_size[3] = { (size_t)ne01, q4k32_nsg, 1 };
@@ -26023,6 +26087,24 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
 
         CL_CHECK(clReleaseMemObject(b_sub_buf));
         CL_CHECK(clReleaseMemObject(b_img));
+
+        // [TongYi-Lite 2026-11-01 S1 发射税] 分段收口：enqueue 段由中央包装器自计（g_tax.enq_*）。
+        if (tyl_launch_tax_en()) {
+            const double tyl_gv_t3 = tyl_now_us();
+            g_tax.gemv_n++;
+            g_tax.gemv_subimg_us += tyl_gv_t1 - tyl_gv_t0;
+            g_tax.gemv_arg_us    += tyl_gv_t2 - tyl_gv_t1;
+            g_tax.gemv_rel_us    += tyl_gv_t3 - tyl_gv_t2;
+            if (g_tax.gemv_n % 200 == 0) {
+                const double per = (g_tax.gemv_subimg_us + g_tax.gemv_arg_us + g_tax.gemv_rel_us) / g_tax.gemv_n;
+                GGML_LOG_INFO("[launch-tax] q4k-gemv n=%d subimg=%.1fus arg=%.1fus rel=%.1fus per-launch(不含enqueue)=%.1fus total=%.1fms\n",
+                              g_tax.gemv_n,
+                              g_tax.gemv_subimg_us / g_tax.gemv_n,
+                              g_tax.gemv_arg_us    / g_tax.gemv_n,
+                              g_tax.gemv_rel_us    / g_tax.gemv_n,
+                              per, (g_tax.gemv_subimg_us + g_tax.gemv_arg_us + g_tax.gemv_rel_us) / 1e3);
+            }
+        }
     } else {
         const int gemm_tile_n = 64;
         int N_pad = CEIL_DIV(N, gemm_tile_n) * gemm_tile_n;
@@ -27918,12 +28000,19 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
     // validated path. On A8X route per-layer n==1 through the GEMM section.
     // lm_head-scale weights (ne01 >= 32768) keep the flat/o4 GEMV (probe6
     // M=248144 n=1 ERR 0.0038 OK); tiled-layout weights keep their own pair.
-    static const bool q6k_gemv_a8x = [] {
+    //
+    // [TongYi-Lite 2026-11-01 S2 翻案] 上述判决基于 SGB wrapper 形式的内核，随
+    // vkh 10-27 根因平反（E031.47 只误编译 inline-wrapper 形式的 sub_group_broadcast，
+    // direct builtin 形式 0 坏行——q4_K 同案）一并撤销。830 实测（事件计时 profiling）：
+    // kernel_gemv_noshuffle_q6_K_f32 0.233ms/次 vs 强制 GEMM 路 0.907ms（3.9x），
+    // Spark-X2.6-4B decode 6.4→8.7-9.0 t/s（+40%），258-token 文本正常。
+    // A8X ne1==1 默认走 GEMV；GGML_OPENCL_Q6K_GEMV=0 逃生（回到 GEMM 路）。
+    static const int q6k_gemv_env = [] {
         const char * e = getenv("GGML_OPENCL_Q6K_GEMV");
-        return e && e[0] == '1';
+        return e ? (e[0] == '0' ? -1 : 1) : 0;
     }();
     const bool force_gemm_n1_q6k = backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X &&
-                                   ne1 == 1 && !q6k_gemv_a8x && !use_q6k_mc3 &&
+                                   ne1 == 1 && q6k_gemv_env < 0 && !use_q6k_mc3 &&
                                    !use_q6k_tiled(backend_ctx, src0) && ne01 < 32768;
 
     if (use_bin) {

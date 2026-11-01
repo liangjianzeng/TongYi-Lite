@@ -47,7 +47,7 @@
 //   vkh_op_timer vkh_lt("LOOP_TOTAL", &backend_ctx->n_enqueues);       // per-node loop top
 //   vkh_op_timer vkh_tf("MUL_MATx2+GLU(fused)", &backend_ctx->n_enqueues);  // fused dispatch
 //   vkh_op_timer vkh_tt(ggml_op_name(node->op), &backend_ctx->n_enqueues);  // around forward
-//   if (g_vkh_optime_on) { vkh_optime_dump(); }                        // at [host-timing] print
+//   if (g_vkh_optime_on()) { vkh_optime_dump(); }                        // at [host-timing] print
 
 #ifndef GGML_OPENCL_VKH_INSTRUMENT_H
 #define GGML_OPENCL_VKH_INSTRUMENT_H
@@ -111,7 +111,13 @@ inline int  g_vkh_graph_depth       = 0;
 inline long g_vkh_loop_outside_graph = 0;
 
 // C++17 inline variables: one instance shared by every TU that includes this header.
-inline bool g_vkh_optime_on = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
+// [TongYi-Lite 2026-11-01] 改懒读：原 inline 全局在 .so 加载期取样，App 的 vk_flags.conf
+// 注入发生在 llama_backend_init（晚于 .so 加载）→ conf 设 GGML_OPENCL_VKH_OPTIME 永远不生效。
+// 懒读与文件内其余 env 静态量同款模式；首次调用点在首个 graph_compute，conf 早已生效。
+inline bool g_vkh_optime_on() {
+    static const bool v = getenv("GGML_OPENCL_VKH_OPTIME") != nullptr;
+    return v;
+}
 
 struct vkh_optime_rec {
     double ms = 0.0;
@@ -186,7 +192,7 @@ struct vkh_op_timer {
 
     explicit vkh_op_timer(const char * o, int * e, bool set_cur_ = true, void * ra_ = nullptr)
         : op(o), prev(g_vkh_current_op), enq(e), ra(g_vkh_dz_tag_on ? ra_ : nullptr), t0(0.0), e0(0),
-          on(g_vkh_optime_on), set_cur(set_cur_) {
+          on(g_vkh_optime_on()), set_cur(set_cur_) {
         if (on) {
             if (set_cur) { g_vkh_current_op = o; }
             static bool armed_printed = false;
@@ -272,7 +278,7 @@ struct vkh_op_timer {
 // Prints the cumulative table. Safe to call repeatedly (the table is cumulative and the
 // caller resets nothing); the last block before exit is the one to read.
 inline void vkh_optime_dump() {
-    if (!g_vkh_optime_on) { return; }
+    if (!g_vkh_optime_on()) { return; }
     const double vkh_dump_t0 = vkh_now_ms();   // the printer is itself a cost the enclosing rows pay
     std::lock_guard<std::recursive_mutex> lk(g_vkh_tbl_mtx);
     fprintf(stderr, "[vkh-optime] DUMP called (on=1 table=%p n=%zu)\n", (void *) g_vkh_optime_p,

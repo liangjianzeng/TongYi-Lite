@@ -240,6 +240,10 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
     set(GGML_OPENCL_USE_ADRENO_KERNELS ON CACHE BOOL "" FORCE)
     set(GGML_OPENCL_TARGET_VERSION 300 CACHE STRING "" FORCE)
+    # [TongYi-Lite 2026-11-01 S1 发射税] 事件计时（cl_event profiling）→ 每内核真实 GPU ns。
+    # S1 判决需要把 host 等待与 GPU 执行分开：NO_FA 打平证明慢在内核执行侧，
+    # 需要 profiling 事件把每内核 GPU 时间按名字列出来（flush_profiling_batch 已有批量落日志）。
+    set(GGML_OPENCL_PROFILING ON CACHE BOOL "" FORCE)
     message(STATUS "OpenCL ENABLED (GPU backend) for arm64-v8a")
 
     # Android NDK has no OpenCL SDK; vendor the Khronos headers (header-only)
