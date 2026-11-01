@@ -58,7 +58,7 @@ TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应�
 | **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（启动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 推荐 OpenCL；**KV 精度三档**（Q4/Q8/F16，混合架构模型选 F16） |
 | **🚀 OpenCL batched MoE** | 单 dispatch gather 绕开 Adreno 驱动级 MUL_MAT_ID 数值 bug，MoE **全 GPU decode/prefill**；Adreno 830 实测 prefill 149 t/s / decode 14–22 t/s；740（小米13）· ling-3.0-tiny decode **5.3 t/s**（v0.3.5 基线） |
 | **🧠 智能 MoE 拆分加载（split-MoE）** | 权重剥离 `.experts/` 或 **in-place GGUF 整包直读**（LFM2.5-24B 官方单文件直下直读，专家 I/O 1902 MiB/s）+ LES 前瞻调度（下一层 router 预测）；35B 级大模型上机 |
-| **🧩 扩散 LLM 推理（dLLM · 实验）** | **块扩散（block diffusion）模型端到端上机**：Clover-35B-A3B（GDN 循环 ×30 + 全注意力 ×10 + 256 专家 top-8 MoE + block_coreset，块长 32）llama 层模型类 + split-MoE 热专家整包流式（3 组 bank / 866 MiB 常驻 / 120+120 窗口），OpenCL q3_K batched MoE 路由实测；catalog 实验条目 `Clover-35B-A3B-Preview-Q3Kexp`（Q3_K 专家整包 14.44 GB）；830 纯 CPU 自回归直出完整答案，性能终测进行中 |
+| **🧩 扩散 LLM 推理（dLLM · 实验）** | **块扩散（block diffusion）模型端到端上机**：Clover-35B-A3B（GDN 循环 ×30 + 全注意力 ×10 + 256 专家 top-8 MoE + block_coreset，块长 32）llama 层模型类 + split-MoE 热专家整包流式（3 组 bank / 866 MiB 常驻 / 120+120 窗口），OpenCL q3_K batched MoE 路由实测；draft-self masked-block 自投机 + mask 防自复制双闸已入；catalog 实验条目 `Clover-35B-A3B-Preview-Q3Kexp`（Q3_K 专家整包 14.44 GB）；830 CLI 全栈判卷矩阵（全驻留/槽位 bank × greedy/采样链 × CPU/OpenCL）全数语义正确，App 内嵌 jinja 模板对齐 CLI `--jinja`；**App 端推理正确性攻坚进行中** |
 | **⏩ 多轮 KV checkpoint/restore** | 长对话边界 checkpoint，恢复后仅对增量 token prefill——多轮对话二次 TTFT **34s → 4.4s** |
 | **投机解码** | **MTP** + **dspark**（整块投机），部分模型支持，设置页按模型单独开启 |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + 断点续传，最多并发 2）、视觉 `mmproj` 闭环下载、catalog JSON 配置驱动（可指向自有 CDN 热更新） |
@@ -435,8 +435,10 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   Q3_K 专家整包 14.44 GB）llama 层并入 fork：模型类 + arch/KV/tensor 表 + 工厂注册（上游 PR #31306  
   血统移植），与 split-MoE 热专家完全同源（in-place GGUF slot bank 流式，3 组 family×quant /  
   866.25 MiB 常驻 / 120 prefill + 120 decode 窗口，槽位记账 miss+hit=320/步精确）；  
-  OpenCL q3_K batched MoE 路由表设备派发 + 数值双验。830 纯 CPU 自回归端到端语义正确  
-  （greedy 完整答案）。catalog 实验条目已挂（inplaceFullGguf 热专家形态）。  
+  OpenCL q3_K batched MoE 路由表设备派发 + 数值双验。**830 CLI 判卷矩阵全绿**（全驻留/槽位 bank ×  
+  greedy/温度采样 × CPU/OpenCL 六臂，答案逐字一致）；draft-self masked-block 自投机（PR 提交2）+  
+  mask 防自复制双闸随行；App 侧 GGUF 内嵌 jinja 模板与 CLI `--jinja` 同路。  
+  catalog 实验条目已挂（inplaceFullGguf 热专家形态）；**App 内推理正确性攻坚中**（判卷探针已布）。  
   深读：[`docs/调研实验总结_扩散LLM新线可行性_2026-10-31.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/调研实验总结_扩散LLM新线可行性_2026-10-31.md)、  
   [`docs/扩散LLM线工作交接_2026-10-30.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/扩散LLM线工作交接_2026-10-30.md)。
 - **📊 GPU decode 路线与 Mesa 全 GPU 卸载线**：OpenCL per-op 提交税 9µs（CPU 0.34µs）且 Adreno 驱动不暴露  
