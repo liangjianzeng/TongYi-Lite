@@ -31,6 +31,8 @@
 #include <cstdarg>
 #include <cstring>
 #include <sys/stat.h>
+#include <unistd.h>   // [TONGYI-LITE] pipe/dup2/read for the stderr->logcat forwarder
+#include <cerrno>     // [TONGYI-LITE] errno for the same
 
 // llama.cpp headers
 #include "llama.h"
@@ -583,17 +585,39 @@ struct InferenceEngine {
             // usedpf=0）-> decode 每 token 同步冷读 UFS（~470MB/token）-> 2.9 t/s。
             // 必须在 llama_model_load 之前 setenv：lookahead.init() 在模型加载期读。
             // LLAMA_MOE_LOOKAHEAD_PREFETCH 显式传值不覆盖（调试时可 adb 反向注入优先）。
+            //
+            // dllm-CLOVER-APP-M（2026-11-01，740 CLI 定罪）：DECODE_WINDOW=8 在
+            // q3_K 专家整包（Clover Q3Kexp）上产乱码——S11（三件套全开）乱、
+            // S12（仅 DECODE_WINDOW=8）乱、S13（仅 LOOKAHEAD_PREFETCH=8）净、
+            // S10（全无预取 env）净，唯一变量即 DECODE_WINDOW。窗口打包
+            // （8 步 × k8 = 64 次专家占用 > bank）溢出重装时错槽，logits 轻度
+            // 污染（贪心可掩、温度采样必现）。minicpm q4_0 专家同配方一直
+            // 干净 ⇒ q3_K 特异。根因修复在 moe 窗口打包侧（另案），此处先
+            // 对 q3_K/clover 模型只保留已验证干净的 LOOKAHEAD_PREFETCH=8。
+            const bool q3k_experts = strstr(moe_manifest, "Q3K") != nullptr
+                                  || strstr(moe_manifest, "q3k") != nullptr
+                                  || strstr(moe_manifest, "Q3_K") != nullptr;
             if (!getenv("LLAMA_MOE_LOOKAHEAD_PREFETCH")) {
                 setenv("LLAMA_MOE_LOOKAHEAD_PREFETCH", "8", 1);
-                setenv("LLAMA_MOE_DECODE_WINDOW", "8", 1);
-                setenv("LLAMA_MOE_PREFETCH_READ", "6", 1);
+                if (q3k_experts) {
+                    // DECODE_WINDOW 的窗口打包在 q3_K 上错槽（S12 定罪）——禁用；
+                    // PREFETCH_READ 是 lookahead 的读深参数，随 DECODE_WINDOW 一起
+                    // 回退默认（S13 配方=纯 lookahead，已验净）。
+                    LOGI("split-MoE decode prefetch: q3_K experts -> DECODE_WINDOW "
+                         "disabled (window packing miserves q3_K slots, S12 verdict); "
+                         "LOOKAHEAD_PREFETCH=8 kept");
+                } else {
+                    setenv("LLAMA_MOE_DECODE_WINDOW", "8", 1);
+                    setenv("LLAMA_MOE_PREFETCH_READ", "6", 1);
+                }
                 // IO_THREADS 保持默认 4（2026-10-16 830 A/B 定案）：试过 8 结果
                 // prefill/decode 双双回退（prompt 5s->6.5s、decode 484->640ms/tok），
                 // moe-ssd 读盘并行度 par 从 3.80 崩到 1.13——decode miss 天然按层
                 // 串行、靠 lookahead 跨层重叠凑并行，IO 线程翻倍 + park_window
                 // 调度切片反而把重叠打碎。4 是实测最优，勿再调大。
                 LOGI("split-MoE decode prefetch recipe injected: "
-                     "LOOKAHEAD_PREFETCH=8 DECODE_WINDOW=8 PREFETCH_READ=6 (IO_THREADS=4 default)");
+                     "LOOKAHEAD_PREFETCH=8%s (IO_THREADS=4 default)",
+                     q3k_experts ? " DECODE_WINDOW=off(q3_K)" : " DECODE_WINDOW=8 PREFETCH_READ=6");
             } else {
                 LOGI("split-MoE prefetch envs already present, not overriding");
             }
@@ -2903,6 +2927,57 @@ struct InferenceEngine {
                          new_token, (int)llama_vocab_n_tokens(vocab));
                 }
 
+                // [TONGYI-LITE 2026-10-29] Logit-shape probe for the ling q4_0
+                // "every token is 127" case. Set TONGYI_DIAG_LOGITS=1 (pushable
+                // through /sdcard/TongYiLite/vk_flags.conf, no rebuild needed) to
+                // dump, for the first few steps, whether the logits are NaN/inf,
+                // finite-but-degenerate, or a plausible distribution. Read-only:
+                // it touches nothing, and is fully off unless the env is set.
+                {
+                    static const bool diag_logits = [] {
+                        const char * e = getenv("TONGYI_DIAG_LOGITS");
+                        return e && e[0] == '1';
+                    }();
+                    if (diag_logits && n_gen < 6) {
+                        const float * lg = llama_get_logits_ith(context, -1);
+                        const int nv = (int)llama_vocab_n_tokens(vocab);
+                        if (!lg) {
+                            LOGE("[DIAGLOGITS] gen#%d logits == NULL", n_gen);
+                        } else {
+                            float vmin = 0.0f, vmax = 0.0f, sum = 0.0f;
+                            long n_nan = 0, n_inf = 0, n_fin = 0;
+                            int top_id[5] = {-1,-1,-1,-1,-1};
+                            float top_v[5] = {0,0,0,0,0};
+                            for (int i = 0; i < nv; ++i) {
+                                const float v = lg[i];
+                                if (std::isnan(v)) { ++n_nan; continue; }
+                                if (std::isinf(v)) { ++n_inf; continue; }
+                                if (n_fin == 0) { vmin = vmax = v; }
+                                if (v < vmin) vmin = v;
+                                if (v > vmax) vmax = v;
+                                sum += v;
+                                ++n_fin;
+                                for (int k = 0; k < 5; ++k) {
+                                    if (top_id[k] < 0 || v > top_v[k]) {
+                                        for (int j = 4; j > k; --j) { top_v[j] = top_v[j-1]; top_id[j] = top_id[j-1]; }
+                                        top_v[k] = v; top_id[k] = i;
+                                        break;
+                                    }
+                                }
+                            }
+                            char tops[128]; tops[0] = '\0';
+                            int off = 0;
+                            for (int k = 0; k < 5 && top_id[k] >= 0; ++k)
+                                off += snprintf(tops + off, sizeof(tops) - (size_t)off,
+                                                "%s%d:%.4f", k ? " " : "", top_id[k], top_v[k]);
+                            LOGI("[DIAGLOGITS] gen#%d chosen=%d n=%d finite=%ld nan=%ld inf=%ld "
+                                 "min=%.5f max=%.5f mean=%.6f top5=[%s]",
+                                 n_gen, (int)new_token, nv, n_fin, n_nan, n_inf,
+                                 vmin, vmax, n_fin ? sum / (float)n_fin : 0.0f, tops);
+                        }
+                    }
+                }
+
                 // DIAG: decode the first few generated tokens to their raw piece
                 // bytes so we can see exactly what the model is emitting (e.g.
                 // whether 151935 is a real character or an empty/padding token).
@@ -3273,10 +3348,65 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *) {
 
 // --- Lifecycle ---
 
+// [TONGYI-LITE 2026-10-29] Forward native stderr into logcat.
+// The llama.cpp fork's whole diagnostic layer writes to stderr — the per-node audit
+// "[nd] <name> op=… rms=… max=…" behind GGML_OPENCL_NODEDUMP (ggml-opencl.cpp:10237),
+// "[vkh-optime]", "[IDLE] ticks" and friends. In a zygote-spawned app fd 2 goes to
+// /dev/null, so those lines were unreachable and the per-node NaN hunt was blind.
+// A dedicated drain thread keeps the pipe empty so no writer can ever block on it.
+static void * stderr_logcat_drain(void * arg) {
+    const int fd = (int) (intptr_t) arg;
+    std::string line;
+    char buf[4096];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        for (ssize_t i = 0; i < n; ++i) {
+            const char c = buf[i];
+            if (c == '\n') {
+                if (!line.empty()) {
+                    __android_log_write(ANDROID_LOG_INFO, "TongYiLite-stderr", line.c_str());
+                    line.clear();
+                }
+            } else if (line.size() < 8000) {
+                line.push_back(c);
+            }
+        }
+    }
+    if (!line.empty()) {
+        __android_log_write(ANDROID_LOG_INFO, "TongYiLite-stderr", line.c_str());
+    }
+    close(fd);
+    return nullptr;
+}
+
+static void redirect_stderr_to_logcat_once(void) {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+    int fds[2];
+    if (pipe(fds) != 0) {
+        LOGE("stderr redirect: pipe() failed (errno=%d)", errno);
+        return;
+    }
+    if (dup2(fds[1], STDERR_FILENO) < 0) {
+        LOGE("stderr redirect: dup2() failed (errno=%d)", errno);
+        close(fds[0]);
+        close(fds[1]);
+        return;
+    }
+    close(fds[1]);   // the write side is now fd 2
+    std::thread(stderr_logcat_drain, (void *) (intptr_t) fds[0]).detach();
+    fprintf(stderr, "[TongYiLite] stderr redirected to logcat tag TongYiLite-stderr\n");
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeInit(JNIEnv *env, jobject) {
     LOGI("nativeInit: initializing llama backend");
     loadVkFlagsConf();
+    redirect_stderr_to_logcat_once();
     llama_log_set(ggmlLogToLogcat, nullptr);
     llama_backend_init();
     return JNI_TRUE;
