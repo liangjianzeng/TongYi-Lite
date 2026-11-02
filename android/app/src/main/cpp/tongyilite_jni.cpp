@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <future>
@@ -1432,6 +1433,38 @@ struct InferenceEngine {
              ctx_val, n_ctx_seq,
              llama_model_n_embd(model),
              llama_model_n_layer(model));
+
+        // [TTFT prefill-warmup 2026-11-02] Precompile the flash_attn PREFILL variant
+        // at load time. This build runs K/V=q4_0 with FA forced on by the quantized V
+        // cache; ggml-opencl compiles FA kernels lazily via the Adreno driver on first
+        // dispatch, and llama only reserves/warms the n_tokens==1 DECODE graph
+        // (graph_reserve n_tokens=1) — the multi-token PREFILL FA program is not built
+        // until the first real prompt, where it costs ~7-13s of clBuildProgram
+        // (measured on 830: first-turn prompt 13241ms then 7309ms for a 32-token
+        // message, while later prefills are 545ms). A throwaway prefill here forces
+        // that kernel to compile under the loading spinner, then resetContext() wipes
+        // the dummy KV so the conversation still starts clean. Disable for A/B with
+        // env TONGYI_NO_PREFILL_WARMUP=1 (via vk_flags.conf).
+        if (!getenv("TONGYI_NO_PREFILL_WARMUP")) {
+            int wt_n = 128;
+            if ((int) n_ctx_seq < wt_n) wt_n = (int) n_ctx_seq;
+            if (wt_n >= 8) {
+                const auto tw0 = std::chrono::steady_clock::now();
+                int wrc = -1;
+                try {
+                    std::vector<llama_token> wtoks(wt_n, 0);   // id 0: any valid vocab id (output discarded)
+                    llama_batch wb = llama_batch_get_one(wtoks.data(), wt_n);
+                    wrc = llama_decode(context, wb);
+                } catch (const std::exception & e) {
+                    LOGW("[TTFT] prefill-warmup threw (non-fatal): %s", e.what());
+                }
+                const long wms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - tw0).count();
+                LOGI("[TTFT] prefill-warmup: %d tokens rc=%d in %ldms (FA prefill variant precompiled)",
+                     wt_n, wrc, wms);
+                resetContext();   // drop the dummy prefill -> clean conversation
+            }
+        }
 
         // MTP: create a second context that runs ONLY the NextN head, reusing the
         // already-loaded target model. The driver (common_speculative) mirrors the
