@@ -1563,7 +1563,9 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
                     segments: const [
                       ButtonSegment(
                         value: 'q4_0',
-                        label: Text('Q4（默认）'),
+                        // 标签留短（"默认"已由下方灰字说明），否则 SegmentedButton
+                        // 三段"图标+文字"在同一 Row，最宽段把整行撑爆→窄屏(830)裁切显示不全。
+                        label: Text('Q4'),
                         icon: Icon(Icons.compress, size: 16),
                       ),
                       ButtonSegment(

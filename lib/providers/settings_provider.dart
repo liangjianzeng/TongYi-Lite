@@ -852,10 +852,13 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
-  /// KV 缓存精度：'q4_0'（默认）/ 'q8_0'。仅量化 K，V 恒 F16（见 settings_service
-  /// 注释）。重新加载模型后生效。
+  /// KV 缓存精度：'q4_0'（默认）/ 'q8_0' / 'f16'（K 不量化）。FA 关时 V 恒 F16、
+  /// FA 开时 V 跟随 K 格式（见 model_provider 注释与原生 type_v 映射）。重新加载模型后生效。
   Future<void> setKvCacheType(String value) async {
-    final v = (value == 'q8_0') ? 'q8_0' : 'q4_0';
+    // UI(设置→推理引擎→KV 精度)、持久化(settings_service)、原生(setKvCacheType
+    // "f16"->GGML_TYPE_F16) 三处均支持 f16，此处不得再把 f16 夹回 q4_0，
+    // 否则点 F16 立刻弹回 Q4（历史 bug）。
+    final v = (value == 'q8_0' || value == 'f16') ? value : 'q4_0';
     if (v == state.kvCacheType) return;
     state = state.copyWith(kvCacheType: v);
     await _persist();
