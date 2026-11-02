@@ -361,3 +361,131 @@ kernel void kernel_cpy_f32_i32(
         dst_data[i00] = (int) src[0];
     }
 }
+
+//------------------------------------------------------------------------------
+// kernel_cpy_q4_0_f32_view_aos  /  kernel_cpy_f32_q4_0_view_aos
+// ggml_cl_cpy path for the rope-shift chain on the q4_0 KV cache:
+//   cast(cur_q4_0 -> f32)  ->  MUL_MAT(hadamard) ROPE MUL_MAT(hadamard)  ->  cur_f32 -> cpy back to q4_0
+// The q4_0 KV cache stays AoS (see ggml.c:1879 nb[1]=nb[0]*(ne[0]/block_size),
+// and ggml_opencl "KV-cache q4_0 stays AoS"). These kernels index blocks tightly
+// within ne[0] and match the standard cpy 20-arg layout so ggml_cl_cpy can reuse
+// its existing arg setup. Quantize is a bit-exact inverse of the CPU
+// ggml_quantize_row_q4_0_ref so a dequant->matmul->dequant round-trip keeps the
+// same q4_0 error profile.
+//------------------------------------------------------------------------------
+#define QK4_0_CPY 32
+typedef struct {
+    half d;
+    uchar qs[QK4_0_CPY / 2];   // 高通驱动无 stdint：uchar 是 8 位标量，uint8 是向量类型
+} block_q4_0_cpy;
+
+// q4_0 (AoS blocks) -> f32, view-aware, standard cpy arg layout.
+kernel void kernel_cpy_q4_0_f32_view_aos(
+        global char * src0,
+        ulong         offset0,
+        global float * dst,
+        ulong         offsetd,
+        int ne00,
+        int ne01,
+        int ne02,
+        int ne03,
+        ulong nb00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne10,
+        int ne11,
+        int ne12,
+        int ne13,
+        ulong nb10,
+        ulong nb11,
+        ulong nb12,
+        ulong nb13
+) {
+    int blk_i0 = get_global_id(0);
+    int i1     = get_global_id(1);
+    int batch  = get_global_id(2);
+
+    if (blk_i0 >= ne00 / QK4_0_CPY) return;
+    if (i1     >= ne01)             return;
+
+    int i2 = batch % ne02;
+    int i3 = batch / ne02;
+
+    global block_q4_0_cpy * blk = (global block_q4_0_cpy *)((global char *)src0 + offset0
+        + (ulong)i3 * nb03 + (ulong)i2 * nb02 + (ulong)i1 * nb01 + (ulong)blk_i0 * nb00);
+
+    global float * dstp = (global float *)((global char *)dst + offsetd
+        + (ulong)i3 * nb13 + (ulong)i2 * nb12 + (ulong)i1 * nb11 + (ulong)blk_i0 * QK4_0_CPY * nb10);
+
+    float d = (float)blk->d;
+    for (int i = 0; i < QK4_0_CPY / 2; ++i) {
+        uchar byte = blk->qs[i];
+        int q0 = (int)(byte & 0x0F) - 8;
+        int q1 = (int)(byte >> 4)   - 8;
+        dstp[i]            = d * (float)q0;
+        dstp[i + QK4_0_CPY / 2]  = d * (float)q1;
+    }
+}
+
+// f32 -> q4_0 (AoS blocks), view-aware, standard cpy arg layout.
+kernel void kernel_cpy_f32_q4_0_view_aos(
+        global float * src0,
+        ulong         offset0,
+        global char * dst,
+        ulong         offsetd,
+        int ne00,
+        int ne01,
+        int ne02,
+        int ne03,
+        ulong nb00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne10,
+        int ne11,
+        int ne12,
+        int ne13,
+        ulong nb10,
+        ulong nb11,
+        ulong nb12,
+        ulong nb13
+) {
+    int blk_i0 = get_global_id(0);
+    int i1     = get_global_id(1);
+    int batch  = get_global_id(2);
+
+    if (blk_i0 >= ne00 / QK4_0_CPY) return;
+    if (i1     >= ne01)             return;
+
+    int i2 = batch % ne02;
+    int i3 = batch / ne02;
+
+    global float * inp = (global float *)((global char *)src0 + offset0
+        + (ulong)i3 * nb03 + (ulong)i2 * nb02 + (ulong)i1 * nb01 + (ulong)blk_i0 * QK4_0_CPY * nb00);
+
+    global block_q4_0_cpy * blk = (global block_q4_0_cpy *)((global char *)dst + offsetd
+        + (ulong)i3 * nb13 + (ulong)i2 * nb12 + (ulong)i1 * nb11 + (ulong)blk_i0 * nb10);
+
+    // match CPU quantize_row_q4_0_ref: d = max/-8 where max is the largest-magnitude value
+    float amax = 0.0f;
+    float maxv = 0.0f;
+    for (int i = 0; i < QK4_0_CPY; ++i) {
+        float v = inp[i];
+        float a = v < 0 ? -v : v;
+        if (a > amax) { amax = a; maxv = v; }
+    }
+    float d  = maxv / -8.0f;
+    float id = d != 0.0f ? 1.0f / d : 0.0f;
+
+    blk->d = (half)d;
+    for (int i = 0; i < QK4_0_CPY / 2; ++i) {
+        int xi0 = (int)(inp[i]      * id + 8.5f);
+        int xi1 = (int)(inp[i + QK4_0_CPY / 2] * id + 8.5f);
+        if (xi0 < 0)   xi0 = 0;
+        if (xi1 < 0)   xi1 = 0;
+        if (xi0 > 15)  xi0 = 15;
+        if (xi1 > 15)  xi1 = 15;
+        blk->qs[i] = (uchar)(xi0) | ((uchar)xi1 << 4);
+    }
+}

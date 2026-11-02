@@ -1094,6 +1094,10 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_dequant_q8_0_f32_view_aos;
     cl_kernel kernel_dequant_q4_0_f16_view_aos;
     cl_kernel kernel_dequant_q4_0_f32_view_aos;
+    // [S2c 2026-11-02] 必须显式 null 初始化：软失败注册见 cpy 块，supports_op 据
+    // null 回落 CPU。缺 = nullptr 时若 clCreateKernel 失败留未初始化值，守卫失效。
+    cl_kernel kernel_cpy_q4_0_f32_view_aos = nullptr;
+    cl_kernel kernel_cpy_f32_q4_0_view_aos = nullptr;
     cl_kernel kernel_convert_block_q6_K_noshuffle, kernel_restore_block_q6_K_noshuffle;
     cl_kernel kernel_convert_bf16_to_f16, kernel_convert_f16_to_bf16;
     cl_kernel kernel_mul_mat_q4_0_f32_8x_flat;
@@ -2315,6 +2319,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
         CL_CHECK((backend_ctx->kernel_cpy_f32_i32 = clCreateKernel(prog, "kernel_cpy_f32_i32", &err), err));
+        // [S2c 2026-11-02] rope-shift q4_0 KV 的 cast(q4_0<->f32) 量化核，落在 cpy.cl。
+        // 【崩溃修复 2026-11-02】软失败注册（仿上方 kernel_cpy_f32_f32_flat）：Adreno
+        // 830 的 OpenCL 驱动若编译这两个新核失败，clCreateKernel 返回错误但绝不再
+        // CL_CHECK abort —— 否则 backend init（早于模型真正加载）就 GGML_ASSERT，表现
+        // 为"模型一加载就崩溃"。失败时 kernel 保持 null，supports_op 据此回落 CPU。
+        {
+            cl_int err_q4a = CL_SUCCESS;
+            cl_kernel k_q4a = clCreateKernel(prog, "kernel_cpy_q4_0_f32_view_aos", &err_q4a);
+            if (err_q4a == CL_SUCCESS) { backend_ctx->kernel_cpy_q4_0_f32_view_aos = k_q4a; }
+            GGML_LOG_INFO("ggml_opencl: [S2c] kernel_cpy_q4_0_f32_view_aos clCreateKernel err=%d -> %s\n",
+                          (int)err_q4a, err_q4a == CL_SUCCESS ? "GPU" : "CPU-fallback");
+        }
+        {
+            cl_int err_q4b = CL_SUCCESS;
+            cl_kernel k_q4b = clCreateKernel(prog, "kernel_cpy_f32_q4_0_view_aos", &err_q4b);
+            if (err_q4b == CL_SUCCESS) { backend_ctx->kernel_cpy_f32_q4_0_view_aos = k_q4b; }
+            GGML_LOG_INFO("ggml_opencl: [S2c] kernel_cpy_f32_q4_0_view_aos clCreateKernel err=%d -> %s\n",
+                          (int)err_q4b, err_q4b == CL_SUCCESS ? "GPU" : "CPU-fallback");
+        }
         GGML_LOG_CONT(".");
     }
 
@@ -11170,13 +11193,17 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
                         backend_ctx->kernel_cpy_f32_i32 != nullptr) {
                         return true;
                     }
-                    switch (op->type) {
-                        case GGML_TYPE_F16:
-                        case GGML_TYPE_F32:
-                            return true;
-                        default:
-                            return false;
-                    }
+                switch (op->type) {
+                    case GGML_TYPE_F16:
+                    case GGML_TYPE_F32:
+                        return true;
+                    case GGML_TYPE_Q4_0:  // quantize f32->q4_0 (rope-shift write-back)
+                        // 核未编成功(驱动拒绝) 或 env 显式禁用 → 回落 CPU，绝不崩。
+                        return backend_ctx->kernel_cpy_f32_q4_0_view_aos != nullptr &&
+                               ![] { const char * e = getenv("GGML_OPENCL_Q4_0_CPY_CPU"); return e && e[0] == '1'; }();
+                    default:
+                        return false;
+                }
                 case GGML_TYPE_F16:
                     switch (op->type) {
                         case GGML_TYPE_F16:
@@ -11189,6 +11216,20 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
                     switch (op->type) {
                         case GGML_TYPE_I32:
                             return true;
+                        default:
+                            return false;
+                    }
+                case GGML_TYPE_Q4_0:
+                    // [S2c 2026-11-02] Spark 1M 上下文 Q4_0 KV：rope-shift 链的
+                    // cast(q4_0→f32)/cpy(f32→q4_0) 必须上 GPU，否则整段落 CPU，
+                    // 36 层 ×6 段 = 218 splits。src0=q4_0→src1=f32=反量化核，
+                    // src0=f32→src1=q4_0=量化核（ggml_cl_cpy 均按标准 cpy 20 参
+                    // 布局，块内 ne[0]/32 紧排，与 CPU quantize/dequant 位精确）。
+                    switch (op->type) {
+                        case GGML_TYPE_F32:  // dequant q4_0->f32 (rope-shift read)
+                            // 核未编成功(驱动拒绝) 或 env 显式禁用 → 回落 CPU，绝不崩。
+                            return backend_ctx->kernel_cpy_q4_0_f32_view_aos != nullptr &&
+                                   ![] { const char * e = getenv("GGML_OPENCL_Q4_0_CPY_CPU"); return e && e[0] == '1'; }();
                         default:
                             return false;
                     }
@@ -11385,7 +11426,21 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
             // backend has no FWHT kernels, so let the scheduler run it on CPU
             // (correct, just slower).
             if (ggml_get_op_params_i32(op, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
-                return false;
+                // [S2c 2026-11-02] 翻案：hadamard hint 只是 ggml_mul_mat 的语义提示——
+                // CPU 端用 FWHT 加速，但 OpenCL 端 rot 是真 f32 矩阵，普通 f32 GEMM 数学
+                // 完全等价。当年以"无 FWHT 核"整类拒 GPU，把 Spark 1M 上下文的整条
+                // rope-shift 链（每层 cast→hadamard→rope→hadamard→cpy）拖去 CPU，
+                // 36 层 × 6 段 = 218 splits（830 实锤，split_dbg_build13.txt 定罪）。
+                // 保留 GGML_OPENCL_HADAMARD_CPU=1 旧判（回退用）；默认让 f32 hadamard
+                // 走 GPU，前提是 src0/src1 都是 f32（数学才等价）。
+                static const bool tyl_hadamard_cpu = [] {
+                    const char * e = getenv("GGML_OPENCL_HADAMARD_CPU");
+                    return e && e[0] == '1';
+                }();
+                if (tyl_hadamard_cpu) {
+                    return false;
+                }
+                return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
             }
             // [vkh R-135 c17案] c17(experts→CPU) 仍 prefill 全零, 岛图余 GPU 面唯一 MoE 嫌疑
             // = ling 共享专家 ffn_{gate,up,down}_shexp(q5_0×24+q8_0×22, probe4 史案 vendor
@@ -34443,6 +34498,22 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
                     // the fused router ids); matches CPU f32_to_i32 truncation
                     kernel = backend_ctx->kernel_cpy_f32_i32;
                     break;
+                case GGML_TYPE_Q4_0:
+                    // rope-shift chain: cast(cur)->f32, matmul/rope on f32, then
+                    // cpy f32 back into the AoS q4_0 KV cache. Bit-exact quantize.
+                    kernel = backend_ctx->kernel_cpy_f32_q4_0_view_aos;
+                    break;
+                default:
+                    GGML_ASSERT(false && "not implemented");
+            }
+            break;
+        case GGML_TYPE_Q4_0:
+            switch (src1t) {
+                case GGML_TYPE_F32:
+                    // rope-shift chain: cast(q4_0 KV cache -> f32) so the
+                    // hadamard/rope matmuls run on the GPU. Bit-exact dequant.
+                    kernel = backend_ctx->kernel_cpy_q4_0_f32_view_aos;
+                    break;
                 default:
                     GGML_ASSERT(false && "not implemented");
             }
@@ -34493,7 +34564,15 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
     CL_CHECK(clSetKernelArg(kernel, 18, sizeof(cl_ulong), &nb12));
     CL_CHECK(clSetKernelArg(kernel, 19, sizeof(cl_ulong), &nb13));
 
-    if (kernel == backend_ctx->kernel_cpy_f32_f32_pack) {
+    if (kernel == backend_ctx->kernel_cpy_q4_0_f32_view_aos ||
+        kernel == backend_ctx->kernel_cpy_f32_q4_0_view_aos) {
+        // block-indexed: one work item per 32-element q4_0 block, one per row,
+        // one per (i2,i3) batch. ne00/32 blocks in dim 0.
+        const int nblk0 = ne00 / (int) ggml_blck_size(GGML_TYPE_Q4_0);
+        size_t global_work_size[] = {(size_t)nblk0, (size_t)ne01, (size_t)ne02 * (size_t)ne03};
+        size_t local_work_size[]  = {1, 1, 1};
+        backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, src1);
+    } else if (kernel == backend_ctx->kernel_cpy_f32_f32_pack) {
         const int maxwg = (int)backend_ctx->get_kernel_workgroup_size(kernel);
         const int base  = MIN(64, maxwg);
         const int tpr   = MIN(ne00, base);                 // threads per row
