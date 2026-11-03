@@ -1524,6 +1524,52 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                 split->backend_id = node_backend_id;
                 split->i_start = i;
                 split->n_inputs = 0;
+                // [TongYi-Lite 2026-11-01 S2c] split 边界点名：env GGML_SCHED_SPLIT_DEBUG=1 时
+                // 打印每个新 split 的 backend_id/起始节点/触发原因（backend-switch vs
+                // weights-reuse），发射税案 830 每步 94 段的成因判定用。总量封顶 600 行。
+                // 22:52 真机轮 logcat 竟零行（conf 注入/执行与否无法证伪），故同时落盘
+                // /sdcard/TongYiLite/split_dbg.txt：首 split 无条件写 env 状态行（证明探针
+                // 执行过 + conf 是否生效），其后仅 env=1 时追加点名行。
+                {
+                    static const char * tyl_split_dbg_env = getenv("GGML_SCHED_SPLIT_DEBUG");
+                    static const bool tyl_split_dbg = tyl_split_dbg_env && tyl_split_dbg_env[0] == '1';
+                    static long tyl_split_dbg_total = 0;
+                    static long tyl_split_dbg_incall = 0;
+                    // 每个新 split_graph 调用的第一个边界（i_split==1）重置 call 内计数：
+                    // reserve 图（218 段）+ 每次 decode 步图（~94 段）各点名前 400 个边界。
+                    if (i_split == 1) {
+                        tyl_split_dbg_incall = 0;
+                    }
+                    tyl_split_dbg_incall++;
+                    tyl_split_dbg_total++;
+                    if (tyl_split_dbg_total == 1) {
+                        if (FILE * f0 = fopen("/sdcard/TongYiLite/split_dbg.txt", "w")) {
+                            fprintf(f0, "[split-dbg] probe alive: env='%s' (%s)\n",
+                                tyl_split_dbg_env ? tyl_split_dbg_env : "<unset>",
+                                tyl_split_dbg ? "verbose ON" : "verbose OFF");
+                            for (int b = 0; b < sched->n_backends && b < 8; b++) {
+                                fprintf(f0, "[split-dbg] backend[%d] = %s\n", b,
+                                    ggml_backend_name(sched->backends[b]));
+                            }
+                            fclose(f0);
+                        }
+                    }
+                    if (tyl_split_dbg && tyl_split_dbg_incall <= 400 && tyl_split_dbg_total <= 2600) {
+                        // 定罪字段：边界节点的权重(src0)被放到了哪个后端、是否 WEIGHTS buffer
+                        struct ggml_tensor * tyl_w = node->src[0];
+                        int tyl_w_bid = tyl_w ? tensor_backend_id(tyl_w) : -2;
+                        const char * tyl_w_use = (tyl_w && tyl_w->buffer) ?
+                            (tyl_w->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS ? "W" : "X") : "-";
+                        if (FILE * f = fopen("/sdcard/TongYiLite/split_dbg.txt", "a")) {
+                            fprintf(f, "[split-dbg] #%d backend=%d start='%s' trigger='%s' node='%s' op=%s w='%s'@%d:%s\n",
+                                i_split, node_backend_id, graph->nodes[split->i_start]->name,
+                                need_new_split ? "weights-reuse" : "backend-switch",
+                                node->name, ggml_op_name(node->op),
+                                tyl_w ? tyl_w->name : "?", tyl_w_bid, tyl_w_use);
+                            fclose(f);
+                        }
+                    }
+                }
                 cur_backend_id = node_backend_id;
             }
 
