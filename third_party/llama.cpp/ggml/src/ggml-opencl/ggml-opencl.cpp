@@ -911,6 +911,90 @@ struct ggml_backend_opencl_context {
     // pool for the on-device f16 buffer for kv-cache with non-FA quantized-K (q8_0/q4_0)
     std::map<ImagePoolKey, ImagePoolEntry> dequant_f16_pool;
 
+    // [TongYi-Lite 2026-11-03 S2a 发射税] decode GEMV 激活侧逐发视图池（GPU发射税减税专项 S2a
+    // 「激活 image/子缓冲池化」，权重池 R-052/上游 kq_img_pool 同款）。S1 判决：decode 每 GEMV
+    // 发射现场做 ~14 次驱动调用，其中 clCreateSubBuffer+clCreateImage+2×Release 为分配类。
+    // env GGML_OPENCL_ACT_POOL=1 启用；未设/0 = 逐发建/销原样，逐字节零扰动。
+    // 池化对象是 cl_mem 视图描述符（IMAGE1D_BUFFER 视图），不缓存数据，视图内容恒随 parent 活；
+    // parent 恒为 per-device 常驻激活缓冲（extra1->data_device，进程期存活），指针为键无 parent
+    // 回收歧义（与上方 kq_img_pool 同款处置）。decode 每步复用同批图槽 → (parent,origin,size) 高命中。
+    // 计数/日志供判卷（命中率、封顶降级），teardown 随 context 统一释放。
+    static constexpr size_t tyl_act_pool_cap = 4096;
+    std::map<std::tuple<uintptr_t, uint64_t, uint64_t>, cl_mem> tyl_act_subbuf_pool;
+    struct TylActImgKey {
+        uintptr_t buf; uint64_t width; uint64_t order; uint64_t type; uint64_t flags;
+        bool operator<(const TylActImgKey & o) const {
+            return std::tie(buf, width, order, type, flags) < std::tie(o.buf, o.width, o.order, o.type, o.flags);
+        }
+    };
+    std::map<TylActImgKey, cl_mem> tyl_act_img_pool;
+    std::unordered_set<cl_mem>     tyl_act_pooled;   // 池内对象集：put 对命中者免释
+    static bool tyl_act_pool_en() {
+        static const bool v = [] { const char * e = getenv("GGML_OPENCL_ACT_POOL"); return e && e[0] == '1'; }();
+        return v;
+    }
+    cl_mem tyl_act_subbuf(cl_mem parent, cl_ulong origin, size_t size) {
+        cl_int err; cl_mem m;
+        cl_buffer_region region; region.origin = origin; region.size = size;
+        if (!tyl_act_pool_en()) {
+            CL_CHECK((m = clCreateSubBuffer(parent, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+            return m;
+        }
+        auto key = std::make_tuple((uintptr_t)parent, (uint64_t)origin, (uint64_t)size);
+        auto it = tyl_act_subbuf_pool.find(key);
+        if (it != tyl_act_subbuf_pool.end()) {
+            static long hits = 0;
+            if (++hits == 1) {
+                GGML_LOG_INFO("[act-pool] subbuf first hit parent=%p origin=%llu size=%zu\n",
+                              (void *)parent, (unsigned long long)origin, size);
+            }
+            return it->second;
+        }
+        CL_CHECK((m = clCreateSubBuffer(parent, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+        if (tyl_act_subbuf_pool.size() < tyl_act_pool_cap) {
+            tyl_act_subbuf_pool.emplace(key, m);   // 池持唯一引用（上游 kq_img_pool 同款），put 免释
+            tyl_act_pooled.insert(m);
+        }
+        return m;
+    }
+    cl_mem tyl_act_image(cl_mem buf, cl_channel_order order, cl_channel_type type,
+                         size_t width, cl_mem_flags flags) {
+        cl_int err; cl_mem m;
+        cl_image_format fmt = { order, type };
+        cl_image_desc desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+        desc.image_width = width;
+        desc.buffer      = buf;
+        if (!tyl_act_pool_en()) {
+            CL_CHECK((m = clCreateImage(context, flags, &fmt, &desc, NULL, &err), err));
+            return m;
+        }
+        TylActImgKey key{ (uintptr_t)buf, (uint64_t)width, (uint64_t)order, (uint64_t)type, (uint64_t)flags };
+        auto it = tyl_act_img_pool.find(key);
+        if (it != tyl_act_img_pool.end()) {
+            static long hits = 0;
+            if (++hits == 1) {
+                GGML_LOG_INFO("[act-pool] image first hit buf=%p width=%llu order=%u type=%u flags=%llu\n",
+                              (void *)buf, (unsigned long long)width, (unsigned)order, (unsigned)type,
+                              (unsigned long long)flags);
+            }
+            return it->second;
+        }
+        CL_CHECK((m = clCreateImage(context, flags, &fmt, &desc, NULL, &err), err));
+        if (tyl_act_img_pool.size() < tyl_act_pool_cap) {
+            tyl_act_img_pool.emplace(key, m);
+            tyl_act_pooled.insert(m);
+        }
+        return m;
+    }
+    // enqueue 后归还激活视图：池内对象免释（引用由池持有）；env 关/超容的非池对象照原样释放。
+    void tyl_act_put(cl_mem obj) {
+        if (!obj) { return; }
+        if (tyl_act_pool_en() && tyl_act_pooled.find(obj) != tyl_act_pooled.end()) { return; }
+        CL_CHECK(clReleaseMemObject(obj));
+    }
+
     // prealloc buffers for src0 and src1
     ggml_cl_buffer prealloc_src0;
     ggml_cl_buffer prealloc_src1;
@@ -1792,6 +1876,12 @@ struct ggml_backend_opencl_context {
                 if (kv.second.image) { CL_CHECK(clReleaseMemObject(kv.second.image)); }
             }
             dequant_f16_pool.clear();
+            // [S2a 2026-11-03] release pooled activation views (see tyl_act_* above).
+            for (auto & kv : tyl_act_subbuf_pool) { CL_CHECK(clReleaseMemObject(kv.second)); }
+            tyl_act_subbuf_pool.clear();
+            for (auto & kv : tyl_act_img_pool) { CL_CHECK(clReleaseMemObject(kv.second)); }
+            tyl_act_img_pool.clear();
+            tyl_act_pooled.clear();
 #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
             ggml_cl_adreno_xmem_attn_release_scratch(this);
 #endif
@@ -26108,16 +26198,9 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         // decode 主发射路径（约 196 次/步），与中央 enqueue 计时（g_tax.enq_*）互补成全成分表。
         const double tyl_gv_t0 = tyl_launch_tax_en() ? tyl_now_us() : 0.0;
 
-        region.origin = offset1;
-        region.size   = (size_t)K * N * sizeof(float);
-        CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
-
-        img_fmt = { CL_RGBA, CL_FLOAT };
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = (size_t)K * N / 4;
-        img_desc.buffer      = b_sub_buf;
-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        // [TongYi-Lite 2026-11-03 S2a] 激活视图走池（GGML_OPENCL_ACT_POOL=1 启用；默认关=逐发建/销原样）。
+        b_sub_buf = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t)K * N * sizeof(float));
+        b_img     = backend_ctx->tyl_act_image(b_sub_buf, CL_RGBA, CL_FLOAT, (size_t)K * N / 4, CL_MEM_READ_ONLY);
 
         const double tyl_gv_t1 = tyl_launch_tax_en() ? tyl_now_us() : 0.0;
 
@@ -26140,8 +26223,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno_ila(ggml_backend_t backend, const gg
         size_t global_work_size[3] = { (size_t)ne01, q4k32_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
-        CL_CHECK(clReleaseMemObject(b_sub_buf));
-        CL_CHECK(clReleaseMemObject(b_img));
+        backend_ctx->tyl_act_put(b_sub_buf);   // [S2a] 池内免释/非池照旧
+        backend_ctx->tyl_act_put(b_img);
 
         // [TongYi-Lite 2026-11-01 S1 发射税] 分段收口：enqueue 段由中央包装器自计（g_tax.enq_*）。
         if (tyl_launch_tax_en()) {
@@ -26431,18 +26514,9 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             CL_CHECK((q_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
         }
 
-        // subbuffer for activations
-        region.origin = offset1;
-        region.size = K * N * sizeof(float);
-        CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
-
-        // image for activations
-        img_fmt = {CL_RGBA, CL_FLOAT};
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = K * N / 4;
-        img_desc.buffer = b_sub_buf;
-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        // [TongYi-Lite 2026-11-03 S2a] 激活子缓冲/image 走池（GGML_OPENCL_ACT_POOL=1；默认关=原样逐发建/销）。
+        b_sub_buf = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t)K * N * sizeof(float));
+        b_img     = backend_ctx->tyl_act_image(b_sub_buf, CL_RGBA, CL_FLOAT, (size_t)K * N / 4, CL_MEM_READ_ONLY);
 
         // 4-output-per-WI o4 variant for the long-vocab lm_head/embed GEMV
         // (ne01 = vocab ~256K on Gemma): shares one activation read across 4
@@ -26554,8 +26628,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             backend_ctx->enqueue_ndrange_kernel(kr, 3, gr, lr, dst);
 
             if (q_img) CL_CHECK(clReleaseMemObject(q_img));
-            CL_CHECK(clReleaseMemObject(b_sub_buf));
-            CL_CHECK(clReleaseMemObject(b_img));
+            backend_ctx->tyl_act_put(b_sub_buf);   // [S2a]
+            backend_ctx->tyl_act_put(b_img);
             return;
         }
         #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
@@ -26637,8 +26711,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
         if (q_img) CL_CHECK(clReleaseMemObject(q_img));
-        CL_CHECK(clReleaseMemObject(b_sub_buf));
-        CL_CHECK(clReleaseMemObject(b_img));
+        backend_ctx->tyl_act_put(b_sub_buf);   // [S2a]
+        backend_ctx->tyl_act_put(b_img);
     } else {
 
         cl_mem b_sub_buf = nullptr;
@@ -27818,16 +27892,9 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno_ila(ggml_backend_t backend, const gg
         cl_mem b_sub_buf  = nullptr;
         cl_mem b_img      = nullptr;
 
-        region.origin = offset1;
-        region.size   = (size_t)K * N * sizeof(float);
-        CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
-
-        img_fmt = { CL_RGBA, CL_FLOAT };
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = (size_t)K * N / 4;
-        img_desc.buffer      = b_sub_buf;
-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        // [TongYi-Lite 2026-11-03 S2a] 激活视图走池（GGML_OPENCL_ACT_POOL=1；默认关=原样逐发建/销）。
+        b_sub_buf = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t)K * N * sizeof(float));
+        b_img     = backend_ctx->tyl_act_image(b_sub_buf, CL_RGBA, CL_FLOAT, (size_t)K * N / 4, CL_MEM_READ_ONLY);
 
         kernel = backend_ctx->kernel_gemv_noshuffle_q6_k_f32_32b_trans;
         CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0_q6_K->ql_img));
@@ -27845,8 +27912,8 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno_ila(ggml_backend_t backend, const gg
         size_t global_work_size[3] = { (size_t)ne01, q6k_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
-        CL_CHECK(clReleaseMemObject(b_img));
-        CL_CHECK(clReleaseMemObject(b_sub_buf));
+        backend_ctx->tyl_act_put(b_img);        // [S2a]
+        backend_ctx->tyl_act_put(b_sub_buf);
     } else {
         const int gemm_tile_n = 64;
         int N_pad = CEIL_DIV(N, gemm_tile_n) * gemm_tile_n;
@@ -28129,17 +28196,9 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
             CL_CHECK((qh_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
         }
 
-        region.origin = offset1;
-        region.size = ne00 * ne1 * sizeof(float);
-        CL_CHECK((b_sub_buffer = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
-
-        img_fmt.image_channel_order = CL_RGBA;
-        img_fmt.image_channel_data_type = CL_FLOAT;
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = ne00 * ne1 / 4;
-        img_desc.buffer = b_sub_buffer;
-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        // [TongYi-Lite 2026-11-03 S2a] 激活视图走池（GGML_OPENCL_ACT_POOL=1；默认关=原样逐发建/销）。
+        b_sub_buffer = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t)ne00 * ne1 * sizeof(float));
+        b_img        = backend_ctx->tyl_act_image(b_sub_buffer, CL_RGBA, CL_FLOAT, (size_t)ne00 * ne1 / 4, CL_MEM_READ_ONLY);
 
         kernel = use_q6k_mc3      ? backend_ctx->kernel_gemv_noshuffle_q6_K_f32_mc3
                : use_q6k_tiled_mc ? backend_ctx->kernel_gemv_noshuffle_q6_K_f32_tiled_mc3
@@ -28176,8 +28235,8 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
 
         if (ql_img) CL_CHECK(clReleaseMemObject(ql_img));
         if (qh_img) CL_CHECK(clReleaseMemObject(qh_img));
-        CL_CHECK(clReleaseMemObject(b_sub_buffer));
-        CL_CHECK(clReleaseMemObject(b_img));
+        backend_ctx->tyl_act_put(b_sub_buffer);   // [S2a]
+        backend_ctx->tyl_act_put(b_img);
     } else {
         // Tiled-layout batched GEMM. When the weight was converted to the 64-row
         // tiled canonical layout (use_q6k_tiled — the default for lm_head/embed),
@@ -28444,16 +28503,9 @@ static void ggml_cl_mul_mat_q5_K_f32_adreno_ila(ggml_backend_t backend, const gg
         cl_mem b_sub_buf  = nullptr;
         cl_mem b_img      = nullptr;
 
-        region.origin = offset1;
-        region.size   = (size_t)K * N * sizeof(float);
-        CL_CHECK((b_sub_buf = clCreateSubBuffer(extra1->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
-
-        img_fmt = { CL_RGBA, CL_FLOAT };
-        memset(&img_desc, 0, sizeof(img_desc));
-        img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-        img_desc.image_width = (size_t)K * N / 4;
-        img_desc.buffer      = b_sub_buf;
-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+        // [TongYi-Lite 2026-11-03 S2a] 激活视图走池（GGML_OPENCL_ACT_POOL=1；默认关=原样逐发建/销）。
+        b_sub_buf = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t)K * N * sizeof(float));
+        b_img     = backend_ctx->tyl_act_image(b_sub_buf, CL_RGBA, CL_FLOAT, (size_t)K * N / 4, CL_MEM_READ_ONLY);
 
         kernel = backend_ctx->kernel_gemv_noshuffle_q5_k_f32_32b_trans;
         CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),   &extra0_q5_k->q_img));
@@ -28472,8 +28524,8 @@ static void ggml_cl_mul_mat_q5_K_f32_adreno_ila(ggml_backend_t backend, const gg
         size_t global_work_size[3] = { (size_t)ne01, q5k32_nsg, 1 };
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
-        CL_CHECK(clReleaseMemObject(b_img));
-        CL_CHECK(clReleaseMemObject(b_sub_buf));
+        backend_ctx->tyl_act_put(b_img);        // [S2a]
+        backend_ctx->tyl_act_put(b_sub_buf);
     } else {
         static const char * q5_k_bin_dp4a_env = getenv("GGML_OPENCL_Q5_K_BIN_DP4A");
                      bool   q5_k_bin_dp4a_on  = q5_k_bin_dp4a_env
