@@ -1,0 +1,12 @@
+{
+  "devices": [
+    {
+      "device_id": 0,
+      "core_id": [0],
+      "core_type": 0,
+      "soc_model": 69,
+      "dsp_arch": "v79",
+      "pd_session": "unsigned"
+    }
+  ]
+}
