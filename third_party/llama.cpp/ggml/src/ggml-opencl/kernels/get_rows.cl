@@ -218,16 +218,29 @@ kernel void kernel_get_rows_f32_flat(
     const ulong n4 = ne / 4;
 
     if (i < n4) {
-        float v[4];
-        #pragma unroll
-        for (int k = 0; k < 4; ++k) {
-            const ulong e   = i*4 + (ulong)k;
-            const ulong row = e / (ulong)ne00;
-            const ulong col = e - row*(ulong)ne00;
-            const int   r   = *(global const int*)((global const char*)src1 + row*nb10);
-            v[k] = *(global const float*)((global const char*)src0 + (ulong)r*nb01 + col*4);
+        // [R-275 v2] one 64-bit div per item (not per element): when the float4 sits
+        // fully inside a row (ne00%4==0 makes this always true on the GDN path) do a
+        // single idx read + 4 contiguous scalars. The per-element div version measured
+        // 4x SLOWER than the row-mapped kernel it replaced (ulong div is micro-coded).
+        const ulong base = i*4;
+        const ulong row  = base / (ulong)ne00;
+        const ulong col  = base - row*(ulong)ne00;
+        if (col + 3 < (ulong)ne00) {
+            const int r = *(global const int*)((global const char*)src1 + row*nb10);
+            const global float * s = (global const float*)((global const char*)src0 + (ulong)r*nb01 + col*4);
+            vstore4((float4)(s[0], s[1], s[2], s[3]), i, dst);
+        } else {
+            float v[4];
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                const ulong e   = base + (ulong)k;
+                const ulong r2  = e / (ulong)ne00;
+                const ulong c2  = e - r2*(ulong)ne00;
+                const int   r   = *(global const int*)((global const char*)src1 + r2*nb10);
+                v[k] = *(global const float*)((global const char*)src0 + (ulong)r*nb01 + c2*4);
+            }
+            vstore4((float4)(v[0], v[1], v[2], v[3]), i, dst);
         }
-        vstore4((float4)(v[0], v[1], v[2], v[3]), i, dst);
     } else if (i == n4 && (ne & 3)) {
         for (ulong t = n4*4; t < ne; ++t) {
             const ulong row = t / (ulong)ne00;

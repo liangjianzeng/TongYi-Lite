@@ -17618,13 +17618,15 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
                 (void*)src1, (void*)extra1->data_device, (void*)backend_ctx->queue);
     }
 
-    // [tongyi SSM state R-275 第二刀 2026-11-04] get_rows 甜点刀：原核每行 nth×nchunks 切片
-    // （decode 实测 65536 workgroups 搬 1MB＝1.7GB/s）。dst 连续+idx 一维连续+纯 f32 时按元素
-    // 全展开每 float4 一 work item，idx 行表逐 item 读（L2 命中）。GGML_OPENCL_GETROWS_FLAT=0
-    // 退行映射原路。
+    // [tongyi SSM state R-276 2026-11-05] get_rows flat 判决＝休眠：v1（每元素 64-bit 整除）
+    // tg 3.77（-45%），v2（行内快路 1 次/item）tg 6.09（-11%）——两版全输给行映射原核 6.84。
+    // 嫌疑：未对齐 float 标量读走 Adreno 慢路径 + idx 逐 item 读不可合并。默认关（opt-in
+    // GGML_OPENCL_GETROWS_FLAT=1 实验），kernel 保留供后续事件流取证。同病相怜教训见 R-276：
+    // "按元素全展开"若引入逐元素整除/未对齐读，可能比行映射更慢——packflat 赢是因为 dst 写
+    // 侧 vstore4 全合并且读侧行距节距规律（每 16B 取 12B）。
     static const bool grflat_on = [] {
         const char * e = getenv("GGML_OPENCL_GETROWS_FLAT");
-        return !(e && e[0] == '0');
+        return e && e[0] == '1';
     }();
     if (grflat_on && backend_ctx->kernel_get_rows_f32_flat != nullptr &&
         src0->type == GGML_TYPE_F32 &&
