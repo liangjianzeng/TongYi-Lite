@@ -1124,6 +1124,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_cpy_f16_f16, kernel_cpy_f16_f32, kernel_cpy_f32_f16, kernel_cpy_f32_f32, kernel_cpy_i32_i32;
     cl_kernel kernel_cpy_f32_f32_pack = nullptr;
     cl_kernel kernel_cpy_f32_f32_flat = nullptr;
+    cl_kernel kernel_cpy_f32_f32_packflat = nullptr;   // [tongyi SSM state R-275] 短行 strided view 甜点刀
     cl_kernel kernel_cpy_f32_i32 = nullptr;
     // [tongyi M-R1] fused MoE router top-k
     cl_program program_moe_topk_fused;
@@ -2414,6 +2415,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             cl_kernel k = clCreateKernel(prog, "kernel_cpy_f32_f32_flat", &err_flat);
             if (err_flat == CL_SUCCESS) {
                 backend_ctx->kernel_cpy_f32_f32_flat = k;
+            }
+        }
+        {   // [tongyi SSM state R-275] 软失败注册（同 flat 款）：编译失败保持 null，走 pack 原路
+            cl_int err_pf = CL_SUCCESS;
+            cl_kernel k = clCreateKernel(prog, "kernel_cpy_f32_f32_packflat", &err_pf);
+            if (err_pf == CL_SUCCESS) {
+                backend_ctx->kernel_cpy_f32_f32_packflat = k;
             }
         }
         CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
@@ -34537,6 +34545,40 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
         // one work item per float4, plus one for the trailing scalars
         const size_t items = (size_t) n4 + ((nelem % 4) ? 1 : 0);
         const size_t lsz   = MIN((size_t) 64, backend_ctx->max_workgroup_size);
+        size_t global_work_size[] = { ((items + lsz - 1) / lsz) * lsz, 1, 1 };
+        size_t local_work_size[]  = { lsz, 1, 1 };
+
+        backend_ctx->enqueue_ndrange_kernel(k, 1, global_work_size, local_work_size, src1);
+        return;
+    }
+
+    // [tongyi SSM state R-275 2026-11-04] pack 甜点刀：行内连续(nb00==4)且行距 float 对齐的
+    // 短行 strided view —— GDN conv state 滚动实测 src=[3,8192] 行距 16B（4-float 节距取 3），
+    // pack 一 workgroup 数行、跨行 gather 不合并，96KB 拷 1.6ms=60MB/s。按元素全展开每
+    // float4 一 work item，dst 写侧全合并。GGML_OPENCL_CPY_PACKFLAT=0 退回 pack 原路。
+    static const bool packflat_on = [] {
+        const char * e = getenv("GGML_OPENCL_CPY_PACKFLAT");
+        return !(e && e[0] == '0');
+    }();
+    if (packflat_on && backend_ctx->kernel_cpy_f32_f32_packflat != nullptr &&
+        src0t == GGML_TYPE_F32 && src1t == GGML_TYPE_F32 &&
+        nb00 == 4 && (nb01 % 4) == 0 &&
+        ggml_is_contiguous(src1) &&
+        (cl_ulong) ggml_nelements(src0) == (cl_ulong) ggml_nelements(src1) &&
+        ne00 < 32) {
+        cl_kernel k = backend_ctx->kernel_cpy_f32_f32_packflat;
+        const cl_ulong tot   = (cl_ulong) ggml_nelements(src0);
+        const cl_ulong items = tot / 4 + ((tot % 4) ? 1 : 0);
+
+        CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &extra0->data_device));
+        CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &offset0));
+        CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &extra1->data_device));
+        CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &offset1));
+        CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &ne00));
+        CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &nb01));
+        CL_CHECK(clSetKernelArg(k, 6, sizeof(cl_ulong), &tot));
+
+        const size_t lsz = MIN((size_t) 64, backend_ctx->max_workgroup_size);
         size_t global_work_size[] = { ((items + lsz - 1) / lsz) * lsz, 1, 1 };
         size_t local_work_size[]  = { lsz, 1, 1 };
 

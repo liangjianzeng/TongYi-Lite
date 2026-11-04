@@ -314,6 +314,46 @@ kernel void kernel_cpy_f32_f32_flat(
     }
 }
 
+// [tongyi SSM state R-275 2026-11-04] Row-contiguous strided view -> contiguous dst, one work
+// item per float4 over the WHOLE tensor. kernel_cpy_f32_f32_pack maps a workgroup to a few
+// short rows and gathers with the row pitch — measured 60 MB/s on the 96KB GDN conv-state
+// roll (src [3,8192] rows spaced 16B: 4-float token stride, keep 3). This shape keeps dst
+// stores fully coalesced and reads short/regular; host gate: nb00==4, nb01%4==0, dst
+// contiguous, short rows (ne00<32), equal element counts.
+kernel void kernel_cpy_f32_f32_packflat(
+        global float * src0,
+        ulong offset0,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        ulong nb01,
+        ulong ne
+) {
+    src0 = (global float*)((global char*)src0 + offset0);
+    dst  = (global float*)((global char*)dst  + offsetd);
+
+    const ulong i  = get_global_id(0);
+    const ulong n4 = ne / 4;
+
+    if (i < n4) {
+        float v[4];
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const ulong e   = i*4 + (ulong)k;
+            const ulong row = e / (ulong)ne00;
+            const ulong col = e - row*(ulong)ne00;
+            v[k] = *(global const float*)((global const char*)src0 + row*nb01 + col*4);
+        }
+        vstore4((float4)(v[0], v[1], v[2], v[3]), i, dst);
+    } else if (i == n4 && (ne & 3)) {
+        for (ulong t = n4*4; t < ne; ++t) {
+            const ulong row = t / (ulong)ne00;
+            const ulong col = t - row*(ulong)ne00;
+            dst[t] = *(global const float*)((global const char*)src0 + row*nb01 + col*4);
+        }
+    }
+}
+
 // [tongyi M-R1 2026-10-25] f32 -> i32 numeric cast (ggml_cast wiring for the
 // fused MoE router ids plane). Matches the CPU f32_to_i32 semantics
 // (common.h: x -> (int32_t) x, truncation); exact for integral float values.
