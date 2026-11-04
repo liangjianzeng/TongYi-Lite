@@ -217,6 +217,25 @@ kernel void kernel_get_rows_f32_flat(
     const ulong i  = get_global_id(0);
     const ulong n4 = ne / 4;
 
+    // [tongyi R-280] Single-row fast path (GDN recurrent-state copy: ne10==1, idx=[seq slot]):
+    // zero 64-bit divides, zero row/col decomposition — one idx[0] L2 read for the row base,
+    // then a pure linear memcpy. The multi-row flat path below loses to the row-mapped kernel
+    // on ulong divides (R-276), but this shape has no divide to pay; measured 2MB single-row
+    // copy at 3.2 GB/s on the row-mapped kernel (nth=1024 x nchunks=64).
+    if (ne10 == 1) {
+        const int r = src1[0];
+        const global float * s = (global const float*)((global const char*)src0 + (ulong)r*nb01);
+        if (i < n4) {
+            float v[4];
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) { v[k] = s[i*4 + k]; }
+            vstore4((float4)(v[0], v[1], v[2], v[3]), i, dst);
+        } else if (i == n4 && (ne & 3)) {
+            for (ulong t = n4*4; t < ne; ++t) { dst[t] = s[t]; }
+        }
+        return;
+    }
+
     if (i < n4) {
         // [R-275 v2] one 64-bit div per item (not per element): when the float4 sits
         // fully inside a row (ne00%4==0 makes this always true on the GDN path) do a

@@ -17608,6 +17608,18 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
         float s4[4] = {0,0,0,0}; int32_t iv = -1;
         clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, sizeof(s4), s4, 0, nullptr, nullptr);
         clEnqueueReadBuffer(backend_ctx->queue, extra1->data_device, CL_TRUE, offset1, sizeof(iv), &iv, 0, nullptr, nullptr);
+        // [R-279] idx 表 dump（≤64 项，按 ne10 守界）：坐实 rs_s_copy 行取是否全指同一行
+        int32_t idx64[64];
+        for (int t = 0; t < 64; ++t) { idx64[t] = -1; }
+        const int nidx = (int) src1->ne[0] < 64 ? (int) src1->ne[0] : 64;
+        if (nidx > 0) {
+            clEnqueueReadBuffer(backend_ctx->queue, extra1->data_device, CL_TRUE, offset1,
+                                (size_t) nidx * sizeof(int32_t), idx64, 0, nullptr, nullptr);
+        }
+        fprintf(stderr, "[offs-gr-idx] %s ne10=%d idx=[%d %d %d %d %d %d %d %d .. %d %d]\n",
+                src0->name, (int) ne10,
+                idx64[0], idx64[1], idx64[2], idx64[3], idx64[4], idx64[5], idx64[6], idx64[7],
+                idx64[62], idx64[63]);
         fprintf(stderr, "[offs-gr] %-18s src dev=%p off=%lu view=%lu ne=[%d,%d] idxval=%d src4=%g %g %g %g | out off=%lu ne=[%d,%d] | idx_t=%s host=%d buf=%s ex_off=%lu voffs=%lu ptr=%p idxdev=%p q=%p\n",
                 src0->name, (void*)extra0->data_device, (unsigned long)extra0->offset, (unsigned long)src0->view_offs,
                 (int)ne00, (int)src0->ne[1], (int)iv, s4[0], s4[1], s4[2], s4[3],
@@ -17628,7 +17640,14 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
         const char * e = getenv("GGML_OPENCL_GETROWS_FLAT");
         return e && e[0] == '1';
     }();
-    if (grflat_on && backend_ctx->kernel_get_rows_f32_flat != nullptr &&
+    // [tongyi R-280 2026-11-05] 单行快路（GDN rs_s_copy：ne10==1，idx=[seq slot]）：原核对
+    // 2MB 单行 3.2GB/s（nth=1024×nchunks=64 行映射）；flat kernel 的 ne10==1 分支零除法纯
+    // memcpy（多行 flat 因 64-bit 整除反噬仍休眠——R-276）。GGML_OPENCL_GETROWS_ROW1=0 逃生。
+    static const bool row1_on = [] {
+        const char * e = getenv("GGML_OPENCL_GETROWS_ROW1");
+        return !(e && e[0] == '0');
+    }();
+    if ((grflat_on || (row1_on && ne10 == 1)) && backend_ctx->kernel_get_rows_f32_flat != nullptr &&
         src0->type == GGML_TYPE_F32 &&
         ggml_is_contiguous(dst) && ggml_is_contiguous(src1) &&
         dst->ne[1] == ne10 && dst->ne[2] == 1 && dst->ne[3] == 1) {
