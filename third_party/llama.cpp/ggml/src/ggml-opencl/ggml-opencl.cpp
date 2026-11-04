@@ -9045,9 +9045,11 @@ static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
     tyl_l0_note_sync();
 
     cl_event evt;
+    // [vkh A腿 R-273] step 末等 GPU 的墙钟（barrier+wait+release 全罩），与 loop 内 DRAIN/* 分账。
+    { vkh_op_timer vkh_ss("STEP_SYNC", nullptr, false);
     CL_CHECK(clEnqueueBarrierWithWaitList(backend_ctx->queue, 0, nullptr, &evt));
     CL_CHECK(clWaitForEvents(1, &evt));
-    CL_CHECK(clReleaseEvent(evt));
+    CL_CHECK(clReleaseEvent(evt)); }
     if (g_vkh_optime_on()) { vkh_optime_dump(); }   // [vkh R-093] closed-window dump: every step's sync runs after graph_compute returns (graph_depth==0)
 }
 
@@ -10217,8 +10219,9 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             static const int sd_flush = [] { const char * e = getenv("GGML_OPENCL_SD_FLUSH");  return e ? atoi(e) : 16;  }();
             static const int sd_fin   = [] { const char * e = getenv("GGML_OPENCL_SD_FINISH"); return e ? atoi(e) : 256; }();
             static int sd_fc = 0, sd_kc = 0;
-            if (sd_flush > 0 && ++sd_fc >= sd_flush) { clFlush(backend_ctx->queue); sd_fc = 0; }
-            if (sd_fin  > 0 && ++sd_kc >= sd_fin)   { clFinish(backend_ctx->queue); sd_kc = 0; }
+            // [vkh A腿 R-273] 智能排空档无账之疑：loop 内 clFlush/clFinish 上表（env 关零扰动）。
+            if (sd_flush > 0 && ++sd_fc >= sd_flush) { vkh_op_timer vkh_df("DRAIN/FLUSH", nullptr, false); clFlush(backend_ctx->queue); sd_fc = 0; }
+            if (sd_fin  > 0 && ++sd_kc >= sd_fin)   { vkh_op_timer vkh_dk("DRAIN/FINISH", nullptr, false); clFinish(backend_ctx->queue); sd_kc = 0; }
         }
         if (opsync_en || opbatch > 1) {
             if (opsync_en || ++opbatch_cnt >= opbatch) {
@@ -10264,7 +10267,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         // NOTE: this may oversynchronize by synchronizing with
         //       backends/devices which don't compute 'cgraph's
         //       dependencies.
-        sync_with_other_backends(backend);
+        { vkh_op_timer vkh_ob("SYNC_OB", nullptr, false); sync_with_other_backends(backend); }   // [vkh A腿 R-273]
 
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
