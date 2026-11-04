@@ -191,3 +191,49 @@ kernel void kernel_get_rows_q4_0(
         *(((global float16 *) ((global char *) dst + i12*nb3 + i11*nb2 + i10*nb1)) + ind) = temp;
     }
 }
+
+// [tongyi SSM state R-275 第二刀 2026-11-04] Contiguous dst + 1-D contiguous idx gather,
+// one work item per float4 over the whole output. The row-mapped kernel spawns ne10*nth*nchunks
+// workgroups (measured 65536 groups to move 1MB = 1.7 GB/s on the GDN state row-slices); this
+// shape is a flat stream: idx row table read per item (L2-resident), src rows gathered, dst
+// stores fully coalesced. Host gate: f32 src, dst & idx contiguous, dst=[ne00,ne10,1,1].
+kernel void kernel_get_rows_f32_flat(
+        global void * src0,
+        ulong offset0,
+        global int * src1,
+        ulong offset1,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        ulong nb01,
+        int ne10,
+        ulong nb10,
+        ulong ne
+) {
+    src0 = (global void*)((global char*)src0 + offset0);
+    src1 = (global int*)((global char*)src1 + offset1);
+    dst  = (global float*)((global char*)dst + offsetd);
+
+    const ulong i  = get_global_id(0);
+    const ulong n4 = ne / 4;
+
+    if (i < n4) {
+        float v[4];
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const ulong e   = i*4 + (ulong)k;
+            const ulong row = e / (ulong)ne00;
+            const ulong col = e - row*(ulong)ne00;
+            const int   r   = *(global const int*)((global const char*)src1 + row*nb10);
+            v[k] = *(global const float*)((global const char*)src0 + (ulong)r*nb01 + col*4);
+        }
+        vstore4((float4)(v[0], v[1], v[2], v[3]), i, dst);
+    } else if (i == n4 && (ne & 3)) {
+        for (ulong t = n4*4; t < ne; ++t) {
+            const ulong row = t / (ulong)ne00;
+            const ulong col = t - row*(ulong)ne00;
+            const int   r   = *(global const int*)((global const char*)src1 + row*nb10);
+            dst[t] = *(global const float*)((global const char*)src0 + (ulong)r*nb01 + col*4);
+        }
+    }
+}

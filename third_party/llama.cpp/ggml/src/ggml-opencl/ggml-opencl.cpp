@@ -1114,6 +1114,7 @@ struct ggml_backend_opencl_context {
     ggml_cl_adreno_xmem_attn_state adreno_xmem_attn;
 #endif
     cl_kernel kernel_get_rows_f32, kernel_get_rows_f16, kernel_get_rows_q4_0;
+    cl_kernel kernel_get_rows_f32_flat = nullptr;   // [tongyi SSM state R-275] get_rows 甜点刀
     cl_kernel kernel_set_rows_f32_i64, kernel_set_rows_f32_i32, kernel_set_rows_f16_i64, kernel_set_rows_f16_i32;
     cl_kernel kernel_set_rows_q8_0_i64, kernel_set_rows_q8_0_i32;
     cl_kernel kernel_set_rows_q8_0_soa_i64, kernel_set_rows_q8_0_soa_i32;
@@ -2635,6 +2636,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_get_rows_f32  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_f16  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_q4_0 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q4_0", &err), err));
+        {   // [tongyi SSM state R-275] 软失败注册：编译失败保持 null，走行映射原路
+            cl_int err_grf = CL_SUCCESS;
+            cl_kernel k = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32_flat", &err_grf);
+            if (err_grf == CL_SUCCESS) {
+                backend_ctx->kernel_get_rows_f32_flat = k;
+            }
+        }
         GGML_LOG_CONT(".");
     }
 
@@ -17608,6 +17616,42 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
                 src1->buffer ? ggml_backend_buffer_name(src1->buffer) : "-",
                 (unsigned long)extra1->offset, (unsigned long)src1->view_offs,
                 (void*)src1, (void*)extra1->data_device, (void*)backend_ctx->queue);
+    }
+
+    // [tongyi SSM state R-275 第二刀 2026-11-04] get_rows 甜点刀：原核每行 nth×nchunks 切片
+    // （decode 实测 65536 workgroups 搬 1MB＝1.7GB/s）。dst 连续+idx 一维连续+纯 f32 时按元素
+    // 全展开每 float4 一 work item，idx 行表逐 item 读（L2 命中）。GGML_OPENCL_GETROWS_FLAT=0
+    // 退行映射原路。
+    static const bool grflat_on = [] {
+        const char * e = getenv("GGML_OPENCL_GETROWS_FLAT");
+        return !(e && e[0] == '0');
+    }();
+    if (grflat_on && backend_ctx->kernel_get_rows_f32_flat != nullptr &&
+        src0->type == GGML_TYPE_F32 &&
+        ggml_is_contiguous(dst) && ggml_is_contiguous(src1) &&
+        dst->ne[1] == ne10 && dst->ne[2] == 1 && dst->ne[3] == 1) {
+        cl_kernel k = backend_ctx->kernel_get_rows_f32_flat;
+        const cl_ulong tot   = (cl_ulong) ggml_nelements(dst);
+        const cl_ulong items = tot / 4 + ((tot % 4) ? 1 : 0);
+
+        CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &extra0->data_device));
+        CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &offset0));
+        CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &extra1->data_device));
+        CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &offset1));
+        CL_CHECK(clSetKernelArg(k, 4, sizeof(cl_mem),   &extrad->data_device));
+        CL_CHECK(clSetKernelArg(k, 5, sizeof(cl_ulong), &offsetd));
+        CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &ne00));
+        CL_CHECK(clSetKernelArg(k, 7, sizeof(cl_ulong), &nb01));
+        CL_CHECK(clSetKernelArg(k, 8, sizeof(int),      &ne10));
+        CL_CHECK(clSetKernelArg(k, 9, sizeof(cl_ulong), &nb10));
+        CL_CHECK(clSetKernelArg(k,10, sizeof(cl_ulong), &tot));
+
+        const size_t lsz = MIN((size_t) 64, backend_ctx->max_workgroup_size);
+        size_t global_work_size[] = { ((items + lsz - 1) / lsz) * lsz, 1, 1 };
+        size_t local_work_size[]  = { lsz, 1, 1 };
+
+        backend_ctx->enqueue_ndrange_kernel(k, 1, global_work_size, local_work_size, dst);
+        return;
     }
 
     cl_kernel kernel;
