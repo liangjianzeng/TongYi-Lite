@@ -17603,7 +17603,7 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
         idx_dev = (void *) extra1->data_device;
         ggml_cl_idx_hunt_dev = idx_dev;
     }
-    if (offs_dbg && offs_cnt < 400 && src0->name && strstr(src0->name, "cache_")) {
+    if (offs_dbg && offs_cnt < 400) {   // [R-279] 放宽：所有 get_rows 都打（原只 cache_ 前缀，罩不住匿名 node）
         ++offs_cnt;
         float s4[4] = {0,0,0,0}; int32_t iv = -1;
         clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, sizeof(s4), s4, 0, nullptr, nullptr);
