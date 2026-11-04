@@ -3223,7 +3223,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    // [tongyi R-278 2026-11-05] FA 对照腿实测（740, Qwen3.5-4B, pp512/n128，两轮一致）：
+    // FA on pp 45.15(+38%) 但 tg 4.25(-36%)——FA kernel 对 N=1 decode 形态反噬（N=1 无
+    // Q-block 并行可赚，纯多付 F32 累加与掩码开销）。decode 图（kq_mask 行数=1）构建期
+    // 回标准 kq 路（数学等价，FA=0 形态已实证 tg 6.8），prefill 图（N>1）照走 FA 吃 +38%。
+    // GGML_OPENCL_FA_DECODE=1 逃生强开 decode-FA。
+    static const bool fa_decode_force = [] {
+        const char * e = getenv("GGML_OPENCL_FA_DECODE");
+        return e && e[0] == '1';
+    }();
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr &&
+        (kq_mask->ne[1] > 1 || fa_decode_force);
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
