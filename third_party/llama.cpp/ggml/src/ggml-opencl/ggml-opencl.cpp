@@ -1407,8 +1407,17 @@ struct ggml_backend_opencl_context {
         // Dump a csv
         // [TongYi-Lite 2026-11-01 S1] 落盘路径改 /sdcard：App 进程 cwd 不可写，相对路径必败；
         // 同批还写 cl_trace.json（同款改法，见下）。
+        // [tongyi B腿 2026-11-04] bench/ADB 影子目录场景 shell 用户写不了 /sdcard：
+        // GGML_OPENCL_PROFILE_DIR 覆写目录（未设=原 /sdcard 路径逐字节不变，生产零扰动）。
+        static const char * prof_dir = [] {
+            const char * e = getenv("GGML_OPENCL_PROFILE_DIR");
+            return (e && e[0]) ? e : "/sdcard/TongYiLite";
+        }();
+        char prof_csv[512]; char prof_json[512];
+        snprintf(prof_csv, sizeof prof_csv, "%s/cl_profiling.csv", prof_dir);
+        snprintf(prof_json, sizeof prof_json, "%s/cl_trace.json", prof_dir);
         // 追加模式：flush 每 2048 内核一次，每次落一批；表头只在文件起始写一次。
-        FILE * fperf = fopen("/sdcard/TongYiLite/cl_profiling.csv", "a");
+        FILE * fperf = fopen(prof_csv, "a");
         if (!fperf) {
             GGML_LOG_ERROR("Failed to open cl_profiling.csv\n");
             return;
@@ -1428,7 +1437,7 @@ struct ggml_backend_opencl_context {
         fclose(fperf);
 
         // Dump a simple chrome trace
-        FILE * ftrace = fopen("/sdcard/TongYiLite/cl_trace.json", "w");
+        FILE * ftrace = fopen(prof_json, "w");
         if (!ftrace) {
             GGML_LOG_ERROR("Failed to open cl_trace.json\n");
             return;
