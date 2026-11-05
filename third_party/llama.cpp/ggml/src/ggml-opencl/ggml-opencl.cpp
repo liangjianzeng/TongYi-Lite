@@ -10846,6 +10846,7 @@ inline bool q3k_dense_gemv_ready(const ggml_backend_opencl_context * backend_ctx
     if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
     if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
+    if (dst->ne[2] != 1 || dst->ne[3] != 1) return false;   // single-batch decode
     // same shape gates as the batched plane layout (per-row scale indexing)
     if (src0->ne[0] % 256 != 0 || src0->ne[1] % 128 != 0) return false;
     const int64_t N = dst->ne[1];
@@ -10869,6 +10870,7 @@ inline bool q3k_dense_gemv_willprep(const ggml_backend_opencl_context * backend_
     if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
     if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
+    if (dst->ne[2] != 1 || dst->ne[3] != 1) return false;   // single-batch decode
     if (src0->ne[0] % 256 != 0 || src0->ne[1] % 128 != 0) return false;
     if (dst->ne[0] != src0->ne[1]) return false;
     // probe uses batch=1 (fork default); graph-time re-check sees the real batch —
@@ -29452,11 +29454,14 @@ static void ggml_cl_mul_mat_q3_k_f32_adreno(ggml_backend_t backend, const ggml_t
     const int N = dst->ne[1];
     GGML_ASSERT((size_t) src1->nb[1] == (size_t) K * sizeof(float));   // decode cols contiguous
 
-    // q plane image (uint pixels: 6 per row-pair per 32-elem block)
+    // q plane image (uint pixels: 6 per row-pair per 32-elem block).
+    // FULL plane: layer_pix = M * (K/32) * 3 — the kernel indexes rp + j*(M/2)
+    // + k*3*M, which spans every row-pair of every k block. (First device leg
+    // R-284 verdict: (M/2)*... covered half the plane -> OOB reads, 8888... output.)
     img_fmt = { CL_R, CL_UNSIGNED_INT32 };
     memset(&img_desc, 0, sizeof(img_desc));
     img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
-    img_desc.image_width = (size_t)(M / 2) * (K / 32) * 3;
+    img_desc.image_width = (size_t)M * (K / 32) * 3;
     img_desc.buffer      = extra0->q;
     cl_mem q_img;
     CL_CHECK((q_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
@@ -31537,8 +31542,12 @@ switch(src0t) {
 #endif // GGML_OPENCL_SOA_Q
             break;
         }
-        case GGML_TYPE_Q2_K:
-        case GGML_TYPE_Q3_K:
+        // [tongyi P0 2026-11-06] Q2_K(84 B/block)/Q3_K(110 B/block) 不再共用
+        // Q4_K(144 B/block) flat 核——审计 §3.4-② 确认的独立正确性缺陷：块尺寸不符
+        // = 行索引越界（静默）。dense MUL_MAT 准入层 supports_op 对两者本就拒绝
+        //（Q3_K = R-284 GEMV 臂或 CPU；Q2_K = 未列类型尾 return false）⇒ 正常路径
+        // 到不了这里；内部误派发时改由 default 的 GGML_ASSERT 响断言，不再静默越界。
+        // B 线 #30999/#31172 原生 q2_k/q3_k 内核落地后由原生 case 取代。
         case GGML_TYPE_Q4_K: {
 #ifdef GGML_OPENCL_SOA_Q
             kernel = backend_ctx->kernel_mul_mv_q4_K_f32_flat;
