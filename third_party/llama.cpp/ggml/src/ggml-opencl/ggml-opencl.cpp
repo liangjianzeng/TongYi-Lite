@@ -1714,6 +1714,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_mul_mat_id_q4_0_f32_batched;  // [dspark] single-dispatch batched MoE gather (q4_0)
     cl_kernel kernel_mul_mat_id_q4_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q4_K)
     cl_kernel kernel_mul_mat_id_q3_k_f32_batched;  // [dspark 2026-10-14] batched MoE gather (q3_K, #28)
+    cl_kernel kernel_gemv_q3_k_f32 = nullptr;      // [tongyi R-284 2026-11-05] dense q3_K decode GEMV (same planes, E=1)
     cl_kernel kernel_mul_mat_id_iq4_xs_f32_batched;  // [tongyi M1 2026-10-25] batched MoE gather (iq4_xs, G-733 M1)
 
     // [dspark 2026-10-14] P4: batched MoE activation image cache. The dense-loop
@@ -4759,6 +4760,13 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 
         cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
         CL_CHECK((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
+        // [tongyi R-284] dense twin in the same program; soft-fail — the dispatch
+        // predicate requires a non-null handle, so a failed create = path off.
+        backend_ctx->kernel_gemv_q3_k_f32 = clCreateKernel(prog, "kernel_gemv_q3_k_f32", &err);
+        if (err != CL_SUCCESS) {
+            GGML_LOG_WARN("ggml_opencl: kernel_gemv_q3_k_f32 create failed err=%d (dense q3_K GEMV disabled)\n", err);
+            backend_ctx->kernel_gemv_q3_k_f32 = nullptr;
+        }
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
@@ -8785,6 +8793,19 @@ struct ggml_tensor_extra_cl_q3_K {
     cl_mem se0  = nullptr;
     cl_mem se1  = nullptr;
 
+    // [tongyi R-284] Dense-GEMV bookkeeping (GGML_OPENCL_Q3K_GEMV=1, 2D weights).
+    // The MoE prep above never touches the raw block bytes — the batched kernel
+    // only reads the planes. A dense tensor can still fall to the CPU (prefill,
+    // unsupported shape, partial upload), which reads the blocks back through
+    // get_tensor, so the 2D branch (1) writes the raw bytes to the buffer like
+    // the generic set_tensor tail would and (2) records where here (alias, NOT
+    // owned — released with the parent buffer). dense_gemv_ready is the single
+    // source of truth consulted by BOTH the supports_op admission and the
+    // dispatch arm, so an unprepped tensor can never reach the GEMV.
+    cl_mem base_data   = nullptr;
+    cl_ulong base_off  = 0;
+    bool dense_gemv_ready = false;
+
     ~ggml_tensor_extra_cl_q3_K() {
         reset();
     }
@@ -8806,6 +8827,10 @@ struct ggml_tensor_extra_cl_q3_K {
             CL_CHECK(clReleaseMemObject(se1));
             se1 = nullptr;
         }
+        // [R-284] alias + flag: cleared, never released (parent buffer owns it)
+        base_data = nullptr;
+        base_off = 0;
+        dense_gemv_ready = false;
     }
 };
 
@@ -10797,6 +10822,60 @@ inline bool moe_selfbuild_unlock(const ggml_backend_opencl_context *backend_ctx,
     return lvl[0] == '2' && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q3_K);
 }
 
+// [tongyi R-284 2026-11-05] Dense q3_K decode GEMV gate — ONE source of truth
+// (GGML_OPENCL_Q3K_GEMV=1). Reuses the batched-MoE plane format with E=1: the
+// host prepack in set_tensor already folds the aux32 scale shuffle + d*(sc-32)
+// into fp16 effective-scale planes (NMSE=0 recipe, #28), and kernel_gemv_q3_k_f32
+// is the batched kernel's dense twin (no ids/perm/es_base). supports_op admission,
+// the dispatch arm and the prep all read this predicate + the per-tensor
+// dense_gemv_ready flag, so an unprepped tensor can never reach the kernel and
+// an admitted tensor never silently falls to the CPU readback.
+inline bool q3k_gemv_env_on() {
+    static const bool on = [] {
+        const char * e = getenv("GGML_OPENCL_Q3K_GEMV");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
+inline bool q3k_dense_gemv_ready(const ggml_backend_opencl_context * backend_ctx,
+                                 const ggml_tensor * src0, const ggml_tensor * dst) {
+    if (!q3k_gemv_env_on()) return false;
+    // vendor path only — Mesa/rusticl keeps today's routing (R-084 family)
+    if (backend_ctx && backend_ctx->is_mesa_rusticl) return false;
+    if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
+    if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
+    if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
+    // same shape gates as the batched plane layout (per-row scale indexing)
+    if (src0->ne[0] % 256 != 0 || src0->ne[1] % 128 != 0) return false;
+    const int64_t N = dst->ne[1];
+    if (N < 1 || N > 8) return false;   // decode-scale only; prefill stays CPU as today
+    if (dst->ne[0] != src0->ne[1]) return false;
+    const ggml_tensor_extra_cl_q3_K * e = (const ggml_tensor_extra_cl_q3_K *) src0->extra;
+    return e != nullptr && e->dense_gemv_ready;
+}
+
+// [R-284] Shape-level half of the gate for the LOAD-TIME buffer placement probe
+// (weight_buft_supported, probe_batch defaults to 1 in this fork): the weight has
+// no extra yet (planes are built in set_tensor, later), so admission there must be
+// decided on env+shape alone. Prefill re-checks supports_op with the real batch —
+// N>8 lands on CPU with the raw blocks the dense prep writes. Dispatch keeps the
+// strict q3k_dense_gemv_ready (extra present, planes complete): admitted ==
+// dispatchable, always.
+inline bool q3k_dense_gemv_willprep(const ggml_backend_opencl_context * backend_ctx,
+                                    const ggml_tensor * src0, const ggml_tensor * dst) {
+    if (!q3k_gemv_env_on()) return false;
+    if (backend_ctx && backend_ctx->is_mesa_rusticl) return false;
+    if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
+    if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
+    if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
+    if (src0->ne[0] % 256 != 0 || src0->ne[1] % 128 != 0) return false;
+    if (dst->ne[0] != src0->ne[1]) return false;
+    // probe uses batch=1 (fork default); graph-time re-check sees the real batch —
+    // the cap keeps supports_op == dispatch for every admitted shape.
+    return dst->ne[1] >= 1 && dst->ne[1] <= 8;
+}
+
 // [tongyi TYL-UNLOCK-R2 2026-10-28] A7X FA 混合 KV 防 crash 闸的 Mesa 面豁免（一处真源）。
 // 现场（R-114 d2 op 级普查）：ling 混合模型 6 个 attention 层 FLASH_ATTN 全坠 CPU 岛。
 // 判据链：本闸把 is_f32_f16（=f32 q + f16 KV cache，** llama.cpp 标准配置**）连同 q8_0/q4_0
@@ -11693,6 +11772,21 @@ static bool ggml_opencl_supports_op_inner(ggml_backend_dev_t dev, const struct g
                 // / Qwen3.6-35B q8_0 GDN ssm_out) runs on GPU via the per-slice broadcast
                 // iteration in ggml_cl_mul_mat. No special-casing needed.
                 return op->src[1]->type == GGML_TYPE_F32;
+            } else if (op->src[0]->type == GGML_TYPE_Q3_K) {
+                // [tongyi R-284 2026-11-05] dense q3_K decode GEMV (env
+                // GGML_OPENCL_Q3K_GEMV=1): N<=8 MUL_MATs on host-prepped tensors
+                // run on the batched-MoE plane format (E=1). Shared predicate with
+                // the dispatch arm + prep => admitted == dispatchable, always.
+                // Everything else (prefill N>8, unprepped tensors, Mesa) stays on
+                // the CPU path exactly as before this knife.
+                if (op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                    // probe time: extra absent, shape gate only (willprep); graph
+                    // time the same shape gate + real N — decode N<=8 admitted,
+                    // prefill falls back per-op to CPU (raw blocks are correct).
+                    q3k_dense_gemv_willprep(backend_ctx, op->src[0], op)) {
+                    return true;
+                }
+                return false;
             }
             return false;
         case GGML_OP_MUL_MAT_ID: {
@@ -13908,10 +14002,33 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                     (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2],
                     data, h);
         }
+        // [tongyi R-284 2026-11-05] 2D dense q3_K (GGML_OPENCL_Q3K_GEMV=1): the
+        // decode GEMV consumes these planes with E=1. This block's returns skip the
+        // generic set_tensor tail write (see soa_check_parent note), so the raw
+        // block bytes are written HERE — the CPU fallback (prefill N>8, unprepped
+        // shapes, chunked uploads) reads them back through get_tensor, which needs
+        // them: without this write the device slot is uninitialized.
+        const bool dense2d = tensor->ne[2] <= 1 && q3k_gemv_env_on() &&
+                             !backend_ctx->is_mesa_rusticl;
+        ggml_tensor_extra_cl * extra_orig = dense2d
+            ? (ggml_tensor_extra_cl *) tensor->extra : nullptr;
+        const auto tyl_q3k_dense_raw_write = [&]() {
+            if (!dense2d) return;
+            GGML_ASSERT(extra_orig != nullptr);
+            tyl_wbw_before_write(queue, size);   // [R-052] parity with the tail
+            CL_CHECK(clEnqueueWriteBuffer(queue, extra_orig->data_device, CL_TRUE,
+                        extra_orig->offset + offset, size, data, 0, NULL, NULL));
+        };
         if (tensor->view_src != nullptr || !ggml_is_contiguous(tensor)) {
+            tyl_q3k_dense_raw_write();   // keep the CPU path byte-correct anyway
             return;
         }
-        if (tensor->ne[2] <= 1 || !use_adreno_moe_kernels(backend_ctx, tensor)) {
+        if (dense2d) {
+            tyl_q3k_dense_raw_write();
+            if (offset != 0 || size != ggml_nbytes(tensor)) {
+                return;   // chunked upload: raw only; no planes => CPU computes (correct)
+            }
+        } else if (tensor->ne[2] <= 1 || !use_adreno_moe_kernels(backend_ctx, tensor)) {
             return;   // 2D q3_K / non-MoE: no GPU path, keep raw (CPU handles)
         }
         const int Kc = tensor->ne[0];
@@ -14014,6 +14131,15 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         tyl_wbw_before_write(queue, se1.size() * sizeof(ggml_fp16_t));   // [R-056]
         CL_CHECK(clEnqueueWriteBuffer(queue, extra->se1, CL_TRUE, 0,
                     se1.size() * sizeof(ggml_fp16_t), se1.data(), 0, NULL, NULL));
+
+        if (dense2d) {
+            // [R-284] planes complete => the GEMV may consume this tensor. Record
+            // the raw-block location (alias, NOT owned) so get_tensor can serve the
+            // CPU prefill fallback with byte-identical blocks.
+            extra->base_data = extra_orig->data_device;
+            extra->base_off  = extra_orig->offset;
+            extra->dense_gemv_ready = true;
+        }
 
         tensor->extra = extra;
         return;
@@ -15046,6 +15172,20 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 
     // Make sure all previously submitted commands in other devices are finished.
     sync_with_other_backends(backend_ctx);
+
+    // [tongyi R-284] Dense q3_K GEMV tensors carry the plane extra, but the raw
+    // block bytes were written by the prep branch (base_data/base_off) — serve the
+    // CPU prefill fallback straight from them. Without this branch the generic
+    // tail below would misread the plane struct as ggml_tensor_extra_cl.
+    if (tensor->type == GGML_TYPE_Q3_K) {
+        const ggml_tensor_extra_cl_q3_K * e3 =
+            (const ggml_tensor_extra_cl_q3_K *) tensor->extra;
+        if (e3->dense_gemv_ready && e3->base_data != nullptr) {
+            CL_CHECK(clEnqueueReadBuffer(queue, e3->base_data, CL_TRUE,
+                        e3->base_off + offset, size, data, 0, NULL, NULL));
+            return;
+        }
+    }
 
 #ifdef GGML_OPENCL_SOA_Q
     if (tensor->type == GGML_TYPE_Q1_0) {
@@ -29285,6 +29425,72 @@ static cl_mem ggml_cl_img_pool_get_or_create(
     return img;
 }
 
+// [tongyi R-284 2026-11-05] Dense q3_K decode GEMV. Consumes the batched-MoE plane
+// format (see ggml_tensor_extra_cl_q3_K / kernels/gemv_noshuffle_q3_k_f32.cl) with
+// E=1, pre-packed once in set_tensor. Gates: q3k_dense_gemv_ready (shared with the
+// supports_op admission) — decode-scale N<=8 only; prefill stays on the CPU path.
+static void ggml_cl_mul_mat_q3_k_f32_adreno(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0 && src0->extra);
+    GGML_ASSERT(src1 && src1->extra);
+    GGML_ASSERT(dst  && dst->extra);
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    ggml_tensor_extra_cl      * extra1 = (ggml_tensor_extra_cl *) src1->extra;
+    ggml_tensor_extra_cl      * extrad = (ggml_tensor_extra_cl *) dst->extra;
+    ggml_tensor_extra_cl_q3_K * extra0 = (ggml_tensor_extra_cl_q3_K *) src0->extra;
+    GGML_ASSERT(extra0->q && extra0->se0 && extra0->se1 && extra0->dense_gemv_ready);
+    GGML_ASSERT(dst->nb[0] == 4);   // kernel indexes dstc[] with float* math
+
+    cl_int err;
+    cl_context context = backend_ctx->context;
+    cl_image_format img_fmt;
+    cl_image_desc   img_desc;
+
+    const cl_ulong offsetd = extrad->offset + dst->view_offs;
+    const int K = src0->ne[0];
+    const int M = src0->ne[1];
+    const int N = dst->ne[1];
+    GGML_ASSERT((size_t) src1->nb[1] == (size_t) K * sizeof(float));   // decode cols contiguous
+
+    // q plane image (uint pixels: 6 per row-pair per 32-elem block)
+    img_fmt = { CL_R, CL_UNSIGNED_INT32 };
+    memset(&img_desc, 0, sizeof(img_desc));
+    img_desc.image_type  = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+    img_desc.image_width = (size_t)(M / 2) * (K / 32) * 3;
+    img_desc.buffer      = extra0->q;
+    cl_mem q_img;
+    CL_CHECK((q_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+
+    // activation sub-buffer/image via the S2a pool (same machinery as the q4_K GEMV)
+    const cl_ulong offset1 = extra1->offset + src1->view_offs;
+    cl_mem b_sub_buf = backend_ctx->tyl_act_subbuf(extra1->data_device, offset1, (size_t) K * N * sizeof(float));
+    cl_mem b_img     = backend_ctx->tyl_act_image(b_sub_buf, CL_RGBA, CL_FLOAT, (size_t) K * N / 4, CL_MEM_READ_ONLY);
+
+    cl_kernel kernel = backend_ctx->kernel_gemv_q3_k_f32;
+    cl_uint a = 0;
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &q_img));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &extra0->se0));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &extra0->se1));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &b_img));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_mem),   &extrad->data_device));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &offsetd));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(int),      &K));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(int),      &M));
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(int),      &N));
+    const int grid_x_per_col = CEIL_DIV(M / 2, 64) * 64;
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(int),      &grid_x_per_col));
+    const cl_ulong dst_nb1 = (cl_ulong) dst->nb[1];
+    CL_CHECK(clSetKernelArg(kernel, a++, sizeof(cl_ulong), &dst_nb1));
+
+    size_t gws[2] = { (size_t)grid_x_per_col * (size_t)N, 4 };
+    size_t lws[2] = { 64, 4 };
+    backend_ctx->enqueue_ndrange_kernel(kernel, 2, gws, lws, dst);
+
+    CL_CHECK(clReleaseMemObject(q_img));
+    backend_ctx->tyl_act_put(b_sub_buf);   // [S2a]
+    backend_ctx->tyl_act_put(b_img);
+}
+
 static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_ASSERT(src0);
     GGML_ASSERT(src0->extra);
@@ -29775,6 +29981,17 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
                 return;
         }
         #endif
+
+        // q3_K x fp32 — [tongyi R-284] dense decode GEMV on the batched-MoE plane
+        // format (E=1), env GGML_OPENCL_Q3K_GEMV=1. Shared predicate with the
+        // supports_op admission: admitted == dispatchable, always. Everything the
+        // predicate refuses (prefill, unprepped, Mesa, env off) keeps the CPU path.
+        if (src0t == GGML_TYPE_Q3_K && src1t == GGML_TYPE_F32 &&
+            !mm_type_blocked("q3_K") &&
+            q3k_dense_gemv_ready(backend_ctx, src0, dst)) {
+            ggml_cl_mul_mat_q3_k_f32_adreno(backend, src0, src1, dst);
+            return;
+        }
 
         // q4_k x fp32
         // [dspark 2026-10-14] Adreno 830: the xmem prepack q4_K path is

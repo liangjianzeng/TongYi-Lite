@@ -246,3 +246,85 @@ __kernel void kernel_mul_mat_id_q3_k_f32_batched(
         }
     }
 }
+
+//------------------------------------------------------------------------------
+// [tongyi R-284 2026-11-05] Dense q3_K decode GEMV.
+// The batched kernel above with the expert-gather machinery excised: single
+// layer (E=1 planes from the same host prepack), col == colp (no ids, no perm,
+// no es_base). Same subgroup shape as the validated batched twin: one lane owns
+// one row-pair (2 output rows), the 4 subgroups of a workgroup split the k
+// blocks, y is subgroup-broadcast, final reduce in local memory.
+// Host gates (q3k_dense_gemv_ready, mirrored in set_tensor prep): contiguous
+// 2D q3_K weight, K%256==0, M%128==0, N in [1,8] (decode-scale only).
+//------------------------------------------------------------------------------
+__kernel void kernel_gemv_q3_k_f32(
+        read_only  image1d_buffer_t src0_q,   // E=1 transposed q3_K layer
+        global half2  * src0_se0,             // row-even fp16 dl pairs
+        global half2  * src0_se1,             // row-odd  fp16 dl pairs
+        read_only  image1d_buffer_t src1,     // B: N columns of K floats
+        global float * dst,                   // destination buffer
+        ulong offsetd,                        // byte offset of dst base
+        int ne00,                             // K
+        int ne01,                             // M
+        int ne11,                             // N (activation columns)
+        int grid_x_per_col,                   // CEIL_DIV(M/2, 64) * 64 (== M/2 when M%128==0)
+        ulong dst_nb1)                        // dst->nb[1] bytes (column stride)
+{
+    uint gid     = get_global_id(0);
+    uint slid    = get_sub_group_local_id();
+    uint groupId = get_local_id(1);
+
+    uint K  = (uint)ne00;
+    uint M  = (uint)ne01;
+    uint M2 = M / 2;
+
+    uint col = gid / (uint)grid_x_per_col;
+    uint rp  = gid - col * (uint)grid_x_per_col;
+
+    uint LINE_STRIDE_A  = M / 2;
+    uint BLOCK_STRIDE_A = 3 * M;                   // 6 uints per (rp, k) = 6*M/2
+
+    int bbase = (int)((ulong)col * (K / 4));
+    global float * dstc = (global float *)((global char *)dst + offsetd
+                            + (ulong)col * dst_nb1);
+
+    private uint   qA0, qA1, hmA, qB0, qB1, hmB;
+    private half2  regS, regM;
+    private float8 regB;
+
+    private float2 totalSum = (float2)(0.0f);
+
+    for (uint k = groupId; k < (K / 32); k += NSUBGROUPS) {
+        regS = src0_se0[rp + k * M2];   // row 2rp:   (dl elem 0..15, dl elem 16..31)
+        regM = src0_se1[rp + k * M2];   // row 2rp+1: same
+
+        if (slid < 4) {
+            regB.s0123 = read_imagef(src1, bbase + (int)(slid * 2 + k * 8));
+            regB.s4567 = read_imagef(src1, bbase + (int)(1 + slid * 2 + k * 8));
+        }
+
+        qA0 = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        qA1 = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        hmA = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        qB0 = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+        qB1 = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 4)).x;
+        hmB = read_imageui(src0_q, (int)(rp + k * BLOCK_STRIDE_A + LINE_STRIDE_A * 5)).x;
+
+        BMO_Q3K_HI(totalSum, qA0, qA1, hmA, qB0, qB1, hmB, regS, regM, regB);
+        BMO_Q3K_LO(totalSum, qA0, qA1, hmA, qB0, qB1, hmB, regS, regM, regB);
+    }
+
+    // reduction in local memory, assumes #wave=4
+    local float2 reduceLM[SUBGROUP_SIZE * 3];
+    if (groupId == 1) reduceLM[SUBGROUP_SIZE * 0 + slid] = totalSum;
+    if (groupId == 2) reduceLM[SUBGROUP_SIZE * 1 + slid] = totalSum;
+    if (groupId == 3) reduceLM[SUBGROUP_SIZE * 2 + slid] = totalSum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (groupId == 0) {
+        totalSum += reduceLM[SUBGROUP_SIZE * 0 + slid];
+        totalSum += reduceLM[SUBGROUP_SIZE * 1 + slid];
+        totalSum += reduceLM[SUBGROUP_SIZE * 2 + slid];
+        if (rp * 2 + 0 < M) dstc[rp * 2 + 0] = totalSum.s0;
+        if (rp * 2 + 1 < M) dstc[rp * 2 + 1] = totalSum.s1;
+    }
+}
