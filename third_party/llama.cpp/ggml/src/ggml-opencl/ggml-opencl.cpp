@@ -13,6 +13,7 @@
 #include "ggml-backend-impl.h"
 #include "ggml.h"
 #include "tongyi_route_table.h"
+#include "ggml-quants.h"   // [R-284 selftest] dequantize_row_q3_K independent reference
 
 #include "cl-program-cache.h"
 
@@ -10838,12 +10839,29 @@ inline bool q3k_gemv_env_on() {
     return on;
 }
 
+// [R-284 bisect] M cap for live bisection: GGML_OPENCL_Q3K_GEMV_MMAX=<n> runs
+// the GEMV only on weights with M<=n (lm_head = 151936 falls back to CPU with
+// its raw blocks). Unset = no cap. Applied in BOTH predicates so allocation
+// follows the same split (big-M weights go to a CPU buffer, not a dead GPU one).
+inline int q3k_gemv_mmax() {
+    static const int v = [] {
+        const char * e = getenv("GGML_OPENCL_Q3K_GEMV_MMAX");
+        return (e && e[0]) ? atoi(e) : 0;
+    }();
+    return v;
+}
+inline bool q3k_gemv_m_ok(const ggml_tensor * src0) {
+    const int cap = q3k_gemv_mmax();
+    return cap == 0 || (int)src0->ne[1] <= cap;
+}
+
 inline bool q3k_dense_gemv_ready(const ggml_backend_opencl_context * backend_ctx,
                                  const ggml_tensor * src0, const ggml_tensor * dst) {
     if (!q3k_gemv_env_on()) return false;
     // vendor path only — Mesa/rusticl keeps today's routing (R-084 family)
     if (backend_ctx && backend_ctx->is_mesa_rusticl) return false;
     if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
+    if (!q3k_gemv_m_ok(src0)) return false;
     if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
     if (dst->ne[2] != 1 || dst->ne[3] != 1) return false;   // single-batch decode
@@ -10868,6 +10886,7 @@ inline bool q3k_dense_gemv_willprep(const ggml_backend_opencl_context * backend_
     if (!q3k_gemv_env_on()) return false;
     if (backend_ctx && backend_ctx->is_mesa_rusticl) return false;
     if (backend_ctx && backend_ctx->kernel_gemv_q3_k_f32 == nullptr) return false;
+    if (!q3k_gemv_m_ok(src0)) return false;
     if (src0->view_src != nullptr || !ggml_is_contiguous(src0)) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
     if (dst->ne[2] != 1 || dst->ne[3] != 1) return false;   // single-batch decode
@@ -29491,6 +29510,68 @@ static void ggml_cl_mul_mat_q3_k_f32_adreno(ggml_backend_t backend, const ggml_t
     size_t lws[2] = { 64, 4 };
     backend_ctx->enqueue_ndrange_kernel(kernel, 2, gws, lws, dst);
 
+    // [R-284 selftest] GGML_OPENCL_Q3K_SELFTEST=1: on the first GEMV call, read
+    // dst + the activation + the RAW blocks back and cross-check three sources:
+    //   (a) plane-decoded w (prep correctness) vs
+    //   (b) ggml dequantize_row_q3_K (independent reference) vs
+    //   (c) dst (kernel+launch correctness) — reference dot vs dst row.
+    static const bool q3k_selftest = getenv("GGML_OPENCL_Q3K_SELFTEST") != nullptr;
+    static bool q3k_selftest_done = false;
+    if (q3k_selftest && !q3k_selftest_done && N == 1 && K >= 256 && M >= 2) {
+        q3k_selftest_done = true;
+        cl_command_queue q = backend_ctx->queue;
+        const size_t row_bytes = (size_t)(K / 256) * 110;   // one row = (K/256) superblocks x 110 B
+        std::vector<uint8_t> raw(row_bytes), raw1(row_bytes);
+        std::vector<float>   x(K), w_ref(K), w_ref1(K), dstv(M);
+        cl_event ev;
+        CL_CHECK(clEnqueueReadBuffer(q, extra0->base_data, CL_TRUE,
+                    extra0->base_off, row_bytes, raw.data(), 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+        CL_CHECK(clEnqueueReadBuffer(q, extra0->base_data, CL_TRUE,
+                    extra0->base_off + row_bytes, row_bytes, raw1.data(), 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+        CL_CHECK(clEnqueueReadBuffer(q, b_sub_buf, CL_TRUE, 0,
+                    K * sizeof(float), x.data(), 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+        CL_CHECK(clEnqueueReadBuffer(q, extrad->data_device, CL_TRUE,
+                    offsetd, M * sizeof(float), dstv.data(), 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+
+        dequantize_row_q3_K((const block_q3_K *) raw.data(),  w_ref.data(),  K);
+        dequantize_row_q3_K((const block_q3_K *) raw1.data(), w_ref1.data(), K);
+        double ref0 = 0, ref1 = 0;
+        for (int i = 0; i < K; ++i) {
+            ref0 += (double) w_ref[i]  * x[i];
+            ref1 += (double) w_ref1[i] * x[i];
+        }
+
+        // (a) plane decode for row 0, first 16 elems of superblock 0 (k=0):
+        // pixels 0 (codes lo), M/2 (codes hi), M (hmask); se0[0] = (dl lo, dl hi)
+        std::vector<uint32_t> qp((size_t)3 * M);
+        CL_CHECK(clEnqueueReadBuffer(q, extra0->q, CL_TRUE, 0,
+                    qp.size() * sizeof(uint32_t), qp.data(), 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+        uint16_t se2v[2] = {0, 0};
+        CL_CHECK(clEnqueueReadBuffer(q, extra0->se0, CL_TRUE, 0,
+                    4, se2v, 0, NULL, &ev));
+        CL_CHECK(clWaitForEvents(1, &ev)); CL_CHECK(clReleaseEvent(ev));
+        const float     dl    = ggml_fp16_to_fp32(se2v[0]);
+        const uint32_t  codes = qp[0];
+        const uint32_t  hmb   = qp[2 * (size_t)(M / 2)];
+        double plane_err = 0;
+        for (int l = 0; l < 16; ++l) {
+            const uint32_t code2 = (codes >> (2 * l)) & 3u;
+            const uint32_t hbit  = (hmb  >> l)       & 1u;
+            const float    wp    = (float)((int)(code2 | (hbit << 2)) - 4) * dl;
+            plane_err += fabs(wp - w_ref[l]);
+        }
+
+        fprintf(stderr, "[q3k-selftest] M=%d K=%d plane_abs_err(row0 e0..15)=%g dl=%g\n", M, K, plane_err, dl);
+        fprintf(stderr, "[q3k-selftest] dst[0]=%.6f ref0=%.6f dst[1]=%.6f ref1=%.6f\n", dstv[0], ref0, dstv[1], ref1);
+        fprintf(stderr, "[q3k-selftest] dst[2]=%.6f dst[3]=%.6f x[0..3]=%.4f %.4f %.4f %.4f\n",
+                      dstv[2], dstv[3], x[0], x[1], x[2], x[3]);
+    }
+
     CL_CHECK(clReleaseMemObject(q_img));
     backend_ctx->tyl_act_put(b_sub_buf);   // [S2a]
     backend_ctx->tyl_act_put(b_img);
@@ -29991,9 +30072,18 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         // format (E=1), env GGML_OPENCL_Q3K_GEMV=1. Shared predicate with the
         // supports_op admission: admitted == dispatchable, always. Everything the
         // predicate refuses (prefill, unprepped, Mesa, env off) keeps the CPU path.
+        static const bool q3k_trace = getenv("GGML_OPENCL_Q3K_TRACE") != nullptr;
         if (src0t == GGML_TYPE_Q3_K && src1t == GGML_TYPE_F32 &&
             !mm_type_blocked("q3_K") &&
             q3k_dense_gemv_ready(backend_ctx, src0, dst)) {
+            if (q3k_trace) {
+                static int q3k_tn = 0;
+                if (q3k_tn < 200) {
+                    ++q3k_tn;
+                    fprintf(stderr, "[q3kgemv] %s M=%d K=%d N=%d\n", src0->name,
+                                  (int)src0->ne[1], (int)src0->ne[0], (int)dst->ne[1]);
+                }
+            }
             ggml_cl_mul_mat_q3_k_f32_adreno(backend, src0, src1, dst);
             return;
         }
