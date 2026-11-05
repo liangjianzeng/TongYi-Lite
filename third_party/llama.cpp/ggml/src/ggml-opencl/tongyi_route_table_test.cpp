@@ -98,10 +98,13 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
             (s_dm && s_dm % q.align_bytes) || (s_s && s_s % q.align_bytes))) return false;
         return true;
     }
-    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && !ctx.batched_off) {
+    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS || q.type == RTYPE_PTQ1_0) && !ctx.batched_off) {
+        // [tongyi tern 2026-11-04] ptq1_0 镜像表行 mmid_ptq1_0_batched：
+        // batched-only 家族同构，块门 K%128（group-128，无 superblock scale）
+        const int blk = (q.type == RTYPE_PTQ1_0) ? 128 : 256;
         return q.E > 1 && srcs &&
                legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off) &&
-               (q.K % 256 == 0) && (q.M % 128 == 0);
+               (q.K % blk == 0) && (q.M % 128 == 0);
     }
     // [tongyi 2026-10-25 q4_1 deliberate extension] 非 legacy 等价：镜像表行
     // mmid_q4_1_batched（形状语义 = q4_0：K%32/M%128，无 E>1/K%256；view 禁入——
@@ -121,17 +124,20 @@ static bool legacy_supports_mmid_full(const RouteQuery & q, const RouteContext &
 // 镜像 batched 静态门（:25046 gate 0/1/4/5/6/7/8）
 static bool legacy_batched_static(const RouteQuery & q, const RouteContext & ctx) {
     if (!q.src1_f32 || !q.src2_i32) return false;
-    // q4_1：2026-10-25 故意扩展（镜像表行 mmid_q4_1_batched）
-    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_1 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K && q.type != RTYPE_IQ4_XS) return false;
+    // q4_1：2026-10-25 故意扩展（镜像表行 mmid_q4_1_batched）；
+    // ptq1_0：2026-11-04 三元 batched-only 行（镜像表行 mmid_ptq1_0_batched）
+    if (q.type != RTYPE_Q4_0 && q.type != RTYPE_Q4_1 && q.type != RTYPE_Q4_K && q.type != RTYPE_Q3_K &&
+        q.type != RTYPE_IQ4_XS && q.type != RTYPE_PTQ1_0) return false;
     if (!legacy_use_adreno(ctx.gen, ctx.compiler, q.name ? q.name : "", q.M, ctx.moe_a7x_mode, ctx.e17_quirks_off)) return false;
     if (!q.contiguous0 || !q.contiguous1) return false;
     if (q.is_view) {
-        if (q.type == RTYPE_Q3_K) { if (!q.view_slot_aligned) return false; }
+        if (q.type == RTYPE_Q3_K || q.type == RTYPE_PTQ1_0) { if (!q.view_slot_aligned) return false; }
         else return false;
     }
     if (q.K % 32 != 0 || q.M % 128 != 0) return false;
     if ((q.type == RTYPE_Q4_K || q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && q.K % 256 != 0) return false;
-    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) && q.E <= 1) return false;
+    if (q.type == RTYPE_PTQ1_0 && q.K % 128 != 0) return false;
+    if ((q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS || q.type == RTYPE_PTQ1_0) && q.E <= 1) return false;
     const long long n_cols = (long long)q.n_used * q.n_tok;
     if (q.n_used < 1 || q.n_tok < 1 || n_cols > (1LL << 20)) return false;
     return true;
@@ -150,7 +156,7 @@ static int legacy_dispatch_kind(const RouteQuery & q, const RouteContext & ctx) 
         if (ctx.vendor_diag && q.type == RTYPE_Q4_0 && q.src1_f32 && q.contiguous0 && q.contiguous1) return 3;
         return 0;
     }
-    if (q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS) {
+    if (q.type == RTYPE_Q3_K || q.type == RTYPE_IQ4_XS || q.type == RTYPE_PTQ1_0) {
         if (!ctx.batched_off && legacy_batched_static(q, ctx)) return 1;
         return 0;   // 静态拒 = supports_op 同门拒（GGML_ABORT 契约路径不会发生）
     }
@@ -179,7 +185,7 @@ static int resolve_kind_id(const RouteResult & r) {
 // ============================================================================
 
 static void family_a() {
-    const RType types[]  = { RTYPE_Q4_0, RTYPE_Q4_K, RTYPE_Q3_K, RTYPE_Q8_0, RTYPE_MXFP4, RTYPE_Q4_1, RTYPE_IQ4_XS };
+    const RType types[]  = { RTYPE_Q4_0, RTYPE_Q4_K, RTYPE_Q3_K, RTYPE_Q8_0, RTYPE_MXFP4, RTYPE_Q4_1, RTYPE_IQ4_XS, RTYPE_PTQ1_0 };
     const int   Ks[]     = { 31, 32, 64, 128, 255, 256, 512, 1536, 2048, 5120 };
     const int   Ms[]     = { 4, 8, 32, 64, 127, 128, 129, 512, 1536 };
     const char * names[] = { "blk.3.ffn_gate_exps", "ffn_as", "w_exps", "output.weight", "" };
@@ -243,7 +249,7 @@ static void family_a() {
         // G-725 契约：q3_K 的 supports_op 准入 == 派发 batched 静态门（漂移即 ABORT 风险）。
         // [R2] 契约仅在 view 对齐/无 view 时成立；准入放行未对齐 view 而派发拒 = 已知
         // GGML_ABORT 契约风险（hazard pin，生产中 slot view 恒对齐）。
-        if (q.type == RTYPE_Q3_K) {
+        if (q.type == RTYPE_Q3_K || q.type == RTYPE_PTQ1_0) {
             if (!q.is_view || q.view_slot_aligned) {
                 const bool eq = legacy_adm == ((!ctx.batched_off) && legacy_batched_static(q, ctx));
                 CHECK(eq, "A-q3-contract K=%d M=%d adm=%d", q.K, q.M, legacy_adm);
@@ -313,7 +319,7 @@ static void family_b() {
     CHECK(known_bad_lookup(RCOMP_E031, "kernel_convert_q4_0_trans4_ns"), "B4h R3 trans4_ns 族");
     CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched_raw"), "B4i R3 raw 3-plane 留档");
     CHECK(!known_bad_lookup(RCOMP_E17, "mul_mv_q4_k_f32_flat"), "B4j E17 flat 不在账");
-    CHECK(known_bad_count() == 6 && spec_count() == 10, "B4e 表规模 pin（10 行 + 6 坏账，R3 + q4_1 扩展）");
+    CHECK(known_bad_count() == 6 && spec_count() == 11, "B4e 表规模 pin（11 行 + 6 坏账，R3 + q4_1 + ptq1_0 扩展）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 

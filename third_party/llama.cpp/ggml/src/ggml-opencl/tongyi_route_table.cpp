@@ -57,6 +57,17 @@ static const RouteSpec kSpecs[] = {
         "cpu",
         "tongyi-m1",
     },
+    {   // [tongyi tern 2026-11-04] PTQ1_0 batched-only（决策档 F-1，三元超大 MoE 专家）：
+        // 直读原始块布局（无平面，骨架= iq4_xs raw 分支 + mul_mv_ptq1_0 的 trit 解码）；
+        // K%128（group-128 三元块，无 superblock scale）；view 允许但必须槽位对齐
+        //（split-MoE GPU bank 的 es_base 语义，母本 q3_K——分支自带 view_offs 处理）
+        // ★ 状态：保留休眠（DORMANT）——G2 判卷直接后置三元质量死刑（11-04 落地档 §3）；
+        //   激活条件 = 原厂 QAT 三元 MoE checkpoint；catalog 无 PTQ1_0 专家 ⇒ 行不命中。
+        "mmid_ptq1_0_batched", BATCHED_MOE, RTYPE_PTQ1_0,
+        { 128, 128, 0, true, NAME_FFN_EXPS_OR_AS, true, true, false, true, 1LL << 20 },
+        "cpu",
+        "tongyi-tern",
+    },
     {   // q4_0 dense-loop：supports_op dense 分支原公式（名字/代际不查 —— G-740 漂移点，
         // 由测试族 C 显式 pin，R2 决定是否收紧）
         "mmid_q4_0_dense", DENSE_LOOP, RTYPE_Q4_0,
@@ -167,13 +178,15 @@ static bool dense_static_ok(RType t, const RouteQuery & q, const char ** why) {
 // 镜像 batched 静态门（gate 0/1/4/5/6/7/8；gate 2/3/9 是运行时门）。
 static bool batched_static_ok(RType t, const RouteQuery & q, const RouteContext & ctx, const char ** why) {
     if (!q.src1_f32 || !q.src2_i32) { if (why) *why = "src_types"; return false; }
-    // q4_1：2026-10-25 故意扩展（见 kSpecs mmid_q4_1_batched 行注），非 legacy 等价
-    if (t != RTYPE_Q4_0 && t != RTYPE_Q4_1 && t != RTYPE_Q4_K && t != RTYPE_Q3_K && t != RTYPE_IQ4_XS) { if (why) *why = "quant_type"; return false; }
+    // q4_1：2026-10-25 故意扩展（见 kSpecs mmid_q4_1_batched 行注），非 legacy 等价；
+    // ptq1_0：2026-11-04 三元 batched-only 行（同族语义，见 mmid_ptq1_0_batched 行注）
+    if (t != RTYPE_Q4_0 && t != RTYPE_Q4_1 && t != RTYPE_Q4_K && t != RTYPE_Q3_K &&
+        t != RTYPE_IQ4_XS && t != RTYPE_PTQ1_0) { if (why) *why = "quant_type"; return false; }
     const char * gwhy = nullptr;
     if (!moe_admission_gate(q, ctx, &gwhy)) { if (why) *why = gwhy; return false; }
     if (!q.contiguous0 || !q.contiguous1) { if (why) *why = "contiguity"; return false; }
     if (q.is_view) {
-        if (t == RTYPE_Q3_K) {
+        if (t == RTYPE_Q3_K || t == RTYPE_PTQ1_0) {
             if (!q.view_slot_aligned) { if (why) *why = "view_slot_q3k"; return false; }
         } else if ((t == RTYPE_Q4_0 || t == RTYPE_Q4_K) && ctx.moe_view_slot) {
             // [tongyi TYL-UNLOCK-R4 2026-10-28] A 路（父批 15:2x）：q4_0/q4_K 的 view 由
@@ -190,7 +203,8 @@ static bool batched_static_ok(RType t, const RouteQuery & q, const RouteContext 
     }
     if (q.K % 32 != 0 || q.M % 128 != 0) { if (why) *why = "shape_align K%32/M%128"; return false; }
     if ((t == RTYPE_Q4_K || t == RTYPE_Q3_K || t == RTYPE_IQ4_XS) && q.K % 256 != 0) { if (why) *why = "shape_align K%256"; return false; }
-    if ((t == RTYPE_Q3_K || t == RTYPE_IQ4_XS) && q.E <= 1) { if (why) *why = "e_le_1 (batched-only 家族)"; return false; }
+    if (t == RTYPE_PTQ1_0 && q.K % 128 != 0) { if (why) *why = "shape_align K%128 (ptq1_0 group)"; return false; }
+    if ((t == RTYPE_Q3_K || t == RTYPE_IQ4_XS || t == RTYPE_PTQ1_0) && q.E <= 1) { if (why) *why = "e_le_1 (batched-only 家族)"; return false; }
     const long long n_cols = (long long)q.n_used * (long long)q.n_tok;
     if (q.n_used < 1 || q.n_tok < 1 || n_cols > (1LL << 20)) { if (why) *why = "cols_range"; return false; }
     if (why) *why = nullptr;
@@ -243,6 +257,20 @@ RouteResult resolve_admission(const RouteQuery & q, const RouteContext & ctx) {
             return r;
         }
         return make_cpu(s, why ? why : (q.E <= 1 ? "e_le_1" : "shape/srcs"), "iq4_xs branch refused");
+    }
+    if (q.type == RTYPE_PTQ1_0 && !ctx.batched_off) {
+        // [tongyi tern 2026-11-04] PTQ1_0 准入：镜像 q3_K（batched-only 家族），
+        // 块门换 K%128（group-128 三元，无 superblock scale）
+        const RouteSpec * s = find_spec(RTYPE_PTQ1_0, BATCHED_MOE);
+        const char * why = nullptr;
+        const bool ok = q.src1_f32 && q.src2_i32 && q.contiguous0 && q.contiguous1 &&
+                        q.E > 1 && moe_admission_gate(q, ctx, &why) &&
+                        q.K % 128 == 0 && q.M % 128 == 0;
+        if (ok) {
+            RouteResult r; r.spec = s; r.attempted = s; r.refuse_gate = nullptr; r.refuse_detail = nullptr;
+            return r;
+        }
+        return make_cpu(s, why ? why : (q.E <= 1 ? "e_le_1" : "shape/srcs"), "ptq1_0 branch refused");
     }
     if (q.type == RTYPE_Q3_K && !ctx.batched_off) {
         const RouteSpec * s = find_spec(RTYPE_Q3_K, BATCHED_MOE);
@@ -346,6 +374,19 @@ RouteResult resolve(const RouteQuery & q, const RouteContext & ctx) {
             return make_cpu(s, why, "q3_K batched refused");
         }
         return make_cpu(s, "batched_off", "BATCHED_MOE=0 且 q3_K 无 dense 路线");
+    }
+    if (q.type == RTYPE_PTQ1_0) {
+        // [tongyi tern 2026-11-04] 记账分支：batched-only 家族成员（同 q3_K 构）
+        const RouteSpec * s = find_spec(RTYPE_PTQ1_0, BATCHED_MOE);
+        if (!ctx.batched_off && s) {
+            const char * why = nullptr;
+            if (batched_static_ok(RTYPE_PTQ1_0, q, ctx, &why)) {
+                RouteResult r; r.spec = s; r.attempted = s; r.refuse_gate = nullptr; r.refuse_detail = nullptr;
+                return r;
+            }
+            return make_cpu(s, why, "ptq1_0 batched refused");
+        }
+        return make_cpu(s, "batched_off", "BATCHED_MOE=0 且 ptq1_0 无 dense 路线");
     }
     // [tongyi 2026-10-25] q4_1 记账分支（故意扩展）：batched-only 家族成员，
     // 派发器实际控制流 = 通用 switch 的 Q4_1 case（非 ggml_cl_mul_mat_id_batched），

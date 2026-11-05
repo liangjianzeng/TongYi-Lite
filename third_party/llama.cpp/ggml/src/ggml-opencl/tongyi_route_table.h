@@ -48,6 +48,7 @@ enum RType { // 镜像 ggml_type（仅路由关心的成员）
     RTYPE_Q6_K = 14,
     RTYPE_IQ4_XS = 23,
     RTYPE_MXFP4 = 39,
+    RTYPE_PTQ1_0 = 143, // [tongyi tern 2026-11-04] Prism 三元 group-128（fork 私有高位 id）
 };
 
 // ---- 表结构 ----
