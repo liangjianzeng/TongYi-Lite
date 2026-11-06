@@ -86,6 +86,9 @@ float ggml_table_f32_e8m0_half[1 << 8];
 // precomputed f32 table for ue4m3 (1 KB) (simd-mappings.h)
 float ggml_table_f32_ue4m3[1 << 8];
 
+// Signed FP8 needs its own table: UE4M3 ignores the sign, halves values for NVFP4, and maps NaN to zero.
+float ggml_table_f32_f8_e4m3[1 << 8];
+
 #if defined(__ARM_ARCH)
 struct ggml_arm_arch_features_type {
     int sve_cnt;
@@ -237,18 +240,6 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },
-    [GGML_TYPE_PQ2_0] = {
-        .from_float               = quantize_row_pq2_0,
-        .vec_dot                  = ggml_vec_dot_pq2_0_q8_K_generic,
-        .vec_dot_type             = GGML_TYPE_Q8_K,
-        .nrows                    = 1,
-    },
-    [GGML_TYPE_PTQ1_0] = {
-        .from_float               = quantize_row_ptq1_0,
-        .vec_dot                  = ggml_vec_dot_ptq1_0_q8_0_generic,
-        .vec_dot_type             = GGML_TYPE_Q8_0,
-        .nrows                    = 1,
-    },
     [GGML_TYPE_Q4_0] = {
         .from_float               = quantize_row_q4_0,
         .vec_dot                  = ggml_vec_dot_q4_0_q8_0,
@@ -306,6 +297,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_nvfp4,
         .vec_dot                  = ggml_vec_dot_nvfp4_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_F8_E4M3] = {
+        .from_float               = quantize_row_f8_e4m3,
+        .vec_dot                  = ggml_vec_dot_f8_e4m3_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q2_K] = {
@@ -749,7 +746,7 @@ static void ggml_init_arm_arch_features(void) {}
 #endif
 #endif // __ARM_ARCH
 
-#if defined(__riscv) && defined(__riscv_v_intrinsic)
+#if defined(__riscv) && defined(__riscv_v)
 #include <riscv_vector.h>
 static void ggml_init_riscv_arch_features(void) {
     ggml_riscv_arch_features.rvv_vlen = __riscv_vlenb();
@@ -1664,7 +1661,12 @@ static void ggml_compute_forward_mul_mat_id(
             for (int id = 0; id < n_ids; ++id) {
                 const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
 
-                assert(i02 >= 0 && i02 < n_as);
+                assert(i02 == -1 || (i02 >= 0 && i02 < n_as));
+
+                if (i02 == -1) {
+                    memset((char *) dst->data + id*nb1 + iid1*nb2, 0, ne0*sizeof(float));
+                    continue;
+                }
 
                 MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
                 matrix_row_counts[i02] += 1;
@@ -1748,450 +1750,6 @@ static void ggml_compute_forward_mul_mat_id(
 }
 
 /////////////////////////////////
-
-// [A7.2/R-014] GGML_OP_G1_SSM_LAYER CPU 参考（单 task；数值 = _probe/g1_probe 双精度
-// 口径，与 kernels/g1_ssm_layer.cl 双栈对拍 NMSE 1e-13 一致）。state/conv_state 原地 RMW。
-static void ggml_compute_forward_g1_ssm_layer(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
-    if (params->ith != 0) return;
-
-    const struct ggml_tensor * x    = dst->src[0];
-    const struct ggml_tensor * w_in = dst->src[1];
-    const struct ggml_tensor * w_ba = dst->src[2];
-    const struct ggml_tensor * ssm_dt = dst->src[3];
-    const struct ggml_tensor * ssm_a  = dst->src[4];
-    const struct ggml_tensor * w_conv = dst->src[5];
-    struct ggml_tensor * conv_state = dst->src[6];   // RMW
-    const struct ggml_tensor * rms_w = dst->src[7];
-    const struct ggml_tensor * w_out = dst->src[8];
-    struct ggml_tensor * state = dst->src[9];        // RMW
-
-    const int n_embd = ggml_get_op_params_i32(dst, 0);
-    const int s_k    = ggml_get_op_params_i32(dst, 1);
-    const int h_k    = ggml_get_op_params_i32(dst, 2);
-    const int h_v    = ggml_get_op_params_i32(dst, 3);
-    const int s_v    = ggml_get_op_params_i32(dst, 4);
-    const int d_conv = ggml_get_op_params_i32(dst, 5);
-    const float l2_eps  = ggml_get_op_params_f32(dst, 6);
-    const float rms_eps = ggml_get_op_params_f32(dst, 7);
-    const int rf = h_v / h_k;
-    const int qkvz_new = 2*s_k + 2*s_v*rf;
-    const int conv_new = 2*s_k + s_v*rf;
-    const int cc       = 2*h_k*s_k + h_v*s_v;
-    const int nb_in    = n_embd / QK4_0;
-    const int nb_out   = (h_v*s_v) / QK4_0;
-    const int scr_total = 2*h_v*s_k + 2*h_v*s_v + 2*h_v;
-
-    const float * xf   = (const float *) x->data;
-    const float * wbaf = (const float *) w_ba->data;
-    const float * dtf  = (const float *) ssm_dt->data;
-    const float * af   = (const float *) ssm_a->data;
-    const float * wcf  = (const float *) w_conv->data;
-    float * csf        = (float *) conv_state->data;
-    const float * rwf  = (const float *) rms_w->data;
-    float * stf        = (float *) state->data;
-    float * yf         = (float *) dst->data;
-    const block_q4_0 * wif  = (const block_q4_0 *) w_in->data;
-    const block_q4_0 * wof  = (const block_q4_0 *) w_out->data;
-
-    // 工作区（单 malloc 分段）：mixed | ba | convv | dcol | ocol | sreg(state) | gated
-    double * wk = (double *) malloc(((size_t)qkvz_new*h_k + 2*h_v + (size_t)conv_new*h_k
-                + s_v + (size_t)h_v*s_v + (size_t)h_v*s_v*s_v + (size_t)h_v*s_v) * sizeof(double));
-    double * mixed = wk;                                   // [qkvz_new*h_k]
-    double * ba    = mixed + (size_t)qkvz_new*h_k;         // [2*h_v]
-    double * convv = ba + 2*h_v;                           // [conv_new*h_k]
-    double * dcol  = convv + (size_t)conv_new*h_k;         // [s_v]
-    double * ocol  = dcol + s_v;                           // [h_v*s_v]
-    double * sreg  = ocol + (size_t)h_v*s_v;               // [h_v*s_v*s_v] 列主 state
-    double * gated = sreg + (size_t)h_v*s_v*s_v;           // [h_v*s_v] stage2 出（stage3 的 x）
-    float * scrf = (float *) malloc((size_t)scr_total * sizeof(float));
-    const int scr_k_off = h_v*s_k, scr_v_off = 2*h_v*s_k;
-    const int scr_z_off = 2*h_v*s_k + h_v*s_v, scr_g_off = 2*h_v*s_k + 2*h_v*s_v;
-    const int scr_b_off = scr_g_off + h_v;
-
-    // stage1：in_proj + ba GEMV（块内积 ×d 再累加，与内核 Q4_DOT 同序）
-    for (int r = 0; r < qkvz_new*h_k; ++r) {
-        double acc = 0.0;
-        const block_q4_0 * row = wif + (size_t)r*nb_in;
-        for (int b = 0; b < nb_in; ++b) {
-            const float d = GGML_FP16_TO_FP32(row[b].d);
-            double sm = 0.0;
-            for (int t = 0; t < QK4_0; ++t) {
-                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
-                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
-                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
-                sm += (double)(nib - 8) * xf[b*QK4_0 + t];
-            }
-            acc += sm * (double)d;
-        }
-        mixed[r] = acc;
-    }
-    for (int r = 0; r < 2*h_v; ++r) {
-        double acc = 0.0;
-        const float * row = wbaf + (size_t)r*n_embd;
-        for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
-        ba[r] = acc;
-    }
-    for (int g = 0; g < h_k; ++g) {
-        const double * lq = mixed + (size_t)g*qkvz_new;
-        // gate/beta（b=前 RF 列 / a=后 RF 列；gate=softplus(a+dt)*ssm_a）
-        for (int r = 0; r < rf; ++r) {
-            const double b = ba[g*(2*rf) + r];
-            const double a = ba[g*(2*rf) + rf + r];
-            const int h = 2*g + r;
-            const float aa = (float)(a + (double)dtf[h]);
-            scrf[scr_b_off + h] = 1.0f / (1.0f + expf(-(float)b));
-            scrf[scr_g_off + h] = (aa > 20.0f ? aa : log1pf(expf(aa))) * af[h];
-        }
-        // conv + silu（wcf[c*d_conv + w]；窗口末行=本 token 混合值）
-        for (int t = 0; t < conv_new; ++t) {
-            const int c = (t < s_k) ? (g*s_k + t)
-                        : (t < 2*s_k) ? (h_k*s_k + g*s_k + (t - s_k))
-                        : (2*h_k*s_k + g*s_v*rf + (t - 2*s_k));
-            double acc = 0.0;
-            for (int w = 0; w < d_conv-1; ++w) acc += (double)csf[(size_t)w*cc + c] * wcf[(size_t)c*d_conv + w];
-            acc += lq[t] * (double)wcf[(size_t)c*d_conv + (d_conv-1)];
-            const float av = (float)acc;
-            convv[(size_t)g*conv_new + t] = (double)(av / (1.0f + expf(-av)));   // silu
-        }
-        // q/k l2norm（因子 = 1/sqrt(Σx²+eps)，R-018 代数更正）+ interleave（v 头 2g+r ← k 头 g 第 r 段）
-        for (int seg = 0; seg < 2; ++seg) {
-            double ss = 0.0;
-            for (int t = 0; t < s_k; ++t) {
-                const double v_ = convv[(size_t)g*conv_new + seg*s_k + t];
-                ss += v_*v_;
-            }
-            const float f = 1.0f / sqrtf((float)ss + l2_eps);
-            float * base = scrf + (seg == 0 ? 0 : scr_k_off);
-            for (int t = 0; t < s_k; ++t) {
-                const float v_ = (float)convv[(size_t)g*conv_new + seg*s_k + t] * f;
-                base[(2*g)  *s_k + t] = v_;
-                base[(2*g+1)*s_k + t] = v_;
-            }
-        }
-        // v/z 直通
-        for (int t = 0; t < s_v*rf; ++t) {
-            const int h = 2*g + t/s_v, j = t % s_v;
-            scrf[scr_v_off + h*s_v + j] = (float)convv[(size_t)g*conv_new + 2*s_k + t];
-            scrf[scr_z_off + h*s_v + j] = (float)lq[2*s_k + t];
-        }
-        // conv_state 滚动直写（原地：out[0]=in[1], out[1]=in[2], out[2]=本 token）
-        for (int t = 0; t < conv_new; ++t) {
-            const int c = (t < s_k) ? (g*s_k + t)
-                        : (t < 2*s_k) ? (h_k*s_k + g*s_k + (t - s_k))
-                        : (2*h_k*s_k + g*s_v*rf + (t - 2*s_k));
-            csf[(size_t)0*cc + c] = csf[(size_t)1*cc + c];
-            csf[(size_t)1*cc + c] = csf[(size_t)2*cc + c];
-            csf[(size_t)2*cc + c] = (float)lq[t];
-        }
-    }
-
-    // stage2：GDN AR（state 列主 S(i,j)=s[j*s_v+i]）+ gated RMSNorm
-    for (int h = 0; h < h_v; ++h) {
-        const float * k = scrf + scr_k_off, * q = scrf, * v = scrf + scr_v_off, * z = scrf + scr_z_off;
-        const float gexp = expf(scrf[scr_g_off + h]);
-        const float bta  = scrf[scr_b_off + h];
-        double * S = sreg + (size_t)h*s_v*s_v;
-        for (int idx = 0; idx < s_v*s_v; ++idx) S[idx] = (double)stf[(size_t)h*s_v*s_v + idx] * gexp;
-        for (int j = 0; j < s_v; ++j) {
-            double sk = 0.0;
-            for (int i = 0; i < s_v; ++i) sk += S[j*s_v + i] * (double)k[h*s_k + i];
-            dcol[j] = ((double)v[h*s_v + j] - sk) * (double)bta;
-        }
-        for (int j = 0; j < s_v; ++j)
-            for (int i = 0; i < s_v; ++i)
-                S[j*s_v + i] += (double)k[h*s_k + i] * dcol[j];
-        double ss = 0.0;
-        for (int j = 0; j < s_v; ++j) {
-            double acc = 0.0;
-            for (int i = 0; i < s_v; ++i) acc += S[j*s_v + i] * (double)q[h*s_k + i];
-            ocol[(size_t)h*s_v + j] = acc / sqrt((double)s_k);   // q 预乘 1/sqrt(S_K)
-            ss += ocol[(size_t)h*s_v + j] * ocol[(size_t)h*s_v + j];
-        }
-        const float f = 1.0f / sqrtf((float)(ss / s_v) + rms_eps);
-        for (int j = 0; j < s_v; ++j) {
-            const float ov = (float)ocol[(size_t)h*s_v + j];
-            const float zv = z[h*s_v + j];
-            gated[(size_t)h*s_v + j] = (double)(ov * f * rwf[j] * (zv / (1.0f + expf(-zv))));
-        }
-    }
-    // state 写回（原地 RMW）
-    for (size_t i = 0; i < (size_t)h_v*s_v*s_v; ++i) stf[i] = (float)sreg[i];
-
-    // stage3：o_proj GEMV（q4_0，x = gated → y 直接写 dst，无重叠）
-    for (int r = 0; r < n_embd; ++r) {
-        double acc = 0.0;
-        const block_q4_0 * row = wof + (size_t)r*nb_out;
-        for (int b = 0; b < nb_out; ++b) {
-            const float d = GGML_FP16_TO_FP32(row[b].d);
-            double sm = 0.0;
-            for (int t = 0; t < QK4_0; ++t) {
-                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
-                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
-                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
-                sm += (double)(nib - 8) * gated[b*QK4_0 + t];
-            }
-            acc += sm * (double)d;
-        }
-        yf[r] = (float)acc;
-    }
-    free(wk); free(scrf);
-}
-
-// [R-017] GGML_OP_G1_KDA_IN CPU 参考（单 task；语义 = KDA_SPEC.md stage1，数值双精度
-// 口径，锚点 = bailingmoe3 recr 层 op 链 + bailingmoe3_causal_conv1d）。
-// conv_state 原地滚动（槽序 q|k|v，每槽窗口主序 [d_conv-1 行, d_inner 列]）。
-static void ggml_compute_forward_g1_kda_in(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
-    if (params->ith != 0) return;
-
-    const struct ggml_tensor * x      = dst->src[0];
-    const struct ggml_tensor * wq     = dst->src[1];
-    const struct ggml_tensor * wk     = dst->src[2];
-    const struct ggml_tensor * wv     = dst->src[3];
-    const struct ggml_tensor * cq     = dst->src[4];
-    const struct ggml_tensor * ck     = dst->src[5];
-    const struct ggml_tensor * cv     = dst->src[6];
-    const struct ggml_tensor * beta_w = dst->src[7];
-    struct ggml_tensor * conv_state   = dst->src[8];   // RMW
-
-    const int n_embd   = ggml_get_op_params_i32(dst, 0);
-    const int head_dim = ggml_get_op_params_i32(dst, 1);
-    const int d_conv   = ggml_get_op_params_i32(dst, 2);
-    const float l2_eps = ggml_get_op_params_f32(dst, 3);
-
-    const int d_inner = (int) wq->ne[1];
-    const int n_head  = d_inner / head_dim;
-    const int nb_in   = n_embd / QK4_0;
-
-    const float * xf  = (const float *) x->data;
-    const float * cwf[3] = {
-        (const float *) cq->data,
-        (const float *) ck->data,
-        (const float *) cv->data,
-    };
-    const float * bwf = (const float *) beta_w->data;
-    float * csf       = (float *) conv_state->data;
-    float * yf        = (float *) dst->data;   // [3*d_inner + n_head] = q|k|v|beta
-    const block_q4_0 * wsf[3] = {
-        (const block_q4_0 *) wq->data,
-        (const block_q4_0 *) wk->data,
-        (const block_q4_0 *) wv->data,
-    };
-
-    // 工作区（单 malloc 分段）：qkv_proj[3*d_inner] | conv_out[3*d_inner] | beta_raw[n_head]
-    double * wk_ = (double *) malloc(((size_t)3*d_inner*2 + (size_t)n_head) * sizeof(double));
-    double * qkv  = wk_;                                   // [3*d_inner]
-    double * conv = qkv + (size_t)3*d_inner;               // [3*d_inner]（silu 后）
-    double * braw = conv + (size_t)3*d_inner;              // [n_head]
-
-    // 三路 q4_0 GEMV（Q4_DOT 序：块内 Σt q·x 再 ×d 累加）+ beta f32 GEMV（双精度）
-    for (int s = 0; s < 3; ++s) {
-        for (int c = 0; c < d_inner; ++c) {
-            double acc = 0.0;
-            const block_q4_0 * row = wsf[s] + (size_t)c*nb_in;
-            for (int b = 0; b < nb_in; ++b) {
-                const float d = GGML_FP16_TO_FP32(row[b].d);
-                double sm = 0.0;
-                for (int t = 0; t < QK4_0; ++t) {
-                    // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
-                    const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
-                    const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
-                    sm += (double)(nib - 8) * xf[b*QK4_0 + t];
-                }
-                acc += sm * (double)d;
-            }
-            qkv[(size_t)s*d_inner + c] = acc;
-        }
-    }
-    for (int h = 0; h < n_head; ++h) {
-        double acc = 0.0;
-        const float * row = bwf + (size_t)h*n_embd;
-        for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
-        braw[h] = acc;
-    }
-
-    // conv（每槽 s、通道 c）：conv_state 通道主序（通道 c 的 d_conv-1 个历史值连续，
-    // 地址 = s*cst + c*(d_conv-1) + w——与装载器 causal_conv1d 的 conv_state view
-    // 同构，R-021：prefill 原链/decode 融合共享同一 RMW 内存，布局必须按原链）；
-    // cqw[c*d_conv + w] = c{q,k,v}[c*d_conv + w]（GGUF 行主，通道 c 的核宽连续）
-    for (int s = 0; s < 3; ++s) {
-        for (int c = 0; c < d_inner; ++c) {
-            double acc = 0.0;
-            const float * ch = csf + (size_t)s*(d_conv-1)*d_inner + (size_t)c*(d_conv-1);
-            for (int w = 0; w < d_conv-1; ++w) {
-                acc += (double)ch[w] * (double)cwf[s][(size_t)c*d_conv + w];
-            }
-            acc += qkv[(size_t)s*d_inner + c] * (double)cwf[s][(size_t)c*d_conv + (d_conv-1)];
-            const float av = (float)acc;
-            conv[(size_t)s*d_inner + c] = (double)(av / (1.0f + expf(-av)));   // silu
-        }
-    }
-
-    // q/k 逐头 l2norm（因子 = 1/sqrt(Σx²+eps)，R-018）→ dst q|k 段
-    for (int s = 0; s < 2; ++s) {
-        for (int h = 0; h < n_head; ++h) {
-            double ss = 0.0;
-            for (int j = 0; j < head_dim; ++j) {
-                const double v_ = conv[(size_t)s*d_inner + h*head_dim + j];
-                ss += v_*v_;
-            }
-            const float f = 1.0f / sqrtf((float)ss + l2_eps);   /* build_gdn_l2_norm 闭式（R-018 代数更正） */
-            for (int j = 0; j < head_dim; ++j) {
-                yf[(size_t)s*d_inner + h*head_dim + j] =
-                    (float)conv[(size_t)s*d_inner + h*head_dim + j] * f;
-            }
-        }
-    }
-    // v 直通 + beta sigmoid
-    for (int i = 0; i < d_inner; ++i) {
-        yf[(size_t)2*d_inner + i] = (float)conv[(size_t)2*d_inner + i];
-    }
-    for (int h = 0; h < n_head; ++h) {
-        yf[(size_t)3*d_inner + h] = 1.0f / (1.0f + expf(-(float)braw[h]));
-    }
-
-    // conv_state 原地滚动（先算 conv 后滚动；通道主序连续段内 new[w]=old[w+1]，
-    // 写 w 时 old[w+1] 尚未被覆盖，new[d_conv-2]=本 token qkv 段）
-    for (int s = 0; s < 3; ++s) {
-        for (int c = 0; c < d_inner; ++c) {
-            float * ch = csf + (size_t)s*(d_conv-1)*d_inner + (size_t)c*(d_conv-1);
-            for (int w = 0; w < d_conv-2; ++w) {
-                ch[w] = ch[w+1];
-            }
-            ch[d_conv-2] = (float)qkv[(size_t)s*d_inner + c];
-        }
-    }
-    free(wk_);
-}
-
-// [R-017] GGML_OP_G1_KDA_OUT CPU 参考（单 task；语义 = KDA_SPEC.md stage2+3）。
-// KDA AR（行衰减按 g[i] 向量，与 GDN 唯一差异）+ gated RMSNorm 尾融合 + o_proj GEMV。
-// state 原地 RMW（列主 S(i,j)=s[j*d+i]）；stage3 输入走本地 gated 缓冲，无原地读写冲突。
-static void ggml_compute_forward_g1_kda_out(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
-    if (params->ith != 0) return;
-
-    const struct ggml_tensor * scr    = dst->src[0];   // opA dst：q|k|v|beta
-    const struct ggml_tensor * x      = dst->src[1];
-    const struct ggml_tensor * f_a    = dst->src[2];
-    const struct ggml_tensor * g_a    = dst->src[3];
-    const struct ggml_tensor * dt_b   = dst->src[4];
-    const struct ggml_tensor * ssm_a  = dst->src[5];
-    const struct ggml_tensor * o_norm = dst->src[6];
-    const struct ggml_tensor * wo     = dst->src[7];
-    struct ggml_tensor * state        = dst->src[8];   // RMW
-
-    const int n_embd = ggml_get_op_params_i32(dst, 0);
-    // params i32[1]=head_dim（= o_norm->ne[0]，与 d 冗余，builder 侧已 assert）
-    (void) ggml_get_op_params_i32(dst, 1);
-    const float rms_eps   = ggml_get_op_params_f32(dst, 2);
-    const float lower_bnd = ggml_get_op_params_f32(dst, 3);
-
-    const int d       = (int) o_norm->ne[0];
-    const int n_head  = (int) ssm_a->ne[0];
-    const int d_inner = d * n_head;
-    const int nb_out  = d_inner / QK4_0;
-
-    const float * qf = (const float *) scr->data;      // q|k|v|beta（head 主序 h*d+j）
-    const float * kf = qf + (size_t)d_inner;
-    const float * vf = qf + (size_t)2*d_inner;
-    const float * xf  = (const float *) x->data;
-    const float * faf = (const float *) f_a->data;
-    const float * gaf = (const float *) g_a->data;
-    const float * dtf = (const float *) dt_b->data;
-    const float * af  = (const float *) ssm_a->data;
-    const float * onf = (const float *) o_norm->data;
-    float * stf       = (float *) state->data;
-    float * yf        = (float *) dst->data;
-    const block_q4_0 * wof = (const block_q4_0 *) wo->data;
-
-    // 工作区（单 malloc 分段）：sreg[H*d*d] | dcol[d] | gdec[d] | ogate[d] | gated[d_inner]
-    double * wk_ = (double *) malloc(((size_t)n_head*d*d + (size_t)d_inner + (size_t)3*d) * sizeof(double));
-    double * sreg  = wk_;                                   // [H*d*d] 列主 S(j,i)=s[j*d+i]
-    double * dcol  = sreg + (size_t)n_head*d*d;             // [d]
-    double * gdec  = dcol + d;                              // [d] 衰减 exp(gate)
-    double * ogate = gdec + d;                              // [d] 输出门
-    double * gated = ogate + d;                             // [d_inner] stage3 输入
-
-    // stage2：每头 gate/out-gate 逐通道自算 + KDA AR + 尾融合
-    for (int h = 0; h < n_head; ++h) {
-        // gate（行衰减 g[i]=exp(gate)，lower_bound 负 → gate∈(lb,0)，exp<1）
-        for (int c = 0; c < d; ++c) {
-            const float * row = faf + (size_t)(h*d + c)*n_embd;
-            double acc = 0.0;
-            for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
-            const float pre = (float)acc + dtf[h*d + c];
-            gdec[c] = (double)expf(lower_bnd / (1.0f + expf(-(pre * af[h]))));
-        }
-        // out-gate 逐通道自算
-        for (int c = 0; c < d; ++c) {
-            const float * row = gaf + (size_t)(h*d + c)*n_embd;
-            double acc = 0.0;
-            for (int i = 0; i < n_embd; ++i) acc += (double)row[i] * xf[i];
-            ogate[c] = (double)(1.0f / (1.0f + expf(-(float)acc)));
-        }
-
-        const float * qh = qf + (size_t)h*d;
-        const float * kh = kf + (size_t)h*d;
-        const float * vh = vf + (size_t)h*d;
-        const float bta  = qf[(size_t)3*d_inner + h];
-        double * S = sreg + (size_t)h*d*d;
-
-        // AR（衰减与外积合并单趟：预乘衰减进寄存器，state 存衰减后值，同 delta-net）
-        for (int j = 0; j < d; ++j) {
-            for (int i = 0; i < d; ++i) {
-                S[(size_t)j*d + i] = (double)stf[(size_t)h*d*d + (size_t)j*d + i] * gdec[i];
-            }
-        }
-        for (int j = 0; j < d; ++j) {
-            double sk = 0.0;
-            for (int i = 0; i < d; ++i) sk += S[(size_t)j*d + i] * (double)kh[i];
-            dcol[j] = ((double)vh[j] - sk) * (double)bta;
-        }
-        for (int j = 0; j < d; ++j) {
-            for (int i = 0; i < d; ++i) {
-                S[(size_t)j*d + i] += (double)kh[i] * dcol[j];
-            }
-        }
-        // o_j = Σ_i S[j*d+i]·q[i] × qs（qs = 1/sqrt(d)：原链 build_delta_net_autoregressive
-        // 的 q 预乘 scale，R-021 补齐——此前误按 KDA_SPEC 论文口径漏乘，o 放大 ~sqrt(d) 倍）
-        const double qs = 1.0 / sqrt((double)d);
-        double ss = 0.0;
-        for (int j = 0; j < d; ++j) {
-            double acc = 0.0;
-            for (int i = 0; i < d; ++i) acc += S[(size_t)j*d + i] * (double)qh[i];
-            const double o = acc * qs;
-            gated[(size_t)h*d + j] = o;
-            ss += o * o;
-        }
-        // 尾部融合：gated[j] = o_j·rms 因子·o_norm[j]·ogate[j]
-        const float f = 1.0f / sqrtf((float)(ss / d) + rms_eps);
-        for (int j = 0; j < d; ++j) {
-            gated[(size_t)h*d + j] *= (double)(f * onf[j]) * ogate[j];
-        }
-        // state 写回（原地 RMW）
-        for (size_t idx = 0; idx < (size_t)d*d; ++idx) {
-            stf[(size_t)h*d*d + idx] = (float)S[idx];
-        }
-    }
-
-    // stage3：o_proj GEMV（q4_0，x = gated → y 直接写 dst，无重叠）
-    for (int r = 0; r < n_embd; ++r) {
-        double acc = 0.0;
-        const block_q4_0 * row = wof + (size_t)r*nb_out;
-        for (int b = 0; b < nb_out; ++b) {
-            const float d_ = GGML_FP16_TO_FP32(row[b].d);
-            double sm = 0.0;
-            for (int t = 0; t < QK4_0; ++t) {
-                // q4_0 canonical layout: byte j = (low: elem j | high: elem j+QK4_0/2)
-                const uint8_t qb = row[b].qs[t & (QK4_0/2 - 1)];
-                const int nib = (t < QK4_0/2) ? (qb & 0xF) : (qb >> 4);
-                sm += (double)(nib - 8) * gated[b*QK4_0 + t];
-            }
-            acc += sm * (double)d_;
-        }
-        yf[r] = (float)acc;
-    }
-    free(wk_);
-}
 
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
@@ -2470,22 +2028,6 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_top_k(params, tensor);
             } break;
-        case GGML_OP_MOE_TOPK_FUSED:
-            {
-                ggml_compute_forward_moe_topk_fused(params, tensor);
-            } break;
-        case GGML_OP_G1_SSM_LAYER:
-            {
-                ggml_compute_forward_g1_ssm_layer(params, tensor);
-            } break;
-        case GGML_OP_G1_KDA_IN:
-            {
-                ggml_compute_forward_g1_kda_in(params, tensor);
-            } break;
-        case GGML_OP_G1_KDA_OUT:
-            {
-                ggml_compute_forward_g1_kda_out(params, tensor);
-            } break;
         case GGML_OP_LEAKY_RELU:
             {
                 ggml_compute_forward_leaky_relu(params, tensor);
@@ -2576,6 +2118,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_DSV4_HC_POST:
             {
                 ggml_compute_forward_dsv4_hc_post(params, tensor);
+            } break;
+        case GGML_OP_TOP_K_MASK:
+            {
+                ggml_compute_forward_top_k_mask(params, tensor);
             } break;
         case GGML_OP_MAP_CUSTOM1:
             {
@@ -2754,25 +2300,13 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             {
                 n_tasks = 1;
             } break;
-        case GGML_OP_MOE_TOPK_FUSED:
-            {
-                n_tasks = 1; // tiny [E<=128 x n_tokens] routing op, single task
-            } break;
-        case GGML_OP_G1_SSM_LAYER:
-            {
-                n_tasks = 1; // decode 单 token 层巨核，单 task（参考实现串行）
-            } break;
-        case GGML_OP_G1_KDA_IN:
-        case GGML_OP_G1_KDA_OUT:
-            {
-                n_tasks = 1; // decode 单 token 层巨核，单 task（参考实现串行）
-            } break;
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
         case GGML_OP_DSV4_HC_COMB:
         case GGML_OP_DSV4_HC_PRE:
         case GGML_OP_DSV4_HC_POST:
+        case GGML_OP_TOP_K_MASK:
             {
                 n_tasks = n_threads;
             } break;
@@ -3351,7 +2885,7 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_ADD_ID:
                 case GGML_OP_ADD1:
                     {
-                        if (ggml_is_quantized(node->src[0]->type)) {
+                        if (ggml_is_quantized(node->src[0]->type) || node->src[0]->type == GGML_TYPE_F8_E4M3) {
                             cur = ggml_type_size(GGML_TYPE_F32) * node->src[0]->ne[0] * n_tasks;
                         }
                     } break;
@@ -3399,7 +2933,7 @@ struct ggml_cplan ggml_graph_plan(
                     } break;
                 case GGML_OP_OUT_PROD:
                     {
-                        if (ggml_is_quantized(node->src[0]->type) ||
+                        if (ggml_is_quantized(node->src[0]->type) || node->src[0]->type == GGML_TYPE_F8_E4M3 ||
                             node->src[0]->type == GGML_TYPE_F16) {
                             cur = ggml_type_size(GGML_TYPE_F32) * node->src[0]->ne[0] * n_tasks;
                         }
@@ -3630,30 +3164,6 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             node_n += n_fused;
         } else {
             ggml_compute_forward(&params, node);
-        }
-
-        // [dspark] GGML_CPU_NODEDUMP=1: per-node rms/max/f4, dumped by thread 0
-        // right after compute (before the barrier) — golden reference for the
-        // OpenCL [nd] dumps. Dumps the LAST node of a fused chain.
-        if (state->ith == 0 && getenv("GGML_CPU_NODEDUMP")) {
-            static int nd_cnt = 0;
-            struct ggml_tensor * dn = cgraph->nodes[node_n];
-            if (dn->type == GGML_TYPE_F32 && ggml_is_contiguous(dn) && dn->data && nd_cnt < 4000) {
-                ++nd_cnt;
-                const float * host = (const float *) dn->data;
-                const size_t n = ggml_nbytes(dn) / sizeof(float);
-                double ss = 0; float mx = 0; size_t nz = 0;
-                for (size_t j = 0; j < n; j++) {
-                    ss += (double)host[j]*host[j];
-                    if (fabsf(host[j]) > mx) mx = fabsf(host[j]);
-                    if (host[j] == 0) ++nz;
-                }
-                fprintf(stderr, "[nd-cpu] %s op=%s ne=[%lld,%lld] rms=%.6g max=%.6g zero=%zu/%zu f4=%.6g,%.6g,%.6g,%.6g\n",
-                        dn->name, ggml_op_name(dn->op), (long long)dn->ne[0], (long long)dn->ne[1],
-                        sqrt(ss/(double)n), mx, nz, n,
-                        n >= 4 ? host[0] : 0.f, n >= 4 ? host[1] : 0.f,
-                        n >= 4 ? host[2] : 0.f, n >= 4 ? host[3] : 0.f);
-            }
         }
 
         if (state->ith == 0 && cplan->abort_callback &&
@@ -4046,7 +3556,7 @@ void ggml_cpu_fp16_to_fp32(const ggml_fp16_t * x, float * y, int64_t n) {
         _mm_storeu_ps(y + i, y_vec);
     }
 
-#elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfhmin)
+#elif defined(__riscv_v) && defined(__riscv_zvfhmin)
     // calculate step size
     const int epr = __riscv_vsetvlmax_e16m2();
     const int step = epr * 2;
@@ -4116,7 +3626,7 @@ void ggml_cpu_bf16_to_fp32(const ggml_bf16_t * x, float * y, int64_t n) {
                                         (const __m128i *)(x + i))),
                                 16)));
     }
-#elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfmin)
+#elif defined(__riscv_v) && defined(__riscv_zvfbfmin)
     // calculate step size
     const int epr = __riscv_vsetvlmax_e16m2();
     const int step = epr * 2;
@@ -4236,7 +3746,7 @@ int ggml_cpu_has_arm_fma(void) {
 }
 
 int ggml_cpu_has_riscv_v(void) {
-#if defined(__riscv_v_intrinsic)
+#if defined(__riscv_v)
     return 1;
 #else
     return 0;
@@ -4244,7 +3754,7 @@ int ggml_cpu_has_riscv_v(void) {
 }
 
 int ggml_cpu_get_rvv_vlen(void) {
-#if defined(__riscv) && defined(__riscv_v_intrinsic)
+#if defined(__riscv) && defined(__riscv_v)
     return ggml_riscv_arch_features.rvv_vlen;
 #else
     return 0;
@@ -4407,6 +3917,7 @@ void ggml_cpu_init(void) {
             // initialize UE4M3 table (256 entries)
             for (int i = 0; i < (1 << 8); ++i) {
                 ggml_table_f32_ue4m3[i] = ggml_ue4m3_to_fp32(i);
+                ggml_table_f32_f8_e4m3[i] = ggml_f8_e4m3_to_fp32(i);
             }
 
             const uint64_t t_end = ggml_time_us(); UNUSED(t_end);

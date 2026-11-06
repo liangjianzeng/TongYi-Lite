@@ -19,13 +19,14 @@
 
 llama_memory_recurrent::llama_memory_recurrent(
         const llama_model & model,
+                 bool   no_alloc,
                 ggml_type   type_r,
                 ggml_type   type_s,
                      bool   offload,
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max), ctxs_bufs(no_alloc) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
@@ -51,9 +52,8 @@ llama_memory_recurrent::llama_memory_recurrent(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                // r and s per layer, plus the separate PLE conv row where the model has one,
-                // plus the persistent constant gather index (LLAMA_RS_CONST_IDX)
-                /*.mem_size   =*/ size_t(((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer + 1)*ggml_tensor_overhead()),
+                // r and s per layer, plus the separate PLE conv row where the model has one
+                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -86,24 +86,10 @@ llama_memory_recurrent::llama_memory_recurrent(
         ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
 
         if (offload) {
-            // [dspark 2026-10-17] LLAMA_RS_CACHE_CPU=1 pins the recurrent state
-            // cache to host memory. Workaround/diagnostic for the 740 full-GPU
-            // path: in-graph cpy state write-backs into the GPUOpenCL RS buffer
-            // silently lose data for layers >= 1 (layer 0 OK), corrupting every
-            // decode after prefill. Small cache (~63 MiB) so host residency is
-            // viable on unified-memory devices.
-            static const bool rs_cpu = []{
-                const char * e = getenv("LLAMA_RS_CACHE_CPU");
-                return e && e[0] == '1';
-            }();
-            if (!rs_cpu) {
-                auto * dev = model.dev_layer(i);
-                buft = ggml_backend_dev_buffer_type(dev);
+            auto * dev = model.dev_layer(i);
+            buft = ggml_backend_dev_buffer_type(dev);
 
-                dev_name = ggml_backend_dev_name(dev);
-            } else {
-                dev_name = "CPU (LLAMA_RS_CACHE_CPU=1)";
-            }
+            dev_name = ggml_backend_dev_name(dev);
         }
 
         LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);
@@ -127,25 +113,13 @@ llama_memory_recurrent::llama_memory_recurrent(
             ggml_format_name(p, "cache_ple_r_l%d", i);
             p_l[i] = p;
         }
-
-        // [dspark 2026-10-18] place the persistent constant gather index in the
-        // first (bottom-most) layer's buffer so the layer-0 GET_ROWS reads it
-        // without a cross-backend copy. Buffer clear below zeroes it to [0].
-        if (!s_copy_c) {
-            s_copy_c = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-            ggml_set_name(s_copy_c, "rs_s_copy_const");
-        }
     }
 
-    // allocate tensors and initialize the buffers to avoid NaNs in the padding
+    // allocate the tensors and initialize the buffers to avoid NaNs in the padding
     for (auto & [buft, ctx] : ctx_map) {
-        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
-        if (!buf) {
-            throw std::runtime_error("failed to allocate buffer for rs cache");
-        }
-        ggml_backend_buffer_clear(buf, 0);
+        ggml_backend_buffer_t buf = ctxs_bufs.emplace(std::move(ctx), buft, "rs cache");
+
         LLAMA_LOG_INFO("%s: %10s RS buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
-        ctxs_bufs.emplace_back(std::move(ctx), buf);
     }
 
     if (is_empty()) {
@@ -174,6 +148,7 @@ void llama_memory_recurrent::clear(bool data) {
         cells[i].seq_id.clear();
         cells[i].src = -1;
         cells[i].tail = -1;
+        cells[i].rs_max = 0;
     }
 
     head = 0;
@@ -220,7 +195,7 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
         if (tail_id >= 0) {
             auto & cell = cells[tail_id];
 
-            // partial rollback via per-token snapshot index (bounded by n_rs_seq)
+            // partial rollback via per-token snapshot index (bounded by the snapshots of the last ubatch)
             if (0 < p0 && p0 <= cell.pos && p1 > cell.pos) {
                 // a cell shared by several sequences cannot move back for only one of them
                 if (cell.seq_id.size() > 1) {
@@ -234,7 +209,7 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                 const llama_pos rollback = cell.pos - (p0 - 1);
                 // pending rollback is single-use
                 const bool pending = rs_idx[seq_id] != 0;
-                if (!pending && rollback >= 1 && rollback <= (llama_pos) n_rs_seq) {
+                if (!pending && rollback >= 1 && rollback <= (llama_pos) cell.rs_max) {
                     set_rs_idx(seq_id, (uint32_t) rollback);
                     cell.pos = p0 - 1;
                     return true;
@@ -457,11 +432,7 @@ void llama_memory_recurrent::set_rs_idx(llama_seq_id seq_id, uint32_t idx) {
 }
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_memory_recurrent::memory_breakdown() const {
-    std::map<ggml_backend_buffer_type_t, size_t> ret;
-    for (const auto & [_, buf] : ctxs_bufs) {
-        ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
-    }
-    return ret;
+    return ctxs_bufs.memory_breakdown();
 }
 
 llama_memory_context_ptr llama_memory_recurrent::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
@@ -702,6 +673,7 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
                 __func__, last_pos, cell.pos, ubatch.seq_id[i][0], n_seq_tokens);
         }
         cell.pos = last_pos;
+        cell.rs_max = n_seq_tokens <= n_rs_seq + 1 ? n_seq_tokens - 1 : 0;
         cell.seq_id.clear();
         for (int32_t j = 0; j < ubatch.n_seq_id[i]; ++j) {
             const llama_seq_id seq_id = ubatch.seq_id[i][j];
@@ -1406,34 +1378,4 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
         }
     }
     return (int32_t)(idx * mem->size) + src0;
-}
-
-ggml_tensor * llama_memory_recurrent_context::get_s_copy_c() const {
-    return mem->s_copy_c;
-}
-
-bool llama_memory_recurrent_context::s_copy_is_const_zero() const {
-    if (is_full) {
-        return false;
-    }
-
-    if (mem->n != 1) {
-        return false;
-    }
-
-    const auto & cell = mem->cells[mem->head];
-
-    if (cell.src0 != 0) {
-        return false;
-    }
-
-    // a pending rollback snapshot would make s_copy(0) = rs_idx[seq]*size + src0 != 0
-    if (mem->n_rs_seq != 0 && !cell.seq_id.empty()) {
-        const llama_seq_id seq = *cell.seq_id.begin();
-        if (seq >= 0 && (size_t) seq < mem->rs_idx.size() && mem->rs_idx[seq] != 0) {
-            return false;
-        }
-    }
-
-    return true;
 }

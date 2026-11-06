@@ -158,6 +158,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_F8_E4M3       = 42, // except 1d tensors
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
@@ -318,19 +319,6 @@ extern "C" {
     };
 
     struct llama_model_params {
-        // Opt-in DSpark head borrowing. Caller guarantees the bound target and keeps it alive
-        // until the drafter and all drafter contexts are destroyed. No head weights are copied.
-        const struct llama_model * dspark_head_source;
-
-        // split-moe: path to experts manifest.json (llama-moe-experts). When set,
-        // routed expert tensors (ffn_*_exps) are synthesized as slot tensors fed by
-        // runtime preadv from the per-layer bins (MiniCPM-V4.7 split layout).
-        const char * moe_experts_path;
-
-        // split-moe: number of expert slots (LRU bank) per MoE layer. 0 = disabled.
-        // Must be >= n_expert_used; practical range 8..32 on mobile RAM budgets.
-        int32_t moe_slot_bank;
-
         // NULL-terminated list of devices to use for offloading (if NULL, all available devices are used)
         ggml_backend_dev_t * devices;
 
@@ -619,16 +607,6 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa        (const struct llama_model * model);
 
-    // Max routed-expert usage across layers (0 when the model has no MoE
-    // layers). Worst case for slot / ubatch sizing. (n_expert itself lives in
-    // llama-ext.h.)
-    LLAMA_API int32_t llama_model_n_expert_used(const struct llama_model * model);
-
-    // Total routed experts (hparams.n_expert). Vendored: no llama-ext.h in this
-    // build; split-MoE bank sizing needs the hard upper bound on per-layer
-    // unique experts (unique <= n_expert regardless of ubatch width).
-    LLAMA_API int32_t llama_model_n_expert(const struct llama_model * model);
-
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 
@@ -695,11 +673,6 @@ extern "C" {
 
     // Returns true if the model is hybrid (like Jamba, Granite, etc.)
     LLAMA_API bool llama_model_is_hybrid(const struct llama_model * model);
-
-    // Returns true if the model uses Multi-head Latent Attention (MLA) for all
-    // its attention layers (like DeepSeek, bailingmoe3). MLA models have no
-    // independent V cache (has_v == false) and require type_k == type_v.
-    LLAMA_API bool llama_model_is_mla(const struct llama_model * model);
 
     // Returns true if the model is diffusion-based (like LLaDA, Dream, etc.)
     LLAMA_API bool llama_model_is_diffusion(const struct llama_model * model);
@@ -1591,6 +1564,10 @@ extern "C" {
                                float   penalty_repeat,   // must be > 0.0, 1.0 = disabled
                                float   penalty_freq,     // must be finite, 0.0 = disabled
                                float   penalty_present); // must be finite, 0.0 = disabled
+
+    /// maximum number of distinct DRY sequence breakers, duplicates not counted
+    /// processing each breaker scans the entire vocabulary, so the init cost is O(num_breakers x n_vocab)
+    #define LLAMA_DRY_MAX_SEQ_BREAKERS 64
 
     ///  @details DRY sampler, designed by p-e-w, as described in: https://github.com/oobabooga/text-generation-webui/pull/5677, porting Koboldcpp implementation authored by pi6am: https://github.com/LostRuins/koboldcpp/pull/982
     LLAMA_API struct llama_sampler * llama_sampler_init_dry(

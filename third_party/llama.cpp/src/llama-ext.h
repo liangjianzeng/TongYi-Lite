@@ -5,10 +5,35 @@
 // try as much as possible to not include this header in the rest of the codebase
 
 #include "llama.h"
+#include "llama-arch.h"
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
+
+//
+// llama architecture queries
+//
+
+// all the LLM architectures known to the library
+LLAMA_API std::vector<llm_arch> llama_arch_all();
+
+// the canonical name of an architecture (e.g. "llama"), or "unknown"
+LLAMA_API const char * llama_arch_name(llm_arch arch);
+
+// the architecture with the given canonical name, or LLM_ARCH_UNKNOWN
+LLAMA_API llm_arch llama_arch_from_string(const std::string & name);
+
+// the arch-resolved GGUF key of a KV id, e.g. LLM_KV_CONTEXT_LENGTH -> "llama.context_length"
+LLAMA_API std::string llama_arch_kv_name(llm_arch arch, llm_kv key);
+
+LLAMA_API bool llama_arch_supports_sm_tensor(llm_arch arch);
+
+LLAMA_API bool llama_arch_supports_mixed_batch(llm_arch arch);
+
+// FIXME temporary function for better error messages
+LLAMA_API bool llama_arch_supports_save(llm_arch arch);
 
 // Reserve a new compute graph. It is valid until the next call to llama_graph_reserve.
 LLAMA_API struct ggml_cgraph * llama_graph_reserve(
@@ -122,6 +147,9 @@ enum llama_decision_order {
 // The embeddings output has one value per entry: row i is the score of option i
 LLAMA_API bool llama_batch_ext_set_decision_order(struct llama_batch_ext * batch, int32_t idx, enum llama_decision_order order);
 
+// Label of option i of a decision model ("<arch>.decision.labels"), nullptr past the last one
+LLAMA_API const char * llama_model_decision_label(const struct llama_model * model, uint32_t i);
+
 // mirrors:
 // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
@@ -136,6 +164,19 @@ LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32
 // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
 
+// Write the enabled layer inputs to a device buffer [n_layer_inp*n_embd, n_batch] instead of host memory.
+// Row r holds the token at batch index r, layers in ascending layer id order.
+LLAMA_API void llama_set_embeddings_layer_inp_dev(struct llama_context * ctx, bool value);
+
+// Whether decode accepts entries added with llama_batch_ext_add_embd_row()
+// (needs a DFlash/DSpark decoder context whose ctx_other has a layer input device buffer).
+LLAMA_API bool llama_supports_embd_row(const struct llama_context * ctx);
+
+// Add an entry whose embedding is row `row` of the layer input device buffer of ctx_other.
+// All entries of the batch must be of this kind. Positions are set with llama_batch_ext_set_pos(), n_pos_per_embd of them.
+// Returns the batch index (>= 0), or the llama_batch_ext_add() error codes.
+LLAMA_API int32_t llama_batch_ext_add_embd_row(struct llama_batch_ext * batch, llama_seq_id seq_id, int32_t row);
+
 LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 
 //
@@ -149,10 +190,6 @@ LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_mode
 // returns the number of extracted layers from target model
 LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
 
-// returns true if the draft model carries a DSpark Markov head. Both lineages declare
-// general.architecture = dflash, so this is how to tell them apart.
-LLAMA_API bool llama_model_has_dspark_markov_head(const struct llama_model * model);
-
 // retrieves the whole token embedding matrix in F32 format (n_embd * n_vocab)
 // returns total number of elements or 0 on error
 // if out is nullptr, returns the number of tokens without writing to out
@@ -162,39 +199,6 @@ LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, fl
 // same as above, but only the rows of the given tokens, in order (n_tokens * n_embd elements)
 // returns the number of elements written or 0 on error
 LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const llama_token * tokens, uint32_t n_tokens, float * out);
-
-//
-// dspark model metadata (fork API, kept for the speculative dspark driver)
-//
-
-struct llama_dspark_meta {
-    int64_t n_embd          = 0;
-    int64_t n_vocab         = 0;  // from token_embd.weight's own shape, not the (empty) vocab
-    int64_t n_capture       = 0;  // target_layer_ids count
-    int64_t n_embd_cap      = 0;  // n_capture * n_embd (raw pre-fc tap width)
-    int32_t block_size      = 0;
-    int32_t mask_token_id   = 0;
-    int64_t markov_rank     = 0;      // 0 if the checkpoint has no markov head
-    bool    graph_corrected = false;  // greedy predecessor chain already applied on device
-};
-
-// Returns false if `model` is not a loaded dspark model (block_size == 0).
-LLAMA_API bool llama_model_dspark_get_meta(const struct llama_model * model, llama_dspark_meta * out);
-
-// Only the "vanilla" markov head (a plain low-rank embedding + linear pair,
-// VanillaMarkov in the DeepSpec reference) is supported here: it's the only
-// variant present in shipped GGUFs today -- gated/rnn markov heads carry
-// extra gate_proj/joint_proj tensors that dspark's GGUF converter and
-// load_arch_tensors() don't currently map (see src/models/dspark.cpp).
-//
-// w1 and w2 are both returned as [n_vocab * n_rank] row-major (rank
-// fastest-varying), matching their GGUF storage (ne = [n_rank, n_vocab]):
-//   w1[token_id * n_rank + r] == markov_w1.weight[token_id][r]  (embedding row)
-//   w2[token_id * n_rank + r] == markov_w2.weight[token_id][r]  (mul_mat weight row)
-// Returns false (leaving w1/w2 untouched) if the model has no markov head.
-LLAMA_API bool llama_model_dspark_get_markov(const struct llama_model * model,
-                                             std::vector<float> &       w1,
-                                             std::vector<float> &       w2);
 
 // realtime models: number of tokens the output lags behind the audio input, used by mtmd; 0 if not applicable
 LLAMA_API uint32_t llama_model_n_tokens_delay(const struct llama_model * model);
