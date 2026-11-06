@@ -263,12 +263,11 @@ kernel void kernel_convert_block_q4_0_noshuffle(
         q[i + 0      ] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
         q[i + QK4_0/4] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
 
-#ifdef ADRENO_GPU
-        // Workaround for adreno - must have the following printf statement for
-        // the kernel to work properly. Otherwise it produces incorrect result.
-        // convert_uchar above also seems necessary.
-        // Compare against a large number so that it does not print anything.
-        // get_sub_group_local_id() also works.
+// [dspark 2026-10-19] printf hack removed under rusticl (FAKE_QCOM): it is a QC
+// online-compiler workaround only; on rusticl/clang the never-firing printf makes
+// NIR allocate a device printf buffer whose uninitialized header is read back by
+// the host as a bogus length -> Rust range panic -> process abort (K40 a650).
+#if defined(ADRENO_GPU) && !defined(GGML_NO_ADRENO_PRINTF_HACK)
         if (get_global_id(0) == 65536*4096) {
             printf("%04x - %02x\n", *(global ushort*)d, ((x0 & 0xF0) >> 4) | (x1 & 0xF0));
         }
@@ -320,22 +319,31 @@ kernel void kernel_convert_block_q4_0_trans4_ns(
     dst_d[dst_blk_offset] = b->d;
 
     // extract quantization and unshuffle
-    ushort8 pre_block = ((global ushort8 *)(&(b->qs[0])))[0];
-
-    ushort8 post_block = (ushort8)(0);
-
-    uchar * pre_block_ptr = (uchar *)(&pre_block);
-    uchar * post_block_ptr = (uchar *)(&post_block);
-
+    // [dspark 2026-10-13] Do NOT alias private vectors through uchar* here.
+    // Qualcomm Adreno compilers have been observed to miscompile exactly this
+    // pattern (use_adreno_moe_kernels excludes A6x/A7x upstream for precisely
+    // these *_trans4_ns repack kernels; E031.47.18.49 on Adreno 830 shows the
+    // same corruption: on-device probe rel err ~0.2-0.3 for q4_0, output =
+    // correct value x wrong constant for q4_K, garbage logits in real models).
+    // Build the packed words explicitly with shifts instead.
+    global uchar * qs = b->qs;
+    uint wx = 0, wy = 0, wz = 0, ww = 0;
     for (int i = 0; i < QK4_0 / 4; ++i) {
-        uchar x0 = pre_block_ptr[2*i + 0];
-        uchar x1 = pre_block_ptr[2*i + 1];
+        uchar x0 = qs[2*i + 0];
+        uchar x1 = qs[2*i + 1];
 
-        post_block_ptr[i + 0        ] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
-        post_block_ptr[i + QK4_0 / 4] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
+        uchar lo = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
+        uchar hi = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
+
+        if (i < 4) {
+            wx |= ((uint)lo) << (i * 8);
+            wz |= ((uint)hi) << (i * 8);
+        } else {
+            wy |= ((uint)lo) << ((i - 4) * 8);
+            ww |= ((uint)hi) << ((i - 4) * 8);
+        }
     }
-
-    uint4 q_block = as_uint4(post_block);
+    uint4 q_block = (uint4)(wx, wy, wz, ww);
 
     uint offset = i02 * ne00_blk * ne01 * 4 + i00 * ne01 * 4 + i01;
     dst_q[offset] = q_block.x;
@@ -374,21 +382,24 @@ kernel void kernel_restore_block_q4_0_trans4_ns(
     q_block.z = src_q[src_q_offset + ne01 * 2];
     q_block.w = src_q[src_q_offset + ne01 * 3];
 
-    ushort8 post_block = as_ushort8(q_block);
-    ushort8 pre_block = (ushort8)(0);
-
-    uchar * pre_block_ptr = (uchar *)(&pre_block);
-    uchar * post_block_ptr = (uchar *)(&post_block);
-
+    // [dspark 2026-10-13] Same anti-aliasing rewrite as the convert kernel:
+    // no private-vector-through-uchar* access (miscompiled by some Adreno
+    // compilers, see kernel_convert_block_q4_0_trans4_ns note).
+    global uchar * qs_dst = b->qs;
     for (int i = 0; i < QK4_0 / 4; ++i) {
-        uchar x0 = post_block_ptr[i + 0];
-        uchar x1 = post_block_ptr[i + QK4_0 / 4];
-
-        pre_block_ptr[2 * i + 0] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
-        pre_block_ptr[2 * i + 1] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
+        // post bytes: lo pair byte (values 2i, 2i+1), hi pair byte (values 2i+16, 2i+17)
+        uchar x0, x1;
+        if (i < 4) {
+            x0 = (uchar)((q_block.x >> (i * 8)) & 0xFF);
+            x1 = (uchar)((q_block.z >> (i * 8)) & 0xFF);
+        } else {
+            x0 = (uchar)((q_block.y >> ((i - 4) * 8)) & 0xFF);
+            x1 = (uchar)((q_block.w >> ((i - 4) * 8)) & 0xFF);
+        }
+        // re-shuffle into ggml q4_0 byte order: byte j holds v(j) | v(j+16) << 4
+        qs_dst[2*i + 0] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
+        qs_dst[2*i + 1] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
     }
-
-    ((__global ushort8 *)(&(b->qs[0])))[0] = pre_block;
 }
 
 //------------------------------------------------------------------------------
@@ -453,7 +464,7 @@ kernel void kernel_convert_block_q4_1_noshuffle(
         q[i + 0      ] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
         q[i + QK4_1/4] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
 
-#ifdef ADRENO_GPU
+#if defined(ADRENO_GPU) && !defined(GGML_NO_ADRENO_PRINTF_HACK)
         if (get_global_id(0) == 65536*4096) {
             printf("%04x - %02x\n", *(global ushort*)d, ((x0 & 0xF0) >> 4) | (x1 & 0xF0));
         }
@@ -566,21 +577,24 @@ kernel void kernel_restore_block_q4_1_trans4_ns(
     q_block.z = src_q[src_q_offset + ne01 * 2];
     q_block.w = src_q[src_q_offset + ne01 * 3];
 
-    ushort8 post_block = as_ushort8(q_block);
-    ushort8 pre_block = (ushort8)(0);
-
-    uchar * pre_block_ptr = (uchar *)(&pre_block);
-    uchar * post_block_ptr = (uchar *)(&post_block);
-
+    // [dspark 2026-10-13] Same anti-aliasing rewrite as the convert kernel:
+    // no private-vector-through-uchar* access (miscompiled by some Adreno
+    // compilers, see kernel_convert_block_q4_0_trans4_ns note).
+    global uchar * qs_dst = b->qs;
     for (int i = 0; i < QK4_0 / 4; ++i) {
-        uchar x0 = post_block_ptr[i + 0];
-        uchar x1 = post_block_ptr[i + QK4_0 / 4];
-
-        pre_block_ptr[2 * i + 0] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
-        pre_block_ptr[2 * i + 1] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
+        // post bytes: lo pair byte (values 2i, 2i+1), hi pair byte (values 2i+16, 2i+17)
+        uchar x0, x1;
+        if (i < 4) {
+            x0 = (uchar)((q_block.x >> (i * 8)) & 0xFF);
+            x1 = (uchar)((q_block.z >> (i * 8)) & 0xFF);
+        } else {
+            x0 = (uchar)((q_block.y >> ((i - 4) * 8)) & 0xFF);
+            x1 = (uchar)((q_block.w >> ((i - 4) * 8)) & 0xFF);
+        }
+        // re-shuffle into ggml q4_0 byte order: byte j holds v(j) | v(j+16) << 4
+        qs_dst[2*i + 0] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
+        qs_dst[2*i + 1] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
     }
-
-    ((__global ushort8 *)(&(b->qs[0])))[0] = pre_block;
 }
 
 //------------------------------------------------------------------------------
@@ -651,7 +665,7 @@ kernel void kernel_convert_block_q5_0_noshuffle(
         q[i + 0      ] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
         q[i + QK5_0/4] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
 
-#ifdef ADRENO_GPU
+#if defined(ADRENO_GPU) && !defined(GGML_NO_ADRENO_PRINTF_HACK)
         if (get_global_id(0) == 65536*4096) {
             printf("%04x - %02x\n", *(global ushort*)d, ((x0 & 0xF0) >> 4) | (x1 & 0xF0));
         }
@@ -860,7 +874,7 @@ kernel void kernel_convert_block_q5_1_noshuffle(
         q[i + 0      ] = convert_uchar(x0 & 0x0F) | convert_uchar((x1 & 0x0F) << 4);
         q[i + QK5_1/4] = convert_uchar((x0 & 0xF0) >> 4) | convert_uchar(x1 & 0xF0);
 
-#ifdef ADRENO_GPU
+#if defined(ADRENO_GPU) && !defined(GGML_NO_ADRENO_PRINTF_HACK)
         if (get_global_id(0) == 65536*4096) {
             printf("%04x - %02x\n", *(global ushort*)d, ((x0 & 0xF0) >> 4) | (x1 & 0xF0));
         }
@@ -1026,26 +1040,37 @@ kernel void kernel_convert_block_q4_k_trans4_ns(
     dst_d [dst_blk_offset] = b->d;
     dst_dm[dst_blk_offset] = b->dm;
 
-    uint4 qv[8];
-    uchar * qv_bytes = (uchar *)qv;
+    // [dspark 2026-10-13] No private-vector-through-uchar* aliasing here
+    // (miscompiled by some Adreno compilers, see
+    // kernel_convert_block_q4_0_trans4_ns note). Plain scalar word array,
+    // fully unrolled so all accesses resolve to registers.
+    uint qv_w[32];
+    #pragma unroll
+    for (int w = 0; w < 32; ++w) {
+        qv_w[w] = 0;
+    }
+    #pragma unroll
     for (int i = 0; i < QK_K / 64; ++i) {
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
             uchar x0 = b->q[i*32 + 2*j];
             uchar x1 = b->q[i*32 + 2*j + 1];
 
-            qv_bytes[i*32 + j     ] = convert_uchar(x0 & mask_0F) | convert_uchar((x1 & mask_0F) << 4);
-            qv_bytes[i*32 + j + 16] = convert_uchar((x0 & mask_F0) >> 4) | convert_uchar(x1 & mask_F0);
+            uchar lo = convert_uchar(x0 & mask_0F) | convert_uchar((x1 & mask_0F) << 4);
+            uchar hi = convert_uchar((x0 & mask_F0) >> 4) | convert_uchar(x1 & mask_F0);
+
+            qv_w[i*8 + (j >> 2)]     |= ((uint)lo) << ((j & 3) * 8);
+            qv_w[i*8 + 4 + (j >> 2)] |= ((uint)hi) << ((j & 3) * 8);
         }
     }
 
     uint base = i02 * ne00_blk * ne01 * 32 + i00 * ne01 * 32 + i01;
     #pragma unroll
     for (int p = 0; p < 8; ++p) {
-        uint4 v = qv[p];
-        dst_q[base + (p * 4 + 0) * ne01] = v.x;
-        dst_q[base + (p * 4 + 1) * ne01] = v.y;
-        dst_q[base + (p * 4 + 2) * ne01] = v.z;
-        dst_q[base + (p * 4 + 3) * ne01] = v.w;
+        dst_q[base + (p * 4 + 0) * ne01] = qv_w[p*4 + 0];
+        dst_q[base + (p * 4 + 1) * ne01] = qv_w[p*4 + 1];
+        dst_q[base + (p * 4 + 2) * ne01] = qv_w[p*4 + 2];
+        dst_q[base + (p * 4 + 3) * ne01] = qv_w[p*4 + 3];
     }
 
     __global uchar * s_dst = dst_s + (i02 * ne01 + i01) * ne00_blk * K_SCALE_SIZE + i00 * K_SCALE_SIZE;
@@ -1099,13 +1124,29 @@ kernel void kernel_restore_block_q4_k_trans4_ns(
         qv[p].w = src_q[base + (p * 4 + 3) * ne01];
     }
 
-    uchar * qv_bytes = (uchar *)qv;
+    // [dspark 2026-10-13] No private-vector-through-uchar* aliasing here
+    // (miscompiled by some Adreno compilers, see
+    // kernel_convert_block_q4_0_trans4_ns note). Flatten to a scalar word
+    // array (fully unrolled) and read bytes via shifts.
+    uint qv_w[32];
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+        qv_w[k*4 + 0] = qv[k].x;
+        qv_w[k*4 + 1] = qv[k].y;
+        qv_w[k*4 + 2] = qv[k].z;
+        qv_w[k*4 + 3] = qv[k].w;
+    }
+    global uchar * q_dst = b->q;
+    #pragma unroll
     for (int i = 0; i < QK_K / 64; ++i) {
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
-            uchar lo = qv_bytes[i*32 + j];
-            uchar hi = qv_bytes[i*32 + j + 16];
-            b->q[i*32 + 2*j]     = convert_uchar((lo & mask_0F) | ((hi & mask_0F) << 4));
-            b->q[i*32 + 2*j + 1] = convert_uchar(((lo & mask_F0) >> 4) | (hi & mask_F0));
+            uint wl = qv_w[i*8 + (j >> 2)];      // lo byte word
+            uint wh = qv_w[i*8 + 4 + (j >> 2)];  // hi byte word (+16 bytes)
+            uchar lo = (uchar)((wl >> ((j & 3) * 8)) & 0xFF);
+            uchar hi = (uchar)((wh >> ((j & 3) * 8)) & 0xFF);
+            q_dst[i*32 + 2*j]     = convert_uchar((lo & mask_0F) | ((hi & mask_0F) << 4));
+            q_dst[i*32 + 2*j + 1] = convert_uchar(((lo & mask_F0) >> 4) | (hi & mask_F0));
         }
     }
 }

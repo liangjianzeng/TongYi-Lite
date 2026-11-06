@@ -1,53 +1,91 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_subgroups : enable
 
+// [dspark 2026-10-14] SGB bitcast shims. Host passes -DSGB_FLOAT_BROKEN when
+// the driver's online compiler lacks float overloads of sub_group_broadcast
+// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
+// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
+// [dspark 2026-10-14] Scalar-float subgroup broadcast. 740's online compiler
+// lacks float overloads of sub_group_broadcast entirely -> host passes
+// -DSGB_SCALAR_BROKEN and broadcasts go through the uint-bitcast shim.
+// 830 (E031.47) has working float broadcast but miscompiles kernels whose
+// broadcasts go through an inline wrapper, even in pass-through form
+// (NMSE~2.2, 2026-10-14) -> uses the direct builtin. All call sites are
+// per-component scalar: no vector broadcast anywhere.
+#ifdef SGB_SCALAR_BROKEN
+inline float sgb_f(float v, uint lid) {
+    return as_float(sub_group_broadcast(as_uint(v), lid));
+}
+#define SGB_BC(v, lid) sgb_f(v, lid)
+#else
+#define SGB_BC(v, lid) sub_group_broadcast(v, lid)
+#endif
+
 #ifdef cl_qcom_reqd_sub_group_size
 #pragma OPENCL EXTENSION cl_qcom_reqd_sub_group_size : enable
 #define ADRENO_GPU 1
 #define REQD_SUBGROUP_SIZE_64 __attribute__((qcom_reqd_sub_group_size("half")))
 #endif
 
+// the driver's online compiler lacks float overloads of sub_group_broadcast
+// (Adreno 740: only scalar uint/int/long/ulong exist). Bitcast float<->uint,
+// broadcast as integer, cast back — bitwise identical, subgroup-uniform.
 #define QK1_0 128
 #ifndef N_SIMDGROUP
 #define N_SIMDGROUP 4
 #endif
 
 #define dequantizeBlockAccum_q1(total, bits, scale, regB, lb)                                       \
-    total += (2.0f*(float)((bits >>  0) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s0, lb+0); \
-    total += (2.0f*(float)((bits >>  1) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s1, lb+0); \
-    total += (2.0f*(float)((bits >>  2) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s2, lb+0); \
-    total += (2.0f*(float)((bits >>  3) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s3, lb+0); \
-    total += (2.0f*(float)((bits >>  4) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s4, lb+0); \
-    total += (2.0f*(float)((bits >>  5) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s5, lb+0); \
-    total += (2.0f*(float)((bits >>  6) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s6, lb+0); \
-    total += (2.0f*(float)((bits >>  7) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s7, lb+0); \
-    total += (2.0f*(float)((bits >>  8) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s0, lb+1); \
-    total += (2.0f*(float)((bits >>  9) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s1, lb+1); \
-    total += (2.0f*(float)((bits >> 10) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s2, lb+1); \
-    total += (2.0f*(float)((bits >> 11) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s3, lb+1); \
-    total += (2.0f*(float)((bits >> 12) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s4, lb+1); \
-    total += (2.0f*(float)((bits >> 13) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s5, lb+1); \
-    total += (2.0f*(float)((bits >> 14) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s6, lb+1); \
-    total += (2.0f*(float)((bits >> 15) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s7, lb+1); \
-    total += (2.0f*(float)((bits >> 16) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s0, lb+2); \
-    total += (2.0f*(float)((bits >> 17) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s1, lb+2); \
-    total += (2.0f*(float)((bits >> 18) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s2, lb+2); \
-    total += (2.0f*(float)((bits >> 19) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s3, lb+2); \
-    total += (2.0f*(float)((bits >> 20) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s4, lb+2); \
-    total += (2.0f*(float)((bits >> 21) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s5, lb+2); \
-    total += (2.0f*(float)((bits >> 22) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s6, lb+2); \
-    total += (2.0f*(float)((bits >> 23) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s7, lb+2); \
-    total += (2.0f*(float)((bits >> 24) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s0, lb+3); \
-    total += (2.0f*(float)((bits >> 25) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s1, lb+3); \
-    total += (2.0f*(float)((bits >> 26) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s2, lb+3); \
-    total += (2.0f*(float)((bits >> 27) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s3, lb+3); \
-    total += (2.0f*(float)((bits >> 28) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s4, lb+3); \
-    total += (2.0f*(float)((bits >> 29) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s5, lb+3); \
-    total += (2.0f*(float)((bits >> 30) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s6, lb+3); \
-    total += (2.0f*(float)((bits >> 31) & 1u) - 1.0f) * scale * sub_group_broadcast(regB.s7, lb+3);
+    total += (2.0f*(float)((bits >>  0) & 1u) - 1.0f) * scale * SGB_BC(regB.s0, lb+0); \
+    total += (2.0f*(float)((bits >>  1) & 1u) - 1.0f) * scale * SGB_BC(regB.s1, lb+0); \
+    total += (2.0f*(float)((bits >>  2) & 1u) - 1.0f) * scale * SGB_BC(regB.s2, lb+0); \
+    total += (2.0f*(float)((bits >>  3) & 1u) - 1.0f) * scale * SGB_BC(regB.s3, lb+0); \
+    total += (2.0f*(float)((bits >>  4) & 1u) - 1.0f) * scale * SGB_BC(regB.s4, lb+0); \
+    total += (2.0f*(float)((bits >>  5) & 1u) - 1.0f) * scale * SGB_BC(regB.s5, lb+0); \
+    total += (2.0f*(float)((bits >>  6) & 1u) - 1.0f) * scale * SGB_BC(regB.s6, lb+0); \
+    total += (2.0f*(float)((bits >>  7) & 1u) - 1.0f) * scale * SGB_BC(regB.s7, lb+0); \
+    total += (2.0f*(float)((bits >>  8) & 1u) - 1.0f) * scale * SGB_BC(regB.s0, lb+1); \
+    total += (2.0f*(float)((bits >>  9) & 1u) - 1.0f) * scale * SGB_BC(regB.s1, lb+1); \
+    total += (2.0f*(float)((bits >> 10) & 1u) - 1.0f) * scale * SGB_BC(regB.s2, lb+1); \
+    total += (2.0f*(float)((bits >> 11) & 1u) - 1.0f) * scale * SGB_BC(regB.s3, lb+1); \
+    total += (2.0f*(float)((bits >> 12) & 1u) - 1.0f) * scale * SGB_BC(regB.s4, lb+1); \
+    total += (2.0f*(float)((bits >> 13) & 1u) - 1.0f) * scale * SGB_BC(regB.s5, lb+1); \
+    total += (2.0f*(float)((bits >> 14) & 1u) - 1.0f) * scale * SGB_BC(regB.s6, lb+1); \
+    total += (2.0f*(float)((bits >> 15) & 1u) - 1.0f) * scale * SGB_BC(regB.s7, lb+1); \
+    total += (2.0f*(float)((bits >> 16) & 1u) - 1.0f) * scale * SGB_BC(regB.s0, lb+2); \
+    total += (2.0f*(float)((bits >> 17) & 1u) - 1.0f) * scale * SGB_BC(regB.s1, lb+2); \
+    total += (2.0f*(float)((bits >> 18) & 1u) - 1.0f) * scale * SGB_BC(regB.s2, lb+2); \
+    total += (2.0f*(float)((bits >> 19) & 1u) - 1.0f) * scale * SGB_BC(regB.s3, lb+2); \
+    total += (2.0f*(float)((bits >> 20) & 1u) - 1.0f) * scale * SGB_BC(regB.s4, lb+2); \
+    total += (2.0f*(float)((bits >> 21) & 1u) - 1.0f) * scale * SGB_BC(regB.s5, lb+2); \
+    total += (2.0f*(float)((bits >> 22) & 1u) - 1.0f) * scale * SGB_BC(regB.s6, lb+2); \
+    total += (2.0f*(float)((bits >> 23) & 1u) - 1.0f) * scale * SGB_BC(regB.s7, lb+2); \
+    total += (2.0f*(float)((bits >> 24) & 1u) - 1.0f) * scale * SGB_BC(regB.s0, lb+3); \
+    total += (2.0f*(float)((bits >> 25) & 1u) - 1.0f) * scale * SGB_BC(regB.s1, lb+3); \
+    total += (2.0f*(float)((bits >> 26) & 1u) - 1.0f) * scale * SGB_BC(regB.s2, lb+3); \
+    total += (2.0f*(float)((bits >> 27) & 1u) - 1.0f) * scale * SGB_BC(regB.s3, lb+3); \
+    total += (2.0f*(float)((bits >> 28) & 1u) - 1.0f) * scale * SGB_BC(regB.s4, lb+3); \
+    total += (2.0f*(float)((bits >> 29) & 1u) - 1.0f) * scale * SGB_BC(regB.s5, lb+3); \
+    total += (2.0f*(float)((bits >> 30) & 1u) - 1.0f) * scale * SGB_BC(regB.s6, lb+3); \
+    total += (2.0f*(float)((bits >> 31) & 1u) - 1.0f) * scale * SGB_BC(regB.s7, lb+3);
 
 
-#ifdef ADRENO_GPU
+// [dspark 2026-10-20] rusticl-safe (GGML_OPENCL_RUSTICL) per-lane self-load
+// dequant, one q1_0 32-bit word at a time: bit i of the word multiplies
+// activation float 32*j + i, i.e. pixel (pix + i/4) component (i%4) where
+// pix = kb*32 + 8*j for word j. No broadcast, no local reduce; one lane owns
+// a row end-to-end (full K loop), 4x redundant B reads (L1-resident).
+#define DEQUANT_ACCUM_SELF_Q1_W(total, bits, scale, img, pix) \
+    { for (uint _p = 0; _p < 8; _p++) { \
+        float4 qb4 = read_imagef(img, (pix) + _p); \
+        uint _s = _p * 4; \
+        total += (2.0f*(float)((bits >> (_s+0)) & 1u) - 1.0f) * scale * qb4.x; \
+        total += (2.0f*(float)((bits >> (_s+1)) & 1u) - 1.0f) * scale * qb4.y; \
+        total += (2.0f*(float)((bits >> (_s+2)) & 1u) - 1.0f) * scale * qb4.z; \
+        total += (2.0f*(float)((bits >> (_s+3)) & 1u) - 1.0f) * scale * qb4.w; \
+    } }
+
+#if defined(ADRENO_GPU) && !defined(GGML_OPENCL_RUSTICL)
 REQD_SUBGROUP_SIZE_64
 #endif
 __kernel void kernel_gemv_noshuffle_q1_0_f32(
@@ -85,6 +123,7 @@ __kernel void kernel_gemv_noshuffle_q1_0_f32(
 
     float totalSum = 0.0f;
 
+#if defined(ADRENO_GPU) && !defined(GGML_OPENCL_RUSTICL)
     #pragma unroll 1
     for (uint kb = groupId; kb < (K / QK1_0); kb += N_SIMDGROUP) {
         regS = src0_d[gid_s + kb * LINE_STRIDE_A]; // each fiber loads its row's scale
@@ -132,4 +171,26 @@ __kernel void kernel_gemv_noshuffle_q1_0_f32(
             dst[gid] = totalSum;
         }
     }
+#else
+    // [dspark 2026-10-20] rusticl-safe variant (FD650 measured sgs=128 for this
+    // kernel): sync-free full-K path, one lane owns its output row end-to-end.
+    #pragma unroll 1
+    for (uint kb = 0; kb < (K / QK1_0); kb++) {
+        regS = src0_d[gid_s + kb * LINE_STRIDE_A];
+        regA.s0 = read_imageui(src0_q, (gid_s + kb * BLOCK_STRIDE_A + LINE_STRIDE_A * 0)).x;
+        regA.s1 = read_imageui(src0_q, (gid_s + kb * BLOCK_STRIDE_A + LINE_STRIDE_A * 1)).x;
+        regA.s2 = read_imageui(src0_q, (gid_s + kb * BLOCK_STRIDE_A + LINE_STRIDE_A * 2)).x;
+        regA.s3 = read_imageui(src0_q, (gid_s + kb * BLOCK_STRIDE_A + LINE_STRIDE_A * 3)).x;
+
+        float scale = (float)regS;
+        DEQUANT_ACCUM_SELF_Q1_W(totalSum, regA.s0, scale, src1, kb * 32 + 0);
+        DEQUANT_ACCUM_SELF_Q1_W(totalSum, regA.s1, scale, src1, kb * 32 + 8);
+        DEQUANT_ACCUM_SELF_Q1_W(totalSum, regA.s2, scale, src1, kb * 32 + 16);
+        DEQUANT_ACCUM_SELF_Q1_W(totalSum, regA.s3, scale, src1, kb * 32 + 24);
+    }
+
+    dst = (global float*)((global char*)dst + offsetd);
+    if (gid < M) dst[gid] = totalSum;
+    return;
+#endif
 }

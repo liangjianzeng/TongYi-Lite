@@ -7,9 +7,18 @@ ggml_add_backend_library(${TARGET_NAME}
                          ggml-opencl.cpp
                          cl-program-cache.cpp
                          cl-program-cache.h
+                         tongyi_route_table.cpp
+                         tongyi_route_table.h
                          ../../include/ggml-opencl.h)
 target_link_libraries(${TARGET_NAME} PRIVATE ${OpenCL_LIBRARIES})
 target_include_directories(${TARGET_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
+
+# [tongyi R1 2026-10-25] 路由表单测（设计稿 §4）：cmake -DTONGYI_ROUTE_TEST=ON && ctest
+# 纯 host 逻辑（不碰 CL/ggml 内部头），交叉构建后推设备跑同样成立。
+if (TONGYI_ROUTE_TEST)
+    add_executable(tongyi-route-test tongyi_route_table_test.cpp tongyi_route_table.cpp tongyi_route_table.h)
+    add_test(NAME tongyi-route-test COMMAND tongyi-route-test)
+endif()
 
 if (GGML_OPENCL_PROFILING)
     message(STATUS "OpenCL profiling enabled (increases CPU overhead)")
@@ -328,6 +337,17 @@ set(GGML_OPENCL_KERNELS
     flash_attn_f32_q4_0
     flash_attn_f16
     flash_attn_f32
+    # [tongyi fork] 以下为 fork 专属内核 (batched-MoE/M1 raw/PTQ1_0/平面化 R-284 等), 上游无
+    moe_topk_fused
+    mul_mv_ptq1_0_f32
+    moe_sort_dspark
+    moe_q3k_pack
+    mul_mm_ptq1_0_f32_l4_lm
+    gemv_noshuffle_iq4_xs_plane_f32
+    gemv_noshuffle_ptq1_0_f32
+    gemv_noshuffle_q3_k_plane_f32
+    g1_ssm_layer
+    g1_kda_layer
 )
 
 if (GGML_OPENCL_USE_ADRENO_KERNELS)
