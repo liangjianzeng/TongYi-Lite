@@ -442,6 +442,17 @@ kernel void kernel_cpy_f32_f32_packflat(
 }
 
 
+// [TongYi-Lite aline-P1] fork 私有 q4_0 AoS 定义（换树时随 v0.9.0 版整文件取用而
+// 与使用端失联；源自 fork cpy.cl:416）。KV-cache q4_0 stays AoS 系列内核专用，
+// 与 ggml_opencl "KV-cache q4_0 stays AoS" 内核配套（quantize 位精确复刻 CPU
+// ggml_quantize_row_q4_0_ref）。
+#define QK4_0_CPY 32
+typedef struct {
+    half d;
+    uchar qs[QK4_0_CPY / 2];   // 高通驱动无 stdint：uchar 是 8 位标量，uint8 是向量类型
+} block_q4_0_cpy;
+
+
 // q4_0 (AoS blocks) -> f32, view-aware, standard cpy arg layout.
 kernel void kernel_cpy_q4_0_f32_view_aos(
         global char * src0,

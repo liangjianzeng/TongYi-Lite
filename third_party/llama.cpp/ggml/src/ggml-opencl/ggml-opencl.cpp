@@ -2778,6 +2778,18 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
     const std::string opencl_c_std = "CL" + std::to_string(backend_ctx->opencl_c_version.major) +
                                    "." + std::to_string(backend_ctx->opencl_c_version.minor);
 
+    // [dspark 2026-10-14] canary BEFORE any kernel program is built: broken
+    // float sub_group_broadcast (Adreno 740) must route every gemv program
+    // through the sgb_* uint-bitcast shims via -DSGB_SCALAR_BROKEN.
+    // [TongYi-Lite aline-P1 换树回贴] 此三行在 v0.9.0 版 load_cl_kernels 取用时
+    // 丢失（probe 函数体幸存、调用点失联）：740 上 float sub_group_broadcast 为
+    // 坏，缺失时 q4_K batched MoE 核直撞 E031 误编译路径 → NMSE≈2（dense-loop
+    // 不用广播故无恙）。金丝雀必须早于任何 build_program_from_source。
+    backend_ctx->sgb_float_broken = !probe_float_subgroup_broadcast(backend_ctx->context, backend_ctx->device);
+    if (backend_ctx->sgb_float_broken) {
+        GGML_LOG_INFO("\nggml_opencl: driver lacks float sub_group_broadcast -> SGB bitcast shims enabled");
+    }
+
     GGML_LOG_INFO("ggml_opencl: loading OpenCL kernels");
 
     // add
@@ -2931,9 +2943,39 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 backend_ctx->kernel_cpy_f32_f32_flat = k;
             }
         }
+        {   // [tongyi SSM state R-275] 软失败注册（同 flat 款）：编译失败保持 null，走 pack 原路
+            // [TongYi-Lite aline-P1 换树回贴] v0.9.0 版 cpy 块取用时的失联注册，消费端
+            // (ggml_cl_cpy packflat 甜点刀) 仍在，缺注册即静默落回 row-mapped 原路。
+            cl_int err_pf = CL_SUCCESS;
+            cl_kernel k = clCreateKernel(prog, "kernel_cpy_f32_f32_packflat", &err_pf);
+            if (err_pf == CL_SUCCESS) {
+                backend_ctx->kernel_cpy_f32_f32_packflat = k;
+            }
+        }
         CL_CHECK((backend_ctx->kernel_cpy_i32_i32 = clCreateKernel(prog, "kernel_cpy_i32_i32", &err), err));
         CL_CHECK((backend_ctx->kernel_cpy_i32_f32 = clCreateKernel(prog, "kernel_cpy_i32_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_cpy_f32_i32 = clCreateKernel(prog, "kernel_cpy_f32_i32", &err), err));
+        // [S2c 2026-11-02] rope-shift q4_0 KV 的 cast(q4_0<->f32) 量化核，落在 cpy.cl。
+        // 【崩溃修复 2026-11-02】软失败注册（仿上方 kernel_cpy_f32_f32_flat）：Adreno
+        // 830 的 OpenCL 驱动若编译这两个新核失败，clCreateKernel 返回错误但绝不再
+        // CL_CHECK abort —— 否则 backend init（早于模型真正加载）就 GGML_ASSERT，表现
+        // 为"模型一加载就崩溃"。失败时 kernel 保持 null，supports_op 据此回落 CPU。
+        // [TongYi-Lite aline-P1 换树回贴] 随 v0.9.0 版 cpy 块失联的 S2c 注册对；
+        // 核定义在 cpy.cl（fork 私有 QK4_0_CPY/block_q4_0_cpy 已另刀回贴）。
+        {
+            cl_int err_q4a = CL_SUCCESS;
+            cl_kernel k_q4a = clCreateKernel(prog, "kernel_cpy_q4_0_f32_view_aos", &err_q4a);
+            if (err_q4a == CL_SUCCESS) { backend_ctx->kernel_cpy_q4_0_f32_view_aos = k_q4a; }
+            GGML_LOG_INFO("ggml_opencl: [S2c] kernel_cpy_q4_0_f32_view_aos clCreateKernel err=%d -> %s\n",
+                          (int)err_q4a, err_q4a == CL_SUCCESS ? "GPU" : "CPU-fallback");
+        }
+        {
+            cl_int err_q4b = CL_SUCCESS;
+            cl_kernel k_q4b = clCreateKernel(prog, "kernel_cpy_f32_q4_0_view_aos", &err_q4b);
+            if (err_q4b == CL_SUCCESS) { backend_ctx->kernel_cpy_f32_q4_0_view_aos = k_q4b; }
+            GGML_LOG_INFO("ggml_opencl: [S2c] kernel_cpy_f32_q4_0_view_aos clCreateKernel err=%d -> %s\n",
+                          (int)err_q4b, err_q4b == CL_SUCCESS ? "GPU" : "CPU-fallback");
+        }
         GGML_LOG_CONT(".");
     }
 
@@ -3205,6 +3247,15 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_get_rows_i32  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_i32", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_f16  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_q4_0 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q4_0", &err), err));
+        {   // [tongyi SSM state R-275] 软失败注册：编译失败保持 null，走行映射原路
+            // [TongYi-Lite aline-P1 换树回贴] v0.9.0 版块取用时的失联注册（消费端
+            // ggml_cl_get_rows 的 grflat/row1 甜点刀仍在）。
+            cl_int err_grf = CL_SUCCESS;
+            cl_kernel k = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32_flat", &err_grf);
+            if (err_grf == CL_SUCCESS) {
+                backend_ctx->kernel_get_rows_f32_flat = k;
+            }
+        }
         GGML_LOG_CONT(".");
     }
 
