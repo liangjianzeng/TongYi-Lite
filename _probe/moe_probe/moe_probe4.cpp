@@ -421,7 +421,10 @@ int main() {
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 512, 1536, 128, 8, "REAL-down", true);
     run_shape(ocl, cpu, GGML_TYPE_Q4_0, 1536, 512, 128, 8, "PREFILL-gateup-tok4", true, 4);
     }
-    if (!skip_batched) {
+    if (!skip_batched && !only_q4k && !only_q40) {
+    // [tongyi aline-P1] 补 only_q4k/only_q40 滤除：iq4_xs 是 batched-only 家族，
+    // GGML_OPENCL_BATCHED_MOE=0 时按契约 GGML_ABORT —— Q4K A/B 臂必须在触及其
+    // 用例之前跳过，否则永远跑不到 q4_K。
     // [tongyi M1 2026-10-25] iq4_xs 首个 sub-3bpw 内核验收（G-733 路线①）：
     // Ling 真形状（K=1536/512 M%128=0）+ 边界（K=256 单超块）。
     run_shape(ocl, cpu, GGML_TYPE_IQ4_XS, 1536, 512, 128, 8, "M1-IQ4XS-gateup", true);

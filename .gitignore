@@ -167,6 +167,9 @@ _probe/moe_probe/build5/
 _probe/moe_probe/build_v86/
 # Mesa 线测量体构建目录（third_party/mesa-kgsl/scripts/build_probes_android.sh 的输出）
 _probe/moe_probe/build-android/
+# aline-P1 真机四道门双树探针构建目录（新树 static + fork golden 控制臂）
+_probe/moe_probe/build-ndk-aline/
+_probe/moe_probe/build-ndk-aline-static/
 _probe/oclstub_build/
 
 _probe/moe_probe/build-android-cli/
