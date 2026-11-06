@@ -38981,45 +38981,51 @@ switch(src0t) {
                 if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
                     break;
                 }
-                // [fork] SoA planes only exist on the env-gated noshuffle arm
-                // (set_tensor fills qs/hm/sc/d for dense2d when env=1); admission
-                // refuses everything else, so this is belt-and-suspenders.
-                if (extra0_q3_K->qs == nullptr) {
+                // [k40port fix 2026-11-07] 换树回贴时此 case 错抄自 Q3_K：在 q4_K extra 上
+                // 类型双关 extra0_q3_K（->qs 越界读到堆垃圾骗过 nullptr 守卫）并误派
+                // kernel_mul_mm_q3_k_f32_l4_lm —— 通用 GEMM 路对 q4_K 输出静默垃圾。
+                // fork 旧树此 case 本为 kernel_mul_mm_q4_k_f32_l4_lm（上游 verbatim）；
+                // 740 上被 adreno wavepair 路遮蔽不可达（门④逐字节无恙的原因），K40 移植
+                // （GGML_OPENCL_USE_ADRENO_KERNELS=OFF）实证修复：498/498 q4_K GEMM→GPU，
+                // ARGMAX id=271 与 740 金标精确一致。参数布局对齐上游 q4_K l4_lm 内核
+                // （平面 q/s/d/dm @0-3，无 offset0 实参，21 args）。
+                if (extra0_q4_K->q == nullptr || extra0_q4_K->s == nullptr ||
+                    extra0_q4_K->d == nullptr || extra0_q4_K->dm == nullptr) {
                     break;
                 }
 
-                kernel = backend_ctx->kernel_mul_mm_q3_k_f32_l4_lm;
+                kernel = backend_ctx->kernel_mul_mm_q4_k_f32_l4_lm;
+                // (BM*BN)/(TM*TN): Intel uses an 8x8 microtile (WG=64), others 4x8 (WG=128)
                 nth0 = (backend_ctx->gpu_family == INTEL) ? 64 : 128;
-                offset0 = src0->view_offs;
 
                 int batch_stride_a = ne00*ne01;
                 int batch_stride_b = ne10*ne11;
                 int batch_stride_d = ne0*ne1;
 
-                CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),    &extra0_q3_K->qs));
-                CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_mem),    &extra0_q3_K->hm));
-                CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),    &extra0_q3_K->sc));
-                CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_mem),    &extra0_q3_K->d));
-                CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_ulong),  &offset0));
-                CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),    &extra1->data_device));
-                CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong),  &offset1));
-                CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_mem),    &extrad->data_device));
-                CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong),  &offsetd));
-                CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),       &ne00));
-                CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),       &ne01));
-                CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),       &ne02));
-                CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),       &ne11));
-                CL_CHECK(clSetKernelArg(kernel, 13, sizeof(int),       &ne12));
-                CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int),       &ne00));
-                CL_CHECK(clSetKernelArg(kernel, 15, sizeof(int),       &ne10));
-                CL_CHECK(clSetKernelArg(kernel, 16, sizeof(int),       &ne0));
-                CL_CHECK(clSetKernelArg(kernel, 17, sizeof(int),       &batch_stride_a));
-                CL_CHECK(clSetKernelArg(kernel, 18, sizeof(int),       &batch_stride_b));
-                CL_CHECK(clSetKernelArg(kernel, 19, sizeof(int),       &batch_stride_d));
-                CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int),       &r2));
-                CL_CHECK(clSetKernelArg(kernel, 21, sizeof(int),       &r3));
+                CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0_q4_K->q));
+                CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_mem),   &extra0_q4_K->s));
+                CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &extra0_q4_K->d));
+                CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_mem),   &extra0_q4_K->dm));
+                CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_mem),   &extra1->data_device));
+                CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_ulong), &offset1));
+                CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_mem),   &extrad->data_device));
+                CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_ulong), &offsetd));
+                CL_CHECK(clSetKernelArg(kernel,  8, sizeof(int),      &ne00));
+                CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &ne01));
+                CL_CHECK(clSetKernelArg(kernel, 10, sizeof(int),      &ne02));
+                CL_CHECK(clSetKernelArg(kernel, 11, sizeof(int),      &ne11));
+                CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int),      &ne12));
+                CL_CHECK(clSetKernelArg(kernel, 13, sizeof(int),      &ne10)); // stride_a
+                CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int),      &ne10)); // stride_b
+                CL_CHECK(clSetKernelArg(kernel, 15, sizeof(int),      &ne01)); // stride_d
+                CL_CHECK(clSetKernelArg(kernel, 16, sizeof(int),      &batch_stride_a));
+                CL_CHECK(clSetKernelArg(kernel, 17, sizeof(int),      &batch_stride_b));
+                CL_CHECK(clSetKernelArg(kernel, 18, sizeof(int),      &batch_stride_d));
+                CL_CHECK(clSetKernelArg(kernel, 19, sizeof(int),      &r2));
+                CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int),      &r3));
 
-                size_t global_work_size[] = {(size_t)(CEIL_DIV(ne01, 64)*nth0), (size_t)CEIL_DIV(ne11, 64), (size_t)ne12*ne13};
+                // 64 is block tile size BM and BN - change here when BM and BN in the kernel are changed.
+                size_t global_work_size[] = {(size_t)(CEIL_DIV(ne01, 64)*nth0), (size_t)(CEIL_DIV(ne11, 64)), (size_t)ne12*ne13};
                 size_t local_work_size[] = {(size_t)nth0, 1, 1};
 
                 backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
