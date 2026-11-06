@@ -1,88 +1,44 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
-//------------------------------------------------------------------------------
-// fwht
-//
-// MUL_MAT hadamard hint: dst = FWHT_rows(src1), row length n = src1->ne[0]
-// (power of 2, <= 4096, gated host-side), rows = ne1*ne2*ne3. Row-major
-// contiguous only. Matches ggml_compute_forward_fwht_impl: scale = 1/sqrt(n)
-// at load, then butterfly len=1..n/2 with u+v / u-v. One workgroup per row.
-//------------------------------------------------------------------------------
-
-kernel void kernel_fwht_f32(
-        global const float * src1,
-        ulong                offset1,
-        global       float * dst,
-        ulong                offsetd,
-        int                  n
-) {
-    src1 = (global float*)((global char*)src1 + offset1);
-    dst  = (global float*)((global char*)dst  + offsetd);
-
-    const int row = get_group_id(0);
+kernel void kernel_fwht(
+        global const char * src,
+        ulong offset_src,
+        global char * dst,
+        ulong offset_dst,
+        int n,
+        ulong ne1,
+        ulong ne2,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3,
+        float scale,
+        local float * work) {
+    const ulong row = get_group_id(1);
+    const ulong i1 = row % ne1;
+    const ulong i2 = row / ne1 % ne2;
+    const ulong i3 = row / ne1 / ne2;
+    global const SRC_TYPE * x = (global const SRC_TYPE *)(src + offset_src + i1*nb1 + i2*nb2 + i3*nb3);
+    global float * y = (global float *)(dst + offset_dst) + row*n;
     const int tid = get_local_id(0);
-    const int lsz = get_local_size(0);
+    const int nth = get_local_size(0);
 
-    __local float l[4096];
-
-    const float scale = rsqrt((float)n);
-    src1 += (long)row * n;
-    dst  += (long)row * n;
-
-    for (int i = tid; i < n; i += lsz) {
-        l[i] = src1[i] * scale;
-    }
-    for (int log2len = 0, len = 1; len < n; len <<= 1, log2len++) {
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int p = tid; p < (n >> 1); p += lsz) {
-            const int a = ((p >> log2len) << (log2len + 1)) + (p & (len - 1));
-            const float u = l[a];
-            const float v = l[a + len];
-            l[a]       = u + v;
-            l[a + len] = u - v;
-        }
+    for (int i = tid; i < n; i += nth) {
+        work[i] = (float)x[i] * scale;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    for (int i = tid; i < n; i += lsz) {
-        dst[i] = l[i];
-    }
-}
 
-kernel void kernel_fwht_f16(
-        global const half * src1,
-        ulong               offset1,
-        global       float * dst,
-        ulong                offsetd,
-        int                  n
-) {
-    src1 = (global half*)((global char*)src1 + offset1);
-    dst  = (global float*)((global char*)dst + offsetd);
-
-    const int row = get_group_id(0);
-    const int tid = get_local_id(0);
-    const int lsz = get_local_size(0);
-
-    __local float l[4096];
-
-    const float scale = rsqrt((float)n);
-    src1 += (long)row * n;
-    dst  += (long)row * n;
-
-    for (int i = tid; i < n; i += lsz) {
-        l[i] = convert_float(src1[i]) * scale;
-    }
-    for (int log2len = 0, len = 1; len < n; len <<= 1, log2len++) {
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int p = tid; p < (n >> 1); p += lsz) {
-            const int a = ((p >> log2len) << (log2len + 1)) + (p & (len - 1));
-            const float u = l[a];
-            const float v = l[a + len];
-            l[a]       = u + v;
-            l[a + len] = u - v;
+    for (int h = 1; h < n; h *= 2) {
+        for (int i = tid; i < n/2; i += nth) {
+            const int j = 2*i - (i & (h - 1));
+            const float a = work[j];
+            const float b = work[j + h];
+            work[j] = a + b;
+            work[j + h] = a - b;
         }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (int i = tid; i < n; i += lsz) {
-        dst[i] = l[i];
+
+    for (int i = tid; i < n; i += nth) {
+        y[i] = work[i];
     }
 }

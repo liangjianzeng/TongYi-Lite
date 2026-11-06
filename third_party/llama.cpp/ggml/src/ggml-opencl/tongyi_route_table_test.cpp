@@ -319,7 +319,9 @@ static void family_b() {
     CHECK(known_bad_lookup(RCOMP_E031, "kernel_convert_q4_0_trans4_ns"), "B4h R3 trans4_ns 族");
     CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched_raw"), "B4i R3 raw 3-plane 留档");
     CHECK(!known_bad_lookup(RCOMP_E17, "mul_mv_q4_k_f32_flat"), "B4j E17 flat 不在账");
-    CHECK(known_bad_count() == 6 && spec_count() == 11, "B4e 表规模 pin（11 行 + 6 坏账，R3 + q4_1 + ptq1_0 扩展）");
+    // [aline-P1 2026-11-06] 740/E031.41 q4_K batched 驱动腐化行：派发端 known_bad 门的账面依据
+    CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched"), "B4k 740/E031.41 v2 形态拒账");
+    CHECK(known_bad_count() == 7 && spec_count() == 11, "B4e 表规模 pin（11 行 + 7 坏账，R3 + q4_1 + ptq1_0 + aline-P1 740 batched）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 

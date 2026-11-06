@@ -2815,39 +2815,6 @@ kernel void kernel_restore_block_q2_k_noshuffle(
     }
 }
 
-struct block_q2_0 {
-    half d;
-    uchar qs[16];
-};
-
-kernel void kernel_convert_block_q2_0(
-    global struct block_q2_0 * src0,
-    global uchar * dst_qs,
-    global half * dst_d,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst_d[i] = src0[i].d;
-    for (int j = 0; j < 16; ++j) {
-        dst_qs[16*i + j] = src0[i].qs[j];
-    }
-}
-
-kernel void kernel_restore_block_q2_0(
-    global uchar * src_qs,
-    global half * src_d,
-    global struct block_q2_0 * dst,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst[i].d = src_d[i];
-    for (int j = 0; j < 16; ++j) {
-        dst[i].qs[j] = src_qs[16*i + j];
-    }
-}
-
 struct block_q3_K {
     uchar hmask[QK_K/8];
     uchar qs[QK_K/4];
@@ -3001,101 +2968,6 @@ kernel void kernel_restore_block_q3_k_noshuffle(
     }
 }
 
-struct block_iq4_xs {
-    half d;
-    ushort scales_h;
-    uchar scales_l[QK_K/64];
-    uchar qs[QK_K/2];
-};
-
-kernel void kernel_convert_block_iq4_xs(
-    global struct block_iq4_xs * src0,
-    global uchar * dst_qs,
-    global uchar * dst_sl,
-    global ushort * dst_sh,
-    global half * dst_d,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst_d[i] = src0[i].d;
-    dst_sh[i] = src0[i].scales_h;
-    for (int j = 0; j < 128; ++j) {
-        dst_qs[128*i + j] = src0[i].qs[j];
-    }
-    for (int j = 0; j < 4; ++j) {
-        dst_sl[4*i + j] = src0[i].scales_l[j];
-    }
-}
-
-kernel void kernel_restore_block_iq4_xs(
-    global uchar * src_qs,
-    global uchar * src_sl,
-    global ushort * src_sh,
-    global half * src_d,
-    global struct block_iq4_xs * dst,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst[i].d = src_d[i];
-    dst[i].scales_h = src_sh[i];
-    for (int j = 0; j < 128; ++j) {
-        dst[i].qs[j] = src_qs[128*i + j];
-    }
-    for (int j = 0; j < 4; ++j) {
-        dst[i].scales_l[j] = src_sl[4*i + j];
-    }
-}
-
-kernel void kernel_convert_block_iq4_xs_noshuffle(
-    global struct block_iq4_xs * src0,
-    global ushort * dst_qs,
-    global uint * dst_sl,
-    global ushort * dst_sh,
-    global half * dst_d,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst_d[i] = src0[i].d;
-    dst_sh[i] = src0[i].scales_h;
-    dst_sl[i] = as_uint(vload4(0, src0[i].scales_l));
-    for (int sb = 0; sb < 8; ++sb) {
-        for (int u = 0; u < 8; ++u) {
-            ushort q = 0;
-            for (int j = 0; j < 4; ++j) {
-                uchar v = src0[i].qs[16*sb + 4*(u & 3) + j];
-                q |= (ushort)(((v >> (4*(u >> 2))) & 15) << (4*j));
-            }
-            dst_qs[64*i + 8*sb + u] = q;
-        }
-    }
-}
-
-kernel void kernel_restore_block_iq4_xs_noshuffle(
-    global ushort * src_qs,
-    global uint * src_sl,
-    global ushort * src_sh,
-    global half * src_d,
-    global struct block_iq4_xs * dst,
-    ulong n_blocks
-) {
-    const ulong i = get_global_id(0);
-    if (i >= n_blocks) { return; }
-    dst[i].d = src_d[i];
-    dst[i].scales_h = src_sh[i];
-    vstore4(as_uchar4(src_sl[i]), 0, dst[i].scales_l);
-    for (int sb = 0; sb < 8; ++sb) {
-        for (int j = 0; j < 16; ++j) {
-            const int shift = 4*(j & 3);
-            const ushort lo = src_qs[64*i + 8*sb + j/4];
-            const ushort hi = src_qs[64*i + 8*sb + j/4 + 4];
-            dst[i].qs[16*sb + j] = (uchar)(((lo >> shift) & 15) | (((hi >> shift) & 15) << 4));
-        }
-    }
-}
-
 struct block_iq2_s {
     half d;
     uchar qs[QK_K/4];
@@ -3225,6 +3097,129 @@ kernel void kernel_restore_block_iq2_xxs(
     }
 }
 
+struct block_q2_0 {
+    half d;
+    uchar qs[16];
+};
+
+kernel void kernel_convert_block_q2_0(
+    global struct block_q2_0 * src0,
+    global uchar * dst_qs,
+    global half * dst_d,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    dst_d[i] = src0[i].d;
+    for (int j = 0; j < 16; ++j) {
+        dst_qs[16*i + j] = src0[i].qs[j];
+    }
+}
+
+kernel void kernel_restore_block_q2_0(
+    global uchar * src_qs,
+    global half * src_d,
+    global struct block_q2_0 * dst,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    dst[i].d = src_d[i];
+    for (int j = 0; j < 16; ++j) {
+        dst[i].qs[j] = src_qs[16*i + j];
+    }
+}
+
+struct block_iq1_s {
+    half d;
+    uchar qs[QK_K/8];
+    ushort qh[QK_K/32];
+};
+
+kernel void kernel_convert_block_iq1_s(
+    global struct block_iq1_s * src0,
+    global uchar * dst_qs,
+    global ushort * dst_qh,
+    global half * dst_d,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    dst_d[i] = src0[i].d;
+    for (int j = 0; j < 32; ++j) {
+        dst_qs[32*i + j] = src0[i].qs[j];
+    }
+    for (int j = 0; j < 8; ++j) {
+        dst_qh[8*i + j] = src0[i].qh[j];
+    }
+}
+
+kernel void kernel_restore_block_iq1_s(
+    global uchar * src_qs,
+    global ushort * src_qh,
+    global half * src_d,
+    global struct block_iq1_s * dst,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    dst[i].d = src_d[i];
+    for (int j = 0; j < 32; ++j) {
+        dst[i].qs[j] = src_qs[32*i + j];
+    }
+    for (int j = 0; j < 8; ++j) {
+        dst[i].qh[j] = src_qh[8*i + j];
+    }
+}
+
+struct block_iq1_m {
+    uchar qs[QK_K/8];
+    uchar qh[QK_K/16];
+    uchar scales[QK_K/32];
+};
+
+kernel void kernel_convert_block_iq1_m(
+    global struct block_iq1_m * src0,
+    global uchar * dst_qs,
+    global uchar * dst_qh,
+    global ushort * dst_sc,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    for (int j = 0; j < 32; ++j) {
+        dst_qs[32*i + j] = src0[i].qs[j];
+    }
+    for (int j = 0; j < 16; ++j) {
+        dst_qh[16*i + j] = src0[i].qh[j];
+    }
+    for (int j = 0; j < 4; ++j) {
+        dst_sc[4*i + j] = (ushort)src0[i].scales[2*j] | ((ushort)src0[i].scales[2*j + 1] << 8);
+    }
+}
+
+kernel void kernel_restore_block_iq1_m(
+    global uchar * src_qs,
+    global uchar * src_qh,
+    global ushort * src_sc,
+    global struct block_iq1_m * dst,
+    ulong n_blocks
+) {
+    const ulong i = get_global_id(0);
+    if (i >= n_blocks) { return; }
+    for (int j = 0; j < 32; ++j) {
+        dst[i].qs[j] = src_qs[32*i + j];
+    }
+    for (int j = 0; j < 16; ++j) {
+        dst[i].qh[j] = src_qh[16*i + j];
+    }
+    for (int j = 0; j < 4; ++j) {
+        ushort sc = src_sc[4*i + j];
+        dst[i].scales[2*j] = (uchar)sc;
+        dst[i].scales[2*j + 1] = (uchar)(sc >> 8);
+    }
+}
+
 struct block_iq3_s {
     half d;
     uchar qs[QK_K/4];
@@ -3330,92 +3325,97 @@ kernel void kernel_restore_block_iq3_xxs(
     }
 }
 
-struct block_iq1_s {
+struct block_iq4_xs {
     half d;
-    uchar qs[QK_K/8];
-    ushort qh[QK_K/32];
+    ushort scales_h;
+    uchar scales_l[QK_K/64];
+    uchar qs[QK_K/2];
 };
 
-kernel void kernel_convert_block_iq1_s(
-    global struct block_iq1_s * src0,
+kernel void kernel_convert_block_iq4_xs(
+    global struct block_iq4_xs * src0,
     global uchar * dst_qs,
-    global ushort * dst_qh,
+    global uchar * dst_sl,
+    global ushort * dst_sh,
     global half * dst_d,
     ulong n_blocks
 ) {
     const ulong i = get_global_id(0);
     if (i >= n_blocks) { return; }
     dst_d[i] = src0[i].d;
-    for (int j = 0; j < 32; ++j) {
-        dst_qs[32*i + j] = src0[i].qs[j];
+    dst_sh[i] = src0[i].scales_h;
+    for (int j = 0; j < 128; ++j) {
+        dst_qs[128*i + j] = src0[i].qs[j];
     }
-    for (int j = 0; j < 8; ++j) {
-        dst_qh[8*i + j] = src0[i].qh[j];
+    for (int j = 0; j < 4; ++j) {
+        dst_sl[4*i + j] = src0[i].scales_l[j];
     }
 }
 
-kernel void kernel_restore_block_iq1_s(
+kernel void kernel_restore_block_iq4_xs(
     global uchar * src_qs,
-    global ushort * src_qh,
+    global uchar * src_sl,
+    global ushort * src_sh,
     global half * src_d,
-    global struct block_iq1_s * dst,
+    global struct block_iq4_xs * dst,
     ulong n_blocks
 ) {
     const ulong i = get_global_id(0);
     if (i >= n_blocks) { return; }
     dst[i].d = src_d[i];
-    for (int j = 0; j < 32; ++j) {
-        dst[i].qs[j] = src_qs[32*i + j];
+    dst[i].scales_h = src_sh[i];
+    for (int j = 0; j < 128; ++j) {
+        dst[i].qs[j] = src_qs[128*i + j];
     }
-    for (int j = 0; j < 8; ++j) {
-        dst[i].qh[j] = src_qh[8*i + j];
+    for (int j = 0; j < 4; ++j) {
+        dst[i].scales_l[j] = src_sl[4*i + j];
     }
 }
 
-struct block_iq1_m {
-    uchar qs[QK_K/8];
-    uchar qh[QK_K/16];
-    uchar scales[QK_K/32];
-};
-
-kernel void kernel_convert_block_iq1_m(
-    global struct block_iq1_m * src0,
-    global uchar * dst_qs,
-    global uchar * dst_qh,
-    global ushort * dst_sc,
+kernel void kernel_convert_block_iq4_xs_noshuffle(
+    global struct block_iq4_xs * src0,
+    global ushort * dst_qs,
+    global uint * dst_sl,
+    global ushort * dst_sh,
+    global half * dst_d,
     ulong n_blocks
 ) {
     const ulong i = get_global_id(0);
     if (i >= n_blocks) { return; }
-    for (int j = 0; j < 32; ++j) {
-        dst_qs[32*i + j] = src0[i].qs[j];
-    }
-    for (int j = 0; j < 16; ++j) {
-        dst_qh[16*i + j] = src0[i].qh[j];
-    }
-    for (int j = 0; j < 4; ++j) {
-        dst_sc[4*i + j] = (ushort)src0[i].scales[2*j] | ((ushort)src0[i].scales[2*j + 1] << 8);
+    dst_d[i] = src0[i].d;
+    dst_sh[i] = src0[i].scales_h;
+    dst_sl[i] = as_uint(vload4(0, src0[i].scales_l));
+    for (int sb = 0; sb < 8; ++sb) {
+        for (int u = 0; u < 8; ++u) {
+            ushort q = 0;
+            for (int j = 0; j < 4; ++j) {
+                uchar v = src0[i].qs[16*sb + 4*(u & 3) + j];
+                q |= (ushort)(((v >> (4*(u >> 2))) & 15) << (4*j));
+            }
+            dst_qs[64*i + 8*sb + u] = q;
+        }
     }
 }
 
-kernel void kernel_restore_block_iq1_m(
-    global uchar * src_qs,
-    global uchar * src_qh,
-    global ushort * src_sc,
-    global struct block_iq1_m * dst,
+kernel void kernel_restore_block_iq4_xs_noshuffle(
+    global ushort * src_qs,
+    global uint * src_sl,
+    global ushort * src_sh,
+    global half * src_d,
+    global struct block_iq4_xs * dst,
     ulong n_blocks
 ) {
     const ulong i = get_global_id(0);
     if (i >= n_blocks) { return; }
-    for (int j = 0; j < 32; ++j) {
-        dst[i].qs[j] = src_qs[32*i + j];
-    }
-    for (int j = 0; j < 16; ++j) {
-        dst[i].qh[j] = src_qh[16*i + j];
-    }
-    for (int j = 0; j < 4; ++j) {
-        ushort sc = src_sc[4*i + j];
-        dst[i].scales[2*j] = (uchar)sc;
-        dst[i].scales[2*j + 1] = (uchar)(sc >> 8);
+    dst[i].d = src_d[i];
+    dst[i].scales_h = src_sh[i];
+    vstore4(as_uchar4(src_sl[i]), 0, dst[i].scales_l);
+    for (int sb = 0; sb < 8; ++sb) {
+        for (int j = 0; j < 16; ++j) {
+            const int shift = 4*(j & 3);
+            const ushort lo = src_qs[64*i + 8*sb + j/4];
+            const ushort hi = src_qs[64*i + 8*sb + j/4 + 4];
+            dst[i].qs[16*sb + j] = (uchar)(((lo >> shift) & 15) | (((hi >> shift) & 15) << 4));
+        }
     }
 }

@@ -314,6 +314,93 @@ kernel void kernel_cpy_f32_f32_flat(
     }
 }
 
+kernel void kernel_cpy_i32_f32(
+        global int * src0,
+        ulong offset0,
+        global float * dst,
+        ulong offsetd,
+        int ne00,
+        int ne01,
+        int ne02,
+        int ne03,
+        ulong nb00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne0,
+        int ne1,
+        int ne2,
+        int ne3,
+        ulong nb0,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3
+) {
+    src0 = (global int *) ((global char *) src0 + offset0);
+    dst  = (global float *) ((global char *) dst  + offsetd);
+
+    const ulong i01 = get_group_id(0);
+    const ulong i02 = get_group_id(1);
+    const ulong i03 = get_group_id(2);
+
+    for (ulong i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+        const ulong n  = ((i03 * ne02 + i02) * ne01 + i01) * ne00 + i00;
+        const ulong i0 = n % ne0;
+        const ulong i1 = n / ne0 % ne1;
+        const ulong i2 = n / ne0 / ne1 % ne2;
+        const ulong i3 = n / ne0 / ne1 / ne2;
+
+        global const int * src = (global const int *) ((global char *) src0 + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+        global float * out = (global float *) ((global char *) dst + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3);
+        out[0] = convert_float(src[0]);
+    }
+}
+
+
+kernel void kernel_cpy_f32_i32(
+        global float * src0,
+        ulong offset0,
+        global int * dst,
+        ulong offsetd,
+        int ne00,
+        int ne01,
+        int ne02,
+        int ne03,
+        ulong nb00,
+        ulong nb01,
+        ulong nb02,
+        ulong nb03,
+        int ne0,
+        int ne1,
+        int ne2,
+        int ne3,
+        ulong nb0,
+        ulong nb1,
+        ulong nb2,
+        ulong nb3
+) {
+    src0 = (global float *) ((global char *) src0 + offset0);
+    dst  = (global int *) ((global char *) dst  + offsetd);
+
+    const ulong i01 = get_group_id(0);
+    const ulong i02 = get_group_id(1);
+    const ulong i03 = get_group_id(2);
+
+    for (ulong i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
+        const ulong n  = ((i03 * ne02 + i02) * ne01 + i01) * ne00 + i00;
+        const ulong i0 = n % ne0;
+        const ulong i1 = n / ne0 % ne1;
+        const ulong i2 = n / ne0 / ne1 % ne2;
+        const ulong i3 = n / ne0 / ne1 / ne2;
+
+        global const float * src = (global const float *) ((global char *) src0 + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+        global int * out = (global int *) ((global char *) dst + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3);
+        out[0] = convert_int_rtz(src[0]);
+    }
+}
+
+// [tongyi fork] 快路/rope-shift 专属 cpy 内核 (R-275 packflat + q4_0 KV AoS view), 上游无
+
 // [tongyi SSM state R-275 2026-11-04] Row-contiguous strided view -> contiguous dst, one work
 // item per float4 over the WHOLE tensor. kernel_cpy_f32_f32_pack maps a workgroup to a few
 // short rows and gathers with the row pitch — measured 60 MB/s on the 96KB GDN conv-state
@@ -354,70 +441,17 @@ kernel void kernel_cpy_f32_f32_packflat(
     }
 }
 
-// [tongyi M-R1 2026-10-25] f32 -> i32 numeric cast (ggml_cast wiring for the
-// fused MoE router ids plane). Matches the CPU f32_to_i32 semantics
-// (common.h: x -> (int32_t) x, truncation); exact for integral float values.
-kernel void kernel_cpy_f32_i32(
-        global float * src0,
-        ulong offset0,
-        global int * dst,
-        ulong offsetd,
-        int ne00,
-        int ne01,
-        int ne02,
-        int ne03,
-        ulong nb00,
-        ulong nb01,
-        ulong nb02,
-        ulong nb03,
-        int ne0,
-        int ne1,
-        int ne2,
-        int ne3,
-        ulong nb0,
-        ulong nb1,
-        ulong nb2,
-        ulong nb3
-) {
-    src0 = (global float*)((global char*)src0 + offset0);
-    dst = (global int*)((global char*)dst + offsetd);
 
-    int i03 = get_group_id(2);
-    int i02 = get_group_id(1);
-    int i01 = get_group_id(0);
-
-    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;
-
-    int i3 = n / (ne2*ne1*ne0);
-    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);
-    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;
-    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);
-
-    global int * dst_data = (global int *) ((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0);
-
-    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {
-        global const float * src = (global float *)((global char *) src0 + i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);
-
-        dst_data[i00] = (int) src[0];
-    }
-}
-
-//------------------------------------------------------------------------------
-// kernel_cpy_q4_0_f32_view_aos  /  kernel_cpy_f32_q4_0_view_aos
-// ggml_cl_cpy path for the rope-shift chain on the q4_0 KV cache:
-//   cast(cur_q4_0 -> f32)  ->  MUL_MAT(hadamard) ROPE MUL_MAT(hadamard)  ->  cur_f32 -> cpy back to q4_0
-// The q4_0 KV cache stays AoS (see ggml.c:1879 nb[1]=nb[0]*(ne[0]/block_size),
-// and ggml_opencl "KV-cache q4_0 stays AoS"). These kernels index blocks tightly
-// within ne[0] and match the standard cpy 20-arg layout so ggml_cl_cpy can reuse
-// its existing arg setup. Quantize is a bit-exact inverse of the CPU
-// ggml_quantize_row_q4_0_ref so a dequant->matmul->dequant round-trip keeps the
-// same q4_0 error profile.
-//------------------------------------------------------------------------------
+// [TongYi-Lite aline-P1] fork 私有 q4_0 AoS 定义（换树时随 v0.9.0 版整文件取用而
+// 与使用端失联；源自 fork cpy.cl:416）。KV-cache q4_0 stays AoS 系列内核专用，
+// 与 ggml_opencl "KV-cache q4_0 stays AoS" 内核配套（quantize 位精确复刻 CPU
+// ggml_quantize_row_q4_0_ref）。
 #define QK4_0_CPY 32
 typedef struct {
     half d;
     uchar qs[QK4_0_CPY / 2];   // 高通驱动无 stdint：uchar 是 8 位标量，uint8 是向量类型
 } block_q4_0_cpy;
+
 
 // q4_0 (AoS blocks) -> f32, view-aware, standard cpy arg layout.
 kernel void kernel_cpy_q4_0_f32_view_aos(
@@ -467,6 +501,7 @@ kernel void kernel_cpy_q4_0_f32_view_aos(
         dstp[i + QK4_0_CPY / 2]  = d * (float)q1;
     }
 }
+
 
 // f32 -> q4_0 (AoS blocks), view-aware, standard cpy arg layout.
 kernel void kernel_cpy_f32_q4_0_view_aos(
