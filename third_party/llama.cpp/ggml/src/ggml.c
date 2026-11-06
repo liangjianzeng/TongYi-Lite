@@ -697,6 +697,22 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_q2_0,
         .from_float_ref           = (ggml_from_float_t) quantize_row_q2_0_ref,
     },
+    [GGML_TYPE_PQ2_0] = {
+        .type_name                = "pq2_0",
+        .blck_size                = QK_PQ2_0,
+        .type_size                = sizeof(block_pq2_0),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_pq2_0,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_pq2_0_ref,
+    },
+    [GGML_TYPE_PTQ1_0] = {
+        .type_name                = "ptq1_0",
+        .blck_size                = QK_PTQ1_0,
+        .type_size                = sizeof(block_ptq1_0),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_ptq1_0,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_ptq1_0_ref,
+    },
     [GGML_TYPE_Q4_0] = {
         .type_name                = "q4_0",
         .blck_size                = QK4_0,
@@ -1115,9 +1131,14 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "MOE_TOPK_FUSED",
+    "G1_SSM_LAYER",
+    "G1_KDA_IN",
+    "G1_KDA_OUT",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+    static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1231,9 +1252,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "moe_topk_fused(x, b)",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+    static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1452,6 +1475,8 @@ enum ggml_type ggml_ftype_to_ggml_type(enum ggml_ftype ftype) {
         case GGML_FTYPE_MOSTLY_Q4_1:          wtype = GGML_TYPE_Q4_1;  break;
         case GGML_FTYPE_MOSTLY_Q1_0:          wtype = GGML_TYPE_Q1_0;  break;
         case GGML_FTYPE_MOSTLY_Q2_0:          wtype = GGML_TYPE_Q2_0;  break;
+        case GGML_FTYPE_MOSTLY_PQ2_0:     wtype = GGML_TYPE_PQ2_0; break;
+        case GGML_FTYPE_MOSTLY_PTQ1_0:    wtype = GGML_TYPE_PTQ1_0; break;
         case GGML_FTYPE_MOSTLY_Q5_0:          wtype = GGML_TYPE_Q5_0;  break;
         case GGML_FTYPE_MOSTLY_Q5_1:          wtype = GGML_TYPE_Q5_1;  break;
         case GGML_FTYPE_MOSTLY_Q8_0:          wtype = GGML_TYPE_Q8_0;  break;
@@ -5516,6 +5541,210 @@ struct ggml_tensor * ggml_argsort_top_k(
     return result;
 }
 
+// ggml_moe_topk_fused
+//
+// [tongyi M-R1 2026-10-25] fused grouped-MoE router top-k. See ggml.h for the
+// semantics contract. dst = [K, n_tokens, 2] F32: plane 0 = normalized weights,
+// plane 1 = expert ids as exact float values (round-trips through ggml_cast).
+//
+// op params: i32[0..5] = E, G, epg, gu, K, has_bias; f32[6] = w_scale.
+struct ggml_tensor * ggml_moe_topk_fused(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * logits,
+        struct ggml_tensor  * bias,
+        int64_t               n_expert,
+        int64_t               n_groups,
+        int64_t               n_exp_per_group,
+        int64_t               n_groups_used,
+        int64_t               n_expert_used,
+        float                 w_scale) {
+    GGML_ASSERT(logits->type == GGML_TYPE_F32);
+    GGML_ASSERT(n_expert == n_groups * n_exp_per_group);
+    GGML_ASSERT(n_groups_used > 0 && n_groups_used <= n_groups);
+    GGML_ASSERT(n_expert_used > 0 && n_expert_used <= n_groups_used * n_exp_per_group);
+    GGML_ASSERT(bias == NULL || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) == n_expert));
+
+    // ids stored as float values must round-trip ggml_cast(F32 -> I32) exactly
+    GGML_ASSERT(n_expert <= (int64_t) UINT32_MAX && n_expert <= (int64_t) INT32_MAX);
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_expert_used, logits->ne[1], 2);
+
+    result->op     = GGML_OP_MOE_TOPK_FUSED;
+    result->src[0] = logits;
+    result->src[1] = bias;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_expert);
+    ggml_set_op_params_i32(result, 1, (int32_t) n_groups);
+    ggml_set_op_params_i32(result, 2, (int32_t) n_exp_per_group);
+    ggml_set_op_params_i32(result, 3, (int32_t) n_groups_used);
+    ggml_set_op_params_i32(result, 4, (int32_t) n_expert_used);
+    ggml_set_op_params_i32(result, 5, bias != NULL);
+    ggml_set_op_params_f32(result, 6, w_scale);
+
+    return result;
+}
+
+// ggml_g1_ssm_layer -- [tongyi A7.2/R-014] 见 ggml.h 语义契约
+struct ggml_tensor * ggml_g1_ssm_layer(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * w_in,
+        struct ggml_tensor  * w_ba,
+        struct ggml_tensor  * ssm_dt,
+        struct ggml_tensor  * ssm_a,
+        struct ggml_tensor  * w_conv,
+        struct ggml_tensor  * conv_state,
+        struct ggml_tensor  * rms_w,
+        struct ggml_tensor  * w_out,
+        struct ggml_tensor  * state,
+        int64_t               n_embd,
+        int64_t               s_k,
+        int64_t               h_k,
+        int64_t               h_v,
+        int64_t               s_v,
+        int64_t               d_conv,
+        float                 l2_eps,
+        float                 rms_eps) {
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == n_embd);
+    GGML_ASSERT(w_in->type  == GGML_TYPE_Q4_0 && w_in->ne[0]  == n_embd);
+    GGML_ASSERT(w_out->type == GGML_TYPE_Q4_0 && w_out->ne[0] == h_v * s_v && w_out->ne[1] == n_embd);
+    GGML_ASSERT(w_ba->type  == GGML_TYPE_F32 && w_ba->ne[0]   == n_embd && w_ba->ne[1] == 2 * h_v);
+    GGML_ASSERT(w_conv->type == GGML_TYPE_F32 && w_conv->ne[0] == d_conv);
+    GGML_ASSERT(conv_state->type == GGML_TYPE_F32 && conv_state->ne[0] == 2 * h_k * s_k + h_v * s_v);
+    GGML_ASSERT(state->ne[0] == s_v && state->ne[1] == s_v && state->ne[2] == h_v);
+    GGML_ASSERT(h_v % h_k == 0);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
+
+    result->op     = GGML_OP_G1_SSM_LAYER;
+    result->src[0] = x;
+    result->src[1] = w_in;
+    result->src[2] = w_ba;
+    result->src[3] = ssm_dt;
+    result->src[4] = ssm_a;
+    result->src[5] = w_conv;
+    result->src[6] = conv_state;
+    result->src[7] = rms_w;
+    result->src[8] = w_out;
+    result->src[9] = state;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_embd);
+    ggml_set_op_params_i32(result, 1, (int32_t) s_k);
+    ggml_set_op_params_i32(result, 2, (int32_t) h_k);
+    ggml_set_op_params_i32(result, 3, (int32_t) h_v);
+    ggml_set_op_params_i32(result, 4, (int32_t) s_v);
+    ggml_set_op_params_i32(result, 5, (int32_t) d_conv);
+    ggml_set_op_params_f32(result, 6, l2_eps);
+    ggml_set_op_params_f32(result, 7, rms_eps);
+
+    return result;
+}
+
+// ggml_g1_kda_in -- [tongyi R-017] 见 ggml.h 语义契约（KDA_SPEC.md stage1）
+struct ggml_tensor * ggml_g1_kda_in(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * wq,
+        struct ggml_tensor  * wk,
+        struct ggml_tensor  * wv,
+        struct ggml_tensor  * cq,
+        struct ggml_tensor  * ck,
+        struct ggml_tensor  * cv,
+        struct ggml_tensor  * beta_w,
+        struct ggml_tensor  * conv_state,
+        int64_t               head_dim,
+        int64_t               d_conv,
+        float                 l2_eps) {
+    const int64_t n_embd  = x->ne[0];
+    const int64_t d_inner = wq->ne[1];
+    const int64_t n_head  = d_inner / head_dim;
+
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == n_embd);
+    GGML_ASSERT(wq->type == GGML_TYPE_Q4_0 && wk->type == GGML_TYPE_Q4_0 && wv->type == GGML_TYPE_Q4_0);
+    GGML_ASSERT(wq->ne[0] == n_embd && wk->ne[0] == n_embd && wv->ne[0] == n_embd);
+    GGML_ASSERT(wk->ne[1] == d_inner && wv->ne[1] == d_inner);
+    GGML_ASSERT(head_dim > 0 && d_inner % head_dim == 0);
+    GGML_ASSERT(cq->type == GGML_TYPE_F32 && ck->type == GGML_TYPE_F32 && cv->type == GGML_TYPE_F32);
+    GGML_ASSERT(cq->ne[0] == d_conv && cq->ne[1] == d_inner);
+    GGML_ASSERT(ck->ne[0] == d_conv && ck->ne[1] == d_inner);
+    GGML_ASSERT(cv->ne[0] == d_conv && cv->ne[1] == d_inner);
+    GGML_ASSERT(beta_w->type == GGML_TYPE_F32 && beta_w->ne[0] == n_embd && beta_w->ne[1] == n_head);
+    GGML_ASSERT(conv_state->type == GGML_TYPE_F32 && conv_state->ne[0] == 3*(d_conv-1)*d_inner);
+    GGML_ASSERT(d_conv >= 2);
+    GGML_ASSERT(l2_eps >= 0.0f);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3*d_inner + n_head);
+
+    result->op     = GGML_OP_G1_KDA_IN;
+    result->src[0] = x;
+    result->src[1] = wq;
+    result->src[2] = wk;
+    result->src[3] = wv;
+    result->src[4] = cq;
+    result->src[5] = ck;
+    result->src[6] = cv;
+    result->src[7] = beta_w;
+    result->src[8] = conv_state;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_embd);
+    ggml_set_op_params_i32(result, 1, (int32_t) head_dim);
+    ggml_set_op_params_i32(result, 2, (int32_t) d_conv);
+    ggml_set_op_params_f32(result, 3, l2_eps);
+
+    return result;
+}
+
+// ggml_g1_kda_out -- [tongyi R-017] 见 ggml.h 语义契约（KDA_SPEC.md stage2+3）
+struct ggml_tensor * ggml_g1_kda_out(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * scratch,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * f_a,
+        struct ggml_tensor  * g_a,
+        struct ggml_tensor  * dt_b,
+        struct ggml_tensor  * ssm_a,
+        struct ggml_tensor  * o_norm,
+        struct ggml_tensor  * wo,
+        struct ggml_tensor  * state,
+        float                 rms_eps,
+        float                 gate_lower_bound) {
+    const int64_t n_embd   = x->ne[0];
+    const int64_t head_dim = o_norm->ne[0];
+    const int64_t n_head   = ssm_a->ne[0];
+    const int64_t d_inner  = head_dim * n_head;
+
+    GGML_ASSERT(scratch->type == GGML_TYPE_F32 && scratch->ne[0] == 3*d_inner + n_head);
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == n_embd);
+    GGML_ASSERT(f_a->type == GGML_TYPE_F32 && f_a->ne[0] == n_embd && f_a->ne[1] == d_inner);
+    GGML_ASSERT(g_a->type == GGML_TYPE_F32 && g_a->ne[0] == n_embd && g_a->ne[1] == d_inner);
+    GGML_ASSERT(dt_b->type == GGML_TYPE_F32 && dt_b->ne[0] == d_inner);
+    GGML_ASSERT(ssm_a->type == GGML_TYPE_F32 && ssm_a->ne[0] == n_head);
+    GGML_ASSERT(o_norm->type == GGML_TYPE_F32 && o_norm->ne[0] == head_dim);
+    GGML_ASSERT(wo->type == GGML_TYPE_Q4_0 && wo->ne[0] == d_inner && wo->ne[1] == n_embd);
+    GGML_ASSERT(state->type == GGML_TYPE_F32 && state->ne[0] == head_dim && state->ne[1] == head_dim && state->ne[2] == n_head);
+    GGML_ASSERT(rms_eps >= 0.0f);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
+
+    result->op     = GGML_OP_G1_KDA_OUT;
+    result->src[0] = scratch;
+    result->src[1] = x;
+    result->src[2] = f_a;
+    result->src[3] = g_a;
+    result->src[4] = dt_b;
+    result->src[5] = ssm_a;
+    result->src[6] = o_norm;
+    result->src[7] = wo;
+    result->src[8] = state;
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_embd);
+    ggml_set_op_params_i32(result, 1, (int32_t) head_dim);
+    ggml_set_op_params_f32(result, 2, rms_eps);
+    ggml_set_op_params_f32(result, 3, gate_lower_bound);
+
+    return result;
+}
+
 // ggml_top_k
 
 struct ggml_tensor * ggml_top_k(
@@ -8222,6 +8451,8 @@ size_t ggml_quantize_chunk(
     switch (type) {
         case GGML_TYPE_Q1_0:    result = quantize_q1_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q2_0:    result = quantize_q2_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_PQ2_0: result = quantize_pq2_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_PTQ1_0: result = quantize_ptq1_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q4_0:    result = quantize_q4_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q4_1:    result = quantize_q4_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

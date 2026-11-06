@@ -1,5 +1,9 @@
 #include "ggml-vulkan-common.h"
 
+#if defined(__ANDROID__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
+
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
@@ -2898,7 +2902,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     };
     uint32_t rm_iq = 2 * rm_kq;
 
-    const bool use_subgroups = device->subgroup_arithmetic;
+    const bool use_subgroups = device->subgroup_arithmetic && getenv("GGML_VK_NO_SUBGROUP") == nullptr;
     // The Imagination proprietary compiler rejects the subgroup-only dequant mul_mat_vec
     // shaders that require a subgroup size >= 16; fall back to shared-memory reduction.
     const bool is_imagination_proprietary =
@@ -4506,7 +4510,7 @@ vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_EXT_device_fault");
         }
 
-        vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
+        ggml_vk_default_dispatcher().vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
 
         device->device_fault = device->device_fault && fault_features.deviceFault;
 
@@ -4694,7 +4698,7 @@ vk_device ggml_vk_get_device(size_t idx) {
             std::vector<VkCooperativeMatrixPropertiesKHR> cm_props;
 
             PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR pfn_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR =
-                (PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)vkGetInstanceProcAddr(vk_instance.instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+                (PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
 
             uint32_t cm_props_num;
 
@@ -4804,7 +4808,7 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         if (device->device_fault) {
             device->pfn_vkGetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)
-                vkGetDeviceProcAddr(device->device, "vkGetDeviceFaultInfoEXT");
+                ggml_vk_default_dispatcher().vkGetDeviceProcAddr(device->device, "vkGetDeviceFaultInfoEXT");
         }
 
         // Queues
@@ -5143,7 +5147,7 @@ static void ggml_vk_print_gpu_info(size_t idx) {
     }
 #endif
 
-    vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);
+    ggml_vk_default_dispatcher().vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);
 
     fp16 = fp16 && vk12_features.shaderFloat16;
 
@@ -5217,14 +5221,93 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher() {
     return ggml_vk_default_dispatcher_instance;
 }
 
+#if defined(__ANDROID__) || defined(__linux__)
+// [turnip] Direct-load a user-supplied Vulkan driver (e.g. Mesa Turnip), bypassing
+// the system loader/vendor driver. GGML_VK_TURNIP = absolute path of driver .so.
+// Entry conventions: standard ICD exports, or Android Vulkan HAL module
+// (dlsym "HMI" -> hw_module_t -> methods->open("vulkan") -> vulkan_device_t),
+// which is how Mesa Turnip Android builds expose their entry points.
+namespace turnip_hal {
+struct hw_module_methods_t { int (*open_)(const void *module, const char *id, void **device); };
+struct hw_module_t {
+    uint32_t tag; uint16_t module_api_version; uint16_t hal_api_version;
+    const char *id; const char *name; const char *author;
+    hw_module_methods_t *methods; void *dso; uint32_t reserved[8];
+};
+struct hw_device_t {
+    uint32_t tag; uint32_t version; hw_module_t *module;
+    hw_module_methods_t *methods; int (*close_)(void *device); int32_t reserved[32];
+};
+struct vulkan_device_t {
+    // Mesa HAL device: PFN table observed starting at byte offset 0x70
+    // (hw_device_t common occupies less than that here), same field order as
+    // the AOSP vulkan_device_t: EnumerateInstanceExtensionProperties,
+    // EnumerateInstanceLayerProperties, CreateInstance, GetInstanceProcAddr.
+    uint8_t _common[0x70];
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkEnumerateInstanceLayerProperties EnumerateInstanceLayerProperties;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+}  // namespace turnip_hal
+
+static PFN_vkGetInstanceProcAddr ggml_vk_turnip_resolve_gipa(const char *path) {
+    void *drv = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (drv == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] dlopen(%s) failed: %s\n", path, dlerror());
+        return nullptr;
+    }
+    PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr) dlsym(drv, "vk_icdGetInstanceProcAddr");
+    if (gipa == nullptr)
+        gipa = (PFN_vkGetInstanceProcAddr) dlsym(drv, "vkGetInstanceProcAddr");
+    if (gipa != nullptr) {
+        GGML_LOG_INFO("ggml_vulkan: [turnip] using ICD entry from %s\n", path);
+        return gipa;
+    }
+    auto mod = (turnip_hal::hw_module_t *) dlsym(drv, "HMI");
+    if (mod == nullptr || mod->tag != 0x48574d54u /* 'HWMT' */ || mod->methods == nullptr || mod->methods->open_ == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] no usable driver entry found in %s\n", path);
+        return nullptr;
+    }
+    void *dev = nullptr;
+    if (mod->methods->open_(mod, "vulkan", &dev) != 0 || dev == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL open() failed for %s\n", path);
+        return nullptr;
+    }
+    auto vdev = (turnip_hal::vulkan_device_t *) dev;
+    if (vdev->GetInstanceProcAddr == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL device has no GetInstanceProcAddr\n");
+        return nullptr;
+    }
+    // Sanity check: a genuine vkGetInstanceProcAddr resolves global entry points for a NULL instance
+    if (vdev->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance") == nullptr) {
+        GGML_LOG_ERROR("ggml_vulkan: [turnip] HAL GetInstanceProcAddr failed sanity check\n");
+        return nullptr;
+    }
+    GGML_LOG_INFO("ggml_vulkan: [turnip] using Vulkan HAL GetInstanceProcAddr from %s\n", path);
+    return vdev->GetInstanceProcAddr;
+}
+#endif
+
 void ggml_vk_instance_init() {
     if (vk_instance_initialized) {
         return;
     }
     VK_LOG_DEBUG("ggml_vk_instance_init()");
 
-    // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
-    ggml_vk_default_dispatcher_instance.init(vkGetInstanceProcAddr);
+#if defined(__ANDROID__) || defined(__linux__)
+    const char* turnip_path = getenv("GGML_VK_TURNIP");
+    if (turnip_path != nullptr && turnip_path[0] != '\0') {
+        PFN_vkGetInstanceProcAddr turnip_gipa = ggml_vk_turnip_resolve_gipa(turnip_path);
+        if (turnip_gipa == nullptr)
+            throw std::runtime_error("[turnip] failed to resolve driver entry points");
+        ggml_vk_default_dispatcher_instance.init(turnip_gipa);
+    } else
+#endif
+    {
+        // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
+        ggml_vk_default_dispatcher_instance.init(vkGetInstanceProcAddr);
+    }
 
     // vkEnumerateInstanceVersion is Vulkan 1.1. A null value indicated Vulkan 1.0.
     if (ggml_vk_default_dispatcher_instance.vkEnumerateInstanceVersion == nullptr) {
@@ -5287,12 +5370,12 @@ void ggml_vk_instance_init() {
 
     if (debug_utils_ext) {
         vk_instance.debug_utils_support              = true;
-        vk_instance.pfn_vkSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkSetDebugUtilsObjectNameEXT");
-        vk_instance.pfn_vkQueueBeginDebugUtilsLabelEXT = (PFN_vkQueueBeginDebugUtilsLabelEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkQueueBeginDebugUtilsLabelEXT");
-        vk_instance.pfn_vkQueueEndDebugUtilsLabelEXT = (PFN_vkQueueEndDebugUtilsLabelEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkQueueEndDebugUtilsLabelEXT");
-        vk_instance.pfn_vkCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkCmdBeginDebugUtilsLabelEXT");
-        vk_instance.pfn_vkCmdEndDebugUtilsLabelEXT =   (PFN_vkCmdEndDebugUtilsLabelEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkCmdEndDebugUtilsLabelEXT");
-        vk_instance.pfn_vkCmdInsertDebugUtilsLabelEXT = (PFN_vkCmdInsertDebugUtilsLabelEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkCmdInsertDebugUtilsLabelEXT");
+        vk_instance.pfn_vkSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkSetDebugUtilsObjectNameEXT");
+        vk_instance.pfn_vkQueueBeginDebugUtilsLabelEXT = (PFN_vkQueueBeginDebugUtilsLabelEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkQueueBeginDebugUtilsLabelEXT");
+        vk_instance.pfn_vkQueueEndDebugUtilsLabelEXT = (PFN_vkQueueEndDebugUtilsLabelEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkQueueEndDebugUtilsLabelEXT");
+        vk_instance.pfn_vkCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkCmdBeginDebugUtilsLabelEXT");
+        vk_instance.pfn_vkCmdEndDebugUtilsLabelEXT =   (PFN_vkCmdEndDebugUtilsLabelEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkCmdEndDebugUtilsLabelEXT");
+        vk_instance.pfn_vkCmdInsertDebugUtilsLabelEXT = (PFN_vkCmdInsertDebugUtilsLabelEXT) ggml_vk_default_dispatcher().vkGetInstanceProcAddr(vk_instance.instance, "vkCmdInsertDebugUtilsLabelEXT");
     }
 
     vk_perf_logger_enabled = getenv("GGML_VK_PERF_LOGGER") != nullptr;
@@ -6678,6 +6761,11 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
 }
 
 static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_t n, uint32_t k, ggml_type src0_type) {
+    // RESEARCH(vendor fix): route decode (n==1) to MMQ too; some mul_mat_vec NCOLS
+    // variants cannot be created on some vendor drivers.
+    if (getenv("GGML_VK_NO_MMV") != nullptr) {
+        return false;
+    }
     if (device->mmvq_mode == 1) {
         return true;
     } else if (device->mmvq_mode == -1) {
@@ -16475,7 +16563,7 @@ bool ggml_vk_device_is_supported(const vk::PhysicalDevice & vkdev) {
     vk11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     device_features2.pNext = &vk11_features;
 
-    vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);
+    ggml_vk_default_dispatcher().vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);
 
     return vk11_features.storageBuffer16BitAccess;
 }

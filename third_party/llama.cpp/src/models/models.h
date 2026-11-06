@@ -1639,6 +1639,25 @@ struct llama_model_mistral_large4 : public llama_model_base {
 };
 
 
+// dspark: EAGLE-style block-diffusion speculative-decoding drafter. Trunk is a
+// small dense Qwen3-style stack (standard llama_layer attn_*/ffn_* tensors);
+// the graph is genuinely novel per-layer (target-tap context re-projected fresh
+// through each layer's own k_proj/v_proj, concatenated with the draft block's
+// own K/V) -- see src/models/dspark.cpp.
+struct llama_model_dspark : public llama_model_base {
+    llama_model_dspark(const struct llama_model_params & params) : llama_model_base(params) {}
+
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    struct graph : public llm_graph_context {
+        graph(const llama_model & model, const llm_graph_params & params);
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
+
 struct llama_model_mistral4 : public llama_model_deepseek2 {
     llama_model_mistral4(const struct llama_model_params & params) : llama_model_deepseek2(params) {}
     // reuse load_arch_hparams and load_arch_tensors from llama_model_deepseek2
@@ -2994,14 +3013,22 @@ struct llama_model_clover_moe : public llama_model_base {
         ggml_tensor * build_layer_attn(llm_graph_input_attn_kv * inp_attn, ggml_tensor * cur, ggml_tensor * inp_pos, int il);
         ggml_tensor * build_layer_attn_linear(llm_graph_input_rs * inp, ggml_tensor * cur, int il);
         ggml_tensor * build_layer_ffn(ggml_tensor * cur, int il);
-        ggml_tensor * build_norm_gated(ggml_tensor * input, ggml_tensor * weights, ggml_tensor * gate, int il);
+        ggml_tensor * build_norm_gated(ggml_tensor * input, ggml_tensor * weights, ggml_tensor * gate);
         std::pair<ggml_tensor *, ggml_tensor *> build_qkvz(ggml_tensor * input, int il);
+
+        ggml_tensor * build_clover(llm_graph_input_rs * inp, ggml_tensor * qkv, ggml_tensor * gate, int il);
+        ggml_tensor * build_clover_coreset(ggml_tensor * logits);
+        ggml_tensor * build_clover_l2_norm(ggml_tensor * cur, bool round);
+        ggml_tensor * build_clover_top_k(ggml_tensor * logits, int64_t k);
+
+        ggml_tensor * build_bf16_round(ggml_tensor * cur) const;
 
         const llama_model & model;
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
+
 
 struct llama_model_mistral3 : public llama_model_base {
     llama_model_mistral3(const struct llama_model_params & params) : llama_model_base(params) {}

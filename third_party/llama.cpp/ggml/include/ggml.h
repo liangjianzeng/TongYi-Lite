@@ -432,8 +432,12 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_F8_E4M3 = 43,
-        GGML_TYPE_COUNT   = 44,
+         GGML_TYPE_F8_E4M3 = 43,
+        // Prism-private Q2_0 at group size 128 (upstream Q2_0 is group 64). High id so it
+        // slots above upstream types; type_traits is sized to COUNT (144) with 44..141 unused (F8_E4M3 fills 43).
+        GGML_TYPE_PQ2_0 = 142,
+        GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
+        GGML_TYPE_COUNT   = 144,
     };
 
     // [TAG_GGML_PREC]
@@ -490,6 +494,8 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
         GGML_FTYPE_MOSTLY_F8_E4M3 = 29, // except 1d tensors
+        GGML_FTYPE_MOSTLY_PQ2_0 = 128, // except 1d tensors (Prism-private group-128 Q2_0)
+        GGML_FTYPE_MOSTLY_PTQ1_0 = 129, // except 1d tensors (Prism-private group-128 ternary)
     };
 
     // available tensor operations:
@@ -605,6 +611,13 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+
+        GGML_OP_MOE_TOPK_FUSED,
+
+        GGML_OP_G1_SSM_LAYER,
+
+        GGML_OP_G1_KDA_IN,
+        GGML_OP_G1_KDA_OUT,
 
         GGML_OP_COUNT,
     };
@@ -2481,6 +2494,133 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   k);
+
+    // [tongyi M-R1 2026-10-25] fused MoE router top-k pipeline (grouped MoE):
+    // one op replacing SIGMOID + ADD(bias) + group top-2/sum + group top-k
+    // + fill(-inf)/set_rows mask + global top-k + gather + normalize of
+    // build_moe_ffn's routing section (llama-graph.cpp).
+    //
+    //   logits: [E, n_tokens] F32 router logits (pre-activation)
+    //   bias:   [E] F32 expert selection bias (DeepSeek-V3 style), may be NULL
+    //   E = G*epg experts; per-group top-2 sum -> group top-gu -> mask ->
+    //   global top-K; weights gathered from the UNBIASED sigmoid probs and
+    //   normalized by max(sum, 6.103515625e-5), then scaled by w_scale
+    //   (pass 1.0 to skip; the graph-level `w_scale != 0 && != 1` fold).
+    //
+    // dst: [K, n_tokens, 2] F32:
+    //   (:, :, 0) = weights   [K, n_tokens] normalized (consumed via view)
+    //   (:, :, 1) = expert ids [K, n_tokens] stored as exact float values
+    //               (wired to I32 through ggml_cast; bit-exact for ids < 2^24)
+    GGML_API struct ggml_tensor * ggml_moe_topk_fused(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * logits,
+            struct ggml_tensor  * bias,
+            int64_t               n_expert,      // E
+            int64_t               n_groups,      // G
+            int64_t               n_exp_per_group,
+            int64_t               n_groups_used, // gu
+            int64_t               n_expert_used, // K
+            float                 w_scale);
+
+    // [tongyi A7.2/R-014 2026-10-26] G1 逐层巨核：ling/qwen3next GDN 层 decode 单 token
+    // 三阶段融合（in_proj+ba GEMV、gate/beta、conv1d+silu、q/k l2norm、v/z interleave、
+    // conv_state 滚动 → GDN AR+gated RMSNorm → o_proj GEMV）。26 op → 3 kernel launch。
+    //
+    // 语义契约（数值口径 = kernels/g1_ssm_layer.cl 与 _probe/g1_probe CPU 参考，
+    // 双栈对拍 NMSE 1e-13，R-010）：
+    //   x          [N_EMBD] F32 当前 token 层输入
+    //   w_in       [N_EMBD, QKVZ_DIM] Q4_0，QKVZ_DIM = H_K*(2*S_K + 2*S_V*H_V/H_K)，
+    //              每 k 头混合块 q|k|v|z（qwen3next.cpp build_qkvz legacy 布局）
+    //   w_ba       [N_EMBD, BA_DIM] F32，BA_DIM = 2*H_V，每 k 头 b|a（各 RF=H_V/H_K 列）
+    //   ssm_dt/a   [H_V] F32（gate = softplus(a + ssm_dt) * ssm_a）
+    //   w_conv     [D_CONV, CC] F32（ggml ssm_conv 核约定，ne[0]=D_CONV），CC = 2*H_K*S_K + H_V*S_V
+    //   conv_state [CC, D_CONV-1] F32 常驻，**原地滚动**（out[0]=in[1], out[1]=in[2], out[2]=本 token）
+    //   rms_w      [S_V] F32
+    //   w_out      [H_V*S_V, N_EMBD] Q4_0（o_proj）
+    //   state      [S_V, S_V, H_V] F32 常驻，**原地 RMW**（GDN AR，列主 S(i,j)=s[j*S_V+i]，
+    //              同 GGML_OP_GATED_DELTA_NET 契约）
+    //   dst        [N_EMBD] F32 层输出
+    // 仅 decode（n_tokens=1）；eps = hparams.f_norm_rms_eps（l2norm 与 ssm_norm 同源）。
+    // params: i32[0..5]=N_EMBD,S_K,H_K,H_V,S_V,D_CONV; f32[6..7]=l2_eps,rms_eps。
+    GGML_API struct ggml_tensor * ggml_g1_ssm_layer(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * w_in,
+            struct ggml_tensor  * w_ba,
+            struct ggml_tensor  * ssm_dt,
+            struct ggml_tensor  * ssm_a,
+            struct ggml_tensor  * w_conv,
+            struct ggml_tensor  * conv_state,
+            struct ggml_tensor  * rms_w,
+            struct ggml_tensor  * w_out,
+            struct ggml_tensor  * state,
+            int64_t               n_embd,
+            int64_t               s_k,
+            int64_t               h_k,
+            int64_t               h_v,
+            int64_t               s_v,
+            int64_t               d_conv,
+            float                 l2_eps,
+            float                 rms_eps);
+
+    // [tongyi R-017 2026-10-25] G1-KDA 变体（ling/bailingmoe3 recr 层 = KDA，R-016 定案）：
+    // 复用 G1-GDN 三阶段骨架（3 launch/层），拆两 op 消 GGML_MAX_SRC=10 限制。
+    // 语义锚点 = src/models/bailingmoe3.cpp recr 层原 op 链 + bailingmoe3_causal_conv1d。
+    // 数值口径 = KDA_SPEC.md（_probe/g1_probe CPU 参考双精度对拍，NMSE ≤1e-6）。
+    // 仅 decode（n_seqs=1、n_tokens=1 门在 bailingmoe3 侧）。
+    //
+    // ggml_g1_kda_in（stage1，1 kernel）：
+    //   x          [N_EMBD] F32 当前 token 层输入
+    //   wq/wk/wv   [N_EMBD, D_INNER] Q4_0 三路投影（q/k/v 均 H 头 × d，无 repeat interleave）
+    //   cq/ck/cv   [D_CONV, D_INNER] F32 三路卷积权（ggml ssm_conv 核约定，ne[0]=D_CONV）
+    //   beta_w     [N_EMBD, N_HEAD] F32（beta = sigmoid(beta_w·x)）
+    //   conv_state [3*(D_CONV-1)*D_INNER] F32 常驻，**原地滚动**（槽序 q|k|v，每槽窗口主序
+    //              [D_CONV-1 行, D_INNER 列]；out_w0=in_w1, out_w1=in_w2, out_w2=本 token）
+    //   dst        [3*D_INNER + N_HEAD] F32 scratch = q(l2norm 后) | k(l2norm 后) | v | beta[N_HEAD]
+    // 阶段：三路 q4_0 GEMV（Q4_DOT 序）+ beta f32 GEMV → 每槽 conv（窗口末行=本 token）+ silu
+    // → q/k 逐头 l2norm（因子 = d/sqrt(Σx²+eps)，build_gdn_l2_norm 闭式）→ beta sigmoid。
+    // params: i32[0..2]=N_EMBD,HEAD_DIM,D_CONV; f32[3]=L2_EPS。
+    GGML_API struct ggml_tensor * ggml_g1_kda_in(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * wq,
+            struct ggml_tensor  * wk,
+            struct ggml_tensor  * wv,
+            struct ggml_tensor  * cq,
+            struct ggml_tensor  * ck,
+            struct ggml_tensor  * cv,
+            struct ggml_tensor  * beta_w,
+            struct ggml_tensor  * conv_state,
+            int64_t               head_dim,
+            int64_t               d_conv,
+            float                 l2_eps);
+
+    // ggml_g1_kda_out（stage2+3，2 kernel 融合）：KDA AR（行衰减按 g[i] 向量，与 GDN 唯一差异）
+    // + gated RMSNorm 尾融合 + o_proj GEMV。
+    //   scratch    [3*D_INNER + N_HEAD] F32（= ggml_g1_kda_in 的 dst，q|k|v|beta）
+    //   x          [N_EMBD] F32（gate / out-gate 逐通道点积复用层输入）
+    //   f_a        [N_EMBD, D_INNER] F32；dt_b [D_INNER] F32；ssm_a [N_HEAD] F32
+    //              gate[c] = LOWER_BOUND·sigmoid((f_a·x + dt_b)[c]·ssm_a[h])（LOWER_BOUND 负
+    //              → gate∈(lb,0)，衰减 g[c] = exp(gate[c]) < 1）
+    //   g_a        [N_EMBD, D_INNER] F32（out-gate = sigmoid(g_a·x)）
+    //   o_norm     [HEAD_DIM] F32；wo [D_INNER, N_EMBD] Q4_0（o_proj）
+    //   state      [HEAD_DIM, HEAD_DIM, N_HEAD] F32 常驻，**原地 RMW**（KDA AR，列主
+    //              S(i,j)=s[j*d+i]，同 GGML_OP_GATED_DELTA_NET 契约；单趟合并衰减+外积）
+    //   dst        [N_EMBD] F32 层输出
+    // params: i32[0..1]=N_EMBD,HEAD_DIM; f32[2..3]=RMS_EPS,GATE_LOWER_BOUND。
+    GGML_API struct ggml_tensor * ggml_g1_kda_out(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * scratch,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * f_a,
+            struct ggml_tensor  * g_a,
+            struct ggml_tensor  * dt_b,
+            struct ggml_tensor  * ssm_a,
+            struct ggml_tensor  * o_norm,
+            struct ggml_tensor  * wo,
+            struct ggml_tensor  * state,
+            float                 rms_eps,
+            float                 gate_lower_bound);
 
     // top k elements per row
     // note: the resulting top k indices are in no particular order

@@ -17,12 +17,18 @@ struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
 
+// transform types live in llama-model.h; forward decls keep this header light
+struct llama_hadamard_transform;
+using llama_hadamard_rotations = std::unordered_map<const ggml_tensor *, llama_hadamard_transform>;
+
 struct llama_cparams;
 struct llama_layer;
 struct llama_prec_policy;
 struct llama_hadamard;
 
 class llama_moe_cache;
+
+class llama_moe_slot_runtime;
 
 struct llama_memory_context_i;
 
@@ -185,6 +191,50 @@ public:
     ggml_tensor * idxs = nullptr; // I64 [n_batch]
 };
 
+struct llama_dspark_ctx {
+    int64_t n_embd_cap = 0;  // n_capture_layers * n_embd (raw tap width, pre dspark.fc)
+    int64_t n_ctx_rows = 0;  // number of staged context rows for the next decode call
+
+    // [n_ctx_rows * n_embd_cap], row-major: row i is position ctx_pos[i]'s
+    // concatenated multi-layer tap feature (e.g. from llama_get_embeddings_capture_ith
+    // on the target's context, one row per accepted-since-last-round token).
+    std::vector<float>   v_ctx_feat;
+    std::vector<int32_t> v_ctx_pos;  // [n_ctx_rows], absolute position id per context row
+};
+
+// the DSpark staged-context feature input: v_ctx_feat is the concatenation of
+// the target's hidden states at the capture layers (rows = n_ctx_rows), which
+// the graph consumes as a single F32 [n_embd_cap, n_ctx_rows] tensor. The
+// feature rows are a pure function of the target's context, not of the current
+// ubatch, so this input ignores ubatch and only stages dctx->v_ctx_feat.
+class llm_graph_input_dspark_ctx : public llm_graph_input_i {
+  public:
+    llm_graph_input_dspark_ctx(const llama_dspark_ctx * dctx) : dctx(dctx) {}
+
+    virtual ~llm_graph_input_dspark_ctx() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    ggml_tensor * ctx_feat = nullptr;  // F32 [n_embd_cap, n_ctx_rows]
+
+    const llama_dspark_ctx * dctx;
+    int32_t                  reuse_mask_id          = -1;
+    int64_t                  correction_prefix_rows = 0;
+};
+class llm_graph_input_dspark_logsnr : public llm_graph_input_i {
+public:
+    llm_graph_input_dspark_logsnr(std::vector<float> feat) : v_feat(std::move(feat)) {}
+    virtual ~llm_graph_input_dspark_logsnr() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * feat = nullptr; // F32 [128, n_tokens]
+
+    std::vector<float> v_feat;
+};
+
 class llm_graph_input_pos : public llm_graph_input_i {
 public:
     llm_graph_input_pos(uint32_t n_pos_per_embd, llama_rope_section_order rope_section_order = LLAMA_ROPE_SECTION_ORDER_TYXZ)
@@ -307,10 +357,17 @@ public:
     // views of s_copy, computed once per graph
     // and shared across layers which use build_rs
     ggml_tensor * s_copy_main; // I32 [n_seqs]
+    ggml_tensor * s_copy_extra; // I32 [n_rs - n_seqs]
     ggml_tensor * s_copy_tail; // I32 [n_rs - 1]
 
     // I32 [n_slot] = {n_slot - 1, ..., 0}, rollback slot of each conv window, created by the graphs that write them
     ggml_tensor * s_slot_rev = nullptr;
+
+    // [dspark 2026-10-18] true when s_copy points at the persistent constant
+    // zero tensor in the RS cache buffer (LLAMA_RS_CONST_IDX). set_input must
+    // skip the host write in that mode, and can_reuse must reject reuse when
+    // the desired mode flips.
+    bool const_idx = false;
 
     const llama_memory_recurrent_context * mctx;
 
@@ -805,7 +862,20 @@ struct llm_graph_params {
     const llama_adapter_cvec     * cvec;
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
+    // split-MoE slot 运行时（null = 未启用，走普通全量专家权重路径）。
+    llama_moe_slot_runtime       * moe_slots = nullptr;
+    // MoE-SSD 阶段。决定 FFN 用哪套 slot 张量（prefill 共享 / decode 每层独立）。
+    // **必须进 allow_reuse**：否则图缓存会把上一个阶段的图复用过来，而图里嵌的是
+    // 张量指针 —— 那就会拿 prefill 的共享张量去跑 decode（窗口失效但不报错）。
+    // n_tokens 不足以区分：单 token 的 prefill 与 decode 都是 1。
+    bool                           moe_decode_phase = false;
     const llama_cross            * cross;
+    const llama_dspark_ctx *         dspark_ctx;
+    bool                             dspark_has_context;
+    int64_t                          dspark_ctx_rows;
+    int64_t                          dspark_ctx_width;
+    const llama_hadamard_rotations * hadamard_rotations;
+    const llama_hadamard_rotations * hadamard_inverses;
     const llama_moe_cache        * moe_cache;
 
     const llama_prec_policy * prec_policy = nullptr;
@@ -913,6 +983,8 @@ struct llm_graph_params {
             gtype == other.gtype &&
             cvec  == other.cvec  &&
             loras == other.loras &&
+            moe_slots == other.moe_slots &&
+            moe_decode_phase == other.moe_decode_phase &&
             cross == other.cross;
     }
 };
@@ -977,6 +1049,7 @@ public:
     std::vector<ggml_tensor *> t_layer_inp;
 
     std::vector<ggml_tensor *> t_sampled;
+    std::vector<ggml_tensor *> t_dspark_greedy;
     std::vector<ggml_tensor *> t_sampled_probs;
     std::vector<ggml_tensor *> t_sampled_logits;
     std::vector<ggml_tensor *> t_candidates;
@@ -1069,7 +1142,19 @@ struct llm_graph_context {
     const llama_adapter_cvec     * cvec;
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
+    llama_moe_slot_runtime       * moe_slots;
+    bool                           moe_decode_phase;
     const llama_cross            * cross;
+    const llama_dspark_ctx *         dspark_ctx;
+    bool                             dspark_has_context;
+    int64_t                          dspark_ctx_rows;
+    int64_t                          dspark_ctx_width;
+    const llama_hadamard_rotations * hadamard_rotations;
+    const llama_hadamard_rotations * hadamard_inverses;
+
+    // Transforms shared by folded weights on the same activation. Key is (input, rotation);
+    // both must match. Valid for one graph build only.
+    mutable std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hadamard_memo;
     const llama_moe_cache        * moe_cache;
 
     const llama_prec_policy * prec_policy;

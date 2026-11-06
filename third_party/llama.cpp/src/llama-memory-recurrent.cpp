@@ -52,8 +52,9 @@ llama_memory_recurrent::llama_memory_recurrent(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                // r and s per layer, plus the separate PLE conv row where the model has one
-                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
+                // r and s per layer, plus the separate PLE conv row where the model has one,
+                // plus the persistent constant gather index (LLAMA_RS_CONST_IDX)
+                /*.mem_size   =*/ size_t(((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer + 1)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -86,10 +87,24 @@ llama_memory_recurrent::llama_memory_recurrent(
         ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
 
         if (offload) {
-            auto * dev = model.dev_layer(i);
-            buft = ggml_backend_dev_buffer_type(dev);
+            // [dspark 2026-10-17] LLAMA_RS_CACHE_CPU=1 pins the recurrent state
+            // cache to host memory. Workaround/diagnostic for the 740 full-GPU
+            // path: in-graph cpy state write-backs into the GPUOpenCL RS buffer
+            // silently lose data for layers >= 1 (layer 0 OK), corrupting every
+            // decode after prefill. Small cache (~63 MiB) so host residency is
+            // viable on unified-memory devices.
+            static const bool rs_cpu = []{
+                const char * e = getenv("LLAMA_RS_CACHE_CPU");
+                return e && e[0] == '1';
+            }();
+            if (!rs_cpu) {
+                auto * dev = model.dev_layer(i);
+                buft = ggml_backend_dev_buffer_type(dev);
 
-            dev_name = ggml_backend_dev_name(dev);
+                dev_name = ggml_backend_dev_name(dev);
+            } else {
+                dev_name = "CPU (LLAMA_RS_CACHE_CPU=1)";
+            }
         }
 
         LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);
@@ -112,6 +127,14 @@ llama_memory_recurrent::llama_memory_recurrent(
             ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
             ggml_format_name(p, "cache_ple_r_l%d", i);
             p_l[i] = p;
+        }
+
+        // [dspark 2026-10-18] place the persistent constant gather index in the
+        // first (bottom-most) layer's buffer so the layer-0 GET_ROWS reads it
+        // without a cross-backend copy. Buffer clear below zeroes it to [0].
+        if (!s_copy_c) {
+            s_copy_c = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+            ggml_set_name(s_copy_c, "rs_s_copy_const");
         }
     }
 
@@ -1378,4 +1401,34 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
         }
     }
     return (int32_t)(idx * mem->size) + src0;
+}
+
+ggml_tensor * llama_memory_recurrent_context::get_s_copy_c() const {
+    return mem->s_copy_c;
+}
+
+bool llama_memory_recurrent_context::s_copy_is_const_zero() const {
+    if (is_full) {
+        return false;
+    }
+
+    if (mem->n != 1) {
+        return false;
+    }
+
+    const auto & cell = mem->cells[mem->head];
+
+    if (cell.src0 != 0) {
+        return false;
+    }
+
+    // a pending rollback snapshot would make s_copy(0) = rs_idx[seq]*size + src0 != 0
+    if (mem->n_rs_seq != 0 && !cell.seq_id.empty()) {
+        const llama_seq_id seq = *cell.seq_id.begin();
+        if (seq >= 0 && (size_t) seq < mem->rs_idx.size() && mem->rs_idx[seq] != 0) {
+            return false;
+        }
+    }
+
+    return true;
 }

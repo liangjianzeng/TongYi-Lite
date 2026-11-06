@@ -8,6 +8,7 @@
 #include "llama-impl.h"
 #include "llama-memory.h"
 #include "llama-moe-cache.h"
+#include "llama-model.h" // TEMP: golden baseline build (libstdc++ needs complete type)
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -18,6 +19,7 @@
 
 struct llama_model;
 class llama_batch_allocr;
+class llama_moe_slot_runtime;
 class llama_moe_cache;
 
 class llama_io_read_i;
@@ -140,6 +142,12 @@ struct llama_context {
                 int32_t   n_embd,
                 int32_t   il_start,
                 int32_t   il_end);
+
+    // dspark drafter: stage the target-tap context window consumed by the next
+    // decode() call. feat is [n_ctx_rows * n_embd_cap] row-major (row i is
+    // position pos[i]'s raw concatenated multi-layer tap feature, pre dspark.fc).
+    // pass n_ctx_rows <= 0 (or feat == nullptr) to clear the staged context.
+    void set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos);
 
     // process a single ubatch with a specific graph type
     // if memory_context is provided, it will be applied first to the context's memory
@@ -315,9 +323,16 @@ private:
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
 
+    // split-MoE slot 运行时（null = 模型未启用 slot bank，走全量专家权重路径）。
+    std::unique_ptr<llama_moe_slot_runtime> moe_slots;
+
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
+    // dspark drafter: staged target-tap context window for the next decode call.
+    // see llama_dspark_ctx in llama-graph.h for why this needs its own side channel
+    // instead of riding batch.token/embd.
+    llama_dspark_ctx dspark_ctx;
     llama_moe_cache_ptr moe_cache;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
@@ -444,6 +459,12 @@ private:
     ggml_backend_event_ptr ev_layer_inp_written;
     ggml_backend_event_ptr ev_layer_inp_read;
     bool ev_layer_inp_read_recorded = false;
+
+    // the Hadamard transforms this context's graphs consult: the model's own,
+    // plus the target's when the model borrows its token embeddings or output
+    // head through ctx_other (those tensors keep the target's folding)
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
 
     // keep copies of the per-sequence memory on the device
     std::map<llama_seq_id, llama_memory_buffers> mem_storage;

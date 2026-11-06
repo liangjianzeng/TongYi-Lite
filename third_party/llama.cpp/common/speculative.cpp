@@ -76,6 +76,7 @@ const std::map<std::string, common_speculative_type> common_speculative_type_fro
     {"draft-simple",  COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE},
     {"draft-eagle3",  COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3},
     {"draft-mtp",     COMMON_SPECULATIVE_TYPE_DRAFT_MTP},
+    {"draft-self",    COMMON_SPECULATIVE_TYPE_DRAFT_SELF},
     {"draft-dflash",  COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH},
     {"draft-dspark",  COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK},
     {"ngram-simple",  COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE},
@@ -216,6 +217,16 @@ struct common_speculative_impl {
     virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
     virtual void set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) {}
 };
+
+// Append an anchor and masked positions; return the first row in the batch.
+static int32_t common_speculative_add_masked_block(common_batch & batch, const common_speculative_draft_params & dp,
+        llama_seq_id seq_id, llama_token mask, int32_t n_tokens, bool logits) {
+    const int32_t begin = batch.size();
+    for (int32_t i = 0; i < n_tokens; ++i) {
+        batch.add(i == 0 ? dp.id_last : mask, dp.pos0 + i, seq_id, logits);
+    }
+    return begin;
+}
 
 struct common_speculative_impl_draft_simple : public common_speculative_impl {
     common_params_speculative_draft params;
@@ -1016,7 +1027,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     std::vector<int64_t>      dflash2_seed;
 
     // draft-dspark: the draft carries a Markov head and uses an anchor-first block layout
-    const bool is_dspark;
+    bool is_dspark = false;
 
     // dspark speculators
     bool sample_from_anchor = true;
@@ -1034,7 +1045,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
         : common_speculative_impl(type, n_seq, params.draft.n_max)
         , params(params.draft)
-        , is_dspark(type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK)
     {
         auto * ctx_tgt = this->params.ctx_tgt;
         auto * ctx_dft = this->params.ctx_dft;
@@ -1042,6 +1052,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         const llama_model * model_dft = llama_get_model(ctx_dft);
         const llama_model * model_tgt = llama_get_model(ctx_tgt);
+
+        // Both lineages declare general.architecture = dflash, so the requested type cannot
+        // pick the draft path. The Markov head is the on-disk marker and is already loaded.
+        is_dspark = llama_model_has_dspark_markov_head(model_dft);
+        const bool type_says_dspark = (type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK);
+        if (type_says_dspark != is_dspark) {
+            LOG_WRN("%s: draft model carries %s, but --spec-type requested %s. Using %s, which is "
+                    "what the model needs. The wrong path drops confidence truncation, and for "
+                    "sample_from_anchor models it also reads the drafts one row late.\n", __func__,
+                    is_dspark ? "a DSpark Markov head" : "no DSpark Markov head",
+                    common_speculative_type_to_str(type).c_str(),
+                    is_dspark ? "DSpark" : "DFlash");
+        }
 
         target_layer_ids   = llama_model_target_layer_ids  (model_dft);
         target_layer_ids_n = llama_model_target_layer_ids_n(model_dft);
@@ -1341,14 +1364,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             common_sampler_reset(smpls[seq_id].get());
 
-            const int32_t n = (int32_t) dp.pos0;
-
             const int32_t n_draft = params.n_max;
             const int32_t n_block_tokens = is_lilicorr ? block_size : n_draft + (is_dspark && sample_from_anchor ? 0 : 1);
-            i_block_beg[seq_id] = batch.size();
-            n_block    [seq_id] = n_block_tokens;
+            i_block_beg[seq_id] = common_speculative_add_masked_block(batch, dp, seq_id, mask_token_id,
+                    n_block_tokens, !is_dflash2 && !is_lilicorr);
+            n_block[seq_id] = n_block_tokens;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
-                const int32_t idx = batch.add(i == 0 ? dp.id_last : mask_token_id, n + i, seq_id, !is_dflash2 && !is_lilicorr);
+                const int32_t idx = i_block_beg[seq_id] + i;
                 if (is_lilicorr) {
                     // For LiliCorr drafting batch, set state embeddings for use in the associated transformer head.
                     const llama_pos pos = dp.pos0 - 1;
@@ -1364,6 +1386,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         // decode all sequence's noise block in a single batch
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+        LOG_WRN("%s: [dspark-dbg] n_max=%d block=%d beg=%d ret=%d\n",
+                __func__, params.n_max, n_block[0], i_block_beg[0], ret);
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
             return;
@@ -1514,6 +1538,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 }
             }
 
+            if (is_dspark) {
+                LOG_WRN("%s: [dspark-dbg] done result=%zu n_min=%d p_min=%.3f anchor=%d dflash2=%d mask=%d\n",
+                        __func__, result.size(), params.n_min, params.p_min,
+                        (int) sample_from_anchor, (int) is_dflash2, (int) mask_token_id);
+            }
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }
@@ -1522,6 +1551,89 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
         // noop
+    }
+};
+
+struct common_speculative_impl_draft_self : public common_speculative_impl {
+    llama_context * ctx;
+    const llama_vocab * vocab;
+    common_batch batch;
+    common_prompt_checkpoint checkpoint;
+    std::vector<bool> needs_anchor;
+
+    common_speculative_impl_draft_self(const common_params_speculative & params, uint32_t n_seq)
+        : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_SELF, n_seq, params.draft.n_max)
+        , ctx(params.draft.ctx_tgt)
+        , needs_anchor(n_seq, false) {
+        if (!ctx || !llama_get_causal_attn(ctx) || !llama_get_memory(ctx) ||
+                llama_vocab_mask(llama_model_get_vocab(llama_get_model(ctx))) == LLAMA_TOKEN_NULL ||
+                n_max < 1 || llama_n_batch(ctx) < 2 || llama_n_ubatch(ctx) < 2) {
+            throw std::runtime_error("draft-self requires a causal target context with memory, a mask token and a positive draft capacity");
+        }
+
+        n_max = std::min(n_max, int32_t(std::min(llama_n_batch(ctx), llama_n_ubatch(ctx))) - 1);
+        vocab = llama_model_get_vocab(llama_get_model(ctx));
+        batch = common_batch(ctx);
+    }
+
+    void begin(llama_seq_id seq_id, const llama_tokens &) override { needs_anchor[seq_id] = true; }
+    bool process(const common_batch &) override { return true; }
+    void accept(llama_seq_id, uint16_t, bool) override {}
+
+    void draft(common_speculative_draft_params_vec & dparams) override {
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
+            auto & dp = dparams[seq_id];
+            if (!dp.drafting) {
+                continue;
+            }
+            // Let causal prefill produce the first anchor before masked-block drafting.
+            if (needs_anchor[seq_id]) {
+                needs_anchor[seq_id] = false;
+                continue;
+            }
+            const int count = std::min(n_max, dp.n_max < 0 ? n_max : dp.n_max);
+            // Block-dependent models must see the configured width even when fewer tokens are requested.
+            if (count <= 0 || int(llama_n_ctx_seq(ctx)) - dp.pos0 <= n_max) {
+                continue;
+            }
+
+            // Restore recurrent state before removing the temporary attention KV suffix,
+            // using the same checkpoint mechanism as the caller's verification rollback.
+            checkpoint.update_tgt(ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            batch.clear();
+            common_speculative_add_masked_block(batch, dp, seq_id, llama_vocab_mask(vocab), n_max + 1, true);
+
+            llama_set_causal_attn(ctx, false);
+            const int ret = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+            llama_set_causal_attn(ctx, true);
+            if (ret == 0) {
+                // The model is trained to emit the mask token itself at masked
+                // positions (entropy ~ 0), but a mask draft can never be verified
+                // in autoregressive decoding and would self-replicate via the
+                // entropy acceptance gate.
+                const llama_token ds_mask_id = llama_vocab_mask(vocab);
+                for (int i = 0; i < count; ++i) {
+                    const float * logits = llama_get_logits_ith(ctx, i + 1);
+                    llama_token token = -1;
+                    for (int t = 0; t < llama_vocab_n_tokens(vocab); ++t) {
+                        if (t != ds_mask_id && (token < 0 || logits[t] > logits[token])) {
+                            token = t;
+                        }
+                    }
+                    dp.result->push_back(token);
+                    if (dp.result_q) {
+                        dp.result_q->push_back({{token, 0.0f, 1.0f}});
+                    }
+                }
+            }
+            if (!checkpoint.load_tgt(ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) ||
+                    !llama_memory_seq_rm(llama_get_memory(ctx), seq_id, dp.pos0, -1)) {
+                GGML_ABORT("failed to restore target state after self-drafting");
+            }
+            if (ret != 0) {
+                SPC_WRN("self-draft decode failed (%d); continuing without a draft\n", ret);
+            }
+        }
     }
 };
 
@@ -2488,6 +2600,7 @@ std::string common_speculative_type_to_str(common_speculative_type type) {
         case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE:  return "draft-simple";
         case COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3:  return "draft-eagle3";
         case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:     return "draft-mtp";
+        case COMMON_SPECULATIVE_TYPE_DRAFT_SELF:    return "draft-self";
         case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:  return "draft-dflash";
         case COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK:  return "draft-dspark";
         case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE:  return "ngram-simple";
@@ -2576,6 +2689,7 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
 
     for (const auto type : spec->types) {
         switch (type) {
+            case COMMON_SPECULATIVE_TYPE_DRAFT_SELF:
             case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE:
             case COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3:
             case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:
@@ -2805,6 +2919,10 @@ common_speculative_init_result::common_speculative_init_result(
         model_path = params.speculative.draft.mparams.path;
         LOG_INF("%s: loading draft model '%s'\n", __func__, model_path.c_str());
 
+        const char * shared_head = std::getenv("LLAMA_DSPARK_SHARED_HEAD");
+        if (shared_head && std::strcmp(shared_head, "1") == 0) {
+            mparams.dspark_head_source = model_tgt;
+        }
         llama_model * model_dft = llama_model_load_from_file(model_path.c_str(), mparams);
         if (model_dft == NULL) {
             LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
@@ -2875,7 +2993,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         };
 
         // when adding a new type - update here the logic above
-        static_assert(COMMON_SPECULATIVE_TYPE_COUNT == 11);
+        static_assert(COMMON_SPECULATIVE_TYPE_COUNT == 12);
 
         // this list here defines the priority of the speculators
         // the one with highest priority are listed first
@@ -2885,6 +3003,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         add_config_if_enabled(COMMON_SPECULATIVE_TYPE_NGRAM_MOD);
         add_config_if_enabled(COMMON_SPECULATIVE_TYPE_NGRAM_CACHE);
 
+        add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_SELF);
         add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE);
         add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3, params.draft.ctx_dft != nullptr);
         add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_MTP,    params.draft.ctx_dft != nullptr);
@@ -2898,6 +3017,10 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         switch (config.type) {
             case COMMON_SPECULATIVE_TYPE_NONE:
                 break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_SELF: {
+                impls.push_back(std::make_unique<common_speculative_impl_draft_self>(config.params, n_seq));
+                break;
+            }
             case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE: {
                 impls.push_back(std::make_unique<common_speculative_impl_draft_simple>(config.params, n_seq));
                 break;

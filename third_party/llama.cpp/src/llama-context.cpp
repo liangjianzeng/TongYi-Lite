@@ -9,12 +9,15 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-moe-slot.h"
 #include "llama-moe-cache.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
 
 #include <algorithm>
+#include <numeric>
+
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -184,6 +187,8 @@ llama_context::llama_context(
     model(model),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
+    moe_slots(model.moe_slot_bank_enabled()
+              ? std::make_unique<llama_moe_slot_runtime>(model) : nullptr),
     // MTP uses the embd input for the hidden state
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd(),
                 llm_arch_supports_mixed_batch(model.arch) && params.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT)) {
@@ -618,7 +623,12 @@ llama_context::llama_context(
         sched_reserve();
 
         if (!cparams.flash_attn) {
-            if (ggml_is_quantized(params.type_v)) {
+            // [TongYi-Lite A15/R-012 follow-up 740 buft-probe leg] same MLA exemption as
+            // the sched-params gate above: MLA has no V tensor (has_v=false), type_v is a
+            // type_k shadow, so the quantized-V-requires-FA precondition is vacuous here.
+            // Without this, hybrid+FA-off models (ling/bailingmoe3, app forces FA off) throw
+            // here after resolve_fused_ops() auto-disables FA when OpenCL declines FA nodes.
+            if (ggml_is_quantized(params.type_v) && !model.hparams.is_mla()) {
                 throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
             }
         }
@@ -1538,6 +1548,36 @@ void llama_context::set_nextn_layer_offset(int32_t offset) {
     cparams.nextn_layer_offset = offset;
 }
 
+void llama_context::set_dspark_ctx(const float * feat, int64_t n_ctx_rows, int64_t n_embd_cap, const int32_t * pos) {
+    if (n_ctx_rows <= 0 || n_embd_cap <= 0 || feat == nullptr) {
+        // reset: no staged context (e.g. before the very first drafter round,
+        // where the whole prompt still needs to go through as context on the
+        // first call, or between unrelated decodes).
+        dspark_ctx.n_ctx_rows = 0;
+        dspark_ctx.n_embd_cap = 0;
+        dspark_ctx.v_ctx_feat.clear();
+        dspark_ctx.v_ctx_pos.clear();
+        return;
+    }
+
+    dspark_ctx.n_ctx_rows = n_ctx_rows;
+    dspark_ctx.n_embd_cap = n_embd_cap;
+
+    dspark_ctx.v_ctx_feat.assign(feat, feat + (size_t) n_ctx_rows * (size_t) n_embd_cap);
+
+    dspark_ctx.v_ctx_pos.resize((size_t) n_ctx_rows);
+    if (pos != nullptr) {
+        std::copy(pos, pos + n_ctx_rows, dspark_ctx.v_ctx_pos.begin());
+    } else {
+        // caller didn't supply explicit positions: assume a contiguous run
+        // ending just before the current staged sequence length. this is a
+        // convenience default; callers doing real multi-round decoding should
+        // pass explicit positions since the growing-cache bookkeeping (Phase 2)
+        // owns the authoritative position numbering.
+        std::iota(dspark_ctx.v_ctx_pos.begin(), dspark_ctx.v_ctx_pos.end(), 0);
+    }
+}
+
 void llama_context::set_causal_attn(bool value) {
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
@@ -1675,6 +1715,14 @@ bool llama_context::set_adapter_cvec(
 }
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: bisect entry of the decode path.
+    static const bool rs_dbg_pu = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    static int rs_pu_cnt = 0;
+    if (rs_dbg_pu && rs_pu_cnt < 40) {
+        LLAMA_LOG_INFO("[rsidx-pu] process_ubatch n_tokens=%d n_seq=%d cnt=%d\n",
+                (int) ubatch.n_tokens, (int) ubatch.n_seq_tokens, rs_pu_cnt);
+        ++rs_pu_cnt;
+    }
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -2260,6 +2308,36 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+
+                // [dspark 2026-10-18] logits extraction probe: CBD-audited
+                // result_output inside the graph is CORRECT (max 31.34, CPU
+                // agrees), but this host read is garbage (max ~9.3). Identify
+                // the buffer/backend the extraction lands on vs what CBD read.
+                static const bool lgd_probe = [] { const char * e = getenv("LLAMA_LGD_PROBE"); return e && e[0] == '1'; }();
+                if (lgd_probe) {
+                    float mx = -1e30f; int am = -1;
+                    for (int64_t t = 0; t < n_outputs*n_vocab; t++) {
+                        if (logits_out[t] > mx) { mx = logits_out[t]; am = (int) t; }
+                    }
+                    const ggml_tensor * rn = t_logits->src[1];
+                    const ggml_tensor * hn = rn ? rn->src[0] : nullptr;
+                    LLAMA_LOG_INFO("[lgdprobe] ubatch t_logits name=%s buf=%s backend=%s ptr=%p data=%p | host max=%.4f argmax=%d n_outputs=%u n_vocab=%d | raw32: %08x %08x %08x %08x\n",
+                            t_logits->name,
+                            t_logits->buffer ? ggml_backend_buffer_name(t_logits->buffer) : "(null)",
+                            ggml_backend_name(backend_res),
+                            (void*) t_logits, (void*) t_logits->data,
+                            mx, am, n_outputs, (int) n_vocab,
+                            ((const uint32_t*) logits_out)[0], ((const uint32_t*) logits_out)[1],
+                            ((const uint32_t*) logits_out)[2], ((const uint32_t*) logits_out)[3]);
+                    if (rn) {
+                        LLAMA_LOG_INFO("[lgdprobe]   src1=%s buf=%s data=%p | src1->src0=%s buf=%s\n",
+                                rn->name,
+                                rn->buffer ? ggml_backend_buffer_name(rn->buffer) : "(null)",
+                                (void*) rn->data,
+                                hn ? hn->name : "-",
+                                hn && hn->buffer ? ggml_backend_buffer_name(hn->buffer) : "(null)");
+                    }
+                }
             }
         }
 
@@ -2878,9 +2956,10 @@ ggml_cgraph * llama_context::graph_reserve(
 
     auto * gf = model.build_graph(gparams);
 
-    // check the graph before scheduling: cross-backend copies break the producer chain that the check follows
-    if (!hadamard_verified && gf && (!model.hdmd.rot.empty() || !model.hdmd.inv.empty())) {
-        llama_verify_hadamard_graph(gf, model.hdmd.rot, model.hdmd.inv, moe_cache.get());
+    // verify transform coverage on the pristine graph: after scheduling,
+    // cross-backend copies break the producer chain the check follows
+    if (!hadamard_verified && gf && (!hadamard_rotations.empty() || !hadamard_inverses.empty())) {
+        llama_verify_hadamard_graph(gf, hadamard_rotations, hadamard_inverses, moe_cache.get());
         hadamard_verified = true;
     }
 
@@ -2919,7 +2998,19 @@ llm_graph_params llama_context::graph_params(
         /*.cvec        =*/ cvec.get(),
         /*.loras       =*/ loras.get(),
         /*.mctx        =*/ mctx,
+        /*.moe_slots   =*/ moe_slots.get(),
+        // MoE-SSD 阶段：批宽落在窗口覆盖范围内时才是「窗口阶段」。
+        // 判据必须与 llama-moe-slot 的 window_mode（process() 内）逐字一致 ——
+        // 它决定运行期往哪段槽位写、以及建图用哪套张量。两处不一致会静默读错专家权重。
+        /*.moe_decode_phase =*/ moe_slots != nullptr && moe_slots->decode_window() > 0 &&
+                                ubatch.n_tokens <= moe_slots->window_max_rows(),
         /*.cross       =*/ &cross,
+        /*.dspark_ctx  =*/&dspark_ctx,
+        /*.dspark_has_context =*/!dspark_ctx.v_ctx_feat.empty(),
+        /*.dspark_ctx_rows =*/dspark_ctx.n_ctx_rows,
+        /*.dspark_ctx_width =*/dspark_ctx.n_embd_cap,
+        /*.hadamard_rotations =*/&hadamard_rotations,
+        /*.hadamard_inverses  =*/&hadamard_inverses,
         /*.moe_cache   =*/ moe_cache.get(),
         /*.prec_policy =*/ &model.prec_policy,
         /*.hdmd        =*/ model.hdmd.rot.empty() ? nullptr : &model.hdmd,
@@ -4328,7 +4419,11 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    if (ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
+    // [TongYi-Lite R-012] MLA models are exempt from the quantized-V gate:
+    // MLA layers have has_v == false (llama-kv-cache allocates no V tensor),
+    // so type_v is never materialized - it only exists to satisfy the
+    // type_k == type_v precondition above. Quantized-V semantics are vacuous.
+    if (!model->hparams.is_mla() && ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
         if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
             LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for quantized V cache\n", __func__);
             params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -4565,6 +4660,16 @@ float * llama_get_embeddings_layer_inp(llama_context * ctx, uint32_t lid) {
     ctx->synchronize();
 
     return ctx->get_embeddings_layer_inp(lid);
+}
+
+// dspark drafter target-context staging C API --------------------------------
+
+void llama_set_dspark_ctx(llama_context * ctx,
+                          const float *   feat,
+                          int64_t         n_ctx_rows,
+                          int64_t         n_embd_cap,
+                          const int32_t * pos) {
+    ctx->set_dspark_ctx(feat, n_ctx_rows, n_embd_cap, pos);
 }
 
 bool llama_set_sampler(llama_context * ctx, llama_seq_id seq_id, llama_sampler * smpl) {

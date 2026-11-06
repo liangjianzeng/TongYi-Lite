@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include <algorithm>
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-moe-cache.h"
@@ -16,6 +18,8 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
+
+#include "llama-moe-slot.h"
 
 #include <cassert>
 #include <cmath>
@@ -44,6 +48,21 @@ static ggml_tensor * build_attn_inp_kq_mask(
     ggml_set_name(res, "attn_inp_kq_mask");
 
     return res;
+}
+
+// [dspark 2026-10-18] LLAMA_RS_CONST_IDX=1: for the single-seq slot runtime the
+// gather index is provably always 0 (head==0, cells[head].src0==0, no pending
+// rollback). Serve it from a persistent constant tensor living in the RS cache
+// buffer instead of a per-call host-written graph input. This removes s_copy
+// from the sched cross-backend copy / ggml-alloc region-reuse lifecycle
+// entirely — the root cause chain behind the OpenCL batched-mode GET_ROWS
+// reading garbage indices and producing all-zero outputs.
+static bool rs_const_idx_enabled() {
+    static const bool en = [] {
+        const char * e = getenv("LLAMA_RS_CONST_IDX");
+        return e && e[0] == '1';
+    }();
+    return en;
 }
 
 static bool can_reuse_kq_mask(
@@ -128,6 +147,52 @@ static llm_attn_mask build_attn_inp_attn_mask(
 }
 
 // impl
+
+void llm_graph_input_dspark_ctx::set_input(const llama_ubatch * ubatch) {
+    if (correction_prefix_rows > 0) {
+        if (!ctx_feat || !dctx || dctx->n_ctx_rows != ctx_feat->ne[1]) {
+            throw std::runtime_error("DSpark correction prefix requires staged context inputs");
+        }
+        for (int64_t row = 0; row < ubatch->n_tokens; ++row) {
+            const bool expected = row >= dctx->n_ctx_rows && row < dctx->n_ctx_rows + correction_prefix_rows;
+            if (!ubatch->output || (ubatch->output[row] != 0) != expected) {
+                throw std::runtime_error("DSpark correction prefix requires matching output rows");
+            }
+        }
+    }
+    if (reuse_mask_id >= 0) {
+        if (!ubatch->token || !dctx || dctx->n_ctx_rows != ctx_feat->ne[1]) {
+            throw std::runtime_error("DSpark mask reuse requires staged token inputs");
+        }
+        for (int64_t i = dctx->n_ctx_rows + 1; i < ubatch->n_tokens; ++i) {
+            if (ubatch->token[i] != reuse_mask_id) {
+                throw std::runtime_error("DSpark mask reuse requires an anchor followed by MASK tokens");
+            }
+        }
+    }
+    // ignores ubatch entirely (like llm_graph_input_cross_embd): the context
+    // feature row count (n_ctx_rows) is independent of the current ubatch's
+    // token count and comes purely from the staged llama_dspark_ctx.
+    if (ctx_feat && dctx && !dctx->v_ctx_feat.empty()) {
+        GGML_ASSERT((int64_t) dctx->v_ctx_feat.size() == ggml_nelements(ctx_feat));
+        ggml_backend_tensor_set(ctx_feat, dctx->v_ctx_feat.data(), 0, ggml_nbytes(ctx_feat));
+    }
+}
+
+void llm_graph_input_dspark_logsnr::set_input(const llama_ubatch * ubatch) {
+    // v_feat was precomputed at graph-build time and does not depend on the ubatch
+    GGML_UNUSED(ubatch);
+    if (feat && !v_feat.empty()) {
+        GGML_ASSERT((int64_t) v_feat.size() == ggml_nelements(feat));
+        ggml_backend_tensor_set(feat, v_feat.data(), 0, ggml_nbytes(feat));
+    }
+}
+
+bool llm_graph_input_dspark_logsnr::can_reuse(const llm_graph_params & params) {
+    // v_feat is a function of n_tokens and n_seqs_unq, both already checked by
+    // llm_graph_params::allow_reuse, and of min/max_log_snr, fixed per model
+    return feat && feat->ne[1] == params.ubatch.n_tokens;
+}
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -497,13 +562,24 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_n_rs();
 
-    if (s_copy) {
+    if (s_copy && !const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(s_copy->buffer));
         int32_t * data = (int32_t *) s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
         for (uint32_t i = 0; i < n_rs; ++i) {
             data[i] = mctx->s_copy(i);
+        }
+
+        // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: log the per-call gather
+        // indices + head/rs_z. Host-side only — does not change execution
+        // granularity, so batched-vs-synced callback comparisons stay valid.
+        static const bool rs_dbg = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+        if (rs_dbg) {
+            char buf[128]; int off = 0;
+            for (int64_t i = 0; i < n_rs && i < 8 && off < 100; ++i) off += snprintf(buf + off, sizeof(buf) - off, " %d", data[i]);
+            LLAMA_LOG_INFO("[rsidx] n_rs=%d head=%u rs_z=%d idx:%s\n", (int) n_rs,
+                    mctx->get_head(), mctx->get_rs_z(), buf);
         }
     }
 
@@ -520,6 +596,9 @@ bool llm_graph_input_rs::can_reuse(const llm_graph_params & params) {
     res &= s_copy->ne[0] == mctx->get_n_rs();
 
     res &= s_copy_main->ne[0] == params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= const_idx == (rs_const_idx_enabled() && mctx->s_copy_is_const_zero());
 
     res &= head == mctx->get_head();
     res &= rs_z == mctx->get_rs_z();
@@ -1205,6 +1284,9 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
 }
 
 void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
+    // [dspark 2026-10-18] entry trace: is this input's set_input called at all?
+    static const bool rs_dbg0 = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    if (rs_dbg0) LLAMA_LOG_INFO("[rsidx-h] set_input enter (s_copy=%d)\n", inp_rs->s_copy ? 1 : 0);
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
@@ -1213,13 +1295,24 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
         for (uint32_t i = 0; i < n_rs; ++i) {
             data[i] = mctx->get_recr()->s_copy(i);
+        }
+
+        // [dspark 2026-10-18] LLAMA_RS_IDX_DEBUG=1: per-call gather indices +
+        // head/rs_z for the hybrid (linear-attn + full-attn) memory path.
+        // Host-side only; does not change execution granularity.
+        static const bool rs_dbg = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+        if (rs_dbg) {
+            char buf[128]; int off = 0;
+            for (int64_t i = 0; i < n_rs && i < 8 && off < 100; ++i) off += snprintf(buf + off, sizeof(buf) - off, " %d", data[i]);
+            LLAMA_LOG_INFO("[rsidx-h] n_rs=%d head=%u rs_z=%d idx:%s\n", (int) n_rs,
+                    mctx->get_recr()->get_head(), mctx->get_recr()->get_rs_z(), buf);
         }
     }
 
@@ -1242,6 +1335,9 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
 
     res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
 
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
+
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
 
@@ -1261,7 +1357,7 @@ void llm_graph_input_mem_hybrid_k::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -1288,6 +1384,9 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
 
     res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -1320,7 +1419,7 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
+    if (inp_rs->s_copy && !inp_rs->const_idx) {
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
@@ -1361,6 +1460,9 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
 
     res &= inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+
+    // [dspark 2026-10-18] reject reuse when the constant-idx mode flips
+    res &= inp_rs->const_idx == (rs_const_idx_enabled() && mctx->get_recr()->s_copy_is_const_zero());
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
@@ -1432,6 +1534,7 @@ void llm_graph_result::reset() {
     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
 
     t_sampled.clear();
+    t_dspark_greedy.clear();
     t_sampled_probs.clear();
     t_sampled_logits.clear();
     t_candidates.clear();
@@ -1456,6 +1559,9 @@ void llm_graph_result::reset() {
 }
 
 void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
+    // [dspark 2026-10-18] entry trace: how many graph inputs get set_input?
+    static const bool rs_dbg0 = [] { const char * e = getenv("LLAMA_RS_IDX_DEBUG"); return e && e[0] == '1'; }();
+    if (rs_dbg0) LLAMA_LOG_INFO("[rsidx] set_inputs n_inputs=%zu\n", inputs.size());
     for (auto & input : inputs) {
         input->set_input(ubatch);
     }
@@ -1580,7 +1686,12 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     n_embd_head_v    (hparams.n_embd_head_v()),
     n_embd_v_gqa     (hparams.n_embd_v_gqa()),
     n_expert         (hparams.n_expert),
-    n_expert_used    (cparams.warmup ? hparams.n_expert : hparams.n_expert_used()),
+    // warmup 时把 n_expert_used 扩到全量，用于给 compute buffer 定尺寸 —— 但
+    // 仅在全量专家权重路径下有意义。slot 模式下专家权重不进 compute buffer
+    // （是独立的 slot 张量），扩到全量反而会让 warmup 去解析全部专家的 slot
+    // 映射，所以保持真实的 top-k。
+    n_expert_used    (cparams.warmup && params.moe_slots == nullptr ? hparams.n_expert
+                      : hparams.n_expert_used()),
     freq_base        (cparams.rope_freq_base),
     freq_scale       (cparams.rope_freq_scale),
     ext_factor       (cparams.yarn_ext_factor),
@@ -1599,7 +1710,15 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     cvec             (params.cvec),
     loras            (params.loras),
     mctx             (params.mctx),
+    moe_slots        (params.moe_slots),
+    moe_decode_phase (params.moe_decode_phase),
     cross            (params.cross),
+    dspark_ctx       (params.dspark_ctx),
+    dspark_has_context(params.dspark_has_context),
+    dspark_ctx_rows  (params.dspark_ctx_rows),
+    dspark_ctx_width (params.dspark_ctx_width),
+    hadamard_rotations(params.hadamard_rotations),
+    hadamard_inverses(params.hadamard_inverses),
     moe_cache        (params.moe_cache),
     prec_policy      (params.prec_policy),
     hdmd             (params.hdmd),
@@ -2176,6 +2295,15 @@ ggml_tensor * llm_graph_context::build_ffn(
     return cur;
 }
 
+// [tongyi M-R1 2026-10-25] fused router gate (GGML_FUSED_MOE_TOPK=1), default off
+static bool llm_moe_topk_fused_env() {
+    static const bool en = [] {
+        const char * e = getenv("GGML_FUSED_MOE_TOPK");
+        return e && e[0] == '1';
+    }();
+    return en;
+}
+
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
          ggml_tensor * gate_inp,
@@ -2272,106 +2400,148 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(logits, "ffn_moe_logits_biased", il);
     }
 
-    ggml_tensor * probs = nullptr;
-    switch (gating_op) {
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
-            {
-                probs = ggml_soft_max(ctx0, logits); // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID:
-            {
-                probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT:
-            {
-                probs = logits; // [n_expert, n_tokens]
-            } break;
-        case LLAMA_EXPERT_GATING_FUNC_TYPE_SQRT_SOFTPLUS:
-            {
-                probs = ggml_sqrt(ctx0, ggml_softplus(ctx0, logits)); // [n_expert, n_tokens]
-            } break;
-        default:
-            GGML_ABORT("fatal error");
-    }
-    cb(probs, "ffn_moe_probs", il);
+    // [tongyi M-R1 2026-10-25] 融合路由：把路由段 ~13 个小 kernel（SIGMOID..weights
+    // 归一化）吃进 1 个 GGML_OP_MOE_TOPK_FUSED + 1 个 f32->i32 cast，仅分组 MoE 且
+    // 形状 pin 到 Ling/bailingmoe3（E=128 G=8 epg=16 gu=4 K=8）。env 默认关
+    // （GGML_FUSED_MOE_TOPK=1 开）。正确性契约见 ggml_moe_topk_fused（ggml.h）与
+    // moe_topk_fused_core.h：ids 走数值 float（id<2^24 经 ggml_cast 位精确），
+    // weights 用无 bias sigmoid gather + clamp/sum/div/scale 归一化，序与原图逐算子
+    // 一致（CPU 参考已对拍 2.66M 断言，见 moe_topk_fused_route_test.cpp）。
+    const bool fused_router = llm_moe_topk_fused_env()
+        && gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID
+        && probs_in == nullptr && selected_experts_in == nullptr && post_exp_norm == nullptr
+        && !(moe_slots && moe_slots->uses_layer(il))
+        && arch != LLM_ARCH_LLAMA4 && arch != LLM_ARCH_GROVEMOE
+        && hparams.n_expert_groups > 1 && n_tokens > 0
+        && n_expert == 128
+        && hparams.n_expert_groups == 8
+        && n_expert / hparams.n_expert_groups == 16
+        && hparams.n_group_used == 4
+        && n_expert_used == 8
+        && logits->type == GGML_TYPE_F32;
 
-    // add experts selection bias - introduced in DeepSeek V3
-    // leave probs unbiased as it's later used to get expert weights
-    ggml_tensor * selection_probs = probs;
-    if (exp_probs_b != nullptr) {
-        selection_probs = ggml_add(ctx0, probs, exp_probs_b);
-        cb(selection_probs, "ffn_moe_probs_biased", il);
-    }
-
-    // llama4 doesn't have exp_probs_b, and sigmoid is only used after top_k
-    // see: https://github.com/meta-llama/llama-models/blob/699a02993512fb36936b1b0741e13c06790bcf98/models/llama4/moe.py#L183-L198
-    if (arch == LLM_ARCH_LLAMA4) {
-        selection_probs = logits;
-    }
-
-    if (arch == LLM_ARCH_GROVEMOE) {
-        selection_probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
-        cb(selection_probs, "ffn_moe_probs_biased", il);
-    }
-
-    // select top n_group_used expert groups
-    // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
-    if (hparams.n_expert_groups > 1 && n_tokens > 0) {
-        const int64_t n_exp_per_group = n_expert / hparams.n_expert_groups;
-
-        // organize experts into n_expert_groups
-        ggml_tensor * selection_groups = ggml_reshape_3d(ctx0, selection_probs, n_exp_per_group, hparams.n_expert_groups, n_tokens); // [n_exp_per_group, n_expert_groups, n_tokens]
-
-        ggml_tensor * group_scores = ggml_argsort_top_k(ctx0, selection_groups, 2); // [2, n_expert_groups, n_tokens]
-        group_scores = ggml_get_rows(ctx0, ggml_reshape_4d(ctx0, selection_groups, 1, selection_groups->ne[0], selection_groups->ne[1], selection_groups->ne[2]), group_scores); // [1, 2, n_expert_groups, n_tokens]
-
-        // get top n_group_used expert groups
-        group_scores = ggml_sum_rows(ctx0, ggml_reshape_3d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2], group_scores->ne[3])); // [1, n_expert_groups, n_tokens]
-        group_scores = ggml_reshape_2d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2]); // [n_expert_groups, n_tokens]
-
-        ggml_tensor * expert_groups = ggml_argsort_top_k(ctx0, group_scores, hparams.n_group_used); // [n_group_used, n_tokens]
-        cb(expert_groups, "ffn_moe_group_topk", il);
-
-        // mask out the other groups
-        selection_probs = ggml_get_rows(ctx0, selection_groups, expert_groups); // [n_exp_per_group, n_group_used, n_tokens]
-        selection_probs = ggml_set_rows(ctx0, ggml_fill(ctx0, selection_groups, -INFINITY), selection_probs, expert_groups); // [n_exp_per_group, n_expert_groups, n_tokens]
-        selection_probs = ggml_reshape_2d(ctx0, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
-        cb(selection_probs, "ffn_moe_probs_masked", il);
-    }
-
-    // select experts
+    ggml_tensor * weights = nullptr;
     ggml_tensor * selected_experts = selected_experts_in;
-    if (selected_experts == nullptr) {
-        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
-        cb(selected_experts->src[0], "ffn_moe_argsort", il);
-    }
-    cb(selected_experts, "ffn_moe_topk", il);
+    if (fused_router) {
+        // w_scale 原样下发：kernel/CPU 核心内按 (ws != 0 && ws != 1) 折算，
+        // 与原路径「div 之后 scale」的两级舍入顺序一致
+        ggml_tensor * fused = ggml_moe_topk_fused(ctx0, logits, exp_probs_b,
+                n_expert, hparams.n_expert_groups, n_expert / hparams.n_expert_groups,
+                hparams.n_group_used, n_expert_used, w_scale);
+        cb(fused, "ffn_moe_topk_fused", il);
 
-    if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
-        // TODO: Use scalar div instead when/if implemented
-        ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
-        selected_experts = ggml_cast(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts)), GGML_TYPE_I32);
-        probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+        // plane 0 = weights：view [1, n_expert_used, n_tokens]（连续，等效原 get_rows 输出）
+        weights = ggml_view_3d(ctx0, fused, 1, n_expert_used, n_tokens,
+                fused->nb[0], fused->nb[1], 0);
+        cb(weights, "ffn_moe_weights", il);
+
+        // plane 1 = ids：view [n_expert_used, n_tokens] -> ggml_cast(F32->I32)。
+        // ggml 的 f32->i32 是数值截断（ggml-cpu/common.h f32_to_i32），ids 存的是
+        // 精确 float 值（非位模式），id < 2^24 时 roundtrip 位精确
+        ggml_tensor * ids_f = ggml_view_2d(ctx0, fused, n_expert_used, n_tokens,
+                fused->nb[1], (size_t) n_expert_used * n_tokens * sizeof(float));
+        selected_experts = ggml_cast(ctx0, ids_f, GGML_TYPE_I32);
+        cb(selected_experts, "ffn_moe_topk", il);
     } else {
-        probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
-    }
+        ggml_tensor * probs = nullptr;
+        switch (gating_op) {
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
+                {
+                    probs = ggml_soft_max(ctx0, logits); // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID:
+                {
+                    probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT:
+                {
+                    probs = logits; // [n_expert, n_tokens]
+                } break;
+            case LLAMA_EXPERT_GATING_FUNC_TYPE_SQRT_SOFTPLUS:
+                {
+                    probs = ggml_sqrt(ctx0, ggml_softplus(ctx0, logits)); // [n_expert, n_tokens]
+                } break;
+            default:
+                GGML_ABORT("fatal error");
+        }
+        cb(probs, "ffn_moe_probs", il);
 
-    ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
-    cb(weights, "ffn_moe_weights", il);
+        // add experts selection bias - introduced in DeepSeek V3
+        // leave probs unbiased as it's later used to get expert weights
+        ggml_tensor * selection_probs = probs;
+        if (exp_probs_b != nullptr) {
+            selection_probs = ggml_add(ctx0, probs, exp_probs_b);
+            cb(selection_probs, "ffn_moe_probs_biased", il);
+        }
+
+        // llama4 doesn't have exp_probs_b, and sigmoid is only used after top_k
+        // see: https://github.com/meta-llama/llama-models/blob/699a02993512fb36936b1b0741e13c06790bcf98/models/llama4/moe.py#L183-L198
+        if (arch == LLM_ARCH_LLAMA4) {
+            selection_probs = logits;
+        }
+
+        if (arch == LLM_ARCH_GROVEMOE) {
+            selection_probs = ggml_sigmoid(ctx0, logits); // [n_expert, n_tokens]
+            cb(selection_probs, "ffn_moe_probs_biased", il);
+        }
+
+        // select top n_group_used expert groups
+        // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299b0bcbac849fa540c768ef21845365c9eb/modeling_deepseek.py#L440-L457
+        if (hparams.n_expert_groups > 1 && n_tokens > 0) {
+            const int64_t n_exp_per_group = n_expert / hparams.n_expert_groups;
+
+            // organize experts into n_expert_groups
+            ggml_tensor * selection_groups = ggml_reshape_3d(ctx0, selection_probs, n_exp_per_group, hparams.n_expert_groups, n_tokens); // [n_exp_per_group, n_expert_groups, n_tokens]
+
+            ggml_tensor * group_scores = ggml_argsort_top_k(ctx0, selection_groups, 2); // [2, n_expert_groups, n_tokens]
+            group_scores = ggml_get_rows(ctx0, ggml_reshape_4d(ctx0, selection_groups, 1, selection_groups->ne[0], selection_groups->ne[1], selection_groups->ne[2]), group_scores); // [1, 2, n_expert_groups, n_tokens]
+
+            // get top n_group_used expert groups
+            group_scores = ggml_sum_rows(ctx0, ggml_reshape_3d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2], group_scores->ne[3])); // [1, n_expert_groups, n_tokens]
+            group_scores = ggml_reshape_2d(ctx0, group_scores, group_scores->ne[1], group_scores->ne[2]); // [n_expert_groups, n_tokens]
+
+            ggml_tensor * expert_groups = ggml_argsort_top_k(ctx0, group_scores, hparams.n_group_used); // [n_group_used, n_tokens]
+            cb(expert_groups, "ffn_moe_group_topk", il);
+
+            // mask out the other groups
+            selection_probs = ggml_get_rows(ctx0, selection_groups, expert_groups); // [n_exp_per_group, n_group_used, n_tokens]
+            selection_probs = ggml_set_rows(ctx0, ggml_fill(ctx0, selection_groups, -INFINITY), selection_probs, expert_groups); // [n_exp_per_group, n_expert_groups, n_tokens]
+            selection_probs = ggml_reshape_2d(ctx0, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
+            cb(selection_probs, "ffn_moe_probs_masked", il);
+        }
+
+        // select experts
+        if (selected_experts == nullptr) {
+            selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+            cb(selected_experts->src[0], "ffn_moe_argsort", il);
+        }
+        cb(selected_experts, "ffn_moe_topk", il);
+
+        if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
+            // TODO: Use scalar div instead when/if implemented
+            ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
+            selected_experts = ggml_cast(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts)), GGML_TYPE_I32);
+            probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+        } else {
+            probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+        }
+
+        weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+        cb(weights, "ffn_moe_weights", il);
 
 
-    if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
-        weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
-        cb(weights, "ffn_moe_weights_softmax", il);
-    }
+        if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
+            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+            weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
+            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+            cb(weights, "ffn_moe_weights_softmax", il);
+        }
 
-    if (norm_w) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+        if (norm_w) {
+            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
 
-        ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
-        cb(weights_sum, "ffn_moe_weights_sum", il);
+            ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
+            cb(weights_sum, "ffn_moe_weights_sum", il);
 
         if (arch == LLM_ARCH_DEEPSEEK41) {
             // model.py Gate.forward: weights / (sum + 1e-20); the sum can fall below the F16 clamp below
@@ -2382,18 +2552,30 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
         cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
 
-        weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
-        cb(weights, "ffn_moe_weights_norm", il);
+            weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
+            cb(weights, "ffn_moe_weights_norm", il);
 
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
-    }
-    if (w_scale != 0.0f && w_scale != 1.0f) {
-        weights = ggml_scale(ctx0, weights, w_scale);
-        cb(weights, "ffn_moe_weights_scaled", il);
+            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+        }
+        if (w_scale != 0.0f && w_scale != 1.0f) {
+            weights = ggml_scale(ctx0, weights, w_scale);
+            cb(weights, "ffn_moe_weights_scaled", il);
+        }
     }
 
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
+
+    // split-MoE slot 路径：把专家 id 重映射成 slot id（map_custom CPU op 内完成
+    // miss 专家的读盘 + 槽位分配），权重张量本身已按 n_slots 虚拟化
+    // （见 llama-model-loader::virtualize_expert_tensor）。
+    // 注意：weights 的 gather 仍用原始 selected_experts（probs 是按专家索引排的），
+    // 只有 matmul/add_id 走 slot id。
+    ggml_tensor * selected_experts_mm = selected_experts;
+    if (moe_slots && moe_slots->uses_layer(il)) {
+        selected_experts_mm = moe_slots->build_slot_ids_tensor(ctx0, selected_experts, il);
+        cb(selected_experts_mm, "ffn_moe_slots", il);
+    }
 
     // the experts of host-resident layers may be read from the MoE cache
     ggml_tensor * slots = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
@@ -2407,172 +2589,224 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    ggml_tensor * up = nullptr;
-    ggml_tensor * experts = nullptr;
+    // [A2 split] 单段 MoE 管线：ids_seg = 本段 slot id 视图（[k, n_tokens]），
+    // in_seg = 输入激活（[n_embd, k 或 1, n_tokens]），返回 [n_embd, k, n_tokens]
+    // 的 down 输出（未加权）。抽成 lambda 是为了 A2 split 路径对前后两段各跑一遍
+    // 而不用复制整段代码；非 split 等价于调用一次，行为与旧代码一致。
+    auto moe_segment = [&](ggml_tensor * ids_seg, ggml_tensor * in_seg) -> ggml_tensor * {
+        ggml_tensor * seg_cur = in_seg;
+        ggml_tensor * up = nullptr;
+        ggml_tensor * experts = nullptr;
 
-    if (gate_up_exps) {
-        // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s, slots); // [n_ff*2, n_expert_used, n_tokens]
-        cb(gate_up, "ffn_moe_gate_up", il);
+        if (gate_up_exps) {
+            // merged gate_up path: one mul_mat_id, then split into gate and up views
+            ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, seg_cur, ids_seg, up_exps_s, slots); // [n_ff*2, k, n_tokens]
+            cb(gate_up, "ffn_moe_gate_up", il);
 
-        if (up_exps_s) {
-            cb(gate_up, "ffn_moe_gate_up_scaled", il);
-        }
-
-        if (gate_up_exps_b) {
-            gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
-            cb(gate_up, "ffn_moe_gate_up_biased", il);
-        }
-
-        const int64_t n_ff = gate_up->ne[0] / 2;
-        cur = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
-        cb(cur, "ffn_moe_gate", il);
-        up  = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff * gate_up->nb[0]);
-        cb(up, "ffn_moe_up", il);
-    } else {
-        // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s, slots); // [n_ff, n_expert_used, n_tokens]
-        cb(up, "ffn_moe_up", il);
-
-        if (up_exps_s) {
-            cb(up, "ffn_moe_up_scaled", il);
-        }
-
-        if (up_exps_b) {
-            up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
-            cb(up, "ffn_moe_up_biased", il);
-        }
-
-        if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s, slots); // [n_ff, n_expert_used, n_tokens]
-            cb(cur, "ffn_moe_gate", il);
-        } else {
-            cur = up;
-        }
-
-        if (gate_exps_s) {
-            cb(cur, "ffn_moe_gate_scaled", il);
-        }
-
-        if (gate_exps_b) {
-            cur = ggml_add_id(ctx0, cur, gate_exps_b, selected_experts);
-            cb(cur, "ffn_moe_gate_biased", il);
-        }
-    }
-
-    const bool has_gate = gate_exps || gate_up_exps;
-
-    switch (type_op) {
-        case LLM_FFN_SILU:
-            if (gate_exps) {
-                if (il >= 0) {
-                    const float limit = hparams.swiglu_clamp_exp[il];
-                    constexpr float eps = 1e-6f;
-                    if (limit > eps) {
-                        if (arch == LLM_ARCH_MAPLE || arch == LLM_ARCH_DEEPSEEK4 || arch == LLM_ARCH_DEEPSEEK41 || arch == LLM_ARCH_GLM5_NEXT || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0) || arch == LLM_ARCH_HY_V4) {
-                            cur = ggml_swiglu_clamp(ctx0, cur, up, limit);
-                        } else {
-                            up = ggml_clamp(ctx0, up, -limit, limit);
-                            cb(up, "ffn_moe_up_clamped", il);
-                            ggml_tensor * gate_act = ggml_silu(ctx0, cur);
-                            cb(gate_act, "ffn_moe_silu", il);
-                            gate_act = ggml_clamp(ctx0, gate_act, -INFINITY, limit);
-                            cb(gate_act, "ffn_moe_silu_clamped", il);
-                            cur = ggml_mul(ctx0, gate_act, up);
-                        }
-                        cb(cur, "ffn_moe_swiglu_limited", il);
-                        break;
-                    }
-                }
+            if (up_exps_s) {
+                cb(gate_up, "ffn_moe_gate_up_scaled", il);
             }
 
-            if (has_gate) {
-                cur = ggml_swiglu_split(ctx0, cur, up);
-                cb(cur, "ffn_moe_swiglu", il);
-            } else {
-                cur = ggml_silu(ctx0, cur);
-                cb(cur, "ffn_moe_silu", il);
-            } break;
-        case LLM_FFN_SITU:
-            {
-                // situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)
-                GGML_ASSERT(has_gate);
-                const float beta = hparams.situ_beta;
-                const float lb   = hparams.situ_linear_beta;
+            if (gate_up_exps_b) {
+                gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, ids_seg);
+                cb(gate_up, "ffn_moe_gate_up_biased", il);
+            }
 
-                ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/beta)), beta);
-                act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, cur));
-                if (lb > 0.0f) {
-                    up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
+            const int64_t n_ff = gate_up->ne[0] / 2;
+            seg_cur = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
+            cb(seg_cur, "ffn_moe_gate", il);
+            up  = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff * gate_up->nb[0]);
+            cb(up, "ffn_moe_up", il);
+        } else {
+            // separate gate and up path
+            up = build_lora_mm_id(up_exps, seg_cur, ids_seg, up_exps_s, slots); // [n_ff, k, n_tokens]
+            cb(up, "ffn_moe_up", il);
+
+            if (up_exps_s) {
+                cb(up, "ffn_moe_up_scaled", il);
+            }
+
+            if (up_exps_b) {
+                up = ggml_add_id(ctx0, up, up_exps_b, ids_seg);
+                cb(up, "ffn_moe_up_biased", il);
+            }
+
+            if (gate_exps) {
+                seg_cur = build_lora_mm_id(gate_exps, seg_cur, ids_seg, gate_exps_s, slots); // [n_ff, k, n_tokens]
+                cb(seg_cur, "ffn_moe_gate", il);
+            } else {
+                seg_cur = up;
+            }
+
+            if (gate_exps_s) {
+                cb(seg_cur, "ffn_moe_gate_scaled", il);
+            }
+
+            if (gate_exps_b) {
+                seg_cur = ggml_add_id(ctx0, seg_cur, gate_exps_b, ids_seg);
+                cb(seg_cur, "ffn_moe_gate_biased", il);
+            }
+        }
+
+        const bool has_gate = gate_exps || gate_up_exps;
+
+        switch (type_op) {
+            case LLM_FFN_SILU:
+                if (gate_exps) {
+                    if (il >= 0) {
+                        const float limit = hparams.swiglu_clamp_exp[il];
+                        constexpr float eps = 1e-6f;
+                        if (limit > eps) {
+                            if (arch == LLM_ARCH_MAPLE || arch == LLM_ARCH_DEEPSEEK4 || arch == LLM_ARCH_DEEPSEEK41 || arch == LLM_ARCH_GLM5_NEXT || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0) || arch == LLM_ARCH_HY_V4) {
+                                seg_cur = ggml_swiglu_clamp(ctx0, seg_cur, up, limit);
+                            } else {
+                                up = ggml_clamp(ctx0, up, -limit, limit);
+                                cb(up, "ffn_moe_up_clamped", il);
+                                ggml_tensor * gate_act = ggml_silu(ctx0, seg_cur);
+                                cb(gate_act, "ffn_moe_silu", il);
+                                gate_act = ggml_clamp(ctx0, gate_act, -INFINITY, limit);
+                                cb(gate_act, "ffn_moe_silu_clamped", il);
+                                seg_cur = ggml_mul(ctx0, gate_act, up);
+                            }
+                            cb(seg_cur, "ffn_moe_swiglu_limited", il);
+                            break;
+                        }
+                    }
                 }
-                cur = ggml_mul(ctx0, act, up);
-                cb(cur, "ffn_moe_situ", il);
-            } break;
-        case LLM_FFN_GELU:
-            if (has_gate) {
-                cur = ggml_geglu_split(ctx0, cur, up);
-                cb(cur, "ffn_moe_geglu", il);
-            } else {
-                cur = ggml_gelu(ctx0, cur);
-                cb(cur, "ffn_moe_gelu", il);
-            } break;
-        case LLM_FFN_SWIGLU_OAI_MOE:
-            {
-                // TODO: move to hparams?
-                constexpr float alpha = 1.702f;
-                constexpr float limit = 7.0f;
-                cur = ggml_swiglu_oai(ctx0, cur, up, alpha, limit);
-                cb(cur, "ffn_moe_swiglu_oai", il);
-            } break;
-        case LLM_FFN_RELU:
-            if (has_gate) {
-                cur = ggml_reglu_split(ctx0, cur, up);
-                cb(cur, "ffn_moe_reglu", il);
-            } else {
-                cur = ggml_relu(ctx0, cur);
-                cb(cur, "ffn_moe_relu", il);
-            } break;
-        case LLM_FFN_RELU_SQR:
-            if (has_gate) {
-                // TODO: add support for gated squared relu
-                GGML_ABORT("fatal error: gated squared relu not implemented");
-            } else {
-                cur = ggml_relu(ctx0, cur);
-                cur = ggml_sqr(ctx0, cur);
-                cb(cur, "ffn_moe_relu_sqr", il);
-            } break;
-        default:
-            GGML_ABORT("fatal error");
-    }
 
-    {
-        // TODO: this graph-level rescaling should only be applied when the corresponding backend does not support
-        //       ggml_prec_set_src(experts, GGML_PREC_BF16, 1);
-        //       the amax op cannot be split across devices, so these architectures are denied -sm tensor [TAG_MOE_AMAX_SCALE]
-        //       ref: https://github.com/ggml-org/llama.cpp/pull/30656#issuecomment-6269597922
-        llm_graph_amax_src1 amax_src1 = { nullptr, nullptr };
+                if (has_gate) {
+                    seg_cur = ggml_swiglu_split(ctx0, seg_cur, up);
+                    cb(seg_cur, "ffn_moe_swiglu", il);
+                } else {
+                    seg_cur = ggml_silu(ctx0, seg_cur);
+                    cb(seg_cur, "ffn_moe_silu", il);
+                } break;
+            case LLM_FFN_SITU:
+                {
+                    // situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)
+                    GGML_ASSERT(has_gate);
+                    const float beta = hparams.situ_beta;
+                    const float lb   = hparams.situ_linear_beta;
 
-        if (arch == LLM_ARCH_MISTRAL4 || arch == LLM_ARCH_MELLUM || arch == LLM_ARCH_FLINT || arch == LLM_ARCH_LAGUNA) {
-            amax_src1 = build_amax_src1_f16(cur);
-            cur = amax_src1.res;
+                    ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, seg_cur, 1.0f/beta)), beta);
+                    act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, seg_cur));
+                    if (lb > 0.0f) {
+                        up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
+                    }
+                    seg_cur = ggml_mul(ctx0, act, up);
+                    cb(seg_cur, "ffn_moe_situ", il);
+                } break;
+            case LLM_FFN_GELU:
+                if (has_gate) {
+                    seg_cur = ggml_geglu_split(ctx0, seg_cur, up);
+                    cb(seg_cur, "ffn_moe_geglu", il);
+                } else {
+                    seg_cur = ggml_gelu(ctx0, seg_cur);
+                    cb(seg_cur, "ffn_moe_gelu", il);
+                } break;
+            case LLM_FFN_SWIGLU_OAI_MOE:
+                {
+                    // TODO: move to hparams?
+                    constexpr float alpha = 1.702f;
+                    constexpr float limit = 7.0f;
+                    seg_cur = ggml_swiglu_oai(ctx0, seg_cur, up, alpha, limit);
+                    cb(seg_cur, "ffn_moe_swiglu_oai", il);
+                } break;
+            case LLM_FFN_RELU:
+                if (has_gate) {
+                    seg_cur = ggml_reglu_split(ctx0, seg_cur, up);
+                    cb(seg_cur, "ffn_moe_reglu", il);
+                } else {
+                    seg_cur = ggml_relu(ctx0, seg_cur);
+                    cb(seg_cur, "ffn_moe_relu", il);
+                } break;
+            case LLM_FFN_RELU_SQR:
+                if (has_gate) {
+                    // TODO: Use scalar div instead when/if implemented
+                    GGML_ABORT("fatal error: gated squared relu not implemented");
+                } else {
+                    seg_cur = ggml_relu(ctx0, seg_cur);
+                    seg_cur = ggml_sqr(ctx0, seg_cur);
+                    cb(seg_cur, "ffn_moe_relu_sqr", il);
+                } break;
+            default:
+                GGML_ABORT("fatal error");
         }
 
-        experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s, slots); // [n_embd, n_expert_used, n_tokens]
-        //ggml_prec_set_src(experts, GGML_PREC_BF16, 1); // (see TODO above)
-        cb(experts, "ffn_moe_down", il);
-
-        if (amax_src1.scale_s) {
-            experts = ggml_mul(ctx0, experts, amax_src1.scale_s);
+        {
+            // [TongYi aline-P1] upstream #30656 amax rescale re-applied over the fork's segmented MoE:
+            // TODO: this graph-level rescaling should only be applied when the corresponding backend does not support
+            //       ggml_prec_set_src(experts, GGML_PREC_BF16, 1);
+            //       the amax op cannot be split across devices, so these architectures are denied -sm tensor [TAG_MOE_AMAX_SCALE]
+            llm_graph_amax_src1 amax_src1 = { nullptr, nullptr };
+            ggml_tensor * src1_for_down = seg_cur;
+            if (arch == LLM_ARCH_MISTRAL4 || arch == LLM_ARCH_MELLUM || arch == LLM_ARCH_FLINT || arch == LLM_ARCH_LAGUNA) {
+                amax_src1 = build_amax_src1_f16(seg_cur);
+                src1_for_down = amax_src1.res;
+            }
+            experts = build_lora_mm_id(down_exps, src1_for_down, ids_seg, down_exps_s, slots); // [n_embd, k, n_tokens]
+            cb(experts, "ffn_moe_down", il);
+            if (amax_src1.scale_s) {
+                experts = ggml_mul(ctx0, experts, amax_src1.scale_s);
+            }
         }
-    }
 
-    if (down_exps_s) {
-        cb(experts, "ffn_moe_down_scaled", il);
-    }
+        if (down_exps_s) {
+            cb(experts, "ffn_moe_down_scaled", il);
+        }
 
-    if (down_exps_b) {
-        experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
-        cb(experts, "ffn_moe_down_biased", il);
+        if (down_exps_b) {
+            experts = ggml_add_id(ctx0, experts, down_exps_b, ids_seg);
+            cb(experts, "ffn_moe_down_biased", il);
+        }
+
+        return experts;
+    };
+
+    // [A2 split] 图侧接线：把 n_used 个名次切成「前段 [0, split) + 后段 [split, n_used)」，
+    // 前段用 phase A 已装好的 slot 先算；trigger 节点（build_deferred_trigger）插在两段
+    // 之间 —— 它 join phase A 发出的异步读并发布槽位，同时把完整 slot_ids 拷一份作为
+    // 输出，后段 matmul 自然依赖它，由此保证后段用的 slot 数据已就绪。
+    //
+    // 逐元素正确性：mul_mat_id 的每个输出元素只依赖 (slot id 值, 本 rank 的输入列)，
+    // 切片不改这两者（内核映射 i11 = id % ne11，见 ggml_compute_forward_mul_mat_id），
+    // 输出与单条 mul_mat_id 位级一致；rank 求和顺序由 concat 后的 per-rank views+add
+    // 原样保持。
+    //
+    // 图侧条件必须是运行期 defer 条件的**超集**（runtime 只在窗口模式 defer；图多切
+    // 无害 —— trigger 对空 defer_list 是 no-op），否则 kSlotPending 的槽位永远没人
+    // 发布，后段会静默读到垃圾。
+    const int32_t moe_split_raw = (moe_slots && moe_slots->uses_layer(il)) ? moe_slots->matmul_split() : 0;
+    const int32_t moe_split = std::min(moe_split_raw, (int32_t) n_expert_used);
+    ggml_tensor * experts = nullptr;
+    if (moe_split > 0 && n_tokens > 0) {
+        ggml_tensor * sem  = selected_experts_mm;   // [n_used, n_tokens] I32（phase A 输出）
+        if (moe_split >= (int32_t) n_expert_used) {
+            // 全延后（动态切点遇到 rank0 miss）：前段为空，trigger 只依赖 phase A，
+            // 整段专家 join 之后再算 —— phase A 内零阻塞读，所有 miss 并行异步读。
+            ggml_tensor * trig = moe_slots->build_deferred_trigger(ctx0, sem, sem, il);
+            cb(trig, "ffn_moe_slot_trigger", il);
+            experts = moe_segment(trig, cur);
+            cb(experts, "ffn_moe_down", il);
+        } else {
+            const int64_t sp = moe_split;
+            ggml_tensor * sem_f = ggml_view_2d(ctx0, sem, sp, n_tokens, sem->nb[1], 0);
+            ggml_tensor * in_f = cur;
+            ggml_tensor * in_b = cur;
+            if (cur->ne[1] > 1) {
+                // weight_before_ffn 的展开列输入：按 rank 切，保持 ids↔列一一对应
+                in_f = ggml_view_3d(ctx0, cur, cur->ne[0], sp, cur->ne[2], cur->nb[1], cur->nb[2], 0);
+                in_b = ggml_view_3d(ctx0, cur, cur->ne[0], cur->ne[1] - sp, cur->ne[2], cur->nb[1], cur->nb[2], sp * cur->nb[1]);
+            }
+            ggml_tensor * ex_f = moe_segment(sem_f, in_f);   // [n_embd, sp, n_tokens]
+            ggml_tensor * trig = moe_slots->build_deferred_trigger(ctx0, sem, ex_f, il);
+            ggml_tensor * sem_b = ggml_view_2d(ctx0, trig, sem->ne[0] - sp, n_tokens, trig->nb[1], sp * trig->nb[0]);
+            ggml_tensor * ex_b = moe_segment(sem_b, in_b);   // [n_embd, n_used-sp, n_tokens]
+            experts = ggml_concat(ctx0, ex_f, ex_b, 1);
+            cb(experts, "ffn_moe_down", il);
+        }
+    } else {
+        experts = moe_segment(selected_experts_mm, cur);
     }
 
     // an expert output can be scaled by a norm weight, then normalized, before the router weights apply
@@ -2728,6 +2962,18 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         // a Hadamard-latent table stores rotated rows: restore the primal basis, h = s * (H z)
         if (hdmd) {
             if (const auto it = hdmd->inv.find(tok_embd); it != hdmd->inv.end()) {
+                cur = llama_mul_mat_hadamard(ctx0, cur, it->second.rot);
+                if (it->second.signs) {
+                    cur = ggml_mul(ctx0, cur, it->second.signs);
+                }
+            }
+        }
+
+        // a Hadamard-latent embedding table stores rotated rows; restore the
+        // primal basis right after the lookup: h = s * (H z)
+        if (hadamard_inverses) {
+            const auto it = hadamard_inverses->find(tok_embd);
+            if (it != hadamard_inverses->end()) {
                 cur = llama_mul_mat_hadamard(ctx0, cur, it->second.rot);
                 if (it->second.signs) {
                     cur = ggml_mul(ctx0, cur, it->second.signs);
@@ -3015,7 +3261,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    // [tongyi R-278 2026-11-05] FA 对照腿实测（740, Qwen3.5-4B, pp512/n128，两轮一致）：
+    // FA on pp 45.15(+38%) 但 tg 4.25(-36%)——FA kernel 对 N=1 decode 形态反噬（N=1 无
+    // Q-block 并行可赚，纯多付 F32 累加与掩码开销）。decode 图（kq_mask 行数=1）构建期
+    // 回标准 kq 路（数学等价，FA=0 形态已实证 tg 6.8），prefill 图（N>1）照走 FA 吃 +38%。
+    // GGML_OPENCL_FA_DECODE=1 逃生强开 decode-FA。
+    static const bool fa_decode_force = [] {
+        const char * e = getenv("GGML_OPENCL_FA_DECODE");
+        return e && e[0] == '1';
+    }();
+    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr &&
+        (kq_mask->ne[1] > 1 || fa_decode_force);
     GGML_ASSERT(use_flash_attn || kv_rows == nullptr);
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
@@ -3975,12 +4231,22 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
     const int64_t n_rs   = mctx_cur->get_n_rs();
     const int64_t n_seqs = ubatch.n_seqs;
 
-    inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
-    ggml_set_input(inp->s_copy);
-    ggml_set_name(inp->s_copy, "rs_s_copy");
+    ggml_tensor * s_copy_c = rs_const_idx_enabled() ? mctx_cur->get_s_copy_c() : nullptr;
 
-    inp->s_copy_main = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
-    inp->s_copy_tail = ggml_view_1d(ctx0, inp->s_copy, n_rs - 1, inp->s_copy->nb[0]);
+    if (s_copy_c && mctx_cur->s_copy_is_const_zero()) {
+        inp->const_idx    = true;
+        inp->s_copy       = s_copy_c;                                         // I32 [1], cache-resident, never written
+        inp->s_copy_main  = s_copy_c;                                         // n_seqs == n_rs == 1
+        inp->s_copy_extra = ggml_view_1d(ctx0, s_copy_c, 0, s_copy_c->nb[0]); // zero-sized, no-op gather
+    } else {
+        inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
+        ggml_set_input(inp->s_copy);
+        ggml_set_name(inp->s_copy, "rs_s_copy");
+
+        inp->s_copy_main  = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
+        inp->s_copy_extra = ggml_view_1d(ctx0, inp->s_copy, n_rs - n_seqs, n_seqs * inp->s_copy->nb[0]);
+        inp->s_copy_tail  = ggml_view_1d(ctx0, inp->s_copy, n_rs - 1, inp->s_copy->nb[0]);
+    }
 
     inp->head = mctx_cur->get_head();
     inp->rs_z = mctx_cur->get_rs_z();

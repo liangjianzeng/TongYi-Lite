@@ -10,6 +10,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <regex>
@@ -965,7 +966,26 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
             } break;
         case GGML_OP_MUL_MAT:
             {
-                ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], 512, w->ne[2], w->ne[3]);
+                // [tongyi 2026-10-25] Placement probe batch is env-tunable. Upstream fixed
+                // 512 collides with backends that reject the generic GEMV path for large
+                // activation batches (Adreno q5_0/q5_1/MXFP4): the probe then misclassifies
+                // decode-shaped (batch=1) matmuls and banishes the whole weight to a CPU
+                // buffer -- every decode token pays a split handoff. Decode is the binding
+                // constraint on device, so GGML_BUFT_PROBE_BATCH=1 probes the decode shape;
+                // prefill re-checks supports_op with the real batch and falls back per-op
+                // (correct, just slower prefill). Default stays 512 = upstream behavior.
+                // [tongyi 2026-10-25 default flip] 512 -> 1: decode is the binding
+                // constraint on device. Only q5_0/q5_1/MXFP4 (GEMV-only types) were
+                // ever misclassified by the 512 probe; verified numerically on 740
+                // (Ling-3.0-tiny q5_0 shexp chain + qwen3.5-4b q4_K/q6_K: text
+                // byte-identical, splits=2, no aborts). GGML_BUFT_PROBE_BATCH=512
+                // restores upstream behavior.
+                int probe_batch = 1;
+                if (const char * pb = getenv("GGML_BUFT_PROBE_BATCH")) {
+                    probe_batch = atoi(pb);
+                    if (probe_batch < 1) probe_batch = 512;
+                }
+                ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], probe_batch, w->ne[2], w->ne[3]);
                 op_tensor = ggml_mul_mat(ctx, w, b);
             } break;
         case GGML_OP_MUL_MAT_ID:
@@ -1124,6 +1144,163 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
     }
 
     return true;
+}
+
+// split-moe: per-buft metadata ctx, same policy as create_tensor's local
+// ctx_for_buft but always non-lazy and without the weights_map bookkeeping.
+ggml_context * llama_model_loader::expert_ctx_for_buft(const llama_hparams & hparams, ggml_backend_buffer_type_t buft) {
+    const ctx_key key { buft, /*lazy=*/false, /*expert=*/true };
+
+    auto it = ctx_map.find(key);
+    if (it == ctx_map.end()) {
+        int max_n_tensors = n_tensors;
+        max_n_tensors += hparams.n_layer()*4; // routed expert families
+        const size_t ctx_size = ggml_tensor_overhead()*max_n_tensors;
+
+        ggml_init_params params = {
+            /*.mem_size   =*/ ctx_size,
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+
+        ggml_context * ctx = ggml_init(params);
+        if (!ctx) {
+            throw std::runtime_error(format("failed to create ggml context"));
+        }
+
+        ctx_map.emplace(key, ctx);
+        return ctx;
+    }
+    return it->second.get();
+}
+
+struct ggml_tensor * llama_model_loader::create_tensor_expert_alloc(
+        const llama_hparams & hparams,
+        ggml_backend_buffer_type_t buft,
+        const std::string & name,
+        const std::initializer_list<int64_t> & ne,
+        ggml_type type) {
+    ggml_context * ctx = expert_ctx_for_buft(hparams, buft);
+
+    // intentionally NOT in weights_map: content comes from the expert bins
+    ggml_tensor * tensor = ggml_new_tensor(ctx, type, (int) ne.size(), ne.begin());
+    ggml_set_name(tensor, name.c_str());
+    // 注意：不递增 n_created —— 专家剥离版主 gguf 的文件条目里没有路由专家，
+    // done_getting_tensors 的 n_created == n_tensors 对账会因此爆掉
+    // （实测 expected 613 got 733）。这些合成张量也不在 weights_map。
+    return tensor;
+}
+
+void llama_model_loader::virtualize_expert_tensor(
+        ggml_tensor * tensor,
+        int64_t n_expert,
+        int64_t n_slots,
+        ggml_type experts_type,
+        size_t bytes_per_expert) {
+    if (!tensor) {
+        return;
+    }
+    if (tensor->data || tensor->buffer) {
+        throw std::runtime_error("cannot virtualize an allocated expert tensor");
+    }
+    if (tensor->type != experts_type) {
+        throw std::runtime_error(format(
+            "expert tensor '%s' type %s does not match experts type %s",
+            ggml_get_name(tensor), ggml_type_name(tensor->type), ggml_type_name(experts_type)));
+    }
+    if (tensor->ne[2] != n_expert || n_slots <= 0) {
+        throw std::runtime_error(format("invalid slot geometry for expert tensor '%s'", ggml_get_name(tensor)));
+    }
+    if (ggml_nbytes(tensor) != bytes_per_expert * (size_t) n_expert) {
+        throw std::runtime_error(format("expert byte stride mismatch for tensor '%s'", ggml_get_name(tensor)));
+    }
+
+    const std::string name = ggml_get_name(tensor);
+    tensor->ne[2] = n_slots;
+    tensor->nb[3] = tensor->nb[2] * tensor->ne[2];
+
+    if (ggml_nbytes(tensor) != bytes_per_expert * (size_t) n_slots) {
+        throw std::runtime_error(format("virtual expert tensor '%s' has unexpected size", name.c_str()));
+    }
+    // if it came from the gguf (unstripped file), drop it so load_all_data
+    // never reads expert content from the file
+    weights_map.erase(name);
+
+    LLAMA_LOG_INFO("%s: virtualized %s from %lld experts to %lld slots (%.2f MiB)\n",
+        __func__, name.c_str(), (long long) n_expert, (long long) n_slots,
+        ggml_nbytes(tensor) / 1024.0 / 1024.0);
+}
+
+void llama_model_loader::alias_expert_slot_tensor(ggml_tensor * dst, ggml_tensor * src) {
+    if (!dst || !src) {
+        throw std::runtime_error("cannot alias a null expert slot tensor");
+    }
+    if (dst == src) {
+        return;
+    }
+    if (dst->data || dst->buffer || src->data || src->buffer) {
+        throw std::runtime_error(format(
+            "cannot alias already-allocated expert tensor '%s'", ggml_get_name(dst)));
+    }
+    if (dst->view_src) {
+        throw std::runtime_error(format(
+            "expert tensor '%s' is already a view", ggml_get_name(dst)));
+    }
+    // allow dst to be a sub-window of src (smaller ne[2], view_offs = 0):
+    // each layer's tensor is sized at prefill capacity while the base is the
+    // larger "prefill + per-layer decode" block.
+    if (dst->ne[0] != src->ne[0] || dst->ne[1] != src->ne[1] ||
+        dst->ne[2] > src->ne[2]) {
+        throw std::runtime_error(format(
+            "cannot alias expert tensor '%s' onto '%s': shape %lldx%lldx%lld vs %lldx%lldx%lld",
+            ggml_get_name(dst), ggml_get_name(src),
+            (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2],
+            (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2]));
+    }
+    if (ggml_nbytes(dst) > ggml_nbytes(src)) {
+        throw std::runtime_error(format(
+            "cannot alias expert tensor '%s' (%.2f MiB) onto smaller base '%s' (%.2f MiB)",
+            ggml_get_name(dst), ggml_nbytes(dst) / 1024.0 / 1024.0,
+            ggml_get_name(src), ggml_nbytes(src) / 1024.0 / 1024.0));
+    }
+    dst->view_src  = src;
+    dst->view_offs = 0;
+    dst->data      = nullptr;
+}
+
+struct ggml_tensor * llama_model_loader::window_expert_slot_tensor(
+        ggml_context * ctx,
+        const char * name,
+        ggml_tensor * base,
+        int64_t slot_offset,
+        int64_t n_slots,
+        size_t bytes_per_expert) {
+    if (!base || !ctx) {
+        throw std::runtime_error("cannot create an expert window without a base / context");
+    }
+    if (slot_offset < 0 || n_slots <= 0 || bytes_per_expert == 0) {
+        throw std::runtime_error("invalid expert window range");
+    }
+    if ((size_t) (slot_offset + n_slots) * bytes_per_expert > ggml_nbytes(base)) {
+        throw std::runtime_error(format(
+            "expert window '%s' [%lld, %lld) exceeds base '%s' (%zu bytes)",
+            name, (long long) slot_offset, (long long) (slot_offset + n_slots),
+            ggml_get_name(base), ggml_nbytes(base)));
+    }
+
+    // new metadata, then a plain view over a span of the base.
+    // reuse base's nb[1]/nb[2] (per-expert strides); only ne[2] and the byte
+    // offset change.
+    ggml_tensor * result = ggml_new_tensor_3d(ctx, base->type,
+                                              base->ne[0], base->ne[1], n_slots);
+    ggml_set_name(result, name);
+    result->nb[1]   = base->nb[1];
+    result->nb[2]   = base->nb[2];
+    result->nb[3]   = base->nb[2] * n_slots;
+    result->view_src  = base;
+    result->view_offs = (size_t) slot_offset * bytes_per_expert;
+    result->data      = nullptr;
+    return result;
 }
 
 struct ggml_tensor * llama_model_loader::create_tensor(
@@ -1902,3 +2079,8 @@ void llama_model_loader::print_info() const {
         LLAMA_LOG_INFO("%s: file size   = %.2f GiB (%.2f BPW) \n", __func__, n_bytes/1024.0/1024.0/1024.0, n_bytes*8.0/n_elements);
     }
 }
+
+// TEMP: explicit instantiations for libstdc++ golden-baseline build
+template bool llama_model_loader::get_arr<int>(const std::string &, std::vector<int> &, bool);
+template bool llama_model_loader::get_arr<std::string>(const std::string &, std::vector<std::string> &, bool);
+template bool llama_model_loader::get_key<bool>(const std::string &, bool &, bool);

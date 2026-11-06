@@ -190,6 +190,10 @@ LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_mode
 // returns the number of extracted layers from target model
 LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
 
+// returns true if the draft model carries a DSpark Markov head. Both lineages declare
+// general.architecture = dflash, so this is how to tell them apart.
+LLAMA_API bool llama_model_has_dspark_markov_head(const struct llama_model * model);
+
 // retrieves the whole token embedding matrix in F32 format (n_embd * n_vocab)
 // returns total number of elements or 0 on error
 // if out is nullptr, returns the number of tokens without writing to out
@@ -199,6 +203,39 @@ LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, fl
 // same as above, but only the rows of the given tokens, in order (n_tokens * n_embd elements)
 // returns the number of elements written or 0 on error
 LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const llama_token * tokens, uint32_t n_tokens, float * out);
+
+//
+// dspark model metadata (fork API, kept for the speculative dspark driver)
+//
+
+struct llama_dspark_meta {
+    int64_t n_embd          = 0;
+    int64_t n_vocab         = 0;  // from token_embd.weight's own shape, not the (empty) vocab
+    int64_t n_capture       = 0;  // target_layer_ids count
+    int64_t n_embd_cap      = 0;  // n_capture * n_embd (raw pre-fc tap width)
+    int32_t block_size      = 0;
+    int32_t mask_token_id   = 0;
+    int64_t markov_rank     = 0;      // 0 if the checkpoint has no markov head
+    bool    graph_corrected = false;  // greedy predecessor chain already applied on device
+};
+
+// Returns false if `model` is not a loaded dspark model (block_size == 0).
+LLAMA_API bool llama_model_dspark_get_meta(const struct llama_model * model, llama_dspark_meta * out);
+
+// Only the "vanilla" markov head (a plain low-rank embedding + linear pair,
+// VanillaMarkov in the DeepSpec reference) is supported here: it's the only
+// variant present in shipped GGUFs today -- gated/rnn markov heads carry
+// extra gate_proj/joint_proj tensors that dspark's GGUF converter and
+// load_arch_tensors() don't currently map (see src/models/dspark.cpp).
+//
+// w1 and w2 are both returned as [n_vocab * n_rank] row-major (rank
+// fastest-varying), matching their GGUF storage (ne = [n_rank, n_vocab]):
+//   w1[token_id * n_rank + r] == markov_w1.weight[token_id][r]  (embedding row)
+//   w2[token_id * n_rank + r] == markov_w2.weight[token_id][r]  (mul_mat weight row)
+// Returns false (leaving w1/w2 untouched) if the model has no markov head.
+LLAMA_API bool llama_model_dspark_get_markov(const struct llama_model * model,
+                                             std::vector<float> &       w1,
+                                             std::vector<float> &       w2);
 
 // realtime models: number of tokens the output lags behind the audio input, used by mtmd; 0 if not applicable
 LLAMA_API uint32_t llama_model_n_tokens_delay(const struct llama_model * model);

@@ -352,6 +352,14 @@ struct llama_layer {
     struct ggml_tensor * ffn_down_exps     = nullptr;
     struct ggml_tensor * ffn_up_exps       = nullptr;
     struct ggml_tensor * ffn_gate_up_exps  = nullptr;
+
+    // split-moe decode-window slot views (base + per-layer lookahead tail).
+    // Only bound when LLAMA_MOE_DECODE_WINDOW > 0; otherwise left null and the
+    // shared prefill slot tensors above serve every phase.
+    struct ggml_tensor * ffn_gate_up_exps_dec = nullptr;
+    struct ggml_tensor * ffn_gate_exps_dec    = nullptr;
+    struct ggml_tensor * ffn_up_exps_dec      = nullptr;
+    struct ggml_tensor * ffn_down_exps_dec    = nullptr;
     struct ggml_tensor * ffn_gate_inp_b    = nullptr;
     struct ggml_tensor * ffn_gate_exps_b   = nullptr;
     struct ggml_tensor * ffn_down_exps_b   = nullptr;
@@ -436,6 +444,12 @@ struct llama_layer {
 
     // qwen3.5
     struct ggml_tensor * ssm_alpha = nullptr;
+
+    // clover
+    struct ggml_tensor * ssm_conv1d_right   = nullptr;
+    struct ggml_tensor * ssm_bd_logit_scale = nullptr;
+    struct ggml_tensor * ssm_bd_history_b   = nullptr;
+    struct ggml_tensor * ssm_bd_history     = nullptr;
 
     // rwkv
     struct ggml_tensor * time_mix_w1         = nullptr;
@@ -744,6 +758,16 @@ struct llama_hadamard {
 };
 
 struct llama_model {
+    // ---- split-moe (llama-moe-experts / llama-moe-slot) ----
+    bool moe_slot_bank_enabled() const;
+    bool moe_experts_inplace() const;
+    int32_t moe_slot_bank_size() const;
+    int32_t moe_experts_layer_count() const;
+    const struct llama_moe_experts_entry * moe_experts_entry(const char * tensor_name) const;
+    int32_t moe_decode_window() const;
+    int32_t moe_prefetch_slots() const;
+    const std::vector<int32_t> & moe_layer_windows() const;
+
     llm_type type = LLM_TYPE_UNKNOWN;
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -866,6 +890,28 @@ struct llama_model {
     struct ggml_tensor * dspark_joint_proj_b = nullptr;
     struct ggml_tensor * dspark_mask_embd    = nullptr; // per-slot mask embeddings
 
+    // dspark GIDD log-SNR conditioning (only when hparams.dspark_log_snr_conditioning)
+    struct ggml_tensor * dspark_mode_embedding = nullptr;  // selected request mode, added only to draft input
+    struct ggml_tensor * dspark_log_snr_fc1_w = nullptr; // [128 -> n_embd]
+    struct ggml_tensor * dspark_log_snr_fc1_b = nullptr;
+    struct ggml_tensor * dspark_log_snr_fc2_w = nullptr; // [n_embd -> n_embd]
+    struct ggml_tensor * dspark_log_snr_fc2_b = nullptr;
+
+    // dspark drafter: target-feature projection + auxiliary heads (output-level,
+    // not per-layer -- the trunk decoder layers reuse the standard llama_layer
+    // attn_*/ffn_* fields above like any dense Qwen3-style stack).
+    struct ggml_tensor * dspark_fc                = nullptr;  // [n_capture*n_embd -> n_embd]
+    struct ggml_tensor * dspark_hidden_norm       = nullptr;  // RMSNorm after fc
+    struct ggml_tensor * dspark_markov_head_a     = nullptr;  // low-rank logit-bias factor A
+    struct ggml_tensor * dspark_markov_head_b     = nullptr;  // low-rank logit-bias factor B
+    struct ggml_tensor * dspark_confidence_head   = nullptr;  // accept-rate predictor
+    struct ggml_tensor * dspark_confidence_head_b = nullptr;
+    struct ggml_tensor * dspark_corr_hnorm        = nullptr;
+    struct ggml_tensor * dspark_corr_enorm        = nullptr;
+    struct ggml_tensor * dspark_corr_gate         = nullptr;
+    struct ggml_tensor * dspark_corr_up           = nullptr;
+    struct ggml_tensor * dspark_corr_down         = nullptr;
+
     struct ggml_tensor * dflash_selector_prev   = nullptr;
     struct ggml_tensor * dflash_selector_next   = nullptr;
     struct ggml_tensor * dflash_selector_hidden = nullptr;
@@ -914,6 +960,19 @@ struct llama_model {
 
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
+
+    // Hadamard-folded GGUF weights are matched with persistent model tensors
+    // containing the activation-side transform.  The string map is populated
+    // from GGUF metadata while loading hparams; the pointer map is populated
+    // after model buffers have been allocated.  In explicit sign mode the
+    // per-width sign vectors come from GGUF metadata as well.
+    std::unordered_map<std::string, uint32_t> hadamard_weight_blocks;
+    std::unordered_map<std::string, uint32_t> hadamard_inverse_blocks;
+    std::map<uint32_t, std::vector<int32_t>> hadamard_sign_data;
+    bool hadamard_gdn_v_grouped = false;
+    bool hadamard_tied_output = false;
+    llama_hadamard_rotations hadamard_rotations;
+    llama_hadamard_rotations hadamard_inverses;
 
     // list of devices used in this model
     std::vector<llama_device> devices;
