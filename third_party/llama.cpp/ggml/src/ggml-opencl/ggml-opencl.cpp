@@ -22888,10 +22888,12 @@ static bool ggml_backend_opencl_device_supports_buft(ggml_backend_dev_t dev, ggm
     return backend_ctx0->context == backend_ctx1->context;
 }
 
-namespace /* anonymous */ {
-// [TongYi-Lite aline-P1] 前向声明: 定义在本 vtable 之后 (offload 分派)
+// [TongYi-Lite aline-P1] 前向声明: 定义在本 vtable 之后的全局作用域 (offload 分派)。
+// 必须置于 anonymous namespace 之外 —— 定义在 namespace 外, 若声明放在内侧则二者
+// mangle 不同 ((anonymous namespace):: vs ::), 链接期 undefined symbol。
 static bool ggml_backend_opencl_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op);
 
+namespace /* anonymous */ {
 struct ggml_backend_device_i ggml_backend_opencl_device_i = {
     /* .get_name             = */ ggml_backend_opencl_device_get_name,
     /* .get_description      = */ ggml_backend_opencl_device_get_description,
