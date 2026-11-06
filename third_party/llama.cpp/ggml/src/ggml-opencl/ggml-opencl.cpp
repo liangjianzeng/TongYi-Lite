@@ -33424,6 +33424,24 @@ static bool ggml_cl_mul_mat_id_batched(ggml_backend_t backend,
         ggml_backend_opencl_context * bk_ctx = (ggml_backend_opencl_context *)backend->context;
         tongyi_route_bookkeeping(bk_ctx, src0, src1, src2);
     }
+    // [TongYi-Lite aline-P1 真机四道门 2026-11-06] q4_K batched 查表拒闸：Adreno 740
+    // E031.41（小米13, OpenCL build 0676.76.1）驱动级 codegen 腐化 —— fork golden
+    // 控制臂同二进制 8/8 案 NMSE 1.5-2.6（同二进制 q4_0/IQ4_XS batched 全 0；
+    // dense-loop 同 plane bit-exact；UNI 同征），与下方 G-759 830 案同指纹。
+    // 判定 = known_bad 表（唯一事实源）× 版本钉 E031.41：K40（E031.37 batched
+    // 100% 命中，G-747 实测）与 830（E031.47 v2-seff/meff 案后健康）均不受累。
+    // 拒闸 return false → 派发侧（ggml_cl_mul_mat_id 的 moe_use_dense_loop 分支）
+    // 自动落 dense-loop（q4_K 有 dense 兜底，无 q3_K/iq4_xs 式 abort 契约）。
+    if (is_q4_k) {
+        ggml_backend_opencl_context * kb_ctx = (ggml_backend_opencl_context *)backend->context;
+        const ggml_cl_compiler_version & kb_cv = kb_ctx->adreno_cl_compiler_version;
+        if (kb_cv.type == ADRENO_CL_COMPILER_TYPE::E031 && kb_cv.major == 41 &&
+            tongyi::known_bad_lookup((tongyi::RCompiler)kb_cv.type, "mul_mat_id_q4_k_f32_batched")) {
+            ggml_cl_mmid_gate_fail(2, "known_bad_e031_41_q4k_batched", src0, src1, src2,
+                                   "E031.41 q4_K batched driver codegen corruption -> dense-loop");
+            return false;
+        }
+    }
     // [dspark 2026-10-14] HISTORICAL (superseded by the v2 note below): q4_K
     // batched MoE DISABLED — Adreno 830 (E031.47.18.49)
     // driver-level codegen corruption, NOT a source bug. Evidence chain

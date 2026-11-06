@@ -115,6 +115,9 @@ static const KnownBadKernel kKnownBad[] = {
     { RCOMP_E17,  "E17 (rare vendor builds)",
       "gemv_moe_", "",
       "G-747: E17 quirks 档默认拒 batched MoE（adreno_e17_compiler_quirks 门）" },
+    { RCOMP_E031, "E031.41 (usually A7x, Xiaomi 13 build 0676.76.1)",
+      "mul_mat_id_q4_k_", "_batched",
+      "aline-P1 真机四道门 2026-11-06: 740 上 fork golden 控制臂同二进制 8/8 案 NMSE 1.5-2.6（同二进制 q4_0/IQ4_XS batched 全 0；dense-loop 同 plane bit-exact；MOE_PROBE_UNI 同征）——驱动级 codegen 腐化，与 G-759 830 案同指纹。派发端（ggml_cl_mul_mat_id_batched known_bad 门，版本钉 .41）拒 batched → dense-loop。" },
 };
 
 // ---- legacy 等价函数（表内唯一「逻辑」，其余全是数据）----
