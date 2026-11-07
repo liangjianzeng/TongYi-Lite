@@ -1285,6 +1285,16 @@ struct InferenceEngine {
             ctx_params.type_k = GGML_TYPE_F16;
         }
         const bool model_is_mla = llama_model_is_mla(model);
+        if (model_is_mla && ctx_params.type_k != GGML_TYPE_F16) {
+            // [ling-garble 2026-11-07] 量化 MLA 潜缓存数值坏：740 native 2×2 矩阵
+            // （ling_e2e E2E_KVM/E2E_NOFA）—— q4_0/q4_0 无论 FA 开关全炸（A=!×48、
+            // B="好的"+45×!），f16 无论 FA 开关全净（C 连贯、D 金标基线）。R-012
+            // 镜像让 q4_0 默认真跑量化 ck → app 面 ling 乱码（740/830 实锤，首
+            // token 即坏）。MLA 一律强制 F16，与 Clover force-F16 同构（quantized
+            // K garbles output）；量化 MLA ck 的 tree 侧深修另案。
+            LOGI("KV cache: MLA arch - forcing type_k=type_v=F16 (quantized MLA ck garbles output)");
+            ctx_params.type_k = GGML_TYPE_F16;
+        }
         ctx_params.type_v = (model_is_mla ||
                              ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
                                 ? ctx_params.type_k : GGML_TYPE_F16;
@@ -2154,7 +2164,18 @@ struct InferenceEngine {
                         LOGI("[clover-tmpl] embedded template head: %.120s", emb_tmpl);
                     }
                 }
-                if (is_clover_model && llama_model_chat_template(model, nullptr)) {
+                // [ling-garble 2026-11-07] apply_chat_template_grown 默认
+                // tmpl="chatml"：非 clover 模型一律按 ChatML 渲染，内嵌模板被
+                // 无视。Qwen 族恰好 ChatML 兼容故无恙；Ling 3.x（Bailing V3
+                // Jinja，<role>HUMAN</role> 标记系）收 ChatML prompt → 推理
+                // 乱码（740/830 实锤；[lingprobe] tokenize head=<|im_start|>user）。
+                // 内嵌模板含 Bailing 标记 → 一并走 CLI --jinja 同路径
+                // （common_chat_templates_* 求值内嵌 Jinja）；其余模型 chatml
+                // 原路径零变化。
+                const char *emb_tmpl_gate = llama_model_chat_template(model, nullptr);
+                const bool emb_is_bailing = emb_tmpl_gate &&
+                    strstr(emb_tmpl_gate, "<role>ASSISTANT</role>") != nullptr;
+                if ((is_clover_model || emb_is_bailing) && emb_tmpl_gate) {
                     common_chat_templates_inputs cinputs;
                     for (const auto & m : chat_vec) {
                         common_chat_msg msg;
@@ -2189,6 +2210,39 @@ struct InferenceEngine {
                 if (!jinja_rendered) {
                     formatted_prompt =
                         apply_chat_template_grown(chat_vec, true, "gen");
+                }
+
+                // Bailing V3（Ling 3.x）：生成提示以 "<think>" 结尾（模板
+                // 渲染的思考开启器，默认 detailed thinking on）。
+                //  - 思考关闭 → 把尾部 "<think>" 改写为 "<think></think>"
+                //    （官方 documented 关闭触发；不改写模型必然思考，
+                //    端侧小模型思考失控会烧光生成预算）。
+                //  - 思考开启 → prompt 尾部 opener 保留，但生成流里没有
+                //    "<think>"（opener 在 prompt 不在输出）→ Dart 侧思考
+                //    状态机不启动、推理文本泄漏进可见回答直到 "</think>"。
+                //    置标志，生成开始时把 "<think>" 作为首个流片段前置。
+                // [ling-garble 2026-11-07] 本块从 legacy 分支提升到 jinja/
+                // legacy 两路共用处：jinja 路落地后 ling 的 prompt 尾同样以
+                // "<think>" 收口（thinking on 时 opener 在 prompt），chatml
+                // 渲染尾部是 "assistant\n"，条件不命中，零变化。
+                if (!formatted_prompt.empty()) {
+                    const std::string think_open_tag = "<think>";
+                    if (formatted_prompt.size() >= think_open_tag.size() &&
+                        formatted_prompt.compare(
+                            formatted_prompt.size() - think_open_tag.size(),
+                            think_open_tag.size(), think_open_tag) == 0) {
+                        if (!enable_thinking.load()) {
+                            formatted_prompt.erase(formatted_prompt.size() -
+                                                   think_open_tag.size());
+                            formatted_prompt += "<think></think>";
+                            LOGI("bailing-v3 style prompt: trailing think opener "
+                                 "closed (<think></think>), thinking disabled");
+                        } else {
+                            bailing_think_opener_in_prompt = true;
+                            LOGI("bailing-v3 style prompt: think opener in "
+                                 "prompt -> will prepend <think> to stream");
+                        }
+                    }
                 }
 
                 if (!jinja_rendered && !formatted_prompt.empty()) {
@@ -2227,32 +2281,6 @@ struct InferenceEngine {
                              (int)supports_think);
                     } else if (enable_thinking.load()) {
                         LOGI("thinking enabled (user toggle) -> model will reason before answering");
-                    }
-                    // Bailing V3（Ling 3.x）：生成提示以 "<think>" 结尾（模板
-                    // 渲染的思考开启器，默认 detailed thinking on）。
-                    //  - 思考关闭 → 把尾部 "<think>" 改写为 "<think></think>"
-                    //    （官方 documented 关闭触发；不改写模型必然思考，
-                    //    端侧小模型思考失控会烧光生成预算）。
-                    //  - 思考开启 → prompt 尾部 opener 保留，但生成流里没有
-                    //    "<think>"（opener 在 prompt 不在输出）→ Dart 侧思考
-                    //    状态机不启动、推理文本泄漏进可见回答直到 "</think>"。
-                    //    置标志，生成开始时把 "<think>" 作为首个流片段前置。
-                    const std::string think_open_tag = "<think>";
-                    if (formatted_prompt.size() >= think_open_tag.size() &&
-                        formatted_prompt.compare(
-                            formatted_prompt.size() - think_open_tag.size(),
-                            think_open_tag.size(), think_open_tag) == 0) {
-                        if (!enable_thinking.load()) {
-                            formatted_prompt.erase(formatted_prompt.size() -
-                                                   think_open_tag.size());
-                            formatted_prompt += "<think></think>";
-                            LOGI("bailing-v3 style prompt: trailing think opener "
-                                 "closed (<think></think>), thinking disabled");
-                        } else {
-                            bailing_think_opener_in_prompt = true;
-                            LOGI("bailing-v3 style prompt: think opener in "
-                                 "prompt -> will prepend <think> to stream");
-                        }
                     }
                     LOGI("chatml template applied: %d chars, %zu history msgs",
                          (int)formatted_prompt.size(), history->size());
