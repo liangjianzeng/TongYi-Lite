@@ -78,7 +78,13 @@ static inline float op_expm1(float x) {
 }
 
 static inline float op_softplus(float x) {
-    return (x > 20.0f) ? x : log1pf(expf(x));
+    // [tongyi 2026-11-07] 换树带入 upstream 的 log1pf(expf(x))，与 fork 原式
+    // logf(1.0f + expf(x)) 各差 ±1ULP（对 double 真值 maxerr 1.005e-7 vs
+    // 1.022e-7，两者皆正确）。但 bonsai-2-27b 金测图 layers 0-9 由 CPU 分片
+    // 计算、GDN 门(a_softplus→gate→递归状态)逐层吃 softplus，±1ULP 被递归
+    // 放大后 greedy 解码翻 token（golden "bomb"→"aix"，830 真机 NODEDUMP
+    // 首分歧节点=l_out-9 实证）。恢复 fork 原式以与旧栈逐位一致。
+    return (x > 20.0f) ? x : logf(1.0f + expf(x));
 }
 
 static inline float op_floor(float x) {

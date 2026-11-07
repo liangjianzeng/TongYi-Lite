@@ -38100,6 +38100,13 @@ switch(src0t) {
                 // GEMM min-batch knob: vk_flags.conf GGML_OPENCL_PTQ10_MM_N=0
                 // disables this path (prefill falls back to the matvec path),
                 // to A/B-debug suspected kernel miscompiles on device.
+                // [tongyi bonsai2-27b@830 2026-11-07] 缺省维持 32！真机实证：
+                // l4_lm GEMM 在 M=14 输出乱码（logits 无 nan 但 token 全错，
+                // DIAGLOGITS top5 健康=数值静默错），M=32..63 是否正确未验；
+                // GEMM 在任意 M 下都快（M=14 prefill 104s→9s）但数值未过门。
+                // GEMV 慢而正确（3.3 GMAC/s），decode 两侧同为 ~8s/token。
+                // 治本=P2 vendor 路（SoA+image+noshuffle）；env=1 可强开 GEMM
+                // 做 A/B（prefill 11 倍提速但乱码，勿用于真实推理）。
                 static const int ptq10_mm_min_n = [] {
                     const char * e = getenv("GGML_OPENCL_PTQ10_MM_N");
                     return e ? atoi(e) : 32;
