@@ -29,8 +29,8 @@ android {
         applicationId = "com.dgxspark.tongyilite"
         minSdk = 33
         targetSdk = 34
-        versionCode = 30
-        versionName = "0.3.7"
+        versionCode = 31
+        versionName = "0.3.8"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
