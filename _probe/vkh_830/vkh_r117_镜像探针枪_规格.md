@@ -47,5 +47,14 @@
 - **四闸**（我的老规矩）：温闸（纯 I/O = 400）、`stay_on_while_plugged_in` 机检（非 0 默认红牌，`FIX_STAYON=1` 才归零）、**有腿在跑就让路**（`ling_e2e|llama-cli|lfm2` 命中即 abort，绝不惊动父腿）、装载证明改行为**驱动归属证明**（本枪不涉 libggml-opencl，无 bin= 红卡可抄）。
 - 排练自证：`DRY=1` 全链 rc=0；排练中另抓到并修掉 2 处（DRY 态假温度污染闸门、DRY 态拿假 md5 比对）。
 
+## 4b. 【事故追加 · 哑火 #26】枪族出厂自检新条（2026-10-28 父 740 尸检，永久生效）
+**事故**：本枪初版只对 `clGetPlatformIDs` 做了 `dlsym`，其余 **9 个函数指针全 NULL 就敢调用** ⇒ 首个 `p_GetPlatformInfo(NULL)` 直接 SEGV。
+**为什么我的门没抓到**：出厂门 `gcc -Wall -Wextra -Werror=int-conversion` 确实抓到另外 3 处真 bug（三个 CL 构造函数被我误写成返回 `cl_int` ⇒ aarch64 句柄截成低 32 位），但"**函数指针从未赋值**"既不是类型错也不算未初始化（静态存储期 = NULL），编译器一声不响。
+**同族第二雷（哑火 #25b）**：构建枪默认 `-static` ⇒ 静态件 `dlopen` 直接废（父 740 先炸在这个上）。
+**枪族出厂自检新增（今后每一支 dlopen 类枪的头部必带）**：
+1. **每 dlsym 非 NULL**：全部符号一次性 `dlsym` 后逐个判空，缺任一 ⇒ `#### *_ABORT_MISSING_SYM <名>` + `exit 2`（**缺一符号 = 结论作废，绝不放行**）。父的修法已落仓库枪身（`vkh_imagecap.c` md5 `3895f9d2`）。
+2. **dlopen 类枪禁静态**：构建枪默认 `STATIC=0`（已改，md5 `8eac7a09`，注释注明 #25b）；确需静态必须显式 `STATIC=1` 并自带 dlopen 可用性自证。
+3. `setvbuf(stdout, NULL, _IONBF, 0)` 进所有枪 —— 崩在缓冲后面等于没打（父补，我学到）。
+
 ## 5. 我要父回的一件事
 父腿侧跑完把 `#### IMAGECAP ` 两行 + `#### IMAGECAP_VERDICT` 一行贴回即可（日志落 `$R/out/imagecap_740_<ts>.log`）。**`lfm=PASS && a_route=PASS` 我明日交 A 路 diff**；否则按 §3 分流，A 路不再烧。

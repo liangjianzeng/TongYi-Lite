@@ -17,9 +17,17 @@ set -u
 DEV="${DEV:-adb -P 15037 -s 8b1e8747}"                  # K40（USB，私有 server 15037）
 SRC="${SRC:-/home/jianzengliang/MyWork/TongYi-Lite/.modelxfer/lfm2.5-24b-a2b-q4_0.gguf}"
 DST="${DST:-/data/local/tmp/lfmb2/lfm2.5-24b-a2b-q4_0.gguf}"   # 父裁：新辟专用 arena
+DTEMP="${DTEMP:-/data/local/tmp/lfmb2/.chunk.tmp}"             # 块临时件（裸字节过 adb push，不经 PTY）
+PART_EARLY=1                                                   # 下方 PART 提前定义（哑火 #20：set -u 下 dsize() 早期引用 $PART）
+PART="${DST}.part"
 EXPECT_SIZE="${EXPECT_SIZE:-13578190880}"
 EXPECT_MD5="${EXPECT_MD5:-}"                            # 源站无 md5 ⇒ 只作 host/device 双向交叉
-EXPECT_SHA256="${EXPECT_SHA256:-b346311324dc0041f57424eae6a8a78c77dfabce71ad0ebbe8fc4ff5420ec115}"
+# [权威谱系 R-111 父裁一] 权威 = **官方整包 QAD-Q4_0 双端一致记录**（docs/lfm25-24b-a2b-q40-moe-
+# smart-loading-eval-2026-10-15.md:233-235；13,578,190,880 B / sha256 d1c03f73…f8a5 双端一致；
+# K90 方案 C 验收 + 740 b2_cpu 正常正文在前；GGUF 自报 general.name=LFM2.5-24B-A2B-QAD-Q4_0）。
+# 旧值 b346311324dc…ec115 = hf-mirror 对 **Q4_0**（非 QAD）路径的 ETag ⇒ **错套作废留档**。
+# 换权威须父裁并在此追加谱系；B2 金标闸随同一枚（见 b2_cpu_gold_k40.sh）。
+EXPECT_SHA256="${EXPECT_SHA256:-d1c03f73ecaf61017d70419eec9e5dc0b05d50ae26c23d522829b934fbabf8a5}"
 CHUNK="${CHUNK:-$((64 * 1024 * 1024))}"
 SLEEP="${SLEEP:-0.5}"
 THERMAL_MAX="${THERMAL_MAX:-400}"
@@ -35,7 +43,12 @@ dsize() {
     if [ "$SELFTEST" = 1 ]; then
         if [ -f "$DST" ]; then stat -c%s "$DST" 2>/dev/null; else stat -c%s "$PART" 2>/dev/null; fi
     else
-        $DEV shell "stat -c %s '$DST' 2>/dev/null" 2>/dev/null | tr -dc "0-9"
+        # [哑火 #19 2026-10-28] 真腿分支同病：终局校验发生在 rename **之前**，设备上的件是 .part，
+        # 只 stat 永不存在的 $DST ⇒ device_size=na ⇒ size_device 误杀（真件排练抓到，自测分支当年已修、真腿分支漏修）。
+        local _s
+        _s=$($DEV shell "stat -c %s '$DST' 2>/dev/null" 2>/dev/null | tr -dc "0-9")
+        [ -n "$_s" ] || _s=$($DEV shell "stat -c %s '$PART' 2>/dev/null" 2>/dev/null | tr -dc "0-9")
+        echo "$_s"
     fi
 }
 dpart() {
@@ -59,7 +72,14 @@ push_chunk() {  # $1=off $2=期望落盘后总长
     if [ "$SELFTEST" = 1 ]; then
         cat "$tmp" >> "$PART"
     else
-        $DEV exec-in "cat >> '$PART'" < "$tmp" || { rm -f "$tmp"; return 1; }
+        # [哑火 #18 2026-10-28] adb **没有 exec-in 子命令**（首射真腿块 1 三连败，落 0 字节即证）；
+        # 且二进制绝不许过 adb shell 的 PTY（\n→\r\n 翻译会把件改成哑弹，比崩更难查）。
+        # 正确姿势：adb push 裸字节块 → **设备侧自己** cat >> 追加（字节全程不经 PTY），
+        # 追加后仍由 dpart 尺寸闸 + 每 16 块 md5 双向交叉兜底。
+        $DEV shell "mkdir -p '$(dirname "$DTEMP")'" >/dev/null 2>&1
+        $DEV push "$tmp" "$DTEMP" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+        $DEV shell "cat '$DTEMP' >> '$PART'" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+        $DEV shell "rm -f '$DTEMP'" >/dev/null 2>&1
     fi
     rm -f "$tmp"
     [ "$(dpart)" = "$want" ] || return 1
@@ -84,11 +104,21 @@ if [ "$SIZE" != "$EXPECT_SIZE" ]; then
 fi
 if [ "$SELFTEST" != 1 ]; then
     DS=$(dsize)
-    if [ -f "${DST%.gguf}.ok" ] && [ "${DS:-}" = "$EXPECT_SIZE" ]; then
-        echo "#### LFMPUSH_ALREADY_OK device_size=$DS (已存在整件，复算 sha 后再决定)"; exit 0
+    # [哑火 #23 2026-10-28] 哨兵在**设备**上，检查也必须在设备上做：上一版在 host 侧 `test -f` 一个设备路径
+    # ⇒ 恒假 ⇒ ALREADY_OK 永不触发 ⇒ 重跑白推整件 13.58 GB。且旧日志写着"复算 sha 后再决定"却根本没复算。
+    # 这次真复算（13.58 GB 设备侧 sha256 ≈ 3-4 分钟，值）：哨兵 + 尺寸 + sha 三闸齐过才认，任一不符即从零重推。
+    MK="${DST}.ok"
+    MKOK=$($DEV shell "[ -f '$MK' ] && echo 1 || echo 0" 2>/dev/null | tr -dc "0-1")
+    if [ "${MKOK:-0}" = 1 ] && [ "${DS:-}" = "$EXPECT_SIZE" ]; then
+        RSSH=$($DEV shell "sha256sum '$DST'" 2>/dev/null | cut -c1-64 | tr -dc "0-9a-f")
+        if [ "${RSSH:-}" = "$EXPECT_SHA256" ]; then
+            echo "#### LFMPUSH_ALREADY_OK device_size=$DS sha256=$RSSH (哨兵+尺寸+权威 sha 三闸皆过，不重推)"; exit 0
+        fi
+        echo "#### LFMPUSH_WARN marker_stale sha256=${RSSH:-na} want=$EXPECT_SHA256 ⇒ 不认哨兵，从零重推"
+        $DEV shell "rm -f '$MK'" >/dev/null 2>&1
     fi
 fi
-PART="${DST}.part"
+PART="${DST}.part"   # [哑火 #20] 必须在任何 dsize()/dpart() 调用之前定义（set -u 下早期引用会炸"parameter not set"）
 HAVE=$(dpart); HAVE=${HAVE:-0}
 if [ "$HAVE" -gt "$SIZE" ]; then echo "#### LFMPUSH_ABORT reason=part_larger_than_src part=$HAVE"; exit 5; fi
 if [ $(( HAVE % CHUNK )) != 0 ]; then
@@ -153,5 +183,17 @@ if [ "${DSHA:-}" != "$EXPECT_SHA256" ]; then
 fi
 echo "#### LFMPUSH_SHA_GATE ok=K40 落盘件对撞源站背书 sha256 通过（B2 金标解锁条件之一）"
 if [ "$SELFTEST" != 1 ]; then $DEV shell "mv -f '$PART' '$DST'" >/dev/null 2>&1 || { echo "#### LFMPUSH_FAIL rename"; exit 12; }; fi
-printf 'size=%s\nmd5=%s\nsha256=%s\nsrc=%s\npushed_at=%s\n' "$HS" "$HM" "$DSHA" "$SRC" "$(date -Is)" > "${DST}.ok"
+# [哑火 #23] 哨兵必须落在**设备上、与件同目录**（随件走，供取证）。上一版写 `printf … > "${DST}.ok"`，
+# 而 $DST 是设备路径、重定向发生在 host ⇒ 写进 host 的 /data/local/… 被权限静默拒绝 ⇒ 设备上永无哨兵。
+MK="${DST}.ok"
+MKTMP="$WORK/dst.ok.$$"
+mkdir -p "$WORK"
+printf 'size=%s\nmd5=%s\nsha256=%s\nsrc=%s\npushed_at=%s\n' "$HS" "$HM" "$DSHA" "$SRC" "$(date -Is)" > "$MKTMP"
+if [ "$SELFTEST" = 1 ]; then
+    cp -f "$MKTMP" "${DST}.ok" || echo "#### LFMPUSH_WARN marker_failed (local selftest)"
+else
+    $DEV push "$MKTMP" "$MK" >/dev/null 2>&1 || echo "#### LFMPUSH_WARN marker_failed path=$MK (件本体已验，仅下次会白推)"
+fi
+rm -f "$MKTMP"
+[ "$SELFTEST" != 1 ] && { MKCHK=$($DEV shell "[ -f '$MK' ] && echo 1 || echo 0" 2>/dev/null | tr -dc "0-1"); echo "#### LFMPUSH_MARKER path=$MK present=${MKCHK:-0}"; }
 echo "#### LFMPUSH_VERDICT PASS=yes size=$HS md5=$HM sha256=$DSHA path=$DST"

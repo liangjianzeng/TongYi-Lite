@@ -83,6 +83,7 @@ if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/ling_e2e.cpp)
   target_include_directories(ling_e2e PRIVATE
     ${LLAMA_DIR}/include ${LLAMA_DIR}/src ${LLAMA_DIR} ${LLAMA_DIR}/common)
   target_link_libraries(ling_e2e PRIVATE llama llama-common)
+  target_link_options(ling_e2e PRIVATE -rdynamic)
 endif()
 
 # [Mesa 线 P4] 把上游 tests/test-export-graph-ops.cpp 编出来：它导出**真实 decode/prefill 图**的

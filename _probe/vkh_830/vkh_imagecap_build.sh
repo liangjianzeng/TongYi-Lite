@@ -11,7 +11,8 @@ HDR=$REPO/third_party/OpenCL-Headers
 OUT=${OUT:-$REPO/_probe/vkh_830/dist}
 CC=${CC:-aarch64-linux-gnu-gcc}
 [ -n "${CHROOT:-}" ] && CC="$CHROOT/$CC"   # 例：CHROOT=/root/routeA/sandbox
-STATIC=${STATIC:-1}
+# [哑火 #25b] 静态件 dlopen 直接废（父 740 尸检）⇒ 默认动态；要静态必须显式 STATIC=1
+STATIC=${STATIC:-0}
 mkdir -p "$OUT"
 [ -f "$SRC" ] || { echo "#### IC_BUILD_ABORT no_src"; exit 1; }
 [ -f "$HDR/CL/cl.h" ] || { echo "#### IC_BUILD_ABORT no_cl_headers dir=$HDR"; exit 1; }

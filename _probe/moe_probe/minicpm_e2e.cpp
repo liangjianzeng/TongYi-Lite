@@ -1081,6 +1081,20 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "[lgd] top5:");
                 for (int k = 0; k < TOP; k++) fprintf(stderr, " %d:%.3f", ix[k], v[k]);
                 fprintf(stderr, "  margin12=%.4f\n", (TOP >= 2 && ix[1] >= 0) ? v[0] - v[1] : -1.0f);
+                // [tongyi tern 2026-11-04] G2 KL 探针：全量 logits 按步落盘（路径即
+                // E2E_LOGITDUMP 的值）。格式：[step i32][nv i32][nv x f32]，追加写。
+                if (const char * lp = getenv("E2E_LOGITDUMP_PATH")) {
+                    FILE * lf = fopen(lp, "ab");
+                    if (lf) {
+                        const int step = (int) gen_tokens.size();
+                        fwrite(&step, sizeof(int), 1, lf);
+                        fwrite(&nv, sizeof(int), 1, lf);
+                        fwrite(lg, sizeof(float), nv, lf);
+                        fclose(lf);
+                    } else {
+                        fprintf(stderr, "[lgd] cannot open %s\n", lp);
+                    }
+                }
                 if (getenv("E2E_LOGITDUMP_STOP")) return 2;
             }
             id = llama_sampler_sample(greedy, ctx, 0);

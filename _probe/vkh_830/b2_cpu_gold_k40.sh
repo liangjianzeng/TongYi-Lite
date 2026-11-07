@@ -23,6 +23,17 @@ P1F=$LFMD/p1.txt
 EXPECT_LFM=13578190880
 GOLD_LIB=2695a8be
 TEMP_MAX=${TEMP_MAX:-440}
+# [哑火 #22 2026-10-28 真机定案] eye 的**内置默认 prompt 就是 p1 全文**（件内实证：
+#   「请详细介绍一下中国的四大发明 / 分别说明历史背景与技术要点」，35+ token），
+#   而 R-083 定案 E2E_NB=16（=n_batch）⇒ prompt 腿必撞 llama-context.cpp:1944
+#   `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` ⇒ rc=134、tok 全空。
+#   这不是我调参调错：p1 与 nb=16 **物理不相容**（两桩旧裁在此打架，已上报父亲裁）。
+#   对策：金标主臂用**短题**（≤n_batch token）留在 R-083 窗口内；p1 尺子腿单独抬 nb（NBR）。
+NB="${NB:-16}"                        # 金标臂 E2E_NB（R-083 唯一 rc=0 窗口 = 16）
+NBR="${NBR:-64}"                      # p1 尺子腿 E2E_NB（p1 35+ token，16 装不下）
+SHORTP="${SHORTP:-介绍四大发明}"        # 短题：字节少、token 数落在 nb=16 内
+MODE="${MODE:-gold}"
+BANK="${BANK:-32}"                      # SLOT_BANK：引擎断言自开方子"increase --moe-slot-bank"，p1 尺子腿按 nb 抬                  # probe=两臂试路（短题@16 / p1@64）；gold=正式四腿
 [ -d $OUT ] || mkdir -p $OUT
 [ -d $LFMD ] || { echo "#### B2G_ABORT reason=no_lfmb2_dir"; exit 3; }
 
@@ -49,6 +60,11 @@ P1P=$(cat "$P1F" 2>/dev/null)
 P1B=$(printf %s "$P1P" | wc -c | tr -dc '0-9')
 [ "$P1B" -ge 20 ] || { echo "#### B2G_ABORT reason=p1_too_short bytes=$P1B ⇒ 抽取器取错字段，停腿"; exit 19; }
 case "$P1P" in (*[!0-9]*) ;; (*) echo "#### B2G_ABORT reason=p1_all_digits ⇒ 取到的是数字字段不是正文"; exit 19;; esac
+# 短题闸：同一条"别把字段当正文"的闸（>=6 字节 + 非全数字）；短题合法所以门槛比 p1 的 20 低。
+SB=$(printf %s "$SHORTP" | wc -c | tr -dc '0-9')
+[ "${SB:-0}" -ge 6 ] || { echo "#### B2G_ABORT reason=shortp_too_short bytes=$SB"; exit 19; }
+case "$SHORTP" in (*[!0-9]*) ;; (*) echo "#### B2G_ABORT reason=shortp_all_digits bytes=$SB"; exit 19;; esac
+echo "#### B2G_PROMPT p1_bytes=$P1B p1_md5=$(printf %s "$P1P" | md5sum | cut -c1-8) short_bytes=$SB short_md5=$(printf %s "$SHORTP" | md5sum | cut -c1-8) nb=$NB nbr=$NBR mode=$MODE"
 echo "#### B2G_BEGIN $(date +%H:%M:%S) lib=$LIBM eye=$(md5sum $EYE|cut -c1-8) lfm_bytes=$SZ batt=$T stayon=$SO"
 echo "#### B2G_P1 bytes=$(printf %s "$P1P" | wc -c | tr -dc '0-9') md5=$(printf %s "$P1P" | md5sum | cut -c1-32)"
 
@@ -60,26 +76,36 @@ run_eye() {  # $1=tag $2=npred $3=ngl $4=prompt(可空)
     if [ -n "$4" ]; then
         timeout 1800 env GGML_OPENCL_FAKE_QCOM_REQD=1 HOME=$R/tmp XDG_CACHE_HOME=$R/tmp \
           OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl \
-          LLAMA_MOE_EXPERTS_PATH=$LFM LLAMA_MOE_SLOT_BANK=32 LLAMA_MOE_LOOKAHEAD_PREFETCH=8 \
-          LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_PREFETCH_READ=6 E2E_NB=16 \
+          LLAMA_MOE_EXPERTS_PATH=$LFM LLAMA_MOE_LOOKAHEAD_PREFETCH=8 \
+          LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_PREFETCH_READ=6 E2E_NB=${5:-$NB} \
+          LLAMA_MOE_SLOT_BANK=${6:-$BANK} \
           $LOADER --library-path $LP $EYE "$LFM" "$2" "$3" 42 "$4" \
           > $OUT/$1.tok 2> $OUT/$1.err
     else
         timeout 1800 env GGML_OPENCL_FAKE_QCOM_REQD=1 HOME=$R/tmp XDG_CACHE_HOME=$R/tmp \
           OCL_ICD_VENDORS=$ICD RUSTICL_ENABLE=kgsl \
-          LLAMA_MOE_EXPERTS_PATH=$LFM LLAMA_MOE_SLOT_BANK=32 LLAMA_MOE_LOOKAHEAD_PREFETCH=8 \
-          LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_PREFETCH_READ=6 E2E_NB=16 \
+          LLAMA_MOE_EXPERTS_PATH=$LFM LLAMA_MOE_LOOKAHEAD_PREFETCH=8 \
+          LLAMA_MOE_DECODE_WINDOW=8 LLAMA_MOE_PREFETCH_READ=6 E2E_NB=${5:-$NB} \
+          LLAMA_MOE_SLOT_BANK=${6:-$BANK} \
           $LOADER --library-path $LP $EYE "$LFM" "$2" "$3" 42 \
           > $OUT/$1.tok 2> $OUT/$1.err
     fi
     RC=$?
-    echo "#### B2GRESULT tag=$1 rc=$RC npred=$2 ngl=$3 lib=$LIBM md5=$(md5sum $OUT/$1.tok 2>/dev/null|cut -c1-8) bytes=$(wc -c < $OUT/$1.tok 2>/dev/null | tr -dc '0-9') gpu=$(grep -ac '> GPU' $OUT/$1.err 2>/dev/null) cpu=$(grep -ac '> CPU' $OUT/$1.err 2>/dev/null) vkh=$(grep -aic vkh $OUT/$1.err 2>/dev/null) drm=$(grep -acF renderD128 $OUT/$1.err 2>/dev/null) $(grep -a tok_s= $OUT/$1.err 2>/dev/null | tail -1) at=$(date +%H:%M:%S)"
+    echo "#### B2GRESULT tag=$1 rc=$RC npred=$2 ngl=$3 nb=${5:-$NB} pmd5=$(printf %s "${4:-}" | md5sum | cut -c1-8) lib=$LIBM md5=$(md5sum $OUT/$1.tok 2>/dev/null|cut -c1-8) bytes=$(wc -c < $OUT/$1.tok 2>/dev/null | tr -dc '0-9') gpu=$(grep -ac '> GPU' $OUT/$1.err 2>/dev/null) cpu=$(grep -ac '> CPU' $OUT/$1.err 2>/dev/null) vkh=$(grep -aic vkh $OUT/$1.err 2>/dev/null) drm=$(grep -acF renderD128 $OUT/$1.err 2>/dev/null) $(grep -a tok_s= $OUT/$1.err 2>/dev/null | tail -1) at=$(date +%H:%M:%S)"
     grep -a "requires more than" $OUT/$1.err 2>/dev/null | head -1 | cut -c1-140
 }
 
-# 三档 CPU 金标（同题：npred=32 + 默认 prompt，ngl=0）+ 一档 p1 尺子（npred=64）
-run_eye b2gold_r1 32 0 ""
-run_eye b2gold_r2 32 0 ""
-run_eye b2gold_r3 32 0 ""
-run_eye b2gold_r4 64 0 "$P1P"
+case "$MODE" in
+probe)   # 两臂试路：短题@nb16（留在 R-083 窗口内）/ p1@nb64（抬批才装得下 35+ token）
+    run_eye b2p_s16 32 0 "$SHORTP" 16
+    run_eye b2p_n64 32 0 "$P1P" 64
+    ;;
+gold)    # 正式：三发同题金标（短题@nb16，同 stack 同姿势）+ 一发 p1 尺子（npred=64@nb64）
+    run_eye b2gold_r1 32 0 "$SHORTP"
+    run_eye b2gold_r2 32 0 "$SHORTP"
+    run_eye b2gold_r3 32 0 "$SHORTP"
+    run_eye b2gold_r4 64 0 "$P1P" "$NBR" 64   # 照引擎处方把 bank 抬到 64（p1 35+ token 的图里专家数超 32）
+    ;;
+*) echo "#### B2G_ABORT reason=bad_mode=$MODE"; exit 9;;
+esac
 echo "#### B2G_DONE $(date +%H:%M:%S)"

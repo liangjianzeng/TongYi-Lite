@@ -33,7 +33,14 @@ run_eye() {  # $1=tag $2=model $3=npred $4=ngl $5=extra_env
     $LOADER --library-path $LP $EYE "$2" "$3" "$4" 42 \
     > $OUT/$1.tok 2> $OUT/$1.err
   RC=$?
-  echo "#### BRESULT tag=$1 rc=$RC ngl=$4 model=$(basename $2) md5=$(md5sum $OUT/$1.tok | cut -c1-8) bytes=$(wc -c < $OUT/$1.tok | tr -dc '0-9') bin=$BIN $(grep -a tok_s= $OUT/$1.err | tail -1) at=$(date +%H:%M:%S)"
+  # [R-095 v5 第三门 · 自 v5_void_e61b4242 并回] runtime loadproof：md5 测的是盘上文件，测不到 dlopen
+  # 实际装载（SONAME 坠金库案 R-089）。err 里必须出现 vkh 仪表/探针行（本 lib=9cf385a2 带 FA/bin+Mesa 闸探针）；
+  # 零命中 = 可能坠库，判词作废候人工。
+  # ⚠ 口径边界（vkh 注）：**ngl=0 的 CPU 腿不适用本门**——那时 OpenCL 面根本不被调用，vkh 行恒 0；
+  #   CPU 腿的装载证明 = 盘上件 md5 + LP 结构性排除 patch79e（见 b2_cpu_gold_k40.sh 的 lib= 字段）。
+  PRF=$(grep -a -i -c 'vkh' $OUT/$1.err)
+  [ "${PRF:-0}" -gt 0 ] || echo "#### B_WARN_PROOF tag=$1 vkh_lines=0 (可能坠金库,判词作废候审)"
+  echo "#### BRESULT tag=$1 rc=$RC ngl=$4 model=$(basename $2) md5=$(md5sum $OUT/$1.tok | cut -c1-8) bytes=$(wc -c < $OUT/$1.tok | tr -dc '0-9') bin=$BIN loadproof=$PRF $(grep -a tok_s= $OUT/$1.err | tail -1) at=$(date +%H:%M:%S)"
 }
 
 case "$1" in

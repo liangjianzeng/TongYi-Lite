@@ -27,9 +27,16 @@ SRC="${SRC:-/storage/emulated/0/TongYiLite/models/lfm2.5-24b-a2b-q4_0.gguf}"
 DST="${DST:-/home/jianzengliang/MyWork/TongYi-Lite/.modelxfer/lfm2.5-24b-a2b-q4_0.gguf}"
 EXPECT_SIZE="${EXPECT_SIZE:-13578190880}"     # 源站背书：hf-mirror Content-Length，逐位合
 EXPECT_MD5="${EXPECT_MD5:-}"                  # 源站无 md5 —— 不造假值，只作 host/device 双向交叉
-# Authoritative content hash = hf-mirror HEAD ETag (LFS oid, 64 hex), per parent 2026-10-28.
-# The ModelScope route answered 200 without an ETag, so hf-mirror is the ONLY authority.
-EXPECT_SHA256="${EXPECT_SHA256:-b346311324dc0041f57424eae6a8a78c77dfabce71ad0ebbe8fc4ff5420ec115}"
+# [权威谱系 R-111 父裁一 2026-10-28] 权威 = **官方整包 QAD-Q4_0 双端一致记录**：
+#   docs/lfm25-24b-a2b-q40-moe-smart-loading-eval-2026-10-15.md:233-235（13,578,190,880 B，
+#   sha256 d1c03f73…f8a5 双端一致；K90 方案 C 真机验收在前；740 b2_cpu 正常正文在前；
+#   GGUF 自报 general.name=LFM2.5-24B-A2B-QAD-Q4_0，本次核件已验）。
+#   旧值 b346311324dc…ec115 = hf-mirror 对 **Q4_0**（非 QAD）路径的 HEAD ETag，**错套** ⇒ 作废留档。
+#   权威必须有出处，防下次再被套；换权威须父裁并在此追加一行谱系。
+EXPECT_SHA256="${EXPECT_SHA256:-d1c03f73ecaf61017d70419eec9e5dc0b05d50ae26c23d522829b934fbabf8a5}"
+# 认证复用通道（父裁一"不重拉"）：整块 .part 若 sha256 命中此值（默认同权威），视为已认证 ⇒
+# 跳过分块拉取直入终局校验（尺寸/md5 双向交叉/sha 闸照跑，不是绕闸）。置空则退回"封存重拉"。
+TRUST_PART_SHA256="${TRUST_PART_SHA256:-$EXPECT_SHA256}"
 CHUNK="${CHUNK:-$((64 * 1024 * 1024))}"       # bytes per adb trip
 SLEEP="${SLEEP:-0.5}"                         # throttle: pause between chunks
 THERMAL_MAX="${THERMAL_MAX:-400}"
@@ -90,12 +97,28 @@ PART="$DST.part"
 HAVE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
 if [ "$HAVE" -gt "$SIZE" ]; then echo "#### LFMPULL_ABORT reason=part_larger_than_src part=$HAVE"; exit 5; fi
 if [ "$HAVE" = "$SIZE" ]; then
-    # A full-size .part can only be a previously INDICTED pull (sha gate kept it for forensics).
-    # Quarantine it instead of letting an unaligned leftover block every later retry (exit 6 trap).
-    Q="$DST.indicted.$(date +%s)"
-    mv -f "$PART" "$Q"
-    echo "#### LFMPULL_QUARANTINE_PART 整块旧 .part 系先前定罪件 ⇒ 封存为 $Q 供验尸，本次从零重拉"
-    HAVE=0
+    # 整块 .part 有两种身份，先分辨再处置（父裁一"不重拉"）：
+    #  ① 认证件 —— sha256 命中 TRUST_PART_SHA256 ⇒ 跳过分块拉取，直入终局校验
+    #     （尺寸闸 / host↔device md5 双向交叉 / 权威 sha 闸 **一条不少**，不是绕闸）；
+    #  ② 定罪件 —— 哈希不中或认证值置空 ⇒ 封存 *.indicted.<ts> 供验尸 + 从零重拉
+    #     （不留未对齐残留，避免把后续重试卡成 exit 6 死循环）。
+    if [ -n "$TRUST_PART_SHA256" ]; then
+        PS=$(sha256sum "$PART" 2>/dev/null | cut -d' ' -f1)
+        if [ "$PS" = "$TRUST_PART_SHA256" ]; then
+            echo "#### LFMPULL_TRUST_PART 整块 .part 命中认证值=$TRUST_PART_SHA256 ⇒ 不重拉，直入终局校验"
+            HAVE=$SIZE
+        else
+            Q="$DST.indicted.$(date +%s)"
+            mv -f "$PART" "$Q"
+            echo "#### LFMPULL_QUARANTINE_PART 整块 .part 哈希不中认证值 got=${PS:-na} ⇒ 封存 $Q 供验尸，从零重拉"
+            HAVE=0
+        fi
+    else
+        Q="$DST.indicted.$(date +%s)"
+        mv -f "$PART" "$Q"
+        echo "#### LFMPULL_QUARANTINE_PART 整块旧 .part 系先前定罪件 ⇒ 封存为 $Q 供验尸，本次从零重拉"
+        HAVE=0
+    fi
 elif [ $((HAVE % CHUNK)) != 0 ]; then
     echo "#### LFMPULL_ABORT reason=part_not_chunk_aligned part=$HAVE chunk=$CHUNK (删 .part 重开)"
     exit 6
