@@ -44078,6 +44078,9 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
     if (packflat_on && backend_ctx->kernel_cpy_f32_f32_packflat != nullptr &&
         src0t == GGML_TYPE_F32 && src1t == GGML_TYPE_F32 &&
         nb00 == 4 && (nb01 % 4) == 0 &&
+        ne02 == 1 && ne03 == 1 && // [tongyi 2026-11-07] 内核仅 2-D 语义(ne00/nb01/tot)，
+                                  // 4-D permuted view 缺此守卫时输出错值——test-backend-ops
+                                  // CPY 8 FAIL 实证后补；SSM conv state 实景均为 2-D。
         ggml_is_contiguous(src1) &&
         (cl_ulong) ggml_nelements(src0) == (cl_ulong) ggml_nelements(src1) &&
         ne00 < 32) {
