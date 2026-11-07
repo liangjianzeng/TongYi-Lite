@@ -2541,6 +2541,20 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     load_tensors_hadamard();
 
+    // [tongyi 2026-11-07] 换树/b11267 合并遗留：加载侧（v0.2.3 契约）填 hadamard_*
+    // 成员，图侧（llama-context build_hadamard_input / build_tok）消费 b11267 新
+    // 结构 hdmd——两套存储从未同步，hdmd.rot 恒空 → 图参数 hdmd=nullptr →
+    // prism.hadamard 正逆变换在整图静默缺席（bonsai-2-27b 全栈确定性乱码根因，
+    // NODEDUMP: model.input_embed 直跳 attn_norm-0，无 FWHT/signs 节点）。
+    // 单向同步对齐两套契约。
+    hdmd.rot = hadamard_rotations;
+    hdmd.inv = hadamard_inverses;
+    hdmd.weight_blocks = hadamard_weight_blocks;
+    hdmd.inverse_blocks = hadamard_inverse_blocks;
+    hdmd.sign_data = hadamard_sign_data;
+    hdmd.gdn_v_grouped = hadamard_gdn_v_grouped;
+    hdmd.tied_output = hadamard_tied_output;
+
     return true;
 }
 
