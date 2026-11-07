@@ -77,10 +77,18 @@ add_compile_definitions(NDEBUG)
 # Set via GGML_CPU_ARM_ARCH (NOT a manual -march flag): ggml-cpu's KleidiAI
 # kernels are gated by the arch extensions. Historically this was
 # armv8.2-a+dotprod for Cortex-A78 compatibility; 2026-10-15 真机 A/B (K90/830,
-# 64 tok 交替控温) 证实 v86 满血档 +23% (5.59 vs 4.55 t/s)，且 APK 仅发
-# SM8735 / 8 Gen3(740) / 8 Gen5(K90) 三台 Armv9 测试机（均支持 i8mm/bf16，
-# Oryon 上实测无 SIGILL），故升到官方 MiniCPM-V-Apps 同款满血档。
-set(GGML_CPU_ARM_ARCH armv8.6-a+dotprod+i8mm+fp16+bf16 CACHE STRING "" FORCE)
+# 64 tok 交替控温) 证实 v86 满血档 +23% (5.59 vs 4.55 t/s)，故升到官方
+# MiniCPM-V-Apps 同款满血档 —— 当时 APK 仅发 SM8735 / 8 Gen3(740) / 8 Gen5(K90)
+# 三台 Armv9 测试机。
+# [k40fix 2026-11-07] 车队扩入 K40/alioth（SD865, Cortex-A77 = armv8.2）后满血档
+# 在真机 SIGILL（ILL_ILLOPC，pc@libggml-cpu.so ggml_graph_compute 内核，i8mm/bf16
+# 指令 A77 无实现 → 未定义指令）。i8mm/bf16 是 A78+ 才有的扩展，回退到
+# armv8.2-a+dotprod+fp16（A77 有 dotprod+fp16，全车队可跑）：
+#   - K40：消除 decode SIGILL（app-face 收口前置条件）；
+#   - 740/830/K90：功能与数值零变化，仅 CPU offload 档位回到 2026-10-15 之前的
+#     dotprod 档（重型算子在 GPU，CPU 档位影响有限；若要找回 +23% CPU 纯解码，
+#     需上 GGML_CPU_ALL_VARIANTS 运行时派发，另行立项）。
+set(GGML_CPU_ARM_ARCH armv8.2-a+dotprod+fp16 CACHE STRING "" FORCE)
 
 # Vulkan GPU acceleration requires the LunarG SDK (glslc) plus a native host
 # C++ compiler on the build machine (to build `vulkan-shaders-gen`).

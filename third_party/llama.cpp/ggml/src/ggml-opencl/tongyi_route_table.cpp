@@ -118,6 +118,9 @@ static const KnownBadKernel kKnownBad[] = {
     { RCOMP_E031, "E031.41 (usually A7x, Xiaomi 13 build 0676.76.1)",
       "mul_mat_id_q4_k_", "_batched",
       "aline-P1 真机四道门 2026-11-06: 740 上 fork golden 控制臂同二进制 8/8 案 NMSE 1.5-2.6（同二进制 q4_0/IQ4_XS batched 全 0；dense-loop 同 plane bit-exact；MOE_PROBE_UNI 同征）——驱动级 codegen 腐化，与 G-759 830 案同指纹。派发端（ggml_cl_mul_mat_id_batched known_bad 门，版本钉 .41）拒 batched → dense-loop。" },
+    { RCOMP_E031, "E031.37.* (Adreno 650 vendor, K40/Redmi alioth build 031.37.12.07)",
+      "mul_mat_adreno_wavepair", nullptr,
+      "K40 app-face 崩溃 A 同款 2026-11-07: E031.37.12.07 老编译器编不了 wavepair/dp4a 全族（QC 内建 dot_acc_sat_4x8packed_ss_int 缺失；legF 铁证=fork 0.3.7 同崩，wavepair 族 program err=-11 → build_program_from_source_ex(fatal=true) abort）→ load_cl_kernels ADRENO 段软注册 null（不 abort），mul_mat 门（use_adreno_kernels，版本钉 major==37）拒入 → generic GEMM/GEMV 兜底（K40 已证数值正确：四腿全过、ARGMAX id=271 金标）。E031.41/47（740/830）零变化——本行仅 major==37 命中。" },
 };
 
 // ---- legacy 等价函数（表内唯一「逻辑」，其余全是数据）----
