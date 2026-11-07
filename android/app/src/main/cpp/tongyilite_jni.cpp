@@ -597,7 +597,12 @@ struct InferenceEngine {
             // 对 q3_K/clover 模型只保留已验证干净的 LOOKAHEAD_PREFETCH=8。
             const bool q3k_experts = strstr(moe_manifest, "Q3K") != nullptr
                                   || strstr(moe_manifest, "q3k") != nullptr
-                                  || strstr(moe_manifest, "Q3_K") != nullptr;
+                                  || strstr(moe_manifest, "Q3_K") != nullptr
+                                  // [tongyi tern 2026-11-04] PTQ1_0 三元专家：窗口打包在
+                                  // 设备上未验证（S12 定罪的是 q3_K 打包错槽，raw 直读
+                                  // 未测），保守同待遇——只保留 LOOKAHEAD_PREFETCH。
+                                  || strstr(moe_manifest, "ptq1_0") != nullptr
+                                  || strstr(moe_manifest, "PTQ1_0") != nullptr;
             if (!getenv("LLAMA_MOE_LOOKAHEAD_PREFETCH")) {
                 setenv("LLAMA_MOE_LOOKAHEAD_PREFETCH", "8", 1);
                 if (q3k_experts) {
@@ -2528,10 +2533,17 @@ struct InferenceEngine {
 
             bool done = false;
             bool ckpt_captured_this_turn = false;   // refreshed the cross-turn checkpoint?
+            // [tongyi 2026-11-07] prefill 停止响应：n_batch(512) 大块内一次 safe_decode
+            // 无法打断——830 上 bonsai-2-27b 首 prompt 曾一次 14-token decode 卡 104s，
+            // 用户 6 次停止全部无效。改成 ≤32 token 一块，块间查 should_stop，中断时
+            // 按 decode 失败同款语义销账 KV 信任并直接返回（下一轮走 full clear 重灌）。
+            bool prefill_aborted = false;
+            constexpr int32_t kPrefillStopChunk = 32;
             for (int attempt = 0; attempt < 2 && !done; ++attempt) {
                 bool failed = false;
                 while (i < prefill_end) {
-                    const int32_t chunk = std::min((int32_t)n_batch, prefill_end - i);
+                    const int32_t chunk = std::min((int32_t)n_batch,
+                        std::min(kPrefillStopChunk, prefill_end - i));
                     // Cross-turn checkpoint: snapshot seq-0 state exactly AT the
                     // final chunk boundary (cur_pos == a multiple of n_batch).
                     // The next turn's LCP sits a few tokens BEFORE prompt end
@@ -2588,8 +2600,27 @@ struct InferenceEngine {
                     llama_batch_free(tok_batch);
                     cur_pos += chunk;
                     i += chunk;
+                    // [tongyi 2026-11-07] 块间停止检查：中断即销账 KV 信任
+                    //（部分 prompt 已入 KV，与 decode 失败路径同款处置），直接
+                    // 返回空结果——gen 循环本也过不了 should_stop，这里提前退。
+                    if (should_stop.load(std::memory_order_relaxed)) {
+                        LOGI("prefill aborted by stop at token %d (pos=%d)", i, (int)cur_pos);
+                        have_prev_kv = false;
+                        rs_ckp_valid = false;
+                        prefill_aborted = true;
+                        failed = false;
+                        break;
+                    }
                 }
                 done = !failed;
+            }
+            if (prefill_aborted) {
+                kv_position = cur_pos;
+                auto t_end2 = std::chrono::high_resolution_clock::now();
+                t_prompt_ms = std::chrono::duration<double, std::milli>(t_end2 - t_start).count();
+                g_last_stats.t_prompt_ms = t_prompt_ms;
+                is_running = false;
+                return "";
             }
             // If no boundary was crossed this turn (tiny prompt or a resume that
             // never hit a multiple of n_batch), the stored checkpoint describes a
