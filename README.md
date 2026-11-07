@@ -9,7 +9,7 @@
 
 > **端到端离线优先的 Android AI 智能体。** 四大支柱：
 >
-> - **🤖 智能体引擎**——事件日志唯一真相源 + ReactLoopAgent 主循环 + 30+ 工具真实执行 +  
+> - **🤖 智能体引擎**——事件日志唯一真相源 + ReactLoopAgent 主循环 + 50 个工具真实执行 +  
 >   子代理 / Skills / 插件 / 人格 / 计划模式（`/plan` → 审批 → 无人值守续跑）/ MCP / `AGENTS.md`；  
 >   一键关闭 = 纯净简单聊天（本地小模型友好）；
 > - **⚙️ 端侧模型引擎**——llama.cpp 上游 `v0.9.0` 基座换树 + fork 资产全量回贴 JNI 直调 · Vulkan / OpenCL GPU 加速 +  
@@ -52,19 +52,19 @@ TongYi-Lite 是一个**端侧优先、可完全离线运行**的 Android AI 应�
 
 | 能力 | 说明 |
 | --- | --- |
-| **🤖 智能体引擎** | 事件日志唯一真相源 + ReactLoopAgent 主循环（失败自动恢复）+ 六段工具流水线 + **子代理**（spawn/fork/fan-out/后台化）+ Skills（内置 18 个）/ 插件 / Hooks / MCP 远程工具 / `AGENTS.md`；30+ 工具按档位与开关注册，沙箱授权 + 逐次审批；**一键关闭 = 简单聊天** |
+| **🤖 智能体引擎** | 事件日志唯一真相源 + ReactLoopAgent 主循环（失败自动恢复）+ 六段工具流水线 + **子代理**（spawn/fork/fan-out/后台化）+ Skills（内置 18 个）/ 插件 / Hooks / MCP 远程工具 / `AGENTS.md`；50 个工具按档位与开关注册（15 核心 + 6 可选 + 17 Dev + 系统/API 档专属），沙箱授权 + 逐次审批；**一键关闭 = 简单聊天** |
 | **🎭 多人格（Persona）** | 标准人格 + 用户自定义人格，聊天页左栏人格侧栏切换/新建/编辑/删除；切换自动重置 KV 缓存 |
 | **📋 计划模式 + 无人值守** | `/plan <任务>` 只读规划 → 计划卡提交审批 → 批准后**自动逐轮续跑**（轮数可配）；对话内计划活卡 + 计划面板逐步推进 |
 | **⚙️ 端侧模型引擎** | llama.cpp 上游 **`v0.9.0` 基座换树**（2026-11，fork 资产全量回贴）JNI 直调（无 HTTP Server，流式直通）：`spark2_5` / **dspark 整块投机** / **MTP 多 token 预测**（按模型开关）、**PTQ1_0 三元量化专用 GPU 内核**、FWHT、Turnip 直载、mtmd 视觉、OOM 内存守卫；mmap 加载 + 批量 prefill + 线程按 CPU 拓扑取核 |
 | **GPU / CPU 加速** | Vulkan + OpenCL 双 GPU 后端（启动探测 + 手动选择）+ KleidiAI dotprod CPU 内核；Adreno 推荐 OpenCL；**KV 精度三档**（Q4/Q8/F16）——**MLA 架构模型（Ling 系）自动强制 F16 K/V**（量化 MLA 潜缓存数值另案），用户设置无需关心 |
 | **🚀 OpenCL 量化内核** | 自研 batched MoE（单 dispatch gather 绕开 Adreno 驱动级 MUL_MAT_ID 数值 bug）+ 换树并入的上游原生内核，q4_0 / q4_K / q4_1 / Q2_K / Q2_0 / Q3_K / IQ4_XS / IQ2 / IQ3 / IQ1 系列；**Adreno 650/740/830 三档真机验证**（830 prefill 149 t/s / decode 14–22 t/s；740 ling-3.0-tiny App 实测 decode **5.9 t/s**；650 老编译器 E031.37 硬闸适配） |
 | **🧠 智能 MoE 拆分加载（split-MoE）** | 权重剥离 `.experts/` 或 **in-place GGUF 整包直读**（LFM2.5-24B 官方单文件直下直读，专家 I/O 1902 MiB/s）+ LES 前瞻调度（下一层 router 预测）；35B 级大模型上机 |
-| **🧩 扩散 LLM 推理（dLLM · 实验）** | **块扩散（block diffusion）模型端到端上机**：Clover-35B-A3B（GDN 循环 ×30 + 全注意力 ×10 + 256 专家 top-8 MoE + block_coreset，块长 32）llama 层模型类 + split-MoE 热专家整包流式（3 组 bank / 866 MiB 常驻 / 120+120 窗口），OpenCL q3_K batched MoE 路由实测；draft-self masked-block 自投机 + mask 防自复制双闸已入；catalog 实验条目 `Clover-35B-A3B-Preview-Q3Kexp`（Q3_K 专家整包 14.44 GB）；830 CLI 全栈判卷矩阵（全驻留/槽位 bank × greedy/采样链 × CPU/OpenCL）全数语义正确，App 内嵌 jinja 模板对齐 CLI `--jinja`；**App 端推理正确性攻坚进行中** |
+| **🧩 扩散 LLM 推理（dLLM · 实验）** | **块扩散（block diffusion）模型端到端上机**：Clover-35B-A3B（GDN 循环 ×30 + 全注意力 ×10 + 256 专家 top-8 MoE + block_coreset，块长 32）llama 层模型类 + split-MoE 热专家整包流式（3 组 bank / 866 MiB 常驻 / 120+120 窗口），OpenCL q3_K batched MoE 路由实测；draft-self masked-block 自投机 + mask 防自复制双闸已入；catalog 实验条目 `Clover-35B-A3B-Preview-Q3Kexp`（Q3_K 专家整包 14.44 GB）；830 CLI 全栈判卷矩阵（全驻留/槽位 bank × greedy/采样链 × CPU/OpenCL）全数语义正确，App 内嵌 jinja 模板对齐 CLI `--jinja`；**实验线已于 2026-11-03 打结封存（留而不砍）**：加速假设实测为负（同机 AR 基线 1.6–2.3 t/s，draft-self CPU 0.879 / OpenCL 0.216 t/s），唯一正面项 draft 验收率 16/16 |
 | **⏩ 多轮 KV checkpoint/restore** | 长对话边界 checkpoint，恢复后仅对增量 token prefill——多轮对话二次 TTFT **34s → 4.4s** |
 | **投机解码** | **MTP** + **dspark**（整块投机），部分模型支持，设置页按模型单独开启 |
 | **模型下载与管理** | 应用内下载（hf-mirror / ModelScope 镜像自动回退 + 断点续传，最多并发 2）、视觉 `mmproj` 闭环下载、catalog JSON 配置驱动（可指向自有 CDN 热更新） |
-| **🖼️ 视觉理解** | Qwen3.5 / Gemma 4 / MiniCPM-V 视觉模型（`.gguf` + `mmproj` 两文件闭环下载）；本地档与 API 档均支持图片输入 |
-| **🎙️ 语音输入（端侧 ASR）** | sherpa-onnx 流式 Zipformer 中文 int8（~160MB 首次下载），FFI 进程内推理，**完全离线零网络依赖**；微信式按住说话、实时回显、上滑取消；9 类约 290 词热词偏置 + 同音校正（差量存储） |
+| **🖼️ 视觉理解** | Qwen3.5 / Gemma 4 / MiniCPM-V / LFM3-VL 视觉模型（catalog 内 6 条 vision 条目，`.gguf` + `mmproj` 两文件闭环下载）；本地档与 API 档均支持图片输入 |
+| **🎙️ 语音输入（端侧 ASR）** | sherpa-onnx 流式 Zipformer 中文 int8（~160MB 首次下载），FFI 进程内推理，**完全离线零网络依赖**；微信式按住说话、实时回显、上滑取消；9 类 284 词热词偏置（另含用户自定义类）+ 同音校正（差量存储） |
 | **🔊 语音播报（Edge TTS）** | 微软 Edge 免费 neural 音色（免 key，**Sec-MS-GEC v2** token 本地算、**IPv4 优先**连接），气泡 🔊 点按播报 / 回复后自动播报；音色/语速/音调/音量可配 + 试听；markdown 清洗 + 按句分段播放；手动失败上 SnackBar（自动播报保持静默） |
 | **上下文占用圈 + 压缩** | 输入框圆形占用环（API `prompt_tokens/n_ctx` 实测 · 本地 KV `kv_used/kv_ctx`），阈值变色；**回合内 LLM 摘要压缩**（失败回退确定性摘要）+ **存储级手动压缩** |
 | **🌐 联网搜索** | **端侧直连国内六引擎**（必应/百度/搜狗/360/夸克/中国搜索）——零配置默认可用，每 10 分钟窗口请求预算、指数熔断、UA 池、引擎开关；配置自建 **SearXNG** 自动切换；`web_search` 并发多关键词、每回合上限、同内容去重 |
@@ -122,8 +122,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 ## 应用功能
 
-> **导航**：聊天页左栏（rail）集中了 会话 / 智能体 / 人格 / 计划 / 模型 / 引擎 / 技能 / 插件 / API /  
-> Dev Agent / 搜索 / 能力与实验 / 存储与日志 / 更多 等面板；设置页七个 Tab：  
+> **导航**：聊天页左栏（rail）**11 个图标 + 底部「更多」**——新建会话 / 会话 / 模型 / 推理引擎 / API 接入 /  
+> 智能体 / 人格 / 计划 / 技能 / 插件 / Dev Agent（「更多」收纳 存储·日志·关于）；设置页七个 Tab：  
 > **模型管理 / API 接入 / 推理引擎 / 智能体 / 能力 / 开发者 / 关于**。
 
 ### 本地端侧推理与模型管理
@@ -138,7 +138,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 | `unloading`（卸载中） | 释放内存    | 橙色进度环               |
 | `error`（错误）      | 加载失败    | 红色错误信息 + [重试]       |
 
-- **模型列表配置驱动**：全部模型定义维护在 `assets/models_catalog.json`（当前 21 个，见[模型列表](#模型列表)），  
+- **模型列表配置驱动**：全部模型定义维护在 `assets/models_catalog.json`（当前 23 个，见[模型列表](#模型列表)），  
   新增/调整/下架只需改这个 JSON，无需改代码；`mirrors` 数组按序回退（hf-mirror 优先，ModelScope 兜底）、  
   HTTP Range 断点续传、最多并发下载 2 个。
 - **视觉模型闭环**：`type=vision` 且带 `mmproj` 的模型自动连投影器一起下载，两者完整才算「已缓存」，  
@@ -149,7 +149,8 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 
 ### 多模态：视觉理解
 
-- **本地视觉**：Qwen3.5-0.8B/2B/4B、Gemma 4 E2B、MiniCPM-V 4.7 等带 `mmproj` 的模型支持单图理解；  
+- **本地视觉**：Qwen3.5-0.8B/2B/4B、Gemma 4 E2B、MiniCPM-V 4.7、LFM3-VL 2B（官方 QAD 抗量化包）等带  
+  `mmproj` 的模型（catalog 内共 6 条）支持单图理解；  
   本地编码后端跟随主后端（Vulkan / OpenCL / CPU）。
 - **API 档视觉**：图片以 base64 `image_url` content-parts 发送（visionCapable 门控、每步重发、  
   8 张 FIFO 编码缓存）；未开启视觉的端点把图片剥离为 `[图片]` 占位，绝不发送原始图数据。
@@ -160,7 +161,7 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型无关，任何对话场景可用。
 
 - **交互**：微信式按住说话——长按 🎤 → 实时回显 partial 结果 → 上滑取消 → 松手终稿直接发送。
-- **热词偏置**：9 个内置分类约 290 词（全中文），ContextGraph 偏置 + 同音后校正；设置页可查看/编辑分类词表  
+- **热词偏置**：9 个内置分类 284 词（全中文，另设 `custom` 自定义类），ContextGraph 偏置 + 同音后校正；设置页可查看/编辑分类词表  
   （差量存储：默认词表改版不顶掉用户编辑）、添加自定义热词、开启增强识别模式（beam search）。
 - **模型管理**：语音设置卡可查看就绪状态、下载/删除模型（释放 160MB）。
 
@@ -172,12 +173,15 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   （`test/tts/sec_ms_gec_v2_test.dart`）。
 - **IPv4 优先连接**：国内网络常见 IPv6 半死通道（TCP 连得上、TLS 被 RST），IPv4 优先规避；  
   IPv6 留作兜底，纯 IPv6-only 网络照常可用。
-- **失败可见**：`classifyTtsError` 归类 鉴权/网络/空音频/播放 四类，手动点 🔊 或试听失败上 SnackBar  
+- **失败可见**：`classifyTtsError` 归类 denied / network / empty / playback / unknown **五类**（鉴权/网络/空音频/播放/其它），  
+  手动点 🔊 或试听失败上 SnackBar  
   并给可行动提示；**自动播报保持静默**，绝不打断聊天。
 - 音色（在线拉取 300+，zh 系置顶）、语速（-50%~+100%）、音调（±50Hz）、音量（±50%）可配 + 试听；  
   管线：markdown 清洗 → 按句分段（≤600 字）→ 逐段合成（SHA-256 缓存复用）→ 逐段播放。
+- **离线英文播报（可选）**：`lib/tts/offline_tts_service.dart` 走 sherpa-onnx OfflineTts（VITS，~40 MB **不随包、不自动下载**，  
+  模型目录合格才启用，缺模型自动回落 Edge TTS），与 Edge TTS 复用同一套播控原语，完全离线。  
 - ⚠️ 免费接口实测定案：中文音色共 14 个，大陆方言仅辽宁/陕西两个女声；英文音色读不出中文  
-  （混合内容建议选 Multilingual 变体）。排障工具 `tool/tts_diag_probe.dart` 等 5 个（`dart run`）。
+  （混合内容建议选 Multilingual 变体）。排障工具 `tool/tts_diag_probe.dart` / `tts_conn_probe.dart` / `tts_gec_matrix.dart` 等 9 个（`dart run`）。
 
 ### 远程 API 接入（OpenAI 兼容）
 
@@ -201,9 +205,10 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 
 - **六引擎**：必应中国（RSS 主 + HTML 兜底）、百度（`tn=json` 主 + HTML 兜底）、搜狗、360 搜索、夸克、  
   中国搜索（官方 JSON）；结果去重合并、内嵌真实 URL 解析（302 / 页内 meta/JS 多策略）。
-- **细水长流安全管控**（防引擎风控封禁）：每引擎每 10 分钟窗口请求预算（低风险档默认 6、高风险档  
-  sogou/baidu/quark 默认 2，可调）；blocked → 指数熔断（2min×2ⁿ 封顶 15min）+ 清 Cookie + 换池内 UA；  
-  引擎可独立开关。实测结论与各引擎坑速查见  
+- **细水长流安全管控**（防引擎风控封禁）：每引擎每 10 分钟窗口请求预算（bing_cn 8、so360/chinaso 6、  
+  高风险档 sogou/baidu/quark 2，可调）；blocked → 指数熔断（**1min×2ⁿ 封顶 10min**，2026-10-02 由 2min/15min  
+  放宽）+ 清 Cookie + 换池内 UA；引擎可独立开关。结果按引擎权重轮转合并（bing/baidu/sogou 权重 2，  
+  360/quark/chinaso 权重 1），时效类查询自动给百科/文库/知道域名降权，无年份查询自动补当年。实测结论与各引擎坑速查见  
   [`docs/websearch_direct_2026-10-02.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/websearch_direct_2026-10-02.md)。
 
 **② 自建 SearXNG 实例（可选）**——配置实例地址后自动切换；地址/密钥/引擎白名单/语言/条数/超时全配置化 +  
@@ -219,15 +224,20 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 **智能体模式有总开关**（设置 → 智能体 Tab 首排，输入区 🤖 图标同款）：开启 = 完整智能体循环；  
 关闭 = 简单聊天直连模型（无系统提示/工具定义/AGENTS.md/Skills，prefill 最小）；**模式/人格切换自动重置 KV**。
 
-#### 工具集（30+，按档位与开关注册）
+#### 工具集（50 个，按档位与开关注册）
 
 - **15 个核心工具**：`get_time` / `calculator` / `todo_write` / `todo_list` / `note_take` / `note_list` /  
   `unit_converter` / `memory_get` / `memory_set` / `read_file` / `write_file` / `edit_file` / `list_files` /  
   `search_text` / `export_file`（产物导出到 `Download/TongYi-Lite/`）。
-- **4 个可选工具**（默认关闭）：`web_search` / `get_weather` / `shell_exec` / `python_exec`  
-  （嵌入式 CPython 3.11，Chaquopy 随 APK 打包，15s 超时 / 输出截断）。
-- **系统工具**：`save_skill`（模型自主沉淀技能）/ `load_skill` / `subagent` / `ask_user_question`  
-  （提问卡片：选项 chip / 自由回答 / 跳过）/ `run_code`（PTC 编排，仅 API 档）。
+- **6 个可选工具**：联网类四个默认**关**（设置页开启后可见）——`web_search` / `fetch_url`（网页正文转纯文本，  
+  GBK 自动识别，512 KB 上限）/ `data_api`（股票行情与财务，A股/港股/美股，腾讯·东财·新浪三源热备）/  
+  `get_weather`；`shell_exec` / `python_exec` 默认**开**（嵌入式 CPython 3.11，Chaquopy 随 APK 打包，  
+  15s 超时 / 输出 4000 字符截断）。`memory_get` / `memory_set` 另受「记忆」开关门控（默认开）。
+- **17 个 Dev 工具**（开发模式开启后可见）：`dev_shell` / `git_status` / `git_diff` / `git_log` / `git_commit` /  
+  `git_push` / `git_clone` / `task_create` / `task_list` / `plan_create` / `plan_update` / `plan_list` /  
+  `ssh_exec` / `ssh_read_file` / `ssh_write_file` / `workspace_sync` / `run_tests`。
+- **系统工具**：`save_skill`（模型自主沉淀技能）/ `load_skill` / `subagent` / `send_message`（向已完成子代理续轮）/  
+  `ask_user_question`（提问卡片：选项 chip / 自由回答 / 跳过）/ `run_code`（PTC 编排，仅 API 档）。
 - **API 档专属**：`exit_plan` / `goal_set` / `goal_complete` / `goal_cancel` / `plan_step_update` /  
   **MCP 远程工具**（`mcp_<server>_<名>`，Streamable HTTP JSON-RPC 2.0）。Dev 工具组见下文。
 - **📱 远程控制工具**（独立开关，不属于 Dev 组）：`adb` —— 单工具 + `action` 枚举
@@ -237,7 +247,8 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   `uninstall` / `pm clear` / `reboot` / 系统目录 `rm -rf` / `dd` 在 execute 内直接拒绝（护住已下载模型缓存）。
   真机验收脚本：`dart run tool/adb_probe.dart <ip>:5555 --selftest`（需 `TONGYI_LIVE_ADB=1`）。
 - **沙箱授权**：文件/命令类工具默认在 app workspace 沙盒内；确需访问公共目录时模型携带  
-  `sandbox_permissions` + `justification` 请求升级，执行前经用户确认框逐次批准，拒绝不绕过。
+  `sandbox_permissions` + `justification` 请求升级，执行前经用户确认框逐次批准，拒绝不绕过  
+  （前提是先开启「完整文件访问授权」，未开启时升级通道不启用）。
 
 #### 引擎架构与执行纪律
 
@@ -252,12 +263,12 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 - **并行工具安全**：`isConcurrencySafe` = 默认只读可并发、副作用工具显式独占；回合中断合成「结果未知」  
   占位保证事件配对完整。
 - **六段工具流水线**：pre-execute（allow/deny/ask 瀑布）→ guard → execute（沙箱审批 + 超时）→ 结果投影 →  
-  post-execute → 溢写（超长输出自动落盘、只回摘要与定位）。
+  post-execute → 溢写（超长输出自动落盘、只回摘要与定位）。端侧实现把段 4/6 合并且 **pre-execute / guard  的钩子生产未接线**（`tools/pipeline.dart` 自陈）——真正的审批发生在 execute 段。
 
 #### 计划模式与无人值守
 
 - **`/plan <任务>`**（输入框前缀或 📋 图标，仅 API 档）：只读规划回合——注册表收窄为「并行安全（只读）  
-  工具 + exit_plan」，调研后提交计划；批准即生成**结构化计划**（标题 + 步骤 + 验证方式）落持久目标库。
+  工具 + exit_plan」，调研后提交计划；批准即生成**结构化计划**（标题 + 步骤 + 验证方式）落持久目标库；只读 MCP 工具同样进白名单。
 - **无人值守续跑**：批准后自动逐轮推进——每轮续跑消息带增量进度（✓/◐/○/✗），完成步骤即时  
   `plan_step_update`；失败/中断/等待提问不续跑；轮数耗尽落提示终结（`agentGoalMaxRounds` 默认 8，可配 1~20）。
 - **三处呈现**：对话内计划活卡（原位重写不刷屏）、计划面板（点步骤改状态/放弃/重新规划）、📋 图标高亮；  
@@ -277,7 +288,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 - **上下文工程**：中文加权 token 估算器（压缩判断不再对中文低估 3 倍）；回合内 LLM 摘要压缩（专用便宜模型，  
   失败回退确定性摘要）+ 存储级手动压缩；环境快照按 10 分钟桶化尾部追加（prompt-cache 友好）；技能目录文本  
   会话内冻结（不破缓存前缀）。
-- **质量度量与 eval**：回合指标零侵入落 `turn_metrics.jsonl`；轨迹导出；`eval/` 12 个基线任务 + 六维离线评分。
+- **质量度量与 eval**：回合指标零侵入落 `turn_metrics.jsonl`；轨迹导出；`eval/` 12 个基线任务 + 六维离线评分（另含 `answerNotContains` 反「假装执行」断言，默认拦 `<tool_call` 泄漏）。
 
 #### 双场景档与多会话
 
@@ -314,13 +325,15 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   自动叠加注入。
 - **任务与规划**：`task_create` / `task_list` + `plan_create` / `plan_update` / `plan_list`；DevContext 自动注入  
   工作区/计划/记忆段 + 【如实报告铁律】（工具返回 error 必须如实复述）。
-- **安全**：危险命令黑名单 deny/ask 策略（dev_shell / ssh_exec / run_tests 全覆盖）；工具逐组开关；  
+- **安全**：危险命令黑名单 **deny** 策略（dev_shell / ssh_exec / run_tests 三通道全覆盖；按 `; && || |` 切段取命令位、  
+  剥 `env|command|nohup|busybox` 包装与 basename，误杀/漏杀双向回归表锁在 `test/agent/dev_safety_matrix_test.dart`；  
+  ask 档随 pre-execute 钩子待接线）；工具逐组开关；  
   `workspace_sync` 本地镜像 ↔ 远端双向同步（mtime 判新旧、冲突默认只报告）。
 
 ### 会话与输入体验
 
-- **聊天页左栏（rail）**：会话/智能体/人格/计划/模型/引擎/技能/插件/API/Dev Agent/搜索/能力与实验/  
-  存储与日志/更多 全部入口收纳于左栏。
+- **聊天页左栏（rail）**：新建会话/会话/模型/推理引擎/API 接入/智能体/人格/计划/技能/插件/Dev Agent  
+  共 11 个图标 + 底部「更多」（存储·日志·关于）；搜索配置已并入「API 接入」面板，能力与实验并入设置页「能力」Tab。
 - **composer 输入区**：生成中状态细条（「● 执行中 · N 个工具」+ 停止）+ 实时 token 计量（含工具参数，  
   「⚠️只想不写」告警）；四态主键（空闲空 = 🎤 长按说话 / 有字 = ➤ 发送 / 生成中空 = ⏹ 停止 / 有字 = ➤ 插话）；  
   模式图标 chips（🤖 智能体 / 🎭 人格 / 📋 计划 / 🧠 模型）；**会话草稿**（切会话回来打字还在）。
@@ -350,8 +363,9 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 | Qwen3.5-0.8BN (Q4_0 MTP) | 497 MB | 1 GB | CPU 加速 · MTP |
 | Qwen3.5-2B (MTP UD-Q4_K_XL) | 1.29 GB | 2 GB | 推荐 · 视觉 · MTP |
 | Qwen3.5-4B (Q4_K_M MTP 视觉) | 2.8 GB | 3.5 GB | 推荐 · 视觉 · MTP |
+| LFM3-VL 2B (QAD Q4_0 视觉) | 1.0 GB | 3 GB | 视觉 · 官方 QAD 抗量化 · 需新版引擎 |
 | LFM 2.5 2.6B (Q4_K_M) | 1.6 GB | 2 GB | 推荐 · 速度快 |
-| Spark-X2.6 4B (Q4_K_M 智能体) | 3.3 GB | 6 GB | 推荐 · 智能体 · 百万上下文 |
+| Spark-X2.6 4B (Q4_K_M 智能体) | 2.44 GB | 6 GB | 推荐 · 智能体 · 百万上下文 |
 | LFM 2.5 8B-A1B (Q4_K_M 智能体) | 4.8 GB | 8 GB | 推荐 · 智能体 · MoE 高效 |
 | Ling 3.0 Tiny (Q4_K_M) | 4.5 GB | 8 GB | 推荐 · MoE 高效（MLA：自动 F16 KV） |
 | Ling 3.0 Tiny (Q4_0 GPU加速) | 4.4 GB | 8 GB | GPU 加速 · MoE 高效（batched MoE；MLA：自动 F16 KV） |
@@ -362,6 +376,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 | MiniCPM5 2B (Q8_0 智能体) | 2.5 GB | 4 GB | 智能体 · 精度更高 |
 | MiniCPM-V 4.7 35B-A3B (拆分 MoE 智能加载) | 1.7 GB | 8 GB | 超大 MoE · 拆分流式（实验） · 视觉 |
 | LFM 2.5 24B-A2B (Q4_0 智能MoE 整包原地读) | 12.6 GB | 8 GB | 超大 MoE · 官方整包原地流式读 |
+| Clover 35B A3B (Q3_K experts 热专家 · 扩散实验) | 14.4 GB | 13 GB | 实验 · 超大 MoE · 热专家原地流式（[dLLM](#技术架构)线） |
 
 > MoE 模型标注「GPU 加速」的量化（Q4_0）开箱即走 OpenCL batched MoE 全 GPU 路径；  
 > 未验证量化自动回退 dense-loop / CPU 专家混合，正确性优先。Ling 3.0 系为 MLA 架构  
@@ -386,12 +401,12 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 │ │ loop/      ReactLoopAgent 主循环       │  │ └─ llama.cpp fork(v0.9.0)  │  │
 │ │            （turn/step 状态机 · 失败瀑布）│  │   ├ ggml-cpu             │  │
 │ │ tools/     六段工具流水线 · 沙箱审批    │  │   │   + KleidiAI dotprod │  │
-│ │ builtin_tools/  15 核心 + 可选 + 系统   │  │   ├ ggml-vulkan          │  │
+│ │ builtin_tools/  15 核心+6 可选+17 Dev   │  │   ├ ggml-vulkan          │  │
 │ │ llm/       LlmAdapter 接缝             │  │   │   + Turnip 直载      │  │
 │ │ protocol/  Prompt-JSON / 原生工具调用   │  │   ├ ggml-opencl          │  │
 │ │ subagents/ spawn/fork/fan-out/后台化   │  │   │   + PTQ1_0 三元内核  │  │
 │ │                                           │  │   │   + batched MoE      │  │
-│ │ skills/(18) · plugins/ · hooks/        │  │   ├ mtmd 视觉编码        │  │
+│ │ skills/(18) · adb/ · hooks/            │  │   ├ mtmd 视觉编码        │  │
 │ │ agents_md/ · goal/ 计划·无人值守       │  │   ├ 投机解码 MTP/dspark  │  │
 │ │ mcp/ 远程工具  metrics/ 回合指标       │  │   ├ KV checkpoint/rest.│  │
 │ │ context_eng/ 压缩  dev/ Dev Agent      │  │   └ OOM 内存守卫          │  │
@@ -417,8 +432,11 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   `loop/` ReactLoopAgent（turn/step 状态机 + 失败瀑布 + 可靠取消）· `tools/` 六段工具流水线 + 沙箱审批 +  
   溢写落盘 · `llm/`+`protocol/` LlmAdapter 接缝（本地 Prompt-JSON / API 原生工具调用，按能力快照选择）。
 - `subagents/` 子代理编排 · `goal/` 计划与无人值守 · `mcp/` MCP 客户端 · `metrics/` 回合指标 ·  
-  `skills/` 内置 18 技能 · `plugins/` 插件宿主 · `hooks/` Hook 接缝 · `agents_md/` 指令文件 ·  
-  `context_eng/` 压缩 + 溢写 · `dev/` Dev Agent（工作区/SSH/git/Termux）· `web_search/` 搜索 provider 接入层。
+  `skills/` 内置 18 技能 · `hooks/` Hook 接缝 · `agents_md/` 指令文件 · `adb/` 纯 Dart ADB 协议栈 ·  
+  `observability/` 回合计量 · `context_eng/` 压缩 + 溢写 · `dev/` Dev Agent（工作区/SSH/git/Termux）·  
+  `web_search/` 搜索 provider 接入层。**插件宿主不在 `lib/agent/` 下，而是顶层 [`lib/plugins/`](lib/plugins)**  
+  （plugin_host + host/ + panel/ + builtin/），并对外开 `app.rail` / `app.composer.dock` /  
+  `app.input.attachments` 三个 UI 槽位（`slot_outlet.dart`）供插件注入界面。
 
 ### 端侧模型引擎（llama.cpp v0.9.0 基座换树 + fork 增强 · JNI 直调）
 
@@ -427,7 +445,9 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
 - **🚀 OpenCL batched MoE**：上游 MUL_MAT_ID 在 Adreno 830 全量化数值损坏（驱动级 bug）→ 自研  
   `kernel_mul_mat_id_*_batched` 单 dispatch gather + 设备端 ids 直读 + 专家桶排序（L2 复用）。  
   **内核级通用能力**：按量化类型逐个验证上线——**q4_0（v0.3.0）→ q4_K（v0.3.1 host 预计算有效 scale）→  
-  q4_1（v0.3.5 路由行）**，IQ2 / IQ3 在路线图；未验证量化自动回退。配套 KV checkpoint/restore、  
+  q4_1（v0.3.5 路由行）→ IQ4_XS（v0.3.5 M1 首条 sub-3bpw 路由）→ q3_K（v0.3.7 三平面 dodge + 专家桶排序）**，  
+  其余量化在路线图（`kernel_mul_mat_id_*_f32_batched` 实测在册：q4_0 / q4_K / q3_K / IQ4_XS，q4_1 走通用派发器）；  
+  未验证量化自动回退。配套 KV checkpoint/restore、  
   BUFT placement 探针默认批量 1、M-R1 融合路由算子 `GGML_FUSED_MOE_TOPK`（CLI kernel 1498→1199、  
   host 提交 -24%、+6~20% tok/s；App 侧 env 门默认关待验收）。
 - **🧠 split-MoE + LES**：权重剥离 `.experts/`（40 分片 + manifest）或 **in-place GGUF 直读**（免剥离，  
@@ -441,9 +461,12 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   OpenCL q3_K batched MoE 路由表设备派发 + 数值双验。**830 CLI 判卷矩阵全绿**（全驻留/槽位 bank ×  
   greedy/温度采样 × CPU/OpenCL 六臂，答案逐字一致）；draft-self masked-block 自投机（PR 提交2）+  
   mask 防自复制双闸随行；App 侧 GGUF 内嵌 jinja 模板与 CLI `--jinja` 同路。  
-  catalog 实验条目已挂（inplaceFullGguf 热专家形态）；**App 内推理正确性攻坚中**（判卷探针已布）。  
+  catalog 实验条目已挂（inplaceFullGguf 热专家形态）；**实验线已于 2026-11-03 打结封存（留而不砍）**——加速假设实测为负（同机 AR 基线 1.6–2.3 t/s vs draft-self  
+  CPU 0.879 / OpenCL 0.216 t/s），唯一正面项是 draft 验收率 16/16 超关；代码与 catalog 条目保留在 main，  
+  重启门槛＝GPU 判卷合格或原厂 QAT 三元 checkpoint。  
   深读：[`docs/调研实验总结_扩散LLM新线可行性_2026-10-31.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/调研实验总结_扩散LLM新线可行性_2026-10-31.md)、  
-  [`docs/扩散LLM线工作交接_2026-10-30.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/扩散LLM线工作交接_2026-10-30.md)。
+  [`docs/扩散LLM线工作交接_2026-10-30.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/扩散LLM线工作交接_2026-10-30.md)、  
+   [`docs/扩散LLM效率重评_2026-11-03.md`](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/扩散LLM效率重评_2026-11-03.md)（封存日重评：加速假设为何判负）。
 - **📊 GPU decode 路线与 Mesa 全 GPU 卸载线**：OpenCL per-op 提交税 9µs（CPU 0.34µs）且 Adreno 驱动不暴露  
   `cl_khr_command_buffer`，decode 混合图多 split/跨后端拷贝 → decode 阶段 CPU 混合守擂（830：CPU bank  
   8.07 vs GPU 最优 5.46 t/s）；batched MoE 收益主战场在 **prefill 大分块 GEMM**。Mesa（rusticl + freedreno  
@@ -471,7 +494,7 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   （`vkGetDeviceQueue2` 坏 queue）已根治（v0.1.6，仅 ARM vendor 生效）。Mali-G68 无矩阵加速单元，  
   Vulkan 解码约为 CPU 的 1/3，属硬件天花板。
 - **KleidiAI dotprod（CPU 备选）**：`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod`；⚠️ 不加 `+i8mm`  
-  （Cortex-A78 无 i8mm，会 SIGILL 三后端同崩）。SME2 内核族已随 KleidiAI v1.31 入包（运行时派发，  
+  （Cortex-A78 无 i8mm，会 SIGILL 三后端同崩）。SME2 内核族已随 KleidiAI v1.32.0 入包（运行时派发，  
   当前设备收益未到）。
 
 #### Adreno Vulkan Turnip 直载（摘要）
@@ -513,7 +536,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 | Java JDK    | 17                  | Gradle / Kotlin（项目 Kotlin 1.9.22）               |
 
 > 重量级原生依赖（随 APK/构建链处理）：Chaquopy 17（CPython 3.11）、JGit 6.10、sherpa-onnx + onnxruntime  
-> （release 包体 +~18MB）、flutter_secure_storage、background_downloader。
+> （三个 .so 压缩后合计 +~9.6 MB，未压缩 ~27 MB）、flutter_secure_storage、background_downloader。
 
 ### 构建要点
 
@@ -526,8 +549,9 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
   APK 打包链的 strip 步骤会删掉 `.symtab`，符号串必然 0 命中（实测踩坑：曾被误判为"APK 带旧库"）。
   另注意 gradle 可能从 **RelWithDebInfo 变体**取 `.so`：native 源码更新后若 APK 内字面量仍旧，删  
   `android/app/.cxx` + `build/app/intermediates/{merged,stripped}_native_libs` 全链重编再验。
-- **回归防线**：动智能体循环/协议先跑 `flutter test test/agent`；全量 `flutter test` 当前 **880+ 项**  
-  （test/agent · providers · services · websearch · tts · asr）。
+- **回归防线**：动智能体循环/协议先跑 `flutter test test/agent`；全量 `flutter test` 当前 **1160 项**  
+  （test/agent · models · providers · services · widgets · websearch · tts · asr · plugins；2026-11-07 实测  
+  1151 绿 / 6 skip / 4 红——thinking 失控守卫口径 ×3、`model_catalog` 目录断言 ×1，属已知待修）。
 - **一键打包**：Windows `tool/build_apk.ps1`，DGX Spark（Linux aarch64）`tool/build_apk.sh`——默认 debug +  
   release 一起打，自带环境自检（`--check`）、apksigner 签名验收（非 `CN=TongYiLite` 直接判失败）、  
   `--install` **覆盖安装**（绝不 uninstall）、`--clean-native` 强制重编 NDK；产物在 `build/app/outputs/flutter-apk/`。  
@@ -543,13 +567,14 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
-> [⬇️ 下载 `TongYi-Lite-v0.3.6.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.6.apk)  
-> v0.3.6+24 · 68,628,713 B（2026-10-28，**远程控制（ADB）**纯 Dart 协议栈 + **Dev Agent SSH 面**：  
-> 远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口、SSH 诊断目标×认证分流）  
-> `SHA-256: 7a32a6daff4503bbdd124dada5b2ecc88c7fd4548ab8b99eeec3f6aac424d85d`
+> [⬇️ 下载 `TongYi-Lite-v0.3.8.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.8.apk)  
+> v0.3.8+31 · 69,318,229 B（2026-11-07，**llama.cpp 换树 v0.9.0 基座** + B 线量化内核 8/8 PR 并入 +  
+> **prism.hadamard 两套存储同步**（bonsai-2-27b 全栈乱码根治）+ **ling-3.0-tiny 三重乱码修复** +  
+> **K40/Adreno 650 车队扩入** + versionCode 归位 31，见 [版本更新](#版本更新)）  
+> `SHA-256: 3e17570b4412e2b5b4532a4ebc40600c6d93a7e02169cde98cb379652f0975d2`
 
-> 📌 `main` 分支源码已至 **v0.3.8+31**（llama.cpp v0.9.0 换树 + ling 三重乱码修复 + K40 车队扩入，见  
-> [版本更新](#版本更新)）；上方 release 包为 v0.3.6，新包随后更新——急用可按[构建与开发](#构建与开发)自行构建。
+> 📌 本包为 `main` 当前 HEAD（`bf2c8151`，含 `99d8b15d` 与 packflat 4-D 守卫）产物，源码与包一致；换树口径与实测数据见  
+> [版本更新](#版本更新)，自行构建见 [构建与开发](#构建与开发)。
 >
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
 > 模型缓存，切勿先卸载。历史版本见 [`releases/`](releases/) 目录或按[构建与开发](#构建与开发)自行构建。
@@ -567,9 +592,9 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.8**（当前） | 2026-11-08 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式。versionCode 31 |
+| **v0.3.8**（当前） | 2026-11-06~07 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
 | v0.3.7 | 2026-10-30~11-06 | **dLLM Clover-35B-A3B 端侧上机**（块扩散 llama 层并入 fork + split-MoE 热专家 + draft-self masked-block 自投机；830 CLI 判卷矩阵全绿）+ B 线 backport 施工（8/8 PR）+ q3_K DECODE_WINDOW 打包错槽修复 + PTQ1_0 窗口打包保守待遇。versionCode 30 |
-| v0.3.6 | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（进程内假 adbd 全链路 56 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
+| v0.3.6 | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（ADB 四套测试共 56 项，其中进程内假 adbd 全链路 29 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
 | v0.3.5 | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
 | v0.3.4+ | 2026-10-20~24 | Mesa 测量接管 + L3 裁决（Mesa ≈ CPU bank 17.5–20%，提交层封死）；智能体思考失控根治（跨块累计守卫）；API「思考强度」档位 + 实时 token 读数 + 停止按钮三洞修复；调试机型分级定案（740 主力 / 830 参考 / 650 冒烟） |
 | v0.3.4+ | 2026-10-20 | Edge TTS 恢复播报（Sec-MS-GEC v2 强制 + 手机 IPv6 半死通道 → v2 token 移植 + IPv4 优先） |
@@ -628,7 +653,7 @@ pluginManagement {
 `CMakeLists.txt` 从 `android/app/src/main/cpp/` 到项目根目录需要 **5 层** `../`：
 
 ```cmake
-set(PROJECT_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../..)
+set(PROJECT_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../..)
 ```
 
 </details>
