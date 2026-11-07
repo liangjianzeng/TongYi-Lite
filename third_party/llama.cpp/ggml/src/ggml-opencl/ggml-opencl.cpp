@@ -73,18 +73,6 @@ typedef const void * (*get_adreno_bin_kernel_func_t)(
         }                                                           \
     } while (0)
 
-// [k40fix 2026-11-07] ADRENO wavepair/dp4a 族软注册版 CL_CHECK：E031.37 老编译器上族内
-// program/kernel 建失败不 abort（kernel 保持 null，消费端由 use_adreno_kernels 拒闸走
-// generic 兜底）。仅限 load_cl_kernels 的 ADRENO 段使用；段外 CL_CHECK 行为不变。
-#define CL_CHECK_SOFT_ADRENO(err)                                   \
-    do {                                                            \
-        cl_int err_ = (err);                                        \
-        if (err_ != CL_SUCCESS) {                                   \
-            GGML_LOG_WARN("ggml_opencl: [adreno-soft] %s error %d at %s:%d (kernel stays null, gated)\n",  \
-                #err, err_, __FILE__, __LINE__);                    \
-        }                                                           \
-    } while (0)
-
 //------------------------------------------------------------------------------
 // OpenCL
 //------------------------------------------------------------------------------
@@ -2344,9 +2332,7 @@ static bool tyl_skip_moe_ns(const ggml_backend_opencl_context * ctx) {   // [R-0
     return v || (ctx != nullptr && ctx->is_mesa_rusticl);
 }   // dense 冒烟模型永不调用 moe 内核；env=1 跳过预编译，init 得以在 a6xx 上存活。
 
-// [k40fix 2026-11-07] fatal 参数：默认 true（既有调用点行为零变化）；ADRENO wavepair/dp4a
-// 族经 build_program_from_source_adreno 传 false（E031.37 老编译器软注册降级，见那里）。
-static cl_program build_program_from_source(ggml_backend_opencl_context * backend_ctx, const char* program_buffer, const std::string &compile_opts, bool fatal = true) {
+static cl_program build_program_from_source(ggml_backend_opencl_context * backend_ctx, const char* program_buffer, const std::string &compile_opts) {
     cl_context   ctx = backend_ctx->context;
     cl_device_id dev = backend_ctx->device;
 
@@ -2443,43 +2429,11 @@ static cl_program build_program_from_source(ggml_backend_opencl_context * backen
         return p_cached;
     }
 
-    cl_program p = build_program_from_source_ex(ctx, dev, program_buffer, opts, /*fatal=*/fatal);
+    cl_program p = build_program_from_source_ex(ctx, dev, program_buffer, opts, /*fatal=*/true);
 
     // Best-effort save of the freshly-built binary (no-op if cache disabled).
     if (p != nullptr) {
         cl_program_cache_try_save(backend_ctx->program_cache, p, dev, program_buffer, opts);
-    }
-    return p;
-}
-
-// [k40fix 2026-11-07] ADRENO wavepair/dp4a 族专用软构建：编译失败不 abort（旧 fatal=true
-// 在 E031.37.12.07 老编译器上一加载模型即 exit(1)——app 崩溃 A 同款；legF 铁证 fork 0.3.7
-// 同崩于 wavepair 族 err=-11）。失败返 nullptr + WARN，族内 kernel 保持 null；派发端由
-// use_adreno_kernels 的 route-table known_bad 拒闸（major==37，唯一事实源
-// tongyi_route_table.cpp kKnownBad "mul_mat_adreno_wavepair" 行）走 generic GEMM/GEMV
-// 兜底（K40 已证数值正确）。健康编译器（E031.38+/740/830）编译全成功 → 行为零变化。
-//
-// [k40fix 2026-11-07 R2] E031.37 硬闸（真机实证升级）：该老编译器不止对 dp4a 内建干净地
-// 返 err=-11（软失败可接），真机 K40 2026-11-07 实测：moe_q3k_pack err=-6（"Pass" 内部
-// 错，软失败接住）后，**下一个族 program 在 libllvm-qcom MinLinkCLRuntime 内 SIGSEGV
-// （je_large_dalloc 空指针，fault addr 0x0，进程死）**——厂商编译器体内的崩溃，任何
-// per-program 软失败都接不住。故 major==37 时整族源码一律**不进驱动**：直接注册 null
-// （与 k40port ADRENO_KERNELS=OFF golden 逐字节等价——该态四腿全过、ARGMAX id=271 金标）。
-// 判定 = 同一 known_bad 行 × major==37；E031.41/47（740/830）不进此分支，零变化。
-static cl_program build_program_from_source_adreno(ggml_backend_opencl_context * backend_ctx, const char* program_buffer, const std::string &compile_opts) {
-    if (backend_ctx &&
-        backend_ctx->adreno_cl_compiler_version.type == ADRENO_CL_COMPILER_TYPE::E031 &&
-        backend_ctx->adreno_cl_compiler_version.major == 37 &&
-        tongyi::known_bad_lookup(tongyi::RCOMP_E031, "mul_mat_adreno_wavepair")) {
-        static std::atomic<int> gate_logs{0};
-        if (gate_logs.fetch_add(1) < 2) {
-            GGML_LOG_WARN("ggml_opencl: [adreno-soft] E031.37 known-bad compiler (MinLinkCLRuntime SIGSEGV on-device) -> family program NOT handed to driver, kernel stays null (dispatch gated, OFF-golden equivalent)\n");
-        }
-        return nullptr;
-    }
-    cl_program p = build_program_from_source(backend_ctx, program_buffer, compile_opts, /*fatal=*/false);
-    if (p == nullptr) {
-        GGML_LOG_WARN("ggml_opencl: [adreno-soft] wavepair/dp4a family program failed to compile -> kernels stay null, dispatch gated to generic fallback (E031.37 old-compiler path)\n");
     }
     return p;
 }
@@ -4600,17 +4554,17 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_xmem_f16_f32_os8.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_adreno_xmem_pack_src_f32 =
+        CL_CHECK((backend_ctx->kernel_adreno_xmem_pack_src_f32 =
             clCreateKernel(prog, "adreno_xmem_pack_src_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_adreno_xmem_prepack_weight_f16 =
+        CL_CHECK((backend_ctx->kernel_adreno_xmem_prepack_weight_f16 =
             clCreateKernel(prog, "adreno_xmem_prepack_weight_f16", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_xmem_f16_f32_os8 =
+        CL_CHECK((backend_ctx->kernel_gemm_xmem_f16_f32_os8 =
             clCreateKernel(prog, "kernel_gemm_xmem_f16_f32_os8", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_adreno_xmem_store_dst_f32 =
+        CL_CHECK((backend_ctx->kernel_adreno_xmem_store_dst_f32 =
             clCreateKernel(prog, "adreno_xmem_store_dst_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
@@ -4625,40 +4579,35 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("sdpa_xmem_f32_f16_os8.cl");
 #endif
-        cl_program program = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
+        cl_program program = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
 
         auto & xmem_attn = backend_ctx->adreno_xmem_attn;
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_q_f32_to_img_scaled =
+        CL_CHECK((xmem_attn.kernel_q_f32_to_img_scaled =
             clCreateKernel(program, "adreno_xmem_attn_q_f32_to_img_scaled", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_kv_f32_to_img_gqa =
+        CL_CHECK((xmem_attn.kernel_kv_f32_to_img_gqa =
             clCreateKernel(program, "adreno_xmem_attn_kv_f32_to_img_gqa", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_kv_f16_to_img_gqa =
+        CL_CHECK((xmem_attn.kernel_kv_f16_to_img_gqa =
             clCreateKernel(program, "adreno_xmem_attn_kv_f16_to_img_gqa", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_img_to_f32 =
+        CL_CHECK((xmem_attn.kernel_img_to_f32 =
             clCreateKernel(program, "adreno_xmem_attn_img_to_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_k_gather =
+        CL_CHECK((xmem_attn.kernel_k_gather =
             clCreateKernel(program, "adreno_xmem_attn_k_gather", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_pack_k =
+        CL_CHECK((xmem_attn.kernel_pack_k =
             clCreateKernel(program, "adreno_xmem_attn_pack_k", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_qk_gemm =
+        CL_CHECK((xmem_attn.kernel_qk_gemm =
             clCreateKernel(program, "adreno_xmem_attn_qk_gemm", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_softmax_reduce_basic =
+        CL_CHECK((xmem_attn.kernel_softmax_reduce_basic =
             clCreateKernel(program, "adreno_xmem_attn_softmax_reduce_basic", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_softmax_apply_basic =
+        CL_CHECK((xmem_attn.kernel_softmax_apply_basic =
             clCreateKernel(program, "adreno_xmem_attn_softmax_apply_basic", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_mask_scores =
+        CL_CHECK((xmem_attn.kernel_mask_scores =
             clCreateKernel(program, "adreno_xmem_attn_mask_scores", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_pack_v =
+        CL_CHECK((xmem_attn.kernel_pack_v =
             clCreateKernel(program, "adreno_xmem_attn_pack_v", &err), err));
-        CL_CHECK_SOFT_ADRENO((xmem_attn.kernel_pv_gemm =
+        CL_CHECK((xmem_attn.kernel_pv_gemm =
             clCreateKernel(program, "adreno_xmem_attn_pv_gemm", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(program));
-        // [k40fix 2026-11-07] 软注册：编失败保持 compiled=false → 派发端
-        // (!adreno_xmem_attn.compiled) 守卫跳过 xmem SDPA（旧 fatal 在此 E031.37 必崩）。
-        xmem_attn.compiled = (program != nullptr);
-        if (!xmem_attn.compiled) {
-            GGML_LOG_WARN("ggml_opencl: [adreno-soft] sdpa_xmem_f32_f16_os8 failed to compile -> xmem SDPA disabled\n");
-        }
+        CL_CHECK(clReleaseProgram(program));
+        xmem_attn.compiled = true;
         GGML_LOG_CONT(".");
     }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
@@ -5906,15 +5855,15 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("transpose.cl");
 #endif
         backend_ctx->program_transpose =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32_buf = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_buf", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_16_4x1 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16_4x1", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -5927,9 +5876,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q1_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q1_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q1_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -5948,19 +5897,19 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_gemv_general = read_file("gemv_noshuffle_q1_0_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q1_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
 
         const char * nsg1_min_m_env = getenv("GGML_OPENCL_Q1_0_GEMV_NSG1_MIN_M");
         backend_ctx->min_m_gemv_nsg1_q1_0 = nsg1_min_m_env ? atoi(nsg1_min_m_env) :
             (backend_ctx->adreno_gen == ADRENO_GPU_GEN::X2E ? 8192 : 0);
         if (backend_ctx->min_m_gemv_nsg1_q1_0 > 0) {
             const std::string nsg1_opts = CL_gemv_compile_opts + " -DN_SIMDGROUP=1";
-            cl_program prog_nsg1 = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv_general.c_str(), nsg1_opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q1_0_f32_nsg1 = clCreateKernel(prog_nsg1, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog_nsg1));
+            cl_program prog_nsg1 = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), nsg1_opts);
+            CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q1_0_f32_nsg1 = clCreateKernel(prog_nsg1, "kernel_gemv_noshuffle_q1_0_f32", &err), err));
+            CL_CHECK(clReleaseProgram(prog_nsg1));
         }
         GGML_LOG_CONT(".");
     }
@@ -5974,12 +5923,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q3_k_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q3_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q3_k_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q3_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q3_k_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -5992,12 +5941,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q2_0_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_0_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_0_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6010,12 +5959,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq4_xs_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6028,9 +5977,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq4_xs_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq4_xs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq4_xs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_xs_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6043,9 +5992,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q2_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6066,21 +6015,18 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ4_XS_MV_NSG=" + std::to_string(backend_ctx->iq4_xs_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;               // (avoids uninitialized max_workgroup UB + GGML_ASSERT abort in this discovery loop)
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq4_xs_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq4_xs_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq4_xs_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq4_xs_f32 = kernel;
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clReleaseProgram(prog));
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq4_xs_mv_nsg > 1);
             backend_ctx->iq4_xs_mv_nsg /= 2;
         }
@@ -6104,15 +6050,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (int wide = 0; wide < 2; ++wide) {
             const std::string opts = compile_opts + " -DQ2_0_MV_WIDE=" + std::to_string(wide);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_q2_0_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(err);
+            CL_CHECK(clReleaseProgram(prog));
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             size_t workgroup = 512;
             while (workgroup > max_workgroup) {
                 workgroup /= 2;
@@ -6138,12 +6081,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq1_s_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6156,9 +6099,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq1_s_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_s_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6179,28 +6122,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ1_S_MV_NSG=" + std::to_string(backend_ctx->iq1_s_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq1_s_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq1_s_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq1_s_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq1_s_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq1_s_grid_buffer.allocate(backend_ctx->context, 2048*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq1_s_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq1_s_grid_buffer.buffer));
                 size_t global[] = { 2048 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6208,11 +6148,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 2048;
                 desc.buffer = backend_ctx->iq1_s_grid_buffer.buffer;
                 backend_ctx->iq1_s_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq1_s_mv_nsg > 1);
             backend_ctx->iq1_s_mv_nsg /= 2;
         }
@@ -6228,12 +6168,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq1_m_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_m_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_m_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_m_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_m_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6246,9 +6186,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq1_m_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq1_m_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq1_m_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq1_m_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6269,21 +6209,18 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ1_M_MV_NSG=" + std::to_string(backend_ctx->iq1_m_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq1_s_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq1_m_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq1_m_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq1_m_f32 = kernel;
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clReleaseProgram(prog));
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq1_m_mv_nsg > 1);
             backend_ctx->iq1_m_mv_nsg /= 2;
         }
@@ -6299,12 +6236,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq3_s_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6317,9 +6254,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq3_s_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_s_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6340,28 +6277,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ3_S_MV_NSG=" + std::to_string(backend_ctx->iq3_s_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq3_s_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq3_s_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq3_s_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq3_s_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq3_s_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq3_s_grid_buffer.allocate(backend_ctx->context, 512*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq3_s_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq3_s_grid_buffer.buffer));
                 size_t global[] = { 512 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6369,11 +6303,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 512;
                 desc.buffer = backend_ctx->iq3_s_grid_buffer.buffer;
                 backend_ctx->iq3_s_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq3_s_mv_nsg > 1);
             backend_ctx->iq3_s_mv_nsg /= 2;
         }
@@ -6389,12 +6323,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq3_xxs_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6407,9 +6341,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq3_xxs_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq3_xxs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq3_xxs_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6430,28 +6364,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ3_XXS_MV_NSG=" + std::to_string(backend_ctx->iq3_xxs_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq3_xxs_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq3_xxs_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq3_xxs_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq3_xxs_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq3_xxs_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq3_xxs_grid_buffer.allocate(backend_ctx->context, 256*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq3_xxs_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq3_xxs_grid_buffer.buffer));
                 size_t global[] = { 256 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6459,11 +6390,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 256;
                 desc.buffer = backend_ctx->iq3_xxs_grid_buffer.buffer;
                 backend_ctx->iq3_xxs_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq3_xxs_mv_nsg > 1);
             backend_ctx->iq3_xxs_mv_nsg /= 2;
         }
@@ -6479,12 +6410,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_s_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_s_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_s_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6497,12 +6428,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_xs_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6515,12 +6446,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_xxs_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6533,9 +6464,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_xxs_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xxs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xxs_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6556,28 +6487,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ2_XXS_MV_NSG=" + std::to_string(backend_ctx->iq2_xxs_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq2_xxs_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq2_xxs_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq2_xxs_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq2_xxs_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq2_xxs_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq2_xxs_grid_buffer.allocate(backend_ctx->context, 512*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_xxs_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_xxs_grid_buffer.buffer));
                 size_t global[] = { 512 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6585,11 +6513,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 512;
                 desc.buffer = backend_ctx->iq2_xxs_grid_buffer.buffer;
                 backend_ctx->iq2_xxs_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq2_xxs_mv_nsg > 1);
             backend_ctx->iq2_xxs_mv_nsg /= 2;
         }
@@ -6605,9 +6533,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_xs_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_xs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_xs_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_xs_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6628,28 +6556,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ2_XS_MV_NSG=" + std::to_string(backend_ctx->iq2_xs_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq2_xs_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq2_xs_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq2_xs_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq2_xs_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq2_xs_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq2_xs_grid_buffer.allocate(backend_ctx->context, 1024*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_xs_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_xs_grid_buffer.buffer));
                 size_t global[] = { 1024 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6657,11 +6582,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 1024;
                 desc.buffer = backend_ctx->iq2_xs_grid_buffer.buffer;
                 backend_ctx->iq2_xs_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq2_xs_mv_nsg > 1);
             backend_ctx->iq2_xs_mv_nsg /= 2;
         }
@@ -6677,9 +6602,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq2_s_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq2_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq2_s_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq2_s_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6700,28 +6625,25 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
         for (;;) {
             const std::string opts = compile_opts + " -DIQ2_S_MV_NSG=" + std::to_string(backend_ctx->iq2_s_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, (iq2_s_grid_src + kernel_src).c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_iq2_s_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
+            CL_CHECK(err);
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->iq2_s_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_iq2_s_f32 = kernel;
                 cl_kernel export_grid = clCreateKernel(prog, "kernel_iq2_s_grid_export", &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 backend_ctx->iq2_s_grid_buffer.allocate(backend_ctx->context, 2048*sizeof(cl_uint));
-                CL_CHECK_SOFT_ADRENO(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_s_grid_buffer.buffer));
+                CL_CHECK(clSetKernelArg(export_grid, 0, sizeof(cl_mem), &backend_ctx->iq2_s_grid_buffer.buffer));
                 size_t global[] = { 2048 };
                 size_t local[] = { 64 };
                 cl_event evt;
-                CL_CHECK_SOFT_ADRENO(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
-                CL_CHECK_SOFT_ADRENO(clWaitForEvents(1, &evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseEvent(evt));
-                CL_CHECK_SOFT_ADRENO(clReleaseKernel(export_grid));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, export_grid, 1, nullptr, global, local, 0, nullptr, &evt));
+                CL_CHECK(clWaitForEvents(1, &evt));
+                CL_CHECK(clReleaseEvent(evt));
+                CL_CHECK(clReleaseKernel(export_grid));
+                CL_CHECK(clReleaseProgram(prog));
 
                 cl_image_format format = { CL_R, CL_UNSIGNED_INT32 };
                 cl_image_desc desc = {};
@@ -6729,11 +6651,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 desc.image_width = 2048;
                 desc.buffer = backend_ctx->iq2_s_grid_buffer.buffer;
                 backend_ctx->iq2_s_grid_image = clCreateImage(backend_ctx->context, CL_MEM_READ_ONLY, &format, &desc, nullptr, &err);
-                CL_CHECK_SOFT_ADRENO(err);
+                CL_CHECK(err);
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_ASSERT(backend_ctx->iq2_s_mv_nsg > 1);
             backend_ctx->iq2_s_mv_nsg /= 2;
         }
@@ -6749,9 +6671,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q3_k_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q3_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q3_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q3_k_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6779,20 +6701,17 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         for (;;) {
             const std::string opts = compile_opts + " -DQ3_K_MV_R=" + std::to_string(backend_ctx->q3_k_mv_rows) +
                                      " -DQ3_K_MV_NSG=" + std::to_string(backend_ctx->q3_k_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_q3_k_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(err);
+            CL_CHECK(clReleaseProgram(prog));
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->q3_k_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_q3_k_f32 = kernel;
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseKernel(kernel));
             GGML_ASSERT(backend_ctx->q3_k_mv_nsg > 1);
             backend_ctx->q3_k_mv_nsg /= 2;
         }
@@ -6808,9 +6727,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q2_k_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6823,12 +6742,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q2_k_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q2_k_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts + " -DTILESIZE_N=8");
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q2_k_q8_1_dp4a_narrow = clCreateKernel(prog, "kernel_gemm_noshuffle_q2_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6856,20 +6775,17 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         for (;;) {
             const std::string opts = compile_opts + " -DQ2_K_MV_R=" + std::to_string(backend_ctx->q2_k_mv_rows) +
                                      " -DQ2_K_MV_NSG=" + std::to_string(backend_ctx->q2_k_mv_nsg);
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            if (prog == nullptr) {   // [k40fix 2026-11-07] soft path: family program failed (E031.37) -> kernel stays null, dispatch gated
-                break;
-            }
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
             cl_kernel kernel = clCreateKernel(prog, "kernel_gemv_noshuffle_q2_k_f32", &err);
-            CL_CHECK_SOFT_ADRENO(err);
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(err);
+            CL_CHECK(clReleaseProgram(prog));
             size_t max_workgroup;
-            CL_CHECK_SOFT_ADRENO(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
+            CL_CHECK(clGetKernelWorkGroupInfo(kernel, backend_ctx->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(max_workgroup), &max_workgroup, nullptr));
             if (64*(size_t)backend_ctx->q2_k_mv_nsg <= max_workgroup) {
                 backend_ctx->kernel_gemv_noshuffle_q2_k_f32 = kernel;
                 break;
             }
-            CL_CHECK_SOFT_ADRENO(clReleaseKernel(kernel));
+            CL_CHECK(clReleaseKernel(kernel));
             GGML_ASSERT(backend_ctx->q2_k_mv_nsg > 1);
             backend_ctx->q2_k_mv_nsg /= 2;
         }
@@ -6897,17 +6813,17 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_gemv_general = read_file("gemv_noshuffle_q4_0_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_mc3", &err), err));
         // [tongyi] GLU + batched MoE twin in the same q4_0 gemv program.
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_glu", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_glu", &err), err));
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_0_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_0_f32_batched", &err), err));
         // P3 sort kernels moved to their own program (moe_sort_dspark): compiling
         // them inside the q4_0 program (with the perm param) miscompiled the
         // q4_0 batched kernel on Adreno 830 / E031.47 (NMSE~2.2, 2026-10-14).
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6932,9 +6848,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_gemv = read_file("gemv_noshuffle_q4_0_f32_spec.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_4096_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_4096_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
 
         // Gemv 2048, 16384
@@ -6948,9 +6864,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
 
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_4096_1_11008 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_4096_1_11008 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
 
         // Gemv 5504, 44032
@@ -6964,9 +6880,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
 
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_11008_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_11008_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
 
         // Gemv 16000, 128000
@@ -6981,9 +6897,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
 
-        prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_32000_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_32000_1_4096 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -6996,9 +6912,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src_CL_gemm = read_file("gemm_noshuffle_q4_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemm.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemm.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7018,10 +6934,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
             const std::string kernel_src = read_file("gemv_noshuffle_q4_0_f32_32b_trans.cl");
 #endif
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_32b_trans =
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
+            CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_0_f32_32b_trans =
                 clCreateKernel(prog, "kernel_gemv_noshuffle_q4_0_f32_32b_trans", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_LOG_CONT(".");
         }
 
@@ -7032,9 +6948,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q4_0_f32_32b_trans_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
 
@@ -7043,9 +6959,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q4_0_q8_1_dp4a_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7060,9 +6976,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q4_1_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_1_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_1_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7082,11 +6998,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_noshuffle_q4_1_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_1_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32_mc3", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_1_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_1_f32_mc3", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7099,9 +7015,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q5_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7114,10 +7030,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q5_0_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_0_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_q8_1_dp4a_wimg", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_0_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_0_q8_1_dp4a_wimg", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7136,9 +7052,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemv_noshuffle_q5_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q5_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q5_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7151,9 +7067,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q5_1_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_1_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_1_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_1_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7172,9 +7088,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemv_noshuffle_q5_1_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q5_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_1_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q5_1_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_1_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7187,9 +7103,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq4_nl_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq4_nl_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_nl_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq4_nl_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_nl_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7202,9 +7118,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_iq4_nl_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_iq4_nl_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_nl_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_iq4_nl_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_iq4_nl_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7217,10 +7133,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q4_0_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_q8_1_dp4a_act_vload4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_0_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_0_q8_1_dp4a_act_vload4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7240,10 +7156,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_noshuffle_iq4_nl_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_iq4_nl_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_iq4_nl_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_iq4_nl_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_iq4_nl_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7256,9 +7172,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q8_0_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7273,8 +7189,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_f32_bin = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_f32_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_f32_bin = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_f32_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7290,8 +7206,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_ila_a8_bin = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_ila_a8_bin = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_ila_a8", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7315,11 +7231,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_gemv_general = read_file("gemv_noshuffle_q8_0_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_gemv_general.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q8_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q8_0_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32_splitk", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q8_0_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q8_0_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q8_0_f32_splitk", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7332,12 +7248,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q4_k_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_r1 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_r1", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_kimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_kimg", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_cok = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_cok", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_r1 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_r1", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_kimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_kimg", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_cok = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_f32_cok", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7356,11 +7272,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         GGML_ASSERT(tile_n >= 4 && tile_n <= 64 && tile_n % 4 == 0);
         backend_ctx->tile_n_dp4a_q4_k = tile_n;
         std::string dp4a_opts = compile_opts + " -DTILESIZE_N=" + std::to_string(tile_n);
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), dp4a_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_act_vload4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), dp4a_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_act_vload4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
 
         // Compile a smaller N tile to avoid unused columns in small batches.
         int tile_n_narrow = MIN(tile_n, 16);
@@ -7372,10 +7288,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         backend_ctx->tile_n_dp4a_narrow_q4_k = tile_n_narrow;
         if (tile_n_narrow != tile_n) {
             std::string narrow_opts = compile_opts + " -DTILESIZE_N=" + std::to_string(tile_n_narrow);
-            cl_program narrow_prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), narrow_opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_narrow = clCreateKernel(narrow_prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a", &err), err));
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_narrow_wimg = clCreateKernel(narrow_prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(narrow_prog));
+            cl_program narrow_prog = build_program_from_source(backend_ctx, kernel_src.c_str(), narrow_opts);
+            CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_narrow = clCreateKernel(narrow_prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a", &err), err));
+            CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_narrow_wimg = clCreateKernel(narrow_prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_wimg", &err), err));
+            CL_CHECK(clReleaseProgram(narrow_prog));
         }
         GGML_LOG_CONT(".");
     }
@@ -7389,11 +7305,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q8_0_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_wimg", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_act_vload4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_wimg = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_wimg", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q8_0_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q8_0_q8_1_dp4a_act_vload4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7406,10 +7322,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q5_k_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_q8_1_dp4a_act_vload4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_q8_1_dp4a_act_vload4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7422,10 +7338,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q6_k_q8_1_dp4a.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_k_q8_1_dp4a_act_vload4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_k_q8_1_dp4a", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a_act_vload4 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_k_q8_1_dp4a_act_vload4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7438,9 +7354,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("quant_a_q8_1.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_quant_a_q8_1 = clCreateKernel(prog, "kernel_quant_a_q8_1", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_quant_a_q8_1 = clCreateKernel(prog, "kernel_quant_a_q8_1", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7454,11 +7370,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_moe_sort = read_file("moe_sort_dspark.cl");
 #endif
         const std::string CL_sort_compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_moe_sort.c_str(), CL_sort_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_sort_hist    = clCreateKernel(prog, "kernel_moe_sort_hist", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_sort_scan    = clCreateKernel(prog, "kernel_moe_sort_scan", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_sort_scatter = clCreateKernel(prog, "kernel_moe_sort_scatter", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_moe_sort.c_str(), CL_sort_compile_opts);
+        CL_CHECK((backend_ctx->kernel_moe_sort_hist    = clCreateKernel(prog, "kernel_moe_sort_hist", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_sort_scan    = clCreateKernel(prog, "kernel_moe_sort_scan", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_sort_scatter = clCreateKernel(prog, "kernel_moe_sort_scatter", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7474,9 +7390,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src_CL_moe_q3k_pack = read_file("moe_q3k_pack.cl");
 #endif
         const std::string CL_pack_compile_opts = std::string("-cl-std=") + opencl_c_std;
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_moe_q3k_pack.c_str(), CL_pack_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_q3k_pack = clCreateKernel(prog, "kernel_moe_q3k_pack", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_moe_q3k_pack.c_str(), CL_pack_compile_opts);
+        CL_CHECK((backend_ctx->kernel_moe_q3k_pack = clCreateKernel(prog, "kernel_moe_q3k_pack", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7491,9 +7407,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src_CL_iq4xs_m1 = read_file("gemv_noshuffle_iq4_xs_plane_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src_CL_iq4xs_m1.c_str(), m1_opts.c_str());
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_iq4_xs_f32_batched", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src_CL_iq4xs_m1.c_str(), m1_opts.c_str());
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_iq4_xs_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_iq4_xs_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
     // gemv_noshuffle_q4_k_f32
@@ -7529,16 +7445,16 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_noshuffle_q4_k_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_mc3", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_splitk", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_splitk = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_splitk", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_splitk_reduce_f32 = clCreateKernel(prog, "kernel_gemv_splitk_reduce_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_glu = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_glu", &err), err));
         // [tongyi] batched MoE twin in the same q4_K gemv program.
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q4_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q4_k_f32_batched", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7560,8 +7476,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_noshuffle_q3_k_plane_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_q3k_compile_opts);
+        CL_CHECK((backend_ctx->kernel_mul_mat_id_q3_k_f32_batched = clCreateKernel(prog, "kernel_mul_mat_id_q3_k_f32_batched", &err), err));
         // [tongyi R-284] dense twin in the same program; soft-fail — the dispatch
         // predicate requires a non-null handle, so a failed create = path off.
         backend_ctx->kernel_gemv_q3_k_f32 = clCreateKernel(prog, "kernel_gemv_q3_k_f32", &err);
@@ -7569,7 +7485,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             GGML_LOG_WARN("ggml_opencl: kernel_gemv_q3_k_f32 create failed err=%d (dense q3_K GEMV disabled)\n", err);
             backend_ctx->kernel_gemv_q3_k_f32 = nullptr;
         }
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7587,10 +7503,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         if (backend_ctx->has_vector_subgroup_broadcast) {
             CL_gemv_compile_opts += " -DVECTOR_SUB_GROUP_BROADCAST ";
         }
-        cl_program prog = build_program_from_source_adreno(
+        cl_program prog = build_program_from_source(
             backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_o4 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_o4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_o4 = clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_o4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7606,10 +7522,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #endif
         std::string compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_tiled =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_tiled =
             clCreateKernel(prog, "kernel_gemv_noshuffle_q4_k_f32_tiled", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7623,10 +7539,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_noshuffle_q4_K_f32_tiled_dp4a.cl");
 #endif
         std::string compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_K_f32_tiled_dp4a =
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_K_f32_tiled_dp4a =
             clCreateKernel(prog, "kernel_gemm_noshuffle_q4_K_f32_tiled_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7646,10 +7562,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
             const std::string kernel_src = read_file("gemv_noshuffle_q4_k_f32_32b_trans.cl");
 #endif
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_32b_trans =
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
+            CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q4_k_f32_32b_trans =
                 clCreateKernel(prog, "gemv_noshuffle_q4_k_f32_32b_trans", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_LOG_CONT(".");
         }
 
@@ -7660,9 +7576,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_32b_trans_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_f32_32b_trans_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q4_k_f32_32b_trans_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
 
@@ -7671,9 +7587,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q4_k_q8_1_dp4a_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q4_k_q8_1_dp4a_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7695,10 +7611,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
             const std::string kernel_src = read_file("gemv_noshuffle_q6_k_f32_32b_trans.cl");
 #endif
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_k_f32_32b_trans =
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
+            CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_k_f32_32b_trans =
                 clCreateKernel(prog, "kernel_gemv_noshuffle_q6_k_f32_32b_trans", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_LOG_CONT(".");
         }
 
@@ -7709,9 +7625,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_k_f32_32b_trans_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_k_f32_32b_trans_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q6_k_f32_32b_trans_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
 
@@ -7720,9 +7636,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_k_q8_1_dp4a_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q6_k_q8_1_dp4a_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7744,10 +7660,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
             const std::string kernel_src = read_file("gemv_noshuffle_q5_k_f32_32b_trans.cl");
 #endif
-            cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts);
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q5_k_f32_32b_trans =
+            cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), opts);
+            CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q5_k_f32_32b_trans =
                 clCreateKernel(prog, "gemv_noshuffle_q5_k_f32_32b_trans", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_LOG_CONT(".");
         }
 
@@ -7758,9 +7674,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_k_f32_32b_trans_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_k_f32_32b_trans_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q5_k_f32_32b_trans_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
 
@@ -7769,9 +7685,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program bin_prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, "", bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a_ila_a8_bin =
+                CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_k_q8_1_dp4a_ila_a8_bin =
                     clCreateKernel(bin_prog, "kernel_gemm_noshuffle_q5_k_q8_1_dp4a_ila_a8", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(bin_prog));
+                CL_CHECK(clReleaseProgram(bin_prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7790,10 +7706,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemv_moe_q4_1_f32_ns.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q4_1_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_1_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q4_1_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_1_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7806,10 +7722,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_moe_q4_1_f32_ns.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_1_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_1_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q4_1_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_1_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7824,8 +7740,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_1_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_1_f32_ns_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q4_1_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_1_f32_ns_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7841,9 +7757,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_mxfp4_f32.cl");
 #endif
         backend_ctx->program_gemv_moe_mxfp4_f32 =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemv_moe_mxfp4_f32, "kernel_gemv_moe_mxfp4_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemv_moe_mxfp4_f32, "kernel_gemv_moe_mxfp4_f32", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -7857,9 +7773,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_mxfp4_f32.cl");
 #endif
         backend_ctx->program_gemm_moe_mxfp4_f32 =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemm_moe_mxfp4_f32, "kernel_gemm_moe_mxfp4_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_f32 = clCreateKernel(backend_ctx->program_gemm_moe_mxfp4_f32, "kernel_gemm_moe_mxfp4_f32", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -7873,10 +7789,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q4_0_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q4_0_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_0_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q4_0_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_0_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7890,10 +7806,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q4_0_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_0_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q4_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_0_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7908,8 +7824,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_0_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_0_f32_ns_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q4_0_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_0_f32_ns_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -7925,10 +7841,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q8_0_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q8_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q8_0_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q8_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q8_0_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7942,10 +7858,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q5_0_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q5_0_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_0_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q5_0_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_0_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7959,10 +7875,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q5_0_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q5_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_0_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q5_0_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_0_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7976,10 +7892,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q5_1_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q5_1_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_1_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q5_1_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_1_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -7993,10 +7909,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q5_1_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q5_1_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_1_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q5_1_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_1_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8010,11 +7926,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q4_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q4_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q4_k_f32_ns_wimg = clCreateKernel(prog, "kernel_gemv_moe_q4_k_f32_ns_wimg", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q4_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q4_k_f32_ns", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q4_k_f32_ns_wimg = clCreateKernel(prog, "kernel_gemv_moe_q4_k_f32_ns_wimg", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8028,10 +7944,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q4_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q4_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q4_k_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8046,8 +7962,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_k_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_k_f32_ns_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q4_k_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_k_f32_ns_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8063,10 +7979,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q4_k_q8_1_dp4a.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q4_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q4_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q4_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8081,8 +7997,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_k_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_k_q8_1_dp4a_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q4_k_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_k_q8_1_dp4a_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8098,10 +8014,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_mxfp4_q8_1_dp4a.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8116,8 +8032,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8134,8 +8050,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a_ldck_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a_ila_ldck", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_q8_1_dp4a_ldck_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_q8_1_dp4a_ila_ldck", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8151,10 +8067,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q4_0_q8_1_dp4a.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q4_0_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q4_0_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q4_0_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8169,8 +8085,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q4_0_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_0_q8_1_dp4a_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q4_0_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q4_0_q8_1_dp4a_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8187,21 +8103,21 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #endif
         const std::string opts80 = CL_moe_compile_opts + " -DMOE_QT=80";
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts80.c_str());
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q80 = clCreateKernel(prog, "kernel_gemm_moe_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            build_program_from_source(backend_ctx, kernel_src.c_str(), opts80.c_str());
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q80 = clCreateKernel(prog, "kernel_gemm_moe_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
 
         const std::string opts50 = CL_moe_compile_opts + " -DMOE_QT=50";
         cl_program prog50 =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts50.c_str());
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q50 = clCreateKernel(prog50, "kernel_gemm_moe_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog50));
+            build_program_from_source(backend_ctx, kernel_src.c_str(), opts50.c_str());
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q50 = clCreateKernel(prog50, "kernel_gemm_moe_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog50));
 
         const std::string opts5 = CL_moe_compile_opts + " -DMOE_QT=5";
         cl_program prog5 =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), opts5.c_str());
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q5k = clCreateKernel(prog5, "kernel_gemm_moe_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog5));
+            build_program_from_source(backend_ctx, kernel_src.c_str(), opts5.c_str());
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q8_1_dp4a_q5k = clCreateKernel(prog5, "kernel_gemm_moe_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog5));
         GGML_LOG_CONT(".");
     }
 
@@ -8215,10 +8131,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("moe_reorder_quant_a_q8_1.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_reorder_quant_a_q8_1 = clCreateKernel(prog, "kernel_moe_reorder_quant_a_q8_1", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_moe_reorder_quant_a_q8_1 = clCreateKernel(prog, "kernel_moe_reorder_quant_a_q8_1", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8232,10 +8148,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("transpose_activation_q8.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_transpose_activation_q8 = clCreateKernel(prog, "kernel_transpose_activation_q8", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_transpose_activation_q8 = clCreateKernel(prog, "kernel_transpose_activation_q8", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8249,10 +8165,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q5_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q5_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q5_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q5_k_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8266,10 +8182,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q5_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q5_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q5_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q5_k_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8283,10 +8199,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_q6_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_q6_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q6_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_q6_k_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_q6_k_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8300,10 +8216,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q6_k_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q6_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q6_k_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q6_k_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_q6_k_f32_ns", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8318,8 +8234,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q6_k_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q6_k_f32_ns_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q6_k_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_q6_k_f32_ns_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8335,10 +8251,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_q6_k_q8_1_dp4a.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q6_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q6_k_q8_1_dp4a", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemm_moe_q6_k_q8_1_dp4a = clCreateKernel(prog, "kernel_gemm_moe_q6_k_q8_1_dp4a", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8353,8 +8269,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_q6_k_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q6_k_q8_1_dp4a_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_q6_k_q8_1_dp4a_bin = clCreateKernel(prog, "kernel_gemm_moe_q6_k_q8_1_dp4a_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8370,11 +8286,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_moe_mxfp4_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_mxfp4_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_mxfp4_f32_ns", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_moe_mxfp4_f32_ns_wimg = clCreateKernel(prog, "kernel_gemv_moe_mxfp4_f32_ns_wimg", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_mxfp4_f32_ns = clCreateKernel(prog, "kernel_gemv_moe_mxfp4_f32_ns", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_moe_mxfp4_f32_ns_wimg = clCreateKernel(prog, "kernel_gemv_moe_mxfp4_f32_ns_wimg", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8388,10 +8304,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_moe_mxfp4_f32_ns.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-            CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_f32_ns", &err), err));
-            CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+            CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_f32_ns = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_f32_ns", &err), err));
+            CL_CHECK(clReleaseProgram(prog));
             GGML_LOG_CONT(".");
     }
 
@@ -8406,8 +8322,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_moe_mxfp4_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_f32_ns_ila", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->kernel_gemm_moe_mxfp4_f32_ns_bin = clCreateKernel(prog, "kernel_gemm_moe_mxfp4_f32_ns_ila", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -8423,10 +8339,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("moe_reorder_b.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_reorder_b = clCreateKernel(prog, "kernel_moe_reorder_b", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_moe_reorder_b = clCreateKernel(prog, "kernel_moe_reorder_b", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8440,14 +8356,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("moe_sort_by_expert.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_histogram = clCreateKernel(prog, "kernel_moe_histogram", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_scan = clCreateKernel(prog, "kernel_moe_scan", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_fill = clCreateKernel(prog, "kernel_moe_fill", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_scatter = clCreateKernel(prog, "kernel_moe_scatter", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_moe_scatter_stable = clCreateKernel(prog, "kernel_moe_scatter_stable", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_moe_histogram = clCreateKernel(prog, "kernel_moe_histogram", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_scan = clCreateKernel(prog, "kernel_moe_scan", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_fill = clCreateKernel(prog, "kernel_moe_fill", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_scatter = clCreateKernel(prog, "kernel_moe_scatter", &err), err));
+        CL_CHECK((backend_ctx->kernel_moe_scatter_stable = clCreateKernel(prog, "kernel_moe_scatter_stable", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8468,10 +8384,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
 
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_mc3", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_mc3", &err), err));
         if (getenv("GGML_OPENCL_MC3_PROBE")) {
             cl_ulong pm6 = 0, pm4 = 0; size_t wg6 = 0, wg4 = 0, mult = 0;
             clGetKernelWorkGroupInfo(backend_ctx->kernel_gemv_noshuffle_q6_K_f32_mc3, backend_ctx->device, CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(pm6), &pm6, NULL);
@@ -8504,18 +8420,18 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         }
 
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_o4 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_o4", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_o4 = clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_o4", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
 
         // Global-read variant: weights read from __global coalesced instead of
         // image1d_buffer (the texture cache caps the streaming lm_head read
         // bandwidth). Opt-in via GGML_OPENCL_Q6K_GEMV_O4_GLOBAL.
-        cl_program prog_g = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts + " -DQ6K_O4_GLOBAL");
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_o4_global =
+        cl_program prog_g = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts + " -DQ6K_O4_GLOBAL");
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_o4_global =
             clCreateKernel(prog_g, "kernel_gemv_noshuffle_q6_K_f32_o4_global", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog_g));
+        CL_CHECK(clReleaseProgram(prog_g));
         GGML_LOG_CONT(".");
     }
 
@@ -8531,12 +8447,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #endif
         std::string compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_tiled =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_tiled =
             clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_tiled", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_tiled_mc3 =
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q6_K_f32_tiled_mc3 =
             clCreateKernel(prog, "kernel_gemv_noshuffle_q6_K_f32_tiled_mc3", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8552,10 +8468,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #endif
         std::string compile_opts = std::string("-cl-std=") + opencl_c_std + " -cl-mad-enable ";
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_K_f32_tiled =
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_K_f32_tiled =
             clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32_tiled", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8569,10 +8485,10 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemm_noshuffle_q6_k_f32.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), CL_moe_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q6_K_f32_cok = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32_cok", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_K_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q6_K_f32_cok = clCreateKernel(prog, "kernel_gemm_noshuffle_q6_K_f32_cok", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -8592,11 +8508,11 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("gemv_noshuffle_q5_k_f32.cl");
 #endif
 
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), CL_gemv_compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q5_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemv_noshuffle_q5_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_k_f32_mc3", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q5_k_f32 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_k_f32", &err), err));
+        CL_CHECK((backend_ctx->kernel_gemv_noshuffle_q5_k_f32_mc3 = clCreateKernel(prog, "kernel_gemv_noshuffle_q5_k_f32_mc3", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8609,9 +8525,9 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
 #else
         const std::string kernel_src = read_file("gemm_noshuffle_q5_k_f32.cl");
 #endif
-        cl_program prog = build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
-        CL_CHECK_SOFT_ADRENO((backend_ctx->kernel_gemm_noshuffle_q5_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_f32", &err), err));
-        CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+        cl_program prog = build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
+        CL_CHECK((backend_ctx->kernel_gemm_noshuffle_q5_k_f32 = clCreateKernel(prog, "kernel_gemm_noshuffle_q5_k_f32", &err), err));
+        CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
     }
 
@@ -8625,12 +8541,12 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         const std::string kernel_src = read_file("flash_attn_repack.cl");
 #endif
         cl_program prog =
-            build_program_from_source_adreno(backend_ctx, kernel_src.c_str(), compile_opts);
+            build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
 
-        CL_CHECK_SOFT_ADRENO((backend_ctx->fa.kernel_repack_q_for_wmm = clCreateKernel(prog, "kernel_repack_q_for_wmm", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->fa.kernel_repack_k_for_wmm = clCreateKernel(prog, "kernel_repack_k_for_wmm", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->fa.kernel_repack_v_for_wmm = clCreateKernel(prog, "kernel_repack_v_for_wmm", &err), err));
-        CL_CHECK_SOFT_ADRENO((backend_ctx->fa.kernel_repack_mask_for_wmm = clCreateKernel(prog, "kernel_repack_mask_for_wmm", &err), err));
+        CL_CHECK((backend_ctx->fa.kernel_repack_q_for_wmm = clCreateKernel(prog, "kernel_repack_q_for_wmm", &err), err));
+        CL_CHECK((backend_ctx->fa.kernel_repack_k_for_wmm = clCreateKernel(prog, "kernel_repack_k_for_wmm", &err), err));
+        CL_CHECK((backend_ctx->fa.kernel_repack_v_for_wmm = clCreateKernel(prog, "kernel_repack_v_for_wmm", &err), err));
+        CL_CHECK((backend_ctx->fa.kernel_repack_mask_for_wmm = clCreateKernel(prog, "kernel_repack_mask_for_wmm", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -8645,8 +8561,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
                 cl_program prog =
                     build_program_from_binary(backend_ctx->context, backend_ctx->device, kernel_bin, CL_moe_compile_opts, bin_size);
 
-                CL_CHECK_SOFT_ADRENO((backend_ctx->fa.kernel_flash_attn_f32_f16_bin = clCreateKernel(prog, "flash_attn_f32_f16", &err), err));
-                CL_CHECK_SOFT_ADRENO(clReleaseProgram(prog));
+                CL_CHECK((backend_ctx->fa.kernel_flash_attn_f32_f16_bin = clCreateKernel(prog, "flash_attn_f32_f16", &err), err));
+                CL_CHECK(clReleaseProgram(prog));
                 GGML_LOG_CONT(".");
             }
         }
@@ -13089,20 +13005,6 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
 // The optimized gemm and gemv kernels are used for large matrices without batch.
 // tensor is the quantized weights matrix.
 inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, const ggml_tensor *tensor) {
-    // [k40fix 2026-11-07] E031.37 老编译器拒闸（K40/Redmi alioth, Adreno 650）：
-    // E031.37.12.07 编不了 wavepair/dp4a 全族（QC 内建 dot_acc_sat_4x8packed_ss_int
-    // 缺失；legF 铁证 fork 0.3.7 同崩），load_cl_kernels ADRENO 段已软注册 null。
-    // 本闸是唯一派发消费点（全部 wavepair gemm/gemv/set_tensor-noshuffle 调用点都过
-    // 这里）：major==37 一律拒入 → 调用方落 generic GEMM/GEMV 兜底（K40 已证数值
-    // 正确：四腿全过、ARGMAX id=271 金标）。判定 = known_bad 表（唯一事实源
-    // "mul_mat_adreno_wavepair" 行）× 版本钉 major==37 —— 仿 740 q4_K batched 拒闸
-    // 姿势；E031.41/47（740/830）条件不命中，逐字节零变化。
-    if (backend_ctx &&
-        backend_ctx->adreno_cl_compiler_version.type == ADRENO_CL_COMPILER_TYPE::E031 &&
-        backend_ctx->adreno_cl_compiler_version.major == 37 &&
-        tongyi::known_bad_lookup(tongyi::RCOMP_E031, "mul_mat_adreno_wavepair")) {
-        return false;
-    }
     int64_t threshold_ne0 = 512;
     int64_t threshold_ne1 = 512;
     if (!backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 38, 11, 0) &&
@@ -29379,11 +29281,6 @@ static bool ggml_cl_can_use_adreno_xmem_gemm_f16_f32(
         const ggml_tensor * src1,
         const ggml_tensor * dst) {
     if (!backend_ctx->adreno_xmem_gemm_enabled) {
-        return false;
-    }
-    // [k40fix 2026-11-07] 软注册一致性：xmem 族 program 编失败时 kernel 为 null
-    // （E031.37 老编译器），此处拒入落回通用 f16 GEMM，绝不派发空核。
-    if (backend_ctx->kernel_gemm_xmem_f16_f32_os8 == nullptr) {
         return false;
     }
     if (backend_ctx->gpu_family != GPU_FAMILY::ADRENO) {
