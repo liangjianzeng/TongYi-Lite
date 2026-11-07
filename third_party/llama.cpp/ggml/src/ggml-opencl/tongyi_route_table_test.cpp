@@ -321,7 +321,15 @@ static void family_b() {
     CHECK(!known_bad_lookup(RCOMP_E17, "mul_mv_q4_k_f32_flat"), "B4j E17 flat 不在账");
     // [aline-P1 2026-11-06] 740/E031.41 q4_K batched 驱动腐化行：派发端 known_bad 门的账面依据
     CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_id_q4_k_f32_batched"), "B4k 740/E031.41 v2 形态拒账");
-    CHECK(known_bad_count() == 7 && spec_count() == 11, "B4e 表规模 pin（11 行 + 7 坏账，R3 + q4_1 + ptq1_0 + aline-P1 740 batched）");
+    // [k40fix 2026-11-07] K40/alioth E031.37.12.07 老编译器 wavepair/dp4a 全族编不了
+    // （QC 内建 dot_acc_sat_4x8packed_ss_int 缺失）→ 拒闸行：消费端 use_adreno_kernels
+    // 版本钉 major==37 + known_bad_lookup("mul_mat_adreno_wavepair")，拒入后 generic
+    // GEMM/GEMV 兜底（K40 已证四腿全过/ARGMAX id=271 金标）。表侧只记 E031 指纹；
+    // major 钉在消费端 gate 的版本条件里，E031.41/47（740/830）不命中 = 零变化。
+    CHECK(known_bad_lookup(RCOMP_E031, "mul_mat_adreno_wavepair"), "B4l K40/E031.37 wavepair 拒账可查");
+    CHECK(!known_bad_lookup(RCOMP_E17, "mul_mat_adreno_wavepair"), "B4m E17 不在 wavepair 账");
+    CHECK(!known_bad_lookup(RCOMP_E031, "mul_mat_adreno_wavekpair"), "B4n 名字不匹配不命中（prefix 精确性）");
+    CHECK(known_bad_count() == 8 && spec_count() == 11, "B4e 表规模 pin（11 行 + 8 坏账，R3 + q4_1 + ptq1_0 + aline-P1 740 batched + k40 E031.37 wavepair）");
     for (int i = 0; i < known_bad_count(); ++i) CHECK(known_bad()[i].evidence && known_bad()[i].evidence[0], "B4f 证据非空");
     for (int i = 0; i < spec_count(); ++i) CHECK(specs()[i].owner && specs()[i].owner[0], "B4g owner 非空");
 
