@@ -125,21 +125,63 @@ kernel void kernel_mul_mv_ptq1_0_f32(
 
     float sumf[N_R0_PTQ1_0] = { 0.f };
 
-    // Each subgroup owns N_R0_PTQ1_0 rows and must visit every block itself:
-    // sub_group_reduce_add cannot cross subgroups.
-    for (int ib = 0; ib < nb; ++ib) {
+    // [tongyi 2026-11-08] v2 重写：per-lane 恒量外提 + 对齐 ushort 读 + 寄存器解包。
+    //  -1 在 float 域（无符号 -1U 下溢 = 2^32-1，740/830 双机 2^33 级乱值定罪）。
+    //  pow3 外提为标量 select（830 __constant 数组第 5 项误编档案 2026-09-27 勿回退）。
+    //  740 驱动对动态索引字节读+select 链误编（旧内核 740 单 trit 错，本版向量读绕开）。
+    //  每个 lane 的 (byte_off, p3) 在全部 K 块上恒定。
+    uint byte_off; uint p3;
+    if (v0 < 80) {
+        byte_off = (uint)(v0 & 15);
+        const uint n = (uint)v0 >> 4;
+        p3 = (n == 4) ? 81u : (n == 3) ? 27u : (n == 2) ? 9u : (n == 1) ? 3u : 1u;
+    } else if (v0 < 120) {
+        byte_off = 16u + (uint)((v0 - 80) & 7);
+        const uint n = (uint)(v0 - 80) >> 3;
+        p3 = (n == 4) ? 81u : (n == 3) ? 27u : (n == 2) ? 9u : (n == 1) ? 3u : 1u;
+    } else {
+        byte_off = 24u;
+        const uint n = (uint)(v0 - 120) >> 1;
+        p3 = (n == 3) ? 27u : (n == 2) ? 9u : (n == 1) ? 3u : 1u;
+    }
+    global const uchar * lane_base[N_R0_PTQ1_0];
+    for (int row = 0; row < N_R0_PTQ1_0; ++row) {
+        lane_base[row] = (global const uchar *)(ax[row]) + byte_off;
+    }
+
+    const int nb2 = nb & ~1;
+    int ib = 0;
+    for (; ib < nb2; ib += 2) {
+        float yl0[N_V_PTQ1_0], yl1[N_V_PTQ1_0];
+        {
+            global float * yb0 = y + (ulong)ib*QK_PTQ1_0 + v0;
+            global float * yb1 = yb0 + QK_PTQ1_0;
+            for (int v = 0; v < N_V_PTQ1_0; ++v) { yl0[v] = yb0[v]; yl1[v] = yb1[v]; }
+        }
+        for (short row = 0; row < N_R0_PTQ1_0; ++row) {
+            global const uchar * lb = lane_base[row] + (ulong)ib*28;
+            global block_ptq1_0 * qb0 = ax[row] + ib;
+            global block_ptq1_0 * qb1 = qb0 + 1;
+            // 对齐 ushort：A 字节 = 低、B 字节 = 高（byte_off 恒偶，块基址 28B 步进）
+            const ushort uv0 = *(global const ushort *)lb;
+            const ushort uv1 = *(global const ushort *)(lb + 28);
+            const float acc0 = ((float)((((uv0 & 0xFFU) * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl0[0]
+                             + ((float)((((uv0 >> 8)   * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl0[1];
+            const float acc1 = ((float)((((uv1 & 0xFFU) * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl1[0]
+                             + ((float)((((uv1 >> 8)   * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl1[1];
+            sumf[row] += (float)qb0->d * acc0 + (float)qb1->d * acc1;
+        }
+    }
+    for (; ib < nb; ++ib) {
         global float * yb = y + (ulong)ib*QK_PTQ1_0 + v0;
         float yl[N_V_PTQ1_0];
-        for (int v = 0; v < N_V_PTQ1_0; ++v) {
-            yl[v] = yb[v];
-        }
-
+        for (int v = 0; v < N_V_PTQ1_0; ++v) yl[v] = yb[v];
         for (short row = 0; row < N_R0_PTQ1_0; ++row) {
+            global const uchar * lb = lane_base[row] + (ulong)ib*28;
             global block_ptq1_0 * qb = ax[row] + ib;
-            float acc = 0.f;
-            for (int v = 0; v < N_V_PTQ1_0; ++v) {
-                acc += block_ptq1_0_value(qb, v0 + v) * yl[v];
-            }
+            const ushort uv = *(global const ushort *)lb;
+            const float acc = ((float)((((uv & 0xFFU) * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl[0]
+                            + ((float)((((uv >> 8)   * p3) & 0xFFU) * 3U >> 8) - 1.0f) * yl[1];
             sumf[row] += (float)qb->d * acc;
         }
     }
