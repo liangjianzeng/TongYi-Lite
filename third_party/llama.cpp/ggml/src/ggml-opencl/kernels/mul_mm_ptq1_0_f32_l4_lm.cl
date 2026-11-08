@@ -128,8 +128,48 @@ kernel void kernel_mul_mm_ptq1_0_f32_l4_lm(
                 const int v0 = e0 % QK_PTQ1_0;
                 const int kbase = loadr_a * LOAD_VEC_A;
 
-                for (int b = 0; b < LOAD_VEC_A; ++b) {
-                    buf_a[(kbase + b) * BM + loadc_a + l] = d * block_ptq1_0_value(qb, v0 + kbase + b);
+                // [tongyi 2026-11-08] A 侧装载重写（同 decode GEMV v2 手术）。
+                // 8 个连续值 V..V+7（V = v0+kbase，stride_a%128==0 且 BK=32 ⇒
+                // V 恒为 8 的倍数）→ 恒整段同槽：V<80 段字节 qs[V&15..]（V&15∈{0,8}），
+                // 80≤V<112..119 段字节 qs[16..23]，V==120 段 qh 交替。
+                // 一次 4B 对齐 uint×2 读替代 8 次分支标量读（块基址 28B mod4=0，
+                // 偏移 {0,8,16,24} mod4=0 ⇒ 对齐恒成立）；-1 在 float 域
+                // （无符号下溢案见 GEMV v2）。
+                const int V = v0 + kbase;
+                if (V < 80) {
+                    const uint p3 = (V >> 4) == 4 ? 81u : (V >> 4) == 3 ? 27u :
+                                    (V >> 4) == 2 ? 9u  : (V >> 4) == 1 ? 3u  : 1u;
+                    global const uchar * qb_b = (global const uchar *)qb + (V & 15);
+                    const uint uv_lo = *(global const uint *)qb_b;
+                    const uint uv_hi = *(global const uint *)(qb_b + 4);
+                    for (int b = 0; b < LOAD_VEC_A; ++b) {
+                        const uint byte_v = (b < 4) ? ((uv_lo >> (8*b)) & 0xFFU)
+                                                    : ((uv_hi >> (8*(b-4))) & 0xFFU);
+                        buf_a[(kbase + b) * BM + loadc_a + l] =
+                            d * ((float)(((byte_v * p3) & 0xFFU) * 3U >> 8) - 1.0f);
+                    }
+                } else if (V < 120) {
+                    const uint nn = (uint)(V - 80) >> 3;
+                    const uint p3 = nn == 4 ? 81u : nn == 3 ? 27u : nn == 2 ? 9u : nn == 1 ? 3u : 1u;
+                    global const uchar * qb_b = (global const uchar *)qb + 16;
+                    const uint uv_lo = *(global const uint *)qb_b;
+                    const uint uv_hi = *(global const uint *)(qb_b + 4);
+                    for (int b = 0; b < LOAD_VEC_A; ++b) {
+                        const uint byte_v = (b < 4) ? ((uv_lo >> (8*b)) & 0xFFU)
+                                                    : ((uv_hi >> (8*(b-4))) & 0xFFU);
+                        buf_a[(kbase + b) * BM + loadc_a + l] =
+                            d * ((float)(((byte_v * p3) & 0xFFU) * 3U >> 8) - 1.0f);
+                    }
+                } else {
+                    // V==120：值 120..127 = qh[0/1] 交替，n = j>>1 ∈ 0..3
+                    const ushort uvqh = *(global const ushort *)((global const uchar *)qb + 24);
+                    for (int b = 0; b < LOAD_VEC_A; ++b) {
+                        const uint byte_v = (uvqh >> (8*(b & 1))) & 0xFFU;
+                        const uint nn = (uint)b >> 1;
+                        const uint p3 = nn == 3 ? 27u : nn == 2 ? 9u : nn == 1 ? 3u : 1u;
+                        buf_a[(kbase + b) * BM + loadc_a + l] =
+                            d * ((float)(((byte_v * p3) & 0xFFU) * 3U >> 8) - 1.0f);
+                    }
                 }
             } else {
                 for (int b = 0; b < LOAD_VEC_A; ++b) {
