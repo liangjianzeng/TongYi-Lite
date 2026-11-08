@@ -754,6 +754,15 @@ struct InferenceEngine {
         model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
 
+        // MTP/NextN 张量加载必须跟随同一个用户开关（下方投机驱动的
+        // mtp_enabled = enable_mtp && n_nextn>0）。loader 缺省 load_mtp=false，
+        // nextn_flags() 会因此返回 TENSOR_SKIP 静默跳过全部 blk.N.nextn.* 张量；
+        // 随后 enable_mtp=true 创建的 MTP 上下文（ctx_type=LLAMA_CONTEXT_TYPE_MTP）
+        // 在 sched_reserve 时构建 graph_mtp，对 null 的 nextn.eh_proj 断言失败
+        // → GGML_ASSERT "MTP block missing nextn.eh_proj" → 加载期 SIGABRT
+        // （ornith-1.5-9b IQ2_XS MTP + OpenCL，740 真机 2026-11-08，tombstone 实锤）。
+        model_params.load_mtp = enable_mtp;
+
         // Pure-CPU path: make sure NO GPU device reaches the llama scheduler.
         // llama_prepare_model_devices() fills model->devices from the ggml
         // registry whenever split_mode is LAYER (the default), so on SoCs whose
