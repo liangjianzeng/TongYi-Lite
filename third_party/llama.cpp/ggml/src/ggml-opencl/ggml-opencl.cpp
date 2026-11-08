@@ -38216,13 +38216,20 @@ switch(src0t) {
                 // 99d8b15d）——当时 GEMM/GEMV 全部输出乱码，GEMM 被单独定罪。
                 // hadamard 修复后 830 真机重审：PTQ10_MM_N=1 全 GPU，M=10
                 // prefill GEMM + 5 token decode 输出 "<think>\n用户用中文打
-                // 招呼" 语义正确、DIAGLOGITS 健康，prefill 7.44s/tok(GEMV)→
-                // 0.877s/tok(GEMM) 8.5 倍。缺省翻为 1（GEMM 任意 M），env=0
-                // 保留回退 GEMV 的 A/B 通道；decode M=1 两侧同速 ~8s/tok，
-                // 另案治本（vendor 路/GEMV 内核优化）。
+                // 招呼" 语义正确、DIAGLOGITS 健康。
+                // [tongyi 2026-11-08 缺省 1→16：M-曲线裁决表（pty_mmbench@830，
+                // mvcheck 同轮全绿）] GEMV v2(89ee8fb1, 6.4 GB/s) 落地后交叉点
+                // 已移，按旧 GEMV(0.71 GB/s)定的缺省 1 过时。三形状 qkv/expert/
+                // ffn_dn 交叉点一致 M≈10-14：GEMV 带宽界 ~55-60 GFLOPS 线性，
+                // GEMM 平台期 ~17-30ms 平（350-400 GFLOPS 饱和）。短 prompt
+                // (M≈4-6) GEMV 快 3-4×；M≥16 GEMM 明确赢（17.7 vs 30.4ms@M=16
+                // qkv）。故缺省 16：M<16 走 GEMV，M≥16 走 GEMM。env=0 仍保留
+                // 全 GEMV 回退。注：ptq GEMM 大 M 段 352-404 GFLOPS，同骨架
+                // q4_0 l4_lm 1884-2137（5.3× 差距 = q4_0 读装载期 SoA 预解包，
+                // ptq 现场 28B 块解包）——大 M 治本 = P2 vendor 重排，另案。
                 static const int ptq10_mm_min_n = [] {
                     const char * e = getenv("GGML_OPENCL_PTQ10_MM_N");
-                    return e ? atoi(e) : 1;
+                    return e ? atoi(e) : 16;
                 }();
                 if (ptq10_mm_min_n <= 0 || ne11 < ptq10_mm_min_n) {
                     break;
