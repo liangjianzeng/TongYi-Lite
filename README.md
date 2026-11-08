@@ -568,12 +568,12 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.3.8.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.8.apk)  
-> v0.3.8+31 · 69,318,229 B（2026-11-07，**llama.cpp 换树 v0.9.0 基座** + B 线量化内核 8/8 PR 并入 +  
-> **prism.hadamard 两套存储同步**（bonsai-2-27b 全栈乱码根治）+ **ling-3.0-tiny 三重乱码修复** +  
-> **K40/Adreno 650 车队扩入** + versionCode 归位 31，见 [版本更新](#版本更新)）  
-> `SHA-256: 3e17570b4412e2b5b4532a4ebc40600c6d93a7e02169cde98cb379652f0975d2`
+> v0.3.8+31 · 69,326,165 B（2026-11-08 重打包，在 11-07 换树基座上追加：**模型族量化选择器**——同基础模型多量化  
+> 折叠一行、默认最小档、选择即时持久化，存量三组同源对归族 + **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M  
+> 六档全 -mtp 包）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L），见 [版本更新](#版本更新)）  
+> `SHA-256: 52e7f9e43d75d4481c74b7552e841cf987c061b16bfec1ed16e668039ff40e9d`
 
-> 📌 本包为 `main` 当前 HEAD（`bf2c8151`，含 `99d8b15d` 与 packflat 4-D 守卫）产物，源码与包一致；换树口径与实测数据见  
+> 📌 本包为 `main` 当前 HEAD（`c1dfcf63`，模型族 + 两新模型 catalog/开关改动）产物，源码与包一致；换树口径与实测数据见  
 > [版本更新](#版本更新)，自行构建见 [构建与开发](#构建与开发)。
 >
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
@@ -592,7 +592,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.8**（当前） | 2026-11-06~07 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
+| **v0.3.8**（当前） | 2026-11-06~08 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式 + **11-08 追加**：**模型族量化选择器**（同基础模型多量化折叠一行，默认最小档、选择即时持久化，qwen3.5-0.8b/bonsai 系因能力/衍生不同维持独立行）+ **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M 六档全 -mtp 包自带 NextN，标准 GGUF）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L，LLM_ARCH_NANBEIGE 已内置）+ 存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族，catalog 23→38 条。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
 | v0.3.7 | 2026-10-30~11-06 | **dLLM Clover-35B-A3B 端侧上机**（块扩散 llama 层并入 fork + split-MoE 热专家 + draft-self masked-block 自投机；830 CLI 判卷矩阵全绿）+ B 线 backport 施工（8/8 PR）+ q3_K DECODE_WINDOW 打包错槽修复 + PTQ1_0 窗口打包保守待遇。versionCode 30 |
 | v0.3.6 | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（ADB 四套测试共 56 项，其中进程内假 adbd 全链路 29 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
 | v0.3.5 | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
