@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# pre-push 闸门：拦住私有工程记忆再次流进公开仓。
+#
+# 背景：AGENTS.md / BUILD.md / android/AGENTS.md / 两篇 thinking 笔记 / .workbuddy 曾在
+# 2026-10-28 迁往私有仓 TongYi-Lite-docs；历史已 filter-repo 重写。本钩子防的是「手滑又提交回去」
+# 以及「旧历史的分支/tag 被误推」——后者一次就能让私有正文整批复活。
+#
+# 装法（本机，一条命令）：
+#   git config core.hooksPath tool/hooks
+# 想全组生效就把本文件随仓提交。
+#
+# 手工审计：bash tool/hooks/pre-push --all
+set -uo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+# 私有路径（公开仓一律不许出现，stub 例外见 ALLOW_STUB）
+BANNED_PATHS=(
+  "AGENTS.md"
+  "BUILD.md"
+  "android/AGENTS.md"
+  "thinking_runaway_notes.md"
+  "thinking_effort_token_meter_notes.md"
+  ".workbuddy"
+)
+# 允许保留的指引 stub（路径:最大字节数）
+declare -A ALLOW_STUB=( ["AGENTS.md"]=2000 )
+
+# 叙述性文本里不许出现的内网地址（.sh 探针脚本的 DEV 默认值是刻意保留的功能值，不拦）
+BANNED_IP_RE='100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+'
+TEXT_EXT_RE='\.(md|markdown|html|htm|txt|json|jsonl)$'
+
+fail=0
+note() { printf '  ✗ %s\n' "$1"; fail=1; }
+
+check_rev() {
+  local rev="$1" label="$2" p obj path
+  for p in "${BANNED_PATHS[@]}"; do
+    if git cat-file -e "$rev:$p" 2>/dev/null; then
+      local sz; sz=$(git cat-file -s "$rev:$p" 2>/dev/null || echo 0)
+      local cap=${ALLOW_STUB[$p]:-0}
+      if [ "$cap" -gt 0 ] && [ "$sz" -le "$cap" ]; then
+        : # 指引 stub，放行
+      else
+        note "$label 的 $p 是 $sz B（> ${cap}B 视为私有正文，应只存在于私有仓 docs/）"
+      fi
+    fi
+    # 整条历史里被新增过的私有路径
+    if [ -n "$(git log --format=%h -1 "$rev" -- "$p" 2>/dev/null)" ] && [ -z "${ALLOW_STUB[$p]:-}" ]; then
+      note "$label 的历史里新增过 $p"
+    fi
+  done
+  # 叙述文本里的内网 IP
+  while read -r obj path; do
+    [ -z "$obj" ] && continue
+    case "$path" in third_party/*) continue;; esac
+    printf '%s\n' "$path" | grep -qE "$TEXT_EXT_RE" || continue
+    if git cat-file -p "$obj" 2>/dev/null | grep -qE "$BANNED_IP_RE"; then
+      note "$label 的 $path 含内网 IP（应打码为 <redacted-tailscale>）"
+    fi
+  done < <(git rev-list --objects "$rev" 2>/dev/null | awk '{o=$1; $1=""; sub(/^ /,""); print o" "$0}' | head -40000)
+}
+
+if [ "${1:-}" = "--all" ]; then
+  echo "全量审计所有本地 ref……"
+  while read -r sha ref; do
+    git cat-file -e "$sha^{commit}" 2>/dev/null || continue
+    check_rev "$sha" "$ref"
+  done < <(git for-each-ref --format='%(objectname) %(refname)')
+  [ "$fail" -eq 0 ] && echo "✓ 全部 ref 干净" || echo "↑ 上面这些 ref 一旦推到公开仓就会复活私有内容"
+  exit "$fail"
+fi
+
+# pre-push 模式：stdin 每行 "<local_ref> <local_sha> <remote_ref> <remote_sha>"
+got=0
+while read -l_ref l_sha r_ref r_sha; do
+  got=1
+  case "$r_ref" in
+    refs/heads/main|refs/heads/*) : ;;
+  esac
+  if [ "$r_sha" = "$(printf '0%.0s' {1..40})" ]; then
+    continue   # 删除 ref，无需扫
+  fi
+  if [ "$l_sha" = "$(printf '0%.0s' {1..40})" ]; then
+    continue
+  fi
+  # 只扫将要推出去的提交范围
+  if git cat-file -e "$r_sha^{commit}" 2>/dev/null; then
+    range="$r_sha..$l_sha"
+  else
+    range="$l_sha"
+  fi
+  echo "推送闸门检查 $l_ref → $r_ref ($range)"
+  for c in $(git rev-list "$range" 2>/dev/null | head -2000); do
+    check_rev "$c" "$r_ref@$(git rev-parse --short "$c")"
+  done
+done
+
+if [ "$got" -eq 0 ]; then
+  echo "（无 ref 推送）"; exit 0
+fi
+
+if [ "$fail" -ne 0 ]; then
+  cat >&2 <<'MSG'
+
+推送被拦：上面列出的内容属私有工程记忆，公开仓不许携带。
+  · 正文该进私有仓：TongYi-Lite-docs（检出在 docs/ 子模块）
+  · 指引 stub 控制在 2 KB 以内
+  · 叙述文本内网 IP 请打码；.sh 探针脚本的 DEV 默认值不受本闸门约束
+确认无误要强行推：git push --no-verify
+MSG
+  exit 1
+fi
+echo "✓ 推送闸门通过"
