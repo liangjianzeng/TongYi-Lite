@@ -38210,9 +38210,19 @@ switch(src0t) {
                 // GEMV 慢而正确（3.3 GMAC/s），decode 两侧同为 ~8s/token。
                 // 治本=P2 vendor 路（SoA+image+noshuffle）；env=1 可强开 GEMM
                 // 做 A/B（prefill 11 倍提速但乱码，勿用于真实推理）。
+                // [tongyi 2026-11-08 昭案] 上述"数值静默错"是冤案：定罪实验与
+                // l4_lm 乱码发生在 prism.hadamard 整图缺席的年代（加载侧填
+                // hadamard_* 而图侧读 model.hdmd 恒空，变换静默不建，见
+                // 99d8b15d）——当时 GEMM/GEMV 全部输出乱码，GEMM 被单独定罪。
+                // hadamard 修复后 830 真机重审：PTQ10_MM_N=1 全 GPU，M=10
+                // prefill GEMM + 5 token decode 输出 "<think>\n用户用中文打
+                // 招呼" 语义正确、DIAGLOGITS 健康，prefill 7.44s/tok(GEMV)→
+                // 0.877s/tok(GEMM) 8.5 倍。缺省翻为 1（GEMM 任意 M），env=0
+                // 保留回退 GEMV 的 A/B 通道；decode M=1 两侧同速 ~8s/tok，
+                // 另案治本（vendor 路/GEMV 内核优化）。
                 static const int ptq10_mm_min_n = [] {
                     const char * e = getenv("GGML_OPENCL_PTQ10_MM_N");
-                    return e ? atoi(e) : 32;
+                    return e ? atoi(e) : 1;
                 }();
                 if (ptq10_mm_min_n <= 0 || ne11 < ptq10_mm_min_n) {
                     break;
