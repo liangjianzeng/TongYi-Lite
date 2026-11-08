@@ -132,7 +132,22 @@ static GenStats g_last_stats;
 //   big:    A72=0xd08, A73=0xd09, A75=0xd40, A76=0xd41, A77=0xd42, A78=0xd44,
 //           A710=0xd47, A715=0xd48, A720=0xd81, A725=0xd4b, X1=0xd45, X2=0xd46,
 //           X3=0xd4a, X4=0xd82, X925=0xd84, X930=0xd85
+// Unknown parts (Qualcomm custom: Kryo Gold 0x805 etc.; alioth/K40 甚至把 A55 簇
+// 报成 0xd0d) cannot be trusted as big — fall back to the per-core cpufreq
+// cpuinfo_max_freq: < 2.05 GHz = little cluster (A55 1.8 GHz / A510 ≤2.0 GHz),
+// ≥ 2.05 GHz = big (A7xx/X 类 ≥2.4 GHz). Unreadable freq → keep old "big" default.
 // Returns number of big cores, or -1 if /proc/cpuinfo cannot be parsed.
+static int read_cpu_max_freq_khz(int cpu) {
+    if (cpu < 0) return -1;
+    char path[96];
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+    std::ifstream f(path);
+    long v = -1;
+    if (f.is_open()) f >> v;
+    return (f.is_open() && v > 0) ? (int) v : -1;
+}
+
 static int detect_big_core_count() {
     std::ifstream f("/proc/cpuinfo");
     if (!f.is_open()) {
@@ -141,11 +156,19 @@ static int detect_big_core_count() {
     }
     int big = 0, little = 0;
     std::string line;
+    int cur_cpu = -1;
     while (std::getline(f, line)) {
+        // Track "processor : N" so unknown parts can consult that core's freq.
+        if (line.compare(0, 9, "processor") == 0) {
+            size_t colon = line.find(':');
+            cur_cpu = colon != std::string::npos
+                      ? atoi(line.c_str() + colon + 1) : -1;
+            continue;
+        }
         // "CPU part\t: 0xd81"
         size_t p = line.find("CPU part");
         if (p == std::string::npos) continue;
-        size_t colon = line.find(':');
+        size_t colon = line.find(':', p);
         if (colon == std::string::npos) continue;
         unsigned long part = strtoul(line.c_str() + colon + 1, nullptr, 16);
         switch (part) {
@@ -155,11 +178,18 @@ static int detect_big_core_count() {
             case 0xd80: // A520
                 little++;
                 break;
-            default:
-                // Unknown part — treat as big (all cores on modern SoCs are
-                // performance-class; unknown ARMv9 parts are A7xx/X-class).
-                big++;
+            default: {
+                // Unknown part — decide by that core's max frequency instead
+                // of blindly treating it as big (K40/870 misreport gave
+                // big=8 little=0 and put 4×A55 into the decode thread pool).
+                const int khz = read_cpu_max_freq_khz(cur_cpu);
+                if (khz > 0 && khz < 2050000) {
+                    little++;
+                } else {
+                    big++;
+                }
                 break;
+            }
         }
     }
     if (big + little == 0) return -1;
@@ -772,6 +802,10 @@ struct InferenceEngine {
         // Use mmap for loading — faster and lower peak memory than loading
         // the entire file into RAM. On Android internal storage (ext4/f2fs)
         // mmap works reliably; file-lock issues only affect FAT32/external SD.
+        // 2026-11-08 曾试过「MemAvailable 紧张时改 LLAMA_LOAD_MODE_NONE 整读」
+        // 防 mmap 页逐出抖动——已撤销：K40 实测 MemAvailable 8.5 GB 根本不紧，
+        // 且 fork 的 no-mmap 装载路径存在堆损坏（raster 线程 SEGV 0x0 +
+        // destroyed-mutex，两次加载即崩），该路径在排查清楚前不可用。
         model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
 
         // Use unique_lock so we can unlock before JNI callbacks to prevent deadlock.
