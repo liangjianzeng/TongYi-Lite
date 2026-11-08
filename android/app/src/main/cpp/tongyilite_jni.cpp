@@ -1509,6 +1509,16 @@ struct InferenceEngine {
             mtp_params.n_threads = ctx_params.n_threads;
             mtp_params.n_threads_batch = ctx_params.n_threads_batch;
             mtp_params.kv_unified = true;
+            // MTP 头必须跟随主上下文的 FA 配置（2026-11-08，740 实机 tombstone）：
+            // mtp_params 缺省 flash_attn_type=AUTO，resolve_fused_ops 会把 FA 探测
+            // 开启（主上下文是 DISABLED 不跟随——ctx_other 继承仅 GEMMA4_ASSISTANT
+            // 有），于是 unified KV 的 fused_kv_rows=true 分配 kv_rows 张量；而
+            // R-278 规则令 decode 形态图 use_flash_attn=false →
+            // build_attn_mha 断言 (use_flash_attn || kv_rows==nullptr) 失败 →
+            // GGML_ASSERT → 每次加载 ~10s 后 SIGABRT 崩溃循环。
+            // DISABLED + kv_unified=true 走 fork 预设的 dense-mask 全缓存回退
+            // （单序列 App 语义等价），kv_rows 恒空，断言通过。
+            mtp_params.flash_attn_type = ctx_params.flash_attn_type;
 
             mtp_ctx = llama_init_from_model(model, mtp_params);
             if (mtp_ctx) {
