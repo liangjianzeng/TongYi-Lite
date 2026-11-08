@@ -454,12 +454,13 @@ struct InferenceEngine {
     // 走 GGUF 内嵌 jinja 模板（dllm-CLOVER-APP-G，真机 830 乱码定罪：
     // 内置 chatml 回退+Qwen3 空 think 注入 → 偏离训练分布 → 空/乱码）。
     bool is_clover_model = false;
-    int  n_draft_max = 2;   // how many tokens the MTP head drafts per step (upper bound).
-                            // Default 2 (was 3): on compute-bound 4B the verify batch
-                            // (1+n_draft) must be repaid by acceptance a>=n_draft, so a
-                            // smaller budget lowers the break-even point and curbs the
-                            // negative-benefit window; the adaptive logic still drops to
-                            // 1 when the head is doing badly.
+    int  n_draft_max = 1;   // how many tokens the MTP head drafts per step (upper bound).
+                            // 2026-11-08 定案 2→1（机主裁决，不再真机 AB）：手机端
+                            // GPU 解码 compute-bound（740 ornith 308ms/tok vs ~70ms
+                            // 内存下限），verify 批 (1+n) 成本近线性——n=2 实测净亏
+                            // （"MTP更慢"），n=1 把亏损压到最小；收益翻身只能等
+                            // memory-bound 场景（CPU / 大批摊薄读权重）。自适应在
+                            // n=1 下无下调空间，恒为 1。
 
     // Adaptive draft budget. Speculative gain hinges on ACCEPTANCE: each iteration
     // verifies a (1+n_draft)-token batch on the target, which on a compute-bound
@@ -2796,10 +2797,9 @@ struct InferenceEngine {
                         if (mtp_draft_sum >= 12.0f) {
                             const float rate = mtp_accept_sum / mtp_draft_sum;
                             if (mtp_enabled) {
-                                // MTP drafts cheaply per token: shrink hard at low
-                                // acceptance (verify batch must be repaid).
-                                mtp_adaptive_max = (rate >= 0.75f) ? n_draft_max :
-                                                   (rate >= 0.50f) ? 2 : 1;
+                                // n_draft_max=1（2026-11-08）下无下调空间，恒为 1；
+                                // accept_rate 仍统计并经下方共用 LOGI 打印供判卷。
+                                mtp_adaptive_max = n_draft_max;
                             } else {
                                 // DSpark decodes the WHOLE noise block per draft
                                 // forward regardless of the kept length (the forward
