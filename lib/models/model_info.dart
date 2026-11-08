@@ -2,6 +2,8 @@
 // Model metadata, mirror entries, and download task state.
 // All model configurations live in assets/models_catalog.json
 // and are loaded dynamically via ModelCatalog.load().
+// familyId 相同的条目构成「模型族」（同基础模型多量化），归组与
+// 量化档位选择见 model_family.dart。
 // ============================================================
 
 enum ModelType { text, vision }
@@ -306,6 +308,20 @@ class ModelConfig {
   /// -les 形态（专家已剥离），专家分片 + manifest 下载到 `{id}.experts/`。
   final SplitMoeConfig? splitMoe;
 
+  /// 模型族 id：同一基础模型的不同量化共用一个族 id，模型管理页折叠为一行、
+  /// 走量化选择器（见 model_family.dart）。null = 独立条目，不参与归族。
+  final String? familyId;
+
+  /// 模型族展示名（族主行标题）。取族内第一个非空 [familyName] 的条目；
+  /// 全族都未配时回退 [cleanModelName]。
+  final String? familyName;
+
+  /// 本条目的量化档位标签（如 "IQ2_XS"），族内量化选择器展示用。
+  final String? quantLabel;
+
+  /// 族内档位排序（升序）。0 = 默认最小档；同族条目按它升序排列与选择。
+  final int quantRank;
+
   const ModelConfig({
     required this.id,
     required this.name,
@@ -321,6 +337,10 @@ class ModelConfig {
     this.mmproj,
     this.dspark,
     this.splitMoe,
+    this.familyId,
+    this.familyName,
+    this.quantLabel,
+    this.quantRank = 0,
   });
 
   String get bestMirrorUrl => mirrors.first.url;
@@ -369,6 +389,10 @@ class ModelConfig {
       splitMoe: json['splitMoe'] != null
           ? SplitMoeConfig.fromJson(json['splitMoe'] as Map<String, dynamic>)
           : null,
+      familyId: json['familyId'] as String?,
+      familyName: json['familyName'] as String?,
+      quantLabel: json['quantLabel'] as String?,
+      quantRank: json['quantRank'] as int? ?? 0,
     );
   }
 }

@@ -101,10 +101,21 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   }
 
   /// 设置全局 dspark 功能总开关（默认关闭）。关闭时模型卡片不显示各模型
-  /// dspark 开关，加载模型也强制不启用；开启后模型卡片显示声明了草稿头??
-  /// 模型??dspark 开关，用户可逐个配置??
+  /// dspark 开关，加载模型也强制不启用；开启后模型卡片显示声明了草稿头
+  /// 模型的 dspark 开关，用户可逐个配置。
   Future<void> setEnableDsparkFeature(bool value) async {
     state = state.copyWith(enableDsparkFeature: value);
+    await _persist();
+  }
+
+  /// 记住模型族的量化档位选择（familyId → 选中的 variant modelId），即时
+  /// 落盘。下次进入模型管理页无需再选；目录热更新撤档后由
+  /// resolveSelectedVariant 自动回落最小档。
+  Future<void> setQuantChoice(String familyId, String variantId) async {
+    if (familyId.isEmpty || variantId.isEmpty) return;
+    final updated = Map<String, String>.from(state.quantChoiceByFamily);
+    updated[familyId] = variantId;
+    state = state.copyWith(quantChoiceByFamily: updated);
     await _persist();
   }
 

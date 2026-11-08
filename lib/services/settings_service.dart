@@ -76,6 +76,11 @@ class InferenceSettings {
   /// 无条目回退全局 autoLoadMmproj，保持既有用户行为不变。
   final Map<String, bool> visionEnabledByModel;
 
+  /// 模型族量化档位选择，按族 id 持久化（familyId → 选中的 variant modelId）。
+  /// 无条目 = 默认最小档（quantRank 最小）；用户在模型管理页展开区点选后
+  /// 即时落盘，下次进入无需再选（归组与解析见 model_family.dart）。
+  final Map<String, String> quantChoiceByFamily;
+
   /// 全局 dspark 功能总开关（默认关闭）。用于控制整??APP ??dspark 是否
   /// 「可见可用」：
   /// - 关闭（默认）：模型卡片不显示各模型的 dspark 开关，加载模型时也强制
@@ -491,6 +496,7 @@ class InferenceSettings {
     Map<String, bool>? dsparkEnabledByModel,
     Map<String, int>? moeBankOverrideByModel,
     Map<String, bool>? visionEnabledByModel,
+    Map<String, String>? quantChoiceByFamily,
     this.enableDsparkFeature = false,
     this.defaultModelId,
     List<ApiModelConfig>? apiModels,
@@ -597,6 +603,7 @@ class InferenceSettings {
         dsparkEnabledByModel = dsparkEnabledByModel ?? const {},
         moeBankOverrideByModel = moeBankOverrideByModel ?? const {},
         visionEnabledByModel = visionEnabledByModel ?? const {},
+        quantChoiceByFamily = quantChoiceByFamily ?? const {},
         apiModels = apiModels ?? const [],
         agentToolsByModel = agentToolsByModel ?? const {},
         agentByModel = agentByModel ?? const {},
@@ -685,6 +692,7 @@ class InferenceSettings {
     Map<String, bool>? dsparkEnabledByModel,
     Map<String, int>? moeBankOverrideByModel,
     Map<String, bool>? visionEnabledByModel,
+    Map<String, String>? quantChoiceByFamily,
     bool? enableDsparkFeature,
     String? defaultModelId,
     // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
@@ -800,6 +808,7 @@ class InferenceSettings {
       moeBankOverrideByModel:
           moeBankOverrideByModel ?? this.moeBankOverrideByModel,
       visionEnabledByModel: visionEnabledByModel ?? this.visionEnabledByModel,
+      quantChoiceByFamily: quantChoiceByFamily ?? this.quantChoiceByFamily,
       enableDsparkFeature: enableDsparkFeature ?? this.enableDsparkFeature,
       defaultModelId:
           clearDefaultModel ? null : defaultModelId ?? this.defaultModelId,
@@ -939,6 +948,7 @@ class InferenceSettings {
         // 换新键一次性失效，让用户在新物理模型下重新覆写。
         'moeBankOverrideByModelV2': moeBankOverrideByModel,
         'visionEnabledByModel': visionEnabledByModel,
+        'quantChoiceByFamily': quantChoiceByFamily,
         'enableDsparkFeature': enableDsparkFeature,
         'defaultModelId': defaultModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
@@ -1056,6 +1066,7 @@ class InferenceSettings {
       // V2 键（2026-10-16 bank 物理模型修正后一次性迁移，旧键弃用）。
       moeBankOverrideByModel: _parseIntMap(json['moeBankOverrideByModelV2']),
       visionEnabledByModel: _parseBoolMap(json['visionEnabledByModel']),
+      quantChoiceByFamily: _parseStringMap(json['quantChoiceByFamily']),
       enableDsparkFeature: json['enableDsparkFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
       // 旧配置缺这两个字段时默认空列??+ 停用，向后兼容??
@@ -1357,6 +1368,12 @@ class InferenceSettings {
       if (iv != null) out[k.toString()] = iv;
     });
     return out;
+  }
+
+  /// 解析按模型 string map（如 quantChoiceByFamily）；非法条目丢弃，空返回空 map。
+  static Map<String, String> _parseStringMap(Object? raw) {
+    if (raw is! Map) return const {};
+    return raw.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
   }
 
   static Map<String, bool> _migrateLegacyMtp(Map<String, dynamic> json) {

@@ -72,6 +72,7 @@ import '../agent/builtin_tools/memory_tool.dart'
     show readGlobalMemorySnapshot, deleteGlobalMemoryEntry, clearGlobalMemory;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/model_info.dart';
+import '../models/model_family.dart';
 import '../models/model_catalog.dart';
 import '../models/api_model.dart';
 import '../agent/llm/thinking_effort.dart';
@@ -214,27 +215,40 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
                   child: Center(child: CircularProgressIndicator()),
                 );
               }
-              // 排序规则：已缓存最优先在前；未下载的按名称首字母排序（A→Z）。
-              final models = List<ModelConfig>.from(snapshot.data!)
-                ..sort((a, b) {
-                  final ca = tasks[a.id]?.state == DownloadState.completed;
-                  final cb = tasks[b.id]?.state == DownloadState.completed;
-                  if (ca != cb) return ca ? -1 : 1;
-                  return cleanModelName(a.name)
-                      .toLowerCase()
-                      .compareTo(cleanModelName(b.name).toLowerCase());
-                });
-              final cachedCount = models
-                  .where((m) => tasks[m.id]?.state == DownloadState.completed)
-                  .length;
+              // 先按族归组（同族量化折叠为一行，见 model_family.dart），再对
+              // 「行」排序——排序规则不变：已缓存最优先在前；未下载的按名称
+              // 首字母排序（A→Z）。族行的缓存判定是行内任一档位已缓存。
+              final rowsData = buildModelRows(snapshot.data!);
+              bool rowCached(ModelListRow r) => switch (r) {
+                    SingleModelRow(:final model) =>
+                      tasks[model.id]?.state == DownloadState.completed,
+                    FamilyModelRow(:final family) => family.variants.any(
+                        (v) => tasks[v.id]?.state == DownloadState.completed),
+                  };
+              String rowName(ModelListRow r) => switch (r) {
+                    SingleModelRow(:final model) => cleanModelName(model.name),
+                    FamilyModelRow(:final family) => cleanModelName(family.name),
+                  }.toLowerCase();
+              rowsData.sort((a, b) {
+                final ca = rowCached(a);
+                final cb = rowCached(b);
+                if (ca != cb) return ca ? -1 : 1;
+                return rowName(a).compareTo(rowName(b));
+              });
+              final cachedCount = rowsData.where(rowCached).length;
               final rows = <Widget>[];
-              for (var i = 0; i < models.length; i++) {
+              for (var i = 0; i < rowsData.length; i++) {
                 // 已缓存块与未下载块之间插一条分组标签，长列表有个分段感。
                 if (i == cachedCount && cachedCount > 0) {
                   rows.add(_groupLabel('未下载'));
                 }
-                rows.add(_modelRow(
-                    models[i], tasks[models[i].id], settings, ms));
+                final r = rowsData[i];
+                switch (r) {
+                  case SingleModelRow(:final model):
+                    rows.add(_modelRow(model, tasks[model.id], settings, ms));
+                  case FamilyModelRow(:final family):
+                    rows.add(_familyRow(family, tasks, settings, ms));
+                }
               }
               return Column(children: rows);
             },
@@ -292,6 +306,29 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
     );
   }
 
+  /// 行首状态图标（_modelRow / _familyRow 共用）：图形 + 颜色表达
+  /// 已加载 / 加载中 / 下载中 / 暂停 / 失败 / 已缓存 / 待下载。
+  (IconData, Color) _rowLeadIcon(
+    ColorScheme scheme, {
+    required bool isLoadedHere,
+    required bool isLoadingHere,
+    required DownloadState state,
+    required bool isCached,
+  }) {
+    if (isLoadedHere) return (Icons.bolt, scheme.primary);
+    if (isLoadingHere) return (Icons.sync_alt, scheme.primary);
+    if (state == DownloadState.downloading ||
+        state == DownloadState.verifying) {
+      return (Icons.download, Colors.blue);
+    }
+    if (state == DownloadState.paused) {
+      return (Icons.pause_circle_outline, Colors.orange);
+    }
+    if (state == DownloadState.failed) return (Icons.error_outline, Colors.red);
+    if (isCached) return (Icons.check_circle_outline, Colors.green);
+    return (Icons.cloud_download_outlined, scheme.outline);
+  }
+
   /// 单个模型的一行（+ 可选次行 / 展开区）。
   Widget _modelRow(ModelConfig model, DownloadTask? task,
       InferenceSettings settings, ModelState ms) {
@@ -313,31 +350,11 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
     }
 
     // 状态全靠「图标颜色 + 主操作文案」表达，不再叠「已缓存 / 待下载」chip。
-    final IconData leadIcon;
-    final Color leadColor;
-    if (isLoadedHere) {
-      leadIcon = Icons.bolt;
-      leadColor = scheme.primary;
-    } else if (isLoadingHere) {
-      leadIcon = Icons.sync_alt;
-      leadColor = scheme.primary;
-    } else if (state == DownloadState.downloading ||
-        state == DownloadState.verifying) {
-      leadIcon = Icons.download;
-      leadColor = Colors.blue;
-    } else if (state == DownloadState.paused) {
-      leadIcon = Icons.pause_circle_outline;
-      leadColor = Colors.orange;
-    } else if (state == DownloadState.failed) {
-      leadIcon = Icons.error_outline;
-      leadColor = Colors.red;
-    } else if (isCached) {
-      leadIcon = Icons.check_circle_outline;
-      leadColor = Colors.green;
-    } else {
-      leadIcon = Icons.cloud_download_outlined;
-      leadColor = scheme.outline;
-    }
+    final (leadIcon, leadColor) = _rowLeadIcon(scheme,
+        isLoadedHere: isLoadedHere,
+        isLoadingHere: isLoadingHere,
+        state: state,
+        isCached: isCached);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
@@ -475,6 +492,284 @@ class _ModelManagementBodyState extends ConsumerState<ModelManagementBody> {
           // ---- 展开区：次要配置与危险动作 ----
           if (expanded) _buildExpandArea(model, settings, state, isCached),
         ],
+      ),
+    );
+  }
+
+  /// 模型族的一行（同基础模型多量化折叠，2026-11-08）：主行 = 状态图标 +
+  /// 族名 + 当前量化档 chip + 主操作按钮，全部绑定 resolveSelectedVariant
+  /// 选中的档位；展开区顶部是量化选择列表（点选即持久化），其余控件复用
+  /// [_buildExpandArea]（同样绑定选中档位）。展开 key 用 `family:` 前缀，
+  /// 避免与 variant id 撞车。
+  Widget _familyRow(ModelFamily family, Map<String, DownloadTask> tasks,
+      InferenceSettings settings, ModelState ms) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = resolveSelectedVariant(family, settings);
+    final task = tasks[selected.id];
+    final isCached = task?.state == DownloadState.completed;
+    final isLoadingHere = ms.isLoading && ms.modelId == selected.id;
+    final isLoadedHere = ms.modelId == selected.id && ms.isLoaded;
+    final isDefault = settings.defaultModelId == selected.id;
+    final expandKey = 'family:${family.familyId}';
+    final expanded = _expanded.contains(expandKey);
+    final DownloadState state;
+    if (task != null &&
+        (task.state == DownloadState.downloading ||
+            task.state == DownloadState.paused ||
+            task.state == DownloadState.failed ||
+            task.state == DownloadState.verifying)) {
+      state = task.state;
+    } else {
+      state = isCached ? DownloadState.completed : DownloadState.idle;
+    }
+    final (leadIcon, leadColor) = _rowLeadIcon(scheme,
+        isLoadedHere: isLoadedHere,
+        isLoadingHere: isLoadingHere,
+        state: state,
+        isCached: isCached);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: isLoadedHere
+            ? scheme.secondaryContainer.withValues(alpha: 0.55)
+            : scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isLoadedHere
+              ? scheme.primary.withValues(alpha: 0.5)
+              : scheme.outlineVariant,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ---- 主行 ----
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => _toggleExpanded(expandKey),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Icon(leadIcon, size: 18, color: leadColor),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            cleanModelName(family.name),
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        // 当前量化档 chip：不展开也能看到选了哪档。
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: scheme.secondaryContainer
+                                .withValues(alpha: 0.7),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            selected.quantLabel ?? family.variants.first.id,
+                            style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: scheme.onSecondaryContainer),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // 默认星标：绑定选中档位（点按 = 设/取消启动自动加载）。
+                  if (isCached)
+                    Tooltip(
+                      message: isDefault
+                          ? '启动时自动加载（当前默认模型），点按取消'
+                          : '设为默认：启动时自动加载',
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => ref
+                            .read(settingsProvider.notifier)
+                            .setDefaultModel(isDefault ? null : selected.id),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 2),
+                          child: Icon(
+                            isDefault
+                                ? Icons.star_rounded
+                                : Icons.star_border_rounded,
+                            size: 18,
+                            color: isDefault
+                                ? Colors.amber.shade700
+                                : scheme.outline,
+                          ),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(width: 2),
+                  _buildActionButton(selected, state, isCached,
+                      isLoadedHere: isLoadedHere,
+                      isLoadingHere: isLoadingHere),
+                ],
+              ),
+            ),
+          ),
+
+          // ---- 次行（与 _modelRow 同规则：只在该说点什么时出现）----
+          if (!isCached &&
+                !expanded &&
+                (state == DownloadState.idle ||
+                    state == DownloadState.failed)) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(36, 0, 12, 7),
+              child: _modelMetaLine(
+                selected,
+                failedMessage: state == DownloadState.failed
+                    ? (task?.errorMessage ?? '下载失败')
+                    : null,
+              ),
+            ),
+          ] else if (state == DownloadState.downloading ||
+              state == DownloadState.verifying ||
+              state == DownloadState.paused) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(36, 0, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(
+                      value: task?.progress,
+                      minHeight: 3,
+                      borderRadius: BorderRadius.circular(2)),
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _progressLabel(state, task),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11, color: scheme.onSurfaceVariant),
+                        ),
+                      ),
+                      Text(
+                        '${task?.downloadedDisplay ?? '-'} / ${task?.totalDisplay ?? '-'} · ${task?.progressPercent ?? ''}',
+                        style: TextStyle(
+                            fontSize: 11, color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          // ---- 展开区：量化选择 + 次要配置与危险动作（绑定选中档位）----
+          if (expanded) ...[
+            _buildQuantSelector(family, selected, tasks),
+            _buildExpandArea(selected, settings, state, isCached),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 量化选择列表（展开区顶部）：每档一行 = 单选钮 + 档位标签 + 体积 + 状态。
+  /// 点击即选中并持久化（setQuantChoice，下次进入无需再选）；已缓存且非当前
+  /// 档的行给一颗删除钮，清理切档后遗留的旧文件。
+  Widget _buildQuantSelector(ModelFamily family, ModelConfig selected,
+      Map<String, DownloadTask> tasks) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text(
+              '量化档位（默认最小档，选择会被记住）',
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: scheme.onSurfaceVariant),
+            ),
+          ),
+          for (final v in family.variants)
+            _quantOptionRow(family, v, v.id == selected.id, tasks[v.id]),
+        ],
+      ),
+    );
+  }
+
+  /// 单个量化档位选项行。
+  Widget _quantOptionRow(ModelFamily family, ModelConfig v, bool isSelected,
+      DownloadTask? task) {
+    final scheme = Theme.of(context).colorScheme;
+    final isCached = task?.state == DownloadState.completed;
+    final busy = task != null &&
+        (task.state == DownloadState.downloading ||
+            task.state == DownloadState.paused ||
+            task.state == DownloadState.verifying);
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: () => ref
+          .read(settingsProvider.notifier)
+          .setQuantChoice(family.familyId, v.id),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Icon(
+              isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+              size: 15,
+              color: isSelected ? scheme.primary : scheme.outline,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              v.quantLabel ?? v.id,
+              style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400),
+            ),
+            const SizedBox(width: 8),
+            Text(v.sizeMBDisplay,
+                style:
+                    TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+            const Spacer(),
+            if (task != null && busy)
+              Text('下载中 ${task.progressPercent}',
+                  style: const TextStyle(fontSize: 11, color: Colors.blue))
+            else if (isCached)
+              Text('已缓存',
+                  style:
+                      TextStyle(fontSize: 11, color: Colors.green.shade700)),
+            if (isCached && !isSelected) ...[
+              const SizedBox(width: 8),
+              Tooltip(
+                message: '删除该档位文件（清理切档后不再使用的旧文件）',
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () => _confirmDeleteModel(v, context),
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Icon(Icons.delete_outline,
+                        size: 15, color: Colors.red.shade600),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
