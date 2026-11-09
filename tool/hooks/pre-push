@@ -31,9 +31,17 @@ BANNED_PATHS=(
 # 允许保留的指引 stub（路径:最大字节数）
 declare -A ALLOW_STUB=( ["AGENTS.md"]=2000 )
 
-# 叙述性文本里不许出现的内网地址（.sh 探针脚本的 DEV 默认值是刻意保留的功能值，不拦）
+# 叙述性文本与脚本里都不许出现的内网地址（2026-11-09 裁决升级：.sh/.py 的 DEV 默认值
+# 同样打码改传参，不再豁免——"功能值"不是携带内网地址的通行证）。
 BANNED_IP_RE='100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+'
-TEXT_EXT_RE='\.(md|markdown|html|htm|txt|json|jsonl)$'
+# 已知设备序列号（真机清单属私有工程记忆；新序列号在此追加）。
+# 拆段拼接：钩子自身 blob 不含完整序列号字面量，避免自我匹配拦死自己；对外匹配不受影响。
+_SN740="98f"; _SN740b="c9410"; _SN830="4332"; _SN830b="8e37"; _SNK40="8b1"; _SNK40b="e8747"
+_SPW1="Lxt2"; _SPW2="01223"
+BANNED_SERIAL_RE="${_SN740}${_SN740b}|${_SN830}${_SN830b}|${_SNK40}${_SNK40b}|${_SPW1}${_SPW2}"
+# 扫描面 = 一切文本（含脚本与配置）；中文文件名必须 core.quotePath=false，
+# 否则 rev-list 输出被引号包裹、尾引号把 '\.md$' 锚定打穿——npu-line 放行事故根因。
+TEXT_EXT_RE='\.(md|markdown|html|htm|txt|text|json|jsonl|jsonc|yaml|yml|toml|ini|cfg|conf|csv|tsv|log|sh|bash|zsh|py|ps1|psm1|bat|cmd|sql|xml|env|list)$'
 
 fail=0
 note() { printf '  ✗ %s\n' "$1"; fail=1; }
@@ -61,15 +69,19 @@ check_rev() {
       note "$label 的历史里新增过 $p"
     fi
   done
-  # 叙述文本里的内网 IP
+  # 叙述文本/脚本里的内网 IP 与设备序列号
+  # core.quotePath=false：中文路径不被 git 加引号转义，否则 TEXT_EXT_RE 的 $ 锚定失效
   while read -r obj path; do
     [ -z "$obj" ] && continue
     case "$path" in third_party/*) continue;; esac
     printf '%s\n' "$path" | grep -qE "$TEXT_EXT_RE" || continue
-    if git cat-file -p "$obj" 2>/dev/null | grep -qE "$BANNED_IP_RE"; then
+    if git cat-file -p "$obj" 2>/dev/null | grep -aqE "$BANNED_IP_RE"; then
       note "$label 的 $path 含内网 IP（应打码为 <redacted-tailscale>）"
     fi
-  done < <(git rev-list --objects "$range" 2>/dev/null | awk '{o=$1; $1=""; sub(/^ /,""); print o" "$0}' | head -40000)
+    if git cat-file -p "$obj" 2>/dev/null | grep -aqE "$BANNED_SERIAL_RE"; then
+      note "$label 的 $path 含设备序列号/凭证（应打码为 <redacted-serial>/<redacted-ssh-passwd>）"
+    fi
+  done < <(git -c core.quotePath=false rev-list --objects "$range" 2>/dev/null | awk '{o=$1; $1=""; sub(/^ /,""); print o" "$0}' | head -40000)
 }
 
 if [ "${1:-}" = "--all" ]; then
@@ -156,7 +168,8 @@ if [ "$fail" -ne 0 ]; then
 推送被拦：上面列出的内容属私有工程记忆，公开仓不许携带。
   · 正文该进私有仓：TongYi-Lite-docs（检出在 docs/ 子模块）
   · 指引 stub 控制在 2 KB 以内
-  · 叙述文本内网 IP 请打码；.sh 探针脚本的 DEV 默认值不受本闸门约束
+  · 一切文本（含 .sh/.py 脚本）内网 IP 打码为 <redacted-tailscale>、序列号打码为
+    <redacted-serial>；脚本功能值改为环境变量/参数传入，真值存私有区不进仓
 确认无误要强行推：git push --no-verify
 MSG
   exit 1
