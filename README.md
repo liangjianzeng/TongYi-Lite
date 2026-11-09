@@ -1,7 +1,7 @@
 # TongYi-Lite 端侧离线 AI 智能体
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![v0.3.8](https://img.shields.io/badge/v0.3.8-8B5CF6)
+![v0.3.9](https://img.shields.io/badge/v0.3.9-8B5CF6)
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Android](https://img.shields.io/badge/Android-33+-3DDC84?logo=android)
 ![llama.cpp](https://img.shields.io/badge/Engine-llama.cpp%20fork-red)
@@ -262,6 +262,11 @@ FFI 进程内推理，完全离线（飞行模式可验证）；与推理模型�
   forceNoThinking 重试，工具决策步默认不思考）；重复调用守护（同工具第 3/5/8 次渐进提醒 + 同签名去重）。
 - **并行工具安全**：`isConcurrencySafe` = 默认只读可并发、副作用工具显式独占；回合中断合成「结果未知」  
   占位保证事件配对完整。
+- **回合过程区（渲染与真相源同源）**：思考卡 / 工具卡 / **步答块**（中间步可见文本独立成块，  
+  不被下一步流式覆写）按真实执行序交错——live 走归约器时间线，历史走 `turnTrace` 信封，两条路共用  
+  同一组件管线，实时与回看所见一致；每步思考落 `agent/thinking` 事件（log-only，不进模型上下文），  
+  **崩溃回合的过程块下回合自动补档**；失败尝试与回合失败码直接可见；🔔 子代理通知与 ☑ 清单 / 📋 计划  
+  活卡走独立槽位不挤占回答；消息列表由存储写路径广播驱动（去抖重查），不再 500ms 轮询。
 - **六段工具流水线**：pre-execute（allow/deny/ask 瀑布）→ guard → execute（沙箱审批 + 超时）→ 结果投影 →  
   post-execute → 溢写（超长输出自动落盘、只回摘要与定位）。端侧实现把段 4/6 合并且 **pre-execute / guard  的钩子生产未接线**（`tools/pipeline.dart` 自陈）——真正的审批发生在 execute 段。
 
@@ -567,15 +572,18 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
-> [⬇️ 下载 `TongYi-Lite-v0.3.8.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.8.apk)  
-> v0.3.8+31 · 69,326,137 B（2026-11-08 重打包，在 11-07 换树基座上追加：**模型族量化选择器**——同基础模型多量化  
-> 折叠一行、默认最小档、选择即时持久化，存量三组同源对归族 + **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M  
-> 六档全 -mtp 包）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L）+ **PTQ1_0 prefill 走 GEMM**  
-> （缺省 MM_N 32→1，830 真机 prefill 8.5×：7.44→0.877 s/tok），见 [版本更新](#版本更新)）  
-> `SHA-256: 1265cc5de62f5cd5a0677bca98762e294c2e5b5ef091f6c366d302a7878b0f8c`
+> [⬇️ 下载 `TongYi-Lite-v0.3.9.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.9.apk)  
+> v0.3.9+32 · 72,470,353 B（2026-11-09：**智能体对话区重构三期**——步内思考入事件日志（崩溃可补档）/  
+> 中间步文本独立成块不再被覆写 / 消息变更广播取代 500ms 轮询 / 失败码与通知行可见 + **Harness 对标 DSH**  
+> （JSONL 事件落盘、压缩三约束与链式折叠、多工具调用、调用入历史、LCP 遥测、MCP 跨回合缓存、执行质量卡、  
+> 本地看门狗）+ **LLM 流骨架统一与取消令牌隔离**，见 [版本更新](#版本更新)）  
+> `SHA-256: 59dd43d63497e8190d145de5d7c086638154a6871303872a18c88b592fb2186c`
 
-> 📌 本包为 `main` 当前 HEAD（`4888f13d`，模型族 + 两新模型 catalog + PTQ1_0 GEMM 缺省改动）产物，源码与包一致；换树口径与实测数据见  
-> [版本更新](#版本更新)，自行构建见 [构建与开发](#构建与开发)。
+> 📌 本包为 `main` 主线功能提交（至 `f0235fef`）+ 版本号 0.3.9+32 提交产物；其后的 `05edced2` 是死代码
+> 清理与 analyze 收口（无行为改动），不改本包语义；引擎仍为 11-08 的  
+> v0.9.0 换树基座，但 **原生侧 JNI 改动随本主线包首启**（harness 提交的 GenStats `lcp_prefix/n_prompt`  
+> 透传 + 本地 usage 回传，11-08 的 v0.3.8.apk 早于该提交故未带），推理日志可见「KV 复用 | LCP」与  
+> 「本地用量」行。口径与实测数据见 [版本更新](#版本更新)，自行构建见 [构建与开发](#构建与开发)。
 >
 > ⚠️ 覆盖安装需同一签名证书（`CN=TongYiLite`）且 versionCode ≥ 已装版本；`adb install -r` 可保留已下载  
 > 模型缓存，切勿先卸载。历史版本见 [`releases/`](releases/) 目录或按[构建与开发](#构建与开发)自行构建。
@@ -593,7 +601,8 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.8**（当前） | 2026-11-06~08 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式 + **11-08 追加**：**模型族量化选择器**（同基础模型多量化折叠一行，默认最小档、选择即时持久化，qwen3.5-0.8b/bonsai 系因能力/衍生不同维持独立行）+ **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M 六档全 -mtp 包自带 NextN，标准 GGUF）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L，LLM_ARCH_NANBEIGE 已内置）+ 存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族，catalog 23→38 条 + **PTQ1_0 prefill 走 GEMM**（GGML_OPENCL_PTQ10_MM_N 缺省 32→1；原「数值静默错」系 prism.hadamard 整图缺席年代的冤案，hadamard 修复后 M=10 prefill + decode 输出语义正确，830 真机 prefill 8.5×：7.44→0.877 s/tok，env=0 保留 GEMV 回退通道）+ pre-push 私有记忆闸门入库随仓分发（`core.hooksPath` → `tool/hooks`，新 clone 自带闸）。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
+| **v0.3.9**（当前） | 2026-11-09 | **智能体对话区重构三期**（评估定位「六个真相源并存」后逐源收口：A1 步内思考落 `agent/thinking` log-only 事件——崩溃回合不再整段蒸发、下回合补档成 💭 行；A2/A3 中间步文本定格 `stepText` 独立行 + live 时间线/历史信封双路定位——「只留最后一步」根除；A4 `messageChanges` 广播 + 120ms 去抖取代 500ms 全表轮询；B3 失败码/失败尝试可见；B4 🔔 通知与 ☑清单/📋计划卡不再劫持回答槽位）+ **Harness 对标 DSH**（JSONL 事件落盘与崩溃修复、压缩三约束 + 链式折叠、多工具调用全块解析、`replayToolCalls` 修 turn 间失忆、LCP 遥测含引擎 `prefix_len` 真 bug、MCP 跨回合缓存与 404 自愈、执行质量卡、本地看门狗 120s 止损）+ **LLM 流骨架三份统一 `runStreamWithGuards` + `CancelToken` 取消隔离**（父子回合不再互杀流；思考失控跨块累计/孤立 response 3 条存量红转绿）+ **spill 兜底契约修复与 quiet-fail 遥测通道** + **仓库健康门禁恢复**（`analysis_options.yaml` 新增，analyze 3015→0）+ **子代理深度 Zone 化**（fan-out 并发兄弟互抬深度误拒根修）。附带：增量导入不再把 🔧/notice 行灌进模型上下文、对话框 controller/焦点节点泄漏清账、设置写盘 400ms 防抖。全量 **1187 过 / 0 红**，analyze **0 issue**。versionCode **32** |
+| **v0.3.8** | 2026-11-06~08 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式 + **11-08 追加**：**模型族量化选择器**（同基础模型多量化折叠一行，默认最小档、选择即时持久化，qwen3.5-0.8b/bonsai 系因能力/衍生不同维持独立行）+ **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M 六档全 -mtp 包自带 NextN，标准 GGUF）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L，LLM_ARCH_NANBEIGE 已内置）+ 存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族，catalog 23→38 条 + **PTQ1_0 prefill 走 GEMM**（GGML_OPENCL_PTQ10_MM_N 缺省 32→1；原「数值静默错」系 prism.hadamard 整图缺席年代的冤案，hadamard 修复后 M=10 prefill + decode 输出语义正确，830 真机 prefill 8.5×：7.44→0.877 s/tok，env=0 保留 GEMV 回退通道）+ pre-push 私有记忆闸门入库随仓分发（`core.hooksPath` → `tool/hooks`，新 clone 自带闸）。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
 | v0.3.7 | 2026-10-30~11-06 | **dLLM Clover-35B-A3B 端侧上机**（块扩散 llama 层并入 fork + split-MoE 热专家 + draft-self masked-block 自投机；830 CLI 判卷矩阵全绿）+ B 线 backport 施工（8/8 PR）+ q3_K DECODE_WINDOW 打包错槽修复 + PTQ1_0 窗口打包保守待遇。versionCode 30 |
 | v0.3.6 | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（ADB 四套测试共 56 项，其中进程内假 adbd 全链路 29 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
 | v0.3.5 | 2026-10-25 | **GPU 全卸载产品化第一轮**：KV 精度加 F16 档（混合架构恢复 GPU 整网）、M-R1 融合路由算子并入、BUFT 探针默认批量 1、q4_1 batched MoE（CLI decode 累计 2.97→8.38 t/s = 2.8×）、740 基线 decode 5.3 t/s；**UI rail 重构**（引擎独立面板/人格侧栏/能力 Tab/统计条重写）；**仓库单主线收敛**（删 temp/spike/tongyi-r2）；UI 补充批：外观主题三档切换、产物「另存」到任意目录（SAF）、简单聊天流式思考卡、统计条流式 tok 实时估算。versionCode 23 |
@@ -621,6 +630,28 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 ---
 
 ## 常见问题
+
+<details>
+
+<summary><b>Q: 智能体的事件轨迹在哪里看？</b></summary>
+
+三个层次，按需要的颗粒度选：
+
+1. **对话页回合「执行过程」区**（面向使用）：工具卡 / 思考卡 / 步答块按真实执行序交错，live 走归约器  
+   时间线、历史回合走 `turnTrace` 信封，两条路同一组件管线。
+2. **设置 → 查看推理日志**（一行一事摘要）：每回合 `[AgentStep] t1 s1 request / failure / end`、失败码、  
+   `KV 复用 | LCP x/y (z%)`、轨迹落盘路径等，支持一键复制。
+3. **JSONL 原始事件流**（完整真相源，含结构与 log-only 事件）：
+   - **会话事件日志**（一直在写）：设置 → 智能体数据目录 → 「会话事件日志」，路径  
+     `<ApplicationSupport>/sessions/<会话id>.jsonl`；
+   - **回合轨迹快照**（默认关，排障时才开）：设置 → 上下文管理 → **回合轨迹落盘（排障/评估）**，  
+     每回合结束写 `<ApplicationSupport>/traces/trace_<会话id>_<时间戳>.jsonl`，写成功后推理日志出现  
+     「轨迹已落盘 | 路径」。回放侧按 `SessionEvent.fromJsonLine` 逐行重建即可。
+
+排障建议：先开轨迹落盘开关复现一次，再从推理日志取路径拉文件——那是唯一真相源，UI 侧的顺序/丢块/  
+漏字符问题对着它比对最直接。
+
+</details>
 
 <details>
 
