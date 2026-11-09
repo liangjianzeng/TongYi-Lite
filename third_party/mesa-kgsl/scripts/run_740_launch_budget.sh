@@ -7,11 +7,11 @@
 #
 # 用法：
 #   third_party/mesa-kgsl/scripts/run_740_launch_budget.sh [DEV]
-#   DEV 默认 100.109.138.2:5555（小米13 / Adreno 740，AGENTS 机型分级的主力+底线档）
+#   DEV 默认 <redacted-tailscale-740>:5555（小米13 / Adreno 740，AGENTS 机型分级的主力+底线档）
 #   可用环境变量覆盖：BIN（设备上的仪器构建）、M（模型绝对路径）、TOK（生成 token 数）、TOKEN_MIN（作废阈值）
 set -uo pipefail
 
-DEV="${1:-100.109.138.2:5555}"
+DEV="${1:-<redacted-tailscale-740>:5555}"
 G=/data/local/tmp/g759
 BIN="${BIN:-$G/e2e_instr}"                 # 必须带 noder 插桩（HEAD + SSM 修复 + per-op 计时）
 M="${M:-$G/Ling-3.0-tiny-Q4_0.gguf}"
