@@ -4,8 +4,6 @@
 /// spawn/fork 会话构造与 result → SubagentResult 映射。
 library;
 
-import 'dart:async';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/builtin_tools/builtin_tools.dart';
 import 'package:tongyi_lite/agent/llm/adapter.dart';
@@ -15,35 +13,7 @@ import 'package:tongyi_lite/agent/subagents/provider.dart';
 import 'package:tongyi_lite/agent/subagents/subagent_tool.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
-
-/// 覆写 [LlmAdapter.generate] 的桩：按轮次返回预设 [LlmResult]，并捕获
-/// 每次收到的消息历史（验证 fork 前缀/上下文）。
-final class _FakeAdapter extends LlmAdapter {
-  final List<LlmResult> _outcomes;
-  int _calls;
-  final List<List<Map<String, dynamic>>> _capturedMessages;
-
-  _FakeAdapter(this._outcomes)
-      : _calls = 0,
-        _capturedMessages = [];
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    _capturedMessages.add(List.of(options.messages));
-    final idx = _calls < _outcomes.length ? _calls : _outcomes.length - 1;
-    final result = _outcomes[idx];
-    _calls++;
-    return result;
-  }
-
-  int get calls => _calls;
-  List<List<Map<String, dynamic>>> get capturedMessages => _capturedMessages;
-}
+import '../helpers/fake_llm.dart';
 
 /// 构建带已完成 turn + 进行中 turn 的父会话。
 SessionLog buildParentWithCompletedTurn() {
@@ -101,7 +71,7 @@ void main() {
   test('深度达到 maxDepth 时拒绝（抛 SubagentMaxDepthExceeded）', () {
     final parent = SessionLog.fromEvents(const []);
     final (provider, _) = buildProvider(
-      adapter: _FakeAdapter([const LlmResult(text: '不该到这里')]),
+      adapter: FakeLlmAdapter([const LlmResult(text: '不该到这里')]),
       parentSession: parent,
     );
 
@@ -124,7 +94,7 @@ void main() {
   // ---------------------------------------------------------------------------
   test('spawn：子代理空白会话回答，stopReason=completed、isError=false', () async {
     final (provider, registry) = buildProvider(
-      adapter: _FakeAdapter([
+      adapter: FakeLlmAdapter([
         const LlmResult(text: '子代理最终答案'),
       ]),
       parentSession: SessionLog.fromEvents(const []),
@@ -148,7 +118,7 @@ void main() {
   test('fork：子代理 session 含父前缀，模型消息历史含父内容、不含进行中 turn',
       () async {
     final parent = buildParentWithCompletedTurn();
-    final adapter = _FakeAdapter([
+    final adapter = FakeLlmAdapter([
       const LlmResult(text: 'fork 子代理答案'),
     ]);
     final (provider, _) = buildProvider(
@@ -176,8 +146,8 @@ void main() {
     // 模型看到的消息历史：含父对话内容（user/assistant），不含进行中
     // turn 内容；system 恒只有子代理自己的（单一 system 块——双 system
     // 会污染本地 chatml 模板，B1 replace 语义的代价是父 system 不再投影）。
-    expect(adapter.capturedMessages.isNotEmpty, true);
-    final joined = adapter.capturedMessages.first
+    expect(adapter.allMessages.isNotEmpty, true);
+    final joined = adapter.allMessages.first
         .map((m) => '${m['role']}: ${m['content']}')
         .join('\n');
     expect(joined, contains('系统提示：可调用工具。'));
@@ -193,7 +163,12 @@ void main() {
   // ---------------------------------------------------------------------------
   test('子代理失败（LlmFailure）→ SubagentResult.isError=true', () async {
     final (provider, _) = buildProvider(
-      adapter: _FailingAdapter(),
+      // 抛出无法恢复的 server 错误 → 瀑布给 Up 为 error（重试耗尽后
+      // 落到脚本耗尽 fail-loud，同样不可交付）。
+      adapter: FakeLlmAdapter([
+        const LlmFailure(
+            code: LlmFailureCode.server, message: '测试服务端错误', status: 500),
+      ]),
       parentSession: SessionLog.fromEvents(const []),
     );
     final run = await provider.start(
@@ -202,21 +177,6 @@ void main() {
     expect(result.isError, true);
     expect(result.stopReason, 'error');
   });
-}
-
-/// 每次 generate 都抛 LlmFailure（验证失败 → isError=true 映射）。
-final class _FailingAdapter extends LlmAdapter {
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    // 抛出无法恢复的 server 错误 → 瀑布给 Up 为 error。
-    throw const LlmFailure(
-        code: LlmFailureCode.server, message: '测试服务端错误', status: 500);
-  }
 }
 
 /// 构建 provider + registry（注册内置工具；subagent 工具在需要时另行 register）。
