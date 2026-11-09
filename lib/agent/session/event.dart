@@ -38,7 +38,6 @@ const String kEventAssistantFailureNote = 'assistant/failure-note';
 // log-only 事件（不进模型历史；UI/诊断可用；崩溃修复参与 pending 销账）
 const String kEventAssistantAttempt = 'assistant/attempt';
 const String kEventLlmRetry = 'llm/retry';
-const String kEventLlmRetryStarted = 'llm/retry-started';
 const String kEventSpillLocate = 'spill/locate';
 
 /// 步内思考快照（UI 重构 A1）：主循环在每个 step 结束时把该步的**完整
@@ -87,7 +86,6 @@ const Map<String, EventTypeCategory> kEventCategory = {
   kEventAssistantFailureNote: EventTypeCategory.surface,
   kEventAssistantAttempt: EventTypeCategory.logOnly,
   kEventLlmRetry: EventTypeCategory.logOnly,
-  kEventLlmRetryStarted: EventTypeCategory.logOnly,
   kEventSpillLocate: EventTypeCategory.logOnly,
   kEventImported: EventTypeCategory.logOnly,
   kEventImportCursor: EventTypeCategory.logOnly,
@@ -110,7 +108,6 @@ bool isLogOnly(String type) => categoryOf(type) == EventTypeCategory.logOnly;
 const Set<String> kIgnorableTypes = {
   kEventAssistantAttempt,
   kEventLlmRetry,
-  kEventLlmRetryStarted,
   kEventSpillLocate,
   kEventImported,
   kEventImportCursor,
@@ -265,20 +262,3 @@ bool isHeaderLine(String line) {
   }
 }
 
-/// 将一行解析成 [SessionHeader] 或 [SessionEvent]。返回 null 表示无法识别。
-SessionHeader? parseHeaderLine(String line) {
-  if (!isHeaderLine(line)) return null;
-  Map<String, dynamic>? m;
-  try {
-    m = jsonDecode(line.trim()) as Map<String, dynamic>;
-  } on FormatException {
-    return null;
-  }
-  return SessionHeader.fromJson(m);
-}
-
-/// 将一行解析成 [SessionEvent]；失败返回 null。
-SessionEvent? parseEventLine(String line) {
-  if (isHeaderLine(line)) return null;
-  return SessionEvent.fromJsonLine(line);
-}

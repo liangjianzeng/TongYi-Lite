@@ -61,15 +61,11 @@ final class LlmFailure {
   final LlmFailureCode code;
   final String message;
   final int? status;
-  final int? providerRetryAfterMs;
-  final String? requestId;
 
   const LlmFailure({
     required this.code,
     required this.message,
     this.status,
-    this.providerRetryAfterMs,
-    this.requestId,
   });
 
   bool get isContextWindowExceeded => code == LlmFailureCode.contextWindowExceeded;
@@ -155,6 +151,10 @@ final class LlmResult {
 /// - [adapter]：本次调用绑定的 adapter（local/API）。
 /// - [model]：模型标识（local=模型 id；api=API 模型 name）。
 /// - [capabilities]：加载时冻结的 [EngineCapabilities] 快照；null 表示未知。
+///
+/// 现状注记（勿被上文文档误导）：生产路径的 local/API 选择发生在
+/// ChatNotifier 组装期，**不经过** [LlmAdapter.prepareCall]；本 seam 保留的
+/// 价值是能力驱动演进的落点 + 全部测试桩按此接口实现（契约由测试锁定）。
 final class PreparedLlmCall {
   final LlmAdapter adapter;
   final String model;

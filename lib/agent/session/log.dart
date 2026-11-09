@@ -458,6 +458,7 @@ final class SessionLog {
                 if (id != '') {
                   pendingCalls[id] = {
                     'callId': id,
+                    'turn': openTurn,
                     'step': e.data['step'] as int? ?? -1,
                     'callSeq': null,
                   };
@@ -471,6 +472,7 @@ final class SessionLog {
           if (cid != '') {
             pendingCalls[cid] = {
               'callId': cid,
+              'turn': openTurn,
               'step': e.data['step'] as int? ?? -1,
               'callSeq': e.seq,
             };
@@ -488,9 +490,6 @@ final class SessionLog {
     // 补未销账的工具调用结果（区分 started/notStarted）
     for (final pc in pendingCalls.values) {
       count = _appendSyntheticToolResult(pc, lastTime) + count;
-    }
-    if (count > 0) {
-      // 已合成，无需再处理
     }
 
     // 补 step/end

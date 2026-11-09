@@ -258,6 +258,13 @@ final class DeterministicCompaction implements CompactionPlugin {
       priorSummaries: priorSummaries,
     );
 
+    // 遮蔽前投影懒计算复用：摘要前缀（B2）与 beforeTokens 基线是同一次
+    // replace 之前的模型可见投影（deriveModelMessages 为 O(events)，长会话
+    // 下两次全量重算白付一倍）；中间无任何 log 写入，快照一致。
+    List<Map<String, dynamic>>? preMaskProjection;
+    List<Map<String, dynamic>> preMask() =>
+        preMaskProjection ??= log.deriveModelMessages();
+
     // ---- 阶段 2：LLM 摘要（失败/超时/禁用一律回退确定性 digest）----
     var finalSummary = deterministic;
     var summaryProvider = 'deterministic-prune';
@@ -271,7 +278,7 @@ final class DeterministicCompaction implements CompactionPlugin {
         );
         // 真前缀（B2）：decide 时点（replace 之前）的模型可见投影 =
         // 最近一次请求的消息列表，本地引擎 LCP 直接命中。
-        final prefixMessages = log.deriveModelMessages();
+        final prefixMessages = preMask();
         final modelSummary = await summarizer(instruction, prefixMessages)
             .timeout(const Duration(seconds: 90));
         final t = modelSummary?.trim() ?? '';
@@ -300,8 +307,7 @@ final class DeterministicCompaction implements CompactionPlugin {
 
     // ---- 遮蔽 [first..last] 为一条摘要 ----
     // 压缩前基线：估算当前投影 token（与预算/呈现同一口径）。
-    final beforeTokens =
-        estimateContextTokens(log.deriveModelMessages());
+    final beforeTokens = estimateContextTokens(preMask());
     final advance = log.replace(
       startSeq: first,
       endSeq: last,

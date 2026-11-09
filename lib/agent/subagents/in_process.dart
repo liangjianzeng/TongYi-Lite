@@ -210,7 +210,11 @@ final class InProcessSubagentProvider extends SubagentProvider {
   void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s,
       {int childDepth = 1}) {
     while (_continuable.length >= kContinuableCapacity) {
-      _continuable.remove(_continuable.keys.first);
+      final evicted = _continuable.remove(_continuable.keys.first);
+      // 回收即释放会话：broadcast StreamController 若不关，被回收子代理的
+      // 事件流与订阅引用会随 FIFO 逐出仍驻留。append 已有 isClosed 防护
+      // （log.dart），迟到的 append 只是静默不进流，不会炸。
+      evicted?.session.dispose();
     }
     _continuable[id] = _Continuable(agent, s, childDepth: childDepth);
   }
@@ -294,6 +298,8 @@ final class InProcessSubagentProvider extends SubagentProvider {
       final turnReason = await agent.kick(task);
       // 映射 turn 结束原因 → SubagentResult（§10.5）。
       bool isError;
+      // 枚举恰四值、分支全覆盖 → 不写 default：将来新增档位由分析器强制
+      // 在此表态，不会静默按「非失败」放行。
       switch (turnReason.kind) {
         case TurnEndReasonKind.completed:
           isError = false;
@@ -303,8 +309,6 @@ final class InProcessSubagentProvider extends SubagentProvider {
         case TurnEndReasonKind.maxSteps:
           isError = true;
           break;
-        default:
-          isError = false;
       }
       return SubagentResult(
         output: agent.lastAssistantContent,

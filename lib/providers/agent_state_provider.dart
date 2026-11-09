@@ -354,7 +354,6 @@ class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
         s = s.copyWith(tools: tools);
         break;
       case kEventLlmRetry:
-      case kEventLlmRetryStarted:
         s = s.copyWith(
             retryAttempt: (e.data['retries'] as num?)?.toInt() ??
                 s.retryAttempt + 1);

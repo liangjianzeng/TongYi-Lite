@@ -158,6 +158,8 @@ abstract class BaseEngineAdapter implements LlmAdapter {
 
   /// 绑定能力快照（Phase 3，DSH `prepareCall` 端侧简化）。
   /// 协议在调用准备时按能力驱动固化，避免运行中换模型导致协议不一致。
+  /// 现状：生产路径的 local/API 选择在 ChatNotifier 组装期完成、不走此口，
+  /// 本实现是能力驱动演进的落点（详见 [PreparedLlmCall] 的现状注记）。
   @override
   PreparedLlmCall prepareCall(String model) =>
       PreparedLlmCall(adapter: this, model: model, capabilities: _capabilities);

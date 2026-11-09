@@ -51,8 +51,6 @@ enum TurnEndReasonKind {
   error,       // 瀑布终态失败
   interrupted, // 用户取消
   maxSteps,    // 达到 maxStepsPerTurn 上限（仍在调用工具）
-  blocked,     // 用户输入等待（Phase 4+）
-  user,        // 用户主动结束
 }
 
 /// turn 结束原因（含详情）。
