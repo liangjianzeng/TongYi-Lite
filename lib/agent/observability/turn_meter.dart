@@ -14,31 +14,15 @@
 // 估算口径刻意保守（见 [estimateTokens]），宁可显示偏小也不虚高。
 // ============================================================
 
-/// 粗略 token 估算：中日韩一字记 1，其余按 4 字符记 1（向上取整）。
-///
-/// 与主流 BPE 的实际比值大致吻合（中文约 1~1.5 字/token，英文约 3.5~4
-/// 字符/token）。这里只用于"看趋势"，不当账本用。
-int estimateTokens(String s) {
-  if (s.isEmpty) return 0;
-  var cjk = 0;
-  var other = 0;
-  for (final r in s.runes) {
-    if (_isCjk(r)) {
-      cjk++;
-    } else if (r != 0x20 && r != 0x0a && r != 0x0d && r != 0x09) {
-      other++;
-    }
-  }
-  return cjk + (other ~/ 4) + (other % 4 == 0 ? 0 : 1);
-}
+import '../context_eng/token_estimate.dart' show estimateTextTokens;
 
-bool _isCjk(int r) =>
-    (r >= 0x4e00 && r <= 0x9fff) || // 汉字
-    (r >= 0x3400 && r <= 0x4dbf) || // 扩展 A
-    (r >= 0x3040 && r <= 0x30ff) || // 日文假名
-    (r >= 0xac00 && r <= 0xd7af) || // 谚文
-    (r >= 0x3000 && r <= 0x303f) || // 中日韩标点
-    (r >= 0xff00 && r <= 0xffef); // 全角字符
+/// 粗略 token 估算（A4 统一口径）：委托 [estimateTextTokens]
+/// （ASCII÷4 + CJK×3/4）。此前本文件用"CJK 一字记 1"，与上下文预算口径
+/// （context_eng/token_estimate CJK×3/4）不一致，占用读数与压缩触发时机
+/// 对不上账——现全仓唯一字符级实现。
+///
+/// 只用于"看趋势"，不当账本用；完成后如拿到服务端 usage 由调用方覆盖。
+int estimateTokens(String s) => estimateTextTokens(s);
 
 /// 一次读数（全部由调用方从既有 UI 状态喂进来，本文件不持状态、不订阅流）。
 final class TurnMeter {

@@ -85,15 +85,15 @@ final class AgentConfig {
 
   /// 双场景档出厂默认值。
   ///
-  /// local 沿用端侧现值（省 token、串行、短超时）；api 对齐 DSH 式云端
-  /// 预算（大生成预算、并行工具、长超时），settings 可逐项覆盖。
+  /// local：B3 放开并行（一步多调用 + 读类并发，写类仍独占）；api 对齐
+  /// DSH 式云端预算（大生成预算、并行工具、长超时），settings 可逐项覆盖。
   factory AgentConfig.forRoute(AgentRoute route) => switch (route) {
         AgentRoute.local => const AgentConfig(
             maxStepsPerTurn: 12,
             maxTokensPerRound: 1024,
             temperature: 0.7,
             toolTimeout: Duration(seconds: 15),
-            allowParallelTools: false,
+            allowParallelTools: true,
             maxParallel: 2,
             contextTokenBudget: null,
             maxTokensFinalRound: 2048,

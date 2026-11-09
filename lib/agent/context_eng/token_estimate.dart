@@ -9,6 +9,25 @@
 /// tool_calls 无法精确计（每 call 的 JSON 骨架 ~40 tok 经验值）。
 library;
 
+/// 单段文本的 token 估算（A4 统一口径：全仓唯一字符级实现）。
+///
+/// ASCII ≈ 4 字符/token；非 ASCII（CJK 为主）≈ 3/4 token/字（qwen/deepseek
+/// 系 BPE 每 CJK 字约 0.6~1，取折中宁略高不略低——早压一次比撞墙便宜）。
+/// 全仓的 token 估算（上下文预算/回合产出读数/子代理预算）一律经由本函数，
+/// 不再各自持字符比。
+int estimateTextTokens(String s) {
+  var ascii = 0;
+  var cjk = 0;
+  for (final r in s.runes) {
+    if (r < 0x80) {
+      ascii++;
+    } else {
+      cjk++;
+    }
+  }
+  return ascii ~/ 4 + cjk * 3 ~/ 4;
+}
+
 /// 估算一批 model messages 的 token 数。
 int estimateContextTokens(List<Map<String, dynamic>> messages) {
   var ascii = 0;

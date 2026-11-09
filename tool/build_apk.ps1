@@ -1,4 +1,4 @@
-# TongYi-Lite —— Windows 打包机一键 APK 构建（PowerShell）
+﻿# TongYi-Lite —— Windows 打包机一键 APK 构建（PowerShell）
 #
 # 与 tool/build_apk.sh（Linux 侧）同语义：环境自检 → 构建 → 签名验收。
 # 整合并取代根目录 build.bat / build_release.bat，沉淀 docs/BUILD_ENV_NOTES.md

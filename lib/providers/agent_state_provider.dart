@@ -92,6 +92,10 @@ final class AgentUiState {
   /// 记录已生成字符数与开头预览。
   final ({int chars, String preview})? toolGen;
 
+  /// 子代理运行进度行（C2）：前台 subagent 的里程碑（步/工具/收尾），
+  /// 最近 3 条，UI 显示在工具卡区下方。不进父模型上下文。
+  final List<String> subagentNotes;
+
   const AgentUiState({
     this.running = false,
     this.turn = 0,
@@ -105,6 +109,7 @@ final class AgentUiState {
     this.thinkingDurations = const [],
     this.timeline = const [],
     this.toolGen,
+    this.subagentNotes = const [],
   });
 
   bool get hasActivity =>
@@ -127,6 +132,7 @@ final class AgentUiState {
     List<UiTimelineMarker>? timeline,
     ({int chars, String preview})? toolGen,
     bool clearToolGen = false,
+    List<String>? subagentNotes,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -141,6 +147,7 @@ final class AgentUiState {
         thinkingDurations: thinkingDurations ?? this.thinkingDurations,
         timeline: timeline ?? this.timeline,
         toolGen: clearToolGen ? null : (toolGen ?? this.toolGen),
+        subagentNotes: subagentNotes ?? this.subagentNotes,
       );
 }
 
@@ -187,6 +194,16 @@ class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
       return;
     }
     _put(convId, cur.copyWith(toolGen: (chars: chars, preview: preview)));
+  }
+
+  /// 子代理运行进度行（C2）：追加里程碑，保留最近 3 条。
+  /// attach 时状态整体重建 → 自动清空（每回合独立）。
+  void appendSubagentNote(String convId, String line) {
+    if (!mounted || !_has(convId)) return;
+    final cur = _entry(convId);
+    final next = [...cur.subagentNotes, line];
+    if (next.length > 3) next.removeRange(0, next.length - 3);
+    _put(convId, cur.copyWith(subagentNotes: next));
   }
 
   void attach(String convId, SessionLog log) {

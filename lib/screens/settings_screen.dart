@@ -50,6 +50,7 @@ import '../services/app_bridge.dart' show AppBridge;
 import '../agent/adb/adb_client.dart';
 import '../agent/adb/adb_targets.dart';
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
+import '../agent/metrics/turn_metrics.dart' show TurnMetricsStore;
 import '../asr/asr_model_manager.dart' show AsrModelManager;
 import '../asr/hold_to_talk.dart' show AsrModelGate;
 import '../asr/default_hotwords.dart'
@@ -2320,6 +2321,122 @@ Widget _buildToggleTitle(
 /// 1. **能力驱动展示**：特性块查询驱动模型的能力快照，不支持则置灰说明；
 /// 2. **只保留新引擎真实消费的旋钮**：每项设置都映射到引擎消费点；
 /// 3. 旧键不动，新键安全默认，旧配置无损迁移。
+/// C3 执行质量观测卡：读取 ApplicationSupport/metrics/turn_metrics.jsonl
+/// 最近 200 回合聚合（失败码分布/步数/重复率/撞限），给"智能体笨在哪一段"
+/// 一个可见的落点——数据早已落盘，此前只差消费端。
+class _ExecutionQualityCard extends StatefulWidget {
+  @override
+  State<_ExecutionQualityCard> createState() => _ExecutionQualityCardState();
+}
+
+class _ExecutionQualityCardState extends State<_ExecutionQualityCard> {
+  Map<String, dynamic>? _agg;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final base = await getApplicationSupportDirectory();
+      final agg = await TurnMetricsStore.aggregateFromDisk(
+          '${base.path}/metrics');
+      if (!mounted) return;
+      setState(() => _agg = agg);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
+  }
+
+  String _fmtReasons(Map<String, dynamic> reasons) {
+    if (reasons.isEmpty) return '无';
+    final entries = reasons.entries.toList()
+      ..sort((a, b) => (b.value as int).compareTo(a.value as int));
+    return entries.map((e) => '${e.key}×${e.value}').join('、');
+  }
+
+  String _fmtFailures(Map<String, dynamic> codes) {
+    if (codes.isEmpty) return '无';
+    final entries = codes.entries.toList()
+      ..sort((a, b) => (b.value as int).compareTo(a.value as int));
+    return entries
+        .take(3)
+        .map((e) => '${e.key}×${e.value}')
+        .join('、');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: _buildSectionHeader('📊 执行质量（最近回合）', context)),
+                InkWell(
+                  onTap: _load,
+                  child: const Icon(Icons.refresh, size: 18),
+                ),
+              ],
+            ),
+            if (_error != null)
+              Text('读取失败：$_error',
+                  style: const TextStyle(fontSize: 12, color: Colors.red)),
+            if (_agg == null && _error == null)
+              const Padding(
+                padding: EdgeInsets.all(8),
+                child: SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (_agg != null) ...[
+              if ((_agg!['turns'] as int?) == 0)
+                Text('暂无数据（跑几回合智能体后这里会聚合）',
+                    style: TextStyle(
+                        fontSize: 12, color: theme.colorScheme.onSurfaceVariant))
+              else ...[
+                Text(
+                  '回合 ${_agg!['turns']} | 平均步数 '
+                  '${((_agg!['avgSteps'] as num?) ?? 0).toStringAsFixed(1)} | '
+                  '平均耗时 '
+                  '${(((_agg!['avgDurationMs'] as num?) ?? 0) / 1000).toStringAsFixed(1)}s',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '结局分布：${_fmtReasons((_agg!['endReasons'] as Map?)?.cast<String, dynamic>() ?? const {})}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '工具 ${_agg!['toolCalls']} 次（重复 '
+                  '${_agg!['duplicateToolCalls']} / 提醒 '
+                  '${_agg!['repeatReminders']}）| LLM 重试 ${_agg!['llmRetries']}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '失败码 TOP：${_fmtFailures((_agg!['failureCodes'] as Map?)?.cast<String, dynamic>() ?? const {})}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class AgentSettingsBody extends ConsumerStatefulWidget {
   const AgentSettingsBody();
 
@@ -3200,6 +3317,11 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
                       ),
                     ),
                   ),
+
+                  const SizedBox(height: 10),
+
+                  // ================= ②a 执行质量观测（C3） =================
+                  _ExecutionQualityCard(),
 
                   const SizedBox(height: 10),
 

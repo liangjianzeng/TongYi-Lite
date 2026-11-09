@@ -41,4 +41,14 @@ abstract class ToolProtocol {
 
   /// 生成侧：消费模型文本增量流，解析出文本与工具调用。
   Future<StreamOutcome> parseStream(Stream<String> stream);
+
+  /// B4 历史回放：把 assistant 历史里的 tool_calls（deriveModelMessages
+  /// 投影的 {id, function_name, arguments} 形态）渲染为模型自身的
+  /// 文本协议形态，回填进历史 assistant 内容——模型在上下文里看见
+  /// 自己发过的调用，参数自纠/多步规划/复用此前调用恢复。
+  ///
+  /// 返回 null = 无回放文本（历史保留结构化 tool_calls 字段——
+  /// 原生 function calling 协议走这条：服务端要求结构化配对）。
+  String? replayToolCalls(String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }

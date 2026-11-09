@@ -45,4 +45,11 @@ class NativeToolProtocol implements ToolProtocol {
     }
     return StreamOutcome(text: buffer.toString());
   }
+
+  /// 原生协议历史保留结构化 tool_calls（服务端要求与 role:tool 消息
+  /// 结构化配对，OpenAI 400 语义）——无文本回放形态，恒 null。
+  @override
+  String? replayToolCalls(
+          String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }

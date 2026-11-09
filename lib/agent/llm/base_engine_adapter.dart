@@ -67,39 +67,69 @@ abstract class BaseEngineAdapter implements LlmAdapter {
   // 共享工具（公开，供子类跨库调用）
   // ---------------------------------------------------------------------------
 
-  /// 引擎消息转换（local 用）：助手剥除 tool_calls；tool 结果角色按模板
-  /// 能力分流——Bailing V3（Ling 3.x）模板原生支持 role:tool（渲染为
+  /// 引擎消息转换（local 用）：assistant 的 tool_calls 按 B4 回放为模型
+  /// 自身的文本协议形态拼回 content（模型在历史里看见自己发过的调用，
+  /// 参数自纠/多步规划/复用此前调用恢复）；tool 结果角色按模板能力分流
+  /// ——Bailing V3（Ling 3.x）模板原生支持 role:tool（渲染为
   /// `<role>OBSERVATION</role>\n<tool_response>…`，贴合训练分布），其余
   /// 模板不识别 tool 角色（minja 渲染会**静默丢消息**）→ 保持 tool→user。
   List<Map<String, dynamic>> convertEngineMessages(
-      List<Map<String, dynamic>> messages) {
+      List<Map<String, dynamic>> messages,
+      {String modelId = ''}) {
     // 仅 Bailing V3 模板吃 role:tool（其 jinja 有 `message.role == "tool"`
     // 分支）；其余模板没有该分支，tool 消息会落不进任何渲染分支被丢弃。
     final keepToolRole = _capabilities?.toolTemplate == 'bailing-v3';
     final out = <Map<String, dynamic>>[];
     for (final m in messages) {
       final role = m['role'] as String?;
-      final content = m['content'] as String? ?? '';
+      var content = m['content'] as String? ?? '';
       if (role == 'tool') {
         out.add({'role': keepToolRole ? 'tool' : 'user', 'content': content});
+      } else if (role == 'assistant') {
+        final replay = _replayAssistant(m, modelId);
+        if (replay != null) {
+          content = content.isEmpty ? replay : '$content\n$replay';
+        }
+        out.add({'role': role, 'content': content});
       } else {
-        // 文本协议从 response 文本解析，工具调用不入历史。
         out.add({'role': role, 'content': content});
       }
     }
     return out;
   }
 
-  /// API 消息转换：'tool' 保留 role:tool（OpenAI 支持），助手剥除 tool_calls。
+  /// API 消息转换（文本协议路线）：'tool' 保留 role:tool（部分服务端宽容
+  /// 处理），assistant 的 tool_calls 按 B4 回放为文本形态拼回 content。
+  /// 原生 function calling 路线不走本方法（toOpenAiWireMessages 保留
+  /// 结构化 tool_calls，服务端要求结构化配对）。
   List<Map<String, dynamic>> convertApiMessages(
-      List<Map<String, dynamic>> messages) {
+      List<Map<String, dynamic>> messages,
+      {String modelId = ''}) {
     final out = <Map<String, dynamic>>[];
     for (final m in messages) {
       final role = m['role'];
-      final content = m['content'] as String? ?? '';
+      var content = m['content'] as String? ?? '';
+      if (role == 'assistant') {
+        final replay = _replayAssistant(m, modelId);
+        if (replay != null) {
+          content = content.isEmpty ? replay : '$content\n$replay';
+        }
+      }
       out.add({'role': role, 'content': content});
     }
     return out;
+  }
+
+  /// assistant 历史条目的工具调用回放文本；无调用/协议无回放形态 → null。
+  String? _replayAssistant(Map<String, dynamic> m, String modelId) {
+    final calls = m['tool_calls'];
+    if (calls is! List || calls.isEmpty) return null;
+    final typed = <Map<String, dynamic>>[
+      for (final c in calls)
+        if (c is Map<String, dynamic>) c,
+    ];
+    if (typed.isEmpty) return null;
+    return _protocol.replayToolCalls(modelId, typed);
   }
 
   /// 解析最终文本流 → [LlmResult]（两条路线共用）。

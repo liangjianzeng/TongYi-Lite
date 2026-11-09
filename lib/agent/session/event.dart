@@ -44,6 +44,12 @@ const String kEventSpillLocate = 'spill/locate';
 // 导入迁移标记（旧 SQLite 会话导入时给每条消息附加；log-only）
 const String kEventImported = 'imported';
 
+/// SQLite→JSONL 增量导入游标（A1 跨回合续原）：记录已消费的 SQLite 消息
+/// 时间戳上界（data.sqliteCursorMs）。回合结束落一条；下次回合启动时
+/// 只导入 timestamp > 游标的 SQLite 消息（普通聊天/其他写入路径的增量）。
+/// log-only + ignorable：旧运行时跳过不影响模型重建。
+const String kEventImportCursor = 'import/cursor';
+
 // ---------------------------------------------------------------------------
 // 事件类别（决定投影/忽略策略）
 // ---------------------------------------------------------------------------
@@ -77,6 +83,7 @@ const Map<String, EventTypeCategory> kEventCategory = {
   kEventLlmRetryStarted: EventTypeCategory.logOnly,
   kEventSpillLocate: EventTypeCategory.logOnly,
   kEventImported: EventTypeCategory.logOnly,
+  kEventImportCursor: EventTypeCategory.logOnly,
 };
 
 EventTypeCategory categoryOf(String type) =>
@@ -98,6 +105,7 @@ const Set<String> kIgnorableTypes = {
   kEventLlmRetryStarted,
   kEventSpillLocate,
   kEventImported,
+  kEventImportCursor,
   kEventAssistantFailureNote,
 };
 
@@ -157,6 +165,10 @@ final class SessionEvent {
   final String? surfaceOp;
   /// 若 `surfaceOp == 'replace'`：遮蔽到哪个 seq（含）。
   final int? shadowsEndSeq;
+  /// 若 `surfaceOp == 'replace'`：遮蔽起点 seq（含）。
+  /// JSONL 持久化（A1）后 [SessionLog.fromEvents] 靠它重建影子区——
+  /// 没有起点，重载后旧事件会全部回到投影里（上下文爆炸）。
+  final int? shadowsStartSeq;
   /// 类型特定载荷。落盘前须过 [sanitizePayload] 校验（拒绝非法 JSON 值）。
   final Map<String, dynamic> data;
   /// 旧运行时可否安全跳过（ignorable）。
@@ -169,6 +181,7 @@ final class SessionEvent {
     this.source,
     this.surfaceOp,
     this.shadowsEndSeq,
+    this.shadowsStartSeq,
     required this.data,
   }) : ignorable = ignorableOf(type);
 
@@ -189,6 +202,7 @@ final class SessionEvent {
     if (source != null) body['source'] = source;
     if (surfaceOp != null) body['surfaceOp'] = surfaceOp;
     if (shadowsEndSeq != null) body['shadowsEndSeq'] = shadowsEndSeq;
+    if (shadowsStartSeq != null) body['shadowsStartSeq'] = shadowsStartSeq;
     if (ignorable != null) body['ignorable'] = ignorable;
     return jsonEncode(body);
   }
@@ -213,6 +227,7 @@ final class SessionEvent {
       source: (m['source'] as Map<String, dynamic>?)?.cast<String, String>(),
       surfaceOp: m['surfaceOp'] as String?,
       shadowsEndSeq: m['shadowsEndSeq'] as int?,
+      shadowsStartSeq: m['shadowsStartSeq'] as int?,
       data: (m['data'] as Map<String, dynamic>?) ?? {},
     );
   }

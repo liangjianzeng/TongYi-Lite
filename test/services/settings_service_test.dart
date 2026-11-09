@@ -17,7 +17,8 @@ void main() {
       expect(s.agentMaxRounds, 12);
       expect(s.agentTokensPerRound, 1024);
       expect(s.agentToolTimeoutMs, 15000);
-      expect(s.agentAllowParallelTools, isFalse);
+      // B3 并行工具默认放开（读类并发、写类独占由 isConcurrencySafe 分批）。
+      expect(s.agentAllowParallelTools, isTrue);
       expect(s.webSearchEnabled, isFalse);
       expect(s.agentShellEnabled, isTrue);
       expect(s.agentPythonEnabled, isTrue);

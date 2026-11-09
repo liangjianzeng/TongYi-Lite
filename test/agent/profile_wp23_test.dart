@@ -33,6 +33,7 @@ class RecordingCompaction implements CompactionPlugin {
     required int turn,
     required int step,
     required String? reason,
+    bool allowModelSummary = true,
   }) async {
     calls++;
     reasons.add(reason);

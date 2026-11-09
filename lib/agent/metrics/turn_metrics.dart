@@ -259,4 +259,35 @@ class TurnMetricsStore {
       'failureCodes': failureCodes,
     };
   }
+
+  /// C3 观测闭环：从磁盘 JSONL 读最近 [limit] 个回合并聚合。
+  /// 设置页「执行质量」面板数据源（内存 ring 只覆盖本进程生命周期，
+  /// 历史回合只有落盘的 JSONL 有）。
+  static Future<Map<String, dynamic>> aggregateFromDisk(String baseDir,
+      {int limit = 200}) async {
+    final file = File('$baseDir/turn_metrics.jsonl');
+    final store = TurnMetricsStore(baseDir: baseDir);
+    if (!await file.exists()) return store.aggregate();
+    List<String> lines;
+    try {
+      lines = await file.readAsLines();
+    } on Exception {
+      return store.aggregate();
+    }
+    final live = lines.where((l) => l.trim().isNotEmpty).toList();
+    final tail = live.length > limit
+        ? live.sublist(live.length - limit)
+        : live;
+    for (final l in tail) {
+      try {
+        final m = jsonDecode(l);
+        if (m is Map<String, dynamic>) {
+          store._recent.add(TurnMetrics.fromJson(m));
+        }
+      } on FormatException {
+        // 单行损坏不影响其他行（append-only JSONL 的既有容错语义）。
+      }
+    }
+    return store.aggregate();
+  }
 }

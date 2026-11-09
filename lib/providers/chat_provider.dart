@@ -17,12 +17,17 @@ import '../agent/dev/dev.dart'
 import '../agent/dev/tools/ssh_tools.dart' show readRemoteAgentsMd;
 import '../agent/dev/workspace.dart' show DevWorkspace;
 import '../agent/web_search/web_search_provider.dart';
-import '../agent/context_eng/compaction.dart' show DeterministicCompaction;
+import '../agent/context_eng/compaction.dart'
+    show DeterministicCompaction, LlmSummarizer;
 import '../agent/context_eng/token_estimate.dart' show estimateContextTokens;
 import '../tts/edge_tts_service.dart' show EdgeTtsService;
 import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
+import '../agent/loop/failure.dart'
+    show SessionRef, CompactionPlugin, CompactionResultKind;
 import '../agent/loop/config.dart' as loopConfig;
+import '../agent/tools/guard.dart'
+    show dangerousCommandShellGuard, modelCacheGuard;
 import '../agent/capability.dart';
 import '../models/model_catalog.dart' show ModelCatalog;
 import '../agent/llm/adapter.dart'
@@ -42,21 +47,30 @@ import '../agent/builtin_tools/memory_tool.dart' show readGlobalMemorySnapshot;
 import '../agent/builtin_tools/ask_user_tool.dart' show createAskUserTool;
 import '../agent/builtin_tools/goal_tools.dart'
     show createGoalTools, createExitPlanTool, createPlanStepUpdateTool;
-import '../agent/mcp/mcp_client.dart' show fetchMcpTools;
+import '../agent/mcp/mcp_client.dart' show fetchMcpTools, McpClient;
 import '../agent/goal/goal_store.dart'
     show GoalStore, GoalStatus, GoalAction, decideGoalAction;
 import '../agent/builtin_tools/run_code_tool.dart' show createRunCodeTool;
 import '../agent/skills/provider.dart' show SkillProvider, loadUserSkills;
 import '../agent/skills/skill.dart' show loadBuiltinSkills;
 import '../agent/agents_md/agents_md.dart' show loadAgentsMd;
+import '../agent/session/session.dart' show SessionLog;
 import '../agent/session/store.dart'
     show
         JsonlSessionStore,
+        SessionPersistor,
+        decodeAgentTraceMessage,
         kAgentTraceMessagePrefix,
         encodeAgentTraceMessage,
         planStorageCompaction;
 import '../agent/session/event.dart'
-    show kEventAssistantMessage, kEventCompactionSummary;
+    show
+        kEventAssistantMessage,
+        kEventCompactionSummary,
+        kEventImportCursor,
+        kEventToolCall,
+        kEventToolResult,
+        kEventUserMessage;
 import '../agent/metrics/turn_metrics.dart'
     show TurnMetrics, TurnMetricsStore;
 import '../agent/session/trace_export.dart' as trace_export;
@@ -213,6 +227,8 @@ class ConversationsNotifier extends StateNotifier<List<Conversation>> {
 
   Future<void> delete(String id) async {
     await _storage.deleteConversation(id);
+    // A1：会话事件日志（JSONL）随会话删除。
+    unawaited(JsonlSessionStore.deleteSessionFile(id));
     // 计划按会话管理（2026-10-25 用户定案）：会话删除 → 计划文件随删。
     unawaited(() async {
       try {
@@ -362,6 +378,10 @@ class ChatNotifier extends StateNotifier<bool> {
   /// P0 遥测：回合指标落盘（ApplicationSupport/metrics/turn_metrics.jsonl）。
   /// 循环零侵入——指标在回合结束后从 SessionLog 纯派生。
   TurnMetricsStore? _metricsStore;
+
+  /// C1：MCP 客户端跨回合缓存（clientKey → 已握手实例）。App 生命周期内
+  /// 复用 session id，server 重启的会话过期由客户端 404 自愈兜底。
+  final Map<String, McpClient> _mcpClients = {};
 
   /// P0 轨迹：每回合自动落盘的目录缓存（ApplicationSupport/traces）。
   String? _traceDir;
@@ -1343,17 +1363,32 @@ class ChatNotifier extends StateNotifier<bool> {
     // P2-B MCP：远程 server 工具注册（仅 API 档；enabled 逐个拉取，
     // 失败 server 静默跳过不阻断回合）。注册在计划模式收窄之前，
     // 只读 MCP 工具可进计划模式白名单。
+    // C1：客户端按连接要素（id|host:port|headers|timeout）跨回合缓存
+    // ——已握手的 server 只刷 tools/list，免每回合 initialize+通知两倍
+    // RTT；拉取失败丢弃缓存实例重试一次（server 重启 → 404 会话过期
+    // 在客户端内已自愈，这里是端点不可达级别的重试）。
     if (useApi) {
       for (final server in settings.mcpServers) {
         if (!server.enabled) continue;
+        var client = _mcpClients[server.clientKey];
         try {
-          final tools = await fetchMcpTools(server);
-          final existing = registry.all.map((t) => t.name).toSet();
-          for (final t in tools) {
-            if (!existing.contains(t.name)) registry.register(t);
-          }
+          client ??= McpClient(server);
+          final tools = await fetchMcpTools(server, client: client);
+          _mcpClients[server.clientKey] = client;
+          _registerMcpTools(registry, server.name, tools);
         } catch (e) {
-          debugPrint('[MCP] server "${server.name}" 拉取失败，跳过: $e');
+          // 首败：缓存会话可能已彻底失效（server 换地址/清 session 状态）
+          // ——丢弃缓存、全新握手重试一次；仍败则跳过该 server。
+          _mcpClients.remove(server.clientKey);
+          try {
+            final fresh = McpClient(server);
+            final tools = await fetchMcpTools(server, client: fresh);
+            _mcpClients[server.clientKey] = fresh;
+            _registerMcpTools(registry, server.name, tools);
+          } catch (e2) {
+            debugPrint('[MCP] server "${server.name}" 拉取失败（含重试），'
+                '跳过: $e2');
+          }
         }
       }
     }
@@ -1539,12 +1574,14 @@ class ChatNotifier extends StateNotifier<bool> {
       toolTimeout: Duration(milliseconds: agentProfile.toolTimeoutMs),
       allowParallelTools: agentProfile.allowParallelTools,
       maxParallel: agentProfile.maxParallel,
-      // 主动压缩/分阶段预算（WP3 消费）：local 档由 agentNctx 派生；
-      // API 档用独立预算设置（默认 32768 tok），配置了端点 contextWindow
-      // 时取 min（×7/8 留生成余量）——长会话 proactive 压缩不再缺位。
+      // 主动压缩/分阶段预算（WP3 消费）：local 档以原生真实窗口 kv_ctx
+      //（含 oom-guard 裁剪后的值，A3）与设置 agentNctx 取小者再 ×3/4——
+      // 此前只用设置值，加载时被 oom-guard 裁掉的窗口预算页不知道，
+      // 预算虚高会一直撞墙；API 档用独立预算设置（默认 32768 tok），
+      // 配置了端点 contextWindow 时取 min（×7/8 留生成余量）。
       contextTokenBudget: useApi
           ? _apiContextTokenBudget(settings, activeApi)
-          : (settings.agentNctx * 3) ~/ 4,
+          : await _localContextTokenBudget(settings),
       maxTokensFinalRound: useApi ? null : 2048,
       // 思考失控治理：工具决策步默认不思考（端侧思考独白几乎都发生在那一步）。
       thinkingOnToolSteps: settings.agentThinkingOnToolSteps,
@@ -1575,14 +1612,44 @@ class ChatNotifier extends StateNotifier<bool> {
       'protocol=${protocol.id} model=$agentModelKey caps=$caps',
     );
 
-    // ---- 历史 → 事件日志（导入，log-only 标记）----
-    // 🔧 轨迹信封（kAgentTraceMessagePrefix 前缀）要放行：importFromMessages
-    // 会把它还原成真实 assistant(toolCalls)/tool/result 事件（WP1a）；
-    // 其余 🔧 活动消息（纯 UI 用）照旧排除。
-    final allMessages = await _storage.getMessages(conversationId, limit: 200);
-    final history = _messagesForModelContext(allMessages);
-    final sessionLog =
-        _sessionStore.importFromMessages(conversationId, history);
+    // ---- A1 会话事件日志：JSONL 优先恢复，SQLite 增量导入兜底 ----
+    // JSONL = 模型上下文唯一真相源（回合内事件、压缩影子区、failure-note
+    // 全部跨回合保留）；SQLite 继续做 UI 真相源。首次智能体回合（无
+    // JSONL）一次性迁移：模型可见历史导入为事件并整份落盘。已有 JSONL
+    // 时只增量导入「游标之后」的 SQLite 消息（普通聊天等非智能体路径的
+    // 写入），带内容级去重（崩溃窗口双写保护，见 [_dedupeDeltaAgainstLog]）。
+    // 🔧 轨迹信封（kAgentTraceMessagePrefix 前缀）要放行：导入时还原成
+    // 真实 assistant(toolCalls)/tool/result 事件（WP1a）；其余 🔧 活动
+    // 消息（纯 UI 用）照旧排除。
+    final persistor = SessionPersistor(_sessionStore, conversationId);
+    SessionLog sessionLog;
+    final persistedLog = await _sessionStore.load(conversationId);
+    if (persistedLog.eventsCount > 0) {
+      sessionLog = persistedLog;
+      sessionLog.attachSink(persistor.onEvent);
+      final cursorMs = persistedLog.lastImportCursorMs;
+      final allMessages =
+          await _storage.getMessages(conversationId, limit: 200);
+      final delta = [
+        for (final m in allMessages)
+          if (m.timestamp.millisecondsSinceEpoch > cursorMs) m,
+      ];
+      if (delta.isNotEmpty) {
+        _sessionStore.importMessagesInto(
+            sessionLog, _dedupeDeltaAgainstLog(sessionLog, delta));
+      }
+    } else {
+      final allMessages = await _storage.getMessages(conversationId, limit: 200);
+      final history = _messagesForModelContext(allMessages);
+      sessionLog = _sessionStore.importFromMessages(conversationId, history);
+      sessionLog.attachSink(persistor.onEvent);
+      // 一次性迁移落盘：失败不致命（下回合重新迁移，rewrite 幂等覆盖）。
+      try {
+        await _sessionStore.rewrite(conversationId, sessionLog);
+      } catch (e) {
+        debugPrint('[AgentSession] JSONL 迁移失败（下回合重试）: $e');
+      }
+    }
 
     // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
     _ref.read(agentUiStateProvider.notifier).attach(conversationId, sessionLog);
@@ -1636,6 +1703,12 @@ class ChatNotifier extends StateNotifier<bool> {
             role: MessageRole.assistant,
             content: '🔔 $notice',
           )));
+        },
+        // C2 前台子代理进度行：UI 状态行展示里程碑（不进父模型上下文）。
+        onProgress: (line) {
+          _ref
+              .read(agentUiStateProvider.notifier)
+              .appendSubagentNote(conversationId, line);
         },
       ));
       // send_message 续轮（DSH tool-subagent-control）：向可续轮子代理
@@ -1746,10 +1819,15 @@ class ChatNotifier extends StateNotifier<bool> {
     }
     // Hooks（默认：模型缓存 guard 已在 guard.dart；pre-step 暂无内置 reject）。
     final hooks = AgentHooks();
-    // ---- P1-B：压缩摘要走便宜模型（按步模型路由的压缩分支）----
-    // 仅 API 档：模型链 = 专用压缩模型 > 子代理模型 > 主模型；摘要失败/
-    // 超时由压缩插件内部回退确定性 digest（压缩永不因摘要模型失败）。
-    Future<String?> Function(String)? llmSummarizer;
+    // ---- B2：压缩摘要器（LlmSummarizer seam）----
+    // API 档：模型链 = 专用压缩模型 > 子代理模型 > 主模型（便宜模型路由）；
+    // 本地档：主模型真前缀摘要——输入 = 对话真前缀 + 末尾指令 user 消息，
+    // 本地引擎 KV LCP 命中前缀缓存，增量 prefill 只有指令尾部（端侧红利，
+    // DSH 只能靠 provider 缓存计费达成同一效果）。摘要失败/超时由压缩
+    // 插件内部回退确定性 digest（压缩永不因摘要模型失败）。
+    // 端侧摘要慢（300 tok 需 30~100s）→ 只用于回合结束后的跨回合压缩
+    //（allowModelSummary 路由，见 loop/agent 与 _maybeCompactAgentLog）。
+    LlmSummarizer? llmSummarizer;
     if (useApi && settings.agentCompactEnabled) {
       var compApiId = settings.agentCompressionApiModelId;
       if (compApiId.isEmpty) compApiId = settings.agentSubagentApiModelId;
@@ -1772,12 +1850,12 @@ class ChatNotifier extends StateNotifier<bool> {
             )
           : engine;
       final compModelName = compApi?.model ?? agentModelKey;
-      llmSummarizer = (prompt) async {
+      llmSummarizer = (instruction, _) async {
         final r = await compEngine.generate(GenerateOptions(
           provider: ProviderKind.api,
           messages: [
             {'role': 'system', 'content': '你是上下文压缩摘要器，只输出摘要本身。'},
-            {'role': 'user', 'content': prompt},
+            {'role': 'user', 'content': instruction},
           ],
           tools: const [],
           temperature: 0.2,
@@ -1786,8 +1864,30 @@ class ChatNotifier extends StateNotifier<bool> {
         ));
         return r.text;
       };
+    } else if (settings.agentCompactEnabled) {
+      llmSummarizer = (instruction, prefixMessages) async {
+        final r = await engine.generate(GenerateOptions(
+          provider: ProviderKind.local,
+          // B2 真前缀：prefixMessages = decide 时点的模型可见投影 ≈ 最近
+          // 一次请求的消息列表；指令作最后一条 user 消息 → 原生 LCP 命中。
+          messages: [
+            ...prefixMessages,
+            {'role': 'user', 'content': instruction},
+          ],
+          tools: const [],
+          temperature: 0.2,
+          maxTokens: 640,
+          modelId: agentModelKey,
+        ));
+        return r.text;
+      };
     }
     // ---- 主循环 ----
+    // A2：guard 层生产接线——模型缓存保护 + 破坏性命令拦截（此前
+    // modelCacheGuard 只被测试引用，`rm model_cache` 防护实际不生效）。
+    final agentCompaction = settings.agentCompactEnabled
+        ? DeterministicCompaction(llmSummarizer: llmSummarizer)
+        : null;
     final agent = ReactLoopAgent(
       session: sessionLog,
       adapter: engine,
@@ -1797,6 +1897,9 @@ class ChatNotifier extends StateNotifier<bool> {
       providerKind: useApi ? ProviderKind.api : ProviderKind.local,
       systemPrompt: systemPrompt,
       onToolActivity: session.update,
+      // A1：跨回合续 turn 号（failure-note 去重/metrics 扫描依赖全局递增）。
+      initialTurn: sessionLog.turnEndCount,
+      guards: [modelCacheGuard, dangerousCommandShellGuard],
       sandboxApprover: _ref.read(sandboxApproverProvider),
       // Dev Agent：开发模式注入工作区解析器（文件/ssh 工具跟随激活工作区）。
       workspaceResolver: settings.devModeEnabled
@@ -1814,11 +1917,9 @@ class ChatNotifier extends StateNotifier<bool> {
       // 逐字节稳定，API prompt cache 不再因时间快照每回合全段破缓存。
       environmentNoteProvider:
           useApi ? () => _formatEnvironmentNote() : null,
-      // 上下文压缩（确定性裁剪 + P1-B LLM 摘要）：设置可关；关 = 超限直接
+      // 上下文压缩（确定性裁剪 + B2 LLM 摘要）：设置可关；关 = 超限直接
       // 走失败终止。摘要模型失败时插件内部回退确定性摘要。
-      compaction: settings.agentCompactEnabled
-          ? DeterministicCompaction(llmSummarizer: llmSummarizer)
-          : null,
+      compaction: agentCompaction,
       // 超长工具输出溢写：写 ApplicationSupport/agent_spill/，模型侧留摘要。
       spillStore: settings.agentSpillEnabled ? _writeSpillFile : null,
     );
@@ -1875,6 +1976,14 @@ class ChatNotifier extends StateNotifier<bool> {
       _lastTurnEndReason[conversationId] = reason.kind.name;
       debugPrint('[ChatNotifier] new-agent done: reason=${reason.kind.name}, '
           'answer len=${answer.length}');
+      // A1：回合事件全部落盘（检查点）。写盘失败不吞掉回合结果，
+      // 下回合 load 不到增量时由 SQLite 增量导入自愈。
+      try {
+        await persistor.flush();
+      } catch (e) {
+        debugPrint('[AgentSession] 事件落盘失败（下回合增量自愈）: $e');
+        logManager.appendInferenceLog('⚠️ 会话事件落盘失败：$e');
+      }
       // 压缩可观测：本回合 compaction/summary 事件 → 推理日志（此前压缩
       // 只有一条 debugPrint，release 里用户/开发者都查不到"压没压"）。
       try {
@@ -2010,6 +2119,27 @@ class ChatNotifier extends StateNotifier<bool> {
     } else {
       // 本地路线：KV 缓存占比（已占用位置 kv_used / 上下文窗口 kv_ctx）。
       _updateLocalContextUsage(conversationId, genStats);
+      // C4：本地 usage（原生 stats 回传，assistant 事件携带）→ 推理日志。
+      // 此前本地回合成本只有估算、真数不落账。
+      for (final e in sessionLog.rawEvents) {
+        final u = e.data['usage'];
+        if (e.type == kEventAssistantMessage && u is Map<String, dynamic>) {
+          logManager.appendInferenceLog(
+            '本地用量 | prompt=${u['prompt_tokens'] ?? '?'} '
+            'completion=${u['completion_tokens'] ?? '?'}',
+          );
+        }
+      }
+      // B5 LCP 遥测：前缀命中率 = 增量 prefill 保住的 token 占全部 prompt
+      // token 的比例（末步口径）。这是端侧效率北极星指标——连续步 <90%
+      // 说明有东西在破坏前缀（提示词漂移/历史重排），先查它。
+      final lcp = (genStats['lcp_prefix'] as num?)?.toInt() ?? -1;
+      final nPrompt = (genStats['n_prompt'] as num?)?.toInt() ?? 0;
+      if (lcp >= 0 && nPrompt > 0) {
+        final pct = lcp * 100 ~/ nPrompt;
+        debugPrint('[AgentKV] LCP $lcp/$nPrompt ($pct%)');
+        logManager.appendInferenceLog('KV 复用 | LCP $lcp/$nPrompt（$pct%）');
+      }
     }
     unawaited(_maybeAutoCompact(conversationId));
     // 思考存档落库（kind=thinking，仅 UI 展示不入模型上下文）：turn 事件流
@@ -2092,9 +2222,140 @@ class ChatNotifier extends StateNotifier<bool> {
       inferenceStats: answerStats,
     );
     await _storage.saveMessage(assistantMsg);
+    // A1 检查点：本回合全部 SQLite 消息（思考存档/UITrace/TRACE 信封/
+    // 最终回答）已落库且时间戳 ≤ assistantMsg.timestamp——写导入游标，
+    // 下回合增量导入只扫游标之后的普通聊天增量（双写去重兜底见
+    // [_dedupeDeltaAgainstLog]）。游标自身也要落盘。
+    try {
+      sessionLog.append(
+        kEventImportCursor,
+        {
+          'sqliteCursorMs': assistantMsg.timestamp.millisecondsSinceEpoch,
+        },
+        source: const {'kind': 'import'},
+      );
+      await persistor.flush();
+    } catch (e) {
+      debugPrint('[AgentSession] 游标落盘失败: $e');
+    }
+    // B1 跨回合自动压缩（SessionLog 版）：回合结束、用户已在看结果，
+    // 此时才允许本地慢摘要（allowModelSummary: true）；压缩成功后物理
+    // 清淤（剔除影子区事件，防 JSONL 无界增长）。
+    await _maybeCompactAgentLog(
+      conversationId,
+      sessionLog,
+      persistor,
+      agentCompaction,
+      newConfig.contextTokenBudget,
+    );
     await _refreshConversationMeta(conversationId);
     _maybeAutoSpeak(conversationId, answer);
     return answer;
+  }
+
+  /// A1 增量导入去重：崩溃窗口（JSONL flush 完成、游标未落）里回合产物
+  /// 可能 JSONL 与 SQLite 双份。规则：
+  /// - TRACE 信封：其全部 tool/result 的 callId 已存在于日志 → 跳过；
+  /// - user/assistant 文本：同类型表面事件**内容相同且时间差 ≤2 分钟** →
+  ///   跳过（kick/事件流与 SQLite 落库几乎同刻）；
+  /// - 其余（普通聊天增量）照常导入。
+  List<ChatMessage> _dedupeDeltaAgainstLog(
+      SessionLog log, List<ChatMessage> delta) {
+    final callIds = <String>{};
+    final surfaceTexts = <String, List<(int, String)>>{};
+    for (final e in log.rawEvents) {
+      if (e.type == kEventToolCall || e.type == kEventToolResult) {
+        final cid = e.data['callId'] as String?;
+        if (cid != null && cid.isNotEmpty) callIds.add(cid);
+        continue;
+      }
+      if (e.type == kEventUserMessage ||
+          e.type == kEventAssistantMessage ||
+          e.type == kEventCompactionSummary) {
+        final c = e.data['content'] as String?;
+        if (c != null) {
+          surfaceTexts.putIfAbsent(e.type, () => []).add((e.timeMs, c));
+        }
+      }
+    }
+    bool textNearDup(String type, String content, int timeMs) {
+      for (final (t, c) in surfaceTexts[type] ?? const <(int, String)>[]) {
+        if (c == content && (t - timeMs).abs() <= 120000) return true;
+      }
+      return false;
+    }
+
+    return [
+      for (final m in delta)
+        if (!_knownInLog(m, textNearDup, callIds)) m,
+    ];
+  }
+
+  bool _knownInLog(
+    ChatMessage m,
+    bool Function(String, String, int) textNearDup,
+    Set<String> callIds,
+  ) {
+    final tsMs = m.timestamp.millisecondsSinceEpoch;
+    if (m.content.startsWith(kAgentTraceMessagePrefix)) {
+      final restored = decodeAgentTraceMessage(m.content);
+      if (restored != null) {
+        var resultCount = 0;
+        var allKnown = true;
+        for (final e in restored) {
+          if (e['type'] == 'tool/result') {
+            resultCount++;
+            final data = e['data'];
+            final cid =
+                data is Map<String, dynamic> ? data['callId'] as String? : null;
+            if (cid == null || cid.isEmpty || !callIds.contains(cid)) {
+              allKnown = false;
+            }
+          }
+        }
+        if (resultCount > 0 && allKnown) return true;
+      }
+      // 还原失败/部分未知 → 按普通 assistant 文本规则再判一次。
+      return textNearDup('assistant/message', m.content, tsMs);
+    }
+    final type = m.role == MessageRole.user
+        ? 'user/message'
+        : 'assistant/message';
+    return textNearDup(type, m.content, tsMs);
+  }
+
+  /// B1 跨回合自动压缩（SessionLog 版）：估算投影 token 超「预算 ×90%」
+  /// 才动手（主动压缩在回合内已守 100% 线，这里是长会话的兜底降档）。
+  /// 压缩成功 → flush + 物理清淤。失败静默（下回合再试）。
+  Future<void> _maybeCompactAgentLog(
+    String conversationId,
+    SessionLog log,
+    SessionPersistor persistor,
+    CompactionPlugin? compaction,
+    int? budget,
+  ) async {
+    if (compaction == null || budget == null || budget <= 0) return;
+    final est = estimateContextTokens(log.deriveModelMessages());
+    if (est < budget * 9 ~/ 10) return;
+    try {
+      final r = await compaction.decide(
+        ref: SessionRef(log),
+        turn: log.turnEndCount,
+        step: 0,
+        reason: 'post-turn auto: est≈$est tok ≥ 预算 $budget 的 90%'
+            '（跨回合压缩，B1）',
+        allowModelSummary: true,
+      );
+      if (r.kind != CompactionResultKind.success) return;
+      await persistor.flush();
+      await persistor.compactFile(log);
+      _ref.read(modelManagerProvider.notifier).appendInferenceLog(
+            '跨回合压缩 | est≈$est → ${r.stats?.afterTokens ?? '?'} tok | '
+            '会话文件已清淤',
+          );
+    } catch (e) {
+      debugPrint('[AgentSession] 跨回合压缩失败（下回合再试）: $e');
+    }
   }
 
   /// 构建 agent 工具注册表：全量内置工具 → 联网类按配置移除 → 按模型过滤。
@@ -2471,6 +2732,34 @@ class ChatNotifier extends StateNotifier<bool> {
       if (derived < budget) budget = derived;
     }
     return budget;
+  }
+
+  /// 本地档主动压缩预算（A3）：以原生真实窗口 kv_ctx（含加载时 oom-guard
+  /// 裁剪后的值）与设置 agentNctx 取小者，再 ×3/4 留生成余量。
+  /// 模型未加载/查询失败 → 回退设置口径（与旧行为一致）；窗口未知 →
+  /// null（不做主动计量，溢出由失败瀑布兜底）。
+  Future<int?> _localContextTokenBudget(InferenceSettings settings) async {
+    var nctx = settings.agentNctx;
+    try {
+      if (await _inference.isModelLoaded()) {
+        final stats = await _inference.getInferenceStats();
+        final kvCtx = (stats['kv_ctx'] as num?)?.toInt() ?? 0;
+        if (kvCtx > 0 && (nctx <= 0 || kvCtx < nctx)) nctx = kvCtx;
+      }
+    } catch (_) {
+      // 原生状态查询失败：用设置值兜底。
+    }
+    if (nctx <= 0) return null;
+    return (nctx * 3) ~/ 4;
+  }
+
+  /// C1：MCP 工具注册（防跨 server 撞名）。
+  void _registerMcpTools(ToolRegistry registry, String serverName,
+      List<ToolDefinition> tools) {
+    final existing = registry.all.map((t) => t.name).toSet();
+    for (final t in tools) {
+      if (!existing.contains(t.name)) registry.register(t);
+    }
   }
 
   /// 默认全启用；联网类（web_search/get_weather）由 [settings.webSearchEnabled]

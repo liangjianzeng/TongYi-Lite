@@ -135,6 +135,11 @@ class _NoSupportProtocol implements ToolProtocol {
   @override
   Future<StreamOutcome> parseStream(Stream<String> stream) async =>
       const StreamOutcome(text: '');
+
+  @override
+  String? replayToolCalls(
+          String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }
 
 /// BaseEngineAdapter 具体桩：仅复用 [BaseEngineAdapter.convertEngineMessages]

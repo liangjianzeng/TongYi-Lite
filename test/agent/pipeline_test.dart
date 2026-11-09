@@ -136,7 +136,9 @@ void _appendToolTurn(SessionLog log, int turn) {
   log.append(kEventToolResult, {
     'callId': callId,
     'name': 't',
-    'content': '工具结果_$turn',
+    // 旧区得有真 token 大户（约束 2：摘要必须比原文小——遮蔽区太小则
+    // 压缩拒绝提交，这是期望行为；fixture 放大到 ~160 tok/条）。
+    'content': '工具结果_$turn：' * 30,
   },
       source: {'kind': 'tool', 'callId': callId});
 }
@@ -169,7 +171,8 @@ test('压缩：旧轮工具结果被遮蔽，摘要入历史，recent 保留', (
     expect(shadowed, !isRecent, reason: 'seq=${toolResultSeqs[i]}');
   }
 
-  // 摘要事件存在，且模型视角可见。
+  // 摘要事件存在，且模型视角可见（B1：结构化 digest 带
+  // <compacted-summary> 标签 + 用户诉求骨架）。
   final summaryData = _findToolResult(
       log, null, type: kEventCompactionSummary) ??
       log.rawEvents
@@ -180,11 +183,11 @@ test('压缩：旧轮工具结果被遮蔽，摘要入历史，recent 保留', (
   final msgs = log.deriveModelMessages();
   // 被遮的旧 tool/result 不应再出现在模型视角。
   expect(msgs
-      .where((m) => m['content'] == '工具结果_1' ||
-              m['content'] == '工具结果_5'),
+      .where((m) => (m['content'] as String? ?? '').startsWith('工具结果_1：') ||
+              (m['content'] as String? ?? '').startsWith('工具结果_5：')),
       isEmpty);
   expect(msgs.firstWhere(
-        (m) => (m['content'] ?? '').contains('较早轮次摘要'),
+        (m) => (m['content'] ?? '').contains('<compacted-summary>'),
       orElse: () => throw StateError('no summary')),
       isNotNull);
 });

@@ -164,7 +164,8 @@ void main() {
 
     // 子代理 session 应含父前缀的事件 + 自己的事件。
     expect(run.session.eventsCount, greaterThan(10));
-    // 子代理 session 含父 system 内容。
+    // 子代理 session 含父 system 事件（B1 语义：被子代理自己的 system
+    // surface-replace 顶替——事件仍在日志里，投影只出子代理 system）。
     expect(
       run.session.rawEvents.any(
           (e) =>
@@ -172,12 +173,15 @@ void main() {
       true,
     );
 
-    // 模型看到的消息历史：含父前缀内容，不含进行中 turn 内容。
+    // 模型看到的消息历史：含父对话内容（user/assistant），不含进行中
+    // turn 内容；system 恒只有子代理自己的（单一 system 块——双 system
+    // 会污染本地 chatml 模板，B1 replace 语义的代价是父 system 不再投影）。
     expect(adapter.capturedMessages.isNotEmpty, true);
     final joined = adapter.capturedMessages.first
         .map((m) => '${m['role']}: ${m['content']}')
         .join('\n');
-    expect(joined, contains('父系统提示'));
+    expect(joined, contains('系统提示：可调用工具。'));
+    expect(joined, isNot(contains('父系统提示')));
     expect(joined, contains('父用户消息'));
     expect(joined, contains('父助手回答'));
     expect(joined, isNot(contains('进行中用户消息')));

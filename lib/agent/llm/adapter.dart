@@ -133,8 +133,9 @@ final class LlmResult {
   final String text;
   final List<ToolCall> toolCalls;
 
-  /// 服务端 token 用量（API 路线，SSE 末块 usage 原样透传；
-  /// {prompt_tokens, completion_tokens, ...}，本地路线恒 null）。
+  /// token 用量（API 路线 SSE 末块透传；本地路线 C4 起由原生 stats 回传
+  /// {prompt_tokens: n_prompt, completion_tokens: n_gen}——回合成本有了
+  /// 真数，不再只有估算）。查询失败/全零为 null。
   final Map<String, dynamic>? usage;
 
   const LlmResult({

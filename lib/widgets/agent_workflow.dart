@@ -330,6 +330,43 @@ class _ToolGenIndicator extends StatelessWidget {
   }
 }
 
+/// 子代理运行进度行（C2）：`👤 子代理 · 步 2 调用 web_search` 样式，
+/// 跟随工具卡区（turn 进行中显示，attach 重建时自动清空）。
+class _SubagentProgressRow extends StatelessWidget {
+  final String note;
+  const _SubagentProgressRow({required this.note});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '👤 子代理 · $note',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontStyle: FontStyle.italic,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// RetryIndicator —— "重试中…（N）"（llm/retry 事件）。
 class RetryIndicator extends StatelessWidget {
   final int attempt;
@@ -1347,6 +1384,10 @@ class AgentTurnBlock extends StatelessWidget {
             chars: ui.toolGen!.chars,
             preview: ui.toolGen!.preview,
           ),
+        // C2：前台子代理运行进度行（最近 3 条里程碑，不进模型上下文）。
+        if (running && ui.subagentNotes.isNotEmpty)
+          for (final note in ui.subagentNotes)
+            _SubagentProgressRow(note: note),
         if (_thinking) const ThinkingIndicator(),
         // 回合错误行（2026-10-25 阶段 3）：AgentUiState.lastError 此前只写
         // 不渲染——红点行给出"该回合失败了"的显式落点（DSH TurnErrorItem）。

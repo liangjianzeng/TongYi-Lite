@@ -114,6 +114,8 @@ struct GenStats {
     double t_prompt_ms = 0;   // prompt prefill time (diagnostics only)
     double t_vision_ms = 0;   // image-encode (vision) wall time, ms — "识图时间"
     double t_audio_ms  = 0;   // audio-encode (speech) wall time, ms — "听音时间"
+    int    lcp_prefix  = -1;  // B5: LCP 增量 prefill 保住的 token 数（-1 = 无测量）
+    int    n_prompt    = 0;   // B5: 本次请求 prompt token 总数（LCP 分母）
 };
 static GenStats g_last_stats;
 
@@ -2440,11 +2442,22 @@ struct InferenceEngine {
                         full_clear();
                     }
                 } else {
+                    // LCP < MIN_INCREMENTAL_PREFIX（或 >= n_prompt）：不值得
+                    // 增量。full_clear 后必须把 prefix_len 归零——它是 prefill
+                    // 起点（cur_pos/i），其余 full-clear 路径都显式清零，唯独
+                    // 这里漏了：空 KV 上从 LCP 位置起步 → 首 decode 必被 KV
+                    // 一致性检查打回、走 attempt=1 全量重灌（白烧一次 decode）。
+                    prefix_len = 0;
                     full_clear();
                 }
             } else {
                 full_clear();
             }
+
+            // B5 telemetry: prefix-reuse ratio for the Dart-side "KV 复用"
+            // readout (kept prefix over full prompt; -1 means unmeasured).
+            g_last_stats.lcp_prefix = prefix_len;
+            g_last_stats.n_prompt   = n_prompt;
 
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
@@ -4149,10 +4162,11 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, job
     // kv_used = KV 缓存已占用位置数（当前会话），kv_ctx = 上下文窗口 n_ctx，
     // 供本地模型顶部状态栏「上下文/KV 占比」细条使用（0 = 无模型/新会话）。
     snprintf(buf, sizeof(buf),
-             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f,\"kv_used\":%lld,\"kv_ctx\":%d}",
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f,\"kv_used\":%lld,\"kv_ctx\":%d,\"lcp_prefix\":%d,\"n_prompt\":%d}",
              g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms,
              g_last_stats.t_vision_ms, g_last_stats.t_audio_ms,
-             (long long)g_engine.get_kv_used_positions(), (int)g_engine.n_ctx.load());
+             (long long)g_engine.get_kv_used_positions(), (int)g_engine.n_ctx.load(),
+             g_last_stats.lcp_prefix, g_last_stats.n_prompt);
     return utf8_to_jstring(env, buf);
 }
 

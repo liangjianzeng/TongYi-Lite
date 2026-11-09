@@ -12,7 +12,9 @@ library;
 import '../session/event.dart';
 import '../session/log.dart';
 
-/// 子代理能力快照（对照 DSH `SubagentCapabilities`）。端侧固定值。
+/// 子代理能力快照（对照 DSH `SubagentCapabilities`）。
+/// C2：toolFilter 放开——委派时可裁剪子代理工具集（最小权限）。
+/// 人设/结构化输出端侧仍缺（无 grammar 注入路径），保持 false。
 final class SubagentCapabilities {
   /// 能否覆盖 provider/model/maxTokens（端侧：子代理用父模型，否）。
   final bool agentOptions;
@@ -20,7 +22,7 @@ final class SubagentCapabilities {
   final bool outputSchema;
   /// 能否限制委派深度（端侧：固定 2，是）。
   final bool depthLimit;
-  /// 能否裁剪子代理工具集（端侧：继承父工具，否）。
+  /// 能否裁剪子代理工具集（C2：是——[SubagentStartRequest.allowedTools]）。
   final bool toolFilter;
   /// 能否注入 per-child 人设（端侧暂无，否）。
   final bool persona;
@@ -29,22 +31,31 @@ final class SubagentCapabilities {
     this.agentOptions = false,
     this.outputSchema = false,
     this.depthLimit = true,
-    this.toolFilter = false,
+    this.toolFilter = true,
     this.persona = false,
   });
 }
 
 /// 子代理启动请求。[mode] 为 `spawn`（空白）或 `fork`（继承父上下文前缀）。
 /// [depth]：调用方当前委派深度（0 = 顶层）。子代理 = depth + 1。
+///
+/// [allowedTools]（C2 toolFilter）：非空 = 子代理只可见这些工具
+/// （最小权限委派——调研型子任务裁掉写类工具）；空/null = 继承父工具。
+/// [onProgress]：运行里程碑回调（步开始/工具调用/收尾），UI 展示用，
+/// 不进父模型上下文；null = 不订阅。
 final class SubagentStartRequest {
   final String task;
   final String mode;
   final int depth;
+  final List<String>? allowedTools;
+  final void Function(String line)? onProgress;
 
   const SubagentStartRequest({
     required this.task,
     required this.mode,
     this.depth = 0,
+    this.allowedTools,
+    this.onProgress,
   });
 }
 

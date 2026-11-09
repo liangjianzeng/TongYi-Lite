@@ -374,9 +374,10 @@ void main() {
     test('LLM 摘要成功 → 摘要用模型文本，provider=llm', () async {
       final log = _oldRoundsLog();
       final result = await DeterministicCompaction(
-        llmSummarizer: (prompt) async {
-          expect(prompt.contains('用户任务诉求'), isTrue);
-          expect(prompt.contains('[web_search]'), isTrue);
+        llmSummarizer: (instruction, prefixMessages) async {
+          expect(instruction.contains('结构化摘要'), isTrue);
+          // B2 真前缀：prefixMessages = decide 时点的模型可见投影。
+          expect(prefixMessages, isNotEmpty);
           return '这是模型生成的紧凑摘要。';
         },
       ).decide(ref: SessionRef(log), turn: 7, step: 1, reason: 'proactive');
@@ -390,19 +391,20 @@ void main() {
     test('LLM 摘要抛异常 → 回退确定性摘要（压缩不失败）', () async {
       final log = _oldRoundsLog();
       final result = await DeterministicCompaction(
-        llmSummarizer: (prompt) async => throw Exception('模型挂了'),
+        llmSummarizer: (instruction, prefixMessages) async =>
+            throw Exception('模型挂了'),
       ).decide(ref: SessionRef(log), turn: 7, step: 1, reason: 'proactive');
       expect(result.kind, CompactionResultKind.success);
       final summary = log.rawEvents
           .lastWhere((e) => e.type == kEventCompactionSummary);
-      expect(summary.data['content'], contains('较早轮次摘要'));
+      expect(summary.data['content'], contains('<compacted-summary>'));
       expect(summary.data['provider'], 'deterministic-prune');
     });
 
     test('LLM 摘要返回空串 → 回退确定性摘要', () async {
       final log = _oldRoundsLog();
       final result = await DeterministicCompaction(
-        llmSummarizer: (prompt) async => '   ',
+        llmSummarizer: (instruction, prefixMessages) async => '   ',
       ).decide(ref: SessionRef(log), turn: 7, step: 1, reason: 'proactive');
       expect(result.kind, CompactionResultKind.success);
       final summary = log.rawEvents

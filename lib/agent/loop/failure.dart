@@ -74,11 +74,17 @@ final class CompactionStats {
 
 abstract class CompactionPlugin {
   /// 给定上下文溢出，尝试压缩。success 才允许 retry（前进性证明）。
+  ///
+  /// [allowModelSummary]：是否允许调用模型生成摘要。端侧本地模型摘要
+  /// 慢（300 tok 需 30~100s），回合进行中的压缩（主动前置/溢出恢复）
+  /// 传 false 只跑确定性 digest——不阻塞回合；回合结束后的跨回合
+  /// 自动压缩传 true（用户已在看结果，慢摘要可接受，B2）。
   Future<CompactionResult> decide({
     required SessionRef ref,
     required int turn,
     required int step,
     required String? reason,
+    bool allowModelSummary = true,
   });
 }
 
@@ -92,6 +98,7 @@ final class NoCompactionPlugin implements CompactionPlugin {
     required int turn,
     required int step,
     required String? reason,
+    bool allowModelSummary = true,
   }) async {
     return const CompactionResult(CompactionResultKind.failure);
   }

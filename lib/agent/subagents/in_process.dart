@@ -18,8 +18,10 @@ import '../loop/agent.dart' show ReactLoopAgent, TurnEndReasonKind;
 import '../loop/config.dart' show AgentConfig;
 import '../llm/adapter.dart' show LlmAdapter, ProviderKind;
 import '../sandbox.dart' show AgentSandboxApprover;
-import '../session/event.dart' show SessionEvent;
+import '../session/event.dart'
+    show SessionEvent, kEventStepStart, kEventToolCall, kEventTurnEnd;
 import '../session/session.dart' show SessionLog;
+import '../context_eng/token_estimate.dart' show estimateTextTokens;
 import '../tool_registry.dart' show ToolRegistry;
 import 'provider.dart';
 
@@ -125,12 +127,23 @@ final class InProcessSubagentProvider extends SubagentProvider {
     final id =
         'sub-${DateTime.now().millisecondsSinceEpoch}-${_kRandom.nextInt(10000)}';
     final session = _createSession(request);
-    final agent = _buildAgent(session);
+    // C2 toolFilter：allowedTools 非空 → 过滤注册表（最小权限委派）。
+    // 白名单里的名字在父注册表不存在时静默忽略（模型可见清单即真相）。
+    ToolRegistry? filtered;
+    final allowed = request.allowedTools;
+    if (allowed != null && allowed.isNotEmpty) {
+      filtered = ToolRegistry();
+      final wanted = allowed.toSet();
+      for (final t in _registry.all) {
+        if (wanted.contains(t.name)) filtered.register(t);
+      }
+    }
+    final agent = _buildAgent(session, registry: filtered);
     _rememberContinuable(id, agent, session);
     final entry = _continuable[id]!;
     entry.running = true;
     final completer = Completer<SubagentResult>();
-    unawaited(_runTurnWith(agent, request.task)
+    unawaited(_runTurnWith(agent, request.task, onProgress: request.onProgress)
         .then((r) => completer.complete(r))
         .catchError((Object e, StackTrace st) =>
             completer.complete(SubagentResult.fromError(e.toString())))
@@ -181,11 +194,11 @@ final class InProcessSubagentProvider extends SubagentProvider {
     _continuable[id] = _Continuable(agent, s);
   }
 
-  ReactLoopAgent _buildAgent(SessionLog session) {
+  ReactLoopAgent _buildAgent(SessionLog session, {ToolRegistry? registry}) {
     return ReactLoopAgent(
       session: session,
       adapter: _adapter,
-      registry: _registry,
+      registry: registry ?? _registry,
       config: _subConfig,
       modelId: _modelId,
       providerKind: _providerKind,
@@ -199,7 +212,7 @@ final class InProcessSubagentProvider extends SubagentProvider {
     if (request.mode == 'fork') {
       final prefix = completedTurnPrefix(_parentSession);
       // 上下文窗口成本控制（§10.6）：fork seed 截断到 maxTokensPerRound
-      //（按字符粗略估算，中文 ~2char/token、英文 ~4char/token，取保守上限）。
+      //（A4 统一口径：estimateTextTokens，与主循环预算/压缩同一把尺）。
       final events = _truncatePrefix(prefix, _subConfig.maxTokensPerRound);
       return SessionLog.fromEvents(events);
     }
@@ -207,52 +220,78 @@ final class InProcessSubagentProvider extends SubagentProvider {
     return SessionLog.fromEvents(const []);
   }
 
-  /// 将前缀事件从末尾保留，总字符数不超过 [maxChars]（粗略 token 预算）。
+  /// 将前缀事件从末尾保留，总估算 token 不超过 [maxTokens]。
   /// 保留 tail（最近内容）以最大化上下文相关性。
   List<SessionEvent> _truncatePrefix(
       List<SessionEvent> prefix, int maxTokens) {
     if (prefix.isEmpty) return prefix;
-    // 粗略估算：中文 ~2char/token、英文 ~4char/token，取平均 ~3。
-    const double charsPerToken = 3.0;
-    final maxChars = (maxTokens * charsPerToken).round();
-    // 从末尾向前累加，找到最大后缀（保持 seq 有序）。
-    var keptChars = 0;
+    var keptTokens = 0;
     int startIndex = prefix.length;
     for (var i = prefix.length - 1; i >= 0; i--) {
-      final count = _eventCharCount(prefix[i].data);
-      if (keptChars + count > maxChars) break;
-      keptChars += count;
+      final count = _eventTokens(prefix[i].data);
+      if (keptTokens + count > maxTokens) break;
+      keptTokens += count;
       startIndex = i;
     }
     return prefix.sublist(startIndex);
   }
 
-  int _eventCharCount(Map<String, dynamic> data) {
+  /// 单个事件载荷的估算 token（A4 统一口径）。
+  int _eventTokens(Map<String, dynamic> data) {
     String s = '';
     data.forEach((k, v) => s += '$k:$v ');
-    return s.length;
+    return estimateTextTokens(s);
   }
 
-  Future<SubagentResult> _runTurnWith(ReactLoopAgent agent, String task) async {
-    final turnReason = await agent.kick(task);
-    // 映射 turn 结束原因 → SubagentResult（§10.5）。
-    bool isError;
-    switch (turnReason.kind) {
-      case TurnEndReasonKind.completed:
-        isError = false;
-        break;
-      case TurnEndReasonKind.error:
-      case TurnEndReasonKind.interrupted:
-      case TurnEndReasonKind.maxSteps:
-        isError = true;
-        break;
-      default:
-        isError = false;
+  Future<SubagentResult> _runTurnWith(ReactLoopAgent agent, String task,
+      {void Function(String line)? onProgress}) async {
+    // C2 进度流：订阅子代理事件流的里程碑（步开始/工具调用/收尾），
+    // 经 [onProgress] 转发（UI 展示用，不进父模型上下文）。subscription
+    // 在 kick 完成后取消——进度只覆盖本次运行。
+    StreamSubscription<SessionEvent>? progressSub;
+    if (onProgress != null) {
+      var stepNo = 0;
+      progressSub = agent.session.events.listen((e) {
+        switch (e.type) {
+          case kEventStepStart:
+            stepNo = (e.data['step'] as num?)?.toInt() ?? stepNo + 1;
+            onProgress('步 $stepNo 开始');
+            break;
+          case kEventToolCall:
+            onProgress(
+                '步 $stepNo 调用 ${e.data['name'] ?? '?'}');
+            break;
+          case kEventTurnEnd:
+            onProgress('结束（${e.data['reason'] ?? '?'}）');
+            break;
+          default:
+            break;
+        }
+      });
     }
-    return SubagentResult(
-      output: agent.lastAssistantContent,
-      isError: isError,
-      stopReason: turnReason.kind.name,
-    );
+    try {
+      final turnReason = await agent.kick(task);
+      // 映射 turn 结束原因 → SubagentResult（§10.5）。
+      bool isError;
+      switch (turnReason.kind) {
+        case TurnEndReasonKind.completed:
+          isError = false;
+          break;
+        case TurnEndReasonKind.error:
+        case TurnEndReasonKind.interrupted:
+        case TurnEndReasonKind.maxSteps:
+          isError = true;
+          break;
+        default:
+          isError = false;
+      }
+      return SubagentResult(
+        output: agent.lastAssistantContent,
+        isError: isError,
+        stopReason: turnReason.kind.name,
+      );
+    } finally {
+      await progressSub?.cancel();
+    }
   }
 }

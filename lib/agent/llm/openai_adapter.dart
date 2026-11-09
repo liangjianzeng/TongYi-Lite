@@ -504,8 +504,10 @@ class OpenAiAdapter extends BaseEngineAdapter {
   }) async {
     final openAi = _openAi!;
     final model = _apiModel!;
-    // 文本路线：'tool' 保留 role:tool（部分服务端宽容处理），助手剥除 tool_calls。
-    final apiMessages = convertApiMessages(options.messages);
+    // 文本路线：'tool' 保留 role:tool（部分服务端宽容处理），assistant 的
+    // tool_calls 按 B4 回放为文本形态拼回 content（模型看见自己发过的调用）。
+    final apiMessages =
+        convertApiMessages(options.messages, modelId: model.model);
     // 视觉：带 imagePath 的 user 消息转 content-parts（visionCapable 才发）。
     if (model.visionCapable) {
       await attachWireImages(apiMessages, options.messages);

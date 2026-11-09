@@ -178,7 +178,8 @@ class InferenceSettings {
   /// 单工具执行超时（毫秒）。默??15s：防止工具卡死拖住整个循环??
   final int agentToolTimeoutMs;
 
-  /// 是否允许并行工具调用（默认关闭；开启后??[agentMaxParallel] 分批并发）??
+  /// 是否允许并行工具调用（B3 默认开启：一步多调用落地后，读类工具按
+  /// [agentMaxParallel] 分批并发、写类工具仍独占执行）。
   final bool agentAllowParallelTools;
 
   /// 并行工具并发上限（默??4；实际再受驱动模型能力夹紧）??
@@ -524,7 +525,7 @@ class InferenceSettings {
     this.agentApiContextBudget = 32768,
     this.agentTokensPerRound = 1024,
     this.agentToolTimeoutMs = 15000,
-    this.agentAllowParallelTools = false,
+    this.agentAllowParallelTools = true,
     this.agentMaxParallel = 4,
     this.agentTemperature = 0.7,
     this.agentApiMaxRounds = 16,
@@ -1116,7 +1117,7 @@ class InferenceSettings {
       agentToolTimeoutMs:
           (json['agentToolTimeoutMs'] as num?)?.toInt() ?? 15000,
       agentAllowParallelTools:
-          json['agentAllowParallelTools'] as bool? ?? false,
+          json['agentAllowParallelTools'] as bool? ?? true,
       agentMaxParallel: json['agentMaxParallel'] as int? ?? 4,
       agentTemperature: (json['agentTemperature'] as num?)?.toDouble() ?? 0.7,
       agentApiMaxRounds: (json['agentApiMaxRounds'] as num?)?.toInt() ?? 16,
