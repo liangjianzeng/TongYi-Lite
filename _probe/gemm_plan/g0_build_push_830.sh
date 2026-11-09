@@ -3,7 +3,7 @@
 # 不碰 build-x4/vkh_batched/glibc-build2;合同第4条:影区 /data/local/tmp/gemm,vkh_batched 不碰)。
 # 用法(host, DGX Spark): bash _probe/gemm_plan/g0_build_push_830.sh [--no-push]
 set -u
-DEV=${DEV:-100.75.247.55:5555}          # 830=本会话车道;740=GEMV SERIAL 车道勿指
+DEV=${DEV:-<redacted-tailscale-830>:5555}          # 830=本会话车道;740=GEMV SERIAL 车道勿指
 PORT=${PORT:-15037}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 BD=$REPO/_probe/moe_probe/build-gemm    # GEMM 侧专属 cmake dir(首次 configure,后续增量)

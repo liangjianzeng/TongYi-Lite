@@ -123,12 +123,22 @@ void main() {
       expect(p.visibleText, isEmpty);
     });
 
-    test('XML 未闭合 → finish 后按普通文本显示', () {
+    test('XML 未闭合 → finish 整块丢弃（协议残骸不得当答案）', () {
+      // 真机 2026-11-09 契约翻转：旧行为把原始串整个写回可见流，闭合标签
+      // 写坏/断在参数区时，整串协议标签进了答案气泡与「步骤 N 输出」块
+      // （用户截图即此）。块已进参数区 = 调用作废，宁可少一段本来就不
+      // 完整的"答案"，不可把工具名/尖括号残骸当答案。
+      const open = '<' + 'tool_call' + '>';
       final p = AgentStreamProcessor();
-      p.add('<tool_call>get_time');
+      p.add('${open}get_time');
       expect(p.hasToolCalls, isFalse);
       p.finish();
-      expect(p.visibleText, '<tool_call>get_time');
+      expect(p.visibleText, isEmpty);
+      // 前言（若有）照常保住——丢的只是参数区之后的内容。
+      final q = AgentStreamProcessor();
+      q.add('答案在前。${open}get_time');
+      q.finish();
+      expect(q.visibleText, '答案在前。');
     });
 
     test('完整工具 JSON 被隐藏并解析', () {

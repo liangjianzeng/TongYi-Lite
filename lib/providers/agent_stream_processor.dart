@@ -82,6 +82,193 @@ class AgentStreamProcessor {
   /// 当前可见文本（思考过滤 + JSON 隐藏后）。
   String get visibleText => visible.toString();
 
+  /// [marker]（形如 `
+  /// `）的**容错**命中：允许尖括号内侧混入空白——真机高发的书写噪声是
+  /// 「标签里多一个空格」与「标签被断句劈开」，两种都会让精确匹配失效。
+  ///
+  /// 为什么不能只用 `endsWith`：状态机原来是**逐字符精确后缀**匹配，标签里
+  /// 多一个空格或断句就整块认不出来，于是协议标签原样留在可见流里——过去
+  /// 答案行是单行覆写，下一行把它盖掉，用户看不见；A2/A3 把每步可见文本
+  /// **定格成独立行**之后，这些残片被永久固化成「步骤 N 输出」块（真机截图
+  /// 即此：步骤卡内容是一串协议标签）。慢路仅在尾部出现 `<` 时走（正常
+  /// 中文答案零命中），热路径不受影响。
+  static bool _endsWithTag(String s, String marker) =>
+      _tailTagLength(s, marker) != null;
+
+  /// 可见文本尾部实际匹配到的标签长度（精确或容错）；未命中返回 null。
+  /// 返回**实际**长度而非 marker.length：容错命中时尾部比 marker 长（多出的
+  /// 是空白），调用方按此长度回退，否则会把空白留在可见流里。
+  static int? _tailTagLength(String s, String marker) {
+    if (s.endsWith(marker)) return marker.length; // 快路（绝大多数命中）
+    if (!s.contains('<')) return null; // 无尖括号 → 不可能命中
+    // 逐个尖括号起点试（最左 `<` 不匹配时后面还可能有）：正文里先出现普通
+    // 尖括号、协议标签在其后才到达尾部，只查最左一个就会漏判。
+    final loose = _looseTagPattern(marker);
+    for (var i = s.length - 2; i >= 0; i--) {
+      if (s[i] != '<') continue;
+      final m = loose.matchAsPrefix(s, i);
+      if (m != null && m.end == s.length) return m.end - i;
+    }
+    return null;
+  }
+
+  /// [marker] 的「任意字符间可混空白」宽松式（`</tool_call >`、`< /tool_call>`
+  /// 这类真机书写噪声）。
+  ///
+  /// 分隔必须带上**尖括号本身**：`join` 只在元素之间插分隔，若 `<`/`>` 不参与
+  /// 拼接，`< /tool_call>`（空格紧跟 `<`）与 `</tool_call >`（空格紧贴 `>`）
+  /// 这两种真机最常见的写法都会漏判。
+  static RegExp _looseTagPattern(String marker) {
+    return RegExp(
+      marker
+          .split('')
+          .map(RegExp.escape)
+          .join(r'\s*'),
+    );
+  }
+
+  /// [marker] 的**部分前缀**是否正压在可见文本尾部（跨 token 断开的协议标签）。
+  ///
+  /// 命中时该字符**先留在可见流**：下一字符继续喂进来后要么补全成完整标签
+  /// （那时 [_endsWithTag] 命中，整块连同这段前缀一起回退隐藏），要么不成
+  /// 标签（自然转正为正文，与旧行为一致）。旧实现没有这一态，标签的前半截
+  /// 单独到达时不进缓冲，其后的参数区就再也不会被识别为工具块。
+  static bool _tagPrefixAtTail(String s, String marker) {
+    for (var i = s.length - 1; i >= 0; i--) {
+      // 每个 `<` 都当候选起点：前面的正文里另有普通尖括号不影响后面的判断。
+      if (s[i] != '<') continue;
+      // 至少吃掉 `<` 才算"标签可疑"（起点即 `<`，天然满足）。
+      if (_isLoosePrefixOf(s.substring(i), marker)) return true;
+    }
+    return false;
+  }
+
+  /// [tail] 是否形如 [marker] 的**前缀**——允许已到达部分内混入空白
+  /// （`< /tool_call`、`<tool_ca` 都算），但不许超出 [marker] 本身。
+  static bool _isLoosePrefixOf(String tail, String marker) {
+    if (tail.length > marker.length) return false;
+    var j = 0; // marker 游标
+    for (var i = 0; i < tail.length; i++) {
+      final c = tail[i];
+      if (c == ' ' || c == '\t' || c == '\n') continue; // 噪声字符跳过
+      while (j < marker.length &&
+          (marker[j] == ' ' || marker[j] == '\t' || marker[j] == '\n')) {
+        j++;
+      }
+      if (j >= marker.length || marker[j] != c) return false;
+      j++;
+    }
+    return true;
+  }
+
+  /// 协议标签字符串（拼接书写：本文件所在工具链对成对尖括号标记有误吞风险）。
+  static const List<String> _protocolTags = [
+    '<' 'tool_call' '>',
+    '<' '/tool_call' '>',
+    '<' 'arg_key' '>',
+    '<' '/arg_key' '>',
+    '<' 'arg_value' '>',
+    '<' '/arg_value' '>',
+    '<|tool_call_start|>',
+    '<|tool_call_end|>',
+    '<' 'thinking' '>',
+    '<' '/thinking' '>',
+    '<' 'think' '>',
+    '<' '/think' '>',
+  ];
+
+  /// 协议标签关键词（拼接书写，理由同上）。
+  static const List<String> _protocolTagWords = [
+    'tool' + '_call',
+    'thin' + 'k',
+    'think' + 'ing',
+    'arg' + '_key',
+    'arg' + '_value',
+    'function',
+    'parameter',
+  ];
+
+  /// 尖括号片段是否是**协议**标记（含 MiniCPM 特殊 token 与属性式 function）。
+  static bool _isProtocolFragment(String frag) {
+    final lower = frag.toLowerCase();
+    for (final w in _protocolTagWords) {
+      if (lower.contains(w)) return true;
+    }
+    return false;
+  }
+
+  /// 只**删协议尖括号片段**，保留其间正文（用于 finish 扫尾：可见流末尾压着
+  /// 半截协议标签前缀——[_tagPrefixAtTail] 的"等补全"态——流已终结不会补全，
+  /// 标签必须扫掉，而它周围真写的正文要留）。
+  static String stripProtocolTags(String text) {
+    if (!text.contains('<')) return text;
+    final sb = StringBuffer();
+    var i = 0;
+    while (i < text.length) {
+      final lt = text.indexOf('<', i);
+      if (lt < 0) {
+        sb.write(text.substring(i));
+        break;
+      }
+      sb.write(text.substring(i, lt));
+      final gt = text.indexOf('>', lt + 1);
+      if (gt < 0) {
+        final tail = text.substring(lt);
+        if (!_isProtocolFragment(tail) && !_looksLikeProtocolTagPrefix(tail)) {
+          sb.write(tail);
+        }
+        break;
+      }
+      final frag = text.substring(lt, gt + 1);
+      if (!_isProtocolFragment(frag)) sb.write(frag);
+      i = gt + 1;
+    }
+    return sb.toString().replaceAll(RegExp(r'[ \t]+\n'), '\n').trim();
+  }
+
+  /// 从**第一个协议标记**起整段截断（落库前的末道防线，供步答块定格与答案
+  /// 行写入调用）。
+  ///
+  /// 与 [stripProtocolTags] 的分工：模型一旦吐出工具调用开标签，其后的内容
+  /// 是**参数区**而不是正文——只删尖括号会把 `city南宁` 这类参数文本当正文
+  /// 留下（真机「步骤 N 输出」的成因）。故这里遇到协议标记就整段截尾。
+  ///
+  /// 判据保守：普通尖括号（「a < b」、示例代码里的 `<div>`）不触发截断，
+  /// 只有含 [_protocolTagWords] 关键词、或明显是协议标签前缀（尾部断开的
+  /// `<tool_ca`）的片段才算协议。
+  static String stripProtocolResidue(String text) {
+    if (!text.contains('<')) return text.trim();
+    var i = 0;
+    while (i < text.length) {
+      final lt = text.indexOf('<', i);
+      if (lt < 0) break;
+      final gt = text.indexOf('>', lt + 1);
+      final frag = gt < 0 ? text.substring(lt) : text.substring(lt, gt + 1);
+      if (_isProtocolFragment(frag) ||
+          (gt < 0 && _looksLikeProtocolTagPrefix(frag))) {
+        // 协议标记起 = 参数区开始，整段截尾。
+        return text.substring(0, lt).trim();
+      }
+      if (gt < 0) break; // 尾部非协议残段：保留并结束扫描
+      i = gt + 1;
+    }
+    return text.trim();
+  }
+
+  /// 尾部文本是否是某个协议标签的**前缀**（跨 token 断开的标签，如半截开标签）。
+  static bool _looksLikeProtocolTagPrefix(String tail) {
+    if (!tail.startsWith('<')) return false;
+    final lower = tail.toLowerCase();
+    for (final tag in _protocolTags) {
+      if (tag.length > lower.length &&
+          tag.toLowerCase().startsWith(lower.replaceFirst('<', '<'))) {
+        return true;
+      }
+    }
+    // `<|...` 形态的特殊 token 前缀。
+    return lower.startsWith('<|');
+  }
+
   /// 各风格的思考闭合记号（' response' 兼容 Qwen3.5 无闭合标签变体）。
   static const List<String> _thinkClosers = [
     '</thinking>',
@@ -142,7 +329,8 @@ class AgentStreamProcessor {
     }
   }
 
-  /// 流结束收尾：把未闭合的 XML 工具块 / JSON 试探恢复为普通文本。
+  /// 流结束收尾：JSON 试探恢复为普通文本；未闭合 XML 工具块**整块丢弃**
+  /// （参数区文本不是答案，2026-11-09 真机契约，理由见函数体注释）。
   /// 思考块未闭合：**短块恢复为可见文本**（dllm-CLOVER-APP-FIX，2026-10-30）。
   /// 旧策略一律丢弃是为 Qwen 系"think  runaway 兜底"设计的，但 Clover 一类
   /// 混合中英文输出会在正文中途吐出 ` think`/` response` 碎片触发思考态，
@@ -152,7 +340,11 @@ class AgentStreamProcessor {
   /// 思考失控止损（thinkingRunaway 预算远大于此阈值）。
   void finish() {
     if (_xmlTool != null) {
-      visible.write(_xmlTool!.toString());
+      // 流结束时工具块仍未闭合 = 调用本身作废（参数区没写完/闭合标签写坏），
+      // 其后内容全是参数区文本——恢复回可见流会把 `city南宁` 这类东西喂给
+      // 答案气泡与步答块（真机截图即此）。旧策略"剥标签后恢复"仍漏参数文本
+      // （剥的是尖括号，留的是尖括号之间的内容），故整块丢弃：
+      // 宁可少一段本来就不完整的"答案"，不可把协议残骸当答案。
       _xmlTool = null;
     }
     if (_inProbe) {
@@ -168,6 +360,14 @@ class AgentStreamProcessor {
     thinking.clear();
     _thinkKind = null;
     _thinkFromOrphanCloser = false;
+    // 尾部还压着半截协议标签（[_tagPrefixAtTail] 的"先留着等补全"态）而流已
+    // 结束 → 永远不会补全了，扫掉，否则答案尾部就是一串尖括号。
+    final tail = stripProtocolTags(visible.toString());
+    if (tail != visible.toString()) {
+      visible
+        ..clear()
+        ..write(tail);
+    }
   }
 
   /// 未闭合思考块恢复为可见文本的长度上限（ runaway 兜底阈值以下才恢复）。
@@ -212,7 +412,7 @@ class AgentStreamProcessor {
         _xmlTool = null;
         return;
       }
-      if (buf.endsWith('</tool_call>')) {
+      if (_endsWithTag(buf, '</tool_call>')) {
         toolXmlBlocks.add(_xmlTool!.toString());
         _xmlTool = null;
       }
@@ -247,7 +447,7 @@ class AgentStreamProcessor {
 
     // XML 工具块开始：`<tool_call>`（Spark 训练分布）。
     const xmlTag = '<tool_call>';
-    if (v.endsWith(xmlTag)) {
+    if (_endsWithTag(v, xmlTag)) {
       _enterXmlTool(v, xmlTag, xmlTag);
       return;
     }
@@ -256,10 +456,16 @@ class AgentStreamProcessor {
     // `<|tool_call_start|>` → 归一化为 `<tool_call>`，`<|tool_call_end|>` 同理，
     // 下游解析与隐藏逻辑统一走 XML 工具块路径（2026-09-30 真机定案）。
     const miniTag = '<|tool_call_start|>';
-    if (v.endsWith(miniTag)) {
+    if (_endsWithTag(v, miniTag)) {
       _enterXmlTool(v, miniTag, xmlTag);
       return;
     }
+
+    // 标签前缀压在尾部（`<`、`<tool`、`<|tool_cal` 这类跨 token 断口）：
+    // 本字符留在可见流，等下一字符补全再判——补全成标签时整块（含这段前缀）
+    // 一起回退隐藏；不成标签则自然转正为正文。缺这一态时，标签前半截单独
+    // 到达就不进缓冲，其后参数区永远不会被识别成工具块。
+    if (_tagPrefixAtTail(v, xmlTag) || _tagPrefixAtTail(v, miniTag)) return;
 
     // JSON 工具块开始：`{`。
     if (ch == '{') {
@@ -313,15 +519,18 @@ class AgentStreamProcessor {
   /// 进入 XML 工具块缓冲：从 visible/clean 回退掉触发标记 [marker]，
   /// 并以规范化形式 [canonical]（如 `<tool_call>`）开启缓冲。
   void _enterXmlTool(String v, String marker, String canonical) {
+    // 回退长度取**实际命中长度**：容错命中（标签内混空白）时尾部比 marker 长。
+    final n = _tailTagLength(v, marker) ?? marker.length;
     visible
       ..clear()
-      ..write(v.substring(0, v.length - marker.length));
+      ..write(v.substring(0, v.length - n));
     // clean 同步回退标记，再写入规范化开标签（工具块保留在 clean 里供协议解析）。
     final c = clean.toString();
-    if (c.length >= marker.length && c.endsWith(marker)) {
+    final cn = _tailTagLength(c, marker);
+    if (cn != null) {
       clean
         ..clear()
-        ..write(c.substring(0, c.length - marker.length));
+        ..write(c.substring(0, c.length - cn));
     }
     clean.write(canonical);
     _xmlTool = StringBuffer()..write(canonical);

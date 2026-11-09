@@ -2,7 +2,7 @@
 # [1027 射击队列] 设备回线后 host 侧一键编排。断点续跑：完成一腿 touch /tmp/e41026/done_<tag>。
 # 用法: bash shoot_1027.sh            # 全自动串腿
 set -u
-D=100.75.247.55:5555
+D=<redacted-tailscale-830>:5555
 R=/data/local/tmp/mesa_clrt_1026
 L=/tmp/e41026
 LOG=$L/recovery_logs; mkdir -p "$LOG"

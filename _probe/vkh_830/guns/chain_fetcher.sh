@@ -3,7 +3,7 @@ export ANDROID_ADB_SERVER_PORT=15037
 OUT=/tmp/chain_fetch_740.log
 : > $OUT
 for i in $(seq 1 120); do
-  for D in 100.75.247.55:5555 100.109.138.2:5555; do
+  for D in <redacted-tailscale-830>:5555 <redacted-tailscale-740>:5555; do
     timeout 12 adb connect $D >/dev/null 2>&1
     st=$(timeout 10 adb devices 2>/dev/null | grep "$D" | awk '{print $2}')
     if [ "$st" = "device" ]; then

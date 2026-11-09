@@ -146,6 +146,13 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 - **推理日志**：加载/卸载/生成全过程 + 每次交互性能指标（提示长度、生成 token 数、首 token 延迟、tok/s 等），  
   `tok/s` 与 JNI 回传的真实 `n_gen` / `t_gen_ms` 对齐。
 - **存储信息**：按候选目录扫描所有 `.gguf`（含 `.mmproj` / `.dspark.gguf`），即使模型不在 catalog 中也能显示。
+- **高通 NPU（Hexagon HTP）端侧推理线（进行中，`npu-line` 分支）**：基于 Qualcomm AI Runtime（QNN）
+  的 HTP 直推路线，目标为 740（SM8550/V73）/830（SM8750/V79）双机 native ctx 推理。
+  **已达成：catalog 原版权重 MiniCPM5-2B（Llama GQA 42 层）fp16 整模型 HTP 跑通，
+  logits 对 torch 参考 cos 0.9999、top-6 token 全一致、prefill ≈65–75 tok/s**；
+  Spark-X2.6-4B（W4A16 配方定案）主靶在途。现状与复跑指引见
+  [`NPU线_剩余任务交接_2026-10-31.md`](NPU线_剩余任务交接_2026-10-31.md) 与
+  [`NPU线_MiniCPM5整模型验收_2026-11-09.md`](NPU线_MiniCPM5整模型验收_2026-11-09.md)。
 
 ### 多模态：视觉理解
 

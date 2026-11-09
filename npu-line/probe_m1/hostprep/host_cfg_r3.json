@@ -1,0 +1,6 @@
+{
+  "backend_extensions": {
+    "shared_library_path": "/mnt/d/MyLLM/qairt/2.44.0.260225/lib/x86_64-linux-clang/libQnnHtpNetRunExtensions.so",
+    "config_file_path": "/mnt/e/MyLLM_exp/_repro/htp_ext_8750.json"
+  }
+}

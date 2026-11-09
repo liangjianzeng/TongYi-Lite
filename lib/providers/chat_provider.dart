@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'agent_stream_processor.dart' show AgentStreamProcessor;
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 import '../models/turn_trace.dart';
@@ -1796,7 +1797,10 @@ class ChatNotifier extends StateNotifier<bool> {
       if (e.type != kEventStepStart) return;
       final s = (e.data['step'] as num?)?.toInt() ?? 0;
       if (s < 2) return; // 第 1 步没有"上一步"可定格
-      final text = latestVisible.trim();
+      // 末道防线：可见流里的协议标签残片**绝不当正文落库**。真机截图里
+      // 「步骤 1 输出」是一串工具标签——上游流式状态机没认出坏标签时，
+      // A2/A3 的定格会把残片永久固化（旧实现靠单行覆写把它盖掉，看不见而已）。
+      final text = AgentStreamProcessor.stripProtocolResidue(latestVisible);
       if (text.isEmpty || text == lastStepSnap) return;
       lastStepSnap = text;
       final id = '$assistantId-s${s - 1}';
@@ -2335,7 +2339,11 @@ class ChatNotifier extends StateNotifier<bool> {
       ));
     }
     assistantMsg = assistantMsg.copyWith(
-      content: answer,
+      // 末道防线：答案气泡也不许残留协议标签（真机截图里气泡只剩半截工具
+      // 开标签）。净化只删含协议关键词的尖括号片段，正文里的普通尖括号
+      // （代码、"a < b"）原样保留；整段都是残片时留空——此时回合本身走
+      // 失败/工具路径，过程区有工具卡与失败行，比糊一串标签诚实。
+      content: AgentStreamProcessor.stripProtocolResidue(answer),
       isStreaming: false,
       inferenceStats: answerStats,
     );
