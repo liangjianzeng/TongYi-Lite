@@ -1216,6 +1216,37 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard>
 /// 已完成回合（折叠）：工具调用 + 思考存档全部收进**总折叠区**
 /// [执行过程 · N 工具 · M 思考]（默认收起，点按展开回看），回答直接可见
 /// ——过程痕迹保留但不再占屏（用户定案：完成即折叠、可点开）。
+/// 过程区的一次渲染结果：**children 与计数同一趟产出**。
+///
+/// 折叠条摘要（[summary]）只能从这里派生，不允许另找数据源——历史教训是
+/// 头部取 DB 🔧/💭 行族长度、展开区取事件投影信封，两套口径必然对不上：
+/// 步答块/失败尝试/通知行压根没进数字，解析失败的 🔧 行被 `whereType` 静默
+/// 丢掉（卡片却照出），崩溃残留的 executing 行又白计一笔（2026-11-09 复盘）。
+/// [cards]（☑ 清单/📋 计划）不计入摘要：它们是常驻卡，不是回合过程事件。
+class _ProcessContent {
+  final List<Widget> children;
+  final int tools, thinks, steps, errors, notices, cards;
+
+  const _ProcessContent({
+    required this.children,
+    this.tools = 0,
+    this.thinks = 0,
+    this.steps = 0,
+    this.errors = 0,
+    this.notices = 0,
+    this.cards = 0,
+  });
+
+  /// 折叠条摘要段：只报**真正渲染出来**的块，零项不进串。
+  List<String> get summary => [
+        if (steps > 0) '$steps 步',
+        if (tools > 0) '$tools 工具',
+        if (thinks > 0) '$thinks 思考',
+        if (errors > 0) '$errors 失败',
+        if (notices > 0) '$notices 通知',
+      ];
+}
+
 class AgentTurnBlock extends StatelessWidget {
   final List<ToolActivityUi> steps;
   final ChatMessage? answer;
@@ -1300,43 +1331,53 @@ class AgentTurnBlock extends StatelessWidget {
       ui.retryAttempt == 0 &&
       !steps.any((s) => s.status == ToolUiStatus.executing);
 
-  /// live 回合按**执行顺序**交错渲染思考存档与工具卡。
+  /// live 回合按**执行顺序**交错渲染思考存档与工具卡，并**就地计数**。
   ///
   /// 时间线标记由归约器按事件到达次序生成（思考落档 / 工具卡加入时追加），
   /// 渲染时依序取对应数据——工具调用与思考不再"一律思考在前、工具在后"。
-  List<Widget> _timelineWidgets() {
+  /// 计数与 widgets 同一趟产出（越界标记跳过即不计），摘要头因此不可能和
+  /// 展开区对不上号。
+  _ProcessContent _timelineContent() {
     final widgets = <Widget>[];
+    var thinks = 0, tools = 0, steps = 0;
     for (final m in ui.timeline) {
       switch (m) {
         case UiTimelineThinking(:final index):
-          if (index < ui.thinkingHistory.length)
+          if (index < ui.thinkingHistory.length) {
             widgets.add(_ThinkingBlockCard(
               text: ui.thinkingHistory[index],
-              index: index + 1,
+              index: ++thinks,
               duration: index < ui.thinkingDurations.length
                   ? ui.thinkingDurations[index]
                   : null,
             ));
+          }
         case UiTimelineTool(:final index):
-          if (index < ui.tools.length)
+          if (index < ui.tools.length) {
             widgets.add(ToolActivityCard(activity: ui.tools[index]));
+            tools++;
+          }
         case UiTimelineStepText(:final index):
           // A2/A3：已定格的步骤文本按其产出时刻进入时间线——回答气泡
           // 只剩当前步在流式，中间步不再被覆写丢失。
-          if (index < ui.stepTexts.length)
+          if (index < ui.stepTexts.length) {
             widgets.add(_StepTextBlock(
-                text: ui.stepTexts[index], index: index + 1));
+                text: ui.stepTexts[index], index: ++steps));
+          }
       }
     }
-    return widgets;
+    return _ProcessContent(
+        children: widgets, tools: tools, thinks: thinks, steps: steps);
   }
 
   /// 过程区附加卡（B4）：任务清单/计划活卡（ChatBubble 认得它们的文案
-  /// 前缀，todo 卡自动走结构化清单渲染）+ 用户可见通知行。
-  List<Widget> get _processExtras {
+  /// 前缀，todo 卡自动走结构化清单渲染）+ 用户可见通知行。同样"渲染即计数"。
+  _ProcessContent _processExtras() {
     final out = <Widget>[];
+    var cards = 0, noticeRows = 0;
     for (final card in [planCard, todoCard]) {
       if (card == null || card.content.trim().isEmpty) continue;
+      cards++;
       out.add(ChatBubble(
         role: 'assistant',
         content: card.content,
@@ -1346,10 +1387,12 @@ class AgentTurnBlock extends StatelessWidget {
     }
     for (final n in notices) {
       if (n.content.trim().isNotEmpty) {
+        noticeRows++;
         out.add(_TraceNoticeRow(message: n.content.trim()));
       }
     }
-    return out;
+    return _ProcessContent(
+        children: out, notices: noticeRows, cards: cards);
   }
 
   /// 步答块行按 id 尾缀 `-sN` 的步号排序（历史无信封回退用）。
@@ -1369,77 +1412,131 @@ class AgentTurnBlock extends StatelessWidget {
     // 按事件到达次序生成）——不再"思考一律在前、工具一律在后"。流式思考卡
     // = 当前正在进行的思考，位于时间线末尾。
     // 历史/普通聊天回合（timeline 恒空）：按存储 🔧 消息顺序渲染工具卡。
-    final stepWidgets = (isLive && ui.timeline.isNotEmpty)
-        ? _timelineWidgets()
-        : steps.map((s) => ToolActivityCard(activity: s)).toList();
+    // live 回合的过程序列：有事件时间线走时间线（思考/工具/步答按到达次序
+    // 交错），否则按存储 🔧 消息序。?? 右侧惰性——有时间线就不必白构造工具卡。
+    final timeline =
+        (isLive && ui.timeline.isNotEmpty) ? _timelineContent() : null;
+    // 列表字面量而非 map().toList()：后者运行时元素类型是 ToolActivityCard，
+    // 往同一个 children 上 .add 步答块/思考卡会 _TypeError（元素类型由
+    // Iterable<T> 的 T 决定，声明的 List<Widget> 返回类型救不回来）。
+    List<Widget> toolCardWidgets() => [
+          for (final s in steps) ToolActivityCard(activity: s),
+        ];
+    final inlineProcess = timeline?.children ?? toolCardWidgets();
 
     // ---- 已完成回合：过程痕迹（工具卡 + 思考存档）收进总折叠区 ----
     if (!running) {
+      // 折叠条摘要与展开区**同源**：children 与计数在同一趟遍历里产出。
+      // 旧实现头部另取 DB 行族数（steps/thinking 长度），而展开区走事件
+      // 投影的信封——step/error/notice 项根本不计数、解析失败的 🔧 行又被
+      // whereType 静默丢掉（卡片照出）、崩溃残留的 executing 行照样计入，
+      // 折叠条上的数字与展开后的块数必然对不上（2026-11-09 复盘）。
+      final extras = _processExtras();
+      final _ProcessContent process;
       // turnTrace 信封优先：按落库时的真实交错顺序渲染（与 live 同管线）。
-      List<Widget>? traceChildren;
       if (trace != null) {
-        traceChildren = <Widget>[];
-        var thinkN = 0;
-        var stepN = 0;
+        final children = <Widget>[];
+        var thinks = 0, tools = 0, stepBlocks = 0, errors = 0, noticeRows = 0;
         final stepRowById = {for (final r in stepTexts) r.id: r};
         for (final item in trace!) {
           switch (item.type) {
             case 'tool':
               final t = traceTools[item.toolId];
-              if (t != null) traceChildren.add(ToolActivityCard(activity: t));
+              // 引用行缺失（清理脚本删过等）→ 整项不渲染，也**不计入**摘要。
+              if (t == null) break;
+              children.add(ToolActivityCard(activity: t));
+              tools++;
             case 'think':
-              traceChildren.add(_ThinkingBlockCard(
-                  text: item.text ?? '', index: ++thinkN));
+              final text = (item.text ?? '').trim();
+              if (text.isEmpty) break;
+              children.add(_ThinkingBlockCard(text: text, index: ++thinks));
             case 'step':
               // A2/A3：步答块按信封定位（崩溃窗口行缺失 → 跳过该项）。
               final row =
                   item.toolId == null ? null : stepRowById[item.toolId];
-              if (row != null && row.content.trim().isNotEmpty) {
-                traceChildren.add(
-                    _StepTextBlock(text: row.content.trim(), index: ++stepN));
-              }
+              if (row == null) break;
+              final content = row.content.trim();
+              if (content.isEmpty) break;
+              children.add(_StepTextBlock(text: content, index: ++stepBlocks));
             case 'error':
               // B3：error/notice 项此前是死分支（switch 只写了 tool/think）
               // ——失败尝试与回合错误在历史过程区不可见。
-              if ((item.text ?? '').isNotEmpty) {
-                traceChildren.add(_TurnErrorRow(message: item.text!));
-              }
+              final msg = (item.text ?? '').trim();
+              if (msg.isEmpty) break;
+              children.add(_TurnErrorRow(message: msg));
+              errors++;
             case 'notice':
-              if ((item.text ?? '').isNotEmpty) {
-                traceChildren.add(_TraceNoticeRow(message: item.text!));
-              }
+              final msg = (item.text ?? '').trim();
+              if (msg.isEmpty) break;
+              children.add(_TraceNoticeRow(message: msg));
+              noticeRows++;
           }
         }
-        if (traceChildren.isEmpty) traceChildren = null;
+        process = _ProcessContent(
+          children: [...children, ...extras.children],
+          tools: tools,
+          thinks: thinks,
+          steps: stepBlocks,
+          errors: errors,
+          notices: noticeRows + extras.notices,
+          cards: extras.cards,
+        );
+      } else if (timeline != null) {
+        // live 刚收尾（事件时间线还在）：时间线**已含**思考卡与步答块，
+        // 绝不能再追加 💭/stepText 行族——旧实现两套都渲染，同一次思考
+        // 显示两遍，而头部只算一份（2026-11-09 复盘第二条）。
+        final children = [...timeline.children];
+        var errors = 0;
+        // 回合级失败（B3）：有信封时由 error 项承载；信封行尚未落库/解码
+        // 失败的窗口里，至少把 lastError 这条红行亮出来。
+        final err = ui.lastError?.trim() ?? '';
+        if (err.isNotEmpty) {
+          children.add(_TurnErrorRow(message: err));
+          errors++;
+        }
+        process = _ProcessContent(
+          children: [...children, ...extras.children],
+          tools: timeline.tools,
+          thinks: timeline.thinks,
+          steps: timeline.steps,
+          errors: errors,
+          notices: extras.notices,
+          cards: extras.cards,
+        );
+      } else {
+        // 无信封的旧数据回退：工具卡按 🔧 行序，步答块按步号、思考存档按
+        // 落库序排在其后（大致时序）；空内容的行不渲染也不计入。
+        final children = toolCardWidgets();
+        var stepBlocks = 0;
+        for (final row in _stepRowsSorted) {
+          final content = row.content.trim();
+          if (content.isEmpty) continue;
+          children.add(_StepTextBlock(text: content, index: ++stepBlocks));
+        }
+        final thinkCards = <Widget>[];
+        for (final t in thinking) {
+          final text = t.trim();
+          if (text.isEmpty) continue;
+          thinkCards.add(_ThinkingBlockCard(text: text, index: thinkCards.length + 1));
+        }
+        children.addAll(thinkCards);
+        process = _ProcessContent(
+          children: [...children, ...extras.children],
+          tools: steps.length,
+          thinks: thinkCards.length,
+          steps: stepBlocks,
+          notices: extras.notices,
+          cards: extras.cards,
+        );
       }
-      final historyThinkingWidgets = <Widget>[
-        for (var i = 0; i < thinking.length; i++)
-          _ThinkingBlockCard(text: thinking[i], index: i + 1),
-      ];
-      // 无信封回退：步答块按步号排在工具卡后、思考存档前（大致时序）。
-      final stepRows = _stepRowsSorted;
-      final legacyStepWidgets = <Widget>[
-        for (var i = 0; i < stepRows.length; i++)
-          if (stepRows[i].content.trim().isNotEmpty)
-            _StepTextBlock(text: stepRows[i].content.trim(), index: i + 1),
-      ];
-      final processChildren = traceChildren != null
-          ? [...traceChildren, ..._processExtras]
-          : [
-              ...stepWidgets,
-              ...legacyStepWidgets,
-              ...historyThinkingWidgets,
-              ..._processExtras
-            ];
       return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (processChildren.isNotEmpty)
+          if (process.children.isNotEmpty)
             _TurnProcessSection(
-              toolCount: steps.length,
-              thinkingCount: thinking.length,
-              children: processChildren,
+              summary: process.summary,
+              children: process.children,
             ),
           if (answer != null)
             ChatBubble(
@@ -1483,9 +1580,9 @@ class AgentTurnBlock extends StatelessWidget {
         // 状态要等下一次 attach 才清，加 ui.running 防串台到普通聊天。
         if (running && ui.retryAttempt > 0) RetryIndicator(attempt: ui.retryAttempt),
         if (running && ui.compacted) const CompactionBanner(),
-        ...stepWidgets,
+        ...inlineProcess,
         // B4：任务清单/计划活卡与通知行随过程区展开内联（结束折叠进过程区）。
-        ..._processExtras,
+        ..._processExtras().children,
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
             ui: ui,
@@ -1503,10 +1600,10 @@ class AgentTurnBlock extends StatelessWidget {
           for (final note in ui.subagentNotes)
             _SubagentProgressRow(note: note),
         if (_thinking) const ThinkingIndicator(),
-        // 回合错误行（2026-10-25 阶段 3）：AgentUiState.lastError 此前只写
-        // 不渲染——红点行给出"该回合失败了"的显式落点（DSH TurnErrorItem）。
-        if (isLive && !running && (ui.lastError?.isNotEmpty ?? false))
-          _TurnErrorRow(message: ui.lastError!),
+        // 注：此处曾是 `if (isLive && !running && ui.lastError != null)` 的
+        // 回合错误行——本分支只可能在 running==true 时到达，条件恒假即死码。
+        // 收尾回合的失败落点在折叠区：有信封走 `error` 项（chat_provider 把
+        // lastError 落成 TurnUiItem.error），无信封走下面 timeline 回退分支。
         // 智能体回合里答案还是空占位 → 不渲染回答气泡：ChatBubble 自带的
         // 「思考中…」占位会和上面的思考行/工具卡转圈叠成第二个 spinner。
         if (answer != null && !_answerPending)
@@ -1647,17 +1744,18 @@ class _StepTextBlock extends StatelessWidget {
 }
 
 /// _TurnProcessSection —— 已完成回合的过程痕迹总折叠区（用户定案）。///
-/// 回合完成后，工具调用卡与思考存档卡**自动折叠**进这个总区域：
-/// 默认只显示一行摘要头（步骤数），点按展开再呈现各工具/思考块——
-/// 过程可回看、但不再占屏。
+/// 回合完成后，工具卡 / 思考存档 / 步答块 / 失败行 / 通知行**自动折叠**进
+/// 这个总区域：默认一行摘要头（`执行过程 · 3 步 · 2 工具 · 1 失败`），点按
+/// 展开再呈现各块——过程可回看、但不再占屏。摘要头是 [summary]，由调用侧
+/// 与实际渲染的块同源产出，展开后"数不上"就是 bug（不是显示误差）。
 class _TurnProcessSection extends StatefulWidget {
-  final int toolCount;
-  final int thinkingCount;
+  /// 摘要段（`['3 步', '2 工具', '1 失败']`）：必须由 [_ProcessContent.summary]
+  /// 传入——即从**实际渲染的那些块**派生，不得另取数据源（见该类注释）。
+  final List<String> summary;
   final List<Widget> children;
 
   const _TurnProcessSection({
-    required this.toolCount,
-    required this.thinkingCount,
+    required this.summary,
     required this.children,
   });
 
@@ -1671,10 +1769,7 @@ class _TurnProcessSectionState extends State<_TurnProcessSection> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final labelParts = <String>[
-      if (widget.toolCount > 0) '${widget.toolCount} 工具',
-      if (widget.thinkingCount > 0) '${widget.thinkingCount} 思考',
-    ];
+    final labelParts = widget.summary;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       child: Container(

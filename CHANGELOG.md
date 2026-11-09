@@ -32,6 +32,15 @@
   upsert 不再把真回答挤出 answer 位。
 - **信封改事件序重建**：turnTrace 按 `agent/thinking`/`tool/call`/`assistant/attempt` 的日志
   seq 走一遍即真实交错序（UI timeline 仅作 A1 事件缺失时回退）。
+- **折叠条摘要与展开区同源**（发版后追加）：「执行过程 · N 工具 · M 思考」过去另取 DB 🔧/💭 行族
+  长度，而展开区取事件投影信封——步答块/失败尝试/通知行不进数字、解析失败的 🔧 行被 `whereType`
+  静默丢掉（卡片照出）、崩溃残留的 executing 行白计一笔，折叠条上必然"数不上"。改为
+  `children` 与计数**同一趟遍历**产出（`_ProcessContent`），摘要按 `步/工具/思考/失败/通知`
+  只报真正渲染出来的块。同批修掉两处：① live 刚收尾（无信封）那条回退把 timeline 的思考卡/步答块
+  与 💭/stepText 行族**各渲染两遍**；② `steps.map(...).toList()` 的运行时元素类型是
+  `ToolActivityCard`，往同列表 `.add` 步答块直接 `_TypeError`（列表字面量才带 `Widget` 元素类型）。
+  行为锁：`test/widgets/turn_process_section_test.dart`（刻意让行族口径与信封口径互相矛盾，并逐个
+  类型数展开后的块数与头部数字对齐）。
 - **附带修复两个真 bug**：① 增量导入会把 🔧/notice/stepText 行当 assistant 文本灌进模型上下文
   （补 kind≠text 过滤，🔧TRACE 信封唯一放行）；② `kSubagentDepth` 原为全局 push/pop，fan-out
   并发兄弟子代理互抬深度、第 3 个后台任务被误拒（HEAD 靠时序侥幸通过）——改 **Zone 作用域**
@@ -119,7 +128,76 @@ gradle 不得再硬编、README 徽章、CHANGELOG 最新节一起钉到 pubspec
 已做：把 About 页改回 0.3.8 立即红）。本 versionCode 32 为 badging 实测值；重出包前入库的
 `TongYi-Lite-v0.3.9.apk`（SHA-256 `59dd43d6…2186c`）功能代码一致但版本标签错，README 下载块已注明。
 
-> 全量验证：**1191 过 / 6 跳 / 0 红**，`flutter analyze` **0 issue**。
+> 全量验证：**1195 过 / 6 跳 / 0 红**，`flutter analyze` **0 issue**。
+
+---
+
+## [0.3.8] — 2026-11-06~08（versionCode 31）
+
+> 本节为 2026-11-09 补记：0.3.8 发版时只更新了 README 版本更新表，CHANGELOG 一直缺这一节，
+> 于是 `[0.3.9]` 直接接 `[0.3.7]`。内容按 `281e505b`→`595b668a` 区间的提交与 README
+> [版本更新](README.md#版本更新) 行还原。
+
+### 🔁 llama.cpp 换树 v0.9.0 基座
+
+- `aline-p1-swap` 分支合入 main：fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入。
+- KleidiAI vendor v1.31.0 → **v1.32.0**；PTQ1_0 三元专家窗口打包保守待遇；prefill ≤32-token
+  分块停止响应；`op_softplus` ULP 恢复 fork 原式。
+
+### 🩺 换树遗留缺陷定谳（一个月乱码史的根）
+
+- **`prism.hadamard` 两套存储同步**（`99d8b15d`）：换树合并后加载侧填 `hadamard_*`（llama_model
+  成员，401 条）而图侧消费 `model.hdmd`（恒空）→ 图参数 `hdmd=nullptr` → prism.hadamard 正反
+  变换在整图**静默缺席** → 残差流基错排 → bonsai-2-27b 全栈（CPU/GPU/混合）确定性乱码。五段
+  铁证链（文件 round-trip 逐位同 / DGX CPU 锚点同乱 / 内核数值门全绿 / NODEDUMP 无 FWHT 节点 /
+  修复后中文连贯）后由 `load_tensors_hadamard()` 后单向同步七字段收口——10-09 起的 bomb·aix·junk
+  乱码史同此一根。
+- **q4_K 通用 GEMM 换树错抄修复**（`c15a3c60`）；**ling-3.0-tiny 三重乱码修复**（`5aede229`：
+  Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）。
+- **找回被版本号提交卷掉的 K40 / ling 修复**（`427da872` 一路）：四文件重建 + hunks 字面量验齐。
+
+### 📱 K40 / Adreno 650 车队扩入
+
+E031.37 老编译器硬闸 + `CL_CHECK_SOFT_ADRENO` 软注册 + A77 CPU 架构回退防 SIGILL。
+
+### 🚀 Adreno OpenCL PTQ1_0 内核（11-08）
+
+- **decode GEMV 重写**（`89ee8fb1`）：逐字节标量读 + 每 value 分支解包 → per-lane 恒量外提 +
+  相邻值对合一次对齐 ushort 读 + K 循环展开 ×2；**0.71 → 6.42 GB/s**，端到端 decode
+  **8 s → 0.887 s/tok**（830 纯 CPU 1.27 s/tok，反超 1.4×）。两枚数学陷阱自纠：无符号 `-1U`
+  下溢（改 float 域 `-1.0f`）、整数除法误写浮点分数（还原全整数移位）。
+- **prefill GEMM**（`3264a41b` / `6542ea1f`）：`GGML_OPENCL_PTQ10_MM_N` 缺省 32→1（830 真机
+  prefill **8.5×**：7.44 → 0.877 s/tok）；原「数值静默错」是 prism.hadamard 整图缺席年代的冤案。
+  A 侧装载向量化（每线程 8 个连续值一次 4B 对齐读）。双缓冲流水线重构实测数值损坏 → 回滚。
+- `cpy_f32_f32_packflat` 补 4-D 守卫（`bf2c8151`）：`ne02/ne03 == 1` 才走快路。
+
+### 🧠 MTP（投机解码）
+
+- JNI 透传 `enable_mtp → model_params.load_mtp`（`3f568385`）——根治开 MTP 加载 NextN 模型必崩；
+  `n_draft_max` 2→1（`942ad889`，手机端 GPU 解码 compute-bound，verify 批 (1+n) 成本近线性，
+  n=2 实测净亏）；MTP 头上下文显式跟随主上下文 FA 配置（`099963b2`）——除掉加载后 ~10 s 必崩的
+  KV-rows 断言。
+
+### 🗂 模型目录 23 → 38 条
+
+- **模型族量化选择器**（`c1dfcf63`）：同基础模型多量化折叠一行，默认最小档、选择即时持久化；
+  存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族。
+- **Ornith 1.5 9B（GSQ-RCO MTP）上架**：IQ2_XS~IQ3_M 六档，全 `-mtp` 包自带 NextN，标准 GGUF。
+- **Nanbeige 4.2 3B 上架**：bartowski imatrix 九档 Q2_K~Q4_K_L（`LLM_ARCH_NANBEIGE` 已内置）。
+
+### 🔒 工程闸门
+
+- **pre-push 私有记忆闸门入库随仓分发**（`8a538cdc`）：此前钩子只存在于本机，新 clone 无闸；
+  拦 AGENTS.md/BUILD.md/android_AGENTS.md/两篇 thinking 笔记/.workbuddy 回流公开仓 + 内网
+  100.64/10、192.168 地址出现在 md/json/jsonl。
+- **闸门三处致死缺陷修复**（`4888f13d`）：`read -l_ref` 误写致循环体从不执行（闸门静默空转）、
+  单提交跑 `rev-list --objects` 把整条历史拉进 IP 扫描（正常推送被历史里已公开的文件误拦）、
+  逐提交 × 范围扫描 N 次叠乘（2 个提交即 >60 s 卡死）。改增量推送 `remote..local` 单次扫描。
+
+> 📎 **版本标签事故本版本已踩过一次**：`d4194fee`（11-07）——`build.gradle.kts` 硬编
+> `versionCode=30/versionName="0.3.7"` 把 pubspec 的 `0.3.8+31` 盖掉，**此前所有打包产物都带
+> 0.3.7 号**。当时的修法是手动把 gradle 数字抬到 31/0.3.8，于是 0.3.9 复发（见
+> [0.3.9] 的 📦 节）；现改由 pubspec 派生，这条路彻底断掉。
 
 ---
 
