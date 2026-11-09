@@ -19,5 +19,9 @@ const Set<String> kHostCapabilityIds = {
   'llm.vision',
 };
 
-/// 与 `settings_screen._appVersion` 对齐；`engines.app` 用它判定。
-const String kPluginHostAppVersion = '0.2.8';
+/// 宿主上报给插件的应用版本：与 About 页 `_appVersion`、pubspec `version`
+/// 同一口径（`engines.app` 用它判定插件的 minAppVersion）。**必须与
+/// pubspec.yaml 的 version 一致**，由
+/// test/meta/version_consistency_test.dart 钉住。（历史：这里停在 0.2.8
+/// 达 7 个版本，插件侧的版本门判定一直在拿旧号比。）
+const String kPluginHostAppVersion = '0.3.9';

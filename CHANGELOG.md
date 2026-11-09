@@ -101,7 +101,25 @@
 - **flake 加固**：`plugin_host_dispose_test` tearDown 在 Windows 并发全量跑撞 errno 32 文件锁
   （单跑恒绿/全量偶红）→ 6 次退避重试、终删不掉按通过（与被测 seam 无关）。
 
-> 全量验证：**1187 过 / 6 跳 / 0 红**，`flutter analyze` **0 issue**。
+### 📦 版本号真源收口（发版事故复盘）
+
+`flutter build apk` 出来的 0.3.9 包 `aapt dump badging` 自报 **0.3.8 / versionCode 31**——四个版本号
+真相源各自飘了很久：
+
+- **`android/app/build.gradle.kts` 硬编 `versionCode = 31 / versionName = "0.3.8"`**，构建期把
+  pubspec 的 `0.3.9+32` 整个盖掉（这是进包的那个数）；
+- About 页常量 `_appVersion` 停在 **0.3.7**（0.3.8、0.3.9 两次发版都没跟上）；
+- 插件宿主握手 `kPluginHostAppVersion` 停在 **0.2.8**，插件侧 `minAppVersion` 判定一直拿 7 个版本
+  前的旧号比。
+
+改法与 UI 那六套真相源同一路子：**pubspec 的 `version:` 定为唯一真源**，gradle 取构建期注入的
+`flutter.versionName` / `flutter.versionCode`（不再硬编）；Dart 侧因离线沙箱拿不到 `package_info_plus`
+只能留常量，于是加 **`test/meta/version_consistency_test.dart`** 把 About 页常量、插件握手常量、
+gradle 不得再硬编、README 徽章、CHANGELOG 最新节一起钉到 pubspec——发版漏改任何一处即红（负向验证
+已做：把 About 页改回 0.3.8 立即红）。本 versionCode 32 为 badging 实测值；重出包前入库的
+`TongYi-Lite-v0.3.9.apk`（SHA-256 `59dd43d6…2186c`）功能代码一致但版本标签错，README 下载块已注明。
+
+> 全量验证：**1191 过 / 6 跳 / 0 红**，`flutter analyze` **0 issue**。
 
 ---
 

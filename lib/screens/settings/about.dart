@@ -18,10 +18,13 @@ class _buildAboutTab extends StatelessWidget {
   }
 }
 
-// About 页版本号：集中式常量，与 android/app/build.gradle.kts 的
-// versionName/versionCode 保持一致。离线沙箱无法下载 package_info_plus 的
-// AGP 依赖，故不引插件动态读取，直接用此常量。
-const _appVersion = '0.3.7';
+// About 页版本号：集中式常量，**必须与 pubspec.yaml 的 version 一致**
+// （gradle 的 versionName/versionCode 已在构建期改由 pubspec 派生，见
+// android/app/build.gradle.kts）。离线沙箱无法下载 package_info_plus 的
+// AGP 依赖，故不引插件动态读取，直接用此常量——代价是它需要人（或发版
+// 流程）手动跟上，由 test/meta/version_consistency_test.dart 钉住：
+// 忘了同步=红。（历史：0.3.8/0.3.9 两次发版这里都停在 0.3.7。）
+const _appVersion = '0.3.9';
 
 /// GitHub 项目主页地址（README 介绍与使用说明）。
 const _githubUrl = 'https://github.com/liangjianzeng/TongYi-Lite';

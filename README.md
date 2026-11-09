@@ -573,14 +573,18 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 **最新 release**（签名 `CN=TongYiLite`，Android 13+，arm64-v8a）：
 
 > [⬇️ 下载 `TongYi-Lite-v0.3.9.apk`](https://github.com/liangjianzeng/TongYi-Lite/raw/main/releases/TongYi-Lite-v0.3.9.apk)  
-> v0.3.9+32 · 72,470,353 B（2026-11-09：**智能体对话区重构三期**——步内思考入事件日志（崩溃可补档）/  
+> v0.3.9+32 · 72,470,465 B（`aapt dump badging` 实测 versionName `0.3.9` / versionCode `32`；2026-11-09：**智能体对话区重构三期**——步内思考入事件日志（崩溃可补档）/  
 > 中间步文本独立成块不再被覆写 / 消息变更广播取代 500ms 轮询 / 失败码与通知行可见 + **Harness 对标 DSH**  
 > （JSONL 事件落盘、压缩三约束与链式折叠、多工具调用、调用入历史、LCP 遥测、MCP 跨回合缓存、执行质量卡、  
 > 本地看门狗）+ **LLM 流骨架统一与取消令牌隔离**，见 [版本更新](#版本更新)）  
-> `SHA-256: 59dd43d63497e8190d145de5d7c086638154a6871303872a18c88b592fb2186c`
+> `SHA-256: 097b029c79ff544ef4f9a83a40d4117fac3eb6f801851840df3426b0e3e56363`
 
-> 📌 本包为 `main` 主线功能提交（至 `f0235fef`）+ 版本号 0.3.9+32 提交产物；其后的 `05edced2` 是死代码
-> 清理与 analyze 收口（无行为改动），不改本包语义；引擎仍为 11-08 的  
+> 📌 **本包重出过一次**：首版（SHA-256 `59dd43d6…2186c`，11-09 上午入库）因 `android/app/build.gradle.kts`
+> 硬编 `versionCode = 31 / versionName = "0.3.8"` 把 pubspec 的号盖掉，装进去自报 **0.3.8/31**；功能代码
+> 与本包一致，只是版本标签错。版本号真源已收口到 `pubspec.yaml`（gradle 构建期派生，Dart 侧两处显示常量
+> 由 `test/meta/version_consistency_test.dart` 钉住），此包为收口后产物。
+
+> 📌 本包为 `main` 当前主线提交产物（含 `05edced2` 死代码清理与 analyze 收口）；引擎仍为 11-08 的  
 > v0.9.0 换树基座，但 **原生侧 JNI 改动随本主线包首启**（harness 提交的 GenStats `lcp_prefix/n_prompt`  
 > 透传 + 本地 usage 回传，11-08 的 v0.3.8.apk 早于该提交故未带），推理日志可见「KV 复用 | LCP」与  
 > 「本地用量」行。口径与实测数据见 [版本更新](#版本更新)，自行构建见 [构建与开发](#构建与开发)。
@@ -601,7 +605,7 @@ adb logcat | grep -iE "TongYiLite|ggml_vulkan|OpenCL"    # 看 backend devices �
 
 | 版本 | 日期 | 要点 |
 | --- | --- | --- |
-| **v0.3.9**（当前） | 2026-11-09 | **智能体对话区重构三期**（评估定位「六个真相源并存」后逐源收口：A1 步内思考落 `agent/thinking` log-only 事件——崩溃回合不再整段蒸发、下回合补档成 💭 行；A2/A3 中间步文本定格 `stepText` 独立行 + live 时间线/历史信封双路定位——「只留最后一步」根除；A4 `messageChanges` 广播 + 120ms 去抖取代 500ms 全表轮询；B3 失败码/失败尝试可见；B4 🔔 通知与 ☑清单/📋计划卡不再劫持回答槽位）+ **Harness 对标 DSH**（JSONL 事件落盘与崩溃修复、压缩三约束 + 链式折叠、多工具调用全块解析、`replayToolCalls` 修 turn 间失忆、LCP 遥测含引擎 `prefix_len` 真 bug、MCP 跨回合缓存与 404 自愈、执行质量卡、本地看门狗 120s 止损）+ **LLM 流骨架三份统一 `runStreamWithGuards` + `CancelToken` 取消隔离**（父子回合不再互杀流；思考失控跨块累计/孤立 response 3 条存量红转绿）+ **spill 兜底契约修复与 quiet-fail 遥测通道** + **仓库健康门禁恢复**（`analysis_options.yaml` 新增，analyze 3015→0）+ **子代理深度 Zone 化**（fan-out 并发兄弟互抬深度误拒根修）。附带：增量导入不再把 🔧/notice 行灌进模型上下文、对话框 controller/焦点节点泄漏清账、设置写盘 400ms 防抖。全量 **1187 过 / 0 红**，analyze **0 issue**。versionCode **32** |
+| **v0.3.9**（当前） | 2026-11-09 | **智能体对话区重构三期**（评估定位「六个真相源并存」后逐源收口：A1 步内思考落 `agent/thinking` log-only 事件——崩溃回合不再整段蒸发、下回合补档成 💭 行；A2/A3 中间步文本定格 `stepText` 独立行 + live 时间线/历史信封双路定位——「只留最后一步」根除；A4 `messageChanges` 广播 + 120ms 去抖取代 500ms 全表轮询；B3 失败码/失败尝试可见；B4 🔔 通知与 ☑清单/📋计划卡不再劫持回答槽位）+ **Harness 对标 DSH**（JSONL 事件落盘与崩溃修复、压缩三约束 + 链式折叠、多工具调用全块解析、`replayToolCalls` 修 turn 间失忆、LCP 遥测含引擎 `prefix_len` 真 bug、MCP 跨回合缓存与 404 自愈、执行质量卡、本地看门狗 120s 止损）+ **LLM 流骨架三份统一 `runStreamWithGuards` + `CancelToken` 取消隔离**（父子回合不再互杀流；思考失控跨块累计/孤立 response 3 条存量红转绿）+ **spill 兜底契约修复与 quiet-fail 遥测通道** + **仓库健康门禁恢复**（`analysis_options.yaml` 新增，analyze 3015→0）+ **子代理深度 Zone 化**（fan-out 并发兄弟互抬深度误拒根修）。附带：增量导入不再把 🔧/notice 行灌进模型上下文、对话框 controller/焦点节点泄漏清账、设置写盘 400ms 防抖。附带：**版本号真源收口**（gradle 硬编 `31/"0.3.8"` 把 pubspec 的号盖掉、首版包自报 0.3.8，现改为构建期由 pubspec 派生；About 页 0.3.7 与插件宿主握手 0.2.8 两处陈旧常量对齐，并由 `test/meta/version_consistency_test.dart` 钉住）。全量 **1191 过 / 0 红**，analyze **0 issue**。versionCode **32**（badging 实测） |
 | **v0.3.8** | 2026-11-06~08 | **llama.cpp 换树 v0.9.0 基座**（fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入）+ **K40/Adreno 650 车队扩入**（E031.37 老编译器硬闸 + CL_CHECK_SOFT_ADRENO 软注册 + A77 CPU 架构回退防 SIGILL）+ q4_K 通用 GEMM 换树错抄修复 + **ling-3.0-tiny 三重乱码修复**（Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）+ **prism.hadamard 两套存储同步**（换树遗留：加载侧填 `hadamard_*` 而图侧消费 `model.hdmd` 恒空 → 正逆变换整图静默缺席 → bonsai-2-27b 全栈确定性乱码，一个月乱码史同此一根）+ **找回被版本号提交卷掉的 K40 / ling 修复**（四文件重建 + hunks 字面量验齐）+ KleidiAI vendor v1.31.0→**v1.32.0** + PTQ1_0 三元专家窗口打包保守待遇 + prefill ≤32-token 分块停止响应 + op_softplus ULP 恢复 fork 原式 + **11-08 追加**：**模型族量化选择器**（同基础模型多量化折叠一行，默认最小档、选择即时持久化，qwen3.5-0.8b/bonsai 系因能力/衍生不同维持独立行）+ **Ornith 1.5 9B（GSQ-RCO MTP）上架**（IQ2_XS~IQ3_M 六档全 -mtp 包自带 NextN，标准 GGUF）+ **Nanbeige 4.2 3B 上架**（bartowski imatrix 九档 Q2_K~Q4_K_L，LLM_ARCH_NANBEIGE 已内置）+ 存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族，catalog 23→38 条 + **PTQ1_0 prefill 走 GEMM**（GGML_OPENCL_PTQ10_MM_N 缺省 32→1；原「数值静默错」系 prism.hadamard 整图缺席年代的冤案，hadamard 修复后 M=10 prefill + decode 输出语义正确，830 真机 prefill 8.5×：7.44→0.877 s/tok，env=0 保留 GEMV 回退通道）+ pre-push 私有记忆闸门入库随仓分发（`core.hooksPath` → `tool/hooks`，新 clone 自带闸）。versionCode **31**（此前 gradle 硬编码 30/0.3.7 覆盖 pubspec，已归位） |
 | v0.3.7 | 2026-10-30~11-06 | **dLLM Clover-35B-A3B 端侧上机**（块扩散 llama 层并入 fork + split-MoE 热专家 + draft-self masked-block 自投机；830 CLI 判卷矩阵全绿）+ B 线 backport 施工（8/8 PR）+ q3_K DECODE_WINDOW 打包错槽修复 + PTQ1_0 窗口打包保守待遇。versionCode 30 |
 | v0.3.6 | 2026-10-28 | **远程控制（ADB）**：App 内纯 Dart ADB 客户端（`lib/agent/adb/` 零依赖协议栈：24B 帧 + RSA 经典授权 + shell_v2 + sync），Wi-Fi TCP 直连另一台手机——shell/GUI 注入/截屏/push/pull/覆盖安装/logcat/dumpsys/perf；设置页白名单 + 开关即授权 + 危险命令硬黑名单（护模型缓存）；测试即验收（ADB 四套测试共 56 项，其中进程内假 adbd 全链路 29 项，并反抓 2 个真 bug）。**Dev Agent**：远程电脑密码登录、工作区激活/共享动作层/目录自愈、dartssh2 错误收口（SftpStatusError 打死发送修复）、SSH 诊断目标×认证分流。versionCode 24 |
