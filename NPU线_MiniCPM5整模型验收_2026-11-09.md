@@ -111,3 +111,24 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 实测：44 层+norm+transpose+head 全链 ~1 分钟，判分 cos 0.9999 / TOP1_MATCH True 复现验收。
 教训（本档根因系列的延续）：当年 devchain 生成器把 norm→head 显式 transpose 写丢过，
 "分两段跑"才是真配方——selftest 脚本已把该步显式化并加布局铁则注释，勿回退成单段。
+
+## 七、SEQ=128 大批量 prefill（2026-11-10）
+
+**动机**：SEQ=16 是编译期定死的小批量（带宽 bound，~65 tok/s）；128-token 单次 forward 让 HTP 迁出带宽 bound。
+
+**管线**（复用 42 层导出/构建配方，独立目录防撞）：`mcp5_46_layered_s128.py all`（SEQ=128 导出 46 图，ORT 等价 1.0）→ `mcp5_47_build_s128.sh` + `mcp5_48_batch_s128.sh`（4 并发构建，产物 `serve_s128/`）→ `mcp5_50_devchain_s128.sh`（生成 chain_run4 manifest，强制 norm→transpose→head 两段式）→ 设备 `chain_run4 manifest_s128`。
+
+**740 实测（fp16）**：
+
+| 口径 | SEQ=16 | SEQ=128 |
+|---|---|---|
+| 整链 HTP exec | 245-343 ms → 47-66 tok/s | 421-545 ms → **235-304 tok/s** |
+| 整链 wall（46 进程 chain_run2） | 17.8 s | — |
+| 整链 wall（chain_run4 单进程） | 6.0 s（**3×**） | 7.1 s |
+| head exec | 32 ms | 42 ms（vocab 130560） |
+
+**判分**：logits cos **1.0000**（absmax 17.66/17.59）、top-6 `[47744, 101715, 33917, 43258, 106306, 121414]` 逐位一致——s128 数值与 HF 全对齐。
+
+**新工具**：`chain_run4.cpp`（单进程常驻 backend/device + manifest 驱动多段链，vs 46 进程 3× wall 加速；ctx 全驻留模式撞 HTP 内存池 0x3ea，不采用）。
+
+**边界**：exec 421ms 距权重流理论下限（~88ms/forward ≈ 1450 tok/s）尚远，瓶颈是 mmap ctx 权重搬运效率；再往上走要 QNN 权重共享/TCM 驻留（M2 课题）。decode（KV-cache 链）仍是 App 可对话前的最大缺口。
