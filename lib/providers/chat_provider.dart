@@ -1640,124 +1640,30 @@ class ChatNotifier extends StateNotifier<bool> {
       'protocol=${protocol.id} model=$agentModelKey caps=$caps',
     );
 
-    // ---- A1 会话事件日志：JSONL 优先恢复，SQLite 增量导入兜底 ----
-    // JSONL = 模型上下文唯一真相源（回合内事件、压缩影子区、failure-note
-    // 全部跨回合保留）；SQLite 继续做 UI 真相源。首次智能体回合（无
-    // JSONL）一次性迁移：模型可见历史导入为事件并整份落盘。已有 JSONL
-    // 时只增量导入「游标之后」的 SQLite 消息（普通聊天等非智能体路径的
-    // 写入），带内容级去重（崩溃窗口双写保护，见 [_dedupeDeltaAgainstLog]）。
-    // 🔧 轨迹信封（kAgentTraceMessagePrefix 前缀）要放行：导入时还原成
-    // 真实 assistant(toolCalls)/tool/result 事件（WP1a）；其余 🔧 活动
-    // 消息（纯 UI 用）照旧排除。
-    final persistor = SessionPersistor(_sessionStore, conversationId);
-    SessionLog sessionLog;
-    final persistedLog = await _sessionStore.load(conversationId);
-    if (persistedLog.eventsCount > 0) {
-      sessionLog = persistedLog;
-      sessionLog.attachSink(persistor.onEvent);
-      final cursorMs = persistedLog.lastImportCursorMs;
-      final allMessages =
-          await _storage.getMessages(conversationId, limit: 200);
-      // 增量必须排除 UI 活动行（🔧/💭/notice/stepText…，kind≠text）：
-      // C-Q4 后 🔧 行带真实时间戳（> 游标 T），旧版靠「合成行时间戳 ≤ T」
-      // 的巧合把它们挡在游标外，现在这层巧合没了；A2/A3 的步答块行同理。
-      // 🔧TRACE 信封是唯一放行的非 text 行（还原成 tool 事件，WP1a）。
-      final delta = [
-        for (final m in allMessages)
-          if (m.timestamp.millisecondsSinceEpoch > cursorMs &&
-              !(m.role == MessageRole.assistant &&
-                  m.kind != MessageKind.text &&
-                  !m.content.startsWith(kAgentTraceMessagePrefix)))
-            m,
-      ];
-      if (delta.isNotEmpty) {
-        _sessionStore.importMessagesInto(
-            sessionLog, _dedupeDeltaAgainstLog(sessionLog, delta));
-      }
-    } else {
-      final allMessages = await _storage.getMessages(conversationId, limit: 200);
-      final history = _messagesForModelContext(allMessages);
-      sessionLog = _sessionStore.importFromMessages(conversationId, history);
-      sessionLog.attachSink(persistor.onEvent);
-      // 一次性迁移落盘：失败不致命（下回合重新迁移，rewrite 幂等覆盖）。
-      try {
-        await _sessionStore.rewrite(conversationId, sessionLog);
-      } catch (e) {
-        debugPrint('[AgentSession] JSONL 迁移失败（下回合重试）: $e');
-      }
-    }
+    // A1 会话事件日志（组合根职责，见 [_loadOrImportSessionLog]）：
+    // JSONL 优先恢复，SQLite 增量导入兜底。persistor 随会话一并取出——
+    // 回合 checkpoint / 游标落盘 / 压缩清淤都用它。
+    final (sessionLog, persistor) =
+        await _loadOrImportSessionLog(conversationId);
 
     // Phase 6：UI 活动状态订阅本 turn 事件流（工具卡片/压缩/重试/徽章）。
     _ref.read(agentUiStateProvider.notifier).attach(conversationId, sessionLog);
 
-    // ---- 子代理接缝（Phase 4）：in-process spawn/fork/fan-out ----
-    // 复用当前 registry/系统提示；adapter 可指定专用（更便宜）API 配置
-    // （P3-2 按步路由：重活/子任务走低价模型，主回答走主模型）。
-    // 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
-    // 本地档精简（2026-10-05）：仅 API 档注册——端侧小模型自驱多回合
-    // 收敛性差，子代理定义的 prefill 成本是净损失。
-    if (settings.agentSubagentEnabled && useApi) {
-      // 专用子代理模型：设置指定 + 存在 + 与主模型不同才单独建 adapter。
-      LlmAdapter subagentEngine = engine;
-      final subApiId = settings.agentSubagentApiModelId;
-      if (useApi && subApiId.isNotEmpty && subApiId != activeApi?.id) {
-        ApiModelConfig? subApi;
-        for (final m in settings.apiModels) {
-          if (m.id == subApiId) {
-            subApi = m;
-            break;
-          }
-        }
-        if (subApi != null) {
-          subagentEngine = OpenAiAdapter(
-            protocol: protocol,
-            capabilities: caps,
-            openAi: _ref.read(openAiServiceProvider),
-            apiModel: subApi,
-            maxThinkingChars: settings.agentThinkingMaxChars,
-          );
-        }
-      }
-      final subagentProvider = InProcessSubagentProvider(
-        adapter: subagentEngine,
-        registry: registry,
-        modelId: agentModelKey,
-        providerKind: useApi ? ProviderKind.api : ProviderKind.local,
-        systemPrompt: systemPrompt,
-        parentSession: sessionLog,
-      );
-      // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
-      // 后台子代理完成 → 通知转投父回合 step 收件箱（下一 step 模型可见）
-      // + 落一条 🔔 可见消息（不入模型上下文，上下文走收件箱）。
-      registry.register(createSubagentTool(
-        subagentProvider,
-        onBackgroundDone: (notice) {
-          turn.agent?.injectNotice(notice);
-          // Q1/B4（UI 重构）：kind=notice——此前 kind=text 会被
-          // groupMessages 当"回答"占 pendingAnswer 槽位（后台子代理完成
-          // 通知晚于最终回答落库时，气泡直接被通知顶掉）；且 text 类
-          // 消息会经 SQLite 增量导入进模型上下文（注释声称不入但实际入了，
-          // 此处一并修正）。
-          unawaited(_storage.saveMessage(ChatMessage(
-            id: 'bgsub_${DateTime.now().millisecondsSinceEpoch}',
-            conversationId: conversationId,
-            role: MessageRole.assistant,
-            content: '🔔 $notice',
-            kind: MessageKind.notice,
-            noticeCode: 'subagentNotice',
-          )));
-        },
-        // C2 前台子代理进度行：UI 状态行展示里程碑（不进父模型上下文）。
-        onProgress: (line) {
-          _ref
-              .read(agentUiStateProvider.notifier)
-              .appendSubagentNote(conversationId, line);
-        },
-      ));
-      // send_message 续轮（DSH tool-subagent-control）：向可续轮子代理
-      // 追加指令再跑一回合。
-      registry.register(createSubagentSendMessageTool(subagentProvider));
-    }
+    // 子代理接缝（Phase 4；组合根单元，见 [_registerSubagentTools]）。
+    _registerSubagentTools(
+      settings: settings,
+      useApi: useApi,
+      activeApi: activeApi,
+      engine: engine,
+      protocol: protocol,
+      caps: caps,
+      registry: registry,
+      agentModelKey: agentModelKey,
+      systemPrompt: systemPrompt,
+      sessionLog: sessionLog,
+      conversationId: conversationId,
+      turn: turn,
+    );
 
     // 保存用户消息（UI 立即可见）。存储用**原图**（imagePaths，用户视角完整
     // 图片）；模型视图（切块序列）存 visionPaths，历史重发模型上下文时用。
@@ -2463,6 +2369,144 @@ class ChatNotifier extends StateNotifier<bool> {
     await _refreshConversationMeta(conversationId);
     _maybeAutoSpeak(conversationId, answer);
     return answer;
+  }
+
+  /// A1 会话事件日志的取得（组合根单元，从 `_sendAgentMessageNew` 抽出）：
+  /// JSONL 优先恢复，SQLite 增量导入兜底。
+  ///
+  /// JSONL = 模型上下文唯一真相源（回合内事件、压缩影子区、failure-note
+  /// 全部跨回合保留）；SQLite 继续做 UI 真相源。首次智能体回合（无
+  /// JSONL）一次性迁移：模型可见历史导入为事件并整份落盘。已有 JSONL
+  /// 时只增量导入「游标之后」的 SQLite 消息（普通聊天等非智能体路径的
+  /// 写入），带内容级去重（崩溃窗口双写保护，见 [_dedupeDeltaAgainstLog]）。
+  /// 🔧 轨迹信封（kAgentTraceMessagePrefix 前缀）要放行：导入时还原成
+  /// 真实 assistant(toolCalls)/tool/result 事件（WP1a）；其余 🔧 活动
+  /// 消息（纯 UI 用）照旧排除。
+  Future<(SessionLog, SessionPersistor)> _loadOrImportSessionLog(
+      String conversationId) async {
+    final persistor = SessionPersistor(_sessionStore, conversationId);
+    final persistedLog = await _sessionStore.load(conversationId);
+    if (persistedLog.eventsCount > 0) {
+      final sessionLog = persistedLog;
+      sessionLog.attachSink(persistor.onEvent);
+      final cursorMs = persistedLog.lastImportCursorMs;
+      final allMessages =
+          await _storage.getMessages(conversationId, limit: 200);
+      // 增量必须排除 UI 活动行（🔧/💭/notice/stepText…，kind≠text）：
+      // C-Q4 后 🔧 行带真实时间戳（> 游标 T），旧版靠「合成行时间戳 ≤ T」
+      // 的巧合把它们挡在游标外，现在这层巧合没了；A2/A3 的步答块行同理。
+      // 🔧TRACE 信封是唯一放行的非 text 行（还原成 tool 事件，WP1a）。
+      final delta = [
+        for (final m in allMessages)
+          if (m.timestamp.millisecondsSinceEpoch > cursorMs &&
+              !(m.role == MessageRole.assistant &&
+                  m.kind != MessageKind.text &&
+                  !m.content.startsWith(kAgentTraceMessagePrefix)))
+            m,
+      ];
+      if (delta.isNotEmpty) {
+        _sessionStore.importMessagesInto(
+            sessionLog, _dedupeDeltaAgainstLog(sessionLog, delta));
+      }
+      return (sessionLog, persistor);
+    }
+    final allMessages = await _storage.getMessages(conversationId, limit: 200);
+    final history = _messagesForModelContext(allMessages);
+    final sessionLog =
+        _sessionStore.importFromMessages(conversationId, history);
+    sessionLog.attachSink(persistor.onEvent);
+    // 一次性迁移落盘：失败不致命（下回合重新迁移，rewrite 幂等覆盖）。
+    try {
+      await _sessionStore.rewrite(conversationId, sessionLog);
+    } catch (e) {
+      debugPrint('[AgentSession] JSONL 迁移失败（下回合重试）: $e');
+    }
+    return (sessionLog, persistor);
+  }
+
+  /// 子代理接缝装配（Phase 4；组合根单元，从 `_sendAgentMessageNew` 抽出）：
+  /// in-process spawn/fork/fan-out 工具注册进本回合 registry。
+  ///
+  /// 复用当前 registry/系统提示；adapter 可指定专用（更便宜）API 配置
+  /// （P3-2 按步路由：重活/子任务走低价模型，主回答走主模型）。
+  /// 子代理审批恒 `never`（自动拒绝沙箱升级，恒 workspace-write）。
+  /// 本地档精简（2026-10-05）：仅 API 档注册——端侧小模型自驱多回合
+  /// 收敛性差，子代理定义的 prefill 成本是净损失。
+  void _registerSubagentTools({
+    required InferenceSettings settings,
+    required bool useApi,
+    required ApiModelConfig? activeApi,
+    required LlmAdapter engine,
+    required ToolProtocol protocol,
+    required EngineCapabilities? caps,
+    required ToolRegistry registry,
+    required String agentModelKey,
+    required String systemPrompt,
+    required SessionLog sessionLog,
+    required String conversationId,
+    required _ActiveTurn turn,
+  }) {
+    if (!(settings.agentSubagentEnabled && useApi)) return;
+    // 专用子代理模型：设置指定 + 存在 + 与主模型不同才单独建 adapter。
+    LlmAdapter subagentEngine = engine;
+    final subApiId = settings.agentSubagentApiModelId;
+    if (useApi && subApiId.isNotEmpty && subApiId != activeApi?.id) {
+      ApiModelConfig? subApi;
+      for (final m in settings.apiModels) {
+        if (m.id == subApiId) {
+          subApi = m;
+          break;
+        }
+      }
+      if (subApi != null) {
+        subagentEngine = OpenAiAdapter(
+          protocol: protocol,
+          capabilities: caps,
+          openAi: _ref.read(openAiServiceProvider),
+          apiModel: subApi,
+          maxThinkingChars: settings.agentThinkingMaxChars,
+        );
+      }
+    }
+    final subagentProvider = InProcessSubagentProvider(
+      adapter: subagentEngine,
+      registry: registry,
+      modelId: agentModelKey,
+      providerKind: useApi ? ProviderKind.api : ProviderKind.local,
+      systemPrompt: systemPrompt,
+      parentSession: sessionLog,
+    );
+    // 注册 subagent 工具（每 turn 新建 registry → 无同名冲突）。
+    // 后台子代理完成 → 通知转投父回合 step 收件箱（下一 step 模型可见）
+    // + 落一条 🔔 可见消息（不入模型上下文，上下文走收件箱）。
+    registry.register(createSubagentTool(
+      subagentProvider,
+      onBackgroundDone: (notice) {
+        turn.agent?.injectNotice(notice);
+        // Q1/B4（UI 重构）：kind=notice——此前 kind=text 会被
+        // groupMessages 当"回答"占 pendingAnswer 槽位（后台子代理完成
+        // 通知晚于最终回答落库时，气泡直接被通知顶掉）；且 text 类
+        // 消息会经 SQLite 增量导入进模型上下文（注释声称不入但实际入了，
+        // 此处一并修正）。
+        unawaited(_storage.saveMessage(ChatMessage(
+          id: 'bgsub_${DateTime.now().millisecondsSinceEpoch}',
+          conversationId: conversationId,
+          role: MessageRole.assistant,
+          content: '🔔 $notice',
+          kind: MessageKind.notice,
+          noticeCode: 'subagentNotice',
+        )));
+      },
+      // C2 前台子代理进度行：UI 状态行展示里程碑（不进父模型上下文）。
+      onProgress: (line) {
+        _ref
+            .read(agentUiStateProvider.notifier)
+            .appendSubagentNote(conversationId, line);
+      },
+    ));
+    // send_message 续轮（DSH tool-subagent-control）：向可续轮子代理
+    // 追加指令再跑一回合。
+    registry.register(createSubagentSendMessageTool(subagentProvider));
   }
 
   /// A1 增量导入去重：崩溃窗口（JSONL flush 完成、游标未落）里回合产物
