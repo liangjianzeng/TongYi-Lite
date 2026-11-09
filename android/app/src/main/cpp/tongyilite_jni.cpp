@@ -3880,7 +3880,18 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeSetFlashAttn(
 
 JNIEXPORT void JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeUnloadModel(JNIEnv *, jobject) {
-    g_engine.unload();
+    // [TongYi-Lite 2026-11-09 缺口收口] unload() 自 reload 竞态修复（a84dcfdb）起会**拒绝**
+    // 释放：在飞 decode 排不空时它一个指针都不动、返回 false。原先这里把返回值丢掉，
+    // Kotlin 侧（InferenceEngine.kt 的 executor.submit + future 超时）与 Dart 一概以为卸载成功。
+    // 不改 JNI 签名（void→jboolean 要连动 Kotlin 的 external fun 与调用点，本轮无编译条件，
+    // 不为一条错误路径拉大爆炸半径）：is_loaded() 只看 model/context/n_ctx，拒绝路径没清空
+    // 任何指针，所以 Dart 再问「装没装」仍拿到真话；本行只把「拒绝」显式落到日志，
+    // 否则线上只会看到「点了卸载但内存没降」，无任何线索可查。
+    if (!g_engine.unload("jni:nativeUnloadModel")) {
+        LOGE("nativeUnloadModel: unload() REFUSED — model still resident, is_loaded() stays true; "
+             "a following nativeLoadModel will fail again at load()'s unload(\"load:pre\") gate "
+             "(see reload-race note near InferenceEngine::unload)");
+    }
 }
 
 JNIEXPORT jboolean JNICALL
@@ -3915,8 +3926,18 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeResetContext(
 
 JNIEXPORT void JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeDestroy(JNIEnv *, jobject) {
-    g_engine.unload();
-    llama_backend_free();
+    // [TongYi-Lite 2026-11-09 缺口收口] 原先无条件 llama_backend_free()：当 unload() 因在飞
+    // decode 排不空而**拒绝**释放时（见 InferenceEngine::unload），context 还活着、decode 还在
+    // 用 ggml 后端（llama_backend_init() 建的 Vulkan 设备/OpenCL 平台资源，见 3662 行），此时
+    // 拆后端与它本想防的 use-after-free 同类——只是从 context 挪到了 backend。
+    // 故：拒绝时跳过 llama_backend_free()。Android 进程退出由系统回收，泄漏优于必崩。
+    if (g_engine.unload("jni:nativeDestroy")) {
+        llama_backend_free();
+    } else {
+        LOGE("nativeDestroy: unload() REFUSED (decode still in flight) — SKIPPING llama_backend_free() "
+             "on purpose; freeing the ggml backend under a running decode is the same use-after-free "
+             "class this fix exists to prevent");
+    }
     LOGI("nativeDestroy");
 }
 
