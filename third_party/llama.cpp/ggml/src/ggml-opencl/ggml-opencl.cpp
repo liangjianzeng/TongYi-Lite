@@ -14944,6 +14944,16 @@ struct ggml_backend_opencl_buffer_context {
     }
 
     ~ggml_backend_opencl_buffer_context() {
+        // [TongYi-Lite 2026-11-08 修复] 本 dtor 的 extras 释放段曾被整段复制成两份，导致
+        // q3_K / iq1_s / iq1_m / iq2_s / iq2_xs / iq2_xxs / iq3_s / iq3_xxs 八类池（含各自
+        // *_in_use）共 16 个 vector 被 delete 两次。dtor 内既无 clear() 也无置空，第二次
+        // delete 即 double free → jemalloc 元数据损坏，崩在 je_large_dalloc（SIGSEGV,
+        // fault addr 0x0），栈：InferenceEngine::load → unload → llama_model_free →
+        // llama_model_nanbeige 析构 → ggml_backend_buffer_free → 本 dtor。
+        // 触发条件：只有 IQ/量化权重才会填这些池，所以 nanbeige4.2-3b IQ2_M（token_embd=iq3_s）
+        // 这类模型「第二次 loadModel 必崩」（load() 开头的自 unload() 才第一次析构模型）；
+        // f16/q4_0 模型填不到这些池 → 不复现，故长期被误判成「no-mmap 整读路径的堆损坏」。
+        // 现每池只释放一次。⚠️ 勿再复制本释放段。
         for (cl_mem buf : buffer) {
             CL_CHECK(clReleaseMemObject(buf));
         }
@@ -15066,31 +15076,7 @@ struct ggml_backend_opencl_buffer_context {
         for (ggml_tensor_extra_cl_q2_K * e : temp_tensor_extras_q2_K) {
             delete e;
         }
-        for (ggml_tensor_extra_cl_q3_K * e : temp_tensor_extras_q3_K) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_s * e : temp_tensor_extras_iq2_s) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_xs * e : temp_tensor_extras_iq2_xs) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_xxs * e : temp_tensor_extras_iq2_xxs) {
-            delete e;
-        }
         for (ggml_tensor_extra_cl_q2_0 * e : temp_tensor_extras_q2_0) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq1_m * e : temp_tensor_extras_iq1_m) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq1_s * e : temp_tensor_extras_iq1_s) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq3_s * e : temp_tensor_extras_iq3_s) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq3_xxs * e : temp_tensor_extras_iq3_xxs) {
             delete e;
         }
         for (ggml_tensor_extra_cl_iq4_xs * e : temp_tensor_extras_iq4_xs) {
@@ -15102,31 +15088,7 @@ struct ggml_backend_opencl_buffer_context {
         for (ggml_tensor_extra_cl_q2_K * e : temp_tensor_extras_q2_K_in_use) {
             delete e;
         }
-        for (ggml_tensor_extra_cl_q3_K * e : temp_tensor_extras_q3_K_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_s * e : temp_tensor_extras_iq2_s_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_xs * e : temp_tensor_extras_iq2_xs_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq2_xxs * e : temp_tensor_extras_iq2_xxs_in_use) {
-            delete e;
-        }
         for (ggml_tensor_extra_cl_q2_0 * e : temp_tensor_extras_q2_0_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq1_m * e : temp_tensor_extras_iq1_m_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq1_s * e : temp_tensor_extras_iq1_s_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq3_s * e : temp_tensor_extras_iq3_s_in_use) {
-            delete e;
-        }
-        for (ggml_tensor_extra_cl_iq3_xxs * e : temp_tensor_extras_iq3_xxs_in_use) {
             delete e;
         }
         for (ggml_tensor_extra_cl_iq4_xs * e : temp_tensor_extras_iq4_xs_in_use) {
