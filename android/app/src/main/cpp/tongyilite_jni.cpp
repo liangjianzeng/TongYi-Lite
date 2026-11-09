@@ -333,12 +333,38 @@ static int64_t oom_headroom_bytes(const char *name, int64_t default_mb) {
     return (int64_t)mb << 20;
 }
 
+// [TongYi-Lite 2026-11-08 reload 竞态修复①] 在飞 decode 计数。
+// 病根：load() 的 prefill-warmup（本文件 llama_decode 调用点）与 generate/completion 的
+// decode 全都不持 mtx，而 unload() 只看 is_running 就直接 llama_free(context)。于是第二次
+// loadModel 的 unload() 能在「别人的 decode 还在跑」时把 context 释放掉，那个 decode 随后
+// 解引用已释放的图张量 → ggml_is_empty(NULL) SIGSEGV（fault addr 0x10）。
+// 真机实测时序（K40，2026-11-08 20:02–20:04）：load#1 打完 "Model loaded." 后进入 warmup
+// 的 128-token llama_decode（跑了 86 s），1.7 s 后 load#2 在另一条线程进来，unload() 照常
+// 释放 context（ENTER 时 is_running=0，因为 warmup 从不置 is_running），~llama_context 打完
+// 24 ms 后 warmup 那条 llama_decode 就炸了。
+// 修法：所有 decode 进出计数，unload() 先置 should_stop 再等排空，然后才 free。
+static std::atomic<int> g_decode_in_flight{0};
+static std::mutex     g_decode_drain_mtx;
+static std::condition_variable g_decode_drain_cv;
+
+struct tyl_decode_guard {
+    tyl_decode_guard() { g_decode_in_flight.fetch_add(1, std::memory_order_acq_rel); }
+    ~tyl_decode_guard() {
+        if (g_decode_in_flight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            g_decode_drain_cv.notify_all();
+        }
+    }
+    tyl_decode_guard(const tyl_decode_guard &) = delete;
+    tyl_decode_guard & operator=(const tyl_decode_guard &) = delete;
+};
+
 // --- Safe token sampling (2026-10-07 voice-input crash fix) ---
 // The split-MoE slot runtime throws std::runtime_error ("requires more than
 // N unique experts in one graph") when a ubatch exceeds the bank; crossing
 // the C API boundary that means std::terminate -> SIGABRT. Catch and report
 // as a decode failure so generation stops gracefully instead of killing the app.
 static int32_t safe_decode(struct llama_context * ctx, llama_batch batch) {
+    tyl_decode_guard tyl_guard;   // [TongYi-Lite 2026-11-08] 见上：让 unload() 能等在飞 decode
     try {
         return llama_decode(ctx, batch);
     } catch (const std::exception & e) {
@@ -593,7 +619,14 @@ struct InferenceEngine {
               int64_t moe_slot_bytes = 0, int64_t moe_experts_bytes = 0,
               int64_t moe_resident_bytes = 0) {
         // Unload previous model FIRST — without holding the mutex during callbacks.
-        unload();
+        // [TongYi-Lite 2026-11-08] 排不空就不能换模型：unload() 此时一个指针都没释放（宁可泄漏），
+        // 这里必须放弃本次加载，否则等于在还在跑的 decode 底下换掉一切 → 必崩。
+        if (!unload("load:pre")) {
+            LOGE("load(): refusing to reload — an in-flight decode would not drain. "
+                 "Keeping the previous model loaded instead of crashing.");
+            reportLoadingLog("上一次推理尚未结束，暂时无法切换模型，请稍后再试");
+            return false;
+        }
 
         LOGI("Loading model from: %s", model_path);
         reportLoadingLog("正在加载 GGUF 模型文件...");
@@ -1499,18 +1532,37 @@ struct InferenceEngine {
             if ((int) n_ctx_seq < wt_n) wt_n = (int) n_ctx_seq;
             if (wt_n >= 8) {
                 const auto tw0 = std::chrono::steady_clock::now();
-                int wrc = -1;
-                try {
-                    std::vector<llama_token> wtoks(wt_n, 0);   // id 0: any valid vocab id (output discarded)
-                    llama_batch wb = llama_batch_get_one(wtoks.data(), wt_n);
-                    wrc = llama_decode(context, wb);
-                } catch (const std::exception & e) {
-                    LOGW("[TTFT] prefill-warmup threw (non-fatal): %s", e.what());
+                // [TongYi-Lite 2026-11-08 reload 竞态修复③] 原来这里是**单发** 128-token
+                // llama_decode：本机要跑 240–540 s 且全程不可中断。实测 20:50:02 那次
+                // loadModel#2 的 unload() 因此等满 240 s 超时、之后照旧释放 → 20:55:05 仍崩在
+                // ggml_is_empty。改成小块循环：块与块之间查 should_stop，unload() 的排空只要等
+                // 一两个块（秒级）就能返回。块大小可 A/B：TONGYI_WARMUP_CHUNK=<token 数>（默认 8）。
+                // ⚠️ 未验证：分块后预编译命中的是否仍是原来那发 128-token 触发的 FA prefill kernel
+                //    变体，要用首 token 延迟复测（报告 §10 挂了待办）。
+                int wt_chunk = 8;
+                if (const char * cs = getenv("TONGYI_WARMUP_CHUNK")) {
+                    const int c = atoi(cs);
+                    if (c >= 1) wt_chunk = c;
+                }
+                std::vector<llama_token> wtoks(wt_n, 0);   // id 0: any valid vocab id (output discarded)
+                int wrc = 0, done_tok = 0;
+                bool stopped_early = false;
+                for (int off = 0; off < wt_n; off += wt_chunk) {
+                    // 块间唯一的可中断点：换模型 / 用户停止请求在这里落地
+                    if (should_stop.load(std::memory_order_acquire)) { stopped_early = true; break; }
+                    const int n = (wt_n - off < wt_chunk) ? (wt_n - off) : wt_chunk;
+                    llama_batch wb = llama_batch_get_one(wtoks.data() + off, n);
+                    // [TongYi-Lite 2026-11-08] 原来这里直接调 llama_decode()，绕过了 safe_decode 的
+                    // 在飞计数 —— 正是这条 warmup decode 在第二次 loadModel 的 unload() 释放
+                    // context 之后仍在跑，炸成 ggml_is_empty(NULL)。改走 safe_decode 统一记账。
+                    const int r = safe_decode(context, wb);
+                    if (r != 0) { wrc = r; break; }
+                    done_tok += n;
                 }
                 const long wms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - tw0).count();
-                LOGI("[TTFT] prefill-warmup: %d tokens rc=%d in %ldms (FA prefill variant precompiled)",
-                     wt_n, wrc, wms);
+                LOGI("[TTFT] prefill-warmup: %d/%d tokens rc=%d in %ldms chunk=%d%s (FA prefill variant precompiled)",
+                     done_tok, wt_n, wrc, wms, wt_chunk, stopped_early ? " STOPPED-EARLY" : "");
                 resetContext();   // drop the dummy prefill -> clean conversation
             }
         }
@@ -1704,12 +1756,44 @@ struct InferenceEngine {
         return true;
     }
 
-    void unload() {
+    // [TongYi-Lite 2026-11-08] 返回 false = 有 decode 排不空，本次**没有**释放任何东西。
+    // 调用方（load()）必须放弃这次加载；宁可泄漏一份旧模型，也不要在别人的 decode 底下
+    // 把 context 释放掉 —— 实测那条路是必崩（SIGSEGV @ ggml_is_empty，见本文件 reload 竞态注释）。
+    bool unload(const char *why = "jni") {
         const int v = static_cast<int>(n_ctx.load());
-        LOGI("unload() ENTER: context=%p model=%p n_ctx=%d is_running=%d", (void*)context, (void*)model, v, (int)is_running.load());
+        LOGI("unload(%s) ENTER: context=%p model=%p n_ctx=%d is_running=%d", why, (void*)context, (void*)model, v, (int)is_running.load());
         std::lock_guard<std::mutex> lock(mtx);
         const int v2 = static_cast<int>(n_ctx.load());
-        LOGI("unload() LOCK ACQUIRED: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v2);
+        LOGI("unload(%s) LOCK ACQUIRED: context=%p model=%p n_ctx=%d", why, (void*)context, (void*)model, v2);
+        // [TongYi-Lite 2026-11-08 reload 竞态修复②] 拿到锁不等于安全：正在跑的 decode 不持 mtx。
+        // 先请它收手（should_stop 由各生成循环在块间检查，块 ≤32 token），再等在飞 decode 归零，
+        // 之后才允许 llama_free()。
+        should_stop = true;
+        {
+            const auto t_drain0 = std::chrono::steady_clock::now();
+            std::unique_lock<std::mutex> wl(g_decode_drain_mtx);
+            // 240 s 只是兜底：warmup 已改成分块可中断（见 [TTFT] prefill-warmup 处），
+            // 正常情况下排空应在一两个块内完成（秒级）。
+            const bool drained = g_decode_drain_cv.wait_for(wl, std::chrono::seconds(240), [] {
+                return g_decode_in_flight.load(std::memory_order_acquire) == 0;
+            });
+            const long dms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t_drain0).count();
+            if (!drained) {
+                // 排不空 → **什么都不释放**，直接失败。留一份旧模型泄漏，换掉一次必崩。
+                const int still = g_decode_in_flight.load(std::memory_order_acquire);
+                LOGE("unload(%s) drain TIMEOUT after %ldms with %d decode(s) still in flight — "
+                     "REFUSING to free (leaking context=%p model=%p deliberately; a free here is a "
+                     "guaranteed SIGSEGV in the running decode)",
+                     why, dms, still, (void*)context, (void*)model);
+                return false;
+            }
+            LOGI("unload(%s) DRAINED in-flight decodes in %ldms", why, dms);
+            // 排空成功 → 归还 should_stop。必须还：completion_with_media() 读 should_stop
+            // 却在入口不重置它（只有 completion() 在 2179/2197 重置），留着 true 会让下一次
+            // 带媒体的补全一进门就以为自己被叫停而直接返回空结果。
+            should_stop = false;
+        }
         if (mtp_ctx)  { llama_free(mtp_ctx);   mtp_ctx = nullptr; }
         if (dspark_ctx) { llama_free(dspark_ctx); dspark_ctx = nullptr; }
         if (context)  { llama_free(context);  context = nullptr; }
@@ -1731,7 +1815,8 @@ struct InferenceEngine {
         is_running = false;
         model_file_size_bytes_ = 0;
         const int v3 = static_cast<int>(n_ctx.load());
-        LOGI("unload() DONE: context=%p model=%p n_ctx=%d", (void*)context, (void*)model, v3);
+        LOGI("unload(%s) DONE: context=%p model=%p n_ctx=%d", why, (void*)context, (void*)model, v3);
+        return true;
     }
 
     bool is_loaded() const {
