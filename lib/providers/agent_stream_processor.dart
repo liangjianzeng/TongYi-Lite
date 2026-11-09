@@ -73,6 +73,12 @@ class AgentStreamProcessor {
   int _probeDepth = 0;
   StringBuffer? _xmlTool;
 
+  /// 当前思考块是否由孤立闭合记号（隐式 opener）开启。
+  /// 这类块装的是"被提前闭合的思考续写"泄漏：finish 时**整体丢弃**，
+  /// 不走短块恢复——恢复会把泄漏续写渗回可见回答（孤立 response 契约）。
+  /// 真 opener 开的块不受影响（Clover 误触发的短正文仍恢复可见）。
+  bool _thinkFromOrphanCloser = false;
+
   /// 当前可见文本（思考过滤 + JSON 隐藏后）。
   String get visibleText => visible.toString();
 
@@ -154,11 +160,14 @@ class AgentStreamProcessor {
       probe.clear();
       _inProbe = false;
     }
-    if (_thinkKind != null && thinking.length <= _recoverUnclosedThinkingMaxChars) {
+    if (_thinkKind != null &&
+        !_thinkFromOrphanCloser &&
+        thinking.length <= _recoverUnclosedThinkingMaxChars) {
       visible.write(thinking.toString());
     }
     thinking.clear();
     _thinkKind = null;
+    _thinkFromOrphanCloser = false;
   }
 
   /// 未闭合思考块恢复为可见文本的长度上限（ runaway 兜底阈值以下才恢复）。
@@ -276,7 +285,9 @@ class AgentStreamProcessor {
           final prev = v[v.length - c.length - 1];
           if (_isAsciiWord(prev)) return;
         }
-        _enterThink(_ThinkKind.qwen, v, c);
+        // 仅 ` response` 按隐式 opener 豁免位置门（契约见 _enterThink）；
+        // `</think>` 无契约，保持旧行为（仅回答开头触发）不放大误吞面。
+        _enterThink(_ThinkKind.qwen, v, c, orphanCloser: c == ' response');
         return;
       }
     }
@@ -319,7 +330,11 @@ class AgentStreamProcessor {
   /// 进入思考态：把已写入 visible 的触发标签回退掉（后续字符全丢弃进思考缓冲）。
   /// 触发标签**不写入** thinking 缓冲——思考内容展示时不许露出 `<think>` 这类
   /// 标签（用户要求：只标注"思考"，标签是协议记号不是内容）。
-  void _enterThink(_ThinkKind kind, String v, String tag) {
+  ///
+  /// [orphanCloser]：触发记号是孤立闭合记号（` response`，无前置 opener）——
+  /// 按隐式 opener 处理（被提前闭合的思考续写，2026-09-29 真机）。
+  void _enterThink(_ThinkKind kind, String v, String tag,
+      {bool orphanCloser = false}) {
     final before = v.substring(0, v.length - tag.length);
     // 位置门（dllm-CLOVER-APP-FIX，2026-10-30）：思考只在回答**开头**出现一次，
     // 这是全部端侧思考模型的真实分布。正文中途冒出的 ` think`/` response`
@@ -327,7 +342,20 @@ class AgentStreamProcessor {
     // 一段正文直到下一个闭合记号）一律按**字面文本**保留，不再进思考态。
     // 判据：触发点前的可见文本 ≤ 16 字符（容忍开头空白）且本轮还没闭合过
     // 任何思考块。二者任一不满足 → 视为正文，原样可见。
-    if (_totalThinkingChars > 0 || before.trim().length > 16) {
+    //
+    // 两条例外（思考失控守卫契约，2026-11-08 定案）：
+    // ① 显式 HTML 标签（<think>/<thinking>）是协议记号不是正文碎片，任何
+    //    位置都进思考态——否则多段 <think>…</think> 块从第 2 段起被当字面
+    //    文本，跨块累计口径（totalThinkingChars）失效，"多段短思考"每块
+    //    归零即可绕过失控守卫（红测试 1/2 契约）。
+    // ② 孤立闭合记号 ` response`（无前置 opener）＝被提前闭合的思考续写：
+    //    当作隐式 opener 重新进思考态，续写一并丢弃（红测试 3 契约）。仅当
+    //    本轮已有思考才豁免——纯正文里首个 response 仍按位置门防误吞；
+    //    英文词 "API response" 已由调用侧 ASCII 守卫拦截。
+    final explicitHtmlTag = tag.startsWith('<');
+    if (!explicitHtmlTag &&
+        !(orphanCloser && _totalThinkingChars > 0) &&
+        (_totalThinkingChars > 0 || before.trim().length > 16)) {
       return; // 正文中途的伪触发：保持字面文本，不回退、不吞后续。
     }
     visible
@@ -342,6 +370,7 @@ class AgentStreamProcessor {
         ..write(raw.substring(0, raw.length - tag.length));
     }
     _thinkKind = kind;
+    _thinkFromOrphanCloser = orphanCloser;
   }
 
   /// 试探深度归零：尝试把 probe 解析为完整 JSON。

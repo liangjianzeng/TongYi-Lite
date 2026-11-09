@@ -49,11 +49,14 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         _thinkingEnabled = thinkingEnabled,
         super(protocol: protocol, capabilities: capabilities);
 
-  /// 取消：先中止 Dart 侧流（基类），再通知 native 引擎停生成。
+  /// 取消：中止「归属本次取消」的 Dart 侧流（基类令牌条件），存在归属
+  /// 目标才通知 native 引擎停生成——共享 adapter 下子代理的流/生成
+  /// （其取消信号未触发）不得被父回合的 cancel() 误杀（T3 缺陷）。
   @override
   void cancel() {
-    super.cancel();
-    _inference.stopGeneration();
+    if (cancelOwnedGenerations()) {
+      _inference.stopGeneration();
+    }
   }
 
   @override
@@ -85,16 +88,7 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         convertEngineMessages(options.messages, modelId: options.modelId));
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
-    final error = StringBuffer();
-    final done = Completer<void>();
-    StreamSubscription<String>? sub;
     var _streamFinished = false;
-    // 思考失控守卫（口径唯一真源：AgentStreamProcessor.thinkingRunaway）：
-    // **跨块累计**思考超预算且本步还没有有用产出 → 主动 stopGeneration 止损。
-    // 旧口径只量「当前块长」，模型 think…response 反复横跳时每块归零 →
-    // 4 万字独白畅通无阻（用户报的"思考超 32k"），已在实测中复现。
-    var _thinkingOverflow = false;
-    var _thinkingCharsAtTrigger = 0;
     // WP5：工具调用块生成中标记（status 流只在状态翻转/持续时推）。
     var _toolGenActive = false;
     // C4 看门狗：无增量止损。token/状态任一增量都刷新 _lastActivity；
@@ -102,8 +96,9 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     // 后按 timeout 失败归档——用户手停语义与挂死语义分开）。
     var _lastActivity = DateTime.now();
     var _stalled = false;
-    Timer? _stallWatch;
-    _stallWatch = Timer.periodic(const Duration(seconds: 5), (_) {
+    final _stallWatch = Timer.periodic(const Duration(seconds: 5), (_) {
+      // 流已终态（onStreamSettled 置位）→ 不许再碰引擎：共享引擎上
+      // stopGeneration 打到的是别人的生成。
       if (_streamFinished) return;
       final idle = DateTime.now().difference(_lastActivity);
       if (idle >= stallTimeout) {
@@ -113,11 +108,6 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         _inference.stopGeneration();
       }
     });
-    void _finish() {
-      if (_streamFinished) return;
-      _streamFinished = true;
-      done.complete();
-    }
     try {
       final sourceStream = _inference.completionWithMessages(
         prompt: '',
@@ -130,23 +120,22 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         temperature: options.temperature,
         topP: 0.9,
       );
-      sub = sourceStream.listen(
-        (token) {
+      // 流消费骨架（守卫+终态+取消令牌+cancel 竞跑+清理）走基类
+      // runStreamWithGuards（T4 收敛，此前与 API 两条路线三份复制）；
+      // 本路线只注入差异：token 解析、口径判定、终态裁决顺序、失败归一化。
+      return await runStreamWithGuards<String>(
+        cancel: cancel,
+        stream: sourceStream,
+        onEvent: (token) {
           if (token.isEmpty) return;
           _lastActivity = DateTime.now();
           rawBuffer.write(token);
           processor.add(token);
           if (onToken != null) {
-            onToken!.add(processor.visibleText);
+            onToken.add(processor.visibleText);
           }
           if (onThinking != null) {
-            onThinking!.add(processor.thinkingText);
-          }
-          if (!_thinkingOverflow &&
-              processor.thinkingRunaway(_maxThinkingChars)) {
-            _thinkingOverflow = true;
-            _thinkingCharsAtTrigger = processor.thinkingCharsSoFar;
-            _inference.stopGeneration();
+            onThinking.add(processor.thinkingText);
           }
           // WP5：工具调用参数生成期反馈（大 HTML/长文本写文件时
           // 可见流为空、思考为空，UI 只能干转圈——把隐藏缓冲长度推给 UI）。
@@ -164,78 +153,88 @@ class LocalEngineAdapter extends BaseEngineAdapter {
             }
           }
         },
-        onError: (Object e, [StackTrace? s]) {
-          error.write('$e\n');
-          _finish();
+        // 思考失控守卫（口径唯一真源：AgentStreamProcessor.thinkingRunaway）：
+        // **跨块累计**思考超预算且本步还没有有用产出 → 主动 stopGeneration
+        // 止损。旧口径只量「当前块长」，模型 think…response 反复横跳时每块
+        // 归零 → 4 万字独白畅通无阻（用户报的"思考超 32k"），实测已复现。
+        thinkingOverflowCheck: () =>
+            processor.thinkingRunaway(_maxThinkingChars)
+                ? processor.thinkingCharsSoFar
+                : null,
+        stopEngine: () => _inference.stopGeneration(),
+        onStreamSettled: () => _streamFinished = true,
+        finalize: (ctx) async {
+          // 本地路线先查流错误再看守卫：引擎错误是真失败，失控只是伴生
+          // 现象（检查顺序差异的理由见 runStreamWithGuards 文档）。
+          if (ctx.streamError != null) {
+            throw LlmFailure(
+              code: mapEngineError('${ctx.streamError}'),
+              message: '${ctx.streamError}',
+            );
+          }
+          // C4 看门狗止损判档：已产出可交付 → 照常返回；无产出 → timeout。
+          if (_stalled) {
+            if (processor.hasToolCalls ||
+                processor.visibleText.trim().length >=
+                    AgentStreamProcessor.kMinUsefulChars) {
+              debugPrint('[AgentLlm] 看门狗止损但已有产出可交付 → 照常返回');
+              return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
+            }
+            throw LlmFailure(
+              code: LlmFailureCode.timeout,
+              message: '本地引擎挂死：超过 ${stallTimeout.inSeconds}s 无任何增量，'
+                  '已主动止损。若长 prefill 频繁触发，可在 设置→智能体 检查'
+                  '上下文设置或换更小模型',
+            );
+          }
+          if (ctx.thinkingOverflowed) {
+            // 先抢救，再判死：止损前已产出的工具调用/答案照样有效。
+            // 旧行为是直接丢弃整步产出并抛错 → 端侧用户白等几分钟还整轮失败。
+            if (processor.hasToolCalls ||
+                processor.visibleText.trim().length >=
+                    AgentStreamProcessor.kMinUsefulChars) {
+              debugPrint('[AgentLlm] 思考失控已止损'
+                  '（累计 ${ctx.thinkingCharsAtTrigger} 字），'
+                  '但已有产出可交付 → 照常返回结果');
+              return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
+            }
+            // 文案唯一真源 BaseEngineAdapter.thinkingOverflowFailure；
+            // 本地尾巴：端侧有原生思考开关可关，多一句提示。
+            throw BaseEngineAdapter.thinkingOverflowFailure(
+              ctx.thinkingCharsAtTrigger,
+              _maxThinkingChars,
+              tail: '或关闭该模型思考模式',
+            );
+          }
+          return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
         },
-        onDone: _finish,
+        mapUnexpected: (e, streamError) => LlmFailure(
+          code: mapEngineError('${streamError ?? ''}'),
+          message: '本地引擎调用失败: $e',
+        ),
+        onFinally: () async {
+          _stallWatch.cancel();
+          // 恢复用户的思考开关（本步曾为止损临时关掉）。失败不改变本步结论。
+          if (suppressThinking) {
+            try {
+              await _inference.setEnableThinking(true);
+            } catch (_) {}
+          }
+        },
       );
-      currentSub = sub;
-      // 与 cancel 竞跑：cancel 先行则取消。
-      if (await race(done.future, cancel)) {
-        throw const AgentCancelledException();
-      }
-      if (error.length > 0) {
-        throw LlmFailure(
-          code: mapEngineError(error.toString()),
-          message: error.toString(),
-        );
-      }
-      // C4 看门狗止损判档：已产出可交付 → 照常返回；无产出 → timeout。
-      if (_stalled) {
-        if (processor.hasToolCalls ||
-            processor.visibleText.trim().length >=
-                AgentStreamProcessor.kMinUsefulChars) {
-          debugPrint('[AgentLlm] 看门狗止损但已有产出可交付 → 照常返回');
-          return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
-        }
-        throw LlmFailure(
-          code: LlmFailureCode.timeout,
-          message: '本地引擎挂死：超过 ${stallTimeout.inSeconds}s 无任何增量，'
-              '已主动止损。若长 prefill 频繁触发，可在 设置→智能体 检查'
-              '上下文设置或换更小模型',
-        );
-      }
-      if (_thinkingOverflow) {
-        // 先抢救，再判死：止损前已产出的工具调用/答案照样有效。
-        // 旧行为是直接丢弃整步产出并抛错 → 端侧用户白等几分钟还整轮失败。
-        if (processor.hasToolCalls ||
-            processor.visibleText.trim().length >=
-                AgentStreamProcessor.kMinUsefulChars) {
-          debugPrint('[AgentLlm] 思考失控已止损（累计 $_thinkingCharsAtTrigger 字），'
-              '但已有产出可交付 → 照常返回结果');
-          return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
-        }
-        throw LlmFailure(
-          code: LlmFailureCode.thinkingOverflow,
-          message: '思考失控：已累计思考 $_thinkingCharsAtTrigger 字仍无任何产出，'
-              '已主动中止（阈值 $_maxThinkingChars 字）。'
-              '本次自动改用「不思考」重试一次；若频繁出现，'
-              '请在 设置→智能体 调大「思考失控守卫阈值」或关闭该模型思考模式',
-        );
-      }
-      return _withLocalUsage(await parseAndReturn(rawBuffer, processor));
-    } on AgentCancelledException catch (e) {
+    } on AgentCancelledException catch (_) {
       rethrow;
-    } on LlmFailure catch (e) {
+    } on LlmFailure catch (_) {
       rethrow;
     } catch (e) {
+      // 只剩流构造等同步异常能到这里（骨架内的错误已由 mapUnexpected
+      // 归一化为 LlmFailure，骨架 finally 的 onFinally 已停过表）；
+      // 此处兜底停表 + 保持旧行为：按引擎错误文案归档。
+      _stallWatch.cancel();
       throw LlmFailure(
-        code: mapEngineError(error.toString()),
+        code: mapEngineError(''),
         message: '本地引擎调用失败: $e',
       );
-    } finally {
-      _stallWatch.cancel();
-      sub?.cancel();
-      if (identical(sub, currentSub)) {
-        currentSub = null;
-      }
-      // 恢复用户的思考开关（本步曾为止损临时关掉）。失败不改变本步结论。
-      if (suppressThinking) {
-        try {
-          await _inference.setEnableThinking(true);
-        } catch (_) {}
-      }
     }
   }
 
