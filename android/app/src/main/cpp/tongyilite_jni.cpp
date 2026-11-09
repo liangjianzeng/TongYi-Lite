@@ -835,10 +835,18 @@ struct InferenceEngine {
         // Use mmap for loading — faster and lower peak memory than loading
         // the entire file into RAM. On Android internal storage (ext4/f2fs)
         // mmap works reliably; file-lock issues only affect FAT32/external SD.
-        // 2026-11-08 曾试过「MemAvailable 紧张时改 LLAMA_LOAD_MODE_NONE 整读」
-        // 防 mmap 页逐出抖动——已撤销：K40 实测 MemAvailable 8.5 GB 根本不紧，
-        // 且 fork 的 no-mmap 装载路径存在堆损坏（raster 线程 SEGV 0x0 +
-        // destroyed-mutex，两次加载即崩），该路径在排查清楚前不可用。
+        // 2026-11-08 曾试过「MemAvailable 紧张时改 LLAMA_LOAD_MODE_NONE 整读」——已撤销，
+        // 两条理由：① K40 实测 MemAvailable 8.5 GB 根本不紧（旧判据误把 free 的 130 MB
+        // 空闲当可用内存），「防 mmap 页逐出抖动」这个前提本身不成立；② 当时观察到
+        // 「两次加载即崩 + raster 线程 SEGV 0x0 + destroyed-mutex」，归因给 no-mmap
+        // 装载路径的堆损坏。
+        // ⚠️ 该归因已被 a4835e51 动摇：同一症状（IQ 权重模型第二次 loadModel 必崩、
+        // fault addr 0x0、栈经 unload → llama_model_free → ggml_backend_buffer_free →
+        // buffer_context 析构）由 ggml-opencl 析构里被复制成两份的 extras 释放段
+        // （q3_K/iq1_* /iq2_* /iq3_* 八池共 16 个 vector double free）更好地解释，
+        // 且只有 IQ/量化权重才填这些池 —— 与 mmap/整读无关。故「no-mmap 路径本身有
+        // 堆损坏」至今**未定罪**，据此回滚的修复①可能无罪。
+        // 但在 IQ2_M「第二次 loadModel 不再崩」于真机复验之前，本行仍保守保持无条件 mmap。
         model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
 
         // Use unique_lock so we can unlock before JNI callbacks to prevent deadlock.
