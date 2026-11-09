@@ -20,7 +20,7 @@
 # Verdict lines:  #### LFMPULL_START|RESUME|CHUNK|THROTTLE|VERIFY|VERDICT …   exit 0 ok, non-zero = abort
 set -u
 
-DEV="${DEV:-adb -P 15037 -s 100.109.138.2:5555}"      # split on purpose; keep it simple words only
+DEV="${DEV:-adb -P 15037 -s <redacted-tailscale-740>:5555}"      # split on purpose; keep it simple words only
 # SRC/DST 承袭祖传件 _probe/mesa_legs/routeA_1026/lfm_pull_chunked_740.sh（R-090：>1GB 设备搬运
 # 一律分块+限速）。祖传件在设备上 split 再拉；本件改为 host 侧 dd 分块读，不占设备第二份空间。
 SRC="${SRC:-/storage/emulated/0/TongYiLite/models/lfm2.5-24b-a2b-q4_0.gguf}"

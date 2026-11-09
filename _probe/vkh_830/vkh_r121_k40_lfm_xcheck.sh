@@ -6,8 +6,8 @@
 #       更不许 stayon）；只碰我自己的序列号，740/830 归父。
 #
 # 宿主侧开火：
-#   adb -P 15037 -s 8b1e8747 push vkh_r121_k40_lfm_xcheck.sh /data/local/tmp/
-#   adb -P 15037 -s 8b1e8747 shell 'sh /data/local/tmp/vkh_r121_k40_lfm_xcheck.sh <ARM>'
+#   adb -P 15037 -s <redacted-serial-k40> push vkh_r121_k40_lfm_xcheck.sh /data/local/tmp/
+#   adb -P 15037 -s <redacted-serial-k40> shell 'sh /data/local/tmp/vkh_r121_k40_lfm_xcheck.sh <ARM>'
 # ARM:  a1 = k40allv(ALL_VARIANTS 七架构) + LFM      ← 父的主枪（对应 740 那手新 stack）
 #       a2 = k40gate(单架构 libggml-cpu)   + LFM
 #       a6/a7 = 同上但 ngl=6（父裁①：禁 ngl=99 全载；K40 只做可用性冒烟）

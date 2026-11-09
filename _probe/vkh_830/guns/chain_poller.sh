@@ -1,7 +1,7 @@
 #!/bin/bash
 # 醒屏窗口猎人：短促重连→上线即推枪+脱离发射（不点屏！adb shell 腿不需亮屏）。
 export ANDROID_ADB_SERVER_PORT=15037
-D=100.109.138.2:5555
+D=<redacted-tailscale-740>:5555
 G=/home/jianzengliang/MyWork/TongYi-Lite/TongYi-Lite/_probe/vkh_830/guns
 K=/home/jianzengliang/MyWork/TongYi-Lite/TongYi-Lite/_probe/vkh_830/lfm_kit2
 for i in $(seq 1 90); do

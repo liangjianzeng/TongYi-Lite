@@ -9,7 +9,7 @@
 #   npred=32 不是我从 ling 案借的：同批 CPU 腿 b2_cpu 的 .err 自报 `gen=32` 有件可证。
 # 件纪律：LP **故意不含 patch79e** ⇒ soname 只能落金库 2695a8be；md5 红卡，金库一字不许动。
 # 铁律：绝不动屏幕（无 svc power / 无 KEYCODE_*）；腿前机检 stay_on_while_plugged_in 必须 0。
-# 用法（host 侧）：adb -P 15037 -s 8b1e8747 shell setsid nohup env GOLD_SHA_OK=1 sh b2_cpu_gold_k40.sh </dev/null >out 2>&1 &
+# 用法（host 侧）：adb -P 15037 -s <redacted-serial-k40> shell setsid nohup env GOLD_SHA_OK=1 sh b2_cpu_gold_k40.sh </dev/null >out 2>&1 &
 R=/data/local/tmp/mesa_clrt_1026
 LFMD=/data/local/tmp/lfmb2
 LOADER=$R/lib/ld-linux-aarch64.so.1

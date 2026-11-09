@@ -1,10 +1,10 @@
 #!/bin/bash
 # measure_toks.sh — 740 App decode tok/s 一键测量（Dart VM service 通道，零 UI 盲驱）。
-# 前提：app-debug.apk（含 f16 KV）已装；设备解锁空闲；adb -s 98fc9410 在线。
+# 前提：app-debug.apk（含 f16 KV）已装；设备解锁空闲；adb -s <redacted-serial-740> 在线。
 # 可选环境变量：UBATCH=N 同时注入 TONGYI_UBATCH=N（pp 收敛 A/B）。
 set -u
 ADB="/c/Users/jianz/AppData/Local/Android/Sdk/platform-tools/adb.exe"
-DEV=98fc9410
+DEV=<redacted-serial-740>
 DART="/c/dev-tools/flutter/bin/dart.bat"
 TOOLDIR="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 PKG=com.dgxspark.tongyilite
