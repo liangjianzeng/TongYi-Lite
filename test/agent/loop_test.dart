@@ -237,7 +237,6 @@ void main() {
       LlmResult(text: '晴', toolCalls: const []),
     ]);
     final agent = _agent(fake);
-    final session = agent.session;
 
     await agent.kick('北京天气？');
 

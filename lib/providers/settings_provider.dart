@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/widgets.dart' show AppLifecycleListener;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../agent/dev/ssh/secret_store.dart'
@@ -15,8 +18,37 @@ import '../services/settings_service.dart';
 class SettingsNotifier extends StateNotifier<InferenceSettings> {
   final SettingsService _service;
 
+  /// 落盘防抖窗口（健康度整改）：全仓 107 个 setter 此前每次全量
+  /// jsonEncode + writeAsString + rename，拖滑块每帧落盘是 I/O 放大。
+  /// 窗口内的多次变更合并为最后一次全量写；窗口内 state 已在内存生效，
+  /// UI 无感知。窗口未到期时的兜底见 [_flushNow] 的三个触发时机。
+  static const _persistDebounceWindow = Duration(milliseconds: 400);
+
+  Timer? _persistTimer;
+
+  /// 防抖窗口内已有未落盘的改动（避免空转 flush）。
+  bool _dirty = false;
+
+  /// 兜底 2 的生命周期监听（退后台立即 flush）；纯单测环境无 binding 时为 null。
+  AppLifecycleListener? _lifecycle;
+
   SettingsNotifier(this._service) : super(const InferenceSettings()) {
     _load();
+    _attachLifecycleFlush();
+  }
+
+  /// 退后台兜底：pause/inactive 时窗口未到期的改动立即落盘——用户切走 App
+  /// 后进程随时可能被杀，靠 400ms 窗口等不到下一次落盘。
+  /// AppLifecycleListener 构造需要 WidgetsBinding，单测环境没有则静默跳过。
+  void _attachLifecycleFlush() {
+    try {
+      _lifecycle = AppLifecycleListener(
+        onPause: () => unawaited(_flushNow()),
+        onInactive: () => unawaited(_flushNow()),
+      );
+    } catch (_) {
+      _lifecycle = null;
+    }
   }
 
   Future<void> _load() async {
@@ -32,6 +64,14 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     } on Exception catch (_) {}
     if (mounted) state = finalSettings;
   }
+
+  /// 当前生效设置的显式读取入口。
+  ///
+  /// Riverpod 的正规读法是 `ref.read(settingsProvider)`；但在**不能安全持有
+  /// ref 的回调**里（如离焦保存监听、dispose 前的落盘兜底），捕获的 notifier
+  /// 是唯一入口，而 `notifier.state` 对外是 protected（越权访问）。这里提供
+  /// 公开 getter 作为合法读口，语义与 provider state 完全一致（内存即时值）。
+  InferenceSettings get snapshot => state;
 
   /// 全局 UI 缩放（0.85–1.30）：main.dart 以 devicePixelRatio 乘数应用。
   Future<void> setUiScale(double value) async {
@@ -930,13 +970,45 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   }
 
   Future<void> _persist() async {
+    // 防抖合并写：窗口内每次 setter 只刷新计时器，最终落一次最新 state。
+    // 签名保持 async Future：107 个调用点的 `await _persist()` 语义不变
+    // （内存 state 已生效，调用方无需感知磁盘时序）。
+    _dirty = true;
+    _persistTimer?.cancel();
+    _persistTimer = Timer(_persistDebounceWindow, () => unawaited(_flushNow()));
+  }
+
+  /// 立即落盘（防抖到期 / 退后台兜底 / dispose 兜底 共用）。
+  /// 并发去重：同一窗口内多次触发只有第一笔真正写盘。
+  Future<void> _flushNow() async {
+    if (!mounted) return;
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    if (!_dirty) return;
+    _dirty = false;
     try {
       await _service.save(state);
     } catch (e) {
-      // 持久化失败不应阻??UI 交互；内存状态已更新??
+      // 持久化失败不应阻塞 UI 交互；内存状态已更新??
       // 记录日志便于定位（此前完全静默，失败时用户无感知）??
       debugPrint('[Settings] persist failed: $e');
     }
+  }
+
+  @override
+  void dispose() {
+    // 兜底 1：notifier 销毁时窗口未到期的改动立即落盘（fire-and-forget，
+    // dispose 不能 await；读 state 必须在 super.dispose() 之前）。
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    if (_dirty) {
+      _dirty = false;
+      unawaited(_service.save(state).catchError((Object e) {
+        debugPrint('[Settings] persist failed on dispose: $e');
+      }));
+    }
+    _lifecycle?.dispose();
+    super.dispose();
   }
 }
 

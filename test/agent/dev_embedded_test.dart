@@ -17,7 +17,6 @@ import 'package:tongyi_lite/agent/builtin_tools/builtin_tools.dart';
 import 'package:tongyi_lite/agent/dev/dev.dart';
 import 'package:tongyi_lite/agent/dev/tools/embedded_git.dart';
 import 'package:tongyi_lite/agent/dev/tools/embedded_tools.dart';
-import 'package:tongyi_lite/agent/dev/tools/git_tools.dart';
 import 'package:tongyi_lite/agent/dev/termux_intent.dart';
 
 void main() {

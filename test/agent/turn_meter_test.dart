@@ -4,19 +4,22 @@ import 'package:tongyi_lite/agent/observability/turn_meter.dart';
 
 void main() {
   group('token 估算口径', () {
-    test('中文按字、英文按 4 字符折 1，空白不计', () {
+    // A4 统一口径：全仓唯一字符级实现 estimateTextTokens
+    //（ASCII ÷4 + CJK ×3/4，向下取整；空白计入 ASCII，与上下文预算
+    // estimateContextTokens 完全一致——占用读数与压缩触发对得上账）。
+    test('中文按 3/4 字/枚、英文按 4 字符折 1（向下取整）', () {
       expect(estimateTokens(''), 0);
-      expect(estimateTokens('一二三四五六七八九十'), 10);
+      expect(estimateTokens('一二三四五六七八九十'), 7); // 10×3/4 = 7.5 → 7
       expect(estimateTokens('a' * 80), 20);
-      expect(estimateTokens('a' * 81), 21); // 向上取整
-      expect(estimateTokens('   \n\t  '), 0);
-      // 混合：9 汉字（按字）+ 40 字母（4 字符折 1）= 9 + 10
-      expect(estimateTokens('一二三四五六七八九${'a' * 40}'), 19);
+      expect(estimateTokens('a' * 81), 20); // 81÷4 = 20.25 → 20（与预算同口径）
+      expect(estimateTokens('   \n\t  '), 1); // 7 ASCII 空白 ÷4 = 1
+      // 混合：9 汉字（×3/4=6）+ 40 字母（÷4=10）= 16
+      expect(estimateTokens('一二三四五六七八九${'a' * 40}'), 16);
     });
 
-    test('全角标点与假名按字计（不能掉进 4 字符折算里）', () {
-      expect(estimateTokens('，。！？；：'), 6);
-      expect(estimateTokens('こんにちは'), 5);
+    test('全角标点与假名按非 ASCII 计（×3/4，不掉进 4 字符折算里）', () {
+      expect(estimateTokens('，。！？；：'), 4); // 6×3/4 = 4.5 → 4
+      expect(estimateTokens('こんにちは'), 3); // 5×3/4 = 3.75 → 3
     });
   });
 

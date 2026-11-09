@@ -6,6 +6,201 @@
 
 ---
 
+## [0.3.9] — 2026-11-09（versionCode 32）
+
+### 🖥️ 智能体对话区重构（UI 三期：C 快赢 / A 治本 / B 交互）
+
+用户反馈「布局乱、步骤到处乱跳、执行过程渲染丢失、执行中漏一堆原始字符」——评估定位到
+**六个真相源并存**（SessionLog 事件流 / 500ms SQLite 轮询 / 单行覆写回答 / `+1000+n` 未来戳
+🔧 行 / `T-(3+i)` 偏移 💭 行 / turnTrace 信封），逐源收口。完整评估与偏差记录见
+[`智能体UI重构_落地记录_2026-11-09.md`](智能体UI重构_落地记录_2026-11-09.md)。
+
+- **A1 思考进唯一真相源**：主循环每步结束把非空思考快照落成 log-only 的 `agent/thinking`
+  事件（`kEventAgentThinking`，不进模型上下文）——回合收尾未写完就崩溃不再整回合蒸发，
+  下回合启动按事件补档成 💭 行（`thinkrec_$seq`，内容去重、时间戳取事件真实时刻）。
+- **A2/A3 中间步文本不再被下一步覆写**：每步推进把上一步可见文本定格成 `MessageKind.stepText`
+  独立行（文本取未节流快照，绕开 150ms 节流丢尾段），最终步天然不定格 = 回答行只留最终答案；
+  live 走 `UiTimelineStepText` 时间线定位、历史走 turnTrace `step` 项定位（崩溃缺行渲染侧跳过）。
+- **A4 杀 500ms 全表轮询**：`StorageService.messageChanges` 写路径广播 + 120ms 去抖重查，
+  轮询降为 2s 兜底心跳（只防事件漏失，不再是刷新来源）。
+- **B3 失败可见**：历史过程区渲染补 `error`/`notice` case（原 switch 只写 tool/think 的死分支）；
+  `assistant/attempt` 失败尝试按发生位置落 error 项；回合级错误文案带失败码
+  （`本轮执行失败（code）：msg`）。
+- **B4 notice 槽位**：`TurnUnit` 加 `notices/todoCard/planCard`——内部信封
+  （turnTrace/agentTrace/compactSummary）不再当通知重复渲染，🔔 子代理完成行进过程区；
+  `todo_$convId`/`plan_$convId` 活卡按 id 前缀分流（kind 仍 text 保模型可见），回合尾清单
+  upsert 不再把真回答挤出 answer 位。
+- **信封改事件序重建**：turnTrace 按 `agent/thinking`/`tool/call`/`assistant/attempt` 的日志
+  seq 走一遍即真实交错序（UI timeline 仅作 A1 事件缺失时回退）。
+- **折叠条摘要与展开区同源**（发版后追加）：「执行过程 · N 工具 · M 思考」过去另取 DB 🔧/💭 行族
+  长度，而展开区取事件投影信封——步答块/失败尝试/通知行不进数字、解析失败的 🔧 行被 `whereType`
+  静默丢掉（卡片照出）、崩溃残留的 executing 行白计一笔，折叠条上必然"数不上"。改为
+  `children` 与计数**同一趟遍历**产出（`_ProcessContent`），摘要按 `步/工具/思考/失败/通知`
+  只报真正渲染出来的块。同批修掉两处：① live 刚收尾（无信封）那条回退把 timeline 的思考卡/步答块
+  与 💭/stepText 行族**各渲染两遍**；② `steps.map(...).toList()` 的运行时元素类型是
+  `ToolActivityCard`，往同列表 `.add` 步答块直接 `_TypeError`（列表字面量才带 `Widget` 元素类型）。
+  行为锁：`test/widgets/turn_process_section_test.dart`（刻意让行族口径与信封口径互相矛盾，并逐个
+  类型数展开后的块数与头部数字对齐）。
+- **附带修复两个真 bug**：① 增量导入会把 🔧/notice/stepText 行当 assistant 文本灌进模型上下文
+  （补 kind≠text 过滤，🔧TRACE 信封唯一放行）；② `kSubagentDepth` 原为全局 push/pop，fan-out
+  并发兄弟子代理互抬深度、第 3 个后台任务被误拒（HEAD 靠时序侥幸通过）——改 **Zone 作用域**
+  委派链深度（`runChild` 包回合、send_message 续轮跑在子代理自身深度），回归 DSH Part 11.10 本意。
+- **泄漏与卫生清账**：settings/home 全部对话框局部 `TextEditingController` 关闭即 dispose
+  （原 7+ 处每次弹窗泄漏）、规划面板 FocusNode 改字段复用、`_pendingVoiceEnd` 离页 cancel、
+  TurnClock 监听三连抽 mixin、`settings_provider._persist` 400ms 防抖 + 三兜底落盘时机
+  （dispose/退后台/窗口到期，107 个 setter 一处收口）。
+
+### 🧭 Harness 对标 DSH（P0+P1 九项 + P2 五项）
+
+- **A1 事件落盘**：`JsonlSessionStore` 经 `SessionPersistor`（Future 链保序）异步写盘；回合启动
+  JSONL 优先恢复（`load` + `closeOpenTurns` 崩溃修复）、首迁 rewrite、SQLite 增量导入
+  （游标 + 内容级去重）、影子区 `shadowsStartSeq` 跨回合重建、`compactFile` 物理清淤。
+- **A2 guards 真生效**：生产构造传入 `modelCacheGuard` + `dangerousCommandShellGuard`
+  （此前 `rm model_cache` 防护实际不生效）；**A3 压缩预算**取 `min(agentNctx, 原生 kv_ctx)×3/4`
+  （oom-guard 裁剪后的真实窗口此前不被感知）；**A4 计量统一** `estimateTextTokens` 全仓唯一实现。
+- **B1 统一压缩**三约束（工具对不拆分 / 摘要必须比原文小 / 前进性不变）+ 旧摘要链式折叠不断链 +
+  回合后 90% 自动压缩接通；**B2 结构化摘要** `<compacted-summary>` 骨架，本地走主模型真前缀摘要。
+- **B3 多工具调用**：全块解析一次提取全部调用（id 防撞 / 块外残差保留 / 坏块回落），local 档并行
+  默认放开；**B4 调用入历史** `ToolProtocol.replayToolCalls` seam 修「turn 间失忆」。
+- **B5 LCP 遥测**：JNI GenStats 透传 `lcp_prefix/n_prompt`，回合后打「KV 复用 | LCP x/y(z%)」；
+  顺手修引擎真 bug——`LCP<16` full-clear 分支唯一不清 `prefix_len`，空 KV 从 LCP 起步必被一致性
+  检查打回重灌。
+- **C 批**：MCP 客户端按连接要素跨回合缓存 + 404 会话自愈 + 端点级失败重试 + 每 server
+  `toolTimeoutMs`；子代理 `allowed_tools` 最小权限委派 + 前台进度流；`TurnMetricsStore` 最近 200
+  回合磁盘聚合 + 设置「📊 执行质量」卡；本地看门狗（流式无增量 >120s 止损）+ 本地 usage 回传；
+  重复提醒带参数 canonical 摘录（治"同工具不同参数"型误重复）。
+
+### 🌊 LLM 流骨架统一与取消隔离
+
+- **三份收敛**：generate 的流消费骨架（守卫 + `_finishStream` + Completer + 令牌 + race + thinking
+  守卫 + finally 清理）在 local / openai-native / openai-text 逐字复制，收敛为
+  `BaseEngineAdapter.runStreamWithGuards<T>`，差异点回调注入，新增 `onStreamSettled` 钩子保本地
+  看门狗不误停他人生成；`thinkingOverflowFailure` 文案三份收敛为单源（字节等价）。
+- **取消令牌隔离**（并发缺陷）：`currentSub` 实例级单槽 + `cancel()` 无条件取消，父子回合共用
+  adapter 时互相误杀流。新增 `CancelToken`（归属凭证 + sub）+ `beginGeneration/bindGenerationStream`
+  /`endGeneration`/`cancelOwnedGenerations`，`cancel()` 只中止「信号已触发或无信号」的令牌流；
+  公开签名不变，`adapter_test` +4 条用例锁口径。
+- **3 条存量红转绿**（测试即规格）：思考失控守卫改**跨块累计**（`_totalThinkingChars`，治"每块
+  闭合后总量仍续涨"型漏检，`kMinUsefulChars=80` 防寒暄误判）；孤立 ` response` 闭合记号判为隐式
+  opener 整体丢弃（英文词 "API response" 由 `_isAsciiWord` 语法层守卫不误吞）。
+- 顺带修文本协议 catch 链缺 `on LlmFailure` rethrow → 失败被重包成 transport 丢分档信息。
+
+### 🛡️ 兜底契约与可观测性
+
+- **spill 兜底**（违反"绝不丢内容"自家契约）：`decide()` 旧 catch 只接 `FormatException`，真实文件
+  写入的 `FileSystemException`（磁盘满/路径非法）会穿透把已成功的工具结果判成"流水线异常"→ 模型
+  误判失败重试。改兜全部异常 + `quietFail` 留痕；顺带修字节语义（`bytesOmitted` 原用 UTF-16 码元
+  冒充字节，CJK 虚高约 3 倍 → 真 UTF-8 长度）。
+- **quiet-fail 统一通道**：新增 `lib/agent/observability/quiet_fail.dart`，best-effort 角落
+  "吞而不默"、`[quiet-fail]` 前缀可检索；接入此前零遥测的五个吞点（spill.store、
+  compaction.summary.{timeout,model}、agent.env-note、tool.workspace-resolver、
+  local.restore-thinking）。
+- **turn_metrics 双形状容错**：`fromLog` 的 `endReason` 对崩溃修复合成的 `{kind: cause}` Map 抛
+  TypeError 致整条指标静默消失 → 补 `_reasonKind`（String | Map['kind']）双形状。
+
+### 🧹 仓库健康门禁恢复
+
+- **`analysis_options.yaml` 新增**：历史无此文件，`flutter analyze` 把根下所有 .dart（`_probe` 探针
+  /build 产物/worktree/examples 独立包）按主包上下文分析，报 **3015** 条假阳性无法当门禁；现排除
+  scratch/产物/独立包目录，真实基线 26 条 → 同批**清零至 0**（机械项：冗余 import、死字段/死读取、
+  多余 `!`/`?.`、可简 catch）。刻意不 include `flutter_lints`（历史从未启用，突启新增数百条淹没真信号，
+  另案决定）。
+- **`.gitignore` scratch 收口**（last-match wins）终结 `_probe/*` 历史拉锯；根 dev_dependencies 补
+  `test:^1.25.0` 消 plugin 包 ~2400 条 `undefined_function` 假阳性。
+- **flake 加固**：`plugin_host_dispose_test` tearDown 在 Windows 并发全量跑撞 errno 32 文件锁
+  （单跑恒绿/全量偶红）→ 6 次退避重试、终删不掉按通过（与被测 seam 无关）。
+
+### 📦 版本号真源收口（发版事故复盘）
+
+`flutter build apk` 出来的 0.3.9 包 `aapt dump badging` 自报 **0.3.8 / versionCode 31**——四个版本号
+真相源各自飘了很久：
+
+- **`android/app/build.gradle.kts` 硬编 `versionCode = 31 / versionName = "0.3.8"`**，构建期把
+  pubspec 的 `0.3.9+32` 整个盖掉（这是进包的那个数）；
+- About 页常量 `_appVersion` 停在 **0.3.7**（0.3.8、0.3.9 两次发版都没跟上）；
+- 插件宿主握手 `kPluginHostAppVersion` 停在 **0.2.8**，插件侧 `minAppVersion` 判定一直拿 7 个版本
+  前的旧号比。
+
+改法与 UI 那六套真相源同一路子：**pubspec 的 `version:` 定为唯一真源**，gradle 取构建期注入的
+`flutter.versionName` / `flutter.versionCode`（不再硬编）；Dart 侧因离线沙箱拿不到 `package_info_plus`
+只能留常量，于是加 **`test/meta/version_consistency_test.dart`** 把 About 页常量、插件握手常量、
+gradle 不得再硬编、README 徽章、CHANGELOG 最新节一起钉到 pubspec——发版漏改任何一处即红（负向验证
+已做：把 About 页改回 0.3.8 立即红）。本 versionCode 32 为 badging 实测值；重出包前入库的
+`TongYi-Lite-v0.3.9.apk`（SHA-256 `59dd43d6…2186c`）功能代码一致但版本标签错，README 下载块已注明。
+
+> 全量验证：**1195 过 / 6 跳 / 0 红**，`flutter analyze` **0 issue**。
+
+---
+
+## [0.3.8] — 2026-11-06~08（versionCode 31）
+
+> 本节为 2026-11-09 补记：0.3.8 发版时只更新了 README 版本更新表，CHANGELOG 一直缺这一节，
+> 于是 `[0.3.9]` 直接接 `[0.3.7]`。内容按 `281e505b`→`595b668a` 区间的提交与 README
+> [版本更新](README.md#版本更新) 行还原。
+
+### 🔁 llama.cpp 换树 v0.9.0 基座
+
+- `aline-p1-swap` 分支合入 main：fork 资产全量回贴 + B 线 backport 8/8 PR 量化内核并入。
+- KleidiAI vendor v1.31.0 → **v1.32.0**；PTQ1_0 三元专家窗口打包保守待遇；prefill ≤32-token
+  分块停止响应；`op_softplus` ULP 恢复 fork 原式。
+
+### 🩺 换树遗留缺陷定谳（一个月乱码史的根）
+
+- **`prism.hadamard` 两套存储同步**（`99d8b15d`）：换树合并后加载侧填 `hadamard_*`（llama_model
+  成员，401 条）而图侧消费 `model.hdmd`（恒空）→ 图参数 `hdmd=nullptr` → prism.hadamard 正反
+  变换在整图**静默缺席** → 残差流基错排 → bonsai-2-27b 全栈（CPU/GPU/混合）确定性乱码。五段
+  铁证链（文件 round-trip 逐位同 / DGX CPU 锚点同乱 / 内核数值门全绿 / NODEDUMP 无 FWHT 节点 /
+  修复后中文连贯）后由 `load_tensors_hadamard()` 后单向同步七字段收口——10-09 起的 bomb·aix·junk
+  乱码史同此一根。
+- **q4_K 通用 GEMM 换树错抄修复**（`c15a3c60`）；**ling-3.0-tiny 三重乱码修复**（`5aede229`：
+  Bailing V3 jinja 模板落地 / MLA 自动 F16 KV / 遗留融合路由试验旗标清除）。
+- **找回被版本号提交卷掉的 K40 / ling 修复**（`427da872` 一路）：四文件重建 + hunks 字面量验齐。
+
+### 📱 K40 / Adreno 650 车队扩入
+
+E031.37 老编译器硬闸 + `CL_CHECK_SOFT_ADRENO` 软注册 + A77 CPU 架构回退防 SIGILL。
+
+### 🚀 Adreno OpenCL PTQ1_0 内核（11-08）
+
+- **decode GEMV 重写**（`89ee8fb1`）：逐字节标量读 + 每 value 分支解包 → per-lane 恒量外提 +
+  相邻值对合一次对齐 ushort 读 + K 循环展开 ×2；**0.71 → 6.42 GB/s**，端到端 decode
+  **8 s → 0.887 s/tok**（830 纯 CPU 1.27 s/tok，反超 1.4×）。两枚数学陷阱自纠：无符号 `-1U`
+  下溢（改 float 域 `-1.0f`）、整数除法误写浮点分数（还原全整数移位）。
+- **prefill GEMM**（`3264a41b` / `6542ea1f`）：`GGML_OPENCL_PTQ10_MM_N` 缺省 32→1（830 真机
+  prefill **8.5×**：7.44 → 0.877 s/tok）；原「数值静默错」是 prism.hadamard 整图缺席年代的冤案。
+  A 侧装载向量化（每线程 8 个连续值一次 4B 对齐读）。双缓冲流水线重构实测数值损坏 → 回滚。
+- `cpy_f32_f32_packflat` 补 4-D 守卫（`bf2c8151`）：`ne02/ne03 == 1` 才走快路。
+
+### 🧠 MTP（投机解码）
+
+- JNI 透传 `enable_mtp → model_params.load_mtp`（`3f568385`）——根治开 MTP 加载 NextN 模型必崩；
+  `n_draft_max` 2→1（`942ad889`，手机端 GPU 解码 compute-bound，verify 批 (1+n) 成本近线性，
+  n=2 实测净亏）；MTP 头上下文显式跟随主上下文 FA 配置（`099963b2`）——除掉加载后 ~10 s 必崩的
+  KV-rows 断言。
+
+### 🗂 模型目录 23 → 38 条
+
+- **模型族量化选择器**（`c1dfcf63`）：同基础模型多量化折叠一行，默认最小档、选择即时持久化；
+  存量三组同源对（minicpm5-2b / lfm2.5-8b-a1b / ling-3.0-tiny）归族。
+- **Ornith 1.5 9B（GSQ-RCO MTP）上架**：IQ2_XS~IQ3_M 六档，全 `-mtp` 包自带 NextN，标准 GGUF。
+- **Nanbeige 4.2 3B 上架**：bartowski imatrix 九档 Q2_K~Q4_K_L（`LLM_ARCH_NANBEIGE` 已内置）。
+
+### 🔒 工程闸门
+
+- **pre-push 私有记忆闸门入库随仓分发**（`8a538cdc`）：此前钩子只存在于本机，新 clone 无闸；
+  拦 AGENTS.md/BUILD.md/android_AGENTS.md/两篇 thinking 笔记/.workbuddy 回流公开仓 + 内网
+  100.64/10、192.168 地址出现在 md/json/jsonl。
+- **闸门三处致死缺陷修复**（`4888f13d`）：`read -l_ref` 误写致循环体从不执行（闸门静默空转）、
+  单提交跑 `rev-list --objects` 把整条历史拉进 IP 扫描（正常推送被历史里已公开的文件误拦）、
+  逐提交 × 范围扫描 N 次叠乘（2 个提交即 >60 s 卡死）。改增量推送 `remote..local` 单次扫描。
+
+> 📎 **版本标签事故本版本已踩过一次**：`d4194fee`（11-07）——`build.gradle.kts` 硬编
+> `versionCode=30/versionName="0.3.7"` 把 pubspec 的 `0.3.8+31` 盖掉，**此前所有打包产物都带
+> 0.3.7 号**。当时的修法是手动把 gradle 数字抬到 31/0.3.8，于是 0.3.9 复发（见
+> [0.3.9] 的 📦 节）；现改由 pubspec 派生，这条路彻底断掉。
+
+---
+
 ## [0.3.7] — 2026-11-01（versionCode 30；26/28 被 dense4b-drainfix 现场包占用，跳号）
 
 ### 🧩 扩散 LLM 推理能力支持（dLLM 实验线 · Clover-35B-A3B 上机）

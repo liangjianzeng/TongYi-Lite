@@ -1,6 +1,4 @@
 /// P2-C 子代理 fan-out 测试：tasks 数组一次派发多个后台子代理。
-import 'dart:async';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/builtin_tools/builtin_tools.dart';
 import 'package:tongyi_lite/agent/llm/adapter.dart';
@@ -8,27 +6,7 @@ import 'package:tongyi_lite/agent/subagents/in_process.dart';
 import 'package:tongyi_lite/agent/subagents/subagent_tool.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
-
-final class _FakeAdapter extends LlmAdapter {
-  int _calls = 0;
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    _calls++;
-    return LlmResult(text: '子任务结果 #$_calls');
-  }
-
-  @override
-  void cancel() {}
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
+import '../helpers/fake_llm.dart';
 
 (InProcessSubagentProvider, ToolRegistry) _build() {
   final registry = ToolRegistry();
@@ -36,7 +14,9 @@ final class _FakeAdapter extends LlmAdapter {
     registry.register(tool);
   }
   final provider = InProcessSubagentProvider(
-    adapter: _FakeAdapter(),
+    // 后台子代理逐个自跑一个文本回合：无界应答场景，用显式 always 桩
+    // （旧本地桩"按调用次数编号"的文本不进任何断言，去之）。
+    adapter: FakeLlmAdapter.always(const LlmResult(text: '子任务结果')),
     registry: registry,
     modelId: 'test-model',
     providerKind: ProviderKind.local,

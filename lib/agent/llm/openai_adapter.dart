@@ -317,11 +317,14 @@ class OpenAiAdapter extends BaseEngineAdapter {
         _maxThinkingChars = maxThinkingChars,
         super(protocol: protocol, capabilities: capabilities);
 
-  /// 取消：先中止 Dart 侧流（基类），再取消 API SSE 请求。
+  /// 取消：中止「归属本次取消」的 Dart 侧流（基类令牌条件），存在归属
+  /// 目标才停 SSE——_openAi.stop() 打断的是 service 当前请求，共享
+  /// adapter 下那可能是子代理的流（其取消信号未触发 → 不许碰，T3）。
   @override
   void cancel() {
-    super.cancel();
-    _openAi?.stop();
+    if (cancelOwnedGenerations()) {
+      _openAi?.stop();
+    }
   }
 
   @override
@@ -364,135 +367,106 @@ class OpenAiAdapter extends BaseEngineAdapter {
     }
     final tools = buildOpenAiToolsSchema(options.tools);
     final assembler = OpenAiNativeStreamAssembler();
-    // 流终态（null=干净完成，非 null=错误）。
-    final outcome = Completer<Object?>();
-    StreamSubscription<Map<String, dynamic>>? sub;
-    bool _streamFinished = false;
-    void _finishStream(Object? err) {
-      if (_streamFinished) return;
-      _streamFinished = true;
-      outcome.complete(err);
-    }
-
-    try {
-      // 思考失控守卫（local/API 同规）：累计思考超预算且尚无产出 → 停 SSE 止损。
-      var _thinkingOverflow = false;
-      var _thinkingCharsAtTrigger = 0;
-      // WP5：API 路线工具调用以原生 tool_calls 分片到达（reasoning 内容在
-      // assembler 思考通道），工具参数生长期 assembler 文本为空——
-      // 用思考通道+分片累计长度合成提示，避免 UI 干转圈。
-      var _toolGenActive = false;
-      sub = openAi.chatCompletionEvents(
+    // WP5：API 路线工具调用以原生 tool_calls 分片到达（reasoning 内容在
+    // assembler 思考通道），工具参数生长期 assembler 文本为空——
+    // 用思考通道+分片累计长度合成提示，避免 UI 干转圈。
+    var _toolGenActive = false;
+    // 流消费骨架（取消令牌+终态+cancel 竞跑+思考守卫+清理）走基类
+    // runStreamWithGuards（T4 收敛，此前与文本/本地路线三份复制）；
+    // 本路线只注入差异：结构化事件解析、原生口径判定、终态裁决顺序。
+    return runStreamWithGuards<Map<String, dynamic>>(
+      cancel: cancel,
+      stream: openAi.chatCompletionEvents(
         config: model,
         messages: wireMessages,
         tools: tools,
         temperature: options.temperature,
         maxTokens: options.maxTokens ?? 512,
         extraBody: _thinkingFields(options.maxTokens ?? 512),
-      ).listen(
-        (event) {
-          assembler.addEvent(event);
-          if (onToken != null) {
-            onToken.add(assembler.textSoFar);
+      ),
+      onEvent: (event) {
+        assembler.addEvent(event);
+        if (onToken != null) {
+          onToken.add(assembler.textSoFar);
+        }
+        if (onThinking != null) {
+          onThinking.add(assembler.thinkingSoFar);
+        }
+        if (options.onStatus != null) {
+          final pendingFrag = assembler.pendingToolCallChars;
+          if (pendingFrag > 0) {
+            _toolGenActive = true;
+            options.onStatus!.add('toolgen|$pendingFrag|');
+          } else if (_toolGenActive) {
+            _toolGenActive = false;
+            options.onStatus!.add('toolgen|0|');
           }
-          if (onThinking != null) {
-            onThinking.add(assembler.thinkingSoFar);
+        }
+      },
+      // 思考失控守卫（local/API 同规）：累计思考超预算且尚无产出 → 停 SSE
+      // 止损。原生路线无 processor，条件为等价手写（reasoning 通道长度、
+      // 可见文本不足寒暄门槛、无在途工具调用分片）。
+      thinkingOverflowCheck: () =>
+          assembler.thinkingSoFar.length > _maxThinkingChars &&
+                  assembler.textSoFar.trim().length <
+                      AgentStreamProcessor.kMinUsefulChars &&
+                  assembler.pendingToolCallChars == 0
+              ? assembler.thinkingSoFar.length
+              : null,
+      stopEngine: () => openAi.stop(),
+      finalize: (ctx) async {
+        // 思考失控先于错误判定：stop() 会以 cancel 错误收场，若先走 error
+        // 分支会归为 transport（可重试）→ 失控思考被重试 5 遍。
+        if (ctx.thinkingOverflowed) {
+          // 先抢救再判死：止损前已产出的正文/工具调用照样交付。
+          final salvaged = assembler.finalize();
+          if (salvaged.text.trim().isNotEmpty || salvaged.calls.isNotEmpty) {
+            debugPrint('[AgentLlm] API 原生路线思考失控已止损'
+                '（累计 ${ctx.thinkingCharsAtTrigger} 字），已有产出 → 照常返回');
+            return LlmResult(
+              text: salvaged.text,
+              toolCalls: salvaged.calls,
+              usage: assembler.usage,
+            );
           }
-          if (!_thinkingOverflow &&
-              assembler.thinkingSoFar.length > _maxThinkingChars &&
-              assembler.textSoFar.trim().length <
-                  AgentStreamProcessor.kMinUsefulChars &&
-              assembler.pendingToolCallChars == 0) {
-            _thinkingOverflow = true;
-            _thinkingCharsAtTrigger = assembler.thinkingSoFar.length;
-            openAi.stop();
-          }
-          if (options.onStatus != null) {
-            final pendingFrag = assembler.pendingToolCallChars;
-            if (pendingFrag > 0) {
-              _toolGenActive = true;
-              options.onStatus!.add('toolgen|$pendingFrag|');
-            } else if (_toolGenActive) {
-              _toolGenActive = false;
-              options.onStatus!.add('toolgen|0|');
-            }
-          }
-        },
-        onError: (Object e, [StackTrace? s]) {
-          // async 生成器出错不关流 → 显式取消并标记完成。
-          sub?.cancel();
-          _finishStream(e);
-        },
-        onDone: () => _finishStream(null),
-      );
-      currentSub = sub;
-      if (await race(outcome.future, cancel)) {
-        throw const AgentCancelledException();
-      }
-      // 思考失控先于错误判定：stop() 会以 cancel 错误收场，若先走 error
-      // 分支会归为 transport（可重试）→ 失控思考被重试 5 遍。
-      if (_thinkingOverflow) {
-        // 先抢救再判死：止损前已产出的正文/工具调用照样交付。
-        final salvaged = assembler.finalize();
-        if (salvaged.text.trim().isNotEmpty || salvaged.calls.isNotEmpty) {
-          debugPrint('[AgentLlm] API 原生路线思考失控已止损'
-              '（累计 $_thinkingCharsAtTrigger 字），已有产出 → 照常返回');
-          return LlmResult(
-            text: salvaged.text,
-            toolCalls: salvaged.calls,
-            usage: assembler.usage,
+          // 文案唯一真源 BaseEngineAdapter.thinkingOverflowFailure（T4）。
+          throw BaseEngineAdapter.thinkingOverflowFailure(
+            ctx.thinkingCharsAtTrigger,
+            _maxThinkingChars,
           );
         }
-        throw LlmFailure(
-          code: LlmFailureCode.thinkingOverflow,
-          message: '思考失控：已累计思考 $_thinkingCharsAtTrigger 字仍无任何产出，'
-              '已主动中止（阈值 $_maxThinkingChars 字）。'
-              '本次自动改用「不思考」重试一次；若频繁出现，'
-              '请在 设置→智能体 调大「思考失控守卫阈值」',
-        );
-      }
-      final error = await outcome.future;
-      if (error != null) {
-        final f = _normalizeStreamError(error);
-        if (f.code == LlmFailureCode.invalidRequest) {
-          // 请求体带 tools 被服务端拒收：端点很可能不支持 function calling。
-          // fail-loud + 明确指引，不静默降级文本协议（会产生解析降级新问题）。
+        if (ctx.streamError != null) {
+          final f = _normalizeStreamError(ctx.streamError!);
+          if (f.code == LlmFailureCode.invalidRequest) {
+            // 请求体带 tools 被服务端拒收：端点很可能不支持 function calling。
+            // fail-loud + 明确指引，不静默降级文本协议（会产生解析降级新问题）。
+            throw LlmFailure(
+              code: f.code,
+              message: '${f.message}'
+                  '（当前端点可能不支持 tools/function calling，'
+                  '请检查 API 服务是否支持原生工具调用）',
+            );
+          }
+          throw f;
+        }
+        final r = assembler.finalize();
+        if (r.text.trim().isEmpty && r.calls.isEmpty) {
+          // 空响应 fail-loud：推理耗尽 max_tokens（finish=length）等场景，
+          // 不能当"最终回答"静默完成。
           throw LlmFailure(
-            code: f.code,
-            message: '${f.message}'
-                '（当前端点可能不支持 tools/function calling，'
-                '请检查 API 服务是否支持原生工具调用）',
+            code: LlmFailureCode.emptyResponse,
+            message: assembler.finishReason == null
+                ? '模型返回空响应（无文本也无工具调用）'
+                : '模型返回空响应（finish_reason=${assembler.finishReason}）',
           );
         }
-        throw f;
-      }
-      final r = assembler.finalize();
-      if (r.text.trim().isEmpty && r.calls.isEmpty) {
-        // 空响应 fail-loud：推理耗尽 max_tokens（finish=length）等场景，
-        // 不能当"最终回答"静默完成。
-        throw LlmFailure(
-          code: LlmFailureCode.emptyResponse,
-          message: assembler.finishReason == null
-              ? '模型返回空响应（无文本也无工具调用）'
-              : '模型返回空响应（finish_reason=${assembler.finishReason}）',
-        );
-      }
-      return LlmResult(text: r.text, toolCalls: r.calls, usage: assembler.usage);
-    } on AgentCancelledException catch (e) {
-      rethrow;
-    } on LlmFailure catch (e) {
-      rethrow;
-    } catch (e) {
-      throw LlmFailure(
+        return LlmResult(text: r.text, toolCalls: r.calls, usage: assembler.usage);
+      },
+      mapUnexpected: (e, streamError) => LlmFailure(
         code: LlmFailureCode.transport,
         message: 'API 调用失败: $e',
-      );
-    } finally {
-      sub?.cancel();
-      if (identical(sub, currentSub)) {
-        currentSub = null;
-      }
-    }
+      ),
+    );
   }
 
   /// 文本协议路径（与本地路线同构）：response 文本交给注入协议解析。
@@ -504,101 +478,70 @@ class OpenAiAdapter extends BaseEngineAdapter {
   }) async {
     final openAi = _openAi!;
     final model = _apiModel!;
-    // 文本路线：'tool' 保留 role:tool（部分服务端宽容处理），助手剥除 tool_calls。
-    final apiMessages = convertApiMessages(options.messages);
+    // 文本路线：'tool' 保留 role:tool（部分服务端宽容处理），assistant 的
+    // tool_calls 按 B4 回放为文本形态拼回 content（模型看见自己发过的调用）。
+    final apiMessages =
+        convertApiMessages(options.messages, modelId: model.model);
     // 视觉：带 imagePath 的 user 消息转 content-parts（visionCapable 才发）。
     if (model.visionCapable) {
       await attachWireImages(apiMessages, options.messages);
     }
     final rawBuffer = StringBuffer();
     final processor = AgentStreamProcessor();
-    // 思考失控守卫标志（同原生路线；口径用 thinkingRunaway = 跨块累计 + 无产出）。
-    var _thinkingOverflow = false;
-    var _thinkingCharsAtTrigger = 0;
-    // 流终态（null=干净完成，非 null=错误）。
-    final outcome = Completer<Object?>();
-    StreamSubscription<String>? sub;
-    bool _streamFinished = false;
-    void _finishStream(Object? err) {
-      if (_streamFinished) return;
-      _streamFinished = true;
-      outcome.complete(err);
-    }
-
-    try {
-      sub = openAi.chatCompletion(
+    // 流消费骨架（取消令牌+终态+cancel 竞跑+思考守卫+清理）走基类
+    // runStreamWithGuards（T4 收敛，此前与本地/原生路线三份复制）。
+    return runStreamWithGuards<String>(
+      cancel: cancel,
+      stream: openAi.chatCompletion(
         config: model,
         messages: apiMessages,
         temperature: options.temperature,
         maxTokens: options.maxTokens ?? 512,
         extraBody: _thinkingFields(options.maxTokens ?? 512),
-      ).listen(
-        (token) {
-          if (token.isEmpty) return;
-          rawBuffer.write(token);
-          processor.add(token);
-          if (onToken != null) {
-            onToken!.add(processor.visibleText);
-          }
-          if (onThinking != null) {
-            onThinking!.add(processor.thinkingText);
-          }
-          if (!_thinkingOverflow &&
-              processor.thinkingRunaway(_maxThinkingChars)) {
-            _thinkingOverflow = true;
-            _thinkingCharsAtTrigger = processor.thinkingCharsSoFar;
-            openAi.stop();
-          }
-        },
-        onError: (Object e, [StackTrace? s]) {
-          // async 生成器出错不关流 → 显式取消并标记完成。
-          sub?.cancel();
-          _finishStream(e);
-        },
-        onDone: () => _finishStream(null),
-      );
-      currentSub = sub;
-      if (await race(outcome.future, cancel)) {
-        throw const AgentCancelledException();
-      }
-      // 思考失控先于错误判定（stop() 以 cancel 收场，别让它进可重试档）。
-      if (_thinkingOverflow) {
-        // 先抢救再判死：止损前已产出的工具调用/答案照样有效。
-        if (processor.hasToolCalls ||
-            processor.visibleText.trim().length >=
-                AgentStreamProcessor.kMinUsefulChars) {
-          debugPrint('[AgentLlm] API 文本路线思考失控已止损'
-              '（累计 $_thinkingCharsAtTrigger 字），已有产出 → 照常返回');
-          return parseAndReturn(rawBuffer, processor);
+      ),
+      onEvent: (token) {
+        if (token.isEmpty) return;
+        rawBuffer.write(token);
+        processor.add(token);
+        if (onToken != null) {
+          onToken.add(processor.visibleText);
         }
-        throw LlmFailure(
-          code: LlmFailureCode.thinkingOverflow,
-          message: '思考失控：已累计思考 $_thinkingCharsAtTrigger 字仍无任何产出，'
-              '已主动中止（阈值 $_maxThinkingChars 字）。'
-              '本次自动改用「不思考」重试一次；若频繁出现，'
-              '请在 设置→智能体 调大「思考失控守卫阈值」',
-        );
-      }
-      final error = await outcome.future;
-      if (error != null) {
-        throw _normalizeStreamError(error);
-      }
-      return parseAndReturn(rawBuffer, processor);
-    } on AgentCancelledException catch (e) {
-      rethrow;
-    } on DioException catch (e) {
-      throw LlmFailure(code: mapApiError(e), message: friendlyApiError(e));
-    } catch (e) {
-      throw LlmFailure(
-        code: LlmFailureCode.transport,
-        message: 'API 调用失败: $e',
-      );
-    } finally {
-      sub?.cancel();
-      if (identical(sub, currentSub)) {
-        currentSub = null;
-      }
-    }
+        if (onThinking != null) {
+          onThinking.add(processor.thinkingText);
+        }
+      },
+      // 思考失控守卫（同本地路线；口径用 thinkingRunaway = 跨块累计 + 无产出）。
+      thinkingOverflowCheck: () => processor.thinkingRunaway(_maxThinkingChars)
+          ? processor.thinkingCharsSoFar
+          : null,
+      stopEngine: () => openAi.stop(),
+      finalize: (ctx) async {
+        // 思考失控先于错误判定（stop() 以 cancel 收场，别让它进可重试档）。
+        if (ctx.thinkingOverflowed) {
+          // 先抢救再判死：止损前已产出的工具调用/答案照样有效。
+          if (processor.hasToolCalls ||
+              processor.visibleText.trim().length >=
+                  AgentStreamProcessor.kMinUsefulChars) {
+            debugPrint('[AgentLlm] API 文本路线思考失控已止损'
+                '（累计 ${ctx.thinkingCharsAtTrigger} 字），已有产出 → 照常返回');
+            return parseAndReturn(rawBuffer, processor);
+          }
+          // 文案唯一真源 BaseEngineAdapter.thinkingOverflowFailure（T4）。
+          throw BaseEngineAdapter.thinkingOverflowFailure(
+            ctx.thinkingCharsAtTrigger,
+            _maxThinkingChars,
+          );
+        }
+        if (ctx.streamError != null) {
+          throw _normalizeStreamError(ctx.streamError!);
+        }
+        return parseAndReturn(rawBuffer, processor);
+      },
+      // DioException（含 setup 阶段同步抛出）走 API 错误分档，其余 transport。
+      mapUnexpected: (e, streamError) => e is DioException
+          ? LlmFailure(code: mapApiError(e), message: friendlyApiError(e))
+          : LlmFailure(code: LlmFailureCode.transport, message: 'API 调用失败: $e'),
+    );
   }
 
   /// 该端点的思考强度请求字段（档位=不干预时返回空 → 一个字段都不发）。

@@ -1,7 +1,5 @@
 // 阶段 1（数据类型化）钉子测试：MessageKind 推断 / ToolActivityData 往返 /
 // turnTrace 信封往返 / 旧前缀行读取推断。
-import 'dart:convert';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/models/chat_message.dart';
 import 'package:tongyi_lite/models/turn_trace.dart';

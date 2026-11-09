@@ -39,9 +39,26 @@ final class SessionLog {
       : _events = (events ?? []).toList(),
         _shadowRanges = <ShadowRange>[],
         _seq = events == null ? 0 : _maxSeq(events),
-        _replaceGen = 0;
+        _replaceGen = 0 {
+    // JSONL 持久化（A1）：从事件流重建影子区。replace 事件自带
+    // shadowsStartSeq（新写入的都有）；缺起点的旧数据按「上一个影子区
+    // 结束 +1」保守回退——宁多遮勿漏遮（漏遮 = 旧事件全回投影，上下文爆炸）。
+    var prevEnd = 0;
+    for (final e in _events) {
+      if (e.isReplace && e.shadowsEndSeq != null) {
+        final start = e.shadowsStartSeq ?? (prevEnd + 1);
+        _shadowRanges.add(ShadowRange(
+          startSeq: start,
+          endSeq: e.shadowsEndSeq!,
+          summarySeq: e.seq,
+        ));
+        _replaceGen++;
+        prevEnd = e.shadowsEndSeq!;
+      }
+    }
+  }
 
-  /// 从事件列表构造（导入/测试）。
+  /// 从事件列表构造（导入/测试/JSONL 加载）。
   factory SessionLog.fromEvents(List<SessionEvent> events) =>
       SessionLog._(events: events);
 
@@ -84,11 +101,21 @@ final class SessionLog {
     _eventsCtrl.close();
   }
 
+  /// 持久化 sink（A1 JSONL 落盘）：每次 append（含 replace / 崩溃修复合成
+  /// 事件）同步回调一次；由 [SessionPersistor] 排队异步写盘，append 本身
+  /// 不因磁盘 I/O 阻塞。须在首次 append 前挂接（构造 agent 前）。
+  void Function(SessionEvent event)? _persistSink;
+
+  void attachSink(void Function(SessionEvent event)? sink) {
+    _persistSink = sink;
+  }
+
   /// 追加事件；返回新事件 seq。
   int append(String type, Map<String, dynamic> data, {
     Map<String, String>? source,
     String? surfaceOp,
     int? shadowsEndSeq,
+    int? shadowsStartSeq,
     int? timeMs,
   }) {
     // 落盘前校验 payload（DSH snapshotJsonValue，Part 4.8 第 2 层）——fail-loud。
@@ -101,12 +128,14 @@ final class SessionLog {
       source: source,
       surfaceOp: surfaceOp,
       shadowsEndSeq: shadowsEndSeq,
+      shadowsStartSeq: shadowsStartSeq,
       data: data,
     );
     _events.add(event);
     if (surfaceOp == 'replace') _replaceGen++;
     _seq = seq;
     if (!_eventsCtrl.isClosed) _eventsCtrl.add(event);
+    _persistSink?.call(event);
     return seq;
   }
 
@@ -114,7 +143,7 @@ final class SessionLog {
   ///
   /// 遮蔽 [startSeq..endSeq]（含）的表面区，用 [newContent]（摘要文本）
   /// 替换；追加一条 compaction/summary 事件（surfaceOp=replace）。
-  /// 返回 advance（恒 1，>0 才允许 overflow 重试）。
+  /// 返回 advance（恒 1，>0 才允许 overflow retry）。
   /// 调用方须保证 startSeq <= endSeq。
   int replace({
     required int startSeq,
@@ -125,22 +154,47 @@ final class SessionLog {
     int? summaryMaxTokens,
     int? timeMs,
   }) {
-    if (endSeq < startSeq) {
-      throw ArgumentError(
-          'replace: endSeq ($endSeq) 必须 >= startSeq ($startSeq)');
-    }
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final summarySeq = append(
-      kEventCompactionSummary,
-      <String, dynamic>{
+    return replaceEvent(
+      startSeq: startSeq,
+      endSeq: endSeq,
+      type: kEventCompactionSummary,
+      data: <String, dynamic>{
         'content': newContent,
         if (summaryProvider != null) 'provider': summaryProvider,
         if (summaryModel != null) 'model': summaryModel,
         if (summaryMaxTokens != null) 'maxTokens': summaryMaxTokens,
       },
       source: <String, String>{}..['kind'] = 'model',
+      timeMs: timeMs,
+    );
+  }
+
+  /// 泛化表面替换：遮蔽 [startSeq..endSeq]（含）后以任意事件类型
+  /// （surfaceOp=replace）顶替。压缩摘要走 [replace]；system/message
+  /// 更新（JSONL 持久化后跨回合提示词变更，追加不重写历史）也走这里。
+  int replaceEvent({
+    required int startSeq,
+    required int endSeq,
+    required String type,
+    required Map<String, dynamic> data,
+    Map<String, String>? source,
+    int? timeMs,
+  }) {
+    if (endSeq < startSeq) {
+      throw ArgumentError(
+          'replaceEvent: endSeq ($endSeq) 必须 >= startSeq ($startSeq)');
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final summarySeq = append(
+      type,
+      <String, dynamic>{
+        ...data,
+        'shadowsStartSeq': startSeq,
+      },
+      source: source,
       surfaceOp: 'replace',
       shadowsEndSeq: endSeq,
+      shadowsStartSeq: startSeq,
       timeMs: timeMs ?? now,
     );
     // 影子区：startSeq..endSeq
@@ -404,6 +458,7 @@ final class SessionLog {
                 if (id != '') {
                   pendingCalls[id] = {
                     'callId': id,
+                    'turn': openTurn,
                     'step': e.data['step'] as int? ?? -1,
                     'callSeq': null,
                   };
@@ -417,6 +472,7 @@ final class SessionLog {
           if (cid != '') {
             pendingCalls[cid] = {
               'callId': cid,
+              'turn': openTurn,
               'step': e.data['step'] as int? ?? -1,
               'callSeq': e.seq,
             };
@@ -434,9 +490,6 @@ final class SessionLog {
     // 补未销账的工具调用结果（区分 started/notStarted）
     for (final pc in pendingCalls.values) {
       count = _appendSyntheticToolResult(pc, lastTime) + count;
-    }
-    if (count > 0) {
-      // 已合成，无需再处理
     }
 
     // 补 step/end
@@ -499,6 +552,28 @@ final class SessionLog {
   /// 本次修复追加的合成事件 seq（避免重复修复）。
   Set<int> get syntheticSeqs => Set.unmodifiable(_syntheticSeqs);
   bool get hasSyntheticClosers => _syntheticSeqs.isNotEmpty;
+
+  /// 已闭合的 turn 数（JSONL 持久化后跨回合续 turn 号，failure-note 按
+  /// (turn,step) 去重、metrics 扫 turn 区间都依赖全局递增的 turn 号）。
+  int get turnEndCount {
+    var n = 0;
+    for (final e in _events) {
+      if (e.type == kEventTurnEnd) n++;
+    }
+    return n;
+  }
+
+  /// 最后一条导入游标（data.sqliteCursorMs）；无则 0——下次增量导入
+  /// 从头扫（首次迁移前）。
+  int get lastImportCursorMs {
+    for (var i = _events.length - 1; i >= 0; i--) {
+      final e = _events[i];
+      if (e.type == kEventImportCursor) {
+        return (e.data['sqliteCursorMs'] as num?)?.toInt() ?? 0;
+      }
+    }
+    return 0;
+  }
 
   InferenceStats? _parseStats(Map<String, dynamic>? stats) {
     if (stats == null) return null;

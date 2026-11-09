@@ -356,7 +356,7 @@ void main() {
         'currentStep': 0,
       });
       expect(plan!.steps.length, 2);
-      expect(plan!.steps[0].done, isTrue);
+      expect(plan.steps[0].done, isTrue);
     });
   });
 }

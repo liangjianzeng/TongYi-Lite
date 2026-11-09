@@ -9,6 +9,7 @@ import 'package:tongyi_lite/agent/llm/adapter.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
+import '../helpers/fake_llm.dart';
 
 // 停止按钮这条链的回归（用户 2026-10-24：「那个停止一点卵用都没有」）。
 //
@@ -19,44 +20,10 @@ import 'package:tongyi_lite/agent/tool_registry.dart';
 //    什么都不做 → _cancelCompleted 仍 false → 下一步检查放行，继续烧 token；
 // ③ 取消后仍去走压缩（改写会话 + 再发一次请求）。
 
-/// 可控桩：第 N 次 generate 前触发 [onCall]（测试在里面按下停止），然后抛
-/// [code] 失败。[code] 默认 transport —— 它在重试器里**是可重试的**，
-/// 正好复现"停止后自己重试"的旧行为。
-class _StubAdapter implements LlmAdapter {
-  _StubAdapter({
-    this.onCall,
-    this.results = const [],
-    this.code = LlmFailureCode.transport,
-  });
-
-  /// 每次 generate 开始前回调（参数为第几次，1 起）。
-  final void Function(int call)? onCall;
-  final List<LlmResult> results;
-  final LlmFailureCode code;
-
-  int calls = 0;
-  int cancelCalls = 0;
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    calls++;
-    onCall?.call(calls);
-    if (calls <= results.length) return results[calls - 1];
-    throw LlmFailure(code: code, message: 'request cancelled');
-  }
-
-  @override
-  void cancel() => cancelCalls++;
-
-  @override
-  PreparedLlmCall prepareCall(String model) =>
-      PreparedLlmCall(adapter: this, model: model);
-}
+// 中止到达时的失败形态：transport 在重试器里**是可重试的**，
+// 正好复现"停止后自己重试"的旧行为（用共享桩 exhausted 注入）。
+const _cancelled =
+    LlmFailure(code: LlmFailureCode.transport, message: 'request cancelled');
 
 ToolRegistry _registry(void Function() onExecute) {
   final reg = ToolRegistry();
@@ -77,7 +44,7 @@ ToolRegistry _registry(void Function() onExecute) {
 }
 
 ReactLoopAgent _agent(
-  _StubAdapter fake, {
+  FakeLlmAdapter fake, {
   void Function()? onToolExecute,
 }) =>
     ReactLoopAgent(
@@ -102,9 +69,11 @@ void main() {
   group('停止按钮 · 中止必须真中止', () {
     test('取消后到达的可重试失败不得进重试瀑布（无幽灵生成）', () async {
       late ReactLoopAgent agent;
-      final fake = _StubAdapter(onCall: (n) {
-        if (n == 1) unawaited(agent.cancel());
-      });
+      final fake = FakeLlmAdapter([],
+          onCall: (n) {
+            if (n == 1) unawaited(agent.cancel());
+          },
+          exhausted: _cancelled);
       agent = _agent(fake);
 
       final reason = await agent.kick('北京天气？');
@@ -118,7 +87,7 @@ void main() {
     test('工具执行期间按下停止：不得再发起下一步', () async {
       late ReactLoopAgent agent;
       // 第 1 次返回工具调用；工具执行中按下停止。
-      final fake = _StubAdapter(results: const [_toolStep]);
+      final fake = FakeLlmAdapter([_toolStep], exhausted: _cancelled);
       agent = _agent(fake, onToolExecute: () => unawaited(agent.cancel()));
 
       final reason = await agent.kick('查天气再总结');
@@ -129,8 +98,8 @@ void main() {
 
     test('取消不跨回合：未 running 时 cancel 幂等，且不得让新回合开局就死',
         () async {
-      final fake = _StubAdapter(
-          results: const [LlmResult(text: '好的', toolCalls: [])]);
+      final fake = FakeLlmAdapter([const LlmResult(text: '好的')],
+          exhausted: _cancelled);
       final agent = _agent(fake);
       await agent.cancel(); // 幂等：没有回合在跑时调用不得抛
 
@@ -144,11 +113,13 @@ void main() {
     });
 
     test('取消态下上下文溢出也不去压缩（压缩=再发一次请求）', () async {
-      final fake = _StubAdapter(
-          code: LlmFailureCode.contextWindowExceeded,
+      final fake = FakeLlmAdapter([],
           onCall: (n) {
             if (n == 1) unawaited(agentRef.value!.cancel());
-          });
+          },
+          exhausted: const LlmFailure(
+              code: LlmFailureCode.contextWindowExceeded,
+              message: 'request cancelled'));
       final agent = _agent(fake);
       agentRef.value = agent;
 

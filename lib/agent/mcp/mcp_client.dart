@@ -23,8 +23,13 @@ class McpServerConfig {
   /// 端点 URL（如 http://100.81.83.59:3000/mcp）。
   final String url;
 
-  /// 自定义请求头（如 Authorization）。
+  /// 自定义请求头（如 Authorization: Bearer …）——鉴权走标准头透传，
+  /// 不做 OAuth 流程（端侧远程 server 为主，token 由部署方下发）。
   final Map<String, String> headers;
+
+  /// 单次工具调用超时（C1）：每 server 可配（数据库查询型 server 需要
+  /// 远大于 120s 的预算时在此放行）。默认 120s。
+  final int toolTimeoutMs;
   final bool enabled;
 
   const McpServerConfig({
@@ -32,6 +37,7 @@ class McpServerConfig {
     required this.name,
     required this.url,
     this.headers = const {},
+    this.toolTimeoutMs = 120000,
     this.enabled = true,
   });
 
@@ -40,6 +46,7 @@ class McpServerConfig {
         'name': name,
         'url': url,
         'headers': headers,
+        if (toolTimeoutMs != 120000) 'toolTimeoutMs': toolTimeoutMs,
         'enabled': enabled,
       };
 
@@ -49,17 +56,28 @@ class McpServerConfig {
         url: m['url'] as String? ?? '',
         headers: (m['headers'] as Map<String, dynamic>?)?.cast<String, String>() ??
             const {},
+        toolTimeoutMs: (m['toolTimeoutMs'] as num?)?.toInt() ?? 120000,
         enabled: m['enabled'] as bool? ?? true,
       );
 
-  McpServerConfig copyWith({String? name, String? url, bool? enabled}) =>
+  McpServerConfig copyWith(
+          {String? name,
+          String? url,
+          bool? enabled,
+          int? toolTimeoutMs,
+          Map<String, String>? headers}) =>
       McpServerConfig(
         id: id,
         name: name ?? this.name,
         url: url ?? this.url,
-        headers: headers,
+        headers: headers ?? this.headers,
+        toolTimeoutMs: toolTimeoutMs ?? this.toolTimeoutMs,
         enabled: enabled ?? this.enabled,
       );
+
+  /// 客户端缓存键（C1）：任一连接要素变化即视为新 server（重建握手）。
+  String get clientKey => '$id|${Uri.parse(url).host}:${Uri.parse(url).port}'
+      '|${headers.length}|$toolTimeoutMs';
 }
 
 /// JSON-RPC 响应。
@@ -67,7 +85,10 @@ class _RpcResponse {
   final dynamic result;
   final Map<String, dynamic>? error;
   final int? id;
-  const _RpcResponse(this.result, this.error, this.id);
+
+  /// HTTP 状态码（C1 会话过期自愈判据：404 = session id 失效）。
+  final int? statusCode;
+  const _RpcResponse(this.result, this.error, this.id, {this.statusCode});
 }
 
 /// MCP 客户端（一个 server 一个实例；有状态：session id）。
@@ -88,8 +109,23 @@ class McpClient {
       };
 
   /// 发一个 JSON-RPC 请求并等待匹配 id 的响应。
+  ///
+  /// C1 会话过期自愈：server 重启后旧 session id 失效（404）。收到 404
+  /// 且当前持有 session → 丢弃会话、重新 initialize、重试一次——调用方
+  /// 无感知，工具调用不再因 server 重启失败一整个回合。
   Future<_RpcResponse> _request(String method, Map<String, dynamic> params,
       {Duration timeout = const Duration(seconds: 15)}) async {
+    final res = await _post(method, params, timeout: timeout);
+    if (res.statusCode == 404 && _sessionId != null) {
+      _invalidateSession();
+      await initialize();
+      return _post(method, params, timeout: timeout);
+    }
+    return res;
+  }
+
+  Future<_RpcResponse> _post(String method, Map<String, dynamic> params,
+      {required Duration timeout}) async {
     final id = _nextId++;
     final body = {
       'jsonrpc': '2.0',
@@ -105,15 +141,27 @@ class McpClient {
         responseType: ResponseType.plain,
         validateStatus: (s) => s != null && s < 500,
         // 响应可能是 JSON 或 SSE，都不让 dio 解析。
+        sendTimeout: timeout,
+        receiveTimeout: timeout,
       ),
     );
     _captureSessionId(res);
     if (res.statusCode == 202) {
       // 通知型请求，无响应体。
-      return _RpcResponse(null, null, id);
+      return _RpcResponse(null, null, id, statusCode: res.statusCode);
     }
-    return _parseRpcBody('${res.data}', id);
+    final parsed = _parseRpcBody('${res.data}', id);
+    return _RpcResponse(parsed.result, parsed.error, parsed.id,
+        statusCode: res.statusCode);
   }
+
+  /// 会话失效（server 重启 / 显式丢弃）：下次请求自动重新握手。
+  void _invalidateSession() {
+    _sessionId = null;
+  }
+
+  /// 是否已完成握手（C1 跨回合复用判据）。
+  bool get isInitialized => _sessionId != null;
 
   void _captureSessionId(Response<dynamic> res) {
     final sid = res.headers.value('mcp-session-id');
@@ -181,7 +229,8 @@ class McpClient {
     );
   }
 
-  /// 拉取 server 工具清单。
+  /// 拉取 server 工具清单。工具超时取 [McpServerConfig.toolTimeoutMs]
+  ///（C1：每 server 可配——慢查询型 server 不再一刀切 120s）。
   Future<List<ToolDefinition>> listTools() async {
     final res = await _request('tools/list', const {});
     if (res.error != null) {
@@ -189,6 +238,7 @@ class McpClient {
     }
     final tools = res.result?['tools'];
     if (tools is! List) return const [];
+    final toolTimeout = Duration(milliseconds: config.toolTimeoutMs);
     final out = <ToolDefinition>[];
     for (final t in tools) {
       if (t is! Map<String, dynamic>) continue;
@@ -201,7 +251,7 @@ class McpClient {
         parameters:
             (t['inputSchema'] as Map<String, dynamic>?) ?? const {},
         execute: (args) => callTool(name, args),
-        timeout: const Duration(seconds: 120),
+        timeout: toolTimeout,
       ));
     }
     return out;
@@ -213,7 +263,7 @@ class McpClient {
       final res = await _request('tools/call', {
         'name': rawName,
         'arguments': args,
-      }, timeout: const Duration(seconds: 120));
+      }, timeout: Duration(milliseconds: config.toolTimeoutMs));
       if (res.error != null) {
         return ToolResult.error('MCP 工具 $rawName 错误: ${res.error}');
       }
@@ -253,9 +303,14 @@ class McpClient {
 }
 
 /// 连接一个 server 并拉取工具清单；失败抛异常（调用方决定跳过该 server）。
+///
+/// [client] 传入已缓存的实例（C1 跨回合复用：已握手则跳过 initialize，
+/// 只刷新 tools/list——免每回合重新握手两倍 RTT）；null = 新建。
 Future<List<ToolDefinition>> fetchMcpTools(McpServerConfig config,
-    {Dio? dio}) async {
-  final client = McpClient(config, dio: dio);
-  await client.initialize();
-  return client.listTools();
+    {Dio? dio, McpClient? client}) async {
+  final c = client ?? McpClient(config, dio: dio);
+  if (!c.isInitialized) {
+    await c.initialize();
+  }
+  return c.listTools();
 }

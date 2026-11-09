@@ -175,3 +175,16 @@ _probe/oclstub_build/
 _probe/moe_probe/build-android-cli/
 _probe/moe_probe/build-android-cli-noadreno/
 build-aline-p1/
+
+# === 根目录 scratch 收口（2026-11-09 健康度整改）===
+# 约定：根目录下划线前缀 = 本地 scratch（实验产物/补丁/脚本/日志），不入库。
+# 此条置尾（last-match wins），取代上方 _probe/* 与 !_probe/moe_probe/ 的历史拉锯——
+# moe_probe 里是 11G 的 .bin/构建产物，从未入库过，不需要例外。
+# 已跟踪的 _ 前缀文件（_my_opencl_lesson.md、_probe/g1_*、_probe/dense4b_1030 源脚本）
+# 不受 gitignore 影响，继续保持跟踪。
+/_*
+/build-android-cli*/
+/generated-images/
+/aarch64-linux-android-gcc
+# vendored llama.cpp 的 OpenCL 本地补丁备份
+third_party/llama.cpp/ggml/src/ggml-opencl/_*

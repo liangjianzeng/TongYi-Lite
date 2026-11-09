@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:tongyi_lite/agent/loop/agent.dart';
@@ -136,7 +137,9 @@ void _appendToolTurn(SessionLog log, int turn) {
   log.append(kEventToolResult, {
     'callId': callId,
     'name': 't',
-    'content': '工具结果_$turn',
+    // 旧区得有真 token 大户（约束 2：摘要必须比原文小——遮蔽区太小则
+    // 压缩拒绝提交，这是期望行为；fixture 放大到 ~160 tok/条）。
+    'content': '工具结果_$turn：' * 30,
   },
       source: {'kind': 'tool', 'callId': callId});
 }
@@ -169,7 +172,8 @@ test('压缩：旧轮工具结果被遮蔽，摘要入历史，recent 保留', (
     expect(shadowed, !isRecent, reason: 'seq=${toolResultSeqs[i]}');
   }
 
-  // 摘要事件存在，且模型视角可见。
+  // 摘要事件存在，且模型视角可见（B1：结构化 digest 带
+  // <compacted-summary> 标签 + 用户诉求骨架）。
   final summaryData = _findToolResult(
       log, null, type: kEventCompactionSummary) ??
       log.rawEvents
@@ -180,11 +184,11 @@ test('压缩：旧轮工具结果被遮蔽，摘要入历史，recent 保留', (
   final msgs = log.deriveModelMessages();
   // 被遮的旧 tool/result 不应再出现在模型视角。
   expect(msgs
-      .where((m) => m['content'] == '工具结果_1' ||
-              m['content'] == '工具结果_5'),
+      .where((m) => (m['content'] as String? ?? '').startsWith('工具结果_1：') ||
+              (m['content'] as String? ?? '').startsWith('工具结果_5：')),
       isEmpty);
   expect(msgs.firstWhere(
-        (m) => (m['content'] ?? '').contains('较早轮次摘要'),
+        (m) => (m['content'] ?? '').contains('<compacted-summary>'),
       orElse: () => throw StateError('no summary')),
       isNotNull);
 });
@@ -243,6 +247,38 @@ test('溢写：大结果被省略，spill/locate 落 log，可 read_file 回读'
   expect(tr['content'], contains('省略'));
   expect(tr['content'], contains('app/data/spill/abc'));
   expect(_findData(session, kEventSpillLocate), isNotNull);
+});
+
+test('溢写：store 抛 FileSystemException（磁盘满）→ 保留原文、不判工具失败', () async {
+  // 契约「best-effort 落盘，绝不丢内容」：store 是真实文件写入，磁盘满/路径非法
+  // 抛 FileSystemException——旧窄 catch(FormatException) 会让它穿透到 _safeExecute，
+  // 把已成功执行的工具结果整体替换成"流水线异常"，模型误判工具失败并重试。
+  final big = 'x' * (4096 * 4 + 10);
+  final registry = ToolRegistry()..register(_tool('big', big));
+  final session = SessionLog.fromEvents(const []);
+  final store = (bytes) async => throw const FileSystemException('磁盘已满');
+
+  final agent = ReactLoopAgent(
+    session: session,
+    adapter: FakeLlmAdapter([
+      LlmResult(text: '', toolCalls: [
+        ToolCall(id: 'c1', name: 'big', arguments: {})
+      ]),
+      LlmResult(text: 'done', toolCalls: const []),
+    ]),
+    registry: registry,
+    modelId: 'm',
+    providerKind: ProviderKind.local,
+    systemPrompt: 'x',
+    spillStore: store,
+    spillMaxInlineTokens: 4096,
+  );
+
+  await agent.kick('hi');
+  final tr = _findToolResult(session, 'c1')!;
+  expect(tr['isError'], false); // 工具成功——溢写失败不许把它变成"工具失败"
+  expect(tr['content'], contains(big.substring(0, 100))); // 原文保留
+  expect(_findData(session, kEventSpillLocate), isNull); // 未落盘则无定位符事件
 });
 
 test('溢写：read_file 结果始终内联（防循环）', () async {

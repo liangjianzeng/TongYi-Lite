@@ -176,7 +176,7 @@ class TurnMetrics {
       turn: turn,
       startedAtMs: startEvent.timeMs,
       endedAtMs: endEvent?.timeMs ?? startEvent.timeMs,
-      endReason: endEvent?.data['reason'] as String? ?? 'unclosed',
+      endReason: _reasonKind(endEvent?.data['reason']),
       steps: steps,
       toolCalls: toolCalls,
       duplicateToolCalls: duplicateToolCalls,
@@ -185,6 +185,19 @@ class TurnMetrics {
       failureCodes: failureCodes,
       compactions: compactions,
     );
+  }
+
+  /// turn/end 的 reason 双形状（与 agent_state_provider._reasonKind 同口径）：
+  /// 主循环写 `reason.name` 字符串；崩溃修复合成写 `{kind: cause}`（log.dart）。
+  /// 直接 `as String?` 对 Map 值抛 TypeError——崩溃修复过的会话推导指标即整条
+  /// 静默丢失（上游 catch 吞掉）。
+  static String _reasonKind(Object? reason) {
+    if (reason is String) return reason;
+    if (reason is Map) {
+      final kind = reason['kind'];
+      if (kind is String) return kind;
+    }
+    return 'unclosed';
   }
 
   /// 工具调用签名（与 ReactLoopAgent._toolCallSignature 同口径；
@@ -258,5 +271,36 @@ class TurnMetricsStore {
       'llmRetries': retries,
       'failureCodes': failureCodes,
     };
+  }
+
+  /// C3 观测闭环：从磁盘 JSONL 读最近 [limit] 个回合并聚合。
+  /// 设置页「执行质量」面板数据源（内存 ring 只覆盖本进程生命周期，
+  /// 历史回合只有落盘的 JSONL 有）。
+  static Future<Map<String, dynamic>> aggregateFromDisk(String baseDir,
+      {int limit = 200}) async {
+    final file = File('$baseDir/turn_metrics.jsonl');
+    final store = TurnMetricsStore(baseDir: baseDir);
+    if (!await file.exists()) return store.aggregate();
+    List<String> lines;
+    try {
+      lines = await file.readAsLines();
+    } on Exception {
+      return store.aggregate();
+    }
+    final live = lines.where((l) => l.trim().isNotEmpty).toList();
+    final tail = live.length > limit
+        ? live.sublist(live.length - limit)
+        : live;
+    for (final l in tail) {
+      try {
+        final m = jsonDecode(l);
+        if (m is Map<String, dynamic>) {
+          store._recent.add(TurnMetrics.fromJson(m));
+        }
+      } on FormatException {
+        // 单行损坏不影响其他行（append-only JSONL 的既有容错语义）。
+      }
+    }
+    return store.aggregate();
   }
 }

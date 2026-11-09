@@ -38,11 +38,23 @@ const String kEventAssistantFailureNote = 'assistant/failure-note';
 // log-only 事件（不进模型历史；UI/诊断可用；崩溃修复参与 pending 销账）
 const String kEventAssistantAttempt = 'assistant/attempt';
 const String kEventLlmRetry = 'llm/retry';
-const String kEventLlmRetryStarted = 'llm/retry-started';
 const String kEventSpillLocate = 'spill/locate';
+
+/// 步内思考快照（UI 重构 A1）：主循环在每个 step 结束时把该步的**完整
+/// 思考文本**落一条 log-only 事件（不进模型上下文——思考不是模型可见
+/// 内容；DSH「model-visible = logged」的反面对称：UI 需要的过程同样
+/// 要进唯一真相源，否则崩溃即丢、回看无门）。
+/// payload: {turn, step, content, [durationMs]}。
+const String kEventAgentThinking = 'agent/thinking';
 
 // 导入迁移标记（旧 SQLite 会话导入时给每条消息附加；log-only）
 const String kEventImported = 'imported';
+
+/// SQLite→JSONL 增量导入游标（A1 跨回合续原）：记录已消费的 SQLite 消息
+/// 时间戳上界（data.sqliteCursorMs）。回合结束落一条；下次回合启动时
+/// 只导入 timestamp > 游标的 SQLite 消息（普通聊天/其他写入路径的增量）。
+/// log-only + ignorable：旧运行时跳过不影响模型重建。
+const String kEventImportCursor = 'import/cursor';
 
 // ---------------------------------------------------------------------------
 // 事件类别（决定投影/忽略策略）
@@ -74,9 +86,10 @@ const Map<String, EventTypeCategory> kEventCategory = {
   kEventAssistantFailureNote: EventTypeCategory.surface,
   kEventAssistantAttempt: EventTypeCategory.logOnly,
   kEventLlmRetry: EventTypeCategory.logOnly,
-  kEventLlmRetryStarted: EventTypeCategory.logOnly,
   kEventSpillLocate: EventTypeCategory.logOnly,
   kEventImported: EventTypeCategory.logOnly,
+  kEventImportCursor: EventTypeCategory.logOnly,
+  kEventAgentThinking: EventTypeCategory.logOnly,
 };
 
 EventTypeCategory categoryOf(String type) =>
@@ -95,10 +108,11 @@ bool isLogOnly(String type) => categoryOf(type) == EventTypeCategory.logOnly;
 const Set<String> kIgnorableTypes = {
   kEventAssistantAttempt,
   kEventLlmRetry,
-  kEventLlmRetryStarted,
   kEventSpillLocate,
   kEventImported,
+  kEventImportCursor,
   kEventAssistantFailureNote,
+  kEventAgentThinking,
 };
 
 bool ignorableOf(String type) => kIgnorableTypes.contains(type);
@@ -157,6 +171,10 @@ final class SessionEvent {
   final String? surfaceOp;
   /// 若 `surfaceOp == 'replace'`：遮蔽到哪个 seq（含）。
   final int? shadowsEndSeq;
+  /// 若 `surfaceOp == 'replace'`：遮蔽起点 seq（含）。
+  /// JSONL 持久化（A1）后 [SessionLog.fromEvents] 靠它重建影子区——
+  /// 没有起点，重载后旧事件会全部回到投影里（上下文爆炸）。
+  final int? shadowsStartSeq;
   /// 类型特定载荷。落盘前须过 [sanitizePayload] 校验（拒绝非法 JSON 值）。
   final Map<String, dynamic> data;
   /// 旧运行时可否安全跳过（ignorable）。
@@ -169,6 +187,7 @@ final class SessionEvent {
     this.source,
     this.surfaceOp,
     this.shadowsEndSeq,
+    this.shadowsStartSeq,
     required this.data,
   }) : ignorable = ignorableOf(type);
 
@@ -189,6 +208,7 @@ final class SessionEvent {
     if (source != null) body['source'] = source;
     if (surfaceOp != null) body['surfaceOp'] = surfaceOp;
     if (shadowsEndSeq != null) body['shadowsEndSeq'] = shadowsEndSeq;
+    if (shadowsStartSeq != null) body['shadowsStartSeq'] = shadowsStartSeq;
     if (ignorable != null) body['ignorable'] = ignorable;
     return jsonEncode(body);
   }
@@ -213,6 +233,7 @@ final class SessionEvent {
       source: (m['source'] as Map<String, dynamic>?)?.cast<String, String>(),
       surfaceOp: m['surfaceOp'] as String?,
       shadowsEndSeq: m['shadowsEndSeq'] as int?,
+      shadowsStartSeq: m['shadowsStartSeq'] as int?,
       data: (m['data'] as Map<String, dynamic>?) ?? {},
     );
   }
@@ -241,20 +262,3 @@ bool isHeaderLine(String line) {
   }
 }
 
-/// 将一行解析成 [SessionHeader] 或 [SessionEvent]。返回 null 表示无法识别。
-SessionHeader? parseHeaderLine(String line) {
-  if (!isHeaderLine(line)) return null;
-  Map<String, dynamic>? m;
-  try {
-    m = jsonDecode(line.trim()) as Map<String, dynamic>;
-  } on FormatException {
-    return null;
-  }
-  return SessionHeader.fromJson(m);
-}
-
-/// 将一行解析成 [SessionEvent]；失败返回 null。
-SessionEvent? parseEventLine(String line) {
-  if (isHeaderLine(line)) return null;
-  return SessionEvent.fromJsonLine(line);
-}

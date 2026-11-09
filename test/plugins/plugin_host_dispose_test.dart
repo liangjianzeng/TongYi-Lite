@@ -32,7 +32,18 @@ void main() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), null);
-    if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+    // Windows 文件锁（errno 32）：全量并发跑时其它 isolate 可能还持有临时树内句柄——
+    // 单跑恒绿、全量偶发红（flake）。退避重试；最终删不掉按通过处理：临时目录泄漏
+    // 由 OS 兜底回收，删除失败与被测 seam 无关，不该把门禁染红。
+    if (!tmp.existsSync()) return;
+    for (var i = 0; i < 6; i++) {
+      try {
+        tmp.deleteSync(recursive: true);
+        return;
+      } on FileSystemException {
+        if (i < 5) sleep(Duration(milliseconds: 80 << i));
+      }
+    }
   });
 
   test('丢弃 pluginHostProvider 必须把 fiber 全卸（宿主 seam 行为级）', () async {

@@ -39,6 +39,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '键值规则：一个 <arg_key>键名</arg_key> 后面必须紧跟 <arg_value>值</arg_value>，'
       '先键后值、一个键配一个值，值不要放进 arg_key。\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
+      '多个相互独立的操作可在一次回复中输出多个 <tool_call> 块（将按顺序执行）；'
+      '有依赖关系的操作必须等上一步结果再调用。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
@@ -53,6 +55,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '数组参数：{"name": "todo_write", "arguments": {"todos": [{"content": "明天开会", "status": "todo"}]}}\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
       '绝对不要输出 [get_time()] 这类函数签名文本——那样不会被当作工具调用，任务会失败。\n'
+      '多个相互独立的操作可在一次回复中输出多个 {"name": …} JSON 块（将按顺序执行）；'
+      '有依赖关系的操作必须等上一步结果再调用。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
@@ -71,6 +75,8 @@ class PromptJsonProtocol implements ToolProtocol {
       '键值规则：每个参数写一行，<arg_key>参数名</arg_key> 与 '
       '<arg_value>参数值</arg_value> 必须成对闭合，先键后值。\n'
       '必填参数必须完整给出（如 web_search 的 query），遗漏会导致工具失败。\n'
+      '多个相互独立的操作可在一次回复中输出多个 <tool_call> 块（将按顺序执行）；'
+      '有依赖关系的操作必须等上一步结果再调用。\n'
       '收到工具结果后，根据真实结果组织最终回答。'
       '若用户要求操作（如添加待办/便签/记忆）但你未调用工具，则视为任务未完成。';
 
@@ -133,8 +139,10 @@ class PromptJsonProtocol implements ToolProtocol {
     return _parseText(buffer.toString());
   }
 
-  /// 从全文解析：优先 XML `<tool_call>`（llama.cpp 原生格式），
-  /// 再试 JSON 对象；都失败则整段作为普通文本回答（优雅降级）。
+  /// 从全文解析（B3 多调用）：按格式族依次提取**全部**工具调用块——
+  /// XML `<tool_call>`（Spark/Hunyuan）→ 属性式 `<function>`（MiniCPM5）
+  /// → 签名式 `[tool(arg)]`（退化输出）→ JSON 对象（LFM/Qwen）。
+  /// 块外文本合并为可见文本；全部失败则整段作为普通文本回答（优雅降级）。
   StreamOutcome _parseText(String text) {
     // 0) 截断兜底（先于一切降级）：文本以未闭合的工具调用块开头
     //    （生成 token 预算不足，JSON/`</tool_call>` 被拦腰截断）。旧行为是
@@ -162,27 +170,22 @@ class PromptJsonProtocol implements ToolProtocol {
       // 协议契约，不误报"token 预算不足"误导用户去调设置。
     }
 
-    // 1) XML tool_call 格式（Spark/Hunyuan 训练分布常见）。
-    final xmlCall = _extractXmlToolCall(text);
-    if (xmlCall != null) {
-      return StreamOutcome(
-        text: xmlCall.before + xmlCall.after,
-        toolCalls: [xmlCall.call],
-      );
+    // 1) XML tool_call 格式（Spark/Hunyuan 训练分布常见）——全部块。
+    final xmlAll = _extractAllXmlToolCalls(text);
+    if (xmlAll != null) {
+      return StreamOutcome(text: xmlAll.residual, toolCalls: xmlAll.calls);
     }
 
     // 1b) 属性式 <function name=…><parameter name=…> 格式（MiniCPM5/Hunyuan
     //     系原生工具标记，特殊 token 渲染后可见）。有无 <tool_call> 包裹均可。
-    final funcCall = _extractFunctionToolCall(text);
-    if (funcCall != null) {
-      return StreamOutcome(
-        text: funcCall.before + funcCall.after,
-        toolCalls: [funcCall.call],
-      );
+    final funcAll = _extractAllFunctionToolCalls(text);
+    if (funcAll != null) {
+      return StreamOutcome(text: funcAll.residual, toolCalls: funcAll.calls);
     }
 
     // 2) [tool_name(arg)] 函数签名式调用（LFM 等模型退化输出，
-    //    如 [get_time()]、[web_search("今天天气")]）。
+    //    如 [get_time()]、[web_search("今天天气")]）。签名式无法可靠映射
+    //    多参数，维持首块语义。
     final bracketCall = _matchBracketCall(text);
     if (bracketCall != null) {
       return StreamOutcome(
@@ -191,55 +194,205 @@ class PromptJsonProtocol implements ToolProtocol {
       );
     }
 
-    // 3) JSON 格式（提示词约定的主格式）。
-    final extracted = _extractFirstJsonObject(text);
-    if (extracted == null) {
-      _noLeakFallback(text);
-      return StreamOutcome(text: text);
+    // 3) JSON 格式（提示词约定的主格式）——全部可解码对象。
+    final jsonAll = _extractAllJsonToolCalls(text);
+    if (jsonAll != null) {
+      return StreamOutcome(text: jsonAll.residual, toolCalls: jsonAll.calls);
     }
 
-    final (:json, :before, :after) = extracted;
-    Object? decoded;
-    try {
-      decoded = jsonDecode(json);
-    } catch (_) {
-      // JSON 解析失败 → 整段视为普通回答。
-      return StreamOutcome(text: text);
-    }
-
-    if (decoded is Map<String, dynamic>) {
-      // 格式 1：{"tool_call": {"name": ..., "arguments": {...}}}（提示词约定）。
-      final toolCall = decoded['tool_call'];
-      if (toolCall is Map<String, dynamic>) {
-        final name = toolCall['name'];
-        if (name is String && name.isNotEmpty) {
-          final args = toolCall['arguments'];
-          return StreamOutcome(
-            text: before + after,
-            toolCalls: [
-              ToolCall(
-                id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
-                name: name,
-                arguments: args is Map<String, dynamic> ? args : null,
-              ),
-            ],
-          );
-        }
-      }
-
-      // 格式 2：顶层 {"name": ..., "arguments": {...}}（OpenAI/LFM 风格）。
-      final topLevel = _decodeJsonToolCall(json);
-      if (topLevel != null) {
-        return StreamOutcome(
-          text: before + after,
-          toolCalls: [topLevel],
-        );
-      }
-    }
-
-    // 是合法 JSON 但不是工具调用 → 整段视为普通回答。
     _noLeakFallback(text);
     return StreamOutcome(text: text);
+  }
+
+  /// 工具调用 id 生成（B3：同一步多调用不撞 id）。
+  static String _callId(int index) =>
+      'tool_${DateTime.now().microsecondsSinceEpoch}_$index';
+
+  /// 提取**全部** XML `<tool_call>` 块（含 MiniCPM 特殊标记变体）。
+  ///
+  /// 返回 (残差文本, 按序调用列表)；首块存在但解析失败 → 返回 null
+  /// （整体回落其它格式族，保持既有失败语义）；后续块解析失败时其文本
+  /// 保留在残差里继续收集（优雅降级，不吞掉已解析的调用）。
+  ({String residual, List<ToolCall> calls})? _extractAllXmlToolCalls(
+      String text) {
+    const openTag = '<tool_call>';
+    const miniOpenTag = '<|tool_call_start|>';
+    final calls = <ToolCall>[];
+    final residualParts = <String>[];
+    var cursor = 0;
+    var seenAnyOpen = false;
+    while (true) {
+      final openPlain = text.indexOf('<tool_call>', cursor);
+      final openMini = text.indexOf('<|tool_call_start|>', cursor);
+      final int open;
+      final bool useMini;
+      if (openPlain < 0 && openMini < 0) {
+        open = -1;
+        useMini = false;
+      } else if (openMini < 0 || (openPlain >= 0 && openPlain < openMini)) {
+        open = openPlain;
+        useMini = false;
+      } else {
+        open = openMini;
+        useMini = true;
+      }
+      if (open < 0) break;
+      seenAnyOpen = true;
+      residualParts.add(text.substring(cursor, open));
+      final effOpenTag = useMini ? miniOpenTag : openTag;
+      final effCloseTag =
+          useMini ? '<|tool_call_end|>' : '</tool_call>';
+      final parsed = _parseXmlToolCallAt(text, open, effOpenTag, effCloseTag,
+          index: calls.length);
+      if (parsed == null) {
+        if (calls.isEmpty) return null; // 首块坏 → 回落其它格式
+        // 后续块坏：文本保留（防泄漏兜底在 _parseText 尾部统一裁决），
+        // 跳过开标签防死循环。
+        cursor = open + effOpenTag.length;
+        continue;
+      }
+      calls.add(parsed.call);
+      cursor = parsed.end;
+    }
+    if (!seenAnyOpen) return null;
+    residualParts.add(text.substring(cursor));
+    return (residual: residualParts.join(), calls: calls);
+  }
+
+  /// 解析 `open` 处的一个 XML 工具调用块，返回 (call, 块结束索引)。
+  /// [effOpenTag]/[effCloseTag] 由调用方选定（普通/MiniCPM 变体）；
+  /// [index] 为本步第几个调用（id 防撞）。
+  /// 坏格式（漏闭合）兼容：以最后一个 `</arg_value>`/`</arg_key>` 收尾，
+  /// 或漏 `>` 的 `</tool_call` 松闭合。
+  ({ToolCall call, int end})? _parseXmlToolCallAt(
+      String text, int open, String effOpenTag, String effCloseTag,
+      {int index = 0}) {
+    final close = text.indexOf(effCloseTag, open + effOpenTag.length);
+    var bodyEnd = close;
+    var altClosed = false;
+    if (close < 0) {
+      // 坏格式兼容：模型常漏 `</tool_call>`，以最后一个 `</arg_value>` /
+      // `</arg_key>` 收尾。无任何闭合标签则不解析。
+      final lastValue = text.lastIndexOf('</arg_value>');
+      final lastKey = text.lastIndexOf('</arg_key>');
+      final altEnd = lastValue > lastKey ? lastValue : lastKey;
+      if (altEnd >= open + effOpenTag.length) {
+        bodyEnd = altEnd;
+        altClosed = true;
+      } else {
+        // 再退一步：闭合标签漏了 `>`（`</tool_call`）也能定位块尾；
+        // MiniCPM5 系漏 `<|tool_call_end|>` 尾段同理。
+        final loose = effCloseTag == '</tool_call>'
+            ? text.indexOf('</tool_call', open + effOpenTag.length)
+            : text.indexOf('<|tool_call_end', open + effOpenTag.length);
+        if (loose < 0) return null;
+        bodyEnd = loose;
+        altClosed = true;
+      }
+    }
+
+    final body = text.substring(open + effOpenTag.length, bodyEnd);
+    final trimmed = body.trim();
+
+    // JSON-in-XML：`<tool_call>{"name": ..., "arguments": {...}}</tool_call>`
+    // （Qwen/LFM 系 chat template 训练分布）。LFM2.5 / MiniCPM5 原生输出。
+    if (trimmed.startsWith('{')) {
+      final jsonCall = _decodeJsonToolCall(trimmed, index: index);
+      if (jsonCall != null) {
+        return (
+          call: jsonCall,
+          end: altClosed
+              ? bodyEnd
+              : close + effCloseTag.length,
+        );
+      }
+      // JSON 解析失败 → 落到下方 XML 解析（容错）。
+    }
+
+    // 工具名：到第一个 <arg_key> 或 <arg_value> 之前。
+    // 容错（2026-09-30 真机定案）：2B 级模型常在名字前后混入杂散标签字符
+    // （实测 `<tool_call><get_time</tool_call>`），先剥掉名字前的
+    // `<`/`>`/`/`/空白再提取；剥完若是 arg_key/arg_value 说明模型没写
+    // 工具名、直接进了参数区 → 无法解析。
+    final cleanedBody =
+        body.trim().replaceAll(RegExp(r'^[<>/\s]+'), '').trim();
+    final nameMatch =
+        RegExp(r'^([A-Za-z_][A-Za-z0-9_.\-]*)').firstMatch(cleanedBody);
+    if (nameMatch == null) return null;
+    final name = nameMatch.group(1)!.trim();
+    if (name.isEmpty ||
+        name == 'arg_key' ||
+        name == 'arg_value' ||
+        name == 'tool_call' ||
+        // `<function name=…>` 属性式格式 → 交给 _extractAllFunctionToolCalls。
+        name == 'function' ||
+        name == 'parameter') {
+      return null;
+    }
+
+    // 参数对：顺序扫描 <arg_key>/<arg_value>，兼容闭合/半开标签，并**容错
+    // 坏格式**——模型常见错误是把值文本直接塞进 <arg_key>。
+    final arguments = _parseXmlArgs(body);
+
+    return (
+      call: ToolCall(
+        id: _callId(index),
+        name: name,
+        arguments: arguments,
+      ),
+      end: altClosed
+          ? bodyEnd // 坏格式：闭合标签之前的残留文本归入下一轮残差
+          : close + effCloseTag.length,
+    );
+  }
+
+  /// 提取**全部**属性式 `<function name=…>` 块（MiniCPM5/Hunyuan 原生格式）。
+  /// 无可解析块返回 null（整体回落其它格式族）。
+  ({String residual, List<ToolCall> calls})? _extractAllFunctionToolCalls(
+      String text) {
+    final fnRe = RegExp(r'<function\s+name\s*=\s*"([^"]+)"\s*>');
+    final paramRe = RegExp(
+      r'<parameter\s+name\s*=\s*"([^"]+)"\s*>(.*?)(?:</parameter>|(?=<parameter)|$)',
+      dotAll: true,
+    );
+    final calls = <ToolCall>[];
+    final residualParts = <String>[];
+    var cursor = 0;
+    var index = 0;
+    for (final fn in fnRe.allMatches(text)) {
+      if (fn.start < cursor) continue; // 已被上一块消费
+      final name = fn.group(1)!.trim();
+      if (name.isEmpty) {
+        cursor = fn.end;
+        continue;
+      }
+      residualParts.add(text.substring(cursor, fn.start));
+      // 块结束先定位（`</function>` 优先，缺省时 `</tool_call>`），
+      // 参数扫描限定在本块内——防止下一块的 <parameter> 被吸进当前块。
+      final after = text.substring(fn.end);
+      var end = text.length;
+      final fnClose = after.indexOf('</function>');
+      if (fnClose >= 0) {
+        end = fn.end + fnClose + '</function>'.length;
+      } else {
+        final tcClose = after.indexOf('</tool_call>');
+        if (tcClose >= 0) end = fn.end + tcClose + '</tool_call>'.length;
+      }
+      final arguments = <String, dynamic>{};
+      for (final p in paramRe.allMatches(text.substring(fn.end, end))) {
+        final k = p.group(1)!.trim();
+        var v = p.group(2)?.trim() ?? '';
+        if (k.isEmpty) continue;
+        // 值尽量还原类型：数组/对象走 JSON，数字/布尔按字面量，其余字符串。
+        final decoded = _tryDecodeScalar(v);
+        arguments[k] = decoded ?? v;
+      }
+      calls.add(ToolCall(id: _callId(index++), name: name, arguments: arguments));
+      cursor = end;
+    }
+    if (calls.isEmpty) return null;
+    residualParts.add(text.substring(cursor));
+    return (residual: residualParts.join(), calls: calls);
   }
 
   /// 防泄漏兜底（2026-09-30 真机定案）：所有容错解析都解不开，但文本里
@@ -260,50 +413,6 @@ class PromptJsonProtocol implements ToolProtocol {
     }
   }
 
-  /// 提取属性式工具调用（MiniCPM5/Hunyuan 原生格式）：
-  /// `<tool_call><function name="get_weather"><parameter name="city">南宁</parameter></function></tool_call>`
-  /// `<tool_call>` 包裹与 `</function>` 闭合均可缺省（特殊 token 渲染残缺时容错）。
-  ({String before, String after, ToolCall call})? _extractFunctionToolCall(
-      String text) {
-    final fn = RegExp(r'<function\s+name\s*=\s*"([^"]+)"\s*>').firstMatch(text);
-    if (fn == null) return null;
-    final name = fn.group(1)!.trim();
-    if (name.isEmpty) return null;
-
-    final arguments = <String, dynamic>{};
-    final params = RegExp(
-      r'<parameter\s+name\s*=\s*"([^"]+)"\s*>(.*?)(?:</parameter>|(?=<parameter)|$)',
-      dotAll: true,
-    ).allMatches(text.substring(fn.end));
-    for (final p in params) {
-      final k = p.group(1)!.trim();
-      var v = p.group(2)?.trim() ?? '';
-      if (k.isEmpty) continue;
-      // 值尽量还原类型：数组/对象走 JSON，数字/布尔按字面量，其余字符串。
-      final decoded = _tryDecodeScalar(v);
-      arguments[k] = decoded ?? v;
-    }
-
-    // 回答文本 = 块之前的文本 + 块结束（</function> 或 </tool_call>）之后的残留。
-    var after = text.substring(fn.end);
-    final fnClose = after.indexOf('</function>');
-    if (fnClose >= 0) {
-      after = after.substring(fnClose + '</function>'.length);
-    } else {
-      final tcClose = after.indexOf('</tool_call>');
-      if (tcClose >= 0) after = after.substring(tcClose + '</tool_call>'.length);
-    }
-    return (
-      before: text.substring(0, fn.start),
-      after: after,
-      call: ToolCall(
-        id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
-        name: name,
-        arguments: arguments,
-      ),
-    );
-  }
-
   /// 标量值还原：JSON 可解（数组/对象/带引号字符串）→ 解码；纯数字/布尔 →
   /// 对应类型；否则保持字符串。
   Object? _tryDecodeScalar(String v) {
@@ -322,120 +431,54 @@ class PromptJsonProtocol implements ToolProtocol {
     return v;
   }
 
-  /// 提取 XML 格式的工具调用（llama.cpp 原生 / Spark 训练分布）：
-  /// `<tool_call>name<arg_key>k1<arg_value>v1</arg_value></arg_key>...</tool_call>`
-  /// 兼容半开标签（无 `</arg_key>`/`</arg_value>` 闭合）与 MiniCPM5 特殊
-  /// 标记 `<|tool_call_start|>` / `<|tool_call_end|>`（两者等价处理）。
-  ({String before, String after, ToolCall call})? _extractXmlToolCall(
+  /// 提取**全部**可解码为工具调用的 JSON 对象（顶层 `{"name":...}` 与
+  /// 包裹式 `{"tool_call": {...}}`）。无可解码对象返回 null（保持既有
+  /// 优雅降级语义）；对象解码失败时其文本保留在残差里继续扫描。
+  ({String residual, List<ToolCall> calls})? _extractAllJsonToolCalls(
       String text) {
-    const openTag = '<tool_call>';
-    const miniOpenTag = '<|tool_call_start|>';
-    const closeTag = '</tool_call>';
-    const miniCloseTag = '<|tool_call_end|>';
-    // 取更早出现的开标签，闭合按同族匹配。
-    final openPlain = text.indexOf(openTag);
-    final openMini = text.indexOf(miniOpenTag);
-    final bool useMini;
-    final int open;
-    if (openPlain < 0 && openMini < 0) return null;
-    if (openPlain < 0) {
-      useMini = true;
-      open = openMini;
-    } else if (openMini < 0) {
-      useMini = false;
-      open = openPlain;
-    } else if (openMini < openPlain) {
-      useMini = true;
-      open = openMini;
-    } else {
-      useMini = false;
-      open = openPlain;
-    }
-    final String effOpenTag = useMini ? miniOpenTag : openTag;
-    final String effCloseTag = useMini ? miniCloseTag : closeTag;
-
-    final close = text.indexOf(effCloseTag, open + effOpenTag.length);
-    var bodyEnd = close;
-    var altClosed = false;
-    if (close < 0) {
-      // 坏格式兼容：模型常漏 `</tool_call>`，以最后一个 `</arg_value>` /
-      // `</arg_key>` 收尾（如 `<tool_call>web_search<arg_key>query<arg_key>
-      // AI news today</arg_value></arg_key>`）。无任何闭合标签则不解析。
-      final lastValue = text.lastIndexOf('</arg_value>');
-      final lastKey = text.lastIndexOf('</arg_key>');
-      final altEnd = lastValue > lastKey ? lastValue : lastKey;
-      if (altEnd >= open + effOpenTag.length) {
-        bodyEnd = altEnd;
-        altClosed = true;
+    final calls = <ToolCall>[];
+    final residualParts = <String>[];
+    var cursor = 0;
+    var index = 0;
+    while (true) {
+      final open = text.indexOf('{', cursor);
+      if (open < 0) break;
+      final extracted = _extractFirstJsonObject(text.substring(open));
+      if (extracted == null) break; // 括号不平衡（截断），无更多完整对象
+      final end = open + extracted.json.length;
+      // 包裹式 {"tool_call": {...}} → 解码内层；顶层 → _decodeJsonToolCall。
+      ToolCall? call;
+      Object? decoded;
+      try {
+        decoded = jsonDecode(extracted.json);
+      } catch (_) {
+        decoded = null;
+      }
+      if (decoded is Map<String, dynamic>) {
+        final wrapped = decoded['tool_call'];
+        if (wrapped is Map<String, dynamic>) {
+          if (wrapped['name'] is String) {
+            call = _decodeJsonToolCall(jsonEncode(wrapped), index: index);
+          }
+        }
+        if (call == null) {
+          call = _decodeJsonToolCall(extracted.json, index: index);
+        }
+      }
+      if (call != null) {
+        residualParts.add(text.substring(cursor, open));
+        calls.add(call);
+        index++;
+        cursor = end;
       } else {
-        // 再退一步：闭合标签漏了 `>`（`</tool_call`）也能定位块尾；
-        // MiniCPM5 系漏 `<|tool_call_end|>` 尾段同理。
-        final loose = useMini
-            ? text.indexOf('<|tool_call_end', open + effOpenTag.length)
-            : text.indexOf('</tool_call', open + effOpenTag.length);
-        if (loose < 0) return null;
-        bodyEnd = loose;
-        altClosed = true;
+        // 不是工具调用的合法 JSON（如普通 JSON 回答）→ 文本保留。
+        residualParts.add(text.substring(cursor, end));
+        cursor = end;
       }
     }
-
-    final body = text.substring(open + effOpenTag.length, bodyEnd);
-    final trimmed = body.trim();
-
-    // JSON-in-XML：`<tool_call>{"name": ..., "arguments": {...}}</tool_call>`
-    // （Qwen/LFM 系 chat template 训练分布：函数调用为 XML 标签内嵌 JSON
-    // 对象，而非 <arg_key> 标签）。LFM2.5 / MiniCPM5 等模型原生输出这种格式。
-    if (trimmed.startsWith('{')) {
-      final jsonCall = _decodeJsonToolCall(trimmed);
-      if (jsonCall != null) {
-        return (
-          before: text.substring(0, open),
-          after: altClosed
-              ? text.substring(bodyEnd)
-              : text.substring(close + effCloseTag.length),
-          call: jsonCall,
-        );
-      }
-      // JSON 解析失败 → 落到下方 XML 解析（容错）。
-    }
-
-    // 工具名：到第一个 <arg_key> 或 <arg_value> 之前。
-    // 容错（2026-09-30 真机定案）：2B 级模型常在名字前后混入杂散标签字符
-    // （实测 `<tool_call><get_time</tool_call>`），先剥掉名字前的
-    // `<`/`>`/`/`/空白再提取；剥完若是 arg_key/arg_value 说明模型没写
-    // 工具名、直接进了参数区 → 无法解析。
-    final cleanedBody =
-        body.trim().replaceAll(RegExp(r'^[<>/\s]+'), '').trim();
-    final nameMatch = RegExp(r'^([A-Za-z_][A-Za-z0-9_.\-]*)').firstMatch(cleanedBody);
-    if (nameMatch == null) return null;
-    final name = nameMatch.group(1)!.trim();
-    if (name.isEmpty ||
-        name == 'arg_key' ||
-        name == 'arg_value' ||
-        name == 'tool_call' ||
-        // `<function name=…>` 属性式格式 → 交给 _extractFunctionToolCall。
-        name == 'function' ||
-        name == 'parameter') {
-      return null;
-    }
-
-    // 参数对：顺序扫描 <arg_key>/<arg_value>，兼容闭合/半开标签，并**容错
-    // 坏格式**——模型常见错误是把值文本直接塞进 <arg_key>（如
-    // `<arg_key>query<arg_key>AI news today</arg_value>`），此时把第二个
-    // <arg_key> 的文本当作 value 配对给前面的 key，一次调用即可成功。
-    final arguments = _parseXmlArgs(body);
-
-    return (
-      before: text.substring(0, open),
-      after: altClosed
-          ? text.substring(bodyEnd) // 坏格式：闭合标签之后的残留文本
-          : text.substring(close + effCloseTag.length),
-      call: ToolCall(
-        id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
-        name: name,
-        arguments: arguments,
-      ),
-    );
+    if (calls.isEmpty) return null;
+    residualParts.add(text.substring(cursor));
+    return (residual: residualParts.join(), calls: calls);
   }
 
   /// 按模型选择指令：LFM 系（id 以 lfm 开头）用 JSON 风格；Ling/Bailing 系
@@ -541,7 +584,7 @@ class PromptJsonProtocol implements ToolProtocol {
   /// 解码 JSON 对象形式的工具调用：`{"name": ..., "arguments": {...}}`。
   /// 用于 `<tool_call>{...}</tool_call>`（Qwen/LFM 系）与顶层 JSON 对象。
   /// 结构不符（缺 name / name 非字符串）返回 null。
-  ToolCall? _decodeJsonToolCall(String jsonText) {
+  ToolCall? _decodeJsonToolCall(String jsonText, {int index = 0}) {
     Object? decoded;
     try {
       decoded = jsonDecode(jsonText);
@@ -553,7 +596,7 @@ class PromptJsonProtocol implements ToolProtocol {
     if (name is! String || name.isEmpty) return null;
     final args = decoded['arguments'];
     return ToolCall(
-      id: 'tool_${DateTime.now().microsecondsSinceEpoch}',
+      id: _callId(index),
       name: name,
       arguments: args is Map<String, dynamic> ? args : null,
     );
@@ -574,6 +617,65 @@ class PromptJsonProtocol implements ToolProtocol {
       // 落到顶层解码（其内部自带 try-catch）。
     }
     return _decodeJsonToolCall(jsonText);
+  }
+
+  // ---------------------------------------------------------------------------
+  // B4：assistant 历史回放（模型在上下文里看见自己发过的调用）
+  // ---------------------------------------------------------------------------
+
+  @override
+  String? replayToolCalls(
+      String modelId, List<Map<String, dynamic>> toolCalls) {
+    if (toolCalls.isEmpty) return null;
+    final lower = modelId.toLowerCase();
+    final buf = StringBuffer();
+    var index = 0;
+    for (final tc in toolCalls) {
+      final name = ((tc['function_name'] ?? tc['name']) as String?) ?? '';
+      if (name.isEmpty) continue;
+      final args = tc['arguments'];
+      if (lower.startsWith('lfm')) {
+        // LFM/Qwen：JSON 对象（与 kProtocolInstructionJson 一致）。
+        buf.writeln(jsonEncode(<String, dynamic>{
+          'name': name,
+          'arguments': args is Map<String, dynamic> ? args : <String, dynamic>{},
+        }));
+      } else if (lower.startsWith('ling')) {
+        // Ling/Bailing V3：闭合标签 XML（与 kProtocolInstructionLing 一致）。
+        buf.writeln('<tool_call>');
+        buf.writeln(name);
+        if (args is Map) {
+          args.forEach((k, v) {
+            buf.writeln('<arg_key>$k</arg_key>');
+            buf.writeln('<arg_value>${_argText(v)}</arg_value>');
+          });
+        }
+        buf.writeln('</tool_call>');
+      } else {
+        // Spark/Qwen 系：半开标签 XML（与 kProtocolInstruction 一致）。
+        buf.write('<tool_call>$name');
+        if (args is Map) {
+          args.forEach((k, v) {
+            buf.write('<arg_key>$k<arg_value>${_argText(v)}</arg_value>');
+          });
+        }
+        buf.writeln('</tool_call>');
+      }
+      index++;
+    }
+    if (index == 0) return null;
+    return buf.toString().trimRight();
+  }
+
+  /// 参数值文本化：字符串原样（模型当初就是裸文本输出），其余 JSON 编码。
+  static String _argText(Object? v) {
+    if (v == null) return '';
+    if (v is String) return v;
+    try {
+      return jsonEncode(v);
+    } catch (_) {
+      return '$v';
+    }
   }
 
   /// 顺序解析 XML 参数对（容错坏格式）。

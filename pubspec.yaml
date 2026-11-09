@@ -1,9 +1,15 @@
 name: tongyi_lite
 description: 端侧离线 AI 智能体
-# 版本号以 android/app/build.gradle.kts 的 versionName/versionCode 为准，
-# 此处同步保持一致；About 页版本号是 Dart 常量（settings_screen.dart 的 _appVersion），
-# 与 gradle 同步；离线沙箱无法下载 package_info_plus 的 AGP 依赖，故不引插件读取。
-version: 0.3.8+31
+# 版本号**唯一真源就是这里的 version**（2026-11-09 起；此前相反——gradle 硬编
+# 数字盖掉本行，导致 0.3.9+32 的两个包都自报 0.3.8/31）。
+# - Android 侧：android/app/build.gradle.kts 取 flutter.versionName /
+#   flutter.versionCode，构建期由本行注入，不再硬编；
+# - Dart 侧两处显示常量需与本行同步：screens/settings/about.dart 的
+#   _appVersion（离线沙箱拿不到 package_info_plus，只能留常量）、
+#   plugins/host/host_capabilities.dart 的 kPluginHostAppVersion（插件握手）；
+# - 同步由 test/meta/version_consistency_test.dart 钉住（连 README 徽章与
+#   CHANGELOG 最新节一起对），漏改任何一处即测试红。
+version: 0.3.9+32
 publish_to: 'none'
 
 environment:
@@ -81,6 +87,10 @@ dev_dependencies:
   # 纯 Dart SQLite（测试用）：StorageService 的真库行为（取尾语义/迁移）可在
   # flutter test 里直接验证，无需真机/模拟器。
   sqflite_common_ffi: ^2.3.3
+  # 纯 Dart 测试框架（2026-11-09）：packages/plugin_kernel、plugin_sdk 的测试文件
+  # import package:test（包自身 dev_deps 有），但根上下文分析时缺这个包会报
+  # ~2400 条 undefined_function 假阳性，analyze 门禁不可用。加入后根上下文可解析。
+  test: ^1.25.0
 
 
 flutter:

@@ -15,10 +15,12 @@ import 'dart:convert';
 ///
 /// - `think`：思考存档块，[text] = 全文（不引用消息，历史思考不再单独落库）。
 /// - `tool`：工具活动，[toolId] = 对应 🔧 消息 id（渲染时查同回合消息）。
+/// - `step`：步答块（A2/A3），[toolId] = 对应 stepText 消息 id（渲染时查
+///   同回合消息；行缺失（崩溃窗口未写成功）→ 渲染侧跳过该 item）。
 /// - `error`：回合错误行，[text] = 错误文案。
 /// - `notice`：系统通知行（steer 注入等），[text] = 文案。
 class TurnUiItem {
-  final String type; // think | tool | error | notice
+  final String type; // think | tool | step | error | notice
   final String? toolId;
   final String? text;
 
@@ -27,6 +29,9 @@ class TurnUiItem {
         toolId = null;
   const TurnUiItem.tool(this.toolId)
       : type = 'tool',
+        text = null;
+  const TurnUiItem.step(this.toolId)
+      : type = 'step',
         text = null;
   const TurnUiItem.error(this.text)
       : type = 'error',
@@ -46,6 +51,8 @@ class TurnUiItem {
         return text == null ? null : TurnUiItem.think(text);
       case 'tool':
         return toolId == null ? null : TurnUiItem.tool(toolId);
+      case 'step':
+        return toolId == null ? null : TurnUiItem.step(toolId);
       case 'error':
         return text == null ? null : TurnUiItem.error(text);
       case 'notice':

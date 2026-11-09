@@ -78,6 +78,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _scrollController = ScrollController();
   final _textController = TextEditingController();
 
+  /// 规划面板「把焦点从输入框抢走」用的空焦点节点：每次 requestFocus(FocusNode())
+  /// 新建节点无人 dispose（泄漏），改为 State 字段一次创建、重复使用。
+  final _planFocusStealer = FocusNode();
+
   /// 左栏面板开合（2026-10-24 harness 改造）：会话/智能体/人格/计划/模型/
   /// 技能/插件/API/更多 全部从左栏进。
   final RailPanelController _railPanel = RailPanelController();
@@ -144,11 +148,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   void dispose() {
     DevSessionController.instance.removeListener(_onDevChanged);
     SshEnvironmentService.instance.removeListener(_onDevChanged);
+    _pendingVoiceEnd?.cancel(); // 松手缓冲计时器：离开页面必须取消，防止回调打在已销毁 State 上。
     _scrollController.dispose();
     _textController.dispose();
     _conversationSearchCtrl.dispose();
     _questionController.dispose();
     _railPanel.dispose();
+    _planFocusStealer.dispose();
 
     super.dispose();
   }
@@ -957,6 +963,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
     );
+    // 弹窗已关闭（结果即文本），控制器一次性回收（原实现从不 dispose）。
+    ctrl.dispose();
     if (name == null || name.isEmpty) return;
     _devSnack('正在电脑上建目录…');
     final r = await createWorkspaceOnActiveConnection(name);
@@ -1415,13 +1423,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
     );
-    if (saved != true) return;
+    if (saved != true) {
+      // 弹窗关闭即释放控制器（原实现从不 dispose，每次弹窗泄漏两个）。
+      nameCtrl.dispose();
+      promptCtrl.dispose();
+      return;
+    }
     final name = nameCtrl.text.trim();
+    final prompt = promptCtrl.text.trim();
+    nameCtrl.dispose();
+    promptCtrl.dispose();
     if (name.isEmpty) return;
     await ref.read(settingsProvider.notifier).upsertPersona(AgentPersona(
           id: existing?.id ?? const Uuid().v4(),
           name: name,
-          prompt: promptCtrl.text.trim(),
+          prompt: prompt,
         ));
   }
 
@@ -1455,7 +1471,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               _textController.selection = TextSelection.fromPosition(
                   TextPosition(offset: _textController.text.length));
             }
-            FocusScope.of(context).requestFocus(FocusNode());
+            // 复用 State 字段节点抢焦点；原写法每次新建 FocusNode 无人 dispose（泄漏）。
+            FocusScope.of(context).requestFocus(_planFocusStealer);
           },
                 onChanged: _refreshActivePlanFlag,
                 onClose: _closeRailSurface,
@@ -2297,7 +2314,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     conversationId: _currentConversationId,
                   ),
                 TurnUnit(:final tools, :final answer, :final thinking,
-                        :final trace, :final traceTools) =>
+                        :final trace, :final traceTools, :final stepTexts,
+                        :final notices, :final todoCard, :final planCard) =>
                   AgentTurnBlock(
                     isLive: isLiveTurn,
                     steps: _stepsFor(uiState, tools, isLiveTurn),
@@ -2306,6 +2324,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     thinking: thinking,
                     trace: trace,
                     traceTools: traceTools,
+                    stepTexts: stepTexts,
+                    notices: notices,
+                    todoCard: todoCard,
+                    planCard: planCard,
                   ),
               };
             },
@@ -2667,7 +2689,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // 环**常显**（KV/上下文占用的固定指示位，2026-10-25 用户定案不许藏）。
     // 无数据的空会话显示 0% 灰环——新会话占用为 0 是事实；
     // 此前的「—」灰圈看着像坏按钮，那才是问题本体。
-    final display = hasData ? fraction! : 0.0;
+    final display = hasData ? fraction : 0.0;
     final color = !hasData
         ? Colors.grey.shade400
         : display >= 0.85
@@ -3361,8 +3383,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
     );
-    if (ok != true) return;
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏）。
     final title = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok != true) return;
     if (title.isEmpty) return;
     await ref
         .read(storageServiceProvider)

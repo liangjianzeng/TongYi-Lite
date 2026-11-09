@@ -15,9 +15,12 @@ import 'provider.dart';
 ///
 /// [onBackgroundDone]：后台子代理完成/失败时的通知回调（接入层注入，
 /// 转投父回合 step 收件箱 + UI 可见痕迹）；null = 后台结果无人接收。
+/// [onProgress]（C2）：前台子代理运行里程碑回调（UI 进度行，不进父
+/// 模型上下文）；null = 不订阅。
 ToolDefinition createSubagentTool(
   SubagentProvider provider, {
   void Function(String notice)? onBackgroundDone,
+  void Function(String line)? onProgress,
 }) {
   return ToolDefinition(
     isConcurrencySafe: (_) => false, // 副作用工具：独占执行（P2-A）
@@ -60,6 +63,13 @@ ToolDefinition createSubagentTool(
               'true = 后台执行，立即返回子代理 id，完成时收到系统通知'
               '（默认 false = 前台等待结果）；tasks 模式恒为后台',
         },
+        'allowed_tools': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'description':
+              '（可选，最小权限）限制子代理可用的工具名清单——调研型子任务'
+              '裁掉写类工具。缺省 = 继承当前全部可用工具',
+        },
       },
       // task 与 tasks 二选一：不设必填（执行体自行校验二选一）。
     },
@@ -80,9 +90,14 @@ ToolDefinition createSubagentTool(
         }
         try {
           final ids = <String>[];
+          final allowed = _allowedToolsArg(args);
           for (final t in tasks) {
-            final run = await provider
-                .start(SubagentStartRequest(task: t, mode: 'spawn'));
+            final run = await provider.start(SubagentStartRequest(
+              task: t,
+              mode: 'spawn',
+              allowedTools: allowed,
+              onProgress: onProgress,
+            ));
             ids.add(run.id);
             if (onBackgroundDone != null) {
               unawaited(run.result.then((r) {
@@ -118,7 +133,13 @@ ToolDefinition createSubagentTool(
         return ToolResult.error('subagent mode 只能是 spawn 或 fork');
       }
       final background = args['run_in_background'] == true;
-      final request = SubagentStartRequest(task: task, mode: mode);
+      final request = SubagentStartRequest(
+        task: task,
+        mode: mode,
+        allowedTools: _allowedToolsArg(args),
+        // 进度流只挂前台（后台子代理完成时有 [系统通知]，无需进度行）。
+        onProgress: background ? null : onProgress,
+      );
       try {
         final run = await provider.start(request);
         if (background) {
@@ -159,6 +180,18 @@ ToolDefinition createSubagentTool(
       }
     },
   );
+}
+
+/// 解析 allowed_tools 参数（C2）：字符串数组 → 白名单；非法/空 → null
+/// （继承父工具）。名字按注册表可见性过滤由 provider 端执行。
+List<String>? _allowedToolsArg(Map<String, dynamic> args) {
+  final raw = args['allowed_tools'];
+  if (raw is! List) return null;
+  final out = [
+    for (final t in raw)
+      if ('$t'.trim().isNotEmpty) '$t'.trim(),
+  ];
+  return out.isEmpty ? null : out;
 }
 
 /// send_message 工具（DSH `tool-subagent-control` 语义）：向可续轮子代理

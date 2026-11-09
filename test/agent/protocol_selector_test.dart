@@ -19,6 +19,11 @@ class _FakeNativeProtocol implements ToolProtocol {
   @override
   Future<StreamOutcome> parseStream(Stream<String> stream) async =>
       const StreamOutcome(text: '');
+
+  @override
+  String? replayToolCalls(
+          String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }
 
 /// 模拟 grammar 协议（测试用）。
@@ -38,6 +43,11 @@ class _FakeGrammarProtocol implements ToolProtocol {
   @override
   Future<StreamOutcome> parseStream(Stream<String> stream) async =>
       const StreamOutcome(text: '');
+
+  @override
+  String? replayToolCalls(
+          String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }
 
 void main() {

@@ -114,6 +114,8 @@ struct GenStats {
     double t_prompt_ms = 0;   // prompt prefill time (diagnostics only)
     double t_vision_ms = 0;   // image-encode (vision) wall time, ms — "识图时间"
     double t_audio_ms  = 0;   // audio-encode (speech) wall time, ms — "听音时间"
+    int    lcp_prefix  = -1;  // B5: LCP 增量 prefill 保住的 token 数（-1 = 无测量）
+    int    n_prompt    = 0;   // B5: 本次请求 prompt token 总数（LCP 分母）
 };
 static GenStats g_last_stats;
 
@@ -510,12 +512,13 @@ struct InferenceEngine {
     // 走 GGUF 内嵌 jinja 模板（dllm-CLOVER-APP-G，真机 830 乱码定罪：
     // 内置 chatml 回退+Qwen3 空 think 注入 → 偏离训练分布 → 空/乱码）。
     bool is_clover_model = false;
-    int  n_draft_max = 2;   // how many tokens the MTP head drafts per step (upper bound).
-                            // Default 2 (was 3): on compute-bound 4B the verify batch
-                            // (1+n_draft) must be repaid by acceptance a>=n_draft, so a
-                            // smaller budget lowers the break-even point and curbs the
-                            // negative-benefit window; the adaptive logic still drops to
-                            // 1 when the head is doing badly.
+    int  n_draft_max = 1;   // how many tokens the MTP head drafts per step (upper bound).
+                            // 2026-11-08 定案 2→1（机主裁决，不再真机 AB）：手机端
+                            // GPU 解码 compute-bound（740 ornith 308ms/tok vs ~70ms
+                            // 内存下限），verify 批 (1+n) 成本近线性——n=2 实测净亏
+                            // （"MTP更慢"），n=1 把亏损压到最小；收益翻身只能等
+                            // memory-bound 场景（CPU / 大批摊薄读权重）。自适应在
+                            // n=1 下无下调空间，恒为 1。
 
     // Adaptive draft budget. Speculative gain hinges on ACCEPTANCE: each iteration
     // verifies a (1+n_draft)-token batch on the target, which on a compute-bound
@@ -816,6 +819,15 @@ struct InferenceEngine {
 
         model_params.n_gpu_layers = effective_gpu_layers;
         LOGI("n_gpu_layers = %d", model_params.n_gpu_layers);
+
+        // MTP/NextN 张量加载必须跟随同一个用户开关（下方投机驱动的
+        // mtp_enabled = enable_mtp && n_nextn>0）。loader 缺省 load_mtp=false，
+        // nextn_flags() 会因此返回 TENSOR_SKIP 静默跳过全部 blk.N.nextn.* 张量；
+        // 随后 enable_mtp=true 创建的 MTP 上下文（ctx_type=LLAMA_CONTEXT_TYPE_MTP）
+        // 在 sched_reserve 时构建 graph_mtp，对 null 的 nextn.eh_proj 断言失败
+        // → GGML_ASSERT "MTP block missing nextn.eh_proj" → 加载期 SIGABRT
+        // （ornith-1.5-9b IQ2_XS MTP + OpenCL，740 真机 2026-11-08，tombstone 实锤）。
+        model_params.load_mtp = enable_mtp;
 
         // Pure-CPU path: make sure NO GPU device reaches the llama scheduler.
         // llama_prepare_model_devices() fills model->devices from the ggml
@@ -1593,6 +1605,16 @@ struct InferenceEngine {
             mtp_params.n_threads = ctx_params.n_threads;
             mtp_params.n_threads_batch = ctx_params.n_threads_batch;
             mtp_params.kv_unified = true;
+            // MTP 头必须跟随主上下文的 FA 配置（2026-11-08，740 实机 tombstone）：
+            // mtp_params 缺省 flash_attn_type=AUTO，resolve_fused_ops 会把 FA 探测
+            // 开启（主上下文是 DISABLED 不跟随——ctx_other 继承仅 GEMMA4_ASSISTANT
+            // 有），于是 unified KV 的 fused_kv_rows=true 分配 kv_rows 张量；而
+            // R-278 规则令 decode 形态图 use_flash_attn=false →
+            // build_attn_mha 断言 (use_flash_attn || kv_rows==nullptr) 失败 →
+            // GGML_ASSERT → 每次加载 ~10s 后 SIGABRT 崩溃循环。
+            // DISABLED + kv_unified=true 走 fork 预设的 dense-mask 全缓存回退
+            // （单序列 App 语义等价），kv_rows 恒空，断言通过。
+            mtp_params.flash_attn_type = ctx_params.flash_attn_type;
 
             mtp_ctx = llama_init_from_model(model, mtp_params);
             if (mtp_ctx) {
@@ -2547,11 +2569,22 @@ struct InferenceEngine {
                         full_clear();
                     }
                 } else {
+                    // LCP < MIN_INCREMENTAL_PREFIX（或 >= n_prompt）：不值得
+                    // 增量。full_clear 后必须把 prefix_len 归零——它是 prefill
+                    // 起点（cur_pos/i），其余 full-clear 路径都显式清零，唯独
+                    // 这里漏了：空 KV 上从 LCP 位置起步 → 首 decode 必被 KV
+                    // 一致性检查打回、走 attempt=1 全量重灌（白烧一次 decode）。
+                    prefix_len = 0;
                     full_clear();
                 }
             } else {
                 full_clear();
             }
+
+            // B5 telemetry: prefix-reuse ratio for the Dart-side "KV 复用"
+            // readout (kept prefix over full prompt; -1 means unmeasured).
+            g_last_stats.lcp_prefix = prefix_len;
+            g_last_stats.n_prompt   = n_prompt;
 
             LOGI("eos token id = %d, n_vocab = %d",
                  (int)llama_vocab_eos(vocab), (int)llama_vocab_n_tokens(vocab));
@@ -2914,10 +2947,9 @@ struct InferenceEngine {
                         if (mtp_draft_sum >= 12.0f) {
                             const float rate = mtp_accept_sum / mtp_draft_sum;
                             if (mtp_enabled) {
-                                // MTP drafts cheaply per token: shrink hard at low
-                                // acceptance (verify batch must be repaid).
-                                mtp_adaptive_max = (rate >= 0.75f) ? n_draft_max :
-                                                   (rate >= 0.50f) ? 2 : 1;
+                                // n_draft_max=1（2026-11-08）下无下调空间，恒为 1；
+                                // accept_rate 仍统计并经下方共用 LOGI 打印供判卷。
+                                mtp_adaptive_max = n_draft_max;
                             } else {
                                 // DSpark decodes the WHOLE noise block per draft
                                 // forward regardless of the kept length (the forward
@@ -4257,10 +4289,11 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetLastStats(JNIEnv *env, job
     // kv_used = KV 缓存已占用位置数（当前会话），kv_ctx = 上下文窗口 n_ctx，
     // 供本地模型顶部状态栏「上下文/KV 占比」细条使用（0 = 无模型/新会话）。
     snprintf(buf, sizeof(buf),
-             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f,\"kv_used\":%lld,\"kv_ctx\":%d}",
+             "{\"n_gen\":%d,\"t_gen_ms\":%.1f,\"t_prompt_ms\":%.1f,\"t_vision_ms\":%.1f,\"t_audio_ms\":%.1f,\"kv_used\":%lld,\"kv_ctx\":%d,\"lcp_prefix\":%d,\"n_prompt\":%d}",
              g_last_stats.n_gen, g_last_stats.t_gen_ms, g_last_stats.t_prompt_ms,
              g_last_stats.t_vision_ms, g_last_stats.t_audio_ms,
-             (long long)g_engine.get_kv_used_positions(), (int)g_engine.n_ctx.load());
+             (long long)g_engine.get_kv_used_positions(), (int)g_engine.n_ctx.load(),
+             g_last_stats.lcp_prefix, g_last_stats.n_prompt);
     return utf8_to_jstring(env, buf);
 }
 

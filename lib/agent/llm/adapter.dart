@@ -61,15 +61,11 @@ final class LlmFailure {
   final LlmFailureCode code;
   final String message;
   final int? status;
-  final int? providerRetryAfterMs;
-  final String? requestId;
 
   const LlmFailure({
     required this.code,
     required this.message,
     this.status,
-    this.providerRetryAfterMs,
-    this.requestId,
   });
 
   bool get isContextWindowExceeded => code == LlmFailureCode.contextWindowExceeded;
@@ -133,8 +129,9 @@ final class LlmResult {
   final String text;
   final List<ToolCall> toolCalls;
 
-  /// 服务端 token 用量（API 路线，SSE 末块 usage 原样透传；
-  /// {prompt_tokens, completion_tokens, ...}，本地路线恒 null）。
+  /// token 用量（API 路线 SSE 末块透传；本地路线 C4 起由原生 stats 回传
+  /// {prompt_tokens: n_prompt, completion_tokens: n_gen}——回合成本有了
+  /// 真数，不再只有估算）。查询失败/全零为 null。
   final Map<String, dynamic>? usage;
 
   const LlmResult({
@@ -154,6 +151,10 @@ final class LlmResult {
 /// - [adapter]：本次调用绑定的 adapter（local/API）。
 /// - [model]：模型标识（local=模型 id；api=API 模型 name）。
 /// - [capabilities]：加载时冻结的 [EngineCapabilities] 快照；null 表示未知。
+///
+/// 现状注记（勿被上文文档误导）：生产路径的 local/API 选择发生在
+/// ChatNotifier 组装期，**不经过** [LlmAdapter.prepareCall]；本 seam 保留的
+/// 价值是能力驱动演进的落点 + 全部测试桩按此接口实现（契约由测试锁定）。
 final class PreparedLlmCall {
   final LlmAdapter adapter;
   final String model;

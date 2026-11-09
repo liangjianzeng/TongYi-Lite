@@ -9,12 +9,29 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  final src = File('lib/screens/settings_screen.dart').readAsStringSync();
+  // 2026-11-09 part 拆分后：settings_screen.dart 拆成 settings/ 下 part 文件，
+  // 数据来源随之改读新位置，断言语义一字不动：Tab 壳（TabBar/TabController）
+  // 留在主文件读 shellSrc；能力区/开发者区按 capability→dev 顺序拼接成 src，
+  // 保持 capAt/devAt 区间切片（能力区必须整体在 DevSettingsBody 之前）有效；
+  // 技能共享 Body（loadUserSkills/loadBuiltinSkills 所在）读 skills.dart。
+  final shellSrc = File('lib/screens/settings_screen.dart').readAsStringSync();
+  final src = File('lib/screens/settings/capability.dart').readAsStringSync() +
+      File('lib/screens/settings/dev.dart').readAsStringSync();
+  // 「只许有一处」类计数断言必须扫全量（主文件 + 所有 part）——拆分前它们
+  // 扫的就是整份 settings_screen.dart；只扫个别 part 会让重复入口漏网。
+  final allSrc = shellSrc +
+      [
+        'common', 'model_management', 'inference_engine', 'skills', 'agent',
+        'about', 'storage', 'capability', 'dev', 'api', 'web_search', 'voice',
+      ]
+          .map((n) =>
+              File('lib/screens/settings/$n.dart').readAsStringSync())
+          .join();
 
   group('能力 Tab（插件 + 技能 + 原生能力同处管理，不塞开发者）', () {
     test('TabBar 里有「能力」，TabController 长度跟着 tabs 走', () {
-      expect(src, contains("text: '能力'"), reason: '「能力」Tab 被删了 = 用户又找不到插件入口了');
-      expect(src, contains('TabController(length: 7'),
+      expect(shellSrc, contains("text: '能力'"), reason: '「能力」Tab 被删了 = 用户又找不到插件入口了');
+      expect(shellSrc, contains('TabController(length: 7'),
           reason: '加了 Tab 忘了改 length，TabBar 与 TabBarView 会当场对不上');
     });
 
@@ -23,7 +40,7 @@ void main() {
       final capAt = src.indexOf('class CapabilitySettingsBody');
       expect(devAt, greaterThan(-1), reason: '读不到 DevSettingsBody = 文件结构变了，这条检查得跟着改');
       expect(capAt, greaterThan(-1));
-      expect('PluginsEntryTile'.allMatches(src).length, 1,
+      expect('PluginsEntryTile'.allMatches(allSrc).length, 1,
           reason: '整个设置页只许有**一处**插件入口（两处 = 两个真相，用户会看见两个"插件"）；'
               '类本身声明在 plugins_screen.dart，不在本文件');
       final capRegion = src.substring(capAt, devAt > capAt ? devAt : src.length);
@@ -43,9 +60,9 @@ void main() {
       // 方式接入——管理动作就地完成，不再跳智能体面板。
       expect(capRegion, contains('SkillsManagementBody()'),
           reason: '能力面板没内嵌技能 Body = 用户又得跨面板找管理入口');
-      expect('await loadUserSkills()'.allMatches(src).length, 1,
+      expect('await loadUserSkills()'.allMatches(allSrc).length, 1,
           reason: 'loadUserSkills 只许在共享 Body 里调用一次（两处 = 两个真相）');
-      expect(src, contains('loadBuiltinSkills'));
+      expect(allSrc, contains('loadBuiltinSkills'));
       expect(capRegion, contains('PluginsEntryTile('));
     });
 

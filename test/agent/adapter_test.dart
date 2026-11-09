@@ -40,6 +40,86 @@ class _PlainAdapter extends LlmAdapter {
 
 void main() {
   convertEngineMessagesTests();
+
+  // 取消令牌回归（T3 并发缺陷，2026-11）：adapter 实例会被共享（chat_provider
+  // 默认让子代理复用父回合的 adapter），旧 cancel() 无条件杀 currentSub 单槽
+  // ——后发起的 generate 覆盖槽位后，父回合 cancel() 会误杀子代理的流。
+  // 契约：归属判定=该次 generate 的取消信号已触发（或未传信号），未表态的
+  // 令牌是别人的生成，一律不碰。
+  group('取消令牌：共享 adapter 下 cancel() 只杀归属自己的生成', () {
+    /// 造一个"在途生成"：真·流订阅，onCancel 经共享 map 观测中止与否。
+    final cancelledFlags = <StreamController<void>, bool>{};
+    (CancelToken, StreamController<void>) spawn(
+      BaseEngineAdapter adapter,
+      Completer<void>? signal,
+    ) {
+      late final StreamController<void> ctrl;
+      ctrl = StreamController<void>(onCancel: () async {
+        cancelledFlags[ctrl] = true;
+      });
+      final token = adapter.beginGeneration(cancel: signal);
+      adapter.bindGenerationStream(token, ctrl.stream.listen((_) {}));
+      return (token, ctrl);
+    }
+
+    bool wasKilled(StreamController<void> ctrl) => cancelledFlags[ctrl] ?? false;
+
+    test('父回合信号已触发 → 只中止父令牌；子代理令牌（未表态）存活', () async {
+      final adapter = _EngineAdapter(protocol: PromptJsonProtocol());
+      final parentSignal = Completer<void>();
+      final (parent, parentCtrl) = spawn(adapter, parentSignal);
+      final (sub, subCtrl) = spawn(adapter, Completer<void>());
+
+      parentSignal.complete(); // ReactLoopAgent.cancel 固定顺序：先表态再 cancel
+      expect(adapter.cancelOwnedGenerations(), isTrue);
+      await Future<void>.delayed(Duration.zero); // 让 onCancel 微任务跑完
+
+      expect(wasKilled(parentCtrl), isTrue, reason: '归属本次取消 → 中止');
+      expect(wasKilled(subCtrl), isFalse,
+          reason: '子代理信号未触发 → 不得误杀（T3 缺陷本体）');
+      expect(adapter.currentSub, isNotNull,
+          reason: 'currentSub 槽属于子令牌（后注册者），不得被清');
+      await parentCtrl.close();
+      await subCtrl.close();
+    });
+
+    test('未传取消信号的令牌（旧式直调）保留可被任意 cancel 中止的旧行为', () async {
+      final adapter = _EngineAdapter(protocol: PromptJsonProtocol());
+      final (_, ctrl) = spawn(adapter, null);
+      expect(adapter.cancelOwnedGenerations(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(wasKilled(ctrl), isTrue);
+      await ctrl.close();
+    });
+
+    test('无归属目标时 cancel 不杀任何流（native 停发不触发）', () async {
+      final adapter = _EngineAdapter(protocol: PromptJsonProtocol());
+      final (_, ctrl) = spawn(adapter, Completer<void>());
+      adapter.cancel(); // 公开 API：签名不变；无归属目标时不动任何流
+      expect(adapter.cancelOwnedGenerations(), isFalse,
+          reason: '信号未触发 → 无归属目标');
+      await Future<void>.delayed(Duration.zero);
+      expect(wasKilled(ctrl), isFalse);
+      await ctrl.close();
+    });
+
+    test('endGeneration：先结束者不清后来者的 currentSub 槽（防误清空）', () async {
+      final adapter = _EngineAdapter(protocol: PromptJsonProtocol());
+      final (parent, parentCtrl) = spawn(adapter, Completer<void>());
+      final (sub, subCtrl) = spawn(adapter, Completer<void>());
+      final subStream = adapter.currentSub; // 子令牌注册后槽位 = 子流
+
+      parent.sub?.cancel(); // 模拟父回合先结束（finally 的 sub?.cancel()）
+      adapter.endGeneration(parent);
+      expect(adapter.currentSub, same(subStream),
+          reason: '槽位已被子令牌覆盖，父令牌注销不得清掉');
+      adapter.endGeneration(sub); // 子令牌注销才清槽
+      expect(adapter.currentSub, isNull);
+      await parentCtrl.close();
+      await subCtrl.close();
+    });
+  });
+
   test('prepareCall：覆写版固化能力快照（adapter + model + capabilities）', () {
     final caps = EngineCapabilities(
       nativeToolCall: false,
@@ -135,6 +215,11 @@ class _NoSupportProtocol implements ToolProtocol {
   @override
   Future<StreamOutcome> parseStream(Stream<String> stream) async =>
       const StreamOutcome(text: '');
+
+  @override
+  String? replayToolCalls(
+          String modelId, List<Map<String, dynamic>> toolCalls) =>
+      null;
 }
 
 /// BaseEngineAdapter 具体桩：仅复用 [BaseEngineAdapter.convertEngineMessages]

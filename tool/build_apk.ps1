@@ -1,4 +1,4 @@
-# TongYi-Lite —— Windows 打包机一键 APK 构建（PowerShell）
+﻿# TongYi-Lite —— Windows 打包机一键 APK 构建（PowerShell）
 #
 # 与 tool/build_apk.sh（Linux 侧）同语义：环境自检 → 构建 → 签名验收。
 # 整合并取代根目录 build.bat / build_release.bat，沉淀 docs/BUILD_ENV_NOTES.md
@@ -48,12 +48,12 @@ function Find-First($cands) { foreach ($c in $cands) { if ($c -and (Test-Path $c
 
 # ---------- 组件定位 ----------
 $Flutter = Find-First @("$env:FLUTTER_BIN",
-    (Get-Command flutter -ErrorAction SilentlyContinue)?.Source,
+    (Get-Command flutter -ErrorAction SilentlyContinue).Source,
     "C:\src\flutter\bin\flutter.bat", "C:\dev-tools\flutter\bin\flutter.bat")
 $AndroidSdk = Find-First @("$env:ANDROID_HOME", "$env:ANDROID_SDK_ROOT",
     "$env:LOCALAPPDATA\Android\Sdk", "C:\Users\jianz\AppData\Local\Android\Sdk")
 $Jdk17 = Find-First @("$env:JAVA_HOME",
-    ((Get-ChildItem "C:\Program Files\Eclipse Adoptium" -Filter "jdk-17*" -Directory -ErrorAction SilentlyContinue | Select -First 1)?.FullName))
+    ((Get-ChildItem "C:\Program Files\Eclipse Adoptium" -Filter "jdk-17*" -Directory -ErrorAction SilentlyContinue | Select -First 1).FullName))
 
 Write-Host "== 环境自检（Windows $([Environment]::OSVersion.Version)）"
 if ($Flutter) { Ok "flutter  $Flutter" } else { Bad "找不到 flutter（FLUTTER_BIN 或装到 C:\src\flutter）" }
@@ -72,13 +72,15 @@ else { Bad "缺 android/gradle/wrapper/gradle-wrapper.jar —— 从 git 恢复�
 # local.properties 防 IDE 写歪
 $lp = "$PROJ\android\local.properties"
 if ((Test-Path $lp) -and $AndroidSdk) {
-    $cur = (Select-String -Path $lp -Pattern '^sdk\.dir=(.*)' | Select -First 1)?.Matches[0]?.Groups[1]?.Value
+    # PS5.1 兼容：`?.` 是 PS7 语法（本机只有 5.1）；管道空输出先判再取，null 下标在 5.1 会炸。
+    $mt = Select-String -Path $lp -Pattern '^sdk\.dir=(.*)' | Select -First 1
+    $cur = if ($mt) { $mt.Matches[0].Groups[1].Value } else { $null }
     if ($cur -ne ($AndroidSdk -replace '\\','/')) { Warn "local.properties sdk.dir=$cur，构建以 ANDROID_HOME=$AndroidSdk 注入为准" }
     else { Ok "local.properties sdk.dir 正确" }
 }
 
 # Vulkan（可选，缺则 OpenCL+CPU）
-$VkSdk = if ($env:VULKAN_SDK -and (Test-Path $env:VULKAN_SDK)) { $env:VULKAN_SDK } else { Find-First @("C:\VulkanSDK\1.4.357.0", ((Get-ChildItem C:\VulkanSDK -Directory -EA SilentlyContinue | Select -Last 1)?.FullName)) }
+$VkSdk = if ($env:VULKAN_SDK -and (Test-Path $env:VULKAN_SDK)) { $env:VULKAN_SDK } else { Find-First @("C:\VulkanSDK\1.4.357.0", ((Get-ChildItem C:\VulkanSDK -Directory -EA SilentlyContinue | Select -Last 1).FullName)) }
 if ($VkSdk -and (Test-Path "$VkSdk\Bin\glslc.exe") -and (Test-Path "$PROJ\android\app\src\main\cpp\host-toolchain-mingw.cmake")) {
     Ok "Vulkan SDK $VkSdk（ggml-vulkan 将启用）"
 } else { Warn "Vulkan SDK/MinGW 未就绪 → 本次只有 OpenCL+CPU（LunarG 装到 C:\VulkanSDK + mingw64 到 C:\mingw64）" }
@@ -149,7 +151,7 @@ foreach ($m in $Modes) {
 }
 
 # ---------- 签名验收（AGENTS 铁律） ----------
-$apksigner = (Get-ChildItem "$AndroidSdk\build-tools\*\apksigner.bat" | Sort-Object FullName | Select -Last 1)?.FullName
+$apksigner = (Get-ChildItem "$AndroidSdk\build-tools\*\apksigner.bat" | Sort-Object FullName | Select -Last 1).FullName
 foreach ($m in $Modes) {
     $apk = "build\app\outputs\flutter-apk\app-$m.apk"
     if ($apksigner) {

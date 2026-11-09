@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# pre-push 闸门：拦住私有工程记忆再次流进公开仓。
+# pre-push 闸门：① 拦住私有工程记忆再次流进公开仓；② 质量门禁（analyze+test 绿才许推）。
 #
 # 背景：AGENTS.md / BUILD.md / android/AGENTS.md / 两篇 thinking 笔记 / .workbuddy 曾在
 # 2026-10-28 迁往私有仓 TongYi-Lite-docs；历史已 filter-repo 重写。本钩子防的是「手滑又提交回去」
 # 以及「旧历史的分支/tag 被误推」——后者一次就能让私有正文整批复活。
 #
+# 质量门禁（2026-11-09 健康度评审 P1-3）：真推送时跑 flutter analyze + 全量 flutter test，
+# 红则拦。逃生口（评审/临场场景）：TONGYI_SKIP_QUALITY=1 git push；flutter 找不到也只警告
+# 不拦（FLUTTER= 可显式指定路径）。隐私闸门不受此开关影响，永远执行。
+#
 # 装法（本机，一条命令）：
 #   git config core.hooksPath tool/hooks
 # 想全组生效就把本文件随仓提交。
 #
-# 手工审计：bash tool/hooks/pre-push --all
+# 手工审计：bash tool/hooks/pre-push --all（只跑隐私审计，不跑质量门禁）
 set -uo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
@@ -33,6 +37,8 @@ TEXT_EXT_RE='\.(md|markdown|html|htm|txt|json|jsonl)$'
 
 fail=0
 note() { printf '  ✗ %s\n' "$1"; fail=1; }
+qfail=0
+qnote() { printf '  ✗ %s\n' "$1"; qfail=1; }
 
 # check_rev <tip 提交> <展示标签> [扫描范围]
 #   第三参缺省 = 整条历史（--all 审计 / 推全新 ref 时用）。
@@ -109,6 +115,41 @@ if [ "$got" -eq 0 ]; then
   echo "（无 ref 推送）"; exit 0
 fi
 
+# ---- 质量门禁（②）：隐私已过才值得花这 ~30s；红则独立计数单独报文案 ----
+if [ "$fail" -eq 0 ]; then
+  if [ "${TONGYI_SKIP_QUALITY:-0}" = "1" ]; then
+    echo "（质量门禁跳过：TONGYI_SKIP_QUALITY=1——自担风险，CI/本地须另验）"
+  else
+    FLUTTER_BIN="${FLUTTER:-}"
+    if [ -z "$FLUTTER_BIN" ]; then
+      FLUTTER_BIN=$(command -v flutter 2>/dev/null || true)
+    fi
+    # -f 不用 -x：Windows .bat 常无 +x 位（实测 644），但 Git Bash 照样能执行。
+    if [ -z "$FLUTTER_BIN" ] && [ -f "/c/src/flutter/bin/flutter.bat" ]; then
+      FLUTTER_BIN=/c/src/flutter/bin/flutter.bat   # 本机常用位置（Git Bash）
+    fi
+    if [ -z "$FLUTTER_BIN" ]; then
+      echo "⚠ 未找到 flutter，质量门禁跳过（FLUTTER=<路径> 可显式指定）"
+    else
+      echo "质量门禁：flutter analyze ……"
+      # 取 $() 的直接退出码，不走管道（管道尾会吞掉真实 rc——本仓踩过的坑）。
+      out=$("$FLUTTER_BIN" analyze 2>&1); rc=$?
+      if [ $rc -ne 0 ]; then
+        printf '%s\n' "$out" | tail -25
+        qnote "flutter analyze 非 0（见上）"
+      fi
+      if [ "$qfail" -eq 0 ]; then
+        echo "质量门禁：flutter test（全量，约 30s）……"
+        out=$("$FLUTTER_BIN" test 2>&1); rc=$?
+        if [ $rc -ne 0 ]; then
+          printf '%s\n' "$out" | tail -40
+          qnote "flutter test 未全绿（见上）"
+        fi
+      fi
+    fi
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   cat >&2 <<'MSG'
 
@@ -120,4 +161,14 @@ if [ "$fail" -ne 0 ]; then
 MSG
   exit 1
 fi
-echo "✓ 推送闸门通过"
+
+if [ "$qfail" -ne 0 ]; then
+  cat >&2 <<'MSG'
+
+推送被拦：质量门禁未过（flutter analyze / flutter test 红，见上）。
+  · 修复后重推；确属偶发（flake）可 TONGYI_SKIP_QUALITY=1 git push 自担风险
+  · 别用 --no-verify 绕质量——那会把隐私闸门一起跳过
+MSG
+  exit 1
+fi
+echo "✓ 推送闸门通过（隐私 + 质量）"

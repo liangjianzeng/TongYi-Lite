@@ -29,8 +29,14 @@ android {
         applicationId = "com.dgxspark.tongyilite"
         minSdk = 33
         targetSdk = 34
-        versionCode = 31
-        versionName = "0.3.8"
+        // 版本单一真源 = pubspec.yaml 的 version:（Flutter 构建期注入
+        // flutter.versionName / flutter.versionCode）。此前是硬编 31/"0.3.8"，
+        // 把 pubspec 的号整个盖掉——0.3.9+32 发出去两个包都自报 0.3.8/31。
+        // Dart 侧两处显示常量（about.dart 的 _appVersion、
+        // host_capabilities.dart 的 kPluginHostAppVersion）由
+        // test/meta/version_consistency_test.dart 钉住与 pubspec 一致。
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
 
         ndk {
             abiFilters += listOf("arm64-v8a")

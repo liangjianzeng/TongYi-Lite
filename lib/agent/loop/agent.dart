@@ -23,6 +23,7 @@ import 'dart:convert' show jsonEncode;
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../llm/adapter.dart';
+import '../observability/quiet_fail.dart';
 import '../session/session.dart';
 import 'config.dart';
 import 'failure.dart';
@@ -50,8 +51,6 @@ enum TurnEndReasonKind {
   error,       // 瀑布终态失败
   interrupted, // 用户取消
   maxSteps,    // 达到 maxStepsPerTurn 上限（仍在调用工具）
-  blocked,     // 用户输入等待（Phase 4+）
-  user,        // 用户主动结束
 }
 
 /// turn 结束原因（含详情）。
@@ -78,9 +77,6 @@ class ReactLoopAgent {
   final String _modelId;
   final ProviderKind _providerKind;
   final String _systemPrompt;
-  final String? _sessionPath;
-
-  final AgentSandboxApprover? _sandboxApprover;
 
   /// Phase 5 hooks（agent/pre-step、tools/result）。
   final AgentHooks? _hooks;
@@ -114,7 +110,8 @@ class ReactLoopAgent {
   /// 对齐旧 `runAgent` 的 [AgentToolActivityCallback]。
   final AgentToolActivityCallback? _onToolActivity;
 
-  AgentPhaseState _phase = AgentPhaseState(AgentPhase.idle, 0, 0);
+  /// 相位/计数状态（构造期以 [initialTurn] 基座初始化，见构造参数注释）。
+  AgentPhaseState _phase;
   Completer<void>? _cancelCompleter;
   bool _cancelCompleted = false;
 
@@ -143,7 +140,7 @@ class ReactLoopAgent {
     required String modelId,
     required ProviderKind providerKind,
     required String systemPrompt,
-    String? sessionPath,
+    // sandboxApprover 直连 ToolExecutor（见下方 _executor 构造），主循环本体不持有。
     AgentSandboxApprover? sandboxApprover,
     Future<String?> Function()? workspaceResolver,
     AgentToolActivityCallback? onToolActivity,
@@ -167,6 +164,8 @@ class ReactLoopAgent {
     String? environmentNote,
     // ---- P1-C：环境快照提供者（每 step 尾部注入，保前缀稳定）----
     String Function()? environmentNoteProvider,
+    // ---- A1：turn 号基座（JSONL 持久化后跨回合续号）----
+    int initialTurn = 0,
   })  : _session = session,
         _adapter = adapter,
         _registry = registry,
@@ -174,14 +173,13 @@ class ReactLoopAgent {
         _modelId = modelId,
         _providerKind = providerKind,
         _systemPrompt = systemPrompt,
-        _sessionPath = sessionPath,
-        _sandboxApprover = sandboxApprover,
         _onToolActivity = onToolActivity,
         _hooks = hooks,
         _skills = skills,
         _agentsMd = agentsMd,
         _environmentNote = environmentNote,
         _environmentNoteProvider = environmentNoteProvider,
+        _phase = AgentPhaseState(AgentPhase.idle, initialTurn, 0),
         _executor = ToolExecutor(
           registry: registry,
           modelId: modelId,
@@ -235,11 +233,34 @@ class ReactLoopAgent {
       systemContent += '\n\n【环境】$env';
     }
 
-    _session.append(
-      kEventSystemMessage,
-      {'content': systemContent},
-      source: const {'kind': 'system'},
-    );
+    // 系统提示入 log（A1 JSONL 持久化后跨回合复用）：日志里已有未遮蔽的
+    // system/message 时**不再追加**——内容逐字节一致则零事件（前缀稳定，
+    // 本地 KV LCP 与 API prompt cache 都整段命中）；内容变更（人格/技能/
+    // AGENTS.md/记忆变化）以 surface replace 顶替旧 system（追加不重写
+    // 历史，deriveModelMessages 恒只投影一条 system 在队首）。
+    String? existingSystemContent;
+    int? existingSystemSeq;
+    for (final e in _session.rawEvents) {
+      if (e.type == kEventSystemMessage && !_session.isShadowed(e.seq)) {
+        existingSystemContent = e.data['content'] as String? ?? '';
+        existingSystemSeq = e.seq;
+      }
+    }
+    if (existingSystemSeq == null) {
+      _session.append(
+        kEventSystemMessage,
+        {'content': systemContent},
+        source: const {'kind': 'system'},
+      );
+    } else if (existingSystemContent != systemContent) {
+      _session.replaceEvent(
+        startSeq: existingSystemSeq,
+        endSeq: existingSystemSeq,
+        type: kEventSystemMessage,
+        data: {'content': systemContent},
+        source: const {'kind': 'system'},
+      );
+    }
     // Phase 2：构建六段流水线（guard/pre/post/spill 集成）。
     _pipeline = ToolPipeline(
       executor: _executor,
@@ -322,6 +343,35 @@ class ReactLoopAgent {
     _phase = AgentPhaseState(AgentPhase.running, turn, 0);
     _session.append(kEventTurnStart, {'turn': turn, 'userSeq': userSeq});
 
+    // A1（UI 重构）：本步思考快照缓冲。adapter 的 onThinking 是全量快照
+    // （替换语义），每个 step 结束把非空快照落成 log-only 的
+    // agent/thinking 事件——思考进唯一真相源：回合收尾（💭 消息/信封）
+    // 还没写就崩溃时不再整回合蒸发，下回合启动可回放补档。
+    var stepThinking = '';
+    var stepThinkingStartMs = 0;
+    StreamSubscription<String>? thinkingSub;
+    void flushStepThinking(int t, int s) {
+      final text = stepThinking.trim();
+      stepThinking = '';
+      final started = stepThinkingStartMs;
+      stepThinkingStartMs = 0;
+      if (text.isEmpty) return;
+      _session.append(kEventAgentThinking, {
+        'turn': t,
+        'step': s,
+        'content': text,
+        if (started > 0)
+          'durationMs': DateTime.now().millisecondsSinceEpoch - started,
+      });
+    }
+    thinkingSub = onThinking?.stream.listen((snap) {
+      if (snap.trim().isEmpty) return;
+      if (stepThinkingStartMs == 0) {
+        stepThinkingStartMs = DateTime.now().millisecondsSinceEpoch;
+      }
+      stepThinking = snap;
+    });
+
     var step = 0;
     var reason = TurnEndReasonKind.completed;
     bool turnDone = false;
@@ -371,6 +421,9 @@ class ReactLoopAgent {
         // P1-C：环境快照尾部注入（内容变化才追加，见方法注释）。
         _maybeInjectEnvironmentNote();
         _session.append(kEventStepStart, {'turn': turn, 'step': step});
+        // A1：新 step 思考缓冲重新计时（上一步的已在 step/end 前落档）。
+        stepThinking = '';
+        stepThinkingStartMs = 0;
         // WP3a：主动压缩前置——估算投影 token，超预算先裁剪，
         // 不等撞 nctx/服务端硬墙（被动压缩只救得了 CONTEXT_WINDOW_EXCEEDED）。
         if (_config.contextTokenBudget != null) {
@@ -459,9 +512,15 @@ class ReactLoopAgent {
             break;
           }
         }
+        // A1：步末落档本步思考（唯一真相源；UI 思考卡走 onThinking 实时流，
+        // 互不影响）。所有 break 路径都会经过这里，一步一事件。
+        flushStepThinking(turn, step);
         _session.append(kEventStepEnd, {'turn': turn, 'step': step});
       }
     } finally {
+      // 兜底：任何异常/取消路径离开循环时，未落档的思考不丢。
+      flushStepThinking(turn, step);
+      await thinkingSub?.cancel();
       _session.append(kEventTurnEnd, {'turn': turn, 'reason': reason.name});
       debugPrint('[AgentStep] t$turn end reason=${reason.name} steps=$step '
           'elapsed=${(turnWatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s');
@@ -602,6 +661,9 @@ class ReactLoopAgent {
       turn: turn,
       step: step,
       reason: 'proactive: 估算约 $estTokens tok 超预算 $budget（主动前置压缩）',
+      // 端侧本地模型摘要慢（B2）：回合进行中的主动压缩只跑确定性 digest，
+      // 不阻塞回合；模型摘要留给回合结束后的跨回合自动压缩。
+      allowModelSummary: _providerKind != ProviderKind.local,
     );
     final stats = result.stats;
     if (result.kind == CompactionResultKind.success) {
@@ -641,6 +703,8 @@ class ReactLoopAgent {
         turn: turn,
         step: step,
         reason: f.message,
+        // 溢出恢复已在失败路径上：本地模型不再叠加慢摘要（B2 同上）。
+        allowModelSummary: _providerKind != ProviderKind.local,
       );
       if (result.kind == CompactionResultKind.success) {
         return const FailureDecision(FailureDecisionKind.retry);
@@ -749,8 +813,10 @@ class ReactLoopAgent {
     String note;
     try {
       note = provider();
-    } on Exception {
-      return; // 提供者异常静默跳过（环境快照非关键路径）
+    } on Exception catch (e) {
+      // 环境快照非关键路径：跳过本步注入，但留痕（注入失效不该是排障盲区）。
+      quietFail('agent.env-note', e);
+      return;
     }
     final t = note.trim();
     if (t.isEmpty || t == _lastEnvNote) return;
@@ -855,8 +921,21 @@ class ReactLoopAgent {
       _turnToolCallCounts[call.name] = n;
       var content = result.content;
       if (kRepeatReminderSteps.contains(n)) {
+        // 参数 canonical 摘录（C5，对齐 DSH repeat-tool-reminder）：把本次
+        // 调用参数带进提醒——模型常在"同工具不同参数"上误判自己没重复，
+        // 看到参数原文才能自查是哪种重复。
+        String argsBrief = '';
+        try {
+          final argsJson = jsonEncode(call.arguments ?? const {});
+          argsBrief = argsJson.length > 120
+              ? '${argsJson.substring(0, 120)}…'
+              : argsJson;
+        } catch (_) {
+          argsBrief = '';
+        }
         content = '${content.isEmpty ? '' : '$content\n'}'
-            '[提醒：这是本回合第 $n 次调用 ${call.name}。'
+            '[提醒：这是本回合第 $n 次调用 ${call.name}'
+            '${argsBrief.isEmpty ? '' : '（参数：$argsBrief）'}。'
             '先检查上面已有的调用结果：结果已足够就直接回答用户；'
             '结果无效就换方法/换参数，不要继续重复同样的调用]';
       }

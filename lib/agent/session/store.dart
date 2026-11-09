@@ -20,20 +20,24 @@ import 'log.dart';
 /// - 旧 SQLite 会话经 [importFromMessages] 一次性迁移（log-only 标记 imported）。
 
 final class JsonlSessionStore {
-  JsonlSessionStore();
+  /// 根目录覆写（测试注入）：null = 生产路径 ApplicationSupport/sessions。
+  final String? baseDirOverride;
+
+  JsonlSessionStore({this.baseDirOverride});
 
   /// 会话文件路径（相对 ApplicationSupport/sessions）。
   Future<String> pathFor(String conversationId) async {
-    final base = await getApplicationSupportDirectory();
-    return p.join(base.path, 'sessions', '${_safe(conversationId)}.jsonl');
+    final dir = await _ensureDir();
+    return p.join(dir, '${_safe(conversationId)}.jsonl');
   }
 
   /// 确保 sessions 目录存在，返回目录路径。
   Future<String> _ensureDir() async {
-    final base = await getApplicationSupportDirectory();
-    final dir = p.join(base.path, 'sessions');
+    final base =
+        baseDirOverride ?? (await getApplicationSupportDirectory()).path;
+    final dir = p.join(base, 'sessions');
     if (!Directory(dir).existsSync()) {
-      Directory(dir).createSync();
+      Directory(dir).createSync(recursive: true);
     }
     return dir;
   }
@@ -104,6 +108,16 @@ final class JsonlSessionStore {
     List<ChatMessage> messages,
   ) {
     final log = SessionLog.fromEvents([]);
+    importMessagesInto(log, messages);
+    return log;
+  }
+
+  /// 把 SQLite 消息导入为事件，**追加进已有日志**。
+  ///
+  /// A1 增量导入与一次性迁移共用：一次性迁移 = 空日志 + 全量消息；
+  /// 跨回合增量 = JSONL 加载的日志 + 游标之后的 SQLite 增量（普通聊天、
+  /// 其他写入路径产生的消息，回合内事件已由 JSONL 承载不重复导入）。
+  void importMessagesInto(SessionLog log, List<ChatMessage> messages) {
     final now = DateTime.now().millisecondsSinceEpoch;
     for (final m in messages) {
       // 工具轮轨迹信封：还原为真实 assistant(toolCalls)/tool/result 事件，
@@ -173,7 +187,6 @@ final class JsonlSessionStore {
         timeMs: now,
       );
     }
-    return log;
   }
 
   /// 判断某会话是否已迁移（存在 .jsonl 文件）。
@@ -188,11 +201,69 @@ final class JsonlSessionStore {
     final file = File(p.join(dirPath, '${_safe(conversationId)}.jsonl'));
     if (file.existsSync()) await file.delete();
   }
+
+  /// 删除会话文件（静态便捷入口）：供不持有 [JsonlSessionStore] 实例的
+  /// 调用方（会话列表 Notifier）随会话删除清理 JSONL。
+  static Future<void> deleteSessionFile(String conversationId) async {
+    await JsonlSessionStore().delete(conversationId);
+  }
 }
 
 /// 路径安全：把非法字符替换为下划线。
 String _safe(String s) =>
     s.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+
+// ---------------------------------------------------------------------------
+// 持久化泵（A1：SessionLog → JSONL 落盘）
+// ---------------------------------------------------------------------------
+
+/// 会话事件落盘泵：把 [SessionLog] 的 append 流按序写进 JSONL。
+///
+/// 设计（对照 DSH "模型可见 = 已落日志"）：
+/// - [SessionLog.attachSink] 挂接 [onEvent]；append 同步回调、本类内部
+///   **Future 链排队**异步写盘——事件顺序 = 落盘顺序，append 不因磁盘阻塞；
+/// - [flush] 等待队列清空并上抛首次写盘错误（回合结束检查点用）；
+/// - [compactFile] 物理清淤：重写文件剔除已被影子区遮蔽的事件
+///   （压缩不改历史 → 追加式文件单调增长，端侧存储需要定期回收）。
+final class SessionPersistor {
+  final JsonlSessionStore _store;
+  final String _conversationId;
+  Future<void> _tail = Future.value();
+  Object? _firstError;
+
+  SessionPersistor(this._store, this._conversationId);
+
+  /// 写盘错误（首错保留；flush 时上抛）。
+  Object? get lastError => _firstError;
+
+  /// SessionLog append sink：入队一条事件（不等待完成）。
+  void onEvent(SessionEvent event) {
+    _tail = _tail.then((_) => _store.appendEvent(_conversationId, event))
+        .catchError((Object e) {
+      _firstError ??= e;
+    });
+  }
+
+  /// 等待队列全部落盘；有写盘错误则抛出（每错只抛一次）。
+  Future<void> flush() async {
+    await _tail;
+    _tail = Future.value();
+    final e = _firstError;
+    _firstError = null;
+    if (e != null) throw StateError('会话事件落盘失败: $e');
+  }
+
+  /// 物理清淤：剔除影子区遮蔽的事件后整体重写文件。
+  /// 只在无并发 append 时调用（回合结束 flush 之后）。
+  Future<void> compactFile(SessionLog log) async {
+    await flush();
+    final kept = <SessionEvent>[
+      for (final e in log.rawEvents)
+        if (!log.isShadowed(e.seq)) e,
+    ];
+    await _store.rewrite(_conversationId, SessionLog.fromEvents(kept));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 工具轮轨迹信封（WP1a：跨 turn 保住工具上下文）

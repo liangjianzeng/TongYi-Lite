@@ -5,8 +5,11 @@
 /// - **审批恒 `never`**（DSH Part 7.11 不变量 10）：[neverApprover] 自动
 ///   **拒绝**沙箱升级 → 子代理恒 `workspace-write`，不可升 `danger-full-access`；
 ///   被拒工具直接失败（§9.5 端侧安全不变量 7/10）。
-/// - **深度 ≤ 2**（DSH Part 11.10 不变量 6）：[SubagentDepthCounter] 嵌套计数
-///   （单线程 async 内嵌套安全；子代理在父 tool 调用内同步 await）。
+/// - **深度 ≤ 2**（DSH Part 11.10 不变量 6）：[SubagentDepthCounter] 深度是
+///   **Zone 作用域的委派链属性**（子代理回合整体跑在抬高后的 Zone 里）。
+///   旧实现是全局 push/pop 计数：fan-out 的**兄弟**后台子代理并发运行期间
+///   互相抬高同一计数器，第 3 个后台任务被误判为深度 3 而拒绝启动
+///   （时序依赖的潜在缺陷，A 期 UI 重构改变 kick 收尾时序后稳定复现）。
 ///
 /// 端侧成本控制（§10.6）：maxStepsPerTurn=5 / maxTokensPerRound=4096。
 library;
@@ -18,25 +21,37 @@ import '../loop/agent.dart' show ReactLoopAgent, TurnEndReasonKind;
 import '../loop/config.dart' show AgentConfig;
 import '../llm/adapter.dart' show LlmAdapter, ProviderKind;
 import '../sandbox.dart' show AgentSandboxApprover;
-import '../session/event.dart' show SessionEvent;
+import '../session/event.dart'
+    show SessionEvent, kEventStepStart, kEventToolCall, kEventTurnEnd;
 import '../session/session.dart' show SessionLog;
+import '../context_eng/token_estimate.dart' show estimateTextTokens;
 import '../tool_registry.dart' show ToolRegistry;
 import 'provider.dart';
 
-/// 嵌套委派深度计数器（单线程 async 内嵌套安全；子代理在父 tool 内 await，
-/// 故 push/pop 配对不会交错）。
+/// 嵌套委派深度计数器（DSH Part 11.10：**每条委派链**的深度，非并发计数）。
+///
+/// 深度存在 [Zone] 里：子代理的整个回合执行期被 [runChild] 包进
+/// `depth = 父深度 + 1` 的 Zone，它内部再委派时读到的就是自己的深度；
+/// **并发/后台的兄弟子代理各在各自 Zone，互不抬高**。工具执行发生在
+/// 回合的调用栈上，天然继承该 Zone——无需全局 push/pop。
 final class SubagentDepthCounter {
-  int _depth = 0;
-  int get depth => _depth;
-  /// 测试用直接设置（生产代码仅通过 push/pop 修改）。
+  static const Symbol _zoneKey = #subagentDepth;
+
+  /// Zone 外的回落深度（测试预置 / 顶层进程）。
+  int _base = 0;
+
+  /// 当前有效深度：Zone 内 = 本委派链深度；Zone 外 = [_base]。
+  int get depth => Zone.current[_zoneKey] as int? ?? _base;
+
+  /// 测试用直接设置（生产代码只通过 [runChild] 抬升）。
   void set depth(int value) {
     if (value < 0) throw ArgumentError('depth >= 0');
-    _depth = value;
+    _base = value;
   }
-  void push() => _depth++;
-  void pop() {
-    if (_depth > 0) _depth--;
-  }
+
+  /// 在「子代理自身回合」的执行期把深度抬升为 [childDepth]。
+  R runChild<R>(int childDepth, R Function() body) =>
+      runZoned(body, zoneValues: {_zoneKey: childDepth});
 }
 
 /// 端侧共享计数器（app 任一时刻仅一个活动 agent → 安全）。
@@ -52,8 +67,12 @@ const int kContinuableCapacity = 8;
 final class _Continuable {
   final ReactLoopAgent agent;
   final SessionLog session;
+
+  /// 本代理所属委派链深度（spawn 时 = 父深度 + 1）：send_message 续轮仍在
+  /// 该深度 Zone 里跑（续轮是**它自己**的回合，不是调用方的子辈）。
+  final int childDepth;
   bool running = false;
-  _Continuable(this.agent, this.session);
+  _Continuable(this.agent, this.session, {this.childDepth = 1});
 }
 
 /// 子代理审批 `never`：恒拒绝沙箱升级（子代理不可升 `danger-full-access`）。
@@ -117,26 +136,40 @@ final class InProcessSubagentProvider extends SubagentProvider {
   @override
   Future<SubagentRun> start(SubagentStartRequest request) async {
     // 深度校验（DSH Part 11.10 不变量 6：固定 maxDepth=2）。
-    if (kSubagentDepth.depth + 1 > kSubagentMaxDepth) {
-      throw SubagentMaxDepthExceeded(kSubagentDepth.depth + 1);
+    // 深度取**调用方 Zone**（父回合栈）；子代理回合随后整体跑在
+    // `callerDepth + 1` 的 Zone 里——并发兄弟互不抬高（见计数器文档）。
+    final callerDepth = kSubagentDepth.depth;
+    if (callerDepth + 1 > kSubagentMaxDepth) {
+      throw SubagentMaxDepthExceeded(callerDepth + 1);
     }
-    // push 在创建前；子代理 turn 结束（result 完成）时 pop。
-    kSubagentDepth.push();
     final id =
         'sub-${DateTime.now().millisecondsSinceEpoch}-${_kRandom.nextInt(10000)}';
     final session = _createSession(request);
-    final agent = _buildAgent(session);
-    _rememberContinuable(id, agent, session);
+    // C2 toolFilter：allowedTools 非空 → 过滤注册表（最小权限委派）。
+    // 白名单里的名字在父注册表不存在时静默忽略（模型可见清单即真相）。
+    ToolRegistry? filtered;
+    final allowed = request.allowedTools;
+    if (allowed != null && allowed.isNotEmpty) {
+      filtered = ToolRegistry();
+      final wanted = allowed.toSet();
+      for (final t in _registry.all) {
+        if (wanted.contains(t.name)) filtered.register(t);
+      }
+    }
+    final agent = _buildAgent(session, registry: filtered);
+    _rememberContinuable(id, agent, session, childDepth: callerDepth + 1);
     final entry = _continuable[id]!;
     entry.running = true;
     final completer = Completer<SubagentResult>();
-    unawaited(_runTurnWith(agent, request.task)
-        .then((r) => completer.complete(r))
-        .catchError((Object e, StackTrace st) =>
-            completer.complete(SubagentResult.fromError(e.toString())))
-        .then((_) {
-      kSubagentDepth.pop();
-      entry.running = false;
+    unawaited(kSubagentDepth.runChild(callerDepth + 1, () {
+      return _runTurnWith(agent, request.task,
+              onProgress: request.onProgress)
+          .then((r) => completer.complete(r))
+          .catchError((Object e, StackTrace st) =>
+              completer.complete(SubagentResult.fromError(e.toString())))
+          .then((_) {
+        entry.running = false;
+      });
     }));
     return SubagentRun(id, session, completer.future);
   }
@@ -164,28 +197,33 @@ final class InProcessSubagentProvider extends SubagentProvider {
         stopReason: 'error',
       );
     }
-    kSubagentDepth.push();
+    entry.running = true;
     try {
-      entry.running = true;
-      return await _runTurnWith(entry.agent, msg);
+      // 续轮 = 子代理自己的回合 → 跑在**它所属委派链**的深度 Zone 里。
+      return await kSubagentDepth.runChild(
+          entry.childDepth, () => _runTurnWith(entry.agent, msg));
     } finally {
       entry.running = false;
-      kSubagentDepth.pop();
     }
   }
 
-  void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s) {
+  void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s,
+      {int childDepth = 1}) {
     while (_continuable.length >= kContinuableCapacity) {
-      _continuable.remove(_continuable.keys.first);
+      final evicted = _continuable.remove(_continuable.keys.first);
+      // 回收即释放会话：broadcast StreamController 若不关，被回收子代理的
+      // 事件流与订阅引用会随 FIFO 逐出仍驻留。append 已有 isClosed 防护
+      // （log.dart），迟到的 append 只是静默不进流，不会炸。
+      evicted?.session.dispose();
     }
-    _continuable[id] = _Continuable(agent, s);
+    _continuable[id] = _Continuable(agent, s, childDepth: childDepth);
   }
 
-  ReactLoopAgent _buildAgent(SessionLog session) {
+  ReactLoopAgent _buildAgent(SessionLog session, {ToolRegistry? registry}) {
     return ReactLoopAgent(
       session: session,
       adapter: _adapter,
-      registry: _registry,
+      registry: registry ?? _registry,
       config: _subConfig,
       modelId: _modelId,
       providerKind: _providerKind,
@@ -199,7 +237,7 @@ final class InProcessSubagentProvider extends SubagentProvider {
     if (request.mode == 'fork') {
       final prefix = completedTurnPrefix(_parentSession);
       // 上下文窗口成本控制（§10.6）：fork seed 截断到 maxTokensPerRound
-      //（按字符粗略估算，中文 ~2char/token、英文 ~4char/token，取保守上限）。
+      //（A4 统一口径：estimateTextTokens，与主循环预算/压缩同一把尺）。
       final events = _truncatePrefix(prefix, _subConfig.maxTokensPerRound);
       return SessionLog.fromEvents(events);
     }
@@ -207,52 +245,78 @@ final class InProcessSubagentProvider extends SubagentProvider {
     return SessionLog.fromEvents(const []);
   }
 
-  /// 将前缀事件从末尾保留，总字符数不超过 [maxChars]（粗略 token 预算）。
+  /// 将前缀事件从末尾保留，总估算 token 不超过 [maxTokens]。
   /// 保留 tail（最近内容）以最大化上下文相关性。
   List<SessionEvent> _truncatePrefix(
       List<SessionEvent> prefix, int maxTokens) {
     if (prefix.isEmpty) return prefix;
-    // 粗略估算：中文 ~2char/token、英文 ~4char/token，取平均 ~3。
-    const double charsPerToken = 3.0;
-    final maxChars = (maxTokens * charsPerToken).round();
-    // 从末尾向前累加，找到最大后缀（保持 seq 有序）。
-    var keptChars = 0;
+    var keptTokens = 0;
     int startIndex = prefix.length;
     for (var i = prefix.length - 1; i >= 0; i--) {
-      final count = _eventCharCount(prefix[i].data);
-      if (keptChars + count > maxChars) break;
-      keptChars += count;
+      final count = _eventTokens(prefix[i].data);
+      if (keptTokens + count > maxTokens) break;
+      keptTokens += count;
       startIndex = i;
     }
     return prefix.sublist(startIndex);
   }
 
-  int _eventCharCount(Map<String, dynamic> data) {
+  /// 单个事件载荷的估算 token（A4 统一口径）。
+  int _eventTokens(Map<String, dynamic> data) {
     String s = '';
     data.forEach((k, v) => s += '$k:$v ');
-    return s.length;
+    return estimateTextTokens(s);
   }
 
-  Future<SubagentResult> _runTurnWith(ReactLoopAgent agent, String task) async {
-    final turnReason = await agent.kick(task);
-    // 映射 turn 结束原因 → SubagentResult（§10.5）。
-    bool isError;
-    switch (turnReason.kind) {
-      case TurnEndReasonKind.completed:
-        isError = false;
-        break;
-      case TurnEndReasonKind.error:
-      case TurnEndReasonKind.interrupted:
-      case TurnEndReasonKind.maxSteps:
-        isError = true;
-        break;
-      default:
-        isError = false;
+  Future<SubagentResult> _runTurnWith(ReactLoopAgent agent, String task,
+      {void Function(String line)? onProgress}) async {
+    // C2 进度流：订阅子代理事件流的里程碑（步开始/工具调用/收尾），
+    // 经 [onProgress] 转发（UI 展示用，不进父模型上下文）。subscription
+    // 在 kick 完成后取消——进度只覆盖本次运行。
+    StreamSubscription<SessionEvent>? progressSub;
+    if (onProgress != null) {
+      var stepNo = 0;
+      progressSub = agent.session.events.listen((e) {
+        switch (e.type) {
+          case kEventStepStart:
+            stepNo = (e.data['step'] as num?)?.toInt() ?? stepNo + 1;
+            onProgress('步 $stepNo 开始');
+            break;
+          case kEventToolCall:
+            onProgress(
+                '步 $stepNo 调用 ${e.data['name'] ?? '?'}');
+            break;
+          case kEventTurnEnd:
+            onProgress('结束（${e.data['reason'] ?? '?'}）');
+            break;
+          default:
+            break;
+        }
+      });
     }
-    return SubagentResult(
-      output: agent.lastAssistantContent,
-      isError: isError,
-      stopReason: turnReason.kind.name,
-    );
+    try {
+      final turnReason = await agent.kick(task);
+      // 映射 turn 结束原因 → SubagentResult（§10.5）。
+      bool isError;
+      // 枚举恰四值、分支全覆盖 → 不写 default：将来新增档位由分析器强制
+      // 在此表态，不会静默按「非失败」放行。
+      switch (turnReason.kind) {
+        case TurnEndReasonKind.completed:
+          isError = false;
+          break;
+        case TurnEndReasonKind.error:
+        case TurnEndReasonKind.interrupted:
+        case TurnEndReasonKind.maxSteps:
+          isError = true;
+          break;
+      }
+      return SubagentResult(
+        output: agent.lastAssistantContent,
+        isError: isError,
+        stopReason: turnReason.kind.name,
+      );
+    } finally {
+      await progressSub?.cancel();
+    }
   }
 }

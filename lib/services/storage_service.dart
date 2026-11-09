@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
@@ -10,6 +11,19 @@ class StorageService {
   StorageService._internal();
 
   static Database? _db;
+
+  // ----- 消息变更广播（UI 重构 A4）-----
+  // 取代 messagesProvider 的 500ms 全表轮询：消息写路径完成后推送会话 id，
+  // UI 去抖重查。低频兜底轮询仍在 provider 侧（防异常路径漏事件）。
+  final StreamController<String> _changesController =
+      StreamController<String>.broadcast();
+
+  /// 某会话消息集发生变化的事件流（会话 id）。
+  Stream<String> get messageChanges => _changesController.stream;
+
+  void _notifyChanged(String conversationId) {
+    if (!_changesController.isClosed) _changesController.add(conversationId);
+  }
 
   Future<Database> get database async {
     if (_db != null) return _db!;
@@ -252,7 +266,8 @@ class StorageService {
       'messages',
       where: 'conversationId = ?',
       whereArgs: [conversationId],
-      orderBy: 'createdAt DESC',
+      // 次级排序键（C-Q3）：DESC 时 rowid 同步 DESC，反转后 = 同毫秒按写入序。
+      orderBy: 'createdAt DESC, rowid DESC',
       limit: limit,
     );
     return rows.map(_mapMessageRow).toList().reversed.toList();
@@ -290,6 +305,7 @@ class StorageService {
           msg.toolData == null ? null : jsonEncode(msg.toolData!.toMap()),
       'noticeCode': msg.noticeCode,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+    _notifyChanged(msg.conversationId);
   }
 
   Future<List<ChatMessage>> getAllMessages(String conversationId) async {
@@ -298,9 +314,45 @@ class StorageService {
       'messages',
       where: 'conversationId = ?',
       whereArgs: [conversationId],
-      orderBy: 'createdAt ASC',
+      // 次级排序键（UI 重构 C-Q3）：同毫秒消息按写入序（rowid）稳定排列，
+      // 不再依赖 SQLite 返回顺序的巧合——同毫秒步骤乱跳的根因之一。
+      orderBy: 'createdAt ASC, rowid ASC',
     );
     return rows.map(_mapMessageRow).toList();
+  }
+
+  /// 回合中断残留清理（C-Q2）：上一回合崩溃/进程被杀后，SQLite 里会残留
+  /// 永远停在「执行中」的 🔧 活动行——下一回合的 done/failed 对位扫描会
+  /// **误抓这些孤儿行**（工具结果挂错卡片的根因之一），回看时也一直显示
+  /// 「执行中」。在智能体回合启动、写入本回合任何行之前调用：
+  /// 全部改为终态 failed（摘要「回合中断，结果未知」）。
+  /// （isStreaming 残留无需处理：saveMessage 每次插入前已复位同会话残留。）
+  /// 返回清理行数。
+  Future<int> reapInterrupted(String conversationId) async {
+    var n = 0;
+    final msgs = await getAllMessages(conversationId);
+    for (final m in msgs) {
+      final staleExec = m.kind == MessageKind.toolActivity &&
+          (m.toolData?.phase == 'executing' ||
+              (m.toolData == null && m.content.startsWith('🔧 正在调用')));
+      if (!staleExec) continue;
+      final name = m.toolData?.name ??
+          m.content
+              .replaceFirst('🔧 正在调用', '')
+              .replaceAll(RegExp(r'[:：…\s]+$'), '')
+              .trim();
+      await saveMessage(m.copyWith(
+        content: '🔧 $name ⚠️（回合中断，结果未知）',
+        toolData: ToolActivityData(
+          phase: 'failed',
+          name: name,
+          summary: '回合中断，结果未知',
+          isError: true,
+        ),
+      ));
+      n++;
+    }
+    return n;
   }
 
   /// 各会话最后一条消息内容（P2 抽屉摘要行；一次 SQL 批量取，免 N 次查询）。
@@ -320,17 +372,35 @@ class StorageService {
   Future<void> clearConversation(String conversationId) async {
     final db = await database;
     await db.delete('messages', where: 'conversationId = ?', whereArgs: [conversationId]);
+    _notifyChanged(conversationId);
   }
 
   /// 按 id 批量删除消息（手动压缩清理旧工具轮轨迹信封用；可见消息不受影响）。
   Future<void> deleteMessages(List<String> ids) async {
     if (ids.isEmpty) return;
     final db = await database;
+    // 先取受影响会话（删除后就查不到了），供变更广播精确到会话粒度。
+    List<String> convIds = const [];
+    try {
+      final rows = await db.query(
+        'messages',
+        columns: ['DISTINCT conversationId'],
+        where: 'id IN (${List.filled(ids.length, '?').join(',')})',
+        whereArgs: ids,
+      );
+      convIds = [
+        for (final r in rows)
+          if (r['conversationId'] is String) r['conversationId'] as String,
+      ];
+    } catch (_) {}
     await db.delete(
       'messages',
       where: 'id IN (${List.filled(ids.length, '?').join(',')})',
       whereArgs: ids,
     );
+    for (final cid in convIds) {
+      _notifyChanged(cid);
+    }
   }
 
   // ----- Storage stats -----

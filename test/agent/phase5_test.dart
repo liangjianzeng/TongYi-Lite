@@ -12,37 +12,18 @@ import 'package:tongyi_lite/agent/skills/skill.dart'
     show Skill, kRankUser, kRankBuiltin, loadBuiltinSkills;
 import 'package:tongyi_lite/agent/tool_definition.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
-
-/// 覆写 [LlmAdapter.generate] 的桩。
-final class _FakeAdapter extends LlmAdapter {
-  final List<LlmResult> _outcomes;
-  int _calls;
-  _FakeAdapter(this._outcomes) : _calls = 0;
-
-  @override
-  Future<LlmResult> generate(
-    GenerateOptions options, {
-    StreamController<String>? onToken,
-    StreamController<String>? onThinking,
-    Completer<void>? cancel,
-  }) async {
-    final idx = _calls < _outcomes.length ? _calls : _outcomes.length - 1;
-    final result = _outcomes[idx];
-    _calls++;
-    return result;
-  }
-
-  int get calls => _calls;
-}
+import '../helpers/fake_llm.dart';
 
 /// 构建 ReactLoopAgent。
+///
+/// 空脚本桩是**故意的**：这些用例只做构造期注入/否决断言，generate 一旦
+/// 被调到即脚本耗尽 fail-loud——回合形状与用例意图漂移会立刻暴露。
 ReactLoopAgent _buildAgent({
   AgentHooks? hooks,
   SkillProvider? skills,
   String? agentsMd,
-  LlmResult? result,
 }) {
-  final adapter = _FakeAdapter(result != null ? [result] : const []);
+  final adapter = FakeLlmAdapter(const []);
   return ReactLoopAgent(
     session: SessionLog.fromEvents(const []),
     adapter: adapter,
