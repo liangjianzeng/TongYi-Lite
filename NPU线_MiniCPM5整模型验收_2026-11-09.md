@@ -103,3 +103,11 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 | 设备端 | `/data/local/tmp/npu_m1`（devchain.sh + d1.sh + 各层 L*_out.raw + head_out.raw） |
 | torch refs | `/home/liang/mcp5_full_logits_ref.npy`、`mcp5_L{0..41,998}_ref.npy` |
 | 判决过程台账 | `E:/MyLLM_exp/_repro/rb/W4_verdict.md` C37-9y 补2–补5 |
+
+## 六、日常自测入口（2026-11-09 固化）
+
+一条命令复跑整模型加载+判分：`bash tool/npu_selftest.sh`（740 USB 默认；换机 `DEV=<序列号>` 传参）。
+前提：设备 /data/local/tmp/npu_m1 资产齐（缺则从 E:/MyLLM_exp/serve 重 push）、WSL Ubuntu-22.04 的 /home/liang 有 HF 参考 npy。
+实测：44 层+norm+transpose+head 全链 ~1 分钟，判分 cos 0.9999 / TOP1_MATCH True 复现验收。
+教训（本档根因系列的延续）：当年 devchain 生成器把 norm→head 显式 transpose 写丢过，
+"分两段跑"才是真配方——selftest 脚本已把该步显式化并加布局铁则注释，勿回退成单段。
