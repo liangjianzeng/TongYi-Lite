@@ -6,7 +6,11 @@ enum MessageRole { user, assistant }
 /// （🔧/💭/🔔…）升级为一等类型。**新消息一律写类型**；content 里的前缀串
 /// 仅作旧版本渲染兼容保留。历史脏数据无 kind 列时由 [_inferLegacyKind]
 /// 按前缀推断，推断不出 = text。
-enum MessageKind { text, toolActivity, thinking, notice, error, question }
+/// - stepText（UI 重构 A2/A3）：智能体回合**中间步**的可见文本快照
+///  （每步推进时定格成独立行，不再被下一步流式覆写）。仅 UI 回看：
+///  非 text 类型天然被模型上下文过滤排除（ChatNotifier 侧），不进模型
+///  ——模型侧的中间步文本本就由 SessionLog 事件投影，SQLite 再入会重复。
+enum MessageKind { text, toolActivity, thinking, notice, error, question, stepText }
 
 MessageKind? _messageKindFromName(Object? name) {
   for (final k in MessageKind.values) {

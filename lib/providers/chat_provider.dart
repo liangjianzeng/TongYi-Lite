@@ -65,12 +65,18 @@ import '../agent/session/store.dart'
         planStorageCompaction;
 import '../agent/session/event.dart'
     show
+        kEventAgentThinking,
+        kEventAssistantAttempt,
         kEventAssistantMessage,
+        kEventStepEnd,
         kEventCompactionSummary,
         kEventImportCursor,
+        kEventStepStart,
         kEventToolCall,
         kEventToolResult,
-        kEventUserMessage;
+        kEventTurnEnd,
+        kEventUserMessage,
+        SessionEvent;
 import '../agent/metrics/turn_metrics.dart'
     show TurnMetrics, TurnMetricsStore;
 import '../agent/session/trace_export.dart' as trace_export;
@@ -89,7 +95,11 @@ import '../services/storage_service.dart';
 import 'agent_approval.dart'
     show sandboxApproverProvider, toolPreApproverProvider;
 import 'agent_state_provider.dart'
-    show agentUiStateProvider, UiTimelineThinking, UiTimelineTool;
+    show
+        agentUiStateProvider,
+        UiTimelineStepText,
+        UiTimelineThinking,
+        UiTimelineTool;
 import 'shared_providers.dart'
     show inferenceServiceProvider, openAiServiceProvider;
 import 'settings_provider.dart' show settingsProvider;
@@ -258,9 +268,30 @@ final messagesProvider = StreamProvider.autoDispose
   // Yield the current messages immediately.
   yield await storage.getAllMessages(convId);
 
-  // Then poll for changes every 500ms to pick up new messages.
-  while (true) {
-    await Future.delayed(const Duration(milliseconds: 500));
+  // A4（UI 重构）：写路径变更事件驱动重查，取代旧「每 500ms 全表轮询」。
+  // - 去抖 120ms：流式期 150ms 节流写连发 → 合并成一次重查；
+  // - 2s 兜底心跳**只作保险丝**（广播订阅建立前的事件会被丢弃、异常路径
+  //   不通知），不再是刷新来源——事件到 → ~120ms 内更新；漏事件 → ≤2s。
+  final trigger = StreamController<void>();
+  Timer? deb;
+  void schedule() {
+    deb?.cancel();
+    deb = Timer(const Duration(milliseconds: 120), () {
+      if (!trigger.isClosed) trigger.add(null);
+    });
+  }
+
+  final sub =
+      storage.messageChanges.where((id) => id == convId).listen((_) => schedule());
+  final heartbeat =
+      Timer.periodic(const Duration(seconds: 2), (_) => schedule());
+  ref.onDispose(() {
+    deb?.cancel();
+    heartbeat.cancel();
+    sub.cancel();
+    trigger.close();
+  });
+  await for (final _ in trigger.stream) {
     yield await storage.getAllMessages(convId);
   }
 });
@@ -1630,9 +1661,17 @@ class ChatNotifier extends StateNotifier<bool> {
       final cursorMs = persistedLog.lastImportCursorMs;
       final allMessages =
           await _storage.getMessages(conversationId, limit: 200);
+      // 增量必须排除 UI 活动行（🔧/💭/notice/stepText…，kind≠text）：
+      // C-Q4 后 🔧 行带真实时间戳（> 游标 T），旧版靠「合成行时间戳 ≤ T」
+      // 的巧合把它们挡在游标外，现在这层巧合没了；A2/A3 的步答块行同理。
+      // 🔧TRACE 信封是唯一放行的非 text 行（还原成 tool 事件，WP1a）。
       final delta = [
         for (final m in allMessages)
-          if (m.timestamp.millisecondsSinceEpoch > cursorMs) m,
+          if (m.timestamp.millisecondsSinceEpoch > cursorMs &&
+              !(m.role == MessageRole.assistant &&
+                  m.kind != MessageKind.text &&
+                  !m.content.startsWith(kAgentTraceMessagePrefix)))
+            m,
       ];
       if (delta.isNotEmpty) {
         _sessionStore.importMessagesInto(
@@ -1697,11 +1736,18 @@ class ChatNotifier extends StateNotifier<bool> {
         subagentProvider,
         onBackgroundDone: (notice) {
           turn.agent?.injectNotice(notice);
+          // Q1/B4（UI 重构）：kind=notice——此前 kind=text 会被
+          // groupMessages 当"回答"占 pendingAnswer 槽位（后台子代理完成
+          // 通知晚于最终回答落库时，气泡直接被通知顶掉）；且 text 类
+          // 消息会经 SQLite 增量导入进模型上下文（注释声称不入但实际入了，
+          // 此处一并修正）。
           unawaited(_storage.saveMessage(ChatMessage(
             id: 'bgsub_${DateTime.now().millisecondsSinceEpoch}',
             conversationId: conversationId,
             role: MessageRole.assistant,
             content: '🔔 $notice',
+            kind: MessageKind.notice,
+            noticeCode: 'subagentNotice',
           )));
         },
         // C2 前台子代理进度行：UI 状态行展示里程碑（不进父模型上下文）。
@@ -1759,6 +1805,47 @@ class ChatNotifier extends StateNotifier<bool> {
       conversationId: conversationId,
       storage: _storage,
     );
+    // C-Q2：清掉上一回合崩溃/被杀残留的孤儿「执行中」工具行——必须在
+    // 本回合写入任何行之前做，且此后 done/failed 对位不再全表扫，
+    // 双保险防止工具结果挂错卡片。
+    try {
+      await _storage.reapInterrupted(conversationId);
+    } catch (_) {}
+    // A1 崩溃恢复：💭 思考存档行过去只在回合**正常收尾**时写，被杀/崩溃
+    // 回合的思考只活在 JSONL（agent/thinking 事件）里，UI 永远看不到
+    // （「执行过程丢失」症状之一）。开新回合前，把最后一条 turn/end 之后
+    // 的思考事件补写成 💭 行：内容去重、时间戳取事件真实时刻——恰好落回
+    // 被杀回合的区间，排序自然正确。
+    try {
+      final lastEndIdx = sessionLog.rawEvents
+          .lastIndexWhere((e) => e.type == kEventTurnEnd);
+      final stranded = sessionLog.rawEvents
+          .skip(lastEndIdx + 1)
+          .where((e) => e.type == kEventAgentThinking)
+          .toList();
+      if (stranded.isNotEmpty) {
+        final have = <String>{
+          for (final m in await _storage.getMessages(conversationId,
+              limit: 200))
+            if (m.kind == MessageKind.thinking) m.content,
+        };
+        for (final e in stranded) {
+          final text = (e.data['content'] as String?)?.trim() ?? '';
+          if (text.isEmpty) continue;
+          final content = '💭 $text';
+          if (!have.add(content)) continue;
+          await _storage.saveMessage(ChatMessage(
+            id: 'thinkrec_${e.seq}',
+            conversationId: conversationId,
+            role: MessageRole.assistant,
+            content: content,
+            isStreaming: false,
+            timestamp: DateTime.fromMillisecondsSinceEpoch(e.timeMs),
+            kind: MessageKind.thinking,
+          ));
+        }
+      }
+    } catch (_) {}
     final assistantId = (DateTime.now().millisecondsSinceEpoch + 1).toString();
     var assistantMsg = ChatMessage(
       id: assistantId,
@@ -1772,8 +1859,14 @@ class ChatNotifier extends StateNotifier<bool> {
     // 消费替换式 visible text → 周期持久化（节流）。
     StreamSubscription<String>? sub;
     var _lastSave = DateTime.now();
+    // 最新可见文本（**不节流**）：适配器推的是本次 LLM 调用的累积文本，
+    // 每步开始重新计数。步答块快照（下方 stepSub）取它——绕开 150ms
+    // 节流可能丢尾段的覆写行，拿到的是该步 LLM 调用的完整文本。
+    var latestVisible = '';
     sub = tokenController.stream.listen((visible) async {
-      if (visible.isEmpty || visible.length == assistantMsg.content.length) {
+      if (visible.isEmpty) return;
+      latestVisible = visible;
+      if (visible.length == assistantMsg.content.length) {
         return;
       }
       final now = DateTime.now();
@@ -1784,6 +1877,39 @@ class ChatNotifier extends StateNotifier<bool> {
         await _storage.saveMessage(next).catchError((_) {});
         _lastSave = now;
       }
+    });
+
+    // ---- A2/A3 步答块：中间步文本定格成独立行 ----
+    // 回答行是单行覆写的（上面的节流 listener）：第 N 步的可见文本会被
+    // 第 N+1 步覆写——用户看到「中间步全丢、只留最后一步」。每次
+    // step/start 推进（第 s 步开始 = 第 s-1 步文本已完整）把 latestVisible
+    // 定格成 kind=stepText 独立行；最终步没有"下一步"来触发定格，其文本
+    // 天然留在回答行 = 语义正确的最终回答。step/start 幂等（行 id 去重）；
+    // 纯工具步无新文本（与上次快照相同）跳过，不产空块/重块。
+    StreamSubscription<SessionEvent>? stepSub;
+    final stepRowIds = <String>{};
+    var lastStepSnap = '';
+    stepSub = sessionLog.events.listen((e) async {
+      if (e.type != kEventStepStart) return;
+      final s = (e.data['step'] as num?)?.toInt() ?? 0;
+      if (s < 2) return; // 第 1 步没有"上一步"可定格
+      final text = latestVisible.trim();
+      if (text.isEmpty || text == lastStepSnap) return;
+      lastStepSnap = text;
+      final id = '$assistantId-s${s - 1}';
+      if (!stepRowIds.add(id)) return;
+      // live 渲染走 UI 状态（时间线标记定位），DB 行管历史回看。
+      agentUi.appendStepText(conversationId, text);
+      try {
+        await _storage.saveMessage(ChatMessage(
+          id: id,
+          conversationId: conversationId,
+          role: MessageRole.assistant,
+          content: text,
+          isStreaming: false,
+          kind: MessageKind.stepText,
+        ));
+      } catch (_) {}
     });
 
     // ---- Phase 5：hooks / skills / AGENTS.md ----
@@ -2037,6 +2163,7 @@ class ChatNotifier extends StateNotifier<bool> {
       _ref.read(agentUiStateProvider.notifier).detach(conversationId);
       agentUi.setToolGen(conversationId, chars: 0); // WP5：清工具参数生成提示
       sub?.cancel();
+      stepSub?.cancel(); // A2/A3：步答块定格监听
       await thinkingSub.cancel();
       await statusSub.cancel();
       tokenController.close();
@@ -2146,8 +2273,22 @@ class ChatNotifier extends StateNotifier<bool> {
     // 结束时各步思考已全部归档到 UI 状态（thinkingHistory），逐块存为过程
     // 痕迹消息——此前思考只存在于 live 状态，回合完成后即消失、无法回看。
     // timestamp 取回答前偏移，保证排序为 [工具活动] → [思考存档] → [回答]。
-    final finishedThinking = List<String>.from(
-        agentUi.state[conversationId]?.thinkingHistory ?? const []);
+    // A1：思考存档优先取**事件日志**（agent/thinking，每步结束由主循环
+    // 定格一条，随 JSONL 持久、崩溃可恢复）；旧会话/降级路径没有该事件
+    // 时回退 live UI 状态的归档。两口径都按步序排列。
+    final execTurn = agent.phaseState.turn;
+    final thinkFromLog = <String>[];
+    for (final e in sessionLog.rawEvents) {
+      if (e.type != kEventAgentThinking) continue;
+      if ((e.data['turn'] as num?)?.toInt() != execTurn) continue;
+      final c = (e.data['content'] as String?)?.trim() ?? '';
+      if (c.isEmpty) continue;
+      thinkFromLog.add(c);
+    }
+    final finishedThinking = thinkFromLog.isNotEmpty
+        ? thinkFromLog
+        : List<String>.from(
+            agentUi.state[conversationId]?.thinkingHistory ?? const []);
     for (var i = 0; i < finishedThinking.length; i++) {
       final block = finishedThinking[i].trim();
       if (block.isEmpty) continue;
@@ -2170,18 +2311,86 @@ class ChatNotifier extends StateNotifier<bool> {
       final uiState = agentUi.state[conversationId];
       final trace = <TurnUiItem>[];
       final toolIds = session.writtenIds;
-      for (final marker in uiState?.timeline ?? const []) {
-        switch (marker) {
-          case UiTimelineThinking(:final index):
-            if (index >= 0 && index < finishedThinking.length) {
-              final block = finishedThinking[index].trim();
-              if (block.isNotEmpty) trace.add(TurnUiItem.think(block));
+      // A2/A3/B3：历史信封按**事件序**重建（取代 UI timeline）——
+      // agent/thinking、tool/call 都带 turn/step，按日志 seq 走一遍即真实
+      // 交错顺序。步答块行插在其所属步的首个工具之前（同一次 LLM 调用
+      // 先出文本再出工具块），纯工具步无文本块、无工具的步在 step/end 前
+      // 补位。assistant/attempt（log-only 失败尝试）按发生位置落 error 项
+      // ——此前回合级只有一条 lastError，中途失败不可见（B3）。
+      final stepRowsByStep = <int, String>{};
+      for (final id in stepRowIds) {
+        final m = RegExp(r'-s(\d+)$').firstMatch(id);
+        final s = m != null ? int.tryParse(m.group(1)!) : null;
+        if (s != null) stepRowsByStep[s] = id;
+      }
+      var toolIdx = 0;
+      final emittedSteps = <int>{};
+      var eventSourced = false;
+      for (final e in sessionLog.rawEvents) {
+        if ((e.data['turn'] as num?)?.toInt() != execTurn) continue;
+        final s = (e.data['step'] as num?)?.toInt() ?? 0;
+        switch (e.type) {
+          case kEventAgentThinking:
+            final c = (e.data['content'] as String?)?.trim() ?? '';
+            if (c.isEmpty) break;
+            trace.add(TurnUiItem.think(c));
+            eventSourced = true;
+            break;
+          case kEventToolCall:
+            final rowId = stepRowsByStep[s];
+            if (rowId != null && emittedSteps.add(s)) {
+              trace.add(TurnUiItem.step(rowId));
             }
-          case UiTimelineTool(:final index):
-            // timeline 的工具序号与落库 writtenIds 同序（都按 tool/call 顺序）。
-            if (index >= 0 && index < toolIds.length) {
-              trace.add(TurnUiItem.tool(toolIds[index]));
+            if (toolIdx < toolIds.length) {
+              trace.add(TurnUiItem.tool(toolIds[toolIdx]));
+              toolIdx++;
             }
+            eventSourced = true;
+            break;
+          case kEventStepEnd:
+            final rowId = stepRowsByStep[s];
+            if (rowId != null && emittedSteps.add(s)) {
+              trace.add(TurnUiItem.step(rowId));
+            }
+            break;
+          case kEventAssistantAttempt:
+            final code = e.data['code'] as String?;
+            final msg = (e.data['content'] as String?)?.trim() ?? '';
+            trace.add(TurnUiItem.error(
+                '失败尝试（${code ?? '?'}）：${msg.isEmpty ? '见推理日志' : msg}'));
+            eventSourced = true;
+            break;
+        }
+      }
+      if (!eventSourced) {
+        // 回退（A1 事件不存在：旧会话/异常窗口）→ UI timeline 口径。
+        for (final marker in uiState?.timeline ?? const []) {
+          switch (marker) {
+            case UiTimelineThinking(:final index):
+              if (index >= 0 && index < finishedThinking.length) {
+                final block = finishedThinking[index].trim();
+                if (block.isNotEmpty) trace.add(TurnUiItem.think(block));
+              }
+            case UiTimelineTool(:final index):
+              // timeline 的工具序号与落库 writtenIds 同序（都按 tool/call 顺序）。
+              if (index >= 0 && index < toolIds.length) {
+                trace.add(TurnUiItem.tool(toolIds[index]));
+              }
+            case UiTimelineStepText(:final index):
+              final texts = uiState?.stepTexts ?? const <String>[];
+              if (index >= 0 && index < texts.length &&
+                  stepRowsByStep.containsKey(index + 1)) {
+                trace.add(TurnUiItem.step(stepRowsByStep[index + 1]!));
+              }
+          }
+        }
+      } else {
+        // 事件流里没轮到补位的步答块（边界丢事件）→ 按步序补在末尾，
+        // 历史回看绝不静默丢步骤文本。
+        for (final entry in stepRowsByStep.entries) {
+          if (emittedSteps.contains(entry.key)) continue;
+          emittedSteps.add(entry.key);
+          trace.add(TurnUiItem.step(entry.value));
         }
       }
       // timeline 之外的兜底：错误行（turn error reason）。
@@ -2214,6 +2423,12 @@ class ChatNotifier extends StateNotifier<bool> {
         content: traceContent,
         timestamp:
             assistantMsg.timestamp.subtract(const Duration(milliseconds: 1)),
+        // Q1（UI 重构）：kind=notice——此前缺省推断为 text，groupMessages
+        // 会把它当"回答"占 pendingAnswer 槽位（失败回合无最终回答时，
+        // 一坨信封 JSON 直接渲染进气泡 = 「漏原始字符」症状之一）。
+        // 模型上下文导入不受影响：导入/去重均按 content 前缀识别信封。
+        kind: MessageKind.notice,
+        noticeCode: 'agentTrace',
       ));
     }
     assistantMsg = assistantMsg.copyWith(
@@ -2997,6 +3212,13 @@ class _AgentActivitySession {
   /// 信封的 tool 项引用它，历史回合按 id 取消息渲染。
   final List<String> writtenIds = [];
 
+  /// 执行中对位队列（C-Q2）：executing 落库 id 按 FIFO 入队，done/failed
+  /// 按同序出队更新。主循环契约：同一步的 tool/call 先全部触发 executing，
+  /// 随后按**同一顺序**触发 done/failed——FIFO 即精确对位。
+  /// 旧实现是全表扫首个 executing 行：上一回合崩溃残留的孤儿 executing 行
+  /// 会被误抓（工具结果挂错卡片），本回合多把"伞"也互相对错位。
+  final List<String> _executingQueue = [];
+
   var _seq = 0;
 
   _AgentActivitySession({
@@ -3010,6 +3232,10 @@ class _AgentActivitySession {
   Future<void> update(ToolActivity activity) async {
     if (activity.status == 'executing') {
       final n = _seq++;
+      // C-Q4：时间戳取真实时刻。旧实现 +1000+n 的"未来戳"会把晚到的
+      // 工具行推到最终回答（T）之后——下一回合用户消息之前，消息区
+      // 步骤因此跨行乱跳；轮次结束后的归属排序由 turnTrace 信封按真实
+      // 交错序决定，散行时间戳只需如实落在回合内。
       final now = DateTime.now().millisecondsSinceEpoch;
       final msg = ChatMessage(
         id: 'agent_tool_${now}_${n}',
@@ -3017,44 +3243,42 @@ class _AgentActivitySession {
         role: MessageRole.assistant,
         content: '🔧 正在调用 ${activity.name}…',
         isStreaming: false,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(now + 1000 + n),
+        timestamp: DateTime.fromMillisecondsSinceEpoch(now),
         kind: MessageKind.toolActivity,
         toolData: ToolActivityData(
             phase: 'executing', name: activity.name),
       );
       writtenIds.add(msg.id);
+      _executingQueue.add(msg.id);
       await storage.saveMessage(msg);
       return;
     }
-    // done/failed：新主循环固定顺序回调（同一步 tool/call 先全部触发
-    // executing，随后按同一顺序触发 done/failed）→ 对位到最早"执行中"
-    // 的 🔧 消息。
+    // done/failed：按 FIFO 对位出队（契约见 _executingQueue）。队列空 =
+    // 本回合没有对应的 executing 行（理论不可达；绝不回退全表扫——那会
+    // 抓到上一回合崩溃残留的孤儿行）。
+    if (_executingQueue.isEmpty) return;
+    final targetId = _executingQueue.removeAt(0);
+    final mark = activity.isFailed ? '⚠️' : '✓';
+    // export_file 的摘要必须保留完整 content:// URI——历史回合工具卡
+    // 的「打开」按钮靠它（截断到 300 字保路径）。
+    final summary = activity.name == 'export_file'
+        ? _summarizeToolResult(activity.result, max: 300)
+        : _summarizeToolResult(activity.result);
     final msgs = await storage.getAllMessages(conversationId);
     for (final m in msgs) {
-      if (m.role == MessageRole.assistant &&
-          m.kind == MessageKind.toolActivity &&
-          // 新行看 toolData.phase；旧版本残留行（toolData 缺失）回退前缀。
-          (m.toolData?.phase == 'executing' ||
-              (m.toolData == null && m.content.startsWith('🔧 正在调用')))) {
-        final mark = activity.isFailed ? '⚠️' : '✓';
-        // export_file 的摘要必须保留完整 content:// URI——历史回合工具卡
-        // 的「打开」按钮靠它（截断到 300 字保路径）。
-        final summary = activity.name == 'export_file'
-            ? _summarizeToolResult(activity.result, max: 300)
-            : _summarizeToolResult(activity.result);
-        await storage.saveMessage(m.copyWith(
-          content: '🔧 ${activity.name} $mark$summary',
-          isStreaming: false,
-          toolData: ToolActivityData(
-            phase: activity.isFailed ? 'failed' : 'done',
-            name: activity.name,
-            summary: summary,
-            resultText: activity.result,
-            isError: activity.isFailed,
-          ),
-        ));
-        return;
-      }
+      if (m.id != targetId) continue;
+      await storage.saveMessage(m.copyWith(
+        content: '🔧 ${activity.name} $mark$summary',
+        isStreaming: false,
+        toolData: ToolActivityData(
+          phase: activity.isFailed ? 'failed' : 'done',
+          name: activity.name,
+          summary: summary,
+          resultText: activity.result,
+          isError: activity.isFailed,
+        ),
+      ));
+      return;
     }
   }
 }

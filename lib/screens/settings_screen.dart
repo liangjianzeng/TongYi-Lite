@@ -2125,9 +2125,6 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
         color = Colors.red;
         label = '错误';
         break;
-      default:
-        color = Colors.grey;
-        label = '未知';
     }
 
     return Container(
@@ -2676,8 +2673,10 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
         ],
       ),
     );
-    if (saved != true) return;
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏）。
     final raw = rawCtrl.text;
+    rawCtrl.dispose();
+    if (saved != true) return;
     // 技能名：`name:` 行优先；缺省从描述派生（去尾标点取前 12 字再 sanitize）。
     final nameMatch =
         RegExp(r'^\s*name\s*:\s*(.+)$', multiLine: true).firstMatch(raw);
@@ -2804,14 +2803,21 @@ class _SkillsManagementBodyState extends State<SkillsManagementBody> {
         ],
       ),
     );
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏三个）。
+    final desc = descCtrl.text;
+    final when = whenCtrl.text;
+    final body = bodyCtrl.text;
+    descCtrl.dispose();
+    whenCtrl.dispose();
+    bodyCtrl.dispose();
     if (saved != true) return;
     try {
       await writeUserSkill(
         name: existing.name,
         previousName: existing.name,
-        description: descCtrl.text,
-        whenToUse: whenCtrl.text,
-        body: bodyCtrl.text,
+        description: desc,
+        whenToUse: when,
+        body: body,
       );
     } on ArgumentError catch (e) {
       if (!mounted) return;
@@ -3049,9 +3055,12 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
         ],
       ),
     );
-    if (ok != true) return;
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏两个）。
     final name = nameCtrl.text.trim();
     final url = urlCtrl.text.trim();
+    nameCtrl.dispose();
+    urlCtrl.dispose();
+    if (ok != true) return;
     if (name.isEmpty || url.isEmpty) return;
     await notifier.upsertMcpServer(McpServerConfig(
       id: 'mcp_${DateTime.now().millisecondsSinceEpoch}',
@@ -3937,12 +3946,15 @@ class AgentSettingsBodyState extends ConsumerState<AgentSettingsBody> {
         ],
       ),
     );
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏）。
+    final content = controller.text;
+    controller.dispose();
     if (saved != true) return;
     try {
-      if (controller.text.trim().isEmpty) {
+      if (content.trim().isEmpty) {
         if (file.existsSync()) file.deleteSync();
       } else {
-        file.writeAsStringSync(controller.text);
+        file.writeAsStringSync(content);
       }
     } catch (_) {/* 只读分区等情况：忽略，状态刷新会如实反映 */}
     _loadAgentsMdInfo();
@@ -5007,7 +5019,7 @@ class CapabilitySettingsBodyState
   }
 
   Future<void> _editAsrHotwords(SettingsNotifier notifier) async {
-    final ctrl = TextEditingController(text: settings0HotwordCustom(notifier));
+    final ctrl = TextEditingController(text: settings0HotwordCustom());
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -5037,8 +5049,9 @@ class CapabilitySettingsBodyState
     }
   }
 
-  String settings0HotwordCustom(SettingsNotifier notifier) =>
-      notifier.state.asrHotwordCustom;
+  String settings0HotwordCustom() =>
+      // Riverpod 正规读口：notifier.state 对外 protected，读状态一律走 provider。
+      ref.read(settingsProvider).asrHotwordCustom;
 
   /// 编辑某个热词分类的词表：预填生效词（默认 + 增 − 删），保存时算差量
   /// （增词 = 新表 − 默认表；删词 = 默认表 − 新表）持久化；「恢复默认」
@@ -5046,8 +5059,9 @@ class CapabilitySettingsBodyState
   Future<void> _editAsrCategoryWords(
       HotwordCategory cat, SettingsNotifier notifier) async {
     final defaults = defaultCategoryWords(cat.id);
-    final effective = effectiveCategoryWords(cat.id,
-        notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
+    final settings = ref.read(settingsProvider);
+    final effective = effectiveCategoryWords(
+        cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved);
     final ctrl = TextEditingController(text: effective.join('\n'));
     final ok = await showDialog<bool>(
       context: context,
@@ -5697,6 +5711,9 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ],
       ),
     );
+    // 弹窗关闭即取走私钥文本并释放控制器（原实现从不 dispose，每次弹窗泄漏）。
+    final pem = ctrl.text.trim();
+    ctrl.dispose();
     if (choice == 1) {
       await Clipboard.setData(ClipboardData(text: pub));
       if (mounted) {
@@ -5704,7 +5721,6 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
             const SnackBar(content: Text('公钥已复制（与 adbkey.pub 首段应完全一致）')));
       }
     } else if (choice == 2) {
-      final pem = ctrl.text.trim();
       if (pem.isEmpty) return;
       try {
         await importAdbPrivateKeyPem(store, pem);
@@ -5791,14 +5807,17 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ),
       ),
     );
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏两个）。
+    final serialText = serialCtrl.text;
+    final nameText = nameCtrl.text.trim();
+    serialCtrl.dispose();
+    nameCtrl.dispose();
     if (ok != true) return;
-    final parsed = AdbTarget.parseSerial(serialCtrl.text)!;
+    final parsed = AdbTarget.parseSerial(serialText)!;
     await notifier.upsertAdbTarget((existing ??
             const AdbTarget(id: '', name: '', host: '', port: 5555))
         .copyWith(
-            name: nameCtrl.text.trim().isEmpty
-                ? parsed.host
-                : nameCtrl.text.trim(),
+            name: nameText.isEmpty ? parsed.host : nameText,
             host: parsed.host,
             port: parsed.port));
   }
@@ -6221,6 +6240,8 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ],
       ),
     );
+    // 弹窗已关闭（结果即文本），控制器一次性回收（原实现从不 dispose，每次弹窗泄漏）。
+    ctrl.dispose();
     if (name == null || name.trim().isEmpty || !mounted) return;
     final r = await createWorkspaceOnActiveConnection(name);
     if (r.ws == null) {
@@ -6251,7 +6272,6 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
     var probing = true;
     var probeResult = _SshdProbe.timeout;
     var generated = false;
-    String? publicKey;
     String? privateKeyPem;
     var command = '';
     var userName = '';
@@ -6274,7 +6294,6 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
               final keys = SshKeyGen.generate();
               if (keys != null) {
                 generated = true;
-                publicKey = keys.publicKey;
                 privateKeyPem = keys.privateKeyPem;
                 command = _buildTermuxInstallCommand(keys.publicKey);
               }
@@ -6779,6 +6798,10 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         },
       ),
     );
+    // 弹窗已关闭，控制器一次性回收（原实现从不 dispose，每次弹窗泄漏四个）。
+    for (final c in [hostCtrl, portCtrl, userCtrl, passCtrl]) {
+      c.dispose();
+    }
     if (mounted) setState(() {});
   }
 
@@ -7134,6 +7157,25 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ),
       ),
     );
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏七个）。
+    final nameText = nameCtrl.text.trim();
+    final hostText = hostCtrl.text.trim();
+    final portText = portCtrl.text.trim();
+    final userText = userCtrl.text.trim();
+    final keyText = keyCtrl.text.trim();
+    final typedPwd = passCtrl.text.trim();
+    final passPhraseText = passPhraseCtrl.text;
+    for (final c in [
+      nameCtrl,
+      hostCtrl,
+      portCtrl,
+      userCtrl,
+      passCtrl,
+      keyCtrl,
+      passPhraseCtrl
+    ]) {
+      c.dispose();
+    }
     if (saved != true) return;
     // 兜底：existing 无稳定 id（旧配置迁移遗漏）→ 分配新 id，避免 upsert 追加。
     final stableId = (cfg?.id.trim().isNotEmpty ?? false)
@@ -7141,17 +7183,16 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         : 'ssh_${DateTime.now().millisecondsSinceEpoch}';
     final needKey = authType != SshAuthType.password;
     final needPassword = authType != SshAuthType.key;
-    final typedPwd = passCtrl.text.trim();
     await notifier.upsertSshConfig(SshConfig(
       id: stableId,
-      name: nameCtrl.text.trim(),
-      host: hostCtrl.text.trim(),
-      port: int.tryParse(portCtrl.text.trim()) ?? 8022,
-      username: userCtrl.text.trim(),
+      name: nameText,
+      host: hostText,
+      port: int.tryParse(portText) ?? 8022,
+      username: userText,
       authType: authType,
-      privateKeyPem: needKey ? keyCtrl.text.trim() : null,
+      privateKeyPem: needKey ? keyText : null,
       keyPassphrase:
-          needKey && passPhraseCtrl.text.isNotEmpty ? passPhraseCtrl.text : null,
+          needKey && passPhraseText.isNotEmpty ? passPhraseText : null,
       // 留空 = 保持安全存储里的原密码（编辑别的字段不该把密码清了）。
       password: needPassword
           ? (typedPwd.isEmpty ? storedPassword : typedPwd)
@@ -7380,15 +7421,19 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ),
       ),
     );
-    if (saved != true) return;
+    // 弹窗关闭即取走文本并释放控制器（原实现从不 dispose，每次弹窗泄漏两个）。
     final name = nameCtrl.text.trim();
+    final pathText = pathCtrl.text.trim();
+    nameCtrl.dispose();
+    pathCtrl.dispose();
+    if (saved != true) return;
     if (name.isEmpty) return;
     final id = existing?.id ?? 'ws_${DateTime.now().millisecondsSinceEpoch}';
     await DevSessionController.instance.upsertWorkspace(DevWorkspace(
       id: id,
       name: name,
       backend: backend,
-      remotePath: backend.isRemoteBackend ? pathCtrl.text.trim() : null,
+      remotePath: backend.isRemoteBackend ? pathText : null,
       sshConfigId: backend.isRemoteBackend ? sshConfigId : null,
     ));
     if (mounted) setState(() {});
@@ -7688,8 +7733,10 @@ class DevSettingsBodyState extends ConsumerState<DevSettingsBody> {
         ],
       ),
     );
-    if (saved != true) return;
+    // 弹窗关闭即取走标题并释放控制器（原实现从不 dispose，每次弹窗泄漏）。
     final title = titleCtrl.text.trim();
+    titleCtrl.dispose();
+    if (saved != true) return;
     if (title.isEmpty) return;
     final task = DevTask(
       id: newDevTaskId(),
@@ -8403,23 +8450,26 @@ class WebSearchSettingsBodyState extends ConsumerState<WebSearchSettingsBody> {
 
   /// 数字项保存：notifier 会把值夹紧到合法区间，保存后把**真正生效的值**回写输入框，
   /// 避免"填了 300、实际生效 120"这种自己看不出来的偏差。
+  /// 读生效值走 [SettingsNotifier.snapshot]：这些回调可能由离焦监听在页面
+  /// 拆卸时触发，ref 已不可用，只能走捕获的 notifier 公开读口。
   Future<void> _saveMaxResults(String v) async {
     final n = _liveNotifier;
     if (n == null) return;
-    await n.setWebSearchSearXngMaxResults(
-        int.tryParse(v.trim()) ?? n.state.webSearchSearXngMaxResults);
+    await n.setWebSearchSearXngMaxResults(int.tryParse(v.trim()) ??
+        n.snapshot.webSearchSearXngMaxResults);
     if (!mounted) return;
-    _maxResults.text = '${n.state.webSearchSearXngMaxResults}';
+    _maxResults.text = '${n.snapshot.webSearchSearXngMaxResults}';
   }
 
   Future<void> _saveTimeoutSec(String v) async {
     final n = _liveNotifier;
     if (n == null) return;
-    final currentSec = n.state.webSearchSearXngTimeoutMs ~/ 1000;
+    final currentSec = n.snapshot.webSearchSearXngTimeoutMs ~/ 1000;
     await n.setWebSearchSearXngTimeoutMs(
         (int.tryParse(v.trim()) ?? currentSec) * 1000);
     if (!mounted) return;
-    _timeoutSec.text = '${(n.state.webSearchSearXngTimeoutMs / 1000).round()}';
+    _timeoutSec.text =
+        '${(n.snapshot.webSearchSearXngTimeoutMs / 1000).round()}';
   }
 
   /// 顺序保存所有文本框的当前草稿值（测试连接前调用）。
@@ -9137,8 +9187,9 @@ class _VoiceSettingsBodyState extends ConsumerState<VoiceSettingsBody> {
   }
 
   Future<void> _editAsrHotwords(SettingsNotifier notifier) async {
-    final ctrl =
-        TextEditingController(text: notifier.state.asrHotwordCustom);
+    // 读状态走 ref.read(provider)（notifier.state 越权，见 Riverpod 正规用法）。
+    final ctrl = TextEditingController(
+        text: ref.read(settingsProvider).asrHotwordCustom);
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -9173,8 +9224,9 @@ class _VoiceSettingsBodyState extends ConsumerState<VoiceSettingsBody> {
   Future<void> _editAsrCategoryWords(
       HotwordCategory cat, SettingsNotifier notifier) async {
     final defaults = defaultCategoryWords(cat.id);
-    final effective = effectiveCategoryWords(cat.id,
-        notifier.state.asrHotwordAdded, notifier.state.asrHotwordRemoved);
+    final settings = ref.read(settingsProvider);
+    final effective = effectiveCategoryWords(
+        cat.id, settings.asrHotwordAdded, settings.asrHotwordRemoved);
     final ctrl = TextEditingController(text: effective.join('\n'));
     final ok = await showDialog<bool>(
       context: context,

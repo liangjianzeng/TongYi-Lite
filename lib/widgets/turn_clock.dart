@@ -9,6 +9,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show State, StatefulWidget;
 
 class TurnClock {
   TurnClock._();
@@ -33,5 +34,39 @@ class TurnClock {
       _timer?.cancel();
       _timer = null;
     }
+  }
+}
+
+/// TurnClock 监听三件套的 State mixin：acquire + addListener / removeListener +
+/// release 此前在 _ThinkingIndicatorState / _ToolActivityCardState /
+/// _ThinkingStreamCardState 三处各抄一份（含 dispose 兜底），行为完全相同，
+/// 收敛到这里消重；tick 统一触发一次 setState（秒级刷新头部耗时，实际耗时
+/// 仍用 DateTime 差值，组件重建不丢）。
+///
+/// 用法：开时钟调 [turnClockStart]（幂等），关时钟 / dispose 调 [turnClockStop]
+/// （幂等），开关成对调用即可，不关心引用计数。
+mixin TurnClockListener<T extends StatefulWidget> on State<T> {
+  /// 时钟是否已挂在本 State 上（防重复 acquire / 双重 release）。
+  bool _clockOn = false;
+
+  /// 开秒级时钟：acquire 引用计数 + 挂 tick 监听（已开则无操作）。
+  void turnClockStart() {
+    if (_clockOn) return;
+    _clockOn = true;
+    TurnClock.instance.acquire();
+    TurnClock.instance.tick.addListener(_onTick);
+  }
+
+  /// 停秒级时钟：摘 tick 监听 + release（未开则无操作）；dispose 必须调用。
+  void turnClockStop() {
+    if (!_clockOn) return;
+    _clockOn = false;
+    TurnClock.instance.tick.removeListener(_onTick);
+    TurnClock.instance.release();
+  }
+
+  /// 秒级 tick → setState 刷新。
+  void _onTick() {
+    if (mounted) setState(() {});
   }
 }

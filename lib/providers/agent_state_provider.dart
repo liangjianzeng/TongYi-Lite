@@ -55,6 +55,14 @@ final class UiTimelineTool extends UiTimelineMarker {
   const UiTimelineTool(this.index);
 }
 
+/// 第 [index] 个步答块（对应 [AgentUiState.stepTexts]，A2/A3）：
+/// 某步的可见文本已完整（下一步 step/start 到达时由 chat_provider 快照
+/// 推入）——live 回合按时间线位置渲染，不再被下一步流式覆写丢失。
+final class UiTimelineStepText extends UiTimelineMarker {
+  final int index;
+  const UiTimelineStepText(this.index);
+}
+
 /// UI 状态快照（§12.2 AgentState 的端侧形态）。
 final class AgentUiState {
   final bool running;
@@ -87,6 +95,10 @@ final class AgentUiState {
   /// 执行顺序时间线：思考落档/工具卡加入的真实次序（live 回合渲染依据）。
   final List<UiTimelineMarker> timeline;
 
+  /// 已完成步骤的可见文本快照（A2/A3）：每步推进时 chat_provider 定格一条
+  /// （同一时刻也写 kind=stepText DB 行——DB 行管历史，这里管 live 位置）。
+  final List<String> stepTexts;
+
   /// 工具调用参数生成中（WP5）：非 null = 模型正在流式输出工具调用块
   /// （可见流与思考流都是空的，没有它 UI 只能干转圈）。
   /// 记录已生成字符数与开头预览。
@@ -95,6 +107,11 @@ final class AgentUiState {
   /// 子代理运行进度行（C2）：前台 subagent 的里程碑（步/工具/收尾），
   /// 最近 3 条，UI 显示在工具卡区下方。不进父模型上下文。
   final List<String> subagentNotes;
+
+  /// 最近一次失败尝试的失败码/原因（C-Q5，assistant/attempt 事件）。
+  /// turn/end(error) 时并入 lastError 文案；无失败尝试则 null。
+  final String? failureCode;
+  final String? failureMessage;
 
   const AgentUiState({
     this.running = false,
@@ -108,8 +125,11 @@ final class AgentUiState {
     this.thinkingHistory = const [],
     this.thinkingDurations = const [],
     this.timeline = const [],
+    this.stepTexts = const [],
     this.toolGen,
     this.subagentNotes = const [],
+    this.failureCode,
+    this.failureMessage,
   });
 
   bool get hasActivity =>
@@ -130,9 +150,12 @@ final class AgentUiState {
     List<String>? thinkingHistory,
     List<Duration?>? thinkingDurations,
     List<UiTimelineMarker>? timeline,
+    List<String>? stepTexts,
     ({int chars, String preview})? toolGen,
     bool clearToolGen = false,
     List<String>? subagentNotes,
+    String? failureCode,
+    String? failureMessage,
   }) =>
       AgentUiState(
         running: running ?? this.running,
@@ -146,8 +169,11 @@ final class AgentUiState {
         thinkingHistory: thinkingHistory ?? this.thinkingHistory,
         thinkingDurations: thinkingDurations ?? this.thinkingDurations,
         timeline: timeline ?? this.timeline,
+        stepTexts: stepTexts ?? this.stepTexts,
         toolGen: clearToolGen ? null : (toolGen ?? this.toolGen),
         subagentNotes: subagentNotes ?? this.subagentNotes,
+        failureCode: failureCode ?? this.failureCode,
+        failureMessage: failureMessage ?? this.failureMessage,
       );
 }
 
@@ -194,6 +220,19 @@ class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
       return;
     }
     _put(convId, cur.copyWith(toolGen: (chars: chars, preview: preview)));
+  }
+
+  /// 步答块（A2/A3）：某步可见文本已完整（下一步 step/start 到达时由
+  /// chat_provider 推入），追加时间线标记——live 回合据此在**正确位置**
+  /// 渲染已定格的步骤文本，回答气泡只留当前步。
+  void appendStepText(String convId, String text) {
+    if (!mounted || !_has(convId)) return;
+    final cur = _entry(convId);
+    if (text.trim().isEmpty) return;
+    _put(convId, cur.copyWith(
+      stepTexts: [...cur.stepTexts, text],
+      timeline: [...cur.timeline, UiTimelineStepText(cur.stepTexts.length)],
+    ));
   }
 
   /// 子代理运行进度行（C2）：追加里程碑，保留最近 3 条。
@@ -269,6 +308,22 @@ class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
         s = _finalizeThinking(s, ctx).copyWith(
           step: (e.data['step'] as num?)?.toInt() ?? s.step);
         break;
+      case kEventAssistantMessage:
+        // C-Q5：assistant/message = 模型本步输出完毕（思考必然已结束）。
+        // 立即落档思考——旧口径等到**下一步 step/start** 才落档，导致
+        // 第 N 步的思考卡在时间线上排在第 N 步工具卡**之后**（工具执行
+        // 期间思考卡仍显示"思考中"，用户看到步骤乱跳的根因之一）。
+        // 此处落档后，时间线次序 = 思考卡 → 本步工具卡，与真实执行序一致。
+        s = _finalizeThinking(s, ctx);
+        break;
+      case kEventAssistantAttempt:
+        // C-Q5/B3：失败尝试（log-only）记录失败码——turn/end 的错误行
+        // 不再只有"本轮执行失败（见推理日志）"，失败码与原因直接可见。
+        s = s.copyWith(
+          failureCode: e.data['code'] as String?,
+          failureMessage: e.data['content'] as String?,
+        );
+        break;
       case kEventToolCall:
         final tools = [...s.tools, ToolActivityUi(
           callId: e.data['callId'] as String? ?? '',
@@ -309,10 +364,16 @@ class AgentUiStateNotifier extends StateNotifier<Map<String, AgentUiState>> {
         break;
       case kEventTurnEnd:
         final kind = _reasonKind(e.data['reason']);
+        // B3：失败文案带失败码（assistant/attempt 记录）；崩溃修复写
+        // Map reason（kind: interrupted 等）无码 → 维持通用文案。
         s = _finalizeThinking(s, ctx).copyWith(
           running: false,
           retryAttempt: 0,
-          lastError: kind == 'error' ? '本轮执行失败（见推理日志）' : null,
+          lastError: kind == 'error'
+              ? (s.failureCode != null
+                  ? '本轮执行失败（${s.failureCode}）：${s.failureMessage ?? ''}'
+                  : '本轮执行失败（见推理日志）')
+              : null,
           clearError: kind != 'error',
         );
         break;

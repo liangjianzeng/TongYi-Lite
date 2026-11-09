@@ -41,6 +41,13 @@ const String kEventLlmRetry = 'llm/retry';
 const String kEventLlmRetryStarted = 'llm/retry-started';
 const String kEventSpillLocate = 'spill/locate';
 
+/// 步内思考快照（UI 重构 A1）：主循环在每个 step 结束时把该步的**完整
+/// 思考文本**落一条 log-only 事件（不进模型上下文——思考不是模型可见
+/// 内容；DSH「model-visible = logged」的反面对称：UI 需要的过程同样
+/// 要进唯一真相源，否则崩溃即丢、回看无门）。
+/// payload: {turn, step, content, [durationMs]}。
+const String kEventAgentThinking = 'agent/thinking';
+
 // 导入迁移标记（旧 SQLite 会话导入时给每条消息附加；log-only）
 const String kEventImported = 'imported';
 
@@ -84,6 +91,7 @@ const Map<String, EventTypeCategory> kEventCategory = {
   kEventSpillLocate: EventTypeCategory.logOnly,
   kEventImported: EventTypeCategory.logOnly,
   kEventImportCursor: EventTypeCategory.logOnly,
+  kEventAgentThinking: EventTypeCategory.logOnly,
 };
 
 EventTypeCategory categoryOf(String type) =>
@@ -107,6 +115,7 @@ const Set<String> kIgnorableTypes = {
   kEventImported,
   kEventImportCursor,
   kEventAssistantFailureNote,
+  kEventAgentThinking,
 };
 
 bool ignorableOf(String type) => kIgnorableTypes.contains(type);

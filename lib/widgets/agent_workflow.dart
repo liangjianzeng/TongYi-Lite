@@ -59,8 +59,32 @@ class TurnUnit extends RenderUnit {
   /// 前缀解析）。
   final Map<String, ToolActivityUi> traceTools;
 
+  /// 本回合的中间步文本行（A2/A3，kind=stepText；id 尾缀 `-sN` = 步号）。
+  /// 历史回合：有信封按 step 项交错定位，无信封按步号排在工具卡后；
+  /// live：走 UI 状态时间线，这里只兜底 DB 已落行。
+  final List<ChatMessage> stepTexts;
+
+  /// 用户可见通知行（B4，kind=notice/error 且非内部信封码）：🔔 后台子代理
+  /// 完成、系统提示等。内部信封（turnTrace/agentTrace/compactSummary）由
+  /// 各自机制渲染，不进这里。
+  final List<ChatMessage> notices;
+
+  /// 「☑ 任务清单」活卡行（固定 id `todo_$convId`）。kind=text 保持模型
+  /// 可见，但 UI 不认它是"回答"——过去走 pendingAnswer 槽位，回合尾的
+  /// 清单写入（时间戳晚于回答）把真回答挤下 answer 位（B4 症状）。
+  final ChatMessage? todoCard;
+
+  /// 「📋 计划」活卡行（固定 id `plan_$convId`），同上。
+  final ChatMessage? planCard;
+
   const TurnUnit(this.tools, this.answer,
-      {this.thinking = const [], this.trace, this.traceTools = const {}});
+      {this.thinking = const [],
+      this.trace,
+      this.traceTools = const {},
+      this.stepTexts = const [],
+      this.notices = const [],
+      this.todoCard,
+      this.planCard});
 }
 
 /// 把原始消息流按回合重排为展示单元。
@@ -72,12 +96,25 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
   final units = <RenderUnit>[];
   final pendingTools = <ChatMessage>[];
   final pendingThinking = <String>[];
+  final pendingStepTexts = <ChatMessage>[];
+  final pendingNotices = <ChatMessage>[];
+  ChatMessage? pendingTodo;
+  ChatMessage? pendingPlan;
   final turnMessages = <ChatMessage>[];
   ChatMessage? pendingAnswer;
+
+  // 内部信封 noticeCode：各有专属渲染机制，不当"通知"重复展示。
+  // 'compactSummary' = ChatNotifier.kCompactSummaryNotice（跨库常量，字面
+  // 对齐处注释）；'agentTrace' 是模型侧工具轮信封——渲染出来就是漏 JSON。
+  const internalNoticeCodes = {'turnTrace', 'agentTrace', 'compactSummary'};
 
   void flush() {
     if (pendingTools.isEmpty &&
         pendingThinking.isEmpty &&
+        pendingStepTexts.isEmpty &&
+        pendingNotices.isEmpty &&
+        pendingTodo == null &&
+        pendingPlan == null &&
         pendingAnswer == null) {
       turnMessages.clear();
       return;
@@ -86,6 +123,7 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
     // 随后的 pendingTools.clear() 会把已入队的 tools 一并清空。
     final toolList = [...pendingTools];
     final thinkingList = [...pendingThinking];
+    final stepTextList = [...pendingStepTexts];
     // turnTrace 信封优先：本回合消息里找 noticeCode='turnTrace' 的信封，
     // 解码成功 → 历史回合按真实交错顺序渲染（与 live 同管线）。
     List<TurnUiItem>? trace;
@@ -120,9 +158,19 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
       if (referenced > 0 && traceTools.length < referenced) trace = null;
     }
     units.add(TurnUnit(toolList, pendingAnswer,
-        thinking: thinkingList, trace: trace, traceTools: traceTools));
+        thinking: thinkingList,
+        trace: trace,
+        traceTools: traceTools,
+        stepTexts: stepTextList,
+        notices: [...pendingNotices],
+        todoCard: pendingTodo,
+        planCard: pendingPlan));
     pendingTools.clear();
     pendingThinking.clear();
+    pendingStepTexts.clear();
+    pendingNotices.clear();
+    pendingTodo = null;
+    pendingPlan = null;
     turnMessages.clear();
     pendingAnswer = null;
   }
@@ -143,9 +191,25 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
           ? m.content.substring('💭 '.length)
           : m.content.substring('💭'.length);
       if (t.trim().isNotEmpty) pendingThinking.add(t);
+    } else if (k == MessageKind.stepText) {
+      // 步答块（A2/A3）：不进 pendingAnswer（会被当回答覆写/挤掉回答位），
+      // 独立随行族进回合过程区。
+      pendingStepTexts.add(m);
+    } else if (m.role == MessageRole.assistant &&
+        m.id == 'todo_${m.conversationId}') {
+      // B4：任务清单活卡（kind=text 保模型可见）不占回答槽位——回合尾的
+      // 清单 upsert 时间戳晚于回答，过去会把真回答挤出 answer 位。
+      pendingTodo = m;
+    } else if (m.role == MessageRole.assistant &&
+        m.id == 'plan_${m.conversationId}') {
+      pendingPlan = m;
     } else if (k == MessageKind.notice || k == MessageKind.error) {
-      // 过程信封/错误行：不进渲染序列（阶段 3 的行族负责回看展示）。
+      // 过程信封/错误行：内部信封只进 turnMessages 供解码；用户可见通知
+      // （🔔 子代理完成等，B4）另列 notices 渲染。
       turnMessages.add(m);
+      if (!internalNoticeCodes.contains(m.noticeCode)) {
+        pendingNotices.add(m);
+      }
     } else {
       pendingAnswer = m;
     }
@@ -229,31 +293,21 @@ class ThinkingIndicator extends StatefulWidget {
   State<ThinkingIndicator> createState() => _ThinkingIndicatorState();
 }
 
-class _ThinkingIndicatorState extends State<ThinkingIndicator> {
+class _ThinkingIndicatorState extends State<ThinkingIndicator>
+    with TurnClockListener<ThinkingIndicator> {
   DateTime? _start;
-  bool _clockOn = false;
 
   @override
   void initState() {
     super.initState();
     _start = DateTime.now();
-    _clockOn = true;
-    TurnClock.instance.acquire();
-    TurnClock.instance.tick.addListener(_onTick);
+    turnClockStart();
   }
 
   @override
   void dispose() {
-    if (_clockOn) {
-      _clockOn = false;
-      TurnClock.instance.tick.removeListener(_onTick);
-      TurnClock.instance.release();
-    }
+    turnClockStop();
     super.dispose();
-  }
-
-  void _onTick() {
-    if (mounted) setState(() {});
   }
 
   @override
@@ -576,7 +630,8 @@ class ToolActivityCard extends StatefulWidget {
   State<ToolActivityCard> createState() => _ToolActivityCardState();
 }
 
-class _ToolActivityCardState extends State<ToolActivityCard> {
+class _ToolActivityCardState extends State<ToolActivityCard>
+    with TurnClockListener<ToolActivityCard> {
   bool _expanded = false;
 
   /// 执行起点（首次以 executing 状态入树时记录）；null = 未知（历史回合）。
@@ -584,8 +639,8 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
   Duration? _total;
 
   /// 秒级刷新走全 app 单时钟 [TurnClock]（阶段 4 计时器收敛：替代每卡
-  /// 一个 Ticker；实际耗时用 DateTime 差值，重建不丢）。
-  bool _clockOn = false;
+  /// 一个 Ticker；实际耗时用 DateTime 差值，重建不丢）。挂钟/摘钟逻辑
+  /// 见 mixin [TurnClockListener]。
 
   /// 折叠行摘要（2026-10-25 阶段 2）：variant 键优先级取参数首行（DSH
   /// toolRowModel 同构）；无命中回退参数 JSON 60 字旧口径。
@@ -714,39 +769,23 @@ class _ToolActivityCardState extends State<ToolActivityCard> {
 
   @override
   void dispose() {
-    if (_clockOn) {
-      _clockOn = false;
-      TurnClock.instance.tick.removeListener(_onTick);
-      TurnClock.instance.release();
-    }
+    turnClockStop();
     super.dispose();
   }
 
   /// 计时归零/冻结：executing 且无起点 → 记录起点并开秒级 Ticker；
-  /// 离开 executing → 冻结总耗时、停 Ticker。
+  /// 离开 executing → 冻结总耗时、停 Ticker。（挂/摘逻辑在 mixin。）
   void _syncClock() {
     final st = widget.activity.status;
     if (st == ToolUiStatus.executing) {
       if (_execStart == null) {
         _execStart = DateTime.now();
-        if (!_clockOn) {
-          _clockOn = true;
-          TurnClock.instance.acquire();
-          TurnClock.instance.tick.addListener(_onTick);
-        }
+        turnClockStart();
       }
     } else if (_execStart != null && _total == null) {
       _total = DateTime.now().difference(_execStart!);
-      if (_clockOn) {
-        _clockOn = false;
-        TurnClock.instance.tick.removeListener(_onTick);
-        TurnClock.instance.release();
-      }
+      turnClockStop();
     }
-  }
-
-  void _onTick() {
-    if (mounted) setState(() {});
   }
 
   /// 当前/最终耗时（未知为 null）。
@@ -976,11 +1015,11 @@ class ThinkingStreamCard extends StatefulWidget {
   State<ThinkingStreamCard> createState() => _ThinkingStreamCardState();
 }
 
-class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
+class _ThinkingStreamCardState extends State<ThinkingStreamCard>
+    with TurnClockListener<ThinkingStreamCard> {
   /// null = 默认收起；非 null = 用户手动覆盖。
   bool? _override;
   DateTime? _start;
-  bool _clockOn = false;
 
   /// 流式长内容自动跟随：内容变长时滚到可见区底部，直到用户手动上滑。
   final ScrollController _scroll = ScrollController();
@@ -994,11 +1033,7 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
 
   @override
   void dispose() {
-    if (_clockOn) {
-      _clockOn = false;
-      TurnClock.instance.tick.removeListener(_onTick);
-      TurnClock.instance.release();
-    }
+    turnClockStop();
     _scroll.dispose();
     super.dispose();
   }
@@ -1037,21 +1072,13 @@ class _ThinkingStreamCardState extends State<ThinkingStreamCard> {
     }
   }
 
-  /// 思考开始时记录起点并挂全 app 单时钟（秒级 setState）。
+  /// 思考开始时记录起点并挂全 app 单时钟（秒级 setState；挂/摘逻辑在 mixin）。
   void _syncClock() {
     final s = widget.ui;
     if (_start == null && s.hasThinking && s.running) {
       _start = DateTime.now();
-      if (!_clockOn) {
-        _clockOn = true;
-        TurnClock.instance.acquire();
-        TurnClock.instance.tick.addListener(_onTick);
-      }
+      turnClockStart();
     }
-  }
-
-  void _onTick() {
-    if (mounted) setState(() {});
   }
 
   Duration? get _elapsed =>
@@ -1199,6 +1226,17 @@ class AgentTurnBlock extends StatelessWidget {
   /// 历史回合的思考存档文本（解析自存储 💭 消息；仅已完成回合折叠区使用）。
   final List<String> thinking;
 
+  /// 步答块行（A2/A3，kind=stepText；id 尾缀 `-sN` = 步号）。历史回合按
+  /// 信封 step 项引用它取文本；无信封的旧数据按步号排在工具卡之后。
+  final List<ChatMessage> stepTexts;
+
+  /// 用户可见通知行（B4：🔔 子代理完成等；内部信封已由各自机制渲染）。
+  final List<ChatMessage> notices;
+
+  /// 「☑ 任务清单」/「📋 计划」活卡行（B4：过程区渲染，不占回答槽位）。
+  final ChatMessage? todoCard;
+  final ChatMessage? planCard;
+
   const AgentTurnBlock({
     super.key,
     required this.steps,
@@ -1208,6 +1246,10 @@ class AgentTurnBlock extends StatelessWidget {
     this.thinking = const [],
     this.trace,
     this.traceTools = const {},
+    this.stepTexts = const [],
+    this.notices = const [],
+    this.todoCard,
+    this.planCard,
   });
 
   /// 历史回合 turnTrace 信封（null = 旧数据，走散消息重排回退）。
@@ -1278,9 +1320,46 @@ class AgentTurnBlock extends StatelessWidget {
         case UiTimelineTool(:final index):
           if (index < ui.tools.length)
             widgets.add(ToolActivityCard(activity: ui.tools[index]));
+        case UiTimelineStepText(:final index):
+          // A2/A3：已定格的步骤文本按其产出时刻进入时间线——回答气泡
+          // 只剩当前步在流式，中间步不再被覆写丢失。
+          if (index < ui.stepTexts.length)
+            widgets.add(_StepTextBlock(
+                text: ui.stepTexts[index], index: index + 1));
       }
     }
     return widgets;
+  }
+
+  /// 过程区附加卡（B4）：任务清单/计划活卡（ChatBubble 认得它们的文案
+  /// 前缀，todo 卡自动走结构化清单渲染）+ 用户可见通知行。
+  List<Widget> get _processExtras {
+    final out = <Widget>[];
+    for (final card in [planCard, todoCard]) {
+      if (card == null || card.content.trim().isEmpty) continue;
+      out.add(ChatBubble(
+        role: 'assistant',
+        content: card.content,
+        timestamp: card.timestamp,
+        showFooter: false,
+      ));
+    }
+    for (final n in notices) {
+      if (n.content.trim().isNotEmpty) {
+        out.add(_TraceNoticeRow(message: n.content.trim()));
+      }
+    }
+    return out;
+  }
+
+  /// 步答块行按 id 尾缀 `-sN` 的步号排序（历史无信封回退用）。
+  List<ChatMessage> get _stepRowsSorted {
+    final rows = [...stepTexts];
+    int stepOf(ChatMessage m) =>
+        int.tryParse(RegExp(r'-s(\d+)$').firstMatch(m.id)?.group(1) ?? '') ??
+        0;
+    rows.sort((a, b) => stepOf(a).compareTo(stepOf(b)));
+    return rows;
   }
 
   @override
@@ -1301,6 +1380,8 @@ class AgentTurnBlock extends StatelessWidget {
       if (trace != null) {
         traceChildren = <Widget>[];
         var thinkN = 0;
+        var stepN = 0;
+        final stepRowById = {for (final r in stepTexts) r.id: r};
         for (final item in trace!) {
           switch (item.type) {
             case 'tool':
@@ -1309,6 +1390,24 @@ class AgentTurnBlock extends StatelessWidget {
             case 'think':
               traceChildren.add(_ThinkingBlockCard(
                   text: item.text ?? '', index: ++thinkN));
+            case 'step':
+              // A2/A3：步答块按信封定位（崩溃窗口行缺失 → 跳过该项）。
+              final row =
+                  item.toolId == null ? null : stepRowById[item.toolId];
+              if (row != null && row.content.trim().isNotEmpty) {
+                traceChildren.add(
+                    _StepTextBlock(text: row.content.trim(), index: ++stepN));
+              }
+            case 'error':
+              // B3：error/notice 项此前是死分支（switch 只写了 tool/think）
+              // ——失败尝试与回合错误在历史过程区不可见。
+              if ((item.text ?? '').isNotEmpty) {
+                traceChildren.add(_TurnErrorRow(message: item.text!));
+              }
+            case 'notice':
+              if ((item.text ?? '').isNotEmpty) {
+                traceChildren.add(_TraceNoticeRow(message: item.text!));
+              }
           }
         }
         if (traceChildren.isEmpty) traceChildren = null;
@@ -1317,8 +1416,21 @@ class AgentTurnBlock extends StatelessWidget {
         for (var i = 0; i < thinking.length; i++)
           _ThinkingBlockCard(text: thinking[i], index: i + 1),
       ];
-      final processChildren = traceChildren ??
-          [...stepWidgets, ...historyThinkingWidgets];
+      // 无信封回退：步答块按步号排在工具卡后、思考存档前（大致时序）。
+      final stepRows = _stepRowsSorted;
+      final legacyStepWidgets = <Widget>[
+        for (var i = 0; i < stepRows.length; i++)
+          if (stepRows[i].content.trim().isNotEmpty)
+            _StepTextBlock(text: stepRows[i].content.trim(), index: i + 1),
+      ];
+      final processChildren = traceChildren != null
+          ? [...traceChildren, ..._processExtras]
+          : [
+              ...stepWidgets,
+              ...legacyStepWidgets,
+              ...historyThinkingWidgets,
+              ..._processExtras
+            ];
       return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1372,6 +1484,8 @@ class AgentTurnBlock extends StatelessWidget {
         if (running && ui.retryAttempt > 0) RetryIndicator(attempt: ui.retryAttempt),
         if (running && ui.compacted) const CompactionBanner(),
         ...stepWidgets,
+        // B4：任务清单/计划活卡与通知行随过程区展开内联（结束折叠进过程区）。
+        ..._processExtras,
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
             ui: ui,
@@ -1452,6 +1566,81 @@ class _TurnErrorRow extends StatelessWidget {
                 style: TextStyle(fontSize: 12, color: theme.colorScheme.error)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 通知行（B3：turnTrace notice 项的历史渲染；steer 注入等系统提示）。
+class _TraceNoticeRow extends StatelessWidget {
+  final String message;
+  const _TraceNoticeRow({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline,
+              size: 13, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(message,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12, color: theme.colorScheme.onSurfaceVariant)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 步答块（A2/A3）：中间步的可见文本定格卡。
+///
+/// 回答气泡只放**当前/最终**步的流式文本；已完成的中间步以本卡留在执行
+/// 序列里（live 按归约器时间线定位，历史按 turnTrace step 项定位），不再
+/// 被下一步覆写丢失（旧行为：单行覆写 → 中间步全丢、只留最后一步）。
+class _StepTextBlock extends StatelessWidget {
+  final String text;
+  final int index;
+  const _StepTextBlock({required this.text, required this.index});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 1),
+      child: Container(
+        decoration: BoxDecoration(
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            left: BorderSide(
+                color: theme.colorScheme.primary.withValues(alpha: 0.5),
+                width: 2),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(10, 5, 10, 7),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('步骤 $index 输出',
+                style: TextStyle(
+                    fontSize: 11, color: theme.colorScheme.primary)),
+            const SizedBox(height: 2),
+            SelectableText(
+              text,
+              style: TextStyle(
+                  fontSize: 13, color: theme.colorScheme.onSurface),
+            ),
+          ],
+        ),
       ),
     );
   }

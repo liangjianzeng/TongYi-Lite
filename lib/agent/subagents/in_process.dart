@@ -5,8 +5,11 @@
 /// - **审批恒 `never`**（DSH Part 7.11 不变量 10）：[neverApprover] 自动
 ///   **拒绝**沙箱升级 → 子代理恒 `workspace-write`，不可升 `danger-full-access`；
 ///   被拒工具直接失败（§9.5 端侧安全不变量 7/10）。
-/// - **深度 ≤ 2**（DSH Part 11.10 不变量 6）：[SubagentDepthCounter] 嵌套计数
-///   （单线程 async 内嵌套安全；子代理在父 tool 调用内同步 await）。
+/// - **深度 ≤ 2**（DSH Part 11.10 不变量 6）：[SubagentDepthCounter] 深度是
+///   **Zone 作用域的委派链属性**（子代理回合整体跑在抬高后的 Zone 里）。
+///   旧实现是全局 push/pop 计数：fan-out 的**兄弟**后台子代理并发运行期间
+///   互相抬高同一计数器，第 3 个后台任务被误判为深度 3 而拒绝启动
+///   （时序依赖的潜在缺陷，A 期 UI 重构改变 kick 收尾时序后稳定复现）。
 ///
 /// 端侧成本控制（§10.6）：maxStepsPerTurn=5 / maxTokensPerRound=4096。
 library;
@@ -25,20 +28,30 @@ import '../context_eng/token_estimate.dart' show estimateTextTokens;
 import '../tool_registry.dart' show ToolRegistry;
 import 'provider.dart';
 
-/// 嵌套委派深度计数器（单线程 async 内嵌套安全；子代理在父 tool 内 await，
-/// 故 push/pop 配对不会交错）。
+/// 嵌套委派深度计数器（DSH Part 11.10：**每条委派链**的深度，非并发计数）。
+///
+/// 深度存在 [Zone] 里：子代理的整个回合执行期被 [runChild] 包进
+/// `depth = 父深度 + 1` 的 Zone，它内部再委派时读到的就是自己的深度；
+/// **并发/后台的兄弟子代理各在各自 Zone，互不抬高**。工具执行发生在
+/// 回合的调用栈上，天然继承该 Zone——无需全局 push/pop。
 final class SubagentDepthCounter {
-  int _depth = 0;
-  int get depth => _depth;
-  /// 测试用直接设置（生产代码仅通过 push/pop 修改）。
+  static const Symbol _zoneKey = #subagentDepth;
+
+  /// Zone 外的回落深度（测试预置 / 顶层进程）。
+  int _base = 0;
+
+  /// 当前有效深度：Zone 内 = 本委派链深度；Zone 外 = [_base]。
+  int get depth => Zone.current[_zoneKey] as int? ?? _base;
+
+  /// 测试用直接设置（生产代码只通过 [runChild] 抬升）。
   void set depth(int value) {
     if (value < 0) throw ArgumentError('depth >= 0');
-    _depth = value;
+    _base = value;
   }
-  void push() => _depth++;
-  void pop() {
-    if (_depth > 0) _depth--;
-  }
+
+  /// 在「子代理自身回合」的执行期把深度抬升为 [childDepth]。
+  R runChild<R>(int childDepth, R Function() body) =>
+      runZoned(body, zoneValues: {_zoneKey: childDepth});
 }
 
 /// 端侧共享计数器（app 任一时刻仅一个活动 agent → 安全）。
@@ -54,8 +67,12 @@ const int kContinuableCapacity = 8;
 final class _Continuable {
   final ReactLoopAgent agent;
   final SessionLog session;
+
+  /// 本代理所属委派链深度（spawn 时 = 父深度 + 1）：send_message 续轮仍在
+  /// 该深度 Zone 里跑（续轮是**它自己**的回合，不是调用方的子辈）。
+  final int childDepth;
   bool running = false;
-  _Continuable(this.agent, this.session);
+  _Continuable(this.agent, this.session, {this.childDepth = 1});
 }
 
 /// 子代理审批 `never`：恒拒绝沙箱升级（子代理不可升 `danger-full-access`）。
@@ -119,11 +136,12 @@ final class InProcessSubagentProvider extends SubagentProvider {
   @override
   Future<SubagentRun> start(SubagentStartRequest request) async {
     // 深度校验（DSH Part 11.10 不变量 6：固定 maxDepth=2）。
-    if (kSubagentDepth.depth + 1 > kSubagentMaxDepth) {
-      throw SubagentMaxDepthExceeded(kSubagentDepth.depth + 1);
+    // 深度取**调用方 Zone**（父回合栈）；子代理回合随后整体跑在
+    // `callerDepth + 1` 的 Zone 里——并发兄弟互不抬高（见计数器文档）。
+    final callerDepth = kSubagentDepth.depth;
+    if (callerDepth + 1 > kSubagentMaxDepth) {
+      throw SubagentMaxDepthExceeded(callerDepth + 1);
     }
-    // push 在创建前；子代理 turn 结束（result 完成）时 pop。
-    kSubagentDepth.push();
     final id =
         'sub-${DateTime.now().millisecondsSinceEpoch}-${_kRandom.nextInt(10000)}';
     final session = _createSession(request);
@@ -139,17 +157,19 @@ final class InProcessSubagentProvider extends SubagentProvider {
       }
     }
     final agent = _buildAgent(session, registry: filtered);
-    _rememberContinuable(id, agent, session);
+    _rememberContinuable(id, agent, session, childDepth: callerDepth + 1);
     final entry = _continuable[id]!;
     entry.running = true;
     final completer = Completer<SubagentResult>();
-    unawaited(_runTurnWith(agent, request.task, onProgress: request.onProgress)
-        .then((r) => completer.complete(r))
-        .catchError((Object e, StackTrace st) =>
-            completer.complete(SubagentResult.fromError(e.toString())))
-        .then((_) {
-      kSubagentDepth.pop();
-      entry.running = false;
+    unawaited(kSubagentDepth.runChild(callerDepth + 1, () {
+      return _runTurnWith(agent, request.task,
+              onProgress: request.onProgress)
+          .then((r) => completer.complete(r))
+          .catchError((Object e, StackTrace st) =>
+              completer.complete(SubagentResult.fromError(e.toString())))
+          .then((_) {
+        entry.running = false;
+      });
     }));
     return SubagentRun(id, session, completer.future);
   }
@@ -177,21 +197,22 @@ final class InProcessSubagentProvider extends SubagentProvider {
         stopReason: 'error',
       );
     }
-    kSubagentDepth.push();
+    entry.running = true;
     try {
-      entry.running = true;
-      return await _runTurnWith(entry.agent, msg);
+      // 续轮 = 子代理自己的回合 → 跑在**它所属委派链**的深度 Zone 里。
+      return await kSubagentDepth.runChild(
+          entry.childDepth, () => _runTurnWith(entry.agent, msg));
     } finally {
       entry.running = false;
-      kSubagentDepth.pop();
     }
   }
 
-  void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s) {
+  void _rememberContinuable(String id, ReactLoopAgent agent, SessionLog s,
+      {int childDepth = 1}) {
     while (_continuable.length >= kContinuableCapacity) {
       _continuable.remove(_continuable.keys.first);
     }
-    _continuable[id] = _Continuable(agent, s);
+    _continuable[id] = _Continuable(agent, s, childDepth: childDepth);
   }
 
   ReactLoopAgent _buildAgent(SessionLog session, {ToolRegistry? registry}) {

@@ -349,6 +349,35 @@ class ReactLoopAgent {
     _phase = AgentPhaseState(AgentPhase.running, turn, 0);
     _session.append(kEventTurnStart, {'turn': turn, 'userSeq': userSeq});
 
+    // A1（UI 重构）：本步思考快照缓冲。adapter 的 onThinking 是全量快照
+    // （替换语义），每个 step 结束把非空快照落成 log-only 的
+    // agent/thinking 事件——思考进唯一真相源：回合收尾（💭 消息/信封）
+    // 还没写就崩溃时不再整回合蒸发，下回合启动可回放补档。
+    var stepThinking = '';
+    var stepThinkingStartMs = 0;
+    StreamSubscription<String>? thinkingSub;
+    void flushStepThinking(int t, int s) {
+      final text = stepThinking.trim();
+      stepThinking = '';
+      final started = stepThinkingStartMs;
+      stepThinkingStartMs = 0;
+      if (text.isEmpty) return;
+      _session.append(kEventAgentThinking, {
+        'turn': t,
+        'step': s,
+        'content': text,
+        if (started > 0)
+          'durationMs': DateTime.now().millisecondsSinceEpoch - started,
+      });
+    }
+    thinkingSub = onThinking?.stream.listen((snap) {
+      if (snap.trim().isEmpty) return;
+      if (stepThinkingStartMs == 0) {
+        stepThinkingStartMs = DateTime.now().millisecondsSinceEpoch;
+      }
+      stepThinking = snap;
+    });
+
     var step = 0;
     var reason = TurnEndReasonKind.completed;
     bool turnDone = false;
@@ -398,6 +427,9 @@ class ReactLoopAgent {
         // P1-C：环境快照尾部注入（内容变化才追加，见方法注释）。
         _maybeInjectEnvironmentNote();
         _session.append(kEventStepStart, {'turn': turn, 'step': step});
+        // A1：新 step 思考缓冲重新计时（上一步的已在 step/end 前落档）。
+        stepThinking = '';
+        stepThinkingStartMs = 0;
         // WP3a：主动压缩前置——估算投影 token，超预算先裁剪，
         // 不等撞 nctx/服务端硬墙（被动压缩只救得了 CONTEXT_WINDOW_EXCEEDED）。
         if (_config.contextTokenBudget != null) {
@@ -486,9 +518,15 @@ class ReactLoopAgent {
             break;
           }
         }
+        // A1：步末落档本步思考（唯一真相源；UI 思考卡走 onThinking 实时流，
+        // 互不影响）。所有 break 路径都会经过这里，一步一事件。
+        flushStepThinking(turn, step);
         _session.append(kEventStepEnd, {'turn': turn, 'step': step});
       }
     } finally {
+      // 兜底：任何异常/取消路径离开循环时，未落档的思考不丢。
+      flushStepThinking(turn, step);
+      await thinkingSub?.cancel();
       _session.append(kEventTurnEnd, {'turn': turn, 'reason': reason.name});
       debugPrint('[AgentStep] t$turn end reason=${reason.name} steps=$step '
           'elapsed=${(turnWatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s');
