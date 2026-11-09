@@ -1,0 +1,37 @@
+# 2026-11-09 健康度整改：根目录分析范围收口。
+# 此前无本文件，flutter analyze 会把根下所有 .dart（探针脚本/构建产物/worktree/
+# 独立包示例）都按主包上下文分析，报 3015 条假阳性，analyze 无法作为门禁。
+# 收口后 flutter analyze 只对主仓 lib/ test/ tool/ packages/ 生效（主仓真实基线 ≈55 条）。
+#
+# 刻意不 include flutter_lints：历史上本仓从未启用 lint 规则集，突然启用会新增
+# 数百条告警淹没真实信号——是否启用另案评估，本文件只做范围排除，不改变分析行为。
+analyzer:
+  exclude:
+    # 本地实验/调试产物（约定：下划线前缀 = 本地 scratch，不入库）
+    - _probe/**
+    - _bench/**
+    - _perf/**
+    - _grab/**
+    - _crashlogs/**
+    - _hang_evidence/**
+    - _review_tmp/**
+    - _mainwt_moveover/**
+    - _local_backup_*/**
+    - _acl_recovery/**
+    - _gguf_parse/**
+    - _gun_*/**
+    - _study/**
+    - _build/**
+    - _build_log/**
+    - _workbuddy/**
+    # 构建产物（含 CLI 测量体构建目录）
+    - build/**
+    - build-android-cli*/**
+    # 独立包/插件模板示例：各自 pubspec，根上下文解析不了自身 package: 导入，
+    # 在各自包目录下单独分析/测试
+    - examples/**
+    # 其他 worktree（独立 flutter 工程，有自己的分析上下文）
+    - wt/**
+    # 发布包与生成图（无源码意义）
+    - releases/**
+    - generated-images/**

@@ -81,6 +81,10 @@ dev_dependencies:
   # 纯 Dart SQLite（测试用）：StorageService 的真库行为（取尾语义/迁移）可在
   # flutter test 里直接验证，无需真机/模拟器。
   sqflite_common_ffi: ^2.3.3
+  # 纯 Dart 测试框架（2026-11-09）：packages/plugin_kernel、plugin_sdk 的测试文件
+  # import package:test（包自身 dev_deps 有），但根上下文分析时缺这个包会报
+  # ~2400 条 undefined_function 假阳性，analyze 门禁不可用。加入后根上下文可解析。
+  test: ^1.25.0
 
 
 flutter:
