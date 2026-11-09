@@ -680,42 +680,44 @@ class PromptJsonProtocol implements ToolProtocol {
 
   /// 顺序解析 XML 参数对（容错坏格式）。
   ///
-  /// 正常：`<arg_key>key<arg_value>value` 或带闭合标签；
-  /// 坏格式：`<arg_key>key<arg_key>value文本</arg_value>`（值误塞进 key 标签）
-  /// → 第二个 <arg_key> 的文本被配对给 pendingKey。
-  /// 孤立 value（key 缺失）忽略；残留 pendingKey（有 key 无 value）丢弃。
+  /// 状态机只有两个位置：**等 key** / **等 value**。每遇到一个参数标签
+  /// （开闭都算），其后到下一个 `<` 之前的文本按当前位置归属：
+  /// - 等 key 时遇到 arg_key 类标签 → 文本是键名；
+  /// - 等 value 时遇到任何参数标签 → 文本是值，配对完成。
+  ///
+  /// 覆盖的坏格式（真机 Ornith 1.5 9B 实锤，2026-11-09）：
+  /// - 正常 `<arg_key>query<arg_value>今天天气`；带闭合 `<arg_key>city</arg_key><arg_value>南宁</arg_value>`；
+  /// - **闭合标签用错** `<arg_key>city</arg_value>南宁`——旧实现只匹配**开标签**
+  ///   `<(arg_key|arg_value)>`，这种写法只产出一个 key 段，值段前面没有开标签
+  ///   → 永不配对 → 参数 `{}` → 工具报「缺少必填参数 city」→ 模型反复重试
+  ///   同一调用直到步数耗尽（真机三步全废）。**开/闭一律当分隔符**即修复此案。
+  /// - 值误塞进 key 标签 `<arg_key>query<arg_key>AI news today</arg_value>`
+  ///   （第二个标签时已在"等 value"位 → 文本自然配成值，与旧行为等价）。
+  /// - 标签内混空白 `<arg_key >k<arg_value>v`（旧正则要求 `>` 紧跟，真机残片
+  ///   常见形态之一）。
+  /// 孤立 value（还没拿到 key）忽略；残留 pendingKey（有 key 无 value）丢弃。
   Map<String, dynamic> _parseXmlArgs(String body) {
     final args = <String, dynamic>{};
-    final tagRe = RegExp(r'<(arg_key|arg_value)>');
+    final tagRe = RegExp(r'<\s*(/?)(arg_key|arg_value)\s*>');
     final tags = tagRe.allMatches(body).toList();
     if (tags.isEmpty) return args;
 
     String? pendingKey;
-    for (var i = 0; i < tags.length; i++) {
-      final tag = tags[i].group(1)!;
-      final valueStart = tags[i].end;
-      // 标签后的文本：到下一个 '<'（含闭合标签）为止。
-      final nextLt = body.indexOf('<', valueStart);
+    for (final t in tags) {
+      final kind = t.group(2)!;
+      // 标签后的文本：到下一个 '<'（含任何闭合标签）为止。
+      final nextLt = body.indexOf('<', t.end);
       final end = nextLt < 0 ? body.length : nextLt;
-      final text = body.substring(valueStart, end).trim();
-      if (text.isEmpty) continue;
+      final text = body.substring(t.end, end).trim();
+      if (text.isEmpty) continue; // 空段不改变状态（闭合标签常紧跟开标签）
 
-      if (tag == 'arg_key') {
-        if (pendingKey != null) {
-          // 连续 arg_key（无中间 arg_value）= 坏格式：当前文本是值，
-          // 配对给 pendingKey（如 `<arg_key>query<arg_key>AI news today</arg_value>`）。
-          args[pendingKey] = _decodeXmlArgValue(text);
-          pendingKey = null;
-        } else {
-          // 正常：文本是 key。
-          pendingKey = text;
-        }
+      if (pendingKey == null) {
+        // 等 key：只有 arg_key 类标签的文本算键名；孤立 arg_value 忽略。
+        if (kind == 'arg_key') pendingKey = text;
       } else {
-        // arg_value：文本是值，配对给 pendingKey；孤立 value 忽略。
-        if (pendingKey != null) {
-          args[pendingKey] = _decodeXmlArgValue(text);
-          pendingKey = null;
-        }
+        // 等 value：任何参数标签（开或闭）后的文本都配对成值。
+        args[pendingKey] = _decodeXmlArgValue(text);
+        pendingKey = null;
       }
     }
     return args;
