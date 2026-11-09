@@ -7,8 +7,8 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../observability/quiet_fail.dart';
 import '../session/event.dart';
 import '../session/log.dart';
 import '../tool_definition.dart';
@@ -61,23 +61,27 @@ final class Spill {
     if (tokens <= maxInlineTokens) {
       return const SpillDecision();
     }
-    final bytesOmitted = result.content.length;
+    // 真 UTF-8 字节数（旧实现把 UTF-16 码元数当字节命名/展示，CJK 场景虚高 ~3 倍）。
+    final bytes = utf8.encode(result.content);
     try {
-      final locator = await store(utf8.encode(result.content));
+      final locator = await store(bytes);
       log.append(
         kEventSpillLocate,
         {
           'callId': call.id,
           'locator': locator,
-          'bytes': result.content.length,
-          'bytesOmitted': bytesOmitted,
+          'bytes': bytes.length,
+          'bytesOmitted': bytes.length,
         },
         source: {'kind': 'tool', 'callId': call.id},
       );
-      return SpillDecision(spilled: true, locator: locator, bytesOmitted: bytesOmitted);
-    } on FormatException catch (_) {
-      // best-effort：失败保留原文（不丢内容）。
-      debugPrint('[Spill] spill 失败，保留原文');
+      return SpillDecision(spilled: true, locator: locator, bytesOmitted: bytes.length);
+    } catch (e, st) {
+      // best-effort：失败保留原文（绝不丢内容）——**必须兜全部异常**：store 是
+      // 真实文件写入，磁盘满/路径非法抛 FileSystemException，旧窄 catch(FormatException)
+      // 会穿透到 _safeExecute，把已成功执行的工具结果整体替换成"流水线异常"，
+      // 模型误判工具失败并重试，与文件头契约相悖（2026-11-09 健康度评审 P1）。
+      quietFail('spill.store', e, st);
       return const SpillDecision();
     }
   }

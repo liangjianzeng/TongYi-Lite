@@ -17,6 +17,7 @@ import '../../services/inference_service.dart';
 import 'adapter.dart';
 import 'base_engine_adapter.dart';
 import '../capability.dart';
+import '../observability/quiet_fail.dart';
 import '../protocol/tool_protocol.dart';
 
 class LocalEngineAdapter extends BaseEngineAdapter {
@@ -214,11 +215,14 @@ class LocalEngineAdapter extends BaseEngineAdapter {
         ),
         onFinally: () async {
           _stallWatch.cancel();
-          // 恢复用户的思考开关（本步曾为止损临时关掉）。失败不改变本步结论。
+          // 恢复用户的思考开关（本步曾为止损临时关掉）。失败不改变本步结论，
+          // 但必须留痕：无痕迹意味着用户的思考设置被悄悄关掉而无人知晓。
           if (suppressThinking) {
             try {
               await _inference.setEnableThinking(true);
-            } catch (_) {}
+            } catch (e) {
+              quietFail('local.restore-thinking', e);
+            }
           }
         },
       );

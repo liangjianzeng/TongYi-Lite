@@ -8,6 +8,7 @@
 library;
 
 import '../dev/workspace.dart' show kWorkspaceIdArgKey;
+import '../observability/quiet_fail.dart';
 import '../sandbox.dart';
 import '../tool_definition.dart';
 import '../tool_registry.dart';
@@ -95,8 +96,9 @@ final class ToolExecutor {
         if (wsId != null && wsId.isNotEmpty) {
           args[kWorkspaceIdArgKey] = wsId;
         }
-      } catch (_) {
-        // 解析失败不阻断执行（默认工作区兜底）。
+      } catch (e) {
+        // 解析失败不阻断执行（默认工作区兜底），但留痕——工作区注错比不注入更糟。
+        quietFail('tool.workspace-resolver', e);
       }
     }
 

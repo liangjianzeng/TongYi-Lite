@@ -107,6 +107,20 @@ SessionLog _metricsLog() {
 
 void main() {
   group('P0-A 回合指标 TurnMetrics.fromLog', () {
+    test('崩溃修复合成的 turn/end reason（Map 形）→ 提取 kind，指标不静默丢', () {
+      // 主循环写 reason.name 字符串；log.dart 崩溃修复合成写 {kind: cause}。
+      // 旧 `as String?` 对 Map 抛 TypeError，该回合指标被上游 catch 整条吞掉。
+      final log = SessionLog.fromEvents(const []);
+      log.append(kEventTurnStart, {'turn': 3});
+      log.append(kEventTurnEnd, {
+        'turn': 3,
+        'reason': const {'kind': 'interrupted'},
+      });
+      final m = TurnMetrics.fromLog(log, 3);
+      expect(m, isNotNull);
+      expect(m!.endReason, 'interrupted');
+    });
+
     test('全量统计：steps/工具/重复/提醒/重试/压缩/终止原因', () {
       final m = TurnMetrics.fromLog(_metricsLog(), 1);
       expect(m, isNotNull);

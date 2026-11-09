@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:tongyi_lite/agent/loop/agent.dart';
@@ -246,6 +247,38 @@ test('溢写：大结果被省略，spill/locate 落 log，可 read_file 回读'
   expect(tr['content'], contains('省略'));
   expect(tr['content'], contains('app/data/spill/abc'));
   expect(_findData(session, kEventSpillLocate), isNotNull);
+});
+
+test('溢写：store 抛 FileSystemException（磁盘满）→ 保留原文、不判工具失败', () async {
+  // 契约「best-effort 落盘，绝不丢内容」：store 是真实文件写入，磁盘满/路径非法
+  // 抛 FileSystemException——旧窄 catch(FormatException) 会让它穿透到 _safeExecute，
+  // 把已成功执行的工具结果整体替换成"流水线异常"，模型误判工具失败并重试。
+  final big = 'x' * (4096 * 4 + 10);
+  final registry = ToolRegistry()..register(_tool('big', big));
+  final session = SessionLog.fromEvents(const []);
+  final store = (bytes) async => throw const FileSystemException('磁盘已满');
+
+  final agent = ReactLoopAgent(
+    session: session,
+    adapter: FakeLlmAdapter([
+      LlmResult(text: '', toolCalls: [
+        ToolCall(id: 'c1', name: 'big', arguments: {})
+      ]),
+      LlmResult(text: 'done', toolCalls: const []),
+    ]),
+    registry: registry,
+    modelId: 'm',
+    providerKind: ProviderKind.local,
+    systemPrompt: 'x',
+    spillStore: store,
+    spillMaxInlineTokens: 4096,
+  );
+
+  await agent.kick('hi');
+  final tr = _findToolResult(session, 'c1')!;
+  expect(tr['isError'], false); // 工具成功——溢写失败不许把它变成"工具失败"
+  expect(tr['content'], contains(big.substring(0, 100))); // 原文保留
+  expect(_findData(session, kEventSpillLocate), isNull); // 未落盘则无定位符事件
 });
 
 test('溢写：read_file 结果始终内联（防循环）', () async {

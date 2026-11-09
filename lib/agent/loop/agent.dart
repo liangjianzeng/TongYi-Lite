@@ -23,6 +23,7 @@ import 'dart:convert' show jsonEncode;
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../llm/adapter.dart';
+import '../observability/quiet_fail.dart';
 import '../session/session.dart';
 import 'config.dart';
 import 'failure.dart';
@@ -814,8 +815,10 @@ class ReactLoopAgent {
     String note;
     try {
       note = provider();
-    } on Exception {
-      return; // 提供者异常静默跳过（环境快照非关键路径）
+    } on Exception catch (e) {
+      // 环境快照非关键路径：跳过本步注入，但留痕（注入失效不该是排障盲区）。
+      quietFail('agent.env-note', e);
+      return;
     }
     final t = note.trim();
     if (t.isEmpty || t == _lastEnvNote) return;

@@ -176,7 +176,7 @@ class TurnMetrics {
       turn: turn,
       startedAtMs: startEvent.timeMs,
       endedAtMs: endEvent?.timeMs ?? startEvent.timeMs,
-      endReason: endEvent?.data['reason'] as String? ?? 'unclosed',
+      endReason: _reasonKind(endEvent?.data['reason']),
       steps: steps,
       toolCalls: toolCalls,
       duplicateToolCalls: duplicateToolCalls,
@@ -185,6 +185,19 @@ class TurnMetrics {
       failureCodes: failureCodes,
       compactions: compactions,
     );
+  }
+
+  /// turn/end 的 reason 双形状（与 agent_state_provider._reasonKind 同口径）：
+  /// 主循环写 `reason.name` 字符串；崩溃修复合成写 `{kind: cause}`（log.dart）。
+  /// 直接 `as String?` 对 Map 值抛 TypeError——崩溃修复过的会话推导指标即整条
+  /// 静默丢失（上游 catch 吞掉）。
+  static String _reasonKind(Object? reason) {
+    if (reason is String) return reason;
+    if (reason is Map) {
+      final kind = reason['kind'];
+      if (kind is String) return kind;
+    }
+    return 'unclosed';
   }
 
   /// 工具调用签名（与 ReactLoopAgent._toolCallSignature 同口径；

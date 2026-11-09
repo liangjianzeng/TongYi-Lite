@@ -24,6 +24,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../observability/quiet_fail.dart';
 import '../session/session.dart';
 import '../loop/failure.dart';
 import 'token_estimate.dart';
@@ -279,11 +280,13 @@ final class DeterministicCompaction implements CompactionPlugin {
           summaryProvider = 'llm';
           summaryModel = 'compression';
         }
-      } on TimeoutException {
-        // 超时 → 确定性 digest 兜底（压缩本身不能失败）。
-      } on Exception {
+      } on TimeoutException catch (e) {
+        // 超时 → 确定性 digest 兜底（压缩本身不能失败）；留痕防静默降级成常态。
+        quietFail('compaction.summary.timeout', e);
+      } on Exception catch (e) {
         // 摘要模型失败 → 同上（TimeoutException 是 Exception 子类，
         // 必须先接超时档，否则永远落到泛 Exception）。
+        quietFail('compaction.summary.model', e);
       }
     }
 
