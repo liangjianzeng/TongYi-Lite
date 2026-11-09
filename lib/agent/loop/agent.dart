@@ -78,9 +78,6 @@ class ReactLoopAgent {
   final String _modelId;
   final ProviderKind _providerKind;
   final String _systemPrompt;
-  final String? _sessionPath;
-
-  final AgentSandboxApprover? _sandboxApprover;
 
   /// Phase 5 hooks（agent/pre-step、tools/result）。
   final AgentHooks? _hooks;
@@ -144,7 +141,7 @@ class ReactLoopAgent {
     required String modelId,
     required ProviderKind providerKind,
     required String systemPrompt,
-    String? sessionPath,
+    // sandboxApprover 直连 ToolExecutor（见下方 _executor 构造），主循环本体不持有。
     AgentSandboxApprover? sandboxApprover,
     Future<String?> Function()? workspaceResolver,
     AgentToolActivityCallback? onToolActivity,
@@ -177,8 +174,6 @@ class ReactLoopAgent {
         _modelId = modelId,
         _providerKind = providerKind,
         _systemPrompt = systemPrompt,
-        _sessionPath = sessionPath,
-        _sandboxApprover = sandboxApprover,
         _onToolActivity = onToolActivity,
         _hooks = hooks,
         _skills = skills,

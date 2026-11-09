@@ -28,14 +28,11 @@ import '../agent/loop/failure.dart'
 import '../agent/loop/config.dart' as loopConfig;
 import '../agent/tools/guard.dart'
     show dangerousCommandShellGuard, modelCacheGuard;
-import '../agent/capability.dart';
 import '../models/model_catalog.dart' show ModelCatalog;
 import '../agent/llm/adapter.dart'
     show LlmAdapter, ProviderKind, GenerateOptions;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
-import '../agent/protocol/protocol_selector.dart' show selectProtocol;
-import '../agent/protocol/prompt_json_protocol.dart' show PromptJsonProtocol;
 import '../agent/protocol/native_tool_protocol.dart' show NativeToolProtocol;
 import '../agent/subagents/in_process.dart' show InProcessSubagentProvider;
 import '../agent/subagents/subagent_tool.dart'
@@ -2162,8 +2159,8 @@ class ChatNotifier extends StateNotifier<bool> {
       // Phase 6：停止订阅本 turn 事件流（状态保留供面板展示本轮末态）。
       _ref.read(agentUiStateProvider.notifier).detach(conversationId);
       agentUi.setToolGen(conversationId, chars: 0); // WP5：清工具参数生成提示
-      sub?.cancel();
-      stepSub?.cancel(); // A2/A3：步答块定格监听
+      sub.cancel();
+      stepSub.cancel(); // A2/A3：步答块定格监听
       await thinkingSub.cancel();
       await statusSub.cancel();
       tokenController.close();

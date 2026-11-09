@@ -13,7 +13,6 @@ library;
 
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:pinenacl/ed25519.dart';
 

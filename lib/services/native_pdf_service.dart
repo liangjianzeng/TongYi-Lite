@@ -43,13 +43,12 @@ class NativePdfService {
             pages: const [],
             note: 'PDF 解析失败（原生桥无响应），已原样保存');
       }
-      final res = raw as Map<String, dynamic>;
-      final pages = (res['pages'] as List<dynamic>? ?? const [])
+      final pages = (raw['pages'] as List<dynamic>? ?? const [])
           .map((e) => e is String ? e : '')
           .toList();
       return PdfExtractResult(
-        ok: res['ok'] == true,
-        pageCount: res['pageCount'] is int ? res['pageCount'] as int : 0,
+        ok: raw['ok'] == true,
+        pageCount: raw['pageCount'] is int ? raw['pageCount'] as int : 0,
         pages: pages,
       );
     } on PlatformException catch (e) {
@@ -65,7 +64,7 @@ class NativePdfService {
           pageCount: 0,
           pages: const [],
           note: 'PDF 解析失败（${e.message ?? '未知错误'}），已原样保存');
-    } on Exception catch (e) {
+    } on Exception {
       return PdfExtractResult(
           ok: false,
           pageCount: 0,

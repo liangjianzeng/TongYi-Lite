@@ -11,26 +11,16 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:path/path.dart' as p;
 
 import 'package:tongyi_lite/agent/protocol/prompt_json_protocol.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
-import 'package:tongyi_lite/agent/session/store.dart';
 import 'package:tongyi_lite/agent/llm/base_engine_adapter.dart';
 import 'package:tongyi_lite/agent/llm/adapter.dart';
 import 'package:tongyi_lite/agent/capability.dart';
 import 'package:tongyi_lite/agent/protocol/tool_protocol.dart';
 import 'package:tongyi_lite/agent/loop/failure.dart';
 import 'package:tongyi_lite/agent/context_eng/compaction.dart';
-import 'package:tongyi_lite/agent/session/event.dart'
-    show
-        kEventAssistantMessage,
-        kEventCompactionSummary,
-        kEventSystemMessage,
-        kEventToolResult,
-        kEventTurnEnd,
-        kEventTurnStart,
-        kEventUserMessage;
+// 事件常量（kEvent*）经 session.dart 桶导出提供，无需单独 import event.dart。
 
 void main() {
   group('B3 多工具调用：_parseText 全块解析', () {

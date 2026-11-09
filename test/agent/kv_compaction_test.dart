@@ -7,7 +7,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tongyi_lite/agent/context_eng/compaction.dart';
 import 'package:tongyi_lite/agent/context_eng/token_estimate.dart';
 import 'package:tongyi_lite/agent/loop/failure.dart';
-import 'package:tongyi_lite/agent/session/event.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 
 void main() {

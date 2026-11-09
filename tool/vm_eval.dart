@@ -71,9 +71,9 @@ Future<void> main(List<String> args) async {
       stdout.writeln('LIB_NOT_FOUND');
       exit(1);
     }
-    stdout.writeln('lib: ${lib!['uri']}');
+    stdout.writeln('lib: ${lib['uri']}');
 
-    final ev = await rpc('evaluate', {'isolateId': isoId, 'targetId': lib!['id'], 'expression': expr});
+    final ev = await rpc('evaluate', {'isolateId': isoId, 'targetId': lib['id'], 'expression': expr});
     if (ev.containsKey('error')) {
       stdout.writeln('EVAL_ERROR: ${jsonEncode(ev['error'])}');
     } else {

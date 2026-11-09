@@ -215,6 +215,9 @@ class SherpaStreamingAsr implements StreamingAsrEngine {
 /// `{'error':msg}`。
 class _AsrWorker {
   SendPort? _toWorker;
+  // 保活句柄：worker 是进程级单例（dispose 不 kill isolate，识别器保留复用），
+  // 端口无读取方但持有防其被 GC 提前关闭——删除该字段会引入随机断流。
+  // ignore: unused_field
   ReceivePort? _fromWorker;
   Completer<void>? _loadCompleter;
   Completer<void>? _sessionCompleter;

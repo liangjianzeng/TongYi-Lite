@@ -41,7 +41,7 @@ ToolDefinition createShellExecTool() {
       if (command.isEmpty) return ToolResult.error('缺少 command 参数');
       // 沙箱模式（workspace-write 默认；danger-full-access 为审批后生效）——
       // Android 上 sh 进程始终以 app 权限运行，完整访问依赖 All-Files-Access。
-      final mode = effectiveModeOf(args);
+      // （执行模式判定在流水线 guard 层，这里曾有一处读取后未使用的死代码。）
       try {
         // stdin：一次性批次输入（对齐 DSH）。喂入后关闭；不传则不写。
         final stdinInput = (args['stdin'] as String?)?.trim();

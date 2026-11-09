@@ -15,7 +15,6 @@ import 'package:tongyi_lite/agent/llm/openai_adapter.dart';
 import 'package:tongyi_lite/agent/loop/agent.dart';
 import 'package:tongyi_lite/agent/session/session.dart';
 import 'package:tongyi_lite/agent/tool_registry.dart';
-import 'package:tongyi_lite/services/openai_service.dart';
 
 void main() {
   group('SessionLog：user/message 携带 imagePath', () {

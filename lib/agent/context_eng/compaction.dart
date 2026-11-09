@@ -24,7 +24,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
-import '../session/event.dart';
 import '../session/session.dart';
 import '../loop/failure.dart';
 import 'token_estimate.dart';

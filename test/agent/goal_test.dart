@@ -3,8 +3,6 @@ import 'dart:io';
 
 import 'package:tongyi_lite/agent/builtin_tools/goal_tools.dart';
 import 'package:tongyi_lite/agent/goal/goal_store.dart';
-import 'package:tongyi_lite/agent/builtin_tools/goal_tools.dart'
-    show createPlanStepUpdateTool;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
