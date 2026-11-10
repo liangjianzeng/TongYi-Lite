@@ -3247,6 +3247,47 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                  int   il) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
+    // [tongyi R-278 2026-11-05] FA 对照腿实测（740, Qwen3.5-4B, pp512/n128，两轮一致）：
+    // FA on pp 45.15(+38%) 但 tg 4.25(-36%)——FA kernel 对 N=1 decode 形态反噬（N=1 无
+    // Q-block 并行可赚，纯多付 F32 累加与掩码开销）。decode 图（kq_mask 行数=1）构建期
+    // 回标准 kq 路（数学等价，FA=0 形态已实证 tg 6.8），prefill 图（N>1）照走 FA 吃 +38%。
+    // GGML_OPENCL_FA_DECODE=1 逃生强开 decode-FA。
+    // [tongyi R-278b 2026-11-09] 判定与 rows 处置上移至此（原在下方 permute 之后）：
+    // 上游不变式 "kv_rows 必随 FA" 被 R-278 旁路打破——resolve_fused_ops 的探测图
+    // （n_tokens_per_seq=1）带 self_attn_mask.rows 进本函数时 ne[1]==1 → use_flash_attn
+    // =false 而 kv_rows!=null → 下方 GGML_ASSERT 当场炸出加载期 SIGABRT（真机
+    // nanbeige4.2-3b-iq2_m / ornith-1.5-9b-iq2_xs-mtp 开 MTP 加载即崩，小米13/fuxi
+    // dropbox 2026-11-08 17:18-17:19，栈 graph_mtp→build_attn→build_attn_mha+2076）。
+    // rows 变体是 FA-only 优化：旁路选非 FA 路径时必须连 rows 一起弃（n_stream 随之
+    // 取 k->ne[3]，与上游非 FA 语义一致），decode 保持 R-278 实测的标准 kq 路。
+    // [tongyi R-278c 2026-11-10] k/v 若是量化条带（app「量化 KV」开关 → type_k=v=q4_0），
+    // 非 FA 路径会把 q4_0 块存储当 f16 读 → logits 塌缩成词表头部单字节 token
+    //（K90 真机 nanbeige4.2-3b-q4_0/iq3_xxs 输出 id 41/127/106… 全 ASCII 字节区，
+    // 2026-11-10 09:56-09:57 logcat gen token 序列），CPU/OpenCL 两后端同崩相。
+    // context 创建期本有「量化 V ⇒ 必 FA」前置（llama-context.cpp 本函数同文件
+    // "quantized V cache was requested, but this requires Flash Attention"），但 app
+    // 显式传 FA=ENABLED 时该前置形同虚设：R-278 decode 旁路照样把 decode 图（ne[1]==1）
+    // 的 FA 关掉，R-278b 再把 rows 静默弃掉——禁组合从加载期崩溃变成静默乱码。
+    // 上游立场收回：**量化 KV ⇒ 必走 FA**（含 decode；此时 R-278 的 decode 旁路与
+    // cparams.flash_attn=0 都不适用——正确性优先于 tg +36% 的性能腿）。
+    // 判据用 k 的 ggml 类型而非 rows!=null：f16 缓存开 fused_kv_rows 时 rows 同样
+    // 非空（rows 只是 FA 的流式 gather），误判会把 f16 模型的 decode 旁路性能腿掐死。
+    // 量化 KV + kq_b（Q-bias）是图形层无法两立的组合，显式 ABORT 而非乱码。
+    static const bool fa_decode_force = [] {
+        const char * e = getenv("GGML_OPENCL_FA_DECODE");
+        return e && e[0] == '1';
+    }();
+    const bool kv_quantized = ggml_is_quantized(k->type) || ggml_is_quantized(v->type);
+    if (kv_quantized && kq_b != nullptr) {
+        GGML_ABORT("build_attn_mha: quantized KV cache with KQ bias is unsupported "
+                   "(non-FA path would read quantized bands as f16 -> garbage)");
+    }
+    const bool use_flash_attn = (cparams.flash_attn || kv_quantized) && kq_b == nullptr &&
+        (kq_mask->ne[1] > 1 || fa_decode_force || kv_quantized);
+    if (!use_flash_attn) {
+        kv_rows = nullptr;
+    }
+
     // split the batch into streams if needed
     const auto n_stream = kv_rows ? kv_rows->ne[1] : k->ne[3];
 
@@ -3261,17 +3302,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    // [tongyi R-278 2026-11-05] FA 对照腿实测（740, Qwen3.5-4B, pp512/n128，两轮一致）：
-    // FA on pp 45.15(+38%) 但 tg 4.25(-36%)——FA kernel 对 N=1 decode 形态反噬（N=1 无
-    // Q-block 并行可赚，纯多付 F32 累加与掩码开销）。decode 图（kq_mask 行数=1）构建期
-    // 回标准 kq 路（数学等价，FA=0 形态已实证 tg 6.8），prefill 图（N>1）照走 FA 吃 +38%。
-    // GGML_OPENCL_FA_DECODE=1 逃生强开 decode-FA。
-    static const bool fa_decode_force = [] {
-        const char * e = getenv("GGML_OPENCL_FA_DECODE");
-        return e && e[0] == '1';
-    }();
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr &&
-        (kq_mask->ne[1] > 1 || fa_decode_force);
+    // 不变式文档：非 FA 路径不得带 rows（R-278b 已在函数入口把 rows 随旁路弃掉）。
     GGML_ASSERT(use_flash_attn || kv_rows == nullptr);
     if (use_flash_attn) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
