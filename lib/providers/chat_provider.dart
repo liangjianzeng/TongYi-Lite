@@ -3041,6 +3041,29 @@ class ChatNotifier extends StateNotifier<bool> {
         adbEnabled: settings.adbEnabled,
         adbTargets: settings.adbTargets,
         conversationId: conversationId,
+        // 生图（局域网 Unsloth Studio，能力移植自汪柴）：关闭时不传取数器
+        // → 工具完全不注册（模型看不见，不会幻觉调用）。成图以带
+        // imagePaths 的 assistant 消息落库（固定前缀 id `imggen_`，
+        // agent_workflow 认得它并渲染成回合过程区图片卡）；重进会话可
+        // 回看（todo 卡 onTodosChanged 同款先例）。
+        imageGenConfigLoader:
+            settings.imageGenEnabled ? () async => settings.imageGenConfig() : null,
+        onImageGenerated: conversationId == null
+            ? null
+            : (result, prompt, model) => unawaited(_storage.saveMessage(
+                  ChatMessage(
+                    id: 'imggen_${conversationId}_'
+                        '${DateTime.now().millisecondsSinceEpoch}_${result.seed}',
+                    conversationId: conversationId,
+                    role: MessageRole.assistant,
+                    content: '🎨 生图（$model · ${result.size} · '
+                        'seed ${result.seed}）：$prompt',
+                    imagePath: result.paths.isNotEmpty
+                        ? result.paths.first
+                        : null,
+                    imagePaths: result.paths,
+                  ),
+                )),
         // todo_write 成功 → 对话内固定 id 的「☑ 任务清单」活卡 upsert
         //（用户有地方看进度；固定 id 反复重写不刷屏，模型历史可见）。
         // 清单本体也按会话隔离存储（v3）：不同会话各看各的清单。
@@ -3097,6 +3120,12 @@ class ChatNotifier extends StateNotifier<bool> {
       registry.unregister('get_weather');
       registry.unregister('fetch_url');
       registry.unregister('data_api');
+    }
+
+    // 生图：关闭时彻底不可见（注册处已按 loader 过滤，这里兜底——
+    // 与 ADB 双保险同构，成本为零）。
+    if (!settings.imageGenEnabled) {
+      registry.unregister('generate_image');
     }
 
     // shell 执行：用户设置关闭时不可见（默认开启，能力不设限）。
