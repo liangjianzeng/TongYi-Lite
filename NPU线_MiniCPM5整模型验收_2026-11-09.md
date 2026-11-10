@@ -152,3 +152,21 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 **④ 判决**：免 pack（SFIXED_POINT_8 容器 + HTP 运行时解包）是 exec 负优化（fp16 10ms/层 → W4 15 → W8 23）——解包开销 > 权重流收益，Q4 提速预期被推翻。**App NPU 后端建议：fp16 为默认（速度+精度双优），W8 为体积敏感场景备选（123 tok/s 仍为 GPU 基线 33 tok/s 的 ~3.7×）**；W4 不可用（精度崩），原生 int4 要 `--pack_4_bit_weights`（SFIXED_POINT_4），QAIRT 2.44 硬拒，升 SDK 版本是后续课题。GPU 基线（台账 leg 273）：740 OpenCL 4B Q4 pp512=33.2 tok/s。
 
 **工具索引**：`E:/MyLLM_exp/_repro/rb/mcp5_52…57`（enc 生成/构建/批量）、`serve_w4/ serve_w8/`（42+42 ctx）、设备 `/data/local/tmp/npu_m1/manifest_w4 manifest_w8`。
+
+## 九、decode（KV-cache 链）抢救与端到端贯通（2026-11-10）
+
+**背景**：「decode 是 App 可对话前的最大缺口」。前会话 decode v1（mcp5_58）报过 "v1 cos=1.0" 里程碑——本次回顾（db.sqlite 原始会话）定性为**自指判分**：设备对拍的参照是同族手写模块的 ORT 运行，三者同错即满分。挖出三重真错：① block 违反 HF pre/post-norm 结构；② 手写 rope 表 theta=10000 与模型不符（HANDROPE_DIFF max=1.97，knew vs-HF 仅 0.56，但被 NC+1 行缓存稀释在 h 里看不见）；③ GQA 用 repeat_kv Expand/Gather 实体化 [1,16,NC,128]，NC=512 时单层 exec ~100ms。
+
+**① dec2 图（mcp5_63）设计**：块结构镜像 HF LlamaDecoderLayer（pre-norm attn / post_attention_layernorm MLP / 残差不归一化）；逐 kv-head 两个 4D matmul + stack 消灭 Expand/Gather；**kcache/vcache 只读输入 + 只发射新行**（cache-row 字节序 [1,1,HD,NKV]），drop-oldest+append 由宿主 chain_run5 ROLL 完成；rope cos/sin 走模型 rotary_emb 真值表（graph 输入 + 每步 stride）。**全 42 层 vs 真 HF 层：h=k=v=1.0000**。
+
+**② 内存墙与 3 进程架构**：fp16 42×~95MB ctx ≈ 3.95GB > HTP 常驻池；实测池为**每进程 ~2.3GB**（24×95MB 过、25 撞 0x3ea；双并发进程各 2.28GB 全过 = 按进程隔离）→ **拆 3 驻留进程 A=l0–13 / B=l14–27 / C=l28–41+norm+head（各 ≤1.9GB）**，hs 中继 4KB/token 走共享文件，文件计数器闸门（CR5_GATE）锁步三进程。设备端 launcher 必须是脚本文件（内联 `cd && j0 & j1 & j2` 只给 j0 绑 env，兄弟进程死无对证——坑 39）。
+
+**③ 判分（两协议两口径）**：
+- **数值对拍**（随机初始 + hidden 中继，设备/参照同协议自洽）：4 步 cos 0.9953（argmax 同）、6 步 0.9758（argmax 同）、8 步 0.9267；ORT 同图三方参照 8 步对 HF 0.9947/top8 8/8 → 图语义干净，设备掉分定性为 **HTP fp16 在分布外对抗初始下的累积数值**，无状态破坏（曲线平滑无断点）。
+- **真协议 e2e（产品口径，mcp5_72/69）**：512 token 真实中英 prompt 走 HF 前向出 cache/hs0，8 步 **teacher-forcing**（每步注入参照 embed——坑 40：步间输入是采样 token 的 embedding，不是上一步 hidden）。**结果 cos=1.0000、argmax 1753/1753、top8 8/8**。HF 参照链自身 sanity：贪心续写复述 prompt 原文（重复嵌入下行为正确）。
+
+**④ 性能与定位（740/SM8550）**：单层 exec 11.0–12.6ms@NC512（NC=128 对照同档 → **注意力 op 非瓶颈，权重流是地板**：95MB@~9GB/s≈10.5ms）；驻留稳态 token 时间 ≈ **630ms（1.5–2.5 tok/s）**，exec 串行和 ≈580ms（A/B 各 ~170 + C 240 含 head ~60）。同表：**prefill fp16 235–304 tok/s（§七）** vs decode 1.6–2.5；GPU 基线 OpenCL 4B-Q4 pp512=33.2。**结论：NPU 线价值锚在 prefill，decode 打不过 GPU 是结构性结论（权重流 × 单 die 面积），App 正确形态 = NPU prefill + GPU decode 混合调度；纯 NPU 低功耗 decode 待 M2 功耗数据再评（候选杠杆：W8 decode 权重减半→理论 ~2×、多层融合减 launch 税）**。
+
+**⑤ 必缺件与后续**：**prefill 图不输出 KV cache——真对话的第一块缺件**（prefill 后 decode 无从续链；ADR-2 早已定性 KV 桥必须直写 buffer）。后续四件：a) KV-output prefill 变体（输出滚动 cache 布局）；b) W8 decode 实测；c) 多层融合减 launch/流税；d) M2 功耗判 NPU decode 存续价值。
+
+**工具索引**：`mcp5_63_export_dec2.py`（dec2 导出+vs-HF 判分）、`mcp5_65_build_dec2.sh`/`mcp5_67_batch_dec2.sh`（构建/批量）、`mcp5_68`（数值对拍参照）、`mcp5_70`（ORT 三方）、`mcp5_71_judgeN.py`（逐步判分）、`mcp5_72_real_prep.py`（真 prompt 参照+feed）、`chain_run5.cpp`（ROLL+闸门+reseed，坑 42/43 已修）、`dump_ids.sh`（ctx 张量 id 反查）；产物 `E:/MyLLM_exp/serve_dec/`（42+2 ctx，4.5G）、设备 `/data/local/tmp/npu_m1/{manifest_dec2_A,B,C,launch3.sh}`。运行入口 `bash mcp5_69_run_full_dec2.sh`（STEPS 可控，含推送/闸门/判分全流程）。
