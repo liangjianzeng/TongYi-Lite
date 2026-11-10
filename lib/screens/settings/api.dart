@@ -86,6 +86,9 @@ class ApiSettingsBody extends ConsumerWidget {
           const SizedBox(height: 20),
           // 联网搜索（SearXNG 实例地址等）：与 API 接入同属"外部服务"配置。
           const WebSearchSettingsBody(),
+          const SizedBox(height: 20),
+          // 图像生成（局域网 Unsloth Studio）：同为外部服务配置，能力移植自汪柴。
+          const ImageGenSettingsBody(),
         ],
       ),
     );

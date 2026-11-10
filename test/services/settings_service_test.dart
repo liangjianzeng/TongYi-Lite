@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart' show SSHKeyPair;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tongyi_lite/agent/dev/ssh/ssh_credentials.dart';
+import 'package:tongyi_lite/services/image_gen_service.dart';
 import 'package:tongyi_lite/services/settings_service.dart';
 
 void main() {
@@ -490,6 +491,93 @@ void main() {
       final s = InferenceSettings(themeMode: 'dark');
       expect(s.copyWith().themeMode, 'dark');
       expect(s.copyWith(themeMode: 'light').themeMode, 'light');
+    });
+  });
+
+  group('InferenceSettings 图像生成（能力移植自汪柴）', () {
+    test('默认：不启用，但地址/模型/密钥预置自建 Tailscale serve（用户 2026-11-10'
+        '定案：模型是服务端真实 id 而非目录，地址是远程 ts.net 而非局域网）', () {
+      const s = InferenceSettings();
+      expect(s.imageGenEnabled, isFalse);
+      expect(s.imageGenBaseUrl, kImageGenDefaultBaseUrl);
+      expect(s.imageGenBaseUrl, contains('ts.net'));
+      expect(s.imageGenModel, kImageGenDefaultModel);
+      // 出厂模型必须是 /v1/models 的 text-to-image id，不是目录路径。
+      expect(s.imageGenModel, isNot(contains('/')));
+      expect(s.imageGenModel, isNot(contains('\\')));
+      expect(s.imageGenDefaultSize, '1024x1024');
+      expect(s.imageGenApiKey, kImageGenDefaultApiKey);
+    });
+
+    test('toJson → fromJson 往返一致；旧配置缺键回落默认', () {
+      final s = const InferenceSettings(
+        imageGenEnabled: true,
+        imageGenBaseUrl: 'http://192.168.1.211:8888/',
+        imageGenModel: 'my/qwen-image',
+        imageGenDefaultSize: '2048x2048',
+        imageGenApiKey: 'sk-unsloth-test',
+      );
+      final back = InferenceSettings.fromJson(s.toJson());
+      expect(back.imageGenEnabled, isTrue);
+      expect(back.imageGenBaseUrl, 'http://192.168.1.211:8888/');
+      expect(back.imageGenModel, 'my/qwen-image');
+      expect(back.imageGenDefaultSize, '2048x2048');
+      expect(back.imageGenApiKey, 'sk-unsloth-test');
+      // 旧配置文件无这些键 → 全回落默认（默认关，行为与升级前一致）。
+      const legacy = InferenceSettings();
+      final old = InferenceSettings.fromJson({});
+      expect(old.imageGenEnabled, legacy.imageGenEnabled);
+      expect(old.imageGenBaseUrl, legacy.imageGenBaseUrl);
+      expect(old.imageGenModel, legacy.imageGenModel);
+      expect(old.imageGenDefaultSize, legacy.imageGenDefaultSize);
+      expect(old.imageGenApiKey, legacy.imageGenApiKey);
+    });
+
+    test('imageGenConfig() 快照透传五字段', () {
+      const s = InferenceSettings(
+        imageGenEnabled: true,
+        imageGenBaseUrl: 'http://10.0.0.9:8888',
+        imageGenModel: 'm1',
+        imageGenDefaultSize: '512x512',
+        imageGenApiKey: 'k1',
+      );
+      final cfg = s.imageGenConfig();
+      expect(cfg.enabled, isTrue);
+      expect(cfg.effectiveBaseUrl, 'http://10.0.0.9:8888');
+      expect(cfg.model, 'm1');
+      expect(cfg.effectiveSize, '512x512');
+      expect(cfg.apiKey, 'k1');
+      expect(cfg.isConfigured, isTrue);
+    });
+
+    test('E:/Unsloth/models 目录旧值一次性迁移（2026-11-10 用户复验：目录不是模型名）', () {
+      for (final legacy in ['E:/Unsloth/models', r'E:\Unsloth\models', 'D:/unsloth/models ']) {
+        final s = InferenceSettings.fromJson({'imageGenModel': legacy});
+        expect(s.imageGenModel, kImageGenDefaultModel,
+            reason: '存量目录值「$legacy」必须换成服务端真实 id');
+        expect(s.imageGenModel, isNot(contains('models')));
+      }
+      // 合法值原样保留：下拉选出的真实 id、HF 风格 repo id（带斜杠但不是盘符）。
+      expect(
+          InferenceSettings.fromJson(
+                  {'imageGenModel': 'qwen-image-2.1-turbo-Q5_K_M'})
+              .imageGenModel,
+          'qwen-image-2.1-turbo-Q5_K_M');
+      expect(InferenceSettings.fromJson({'imageGenModel': 'my-org/qwen-image'})
+          .imageGenModel, 'my-org/qwen-image');
+      // 迁移可持久化：落盘再读回仍是真实 id，不退回目录。
+      final migrated =
+          InferenceSettings.fromJson({'imageGenModel': r'E:\Unsloth\models'});
+      expect(InferenceSettings.fromJson(migrated.toJson()).imageGenModel,
+          kImageGenDefaultModel);
+    });
+
+    test('copyWith 单独改一项，其余保留', () {
+      const s = InferenceSettings(imageGenEnabled: true, imageGenModel: 'm1');
+      final next = s.copyWith(imageGenBaseUrl: 'http://x:8888');
+      expect(next.imageGenEnabled, isTrue);
+      expect(next.imageGenModel, 'm1');
+      expect(next.imageGenBaseUrl, 'http://x:8888');
     });
   });
 }

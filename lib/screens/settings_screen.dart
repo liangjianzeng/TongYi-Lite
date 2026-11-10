@@ -82,6 +82,13 @@ import '../agent/llm/thinking_effort.dart';
 import '../providers/index.dart';
 import '../providers/shared_providers.dart' show openAiServiceProvider;
 import '../providers/settings_provider.dart';
+import '../services/image_gen_service.dart'
+    show
+        ImageGenConfig,
+        ImageGenException,
+        ImageGenService,
+        kImageGenDefaultModel,
+        kImageGenSizes;
 import '../services/settings_service.dart';
 import '../services/model_manager.dart';
 import '../services/model_storage_service.dart'
@@ -94,6 +101,7 @@ part 'settings/api.dart';
 part 'settings/capability.dart';
 part 'settings/common.dart';
 part 'settings/dev.dart';
+part 'settings/image_gen.dart';
 part 'settings/inference_engine.dart';
 part 'settings/model_management.dart';
 part 'settings/skills.dart';

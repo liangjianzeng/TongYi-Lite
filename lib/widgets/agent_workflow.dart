@@ -14,11 +14,14 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show PlatformException;
 
+import 'dart:io';
+
 import '../models/chat_message.dart';
 import '../models/turn_trace.dart';
 import '../providers/agent_state_provider.dart';
 import '../services/device_files_service.dart';
 import 'chat_bubble.dart';
+import 'image_preview.dart';
 import 'turn_clock.dart';
 import 'turn_items.dart';
 
@@ -77,6 +80,12 @@ class TurnUnit extends RenderUnit {
   /// 「📋 计划」活卡行（固定 id `plan_$convId`），同上。
   final ChatMessage? planCard;
 
+  /// 「🎨 生图」卡行（id 前缀 `imggen_`）：生图工具把成图以带 imagePaths
+  /// 的 assistant 消息落库（能力移植自汪柴）。kind=text 保模型可见，但 UI
+  /// 不认它是"回答"——生成时刻晚于/早于回答的落库都会挤占 answer 位，
+  /// 与 todoCard（B4）同纪律走过程区图片卡。
+  final List<ChatMessage> imageCards;
+
   const TurnUnit(this.tools, this.answer,
       {this.thinking = const [],
       this.trace,
@@ -84,7 +93,8 @@ class TurnUnit extends RenderUnit {
       this.stepTexts = const [],
       this.notices = const [],
       this.todoCard,
-      this.planCard});
+      this.planCard,
+      this.imageCards = const []});
 }
 
 /// 把原始消息流按回合重排为展示单元。
@@ -98,6 +108,7 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
   final pendingThinking = <String>[];
   final pendingStepTexts = <ChatMessage>[];
   final pendingNotices = <ChatMessage>[];
+  final pendingImageCards = <ChatMessage>[];
   ChatMessage? pendingTodo;
   ChatMessage? pendingPlan;
   final turnMessages = <ChatMessage>[];
@@ -113,6 +124,7 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
         pendingThinking.isEmpty &&
         pendingStepTexts.isEmpty &&
         pendingNotices.isEmpty &&
+        pendingImageCards.isEmpty &&
         pendingTodo == null &&
         pendingPlan == null &&
         pendingAnswer == null) {
@@ -164,11 +176,13 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
         stepTexts: stepTextList,
         notices: [...pendingNotices],
         todoCard: pendingTodo,
-        planCard: pendingPlan));
+        planCard: pendingPlan,
+        imageCards: [...pendingImageCards]));
     pendingTools.clear();
     pendingThinking.clear();
     pendingStepTexts.clear();
     pendingNotices.clear();
+    pendingImageCards.clear();
     pendingTodo = null;
     pendingPlan = null;
     turnMessages.clear();
@@ -203,6 +217,10 @@ List<RenderUnit> groupMessages(List<ChatMessage> messages) {
     } else if (m.role == MessageRole.assistant &&
         m.id == 'plan_${m.conversationId}') {
       pendingPlan = m;
+    } else if (m.role == MessageRole.assistant &&
+        m.id.startsWith('imggen_')) {
+      // 生图卡（能力移植自汪柴）：不占回答槽位，独立随行族进过程区渲染。
+      pendingImageCards.add(m);
     } else if (k == MessageKind.notice || k == MessageKind.error) {
       // 过程信封/错误行：内部信封只进 turnMessages 供解码；用户可见通知
       // （🔔 子代理完成等，B4）另列 notices 渲染。
@@ -1268,6 +1286,9 @@ class AgentTurnBlock extends StatelessWidget {
   final ChatMessage? todoCard;
   final ChatMessage? planCard;
 
+  /// 「🎨 生图」卡行（id 前缀 `imggen_`）：过程区图片卡，带存下载/另存动作。
+  final List<ChatMessage> imageCards;
+
   const AgentTurnBlock({
     super.key,
     required this.steps,
@@ -1281,6 +1302,7 @@ class AgentTurnBlock extends StatelessWidget {
     this.notices = const [],
     this.todoCard,
     this.planCard,
+    this.imageCards = const [],
   });
 
   /// 历史回合 turnTrace 信封（null = 旧数据，走散消息重排回退）。
@@ -1371,7 +1393,8 @@ class AgentTurnBlock extends StatelessWidget {
   }
 
   /// 过程区附加卡（B4）：任务清单/计划活卡（ChatBubble 认得它们的文案
-  /// 前缀，todo 卡自动走结构化清单渲染）+ 用户可见通知行。同样"渲染即计数"。
+  /// 前缀，todo 卡自动走结构化清单渲染）+ 生图图片卡 + 用户可见通知行。
+  /// 同样"渲染即计数"。
   _ProcessContent _processExtras() {
     final out = <Widget>[];
     var cards = 0, noticeRows = 0;
@@ -1385,6 +1408,8 @@ class AgentTurnBlock extends StatelessWidget {
         showFooter: false,
       ));
     }
+    // 生图卡不再进过程区——它们是**结果**不是痕迹，见 [_imageCardWidgets]
+    // （2026-11-10 用户定案：折叠区藏住进度与成品，还要手点展开）。
     for (final n in notices) {
       if (n.content.trim().isNotEmpty) {
         noticeRows++;
@@ -1393,6 +1418,24 @@ class AgentTurnBlock extends StatelessWidget {
     }
     return _ProcessContent(
         children: out, notices: noticeRows, cards: cards);
+  }
+
+  /// 🎨 生图卡渲染在**结果位**（折叠区之外、回答之上），不进折叠过程区
+  /// （2026-11-10 用户定案：过程与成品都要免点击直接可见）。三态：
+  /// 生成中占位卡（isStreaming，随 live 内联展开，转圈走秒）/ 成品卡
+  /// （缩略图+存图动作）/ 失败·取消·中断文字卡（无图也必须可见）。
+  List<Widget> _imageCardWidgets() {
+    final out = <Widget>[];
+    for (final card in imageCards) {
+      final paths = card.imagePaths ?? const <String>[];
+      if (paths.isEmpty &&
+          !card.isStreaming &&
+          card.content.trim().isEmpty) {
+        continue;
+      }
+      out.add(_ImageGenCard(message: card, isLive: isLive));
+    }
+    return out;
   }
 
   /// 步答块行按 id 尾缀 `-sN` 的步号排序（历史无信封回退用）。
@@ -1407,7 +1450,12 @@ class AgentTurnBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final running = isLive && ui.running;
+    // 客户端直出回合（`/图` 占位行在飞）也算「执行中」：这种回合不走智能体
+    // 循环、ui.running 恒 false——不并入就会被当已完成回合收进折叠区，
+    // 生成进度与成品全藏进折叠条里（2026-11-10 用户复验定案：执行过程
+    // 不得折叠）。占位行 upsert 收尾后自动落回折叠形态 + 结果位成品卡。
+    final running =
+        isLive && (ui.running || imageCards.any((c) => c.isStreaming));
     // live 回合：思考存档与工具卡按**执行顺序**交错渲染（timeline 由归约器
     // 按事件到达次序生成）——不再"思考一律在前、工具一律在后"。流式思考卡
     // = 当前正在进行的思考，位于时间线末尾。
@@ -1538,12 +1586,15 @@ class AgentTurnBlock extends StatelessWidget {
               summary: process.summary,
               children: process.children,
             ),
+          // 生图结果卡（含失败/取消/中断文字卡）：结果位直显，不随过程折叠。
+          ..._imageCardWidgets(),
           if (answer != null)
             ChatBubble(
               role: 'assistant',
               content: answer!.content,
               timestamp: answer!.timestamp,
               imagePath: answer!.imagePath,
+              imagePaths: answer!.imagePaths,
               audioPath: answer!.audioPath,
               inferenceStats: answer!.inferenceStats,
               // 页脚集中到回合尾动作区（一条信息一个家）。
@@ -1583,6 +1634,8 @@ class AgentTurnBlock extends StatelessWidget {
         ...inlineProcess,
         // B4：任务清单/计划活卡与通知行随过程区展开内联（结束折叠进过程区）。
         ..._processExtras().children,
+        // 生图卡（占位/成品/失败）结果位直显——执行中同样免展开。
+        ..._imageCardWidgets(),
         if (isLive && ui.hasThinking)
           ThinkingStreamCard(
             ui: ui,
@@ -1613,6 +1666,7 @@ class AgentTurnBlock extends StatelessWidget {
             timestamp: answer!.timestamp,
             isStreaming: isLive && answer!.isStreaming,
             imagePath: answer!.imagePath,
+            imagePaths: answer!.imagePaths,
             audioPath: answer!.audioPath,
             inferenceStats: answer!.inferenceStats,
             // 页脚集中到回合尾动作区（一条信息一个家）。
@@ -1638,6 +1692,273 @@ class AgentTurnBlock extends StatelessWidget {
         if (answer != null && !_answerPending && _artifacts.isNotEmpty)
           _ArtifactSummaryCard(artifacts: _artifacts),
       ],
+    );
+  }
+}
+
+/// 🎨 生图卡（能力移植自汪柴）：成图缩略图 + 溯源文案 + 每张「存下载 /
+/// 另存」动作。Android 正确形态——桌面版的剪贴板复制/另存为对话框不照搬
+/// （Flutter 剪贴板只支持文本；SAF 对话框由 DeviceFilesService 承担），
+/// 取图路径 = MediaStore 下载目录（与 export_file 同桥）或用户自选位置。
+/// 点缩略图 → 全屏预览（image_preview 共用件）。
+///
+/// `/图` 直出的**生成中进度态**（isStreaming 占位行，chat_provider 落库）：
+/// 转圈 + 实时秒数 + 耗时预期提示，同 id upsert 收尾后原地变成品卡——
+/// 用户不再对着 20s+ 的空白干等（2026-11-10 用户实机反馈）。秒数走
+/// [TurnClockListener] 全局单表；耗时用消息时间戳差值（重建不丢）。
+class _ImageGenCard extends StatefulWidget {
+  final ChatMessage message;
+
+  /// 本回合是否 live（进程内正在跑）：占位行的转圈只在 live 时转——
+  /// 进程被杀留下的孤儿占位行渲染成「已中断」灰字，永不冻结假转圈。
+  final bool isLive;
+  const _ImageGenCard({required this.message, this.isLive = false});
+
+  @override
+  State<_ImageGenCard> createState() => _ImageGenCardState();
+}
+
+class _ImageGenCardState extends State<_ImageGenCard>
+    with TurnClockListener {
+  @override
+  void initState() {
+    super.initState();
+    _syncClock();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ImageGenCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 收尾 upsert（isStreaming 翻 false）到达即停表。
+    if (oldWidget.message.isStreaming != widget.message.isStreaming ||
+        oldWidget.message.id != widget.message.id) {
+      _syncClock();
+    }
+  }
+
+  void _syncClock() {
+    if (widget.message.isStreaming && widget.isLive) {
+      turnClockStart();
+    } else {
+      turnClockStop();
+    }
+  }
+
+  @override
+  void dispose() {
+    turnClockStop();
+    super.dispose();
+  }
+
+  Widget _shell(Widget child) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Material(
+        color: theme.colorScheme.secondaryContainer.withValues(alpha: 0.25),
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final message = widget.message;
+    final paths = message.imagePaths ?? const <String>[];
+    if (message.isStreaming) {
+      if (!widget.isLive) {
+        // 孤儿占位行（生成途中进程没了）：灰字交代，不放假转圈。
+        return _shell(Row(
+          children: [
+            const Icon(Icons.hourglass_disabled, size: 14),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '${message.content}（生成已中断：应用曾被关闭，重发 /图 可重试）',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+            ),
+          ],
+        ));
+      }
+      final secs =
+          DateTime.now().difference(message.timestamp).inSeconds;
+      return _shell(Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '🎨 图像生成中，请等待… 已用 $secs 秒',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.only(left: 23),
+            child: Text(
+              '出图通常 20-30 秒（2048 大图可到 2-4 分钟）·'
+              '右下角 ⏹ 可取消',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ),
+        ],
+      ));
+    }
+    if (paths.isEmpty) {
+      // 失败/取消收尾行：无图但必须可见（此前空图直接 shrink，报错被吞）。
+      if (message.content.trim().isEmpty) return const SizedBox.shrink();
+      return _shell(Row(
+        children: [
+          const Icon(Icons.auto_awesome, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(message.content,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ));
+    }
+    return _shell(Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.auto_awesome, size: 14),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(message.content,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+              for (var i = 0; i < paths.length; i++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      GestureDetector(
+                        onTap: () => showImagePreview(context,
+                            imagePaths: paths, initialIndex: i),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                                maxWidth: 140, maxHeight: 140),
+                            child: Image.file(
+                              File(paths[i]),
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const SizedBox(
+                                  width: 60,
+                                  height: 60,
+                                  child:
+                                      Icon(Icons.broken_image_outlined)),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const Spacer(),
+                      _MiniActionButton(
+                          icon: Icons.download,
+                          label: '存下载',
+                          onTap: () => _exportToDownloads(context, paths[i])),
+                      const SizedBox(width: 4),
+                      _MiniActionButton(
+                          icon: Icons.save_alt,
+                          label: '另存',
+                          onTap: () => _saveAs(context, paths[i])),
+                    ],
+                  ),
+                ),
+      ],
+    ));
+  }
+
+  /// 存到公共下载目录 `Download/TongYi-Lite/`（MediaStore，文件管理器可见）。
+  Future<void> _exportToDownloads(BuildContext context, String path) async {
+    try {
+      final name = path.split('/').last;
+      await DeviceFilesService.instance.exportFile(src: path, name: name);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('已存到 Download/TongYi-Lite/')));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      }
+    }
+  }
+
+  /// 另存到用户自选位置（SAF 选目录+文件名）；用户取消静默返回。
+  Future<void> _saveAs(BuildContext context, String path) async {
+    try {
+      await DeviceFilesService.instance
+          .saveAs(srcPath: path, name: path.split('/').last);
+    } catch (e) {
+      final cancelled = e is PlatformException && e.code == 'CANCELLED';
+      if (!cancelled && context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('另存失败：$e')));
+      }
+    }
+  }
+}
+
+/// 图片动作小按钮（存下载/另存共用，同 _ArtifactSummaryCard 按钮风格）。
+class _MiniActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _MiniActionButton(
+      {required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 12, color: theme.colorScheme.primary),
+            const SizedBox(width: 3),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.primary)),
+          ],
+        ),
+      ),
     );
   }
 }

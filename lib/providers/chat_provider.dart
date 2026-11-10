@@ -22,6 +22,14 @@ import '../agent/context_eng/compaction.dart'
     show DeterministicCompaction, LlmSummarizer;
 import '../agent/context_eng/token_estimate.dart' show estimateContextTokens;
 import '../tts/edge_tts_service.dart' show EdgeTtsService;
+import '../services/image_gen_service.dart'
+    show
+        ImageGenErrorKind,
+        ImageGenException,
+        ImageGenService,
+        ImageGenSlash,
+        kImageGenDefaultModel,
+        parseImageSlash;
 import '../agent/loop/agent.dart'
     show ReactLoopAgent, TurnEndReason, TurnEndReasonKind;
 import '../agent/loop/failure.dart'
@@ -364,6 +372,10 @@ class _ActiveTurn {
 
   /// 用户主动停止：API 侧 cancel 抛 DioException 时静默用。
   bool userCancelled = false;
+
+  /// `/图 ` 直连生图回合（[ChatNotifier._handleSlashImage]）：停止键的取消
+  /// 目标是 [ImageGenService.cancelActive]，不能去碰本地引擎/API 后端。
+  bool slashImage = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +709,102 @@ class ChatNotifier extends StateNotifier<bool> {
     return true;
   }
 
+  /// `/图 ` 直连生图回合（[_dispatchMessage] 顶部拦截转入，两种模式共用）。
+  /// 用户消息原样入库（`/图 …` 原文留痕）→ 直调 [ImageGenService] → 成图走
+  /// 智能体工具同款 `imggen_` 卡片通道落库（groupMessages 认得前缀，回合
+  /// 过程区渲染 🎨 生图卡；不占回答位，见 image_gen_invariant_test 不变量②）。
+  /// 用法/报错文案以 assistant 消息落库——home_screen 不消费返回值，UI 可见
+  /// 只能靠落库（/plan 空用法同款思路）。
+  Future<String> _handleSlashImage(
+    String conversationId,
+    String raw,
+    ImageGenSlash slash,
+    _ActiveTurn turn,
+  ) async {
+    final settings = _ref.read(settingsProvider);
+    await _storage.saveMessage(ChatMessage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      conversationId: conversationId,
+      role: MessageRole.user,
+      content: raw,
+    ));
+    await _refreshConversationMeta(conversationId);
+
+    Future<String> notice(String text) async {
+      await _storage.saveMessage(ChatMessage(
+        id: 'imggenhint_${conversationId}_${DateTime.now().millisecondsSinceEpoch}',
+        conversationId: conversationId,
+        role: MessageRole.assistant,
+        content: text,
+      ));
+      return text;
+    }
+
+    if (!settings.imageGenEnabled) {
+      return notice('🎨 图像生成未启用：设置 → API 接入 → 图像生成，'
+          '打开「启用图像生成」后再发一次。');
+    }
+    if (slash.prompt.isEmpty) {
+      return notice('🎨 生图用法：/图 <画面描述>，例如「/图 赛博朋克柴犬」；'
+          '尾部可加尺寸口令「尺寸 2048x2048」（512/1024/1440/2048）。');
+    }
+    final cfg = settings.imageGenConfig();
+    turn.slashImage = true;
+    turn.started = true;
+    _syncRunningState();
+    // 占位卡先行（流式 assistant 消息同款房内做法：先落 isStreaming 行，
+    // 气泡立刻出现，用户不再对着 20s+ 的空白干等）；出图/失败/取消都以
+    // **同 id 同时间戳** upsert 收尾——永不留冻结转圈。_ImageGenCard 认
+    // isStreaming 渲染「生成中」进度态（实时秒数）。
+    final cardId =
+        'imggen_${conversationId}_${DateTime.now().millisecondsSinceEpoch}';
+    final pending = ChatMessage(
+      id: cardId,
+      conversationId: conversationId,
+      role: MessageRole.assistant,
+      content: '🎨 生成图片中… ${slash.prompt}',
+      isStreaming: true,
+    );
+    await _storage.saveMessage(pending);
+    ChatMessage finalize(String text, {List<String>? paths}) => ChatMessage(
+          id: cardId,
+          conversationId: conversationId,
+          role: MessageRole.assistant,
+          content: text,
+          imagePath: paths != null && paths.isNotEmpty ? paths.first : null,
+          imagePaths: paths,
+          timestamp: pending.timestamp,
+        );
+    try {
+      final result = await ImageGenService.instance.generate(
+        config: cfg,
+        prompt: slash.prompt,
+        size: slash.size,
+      );
+      final model =
+          cfg.model.trim().isEmpty ? kImageGenDefaultModel : cfg.model.trim();
+      await _storage.saveMessage(finalize(
+        '🎨 生图（$model · ${result.size} · seed ${result.seed}）：${slash.prompt}',
+        paths: result.paths,
+      ));
+      return '🎨 已生成（${result.size} · seed ${result.seed} · '
+          '${(result.ms / 1000).toStringAsFixed(1)} 秒）';
+    } on ImageGenException catch (e) {
+      if (e.kind == ImageGenErrorKind.cancelled) {
+        await _storage.saveMessage(
+            finalize('🎨 生图已取消：${slash.prompt}'));
+        return '🎨 生图已取消';
+      }
+      await _storage
+          .saveMessage(finalize('🎨 生图失败：${e.message}（${slash.prompt}）'));
+      return '🎨 生图失败：${e.message}';
+    } catch (e) {
+      await _storage
+          .saveMessage(finalize('🎨 生图失败：$e（${slash.prompt}）'));
+      return '🎨 生图失败：$e';
+    }
+  }
+
   Future<String> _dispatchMessage(
     String conversationId,
     String prompt,
@@ -706,6 +814,13 @@ class ChatNotifier extends StateNotifier<bool> {
     List<String>? attachmentPaths,
     String? audioPath,
   }) async {
+    // P2 聊天直达生图（用户 2026-11-10「做，马上」）：`/图 <提示词>` 客户端
+    // 拦截，不进模型也不进工具循环——普通聊天/智能体模式同一入口。与智能体
+    // generate_image 的分工：那条是「模型决定画」，这条是「用户直接说画」。
+    final slash = parseImageSlash(prompt);
+    if (slash != null) {
+      return _handleSlashImage(conversationId, prompt, slash, turn);
+    }
     // 智能体模式：走工具循环（无工具时单轮直答，与普通聊天一致）。
     final settings = _ref.read(settingsProvider);
     if (settings.agentEnabled) {
@@ -2727,6 +2842,10 @@ class ChatNotifier extends StateNotifier<bool> {
     final cursor = summary?.timestamp;
     return all.where((m) {
       if (m.content.isEmpty) return false;
+      // /图 占位行（isStreaming 生图卡）绝不进模型上下文：生成中途发新
+      // 消息时「生成图片中…」混进历史就是幻觉源；收尾行（isStreaming false）
+      // 照常（与智能体工具落的 🎨 生图行同口径）。
+      if (m.isStreaming && m.id.startsWith('imggen_')) return false;
       final isTrace = m.content.startsWith(kAgentTraceMessagePrefix);
       if (_isToolActivityMessage(m) && !isTrace) return false;
       if (m.noticeCode == kCompactSummaryNotice) return identical(m, summary);
@@ -3239,6 +3358,13 @@ class ChatNotifier extends StateNotifier<bool> {
       // 挂起的提问以"用户未回答"兜底完成——否则 ask_user 工具会把回合
       // 挂死到超时，停止按钮看起来没反应。
       answerPendingQuestion(id, null);
+      // /图 直连生图回合：取消对象是生图请求本身（dio CancelToken），
+      // 绝不能落到下面去停本地引擎/API——会误杀其他并行回合。
+      if (turn.slashImage) {
+        debugPrint('[ChatNotifier] stopGeneration: cancel slash-image turn conv=$id');
+        ImageGenService.instance.cancelActive();
+        continue;
+      }
       // 智能体回合：通知主循环取消（adapter.cancel 会中止 native/API 后端）。
       // 注意**不能**用 isRunning 当门槛：相位在工具执行/步间隙时 isRunning 为
       // false，旧写法会漏到这里以下的"普通聊天"分支——只停一次当前生成，主循环

@@ -2315,7 +2315,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 TurnUnit(:final tools, :final answer, :final thinking,
                         :final trace, :final traceTools, :final stepTexts,
-                        :final notices, :final todoCard, :final planCard) =>
+                        :final notices, :final todoCard, :final planCard,
+                        :final imageCards) =>
                   AgentTurnBlock(
                     isLive: isLiveTurn,
                     steps: _stepsFor(uiState, tools, isLiveTurn),
@@ -2328,6 +2329,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     notices: notices,
                     todoCard: todoCard,
                     planCard: planCard,
+                    imageCards: imageCards,
                   ),
               };
             },
@@ -2349,6 +2351,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// 计划模式文本前缀（P3 模式行「计划」chip 切换；/plan 由 chat_provider 消费）。
   static const String _planPrefix = '/plan ';
+
+  /// 生图直出口前缀（P2，用户 2026-11-10「做，马上」；`/图` 由
+  /// chat_provider._handleSlashImage 消费——不进模型，直调生图服务）。
+  static const String _imagePrefix = '/图 ';
 
   /// 会话草稿（P3）：convId → 未发送文字，切换会话不打字仍在。
   final Map<String, String> _drafts = {};
@@ -2474,6 +2480,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // 快捷设置」里配置，默认全关——2026-10-25 用户定案）。
                   _buildContextUsageRing(),
                   _buildQuickActions(),
+                  _buildImageKey(),
                   const Spacer(),
                   if (!isGenerating) _buildMicKey(),
                   _buildSendKey(isGenerating),
@@ -2735,9 +2742,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 输入 hint 随状态：计划模式 / 生成中插话 / 普通输入。
+  /// 🎨 生图键（P2）：点按给输入框冠 `/图 ` 前缀（再点取消），发送即直连
+  /// 出图。功能总开关关闭时整个键不渲染——入口与能力同步，普通用户零打扰。
+  Widget _buildImageKey() {
+    if (!ref.watch(settingsProvider).imageGenEnabled) {
+      return const SizedBox.shrink();
+    }
+    return IconButton(
+      visualDensity: PluginInputIcon.kDensity,
+      constraints: const BoxConstraints(
+          minWidth: PluginInputIcon.kBoxSize, minHeight: PluginInputIcon.kBoxSize),
+      padding: EdgeInsets.zero,
+      icon: Icon(Icons.image_outlined,
+          size: PluginInputIcon.kIconSize,
+          color: Colors.pink.shade300),
+      tooltip: '生图（填入 /图 口令，直连出图不进模型）',
+      onPressed: () {
+        final text = _textController.text;
+        if (text.startsWith(_imagePrefix)) {
+          _textController.text = text.substring(_imagePrefix.length);
+        } else {
+          _textController.text =
+              '$_imagePrefix${text.trimLeft()}';
+        }
+        _textController.selection = TextSelection.fromPosition(
+            TextPosition(offset: _textController.text.length));
+        // 复用计划 chip 的焦点窃取节点（同「填入前缀后抢焦点」语义）。
+        FocusScope.of(context).requestFocus(_planFocusStealer);
+      },
+    );
+  }
+
+  /// 输入 hint 随状态：计划模式 / 生图模式 / 生成中插话 / 普通输入。
   String _inputHintFor(bool isGenerating, String text) {
     if (text.startsWith(_planPrefix)) return '计划模式：先规划后执行…';
+    if (text.startsWith(_imagePrefix) || text.trim() == '/图') {
+      return '生图模式：描述想要的画面，尾部可加「尺寸 2048x2048」…';
+    }
     if (isGenerating) return '插话给执行中的智能体…（不打断）';
     return '输入消息…';
   }

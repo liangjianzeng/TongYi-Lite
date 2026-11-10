@@ -12,6 +12,7 @@ import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/web_search/web_search_provider.dart';
 import '../models/agent_persona.dart';
 import '../models/api_model.dart';
+import '../services/image_gen_service.dart' show kImageGenSizes;
 import '../services/settings_service.dart';
 
 /// 持有推理引擎设置（GPU 开??/ 卸载层数），并在变更时持久化到本地文件??
@@ -754,6 +755,40 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
   /// 回合轨迹自动落盘开关（P0 轨迹导出）。
   Future<void> setAgentTraceExportEnabled(bool value) async {
     state = state.copyWith(agentTraceExportEnabled: value);
+    await _persist();
+  }
+
+  // ---- 图像生成（局域网 Unsloth Studio，能力移植自汪柴 WangCai）----
+  // 关闭时 generate_image 工具不注册（chat_provider 门禁读 imageGenEnabled）。
+
+  /// 生图总开关。
+  Future<void> setImageGenEnabled(bool value) async {
+    state = state.copyWith(imageGenEnabled: value);
+    await _persist();
+  }
+
+  /// 生图服务地址（如 `http://192.168.1.211:8888`；空 = 未配置）。
+  Future<void> setImageGenBaseUrl(String value) async {
+    state = state.copyWith(imageGenBaseUrl: value.trim());
+    await _persist();
+  }
+
+  /// 生图模型名（服务端注册名）。
+  Future<void> setImageGenModel(String value) async {
+    state = state.copyWith(imageGenModel: value.trim());
+    await _persist();
+  }
+
+  /// 默认出图尺寸档位（仅接受 kImageGenSizes 内的值）。
+  Future<void> setImageGenDefaultSize(String value) async {
+    if (!kImageGenSizes.contains(value)) return;
+    state = state.copyWith(imageGenDefaultSize: value);
+    await _persist();
+  }
+
+  /// 生图服务 API key（Bearer；空 = 无鉴权）。
+  Future<void> setImageGenApiKey(String value) async {
+    state = state.copyWith(imageGenApiKey: value.trim());
     await _persist();
   }
 

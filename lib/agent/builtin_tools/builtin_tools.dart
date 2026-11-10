@@ -4,12 +4,18 @@
 /// - 核心（默认启用）：get_time / calculator / todo / note / unit_converter / memory
 /// - 文件（默认启用）：read_file / write_file / edit_file / list_files / search_text
 /// - 网络（默认关，设置开启）：web_search / get_weather
+/// - 图像生成（默认关，设置开启）：generate_image（局域网 Unsloth Studio）
 /// - 系统（默认关，设置开启）：shell_exec
 ///
 /// 具体启用由接入层按配置决定（createBuiltinTools 全量创建，接入层过滤）。
 library;
 
+import '../../services/image_gen_service.dart'
+    show ImageGenConfig, ImageGenResult;
+import 'generate_image_tool.dart';
+
 export 'calculator.dart' show createCalculatorTool;
+export 'generate_image_tool.dart' show createGenerateImageTool;
 export 'export_file_tool.dart' show createExportFileTool, kArtifactExtensions;
 export 'file_tools.dart'
     show
@@ -114,6 +120,7 @@ const List<String> kOptionalToolNames = [
   'fetch_url',
   'data_api',
   'get_weather',
+  'generate_image',
   'shell_exec',
   'python_exec',
 ];
@@ -150,6 +157,10 @@ const List<String> kDevToolNames = [
 /// [onTodosChanged]：todo_write 成功后的 UI 通知（对话内任务清单活卡 upsert）。
 /// [conversationId]：todo 清单按会话隔离的存储键（todo_v3；null 回退
 /// 'default' 键，现网唯一调用方 chat_provider 恒传真实会话 id）。
+/// [imageGenConfigLoader]：生图配置快照取数器（设置关闭时接入层传 null，
+/// 工具完全不注册——照 weather/web_search「关闭即不可见」先例）；
+/// [onImageGenerated]：成图落库钩子（chat_provider 写带 imagePaths 的
+/// assistant 消息，同 onTodosChanged 形态）。
 List<ToolDefinition> createBuiltinTools({
     int webSearchMaxSearchesPerTurn = 5,
     bool includeDevTools = false,
@@ -158,6 +169,9 @@ List<ToolDefinition> createBuiltinTools({
     List<AdbTarget> adbTargets = const [],
     AdbSecretStore? adbKeyStore,
     String? conversationId,
+    Future<ImageGenConfig> Function()? imageGenConfigLoader,
+    void Function(ImageGenResult result, String prompt, String model)?
+        onImageGenerated,
     void Function(List<Map<String, String>> items)? onTodosChanged}) => [
       createGetTimeTool(),
       createCalculatorTool(),
@@ -181,6 +195,12 @@ List<ToolDefinition> createBuiltinTools({
       createDataApiTool(),
       createFetchUrlTool(),
       createGetWeatherTool(),
+      // 生图（局域网 Unsloth Studio）：仅当接入层给了配置取数器才注册
+      //（设置关闭 = 模型完全看不见，不会幻觉调用）。
+      if (imageGenConfigLoader != null)
+        createGenerateImageTool(
+            configLoader: imageGenConfigLoader,
+            onGenerated: onImageGenerated),
       createShellExecTool(),
       createPythonExecTool(),
       // Dev Agent 工具组（开发模式开启后由接入层过滤启用）。

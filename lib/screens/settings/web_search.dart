@@ -234,9 +234,9 @@ class WebSearchSettingsBodyState extends ConsumerState<WebSearchSettingsBody> {
             _buildSectionHeader('🌐 联网搜索', context),
             const SizedBox(height: 4),
             Text(
-              '为智能体提供 web_search 联网搜索。「端侧直连引擎」开关打开时'
-              '优先级最高（忽略下方 SearXNG 地址）；关闭后用你的 SearXNG 实例'
-              '（需手机能直接访问，局域网 IP 或 Tailscale 地址均可）。',
+              '为智能体提供 web_search 联网搜索。主方案是「端侧直连引擎」'
+              '（开关打开时优先级最高，见下方）；如需自建 SearXNG 实例，'
+              '展开底部「SearXNG 远程实例」低频配置。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
             SwitchListTile(
@@ -249,143 +249,163 @@ class WebSearchSettingsBodyState extends ConsumerState<WebSearchSettingsBody> {
               value: settings.webSearchEnabled,
               onChanged: (v) => _notifier.setWebSearchEnabled(v),
             ),
-            // ---- SearXNG 实例配置（直连引擎开关打开时优先级更高）----
-            const SizedBox(height: 8),
-            TextField(
-              controller: _url,
-              keyboardType: TextInputType.url,
-              focusNode: _urlFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: 'SearXNG 地址',
-                hintText: 'http://192.168.1.20:8080',
-                helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
-                helperMaxLines: 2,
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _apiKey,
-              focusNode: _apiKeyFocus,
-              obscureText: !_revealKey,
-              autocorrect: false,
-              decoration: InputDecoration(
-                labelText: 'API Key（可选）',
-                helperText: '仅私有实例需要；以 Bearer 发送',
-                border: const OutlineInputBorder(),
-                isDense: true,
-                suffixIcon: IconButton(
-                  icon: Icon(
-                      _revealKey ? Icons.visibility_off : Icons.visibility,
-                      size: 18),
-                  onPressed: () => setState(() => _revealKey = !_revealKey),
-                ),
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
-            ),
-            if (insecureKey) ...[
-              const SizedBox(height: 6),
-              Text(
-                '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
-                style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
-              ),
-            ],
-            const SizedBox(height: 12),
-            TextField(
-              controller: _engines,
-              focusNode: _enginesFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '引擎白名单（可选）',
-                hintText: '如 bing,sogou',
-                helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
-                    '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
-                helperMaxLines: 3,
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _language,
-              focusNode: _languageFocus,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '搜索语言（可选）',
-                hintText: '如 zh-CN，留空 = 不指定',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _testing ? null : _test,
-                    icon: const Icon(Icons.wifi_tethering, size: 16),
-                    label: Text(_testing ? '测试中…' : '测试连接'),
-                  ),
-                ),
-              ],
-            ),
-            // ---- 条数 / 超时设置 ----
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _maxResults,
-                    focusNode: _maxResultsFocus,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '最多条数',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onSubmitted: _saveMaxResults,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: _timeoutSec,
-                    focusNode: _timeoutSecFocus,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '超时（秒）',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onSubmitted: _saveTimeoutSec,
-                  ),
-                ),
-              ],
-            ),
+            // ---- SearXNG 远程实例：低频配置，默认折叠（2026-11-10 用户定案）----
+            // 端侧直连是主方案，远程实例不常用、不该大量露出——收进折叠区，
+            // 已配置时把地址带进副题一眼可见。草稿由 State 持有的 controller
+            // 承担，离焦即存与 dispose 兜底独立于展开与否，值不会因折叠丢失。
             if (notConfigured) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: 2),
               Text(
-                '尚未填写地址：联网搜索将使用端侧直连引擎（下方可开关选择）。'
-                '填好地址点「测试连接」可改用 SearXNG 实例。',
+                '未配置 SearXNG 地址：联网搜索使用端侧直连引擎（主方案，'
+                '下方可开关选择引擎）。需要自建实例再展开下面的配置。',
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
               ),
             ],
-            if (_testResult != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                '${_testOk ? '✅' : '❌'} $_testResult',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: _testOk ? Colors.green : Colors.red,
-                ),
+            const SizedBox(height: 8),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(bottom: 8, left: 4, right: 4),
+              title: const Text('SearXNG 远程实例（低频配置）',
+                  style:
+                      TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              subtitle: Text(
+                notConfigured
+                    ? '未配置 · 展开可填地址/密钥/引擎白名单并测试连接'
+                    : '已配置：$url',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11),
               ),
-            ],
-            // ---- 端侧直连引擎（SearXNG 地址为空时生效）----
+              children: [
+                TextField(
+                  controller: _url,
+                  keyboardType: TextInputType.url,
+                  focusNode: _urlFocus,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'SearXNG 地址',
+                    hintText: 'http://192.168.1.20:8080',
+                    helperText: '离焦或按回车自动保存；路径会自动补 /search，只填主机和端口即可',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onSubmitted: (v) => _notifier.setWebSearchSearXngBaseUrl(v),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _apiKey,
+                  focusNode: _apiKeyFocus,
+                  obscureText: !_revealKey,
+                  autocorrect: false,
+                  decoration: InputDecoration(
+                    labelText: 'API Key（可选）',
+                    helperText: '仅私有实例需要；以 Bearer 发送',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                          _revealKey ? Icons.visibility_off : Icons.visibility,
+                          size: 18),
+                      onPressed: () => setState(() => _revealKey = !_revealKey),
+                    ),
+                  ),
+                  onSubmitted: (v) => _notifier.setWebSearchSearXngApiKey(v),
+                ),
+                if (insecureKey) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '⚠️ 当前用 http 明文传输，API Key 会明文过网；建议改用 https 或走 Tailscale。',
+                    style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _engines,
+                  focusNode: _enginesFocus,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: '引擎白名单（可选）',
+                    hintText: '如 bing,sogou',
+                    helperText: '留空 = 用实例的全部引擎。实例上若有连不通的引擎，'
+                        '搜索会一直等到超时（实测可从 20 秒级降到 2~3 秒）',
+                    helperMaxLines: 3,
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onSubmitted: (v) => _notifier.setWebSearchSearXngEngines(v),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _language,
+                  focusNode: _languageFocus,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: '搜索语言（可选）',
+                    hintText: '如 zh-CN，留空 = 不指定',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onSubmitted: (v) => _notifier.setWebSearchSearXngLanguage(v),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _testing ? null : _test,
+                        icon: const Icon(Icons.wifi_tethering, size: 16),
+                        label: Text(_testing ? '测试中…' : '测试连接'),
+                      ),
+                    ),
+                  ],
+                ),
+                // ---- 条数 / 超时设置 ----
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _maxResults,
+                        focusNode: _maxResultsFocus,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: '最多条数',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: _saveMaxResults,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: _timeoutSec,
+                        focusNode: _timeoutSecFocus,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: '超时（秒）',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: _saveTimeoutSec,
+                      ),
+                    ),
+                  ],
+                ),
+                if (_testResult != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '${_testOk ? '✅' : '❌'} $_testResult',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _testOk ? Colors.green : Colors.red,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            // ---- 端侧直连引擎（主方案：SearXNG 地址为空或未启用时生效）----
             _buildDirectEngineSection(context, notConfigured, settings),
           ],
         ),

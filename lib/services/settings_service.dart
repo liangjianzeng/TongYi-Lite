@@ -9,6 +9,12 @@ import '../agent/dev/ssh/ssh_credentials.dart' show SshConfig;
 import '../agent/mcp/mcp_client.dart' show McpServerConfig;
 import '../models/agent_persona.dart';
 import '../models/api_model.dart';
+import 'image_gen_service.dart'
+    show
+        ImageGenConfig,
+        kImageGenDefaultApiKey,
+        kImageGenDefaultBaseUrl,
+        kImageGenDefaultModel;
 
 /// 推理引擎相关的用户设置（GPU 加速开??+ 卸载层数 + 后端选择 + 上下文大小）??
 ///
@@ -346,6 +352,32 @@ class InferenceSettings {
   /// 默认 2：偶尔贡献高质量结果，又不至于因连续请求被判定机器行为。
   final int webSearchDirectHighRiskPerWindow;
 
+  // ---- 图像生成（同尾网/局域网 Unsloth Studio，能力移植自汪柴 WangCai）----
+  // 与联网搜索同款「默认关，设置开启」纪律：关闭时 generate_image 工具
+  // 完全不注册（模型看不见）。密钥明文存本地 JSON，与 ApiModelConfig.apiKey
+  // 同口径（models/api_model.dart:15 的本地个人使用约定）。地址/key 出厂
+  // 预置为自建 tailnet 的 Tailscale serve（见 image_gen_service 常量注释，
+  // 公开克隆请换成自己的）；enabled 仍默认关，用户开一下才可用。
+
+  /// 生图总开关（默认关）。
+  final bool imageGenEnabled;
+
+  /// 生图服务地址（空 = 未配置）。默认是自建 Tailscale serve 地址
+  /// （手机 Tailscale 连同尾网即可跨网访问）；同局域网也可直填
+  /// `http://<PC>:8888`（服务端需开 LAN + 放行 8888）。
+  final String imageGenBaseUrl;
+
+  /// 生图模型名 = 服务端 `/v1/models` 的真实模型 id（设置页下拉选择）。
+  /// 早期出厂值误配成权重目录（`E:/Unsloth/models`，2026-11-10 用户复验
+  /// 定案废除）：[fromJson] 对盘符目录旧值做一次性迁移（[_migrateImageGenModel]）。
+  final String imageGenModel;
+
+  /// 默认出图尺寸档位（kImageGenSizes 之一；脏值回落 1024x1024）。
+  final String imageGenDefaultSize;
+
+  /// 生图服务 API key（Authorization: Bearer；空 = 无鉴权）。
+  final String imageGenApiKey;
+
   /// shell 执行工具开关（默认开启：端侧能力向强扩展，不自我设限??
   /// 用户可在设置中关闭）??
   final bool agentShellEnabled;
@@ -566,6 +598,12 @@ class InferenceSettings {
     this.webSearchDirectEnabled = true,
     this.webSearchDirectLowRiskPerWindow = 10,
     this.webSearchDirectHighRiskPerWindow = 4,
+    // ---- 图像生成（默认关开关；地址/key/模型出厂预置自建 tailnet 服务）----
+    this.imageGenEnabled = false,
+    this.imageGenBaseUrl = kImageGenDefaultBaseUrl,
+    this.imageGenModel = kImageGenDefaultModel,
+    this.imageGenDefaultSize = '1024x1024',
+    this.imageGenApiKey = kImageGenDefaultApiKey,
     this.agentShellEnabled = true,
     this.agentPythonEnabled = true,
     this.agentFullFileAccess = false,
@@ -682,6 +720,15 @@ class InferenceSettings {
           maxParallel: agentMaxParallel,
         );
 
+  /// 生图配置快照（ImageGenService 消费；调用方每次取新值，服务不持状态）。
+  ImageGenConfig imageGenConfig() => ImageGenConfig(
+        enabled: imageGenEnabled,
+        baseUrl: imageGenBaseUrl,
+        model: imageGenModel,
+        defaultSize: imageGenDefaultSize,
+        apiKey: imageGenApiKey,
+      );
+
   InferenceSettings copyWith({
     bool? enableGpu,
     int? gpuLayers,
@@ -766,6 +813,11 @@ class InferenceSettings {
     bool? webSearchDirectEnabled,
     int? webSearchDirectLowRiskPerWindow,
     int? webSearchDirectHighRiskPerWindow,
+    bool? imageGenEnabled,
+    String? imageGenBaseUrl,
+    String? imageGenModel,
+    String? imageGenDefaultSize,
+    String? imageGenApiKey,
     bool? agentShellEnabled,
     bool? agentPythonEnabled,
     bool? agentFullFileAccess,
@@ -902,6 +954,11 @@ class InferenceSettings {
           this.webSearchDirectLowRiskPerWindow,
       webSearchDirectHighRiskPerWindow: webSearchDirectHighRiskPerWindow ??
           this.webSearchDirectHighRiskPerWindow,
+      imageGenEnabled: imageGenEnabled ?? this.imageGenEnabled,
+      imageGenBaseUrl: imageGenBaseUrl ?? this.imageGenBaseUrl,
+      imageGenModel: imageGenModel ?? this.imageGenModel,
+      imageGenDefaultSize: imageGenDefaultSize ?? this.imageGenDefaultSize,
+      imageGenApiKey: imageGenApiKey ?? this.imageGenApiKey,
       agentShellEnabled: agentShellEnabled ?? this.agentShellEnabled,
       agentPythonEnabled: agentPythonEnabled ?? this.agentPythonEnabled,
       agentFullFileAccess: agentFullFileAccess ?? this.agentFullFileAccess,
@@ -1015,6 +1072,11 @@ class InferenceSettings {
         'webSearchDirectEnabled': webSearchDirectEnabled,
         'webSearchDirectLowRiskPerWindow': webSearchDirectLowRiskPerWindow,
         'webSearchDirectHighRiskPerWindow': webSearchDirectHighRiskPerWindow,
+        'imageGenEnabled': imageGenEnabled,
+        'imageGenBaseUrl': imageGenBaseUrl,
+        'imageGenModel': imageGenModel,
+        'imageGenDefaultSize': imageGenDefaultSize,
+        'imageGenApiKey': imageGenApiKey,
         'agentShellEnabled': agentShellEnabled,
         // 修复遗留：python_exec 与完整文件访问开关此前未写入 toJson??
         // 保存后读回会静默丢配置（默认值兜底）??
@@ -1195,6 +1257,14 @@ class InferenceSettings {
           _clampInt(json['webSearchDirectLowRiskPerWindow'], 1, 20, 10),
       webSearchDirectHighRiskPerWindow:
           _clampInt(json['webSearchDirectHighRiskPerWindow'], 1, 6, 4),
+      imageGenEnabled: json['imageGenEnabled'] as bool? ?? false,
+      imageGenBaseUrl:
+          json['imageGenBaseUrl'] as String? ?? kImageGenDefaultBaseUrl,
+      imageGenModel: _migrateImageGenModel(json['imageGenModel']),
+      imageGenDefaultSize:
+          json['imageGenDefaultSize'] as String? ?? '1024x1024',
+      imageGenApiKey:
+          json['imageGenApiKey'] as String? ?? kImageGenDefaultApiKey,
       agentShellEnabled: json['agentShellEnabled'] as bool? ?? true,
       agentPythonEnabled: json['agentPythonEnabled'] as bool? ?? true,
       agentFullFileAccess: json['agentFullFileAccess'] as bool? ?? false,
@@ -1471,4 +1541,19 @@ int _clampInt(dynamic raw, int min, int max, int fallback) {
   final v = raw is int ? raw : int.tryParse('$raw');
   if (v == null) return fallback;
   return v < min ? min : (v > max ? max : v);
+}
+
+/// 生图模型名一次性迁移（2026-11-10 用户复验定案）。
+///
+/// 早期出厂把「模型名」错配成**权重目录**（`E:/Unsloth/models`、
+/// `E:\Unsloth\models` 之类），既不是服务端认的 id、显示在消息里也毫无意义。
+/// 判据取「Windows 盘符目录」这一强信号（`^[A-Za-z]:[\\/]`）——真实的
+/// `/v1/models` id 或 HuggingFace 风格 `repo/model` 都不会以盘符开头，故
+/// 命中即替换为出厂真实模型 id [kImageGenDefaultModel]；其余值（含合法带
+/// 斜杠的 repo id）原样保留。空/非字符串 → 出厂默认。
+String _migrateImageGenModel(dynamic raw) {
+  final v = (raw is String ? raw : '').trim();
+  if (v.isEmpty) return kImageGenDefaultModel;
+  if (RegExp(r'^[A-Za-z]:[\\/]').hasMatch(v)) return kImageGenDefaultModel;
+  return v;
 }

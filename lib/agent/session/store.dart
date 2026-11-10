@@ -159,14 +159,19 @@ final class JsonlSessionStore {
       final isUser = m.role == MessageRole.user;
       // 模型视图（visionPaths 优先的长图切块序列）：重放历史时模型看到的
       // 与首发一致；切片已被清理时（7 天保留）消费侧按缺文件跳过/回退。
-      final modelImages = m.modelImagePaths;
+      // **图片键只挂 user 事件（不回灌不变量）**：生图工具的 assistant
+      // 消息带 imagePaths 是 UI 展示用，绝不随导入进模型历史——消费侧
+      //（deriveModelMessages 投影只给 user 事件带图键、openai_adapter
+      // `role != 'user'` 过滤）本已安全，写入侧这第二把锁让不变量成为
+      // 结构性保证，而非依赖两处消费侧各自正确。
+      final modelImages = isUser ? m.modelImagePaths : null;
       log.append(
         isUser ? kEventUserMessage : kEventAssistantMessage,
         <String, dynamic>{
           'content': m.content,
           if (modelImages != null && modelImages.isNotEmpty)
             'imagePath': modelImages.first
-          else if (m.imagePath != null)
+          else if (isUser && m.imagePath != null)
             'imagePath': m.imagePath,
           if (modelImages != null && modelImages.length > 1)
             'imagePaths': modelImages,
