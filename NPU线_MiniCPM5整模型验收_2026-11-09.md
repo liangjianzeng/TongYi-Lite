@@ -170,3 +170,28 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 **⑤ 必缺件与后续**：**prefill 图不输出 KV cache——真对话的第一块缺件**（prefill 后 decode 无从续链；ADR-2 早已定性 KV 桥必须直写 buffer）。后续四件：a) KV-output prefill 变体（输出滚动 cache 布局）；b) W8 decode 实测；c) 多层融合减 launch/流税；d) M2 功耗判 NPU decode 存续价值。
 
 **工具索引**：`mcp5_63_export_dec2.py`（dec2 导出+vs-HF 判分）、`mcp5_65_build_dec2.sh`/`mcp5_67_batch_dec2.sh`（构建/批量）、`mcp5_68`（数值对拍参照）、`mcp5_70`（ORT 三方）、`mcp5_71_judgeN.py`（逐步判分）、`mcp5_72_real_prep.py`（真 prompt 参照+feed）、`chain_run5.cpp`（ROLL+闸门+reseed，坑 42/43 已修）、`dump_ids.sh`（ctx 张量 id 反查）；产物 `E:/MyLLM_exp/serve_dec/`（42+2 ctx，4.5G）、设备 `/data/local/tmp/npu_m1/{manifest_dec2_A,B,C,launch3.sh}`。运行入口 `bash mcp5_69_run_full_dec2.sh`（STEPS 可控，含推送/闸门/判分全流程）。
+
+## 十、prefill KV 输出（chunked-prefill pre2）设备贯通（2026-11-10）
+
+**背景**：§九 定性的「真对话第一块缺件」——prefill 图不输出 KV cache。本节：pre2（S=128 分块 prefill 图：cache 只读入 + 每步发射 S 新行 + 图内 mask）从导出到 740 设备端到端的验收。
+
+**① 图语义（mcp5_63 DEC_S=128）**：同 dec2 家族（HF 镜像块结构 / 逐 kv-head 分组 matmul / cache 只读 + ROLL 宿主滚窗），两处 prefill 专属：
+- **amask[1,1,S,NC+S] 图输入（-1e4 加法 mask）**：零 pad 窗口行必须屏蔽（否则 softmax 分母虚增 chunk0 5×），chunk 内因果三角必须给（HF layer 级 `attention_mask=None` = eager 全连——参照与设备同错即自洽的暗坑）。广播加走 HTP bias 路（无 Expand 雷区），exec 代价 12→30ms/chunk。
+- **proj view 布局修正（坑 44）**：HF 语义 `view(1,S,HEADS,HD).transpose(1,2)`；`view(1,HEADS,S,HD)` 只在 S=1 恒等——decode 线 42 层全绿掩藏到 pre2 才爆（同坑 37 恒等假象族）。
+- 修后 **42/42 层 vs 真 HF 层 k=v=1.0000**；h 沿深度 0.998→0.91（随机 OOD 输入的 fp16 数值带，非语义错——语义错是 ~0 不是 0.91；真分布判据在 e2e logits）。
+
+**② 设备 IO 铁律（76c 探针定罪，坑 45）**：**APP buffer 字节序 = ctx 声明维 row-major**，声明 = onnx 维 dim1 挪尾（NHWC 化）：hs=(hid,s)、cos/sin=(hd,s)（**方阵也转**）、cache=(s,hd,kv)。S=1 decode 与方阵 dims 各自掩藏了一个自由度，pre2 第一次全暴露。探针法=单变量（vnew 不含 rope 先钉 hs）+ 候选读法 ORT 对号（knew 0.37→1.0000 一击定位）。
+
+**③ 单层设备验收（mcp5_73/75/76，740/SM8550）**：4 chunk 单进程，零起 cache 宿主滚窗：每 chunk **knew/vnew vs HF 逐 chunk 新行 = 1.0000（absmax-diff ~0.002 fp16 粒度）**，终态 512 行 cache 全窗 = 1.0000，exec 28–30ms/chunk。滚窗/发射/判定闭环。
+
+**④ 全链 e2e PASS（mcp5_77/79/79j，740/SM8550）**：真 512-token prompt（P0=88）4-chunk 分块 prefill，3 进程闸门驻留（A l0-13 / B l14-27 / C l28-41），每层宿主滚窗 cache，l41 末行 → host norm+head（decode 线已验组件）：
+
+| 判据 | 值 |
+|---|---|
+| logits vs HF 全前向 | **cos 1.0000**（absmax 18.09 vs 18.05） |
+| argmax / top8 | **一致（101715）** / **8/8** |
+| l0 终态 cache vs HF | kc/vc **1.0000** |
+| exec 关键路径 | 42 层×4 chunk ≈4.7s → **~116 tok/s**（mask 版单层 ~26ms vs 无 mask 10ms，broadcast-add 代价 ~2.5×，优化候选：mask 折叠/降维） |
+| wall（含 42 ctx 启动税） | ~9.5s（驻留热态后只剩 exec） |
+
+**⑤ 调试期间定罪的两大协议坑（坑 49/50，详见交接档）**：ao 布局三重掩蔽（S=1 恒等 + head-major 假相等 + **h 被 residual 主导**——判 h 必须配 attn 分支单判，BRANCH_{k}_COS 判据已入 mcp5_63）；**mask 窗口语义 off-by-one**（chunk c 执行时 cache 真值行数 = c·S 而非 (c+1)·S——参照与设备两侧同错即判分假绿，HF 层级 vs HF 全前向 0.8586 才是照妖镜）。

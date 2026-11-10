@@ -59,6 +59,15 @@ static void write_file(const char* p, const void* buf, size_t n) {
   if (fd < 0) return;
   write(fd, buf, n); close(fd);
 }
+// "{t}" in an output path expands to the step index (per-chunk prefill dumps).
+static std::string expand_step(const std::string& s, int t) {
+  std::string out; char num[16]; snprintf(num, sizeof num, "%d", t);
+  for (size_t i = 0; i < s.size();) {
+    if (s.compare(i, 3, "{t}") == 0) { out += num; i += 3; }
+    else out += s[i++];
+  }
+  return out;
+}
 
 struct IO {
   std::string name, file;
@@ -86,6 +95,9 @@ int main(int argc, char** argv) {
   if (!mf) { printf("CR5_FAIL manifest\n"); return 1; }
   int steps = atoi(argv[2]);
   bool keep = getenv("CHAIN_KEEP") && !strcmp(getenv("CHAIN_KEEP"), "1");
+  // CR5_T0: base step index — lets per-chunk single-step invocations (prefill) address
+  // rope-table stride rows and {t} file names as if one continuous run.
+  const int t0 = getenv("CR5_T0") ? atoi(getenv("CR5_T0")) : 0;
 
   // Cross-process barrier (split-resident decode: N processes, one per ctx-pool slice):
   // process i executes step t only after counter reaches N*t+i, then writes N*t+i+1.
@@ -183,14 +195,15 @@ int main(int argc, char** argv) {
   // is the strict path; zero-filling here only keeps malloc'd buffers defined pre-step-0.
   for (auto& s : segs)
     for (auto& io : s.ins) {
-      size_t cap = io.stride ? io.bytes + io.stride * (steps > 0 ? steps - 1 : 0) : io.bytes;
+      int span = t0 + (steps > 0 ? steps - 1 : 0);          // table may be addressed up to step t0+steps-1
+      size_t cap = io.stride ? io.bytes + io.stride * span : io.bytes;
       io.buf = (uint8_t*)malloc(cap);
-      if (!read_file(io.file.c_str(), io.buf, io.stride ? io.bytes : cap)) {
+      if (!read_file(expand_step(io.file, t0).c_str(), io.buf, io.stride ? io.bytes : cap)) {
         printf("CR5_INFO preload missing %s (zero-filled)\n", io.file.c_str());
         memset(io.buf, 0, cap);
       }
-      // stride inputs: table file holds (steps+1) rows; read whole table
-      if (io.stride && !read_file(io.file.c_str(), io.buf, io.bytes + io.stride * (steps > 0 ? steps - 1 : 0))) return 1;
+      // stride inputs: table file holds (t0+steps) rows; read whole table
+      if (io.stride && !read_file(io.file.c_str(), io.buf, io.bytes + io.stride * span)) return 1;
     }
 
   void* htp = dlopen("./lib/libQnnHtp.so", RTLD_NOW | RTLD_LOCAL);
@@ -216,7 +229,8 @@ int main(int argc, char** argv) {
   STEP(g_qnn.deviceCreate(nullptr, nullptr, &device));
 
   double wall0 = now_ms(), execTotal = 0;
-  for (int t = 0; t < steps; t++) {
+  for (int tx = 0; tx < steps; tx++) {
+    const int t = t0 + tx;
     double tw = now_ms(), te = 0;
     double waitms = 0;
     if (gdir && gn > 0) waitms = gate_wait((long)gn * t + gid);
@@ -259,7 +273,8 @@ int main(int argc, char** argv) {
       // per-step relay: plain inputs re-read every step (h -> hs via file),
       // stride tables not re-read, roll inputs are host-managed after each step.
       for (auto& io : s.ins)
-        if (!io.stride && !io.is_roll && !read_file(io.file.c_str(), io.buf, io.bytes)) return 1;
+        if (!io.stride && !io.is_roll &&
+            !read_file(expand_step(io.file, t).c_str(), io.buf, io.bytes)) return 1;
       std::vector<Qnn_Tensor_t> tins(s.ins.size()), touts(s.outs.size());
       for (size_t j = 0; j < s.ins.size(); j++) {
         IO& io = s.ins[j];
@@ -298,20 +313,29 @@ int main(int argc, char** argv) {
         if (!io.roll_into.empty()) {
           IO* tgt = nullptr;
           for (auto& in : s.ins) if (in.name == io.roll_into) tgt = &in;
-          if (!tgt || !io.roll_row || tgt->bytes < io.roll_row * 2) {
+          // drop-oldest-N + append-N: N = output rows (1 for decode new-row, S for a prefill chunk)
+          size_t nrows = io.bytes / io.roll_row;
+          if (!tgt || !io.roll_row || io.bytes % io.roll_row || tgt->bytes < io.roll_row * nrows) {
             printf("CR5_FAIL roll cfg %s\n", io.roll_into.c_str()); return 1; }
-          memmove(tgt->buf, tgt->buf + io.roll_row, tgt->bytes - io.roll_row);
-          memcpy(tgt->buf + tgt->bytes - io.roll_row, io.buf, io.roll_row);
-          if (!io.file.empty() && io.file != "-") write_file(io.file.c_str(), io.buf, io.bytes);
+          size_t moved = io.roll_row * nrows;
+          memmove(tgt->buf, tgt->buf + moved, tgt->bytes - moved);
+          memcpy(tgt->buf + tgt->bytes - moved, io.buf, moved);
+          if (!io.file.empty() && io.file != "-")
+            write_file(expand_step(io.file, t).c_str(), io.buf, io.bytes);
           continue;
         }
-        write_file(io.file.c_str(), io.buf, io.bytes);
+        write_file(expand_step(io.file, t).c_str(), io.buf, io.bytes);
       }
       if (!keep && s.graphH) { STEP(g_qnn.contextFree(s.ctxH, nullptr)); s.ctxH = nullptr; s.graphH = nullptr; }
     }
     if (gdir && gn > 0) gate_post((long)gn * t + gid + 1);
     printf("CR5_STEP %d id=%d wall=%.1f exec=%.1f wait=%.1f ms\n", t, gid, now_ms() - tw, te, waitms);
   }
+  // persist host-rolled caches so the next driver invocation resumes where this one left off
+  if (getenv("CR5_ROLL_SAVE") && !strcmp(getenv("CR5_ROLL_SAVE"), "1"))
+    for (auto& s : segs)
+      for (auto& io : s.ins)
+        if (io.is_roll && io.buf) write_file(io.file.c_str(), io.buf, io.bytes);
   for (auto& s : segs) { if (s.ctxH) g_qnn.contextFree(s.ctxH, nullptr); }
   g_qnn.contextFree(device, nullptr);
   g_qnn.backendFree(backend);
