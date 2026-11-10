@@ -132,3 +132,23 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 **新工具**：`chain_run4.cpp`（单进程常驻 backend/device + manifest 驱动多段链，vs 46 进程 3× wall 加速；ctx 全驻留模式撞 HTP 内存池 0x3ea，不采用）。
 
 **边界**：exec 421ms 距权重流理论下限（~88ms/forward ≈ 1450 tok/s）尚远，瓶颈是 mmap ctx 权重搬运效率；再往上走要 QNN 权重共享/TCM 驻留（M2 课题）。decode（KV-cache 链）仍是 App 可对话前的最大缺口。
+
+## 八、Q4/W4A16 设备实测全案（2026-11-10）——免 pack 量化三档终局
+
+**背景**：用户 Q4 诉求（体积/内存）；M1 会话 4B W4A16 单图 ctx（2.97GB）当年唯一缺角 = 设备实测。
+
+**① 4B 单图 ctx 设备加载 = HTP 内存墙（0x3ea 实锤）**：md5 完好（dc919c3d…），qnn-net-run 与 chain_run4 两实现同判 createFromBinary 失败——单图 >~2GB 在 SM8550 上不可加载。M1"设备传输玄学"只是表层，拉全也过不了加载。**4B 也必须分层链**（本 2B 分层架构存在价值再 +1）。
+
+**② 分层 W4A16/W8A16 配方全打通（新增件）**：层图权重被匿名化为 `val_N`（同名跨层冲突）→ **每层独立 enc.json**（`mcp5_52_gen_enc_w4.py`：图内 2D 权重按首次消费顺序对号 q/k/v/o/gate/up/down，从 HF safetensors 算 per-channel scale；`activation_encodings` 必须显式空 dict；int8 对称 offset 必须 -127 而非 int4 的 7；head/norm 不入 overrides 靠 --float_fallback 保 fp16）。构建器 `mcp5_53/56`、批量 `mcp5_54/57`、manifest 与判分同 s128 管线。注意 W4/W8 图 out tensor id=91（fp16=90），换图必查 json。
+
+**③ 三档终局（740/SM8550，SEQ=128 整链 42 层+norm，head fp16）**：
+
+| 方案 | 模型体积 | 整链 exec | tok/s | logits cos | top1 |
+|---|---|---|---|---|---|
+| fp16 | 4.3 GB | 421-545 ms | **235-304** | 1.0000 | ✓ |
+| W8A16 | 1.9 GB | 1039-1072 ms | 119-123 | 0.9973 | ✓（top6 4/6 同） |
+| W4A16 | 1.1 GB | 654-693 ms | 185-196 | **0.6539 ✗** | ✗ |
+
+**④ 判决**：免 pack（SFIXED_POINT_8 容器 + HTP 运行时解包）是 exec 负优化（fp16 10ms/层 → W4 15 → W8 23）——解包开销 > 权重流收益，Q4 提速预期被推翻。**App NPU 后端建议：fp16 为默认（速度+精度双优），W8 为体积敏感场景备选（123 tok/s 仍为 GPU 基线 33 tok/s 的 ~3.7×）**；W4 不可用（精度崩），原生 int4 要 `--pack_4_bit_weights`（SFIXED_POINT_4），QAIRT 2.44 硬拒，升 SDK 版本是后续课题。GPU 基线（台账 leg 273）：740 OpenCL 4B Q4 pp512=33.2 tok/s。
+
+**工具索引**：`E:/MyLLM_exp/_repro/rb/mcp5_52…57`（enc 生成/构建/批量）、`serve_w4/ serve_w8/`（42+42 ctx）、设备 `/data/local/tmp/npu_m1/manifest_w4 manifest_w8`。
