@@ -512,6 +512,11 @@ struct InferenceEngine {
     // 走 GGUF 内嵌 jinja 模板（dllm-CLOVER-APP-G，真机 830 乱码定罪：
     // 内置 chatml 回退+Qwen3 空 think 注入 → 偏离训练分布 → 空/乱码）。
     bool is_clover_model = false;
+    // Nanbeige4.x 架构标志：同判据同修法（[nanbeige-garble 2026-11-09]）。
+    // 其内嵌模板要求 assistant 段以 <think> 开启器收口（thinking off 时模板
+    // 自渲染空 think 块），chatml 回退路不注入开启器 → 偏离训练分布 → 乱码
+    // （真机 fuxi 2026-11-09 实锤，与 ling-garble 同症）。
+    bool is_nanbeige_model = false;
     int  n_draft_max = 1;   // how many tokens the MTP head drafts per step (upper bound).
                             // 2026-11-08 定案 2→1（机主裁决，不再真机 AB）：手机端
                             // GPU 解码 compute-bound（740 ornith 308ms/tok vs ~70ms
@@ -716,6 +721,8 @@ struct InferenceEngine {
         std::string backend = gpu_backend ? gpu_backend : "auto";
         int effective_gpu_layers = 0;
         bool vulkan_ok = false, opencl_ok = false;
+        // [kvfa-opencl 2026-11-10] 选中后端是否 OpenCL（KV 策反判据用，见 type_k 段）。
+        bool opencl_selected = false;
         ggml_backend_dev_t vulkan_dev = nullptr, opencl_dev = nullptr;
         if (enable_gpu) {
             // Probe the registry for backend devices of each type.
@@ -766,6 +773,7 @@ struct InferenceEngine {
                     LOGI("OpenCL selected");
                     reportLoadingLog("已选择 OpenCL 后端");
                     effective_gpu_layers = gpu_layers;
+                    opencl_selected = true;
                 } else {
                     LOGW("OpenCL backend requested but not available -> CPU");
                     reportLoadingLog("OpenCL 不可用，回落 CPU");
@@ -775,6 +783,7 @@ struct InferenceEngine {
                     LOGI("auto -> OpenCL");
                     reportLoadingLog("自动选择 OpenCL 后端");
                     effective_gpu_layers = gpu_layers;
+                    opencl_selected = true;
                 } else if (vulkan_ok) {
                     LOGI("auto -> Vulkan (equivalent to OpenCL on Adreno 825)");
                     reportLoadingLog("自动选择 Vulkan 后端");
@@ -966,6 +975,10 @@ struct InferenceEngine {
                 model, "general.architecture", arch_buf, sizeof(arch_buf));
             const bool is_clover = arch_len > 0 && std::strcmp(arch_buf, "clover_moe") == 0;
             is_clover_model = is_clover;   // 模板路径判据（与 draft-self 开关无关）
+            // [nanbeige-garble 2026-11-09] 同上判据族：nanbeige4.x 内嵌模板
+            // 必须走 jinja 路（见成员声明处注释）。
+            is_nanbeige_model = arch_len > 0 &&
+                std::strcmp(arch_buf, "nanbeige") == 0;
             // 2026-10-30 真机判卷（740/830 双机，ledger dllm-CLOVER-APP-D/E）：
             // draft-self + 熵接受在 Clover-35B 上 100% 假接受（高熵行阈值
             // min(ratio, delta*e^-H)→0，草稿不与目标 argmax 对表，mask 块
@@ -1377,6 +1390,21 @@ struct InferenceEngine {
             ctx_params.type_k = GGML_TYPE_F16;
         }
         const bool model_is_mla = llama_model_is_mla(model);
+        // [kvfa-opencl 2026-11-10] OpenCL 的 FA kernel 不收 rows 变体
+        //（ggml-opencl.cpp GGML_OP_FLASH_ATTN_EXT: `op->src[5] != nullptr -> false`），
+        // 而量化 KV 必须经 rows gather 才能进 FA。R-278c 之后量化 KV 无条件走 FA，
+        // 于是 OpenCL 上每层 attention 节点都被调度器踹回 CPU：K90/Adreno 830 实测
+        // nanbeige4.2-3b-q4_0 量化 KV decode 152ms/tok(6.6t/s) < 纯 CPU 112ms/tok(9)，
+        // prefill-warmup 9.2s vs 4.6s——GPU 只剩 matmul + 逐层 ping-pong（用户
+        // 「opencl 比 CPU 慢」2026-11-10）。f16 KV 让 attention 走标准 kq 全上 GPU
+        // （R-278 decode 旁路，spark-x2.6 Q4_K_M 在 K90 的既有速度腿）。MLA/Clover
+        // 各有上面的 force-F16 先例，不经过本策反；Vulkan 的 FA 支持 rows，不受影响。
+        if (opencl_selected && !model_is_mla && ctx_params.type_k != GGML_TYPE_F16) {
+            LOGI("KV cache: OpenCL backend - forcing type_k=F16 (OpenCL FA rejects "
+                 "rows variant; quantized KV pushes attention to CPU ping-pong)");
+            reportLoadingLog("OpenCL 不支持量化 KV 注意力，已改用 F16 KV 保持 GPU 加速");
+            ctx_params.type_k = GGML_TYPE_F16;
+        }
         if (model_is_mla && ctx_params.type_k != GGML_TYPE_F16) {
             // [ling-garble 2026-11-07] 量化 MLA 潜缓存数值坏：740 native 2×2 矩阵
             // （ling_e2e E2E_KVM/E2E_NOFA）—— q4_0/q4_0 无论 FA 开关全炸（A=!×48、
@@ -2329,7 +2357,10 @@ struct InferenceEngine {
                 const char *emb_tmpl_gate = llama_model_chat_template(model, nullptr);
                 const bool emb_is_bailing = emb_tmpl_gate &&
                     strstr(emb_tmpl_gate, "<role>ASSISTANT</role>") != nullptr;
-                if ((is_clover_model || emb_is_bailing) && emb_tmpl_gate) {
+                // [nanbeige-garble 2026-11-09] nanbeige4.x 与 ling 同症同修：
+                // 内嵌模板（ChatML 外壳 + think 开启器 + 工具协议）必须由
+                // jinja 求值，chatml 裸渲染 → 乱码（真机 fuxi 实锤）。
+                if ((is_clover_model || emb_is_bailing || is_nanbeige_model) && emb_tmpl_gate) {
                     common_chat_templates_inputs cinputs;
                     for (const auto & m : chat_vec) {
                         common_chat_msg msg;
@@ -2381,13 +2412,22 @@ struct InferenceEngine {
                 // 渲染尾部是 "assistant\n"，条件不命中，零变化。
                 if (!formatted_prompt.empty()) {
                     const std::string think_open_tag = "<think>";
-                    if (formatted_prompt.size() >= think_open_tag.size() &&
-                        formatted_prompt.compare(
-                            formatted_prompt.size() - think_open_tag.size(),
-                            think_open_tag.size(), think_open_tag) == 0) {
+                    // [nanbeige-garble 2026-11-09] 判定容忍尾随空白：nanbeige
+                    // 内嵌模板 opener 自带尾随 "\n"（"…<think>\n"），Clover/
+                    // Bailing 是裸 "<think>" 收口；不修剪会把开启器漏判成
+                    // "无 opener"，开启器改写与流前置标志双双失灵。
+                    std::string tail = formatted_prompt;
+                    while (!tail.empty() && (tail.back() == '\n' || tail.back() == '\r' ||
+                                             tail.back() == ' '  || tail.back() == '\t')) {
+                        tail.pop_back();
+                    }
+                    if (tail.size() >= think_open_tag.size() &&
+                        tail.compare(tail.size() - think_open_tag.size(),
+                                     think_open_tag.size(), think_open_tag) == 0) {
                         if (!enable_thinking.load()) {
-                            formatted_prompt.erase(formatted_prompt.size() -
-                                                   think_open_tag.size());
+                            // erase 从**修剪后**长度定位开启器起点：带尾随换行时
+                            // 按原 size-7 会把换行当开启器字符留下半个标签。
+                            formatted_prompt.erase(tail.size() - think_open_tag.size());
                             formatted_prompt += "<think></think>";
                             LOGI("bailing-v3 style prompt: trailing think opener "
                                  "closed (<think></think>), thinking disabled");
