@@ -45,7 +45,12 @@ args = ONNXtoQNNArgParser().parse_args()
 # "Saving QNN Model..."; no-pack rerun crashed identically. Export DLC instead — the
 # save_to_dlc path (python, ir_to_dlc.py) is a separate writer and DLC -> context
 # binary is the preferred device deployment form anyway (skips ndk-build).
-args.export_format = 'dlc'
+# UPDATE 2026-11-11: DLC-path layers are device-RED at ZERO quantization too (w8offfc trio)
+# while the DLC tensor content is provably clean (7 FC s8 OI, attention all f16, no f32);
+# 92-line cpp/bin -> model.so -> ctxgen --model is GREEN with the same ONNX. Poison
+# suspected in DLC compose/prepare, so W8_EXPORT_FMT=cpp re-arms the native writer
+# (FIXUP4's honest constants may already cure [C22]'s dtype-size overrun).
+args.export_format = _os0.environ.get('W8_EXPORT_FMT', 'dlc')
 converter = onnx_frontend.OnnxConverterFrontend(args, custom_op_factory=QnnCustomOpFactory())
 ir_graph = converter.convert()
 
@@ -69,11 +74,12 @@ optimized = optimizer.optimize(ir_graph)
 
 # ---- FIXUP: RmsNorm fp32 constant inputs -> main-input dtype ----
 fixed = 0
+# bisect env switches (poison hunt 2026-11-11): W8_NO_FIXUP/_lz/_pfd=1 disable each patch
 nodes = optimized.list_nodes() if hasattr(optimized, 'list_nodes') else []
 if not nodes:
     nodes = list(getattr(optimized, 'nodes_in_order', []))
 print('FIXUP scanning %d nodes' % len(nodes), file=sys.stderr)
-for node in nodes:
+for node in nodes if _os0.environ.get('W8_NO_FIXUP', '0') != '1' else []:
     op = getattr(node, 'op', None)
     tstr = str(getattr(op, 'type', ''))
     if 'rmsnorm' not in tstr.lower().replace('_', '') and not str(getattr(op, 'name', '')).startswith('rms_norm_'):
@@ -155,7 +161,7 @@ del _om
 print('EXTMETA fp16 external tensors: %d' % len(_ext_meta), file=sys.stderr)
 
 c_w = c_f = 0
-for node in nodes:
+for node in nodes if _os.environ.get('W8_NO_FIXUP4', '0') != '1' else []:
     op = getattr(node, 'op', None)
     name = getattr(op, 'name', '?')
     meta = _ext_meta.get(name)
@@ -212,7 +218,7 @@ print('FIXUP4 done: weights_real_fp32=%d floats_real_fp16=%d' % (c_w, c_f), file
 # weight constant (that has param encodings) to OI [out,in]; per-channel scale count
 # (= in-features) matches the last dim either way (ensureValidEncoding said 2048).
 c_t = 0
-for node in nodes:
+for node in nodes if _os0.environ.get('W8_NO_FIXUP5', '0') != '1' else []:
     op = getattr(node, 'op', None)
     if op is None or str(getattr(op, 'type', '')) != str(_oa.FullyConnectedOp.TRANSLATION_KEY):
         continue
@@ -277,7 +283,8 @@ def _pfd(self, is_bias=False):
         return _orig_pfd(self, is_bias)
     finally:
         self.qairt_converter_float_fallback = old
-type(backend).process_float_datatype = _pfd
+if _os.environ.get('W8_NO_PFD', '0') != '1':
+    type(backend).process_float_datatype = _pfd
 
 # The embedding (un-quantized float weight) is added via add_lazy_tensor whose default
 # tensor_data_type is FLOAT_32 and which does NOT route through process_float_datatype;
@@ -297,7 +304,8 @@ def _lz(self, *a, **k):
         k['tensor_data_type'] = _FP16
         print('LAZY16 %s' % str(k.get('tensor_name', '?'))[:60], file=sys.stderr)
     return _orig_lazy(self, *a, **k)
-type(backend).add_lazy_tensor = _lz
+if _os.environ.get('W8_NO_LZ', '0') != '1':
+    type(backend).add_lazy_tensor = _lz
 
 backend.save(optimized)
 print('CONVERSION COMPLETE', file=sys.stderr)

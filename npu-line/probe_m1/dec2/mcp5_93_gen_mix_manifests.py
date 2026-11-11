@@ -38,7 +38,7 @@ def layer_line(prefix, i):
     line = f"{tag}_ctx.bin {gname} {len(iord)} " + " ".join(
         f"{nm} {ins[nm]['id']} f2 {dims(ins[nm])} {FILES[nm]}" for nm in iord)
     line += f" {len(oord)} " + " ".join(
-        f"{ROLL.get(nm, nm)}{outs[nm]['id']} f2 {dims(outs[nm])} {OF[nm]}" for nm in oord)
+        f"{ROLL.get(nm, nm + ' ')}{outs[nm]['id']} f2 {dims(outs[nm])} {OF[nm]}" for nm in oord)
     return line
 
 

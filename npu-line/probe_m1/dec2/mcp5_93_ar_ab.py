@@ -10,8 +10,12 @@ import numpy as np
 import torch
 from safetensors import safe_open
 
-HEAD = sys.argv[1] if len(sys.argv) > 1 else "w8"   # w8 | w8full | fp16 | mix:mN (step0 only)
+HEAD = sys.argv[1] if len(sys.argv) > 1 else "w8"   # w8 | w8full | fp16 | mix:mN | teacher:X
 MIXGRP = HEAD.split(":")[1] if HEAD.startswith("mix:") else None
+# teacher:X = feed the EXPECTED token's embedding each step (no device-selected token);
+# X must be a LAUNCH head ("teacher:w8nat" -> launch_nc640_step_w8nat.sh). Isolates
+# quant-noise greedy divergence from numeric defects (W8 free-run drifts after step0).
+TEACHER = HEAD.startswith("teacher:")
 ADB = "/mnt/c/Users/jianz/AppData/Local/Android/Sdk/platform-tools/adb.exe"
 DEV = "<redacted-serial>"
 R = "/data/local/tmp/npu_m1"
@@ -20,9 +24,13 @@ ST = "/mnt/e/wsl_stage"
 STW = "E:\\wsl_stage"
 EXPECTED = [62598, 26619, 46436, 15343, 396, 5020, 18219, 1753]
 STEPS = 1 if MIXGRP else 8   # bisection needs only the step-0 token
+BASE = HEAD.split(":")[1] if TEACHER else HEAD
 LAUNCH = {"w8": "launch_nc640_step_w8.sh", "w8full": "launch_nc640_step_w8full.sh",
-          "fp16": "launch_nc640_step.sh"}.get(HEAD, "launch_nc640_step_mix.sh")
-TAGP = {"w8": "w8", "w8full": "w8f", "fp16": "fp"}.get(HEAD, "mix")
+          "w8nat": "launch_nc640_step_w8nat.sh",
+          "fp16": "launch_nc640_step.sh"}.get(BASE, "launch_nc640_step_mix.sh")
+TAGP = {"w8": "w8", "w8full": "w8f", "w8nat": "nat", "fp16": "fp"}.get(BASE, "mix")
+if TEACHER:
+    TAGP += "T"
 
 with safe_open(CK, framework="pt") as f:
     emb = f.get_tensor("model.embed_tokens.weight").to(torch.float16).numpy()
@@ -55,10 +63,22 @@ if MIXGRP:
     push("E:\\MyLLM_exp\\_repro\\rb\\launch_nc640_step_mix.sh", f"{R}/launch_nc640_step_mix.sh")
     sh(["chmod 755 " + R + "/launch_nc640_step_mix.sh"])
     print("PRISTINE_PUSHED", MIXGRP, flush=True)
-if HEAD in ("w8", "w8full"):
+if BASE in ("w8", "w8full", "w8nat"):
     subprocess.run([ADB, "-s", DEV, "push", "E:\\MyLLM_exp\\serve_dec\\w8dec_l999head_ctx.bin",
                     f"{R}/w8dec_l999head_ctx.bin"], capture_output=True, check=True)
-if HEAD == "w8":
+if BASE == "w8nat":
+    # native-recipe W8 layers (native qnn-onnx-converter + enc -> cpp/model.so); the
+    # 93-line wrapper builds (w8nc640_*) are device-RED — wrapper patch-flow poison, pit 57
+    for i in range(42):
+        subprocess.run([ADB, "-s", DEV, "push", f"E:\\MyLLM_exp\\serve_dec\\w8nat_l{i}_ctx.bin",
+                        f"{R}/w8nat_l{i}_ctx.bin"], capture_output=True, check=True)
+    print("W8NAT_LAYERS_PUSHED 42", flush=True)
+    for nm in ("A", "B", "C"):
+        push(f"E:\\MyLLM_exp\\manifest_nat_{nm}", f"{R}/manifest_nat_{nm}")
+    push("E:\\MyLLM_exp\\_repro\\rb\\launch_nc640_step_w8nat.sh",
+         f"{R}/launch_nc640_step_w8nat.sh")
+    sh(["chmod 755 " + R + "/launch_nc640_step_w8nat.sh"])
+elif HEAD == "w8":
     push("E:\\MyLLM_exp\\manifest_nc640_C_w8", f"{R}/manifest_nc640_C_w8")
     push("E:\\MyLLM_exp\\_repro\\rb\\launch_nc640_step_w8.sh", f"{R}/launch_nc640_step_w8.sh")
     sh(["chmod 755 " + R + "/launch_nc640_step_w8.sh"])
@@ -102,7 +122,8 @@ for s in range(STEPS):
     ok = "OK" if t == EXPECTED[s] else f"MISMATCH exp {EXPECTED[s]}"
     print(f"step {s}: token {t} {ok} cos={cos:.6f}\n   {line.strip()}", flush=True)
     if s < STEPS - 1:
-        emb[t].astype("<f2").tofile(f"{ST}/d2e_hs_t{s + 1}.raw")
+        feed_tok = EXPECTED[s] if TEACHER else t
+        emb[feed_tok].astype("<f2").tofile(f"{ST}/d2e_hs_t{s + 1}.raw")
         push(f"{STW}\\d2e_hs_t{s + 1}.raw", f"{R}/")
 
 w = sh(["dumpsys power | grep -m1 mWakefulness"])
