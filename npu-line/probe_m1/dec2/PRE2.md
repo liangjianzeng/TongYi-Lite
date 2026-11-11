@@ -52,3 +52,22 @@ exec 4.7s → 2.35s ≈ **218 tok/s（14ms/pass，-47%）**，设备输出与 ba
 A/B 判据留档（单 l0，4-chunk exec 和）：baseline 120.7ms / **tile 77.2（-36%）** /
 const 57.8（常数 mask 最快但要每 chunk 一 ctx=168 个，弃）/ nomask 68.8（地板）。
 const/nomask 改 mask 语义、h 偏离属预期；tile 是唯一逐位无损变体。
+
+## G5 W8 prefill 判决（2026-11-11，结案：exec 反升 +42%，W8 定档纯容量）
+
+natw8 配方（W8.md）直接吃 Tile 化 prefill 图——enc 键是层内权重名，dec2/nc640/pre2 全家族通用：
+
+```bash
+# 1) 建（对照物 = DEC_NC=512_s128 bash mcp5_65_build_dec2.sh dec2p_l0 的 94.7M fp16）
+ONNXOVERRIDE=/home/liang/models/mcp5_dec2_512_s128/mcp5_dec2p_l0.onnx \
+  ENCOVR=/home/liang/l0_enc.json bash mcp5_93_build_natw8.sh w8natp_l0   # → 46M 绿
+# 2) 单层 4-chunk A/B（TAGS/TAGS_CSV 已参数化，默认仍跑 G2 四变体）
+TAGS_CSV=dec2p_l0,w8natp_l0 python3 mcp5_92_gen_manifests.py   # WSL
+TAGS="dec2p_l0 w8natp_l0" bash mcp5_92_run_g2ab.sh             # Git Bash
+# 3) 数值判（vs 同 feeds fp16 设备输出）
+python3 mcp5_93_w8p_judge.py
+```
+
+判据留档：**fp16 exec 79.5ms vs W8 113.3ms（+42%）**；数值 k 0.999990 / v 0.999788
+（= decode 探针下界同档）/ h 0.9914 无 NaN ⇒ 配方无罪、反量化开销净负 ⇒ 42 层批量不跑。
+结论与复判入口见验收 §十⑩、W8.md。

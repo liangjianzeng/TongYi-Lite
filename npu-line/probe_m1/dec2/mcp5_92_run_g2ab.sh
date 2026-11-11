@@ -22,7 +22,9 @@ done
 push E:/MyLLM_exp/_repro/rb/chain_run5
 "$ADB" -s "$DEV" shell "cd $R && chmod 755 chain_run5"
 
-for TAG in dec2p_l0 dec2pt_l0 dec2pc_l0 dec2pn_l0; do
+# G5: TAGS env override, e.g. TAGS="dec2p_l0 w8natp_l0" for the W8-prefill A/B.
+[ -n "${TAGS:-}" ] || TAGS="dec2p_l0 dec2pt_l0 dec2pc_l0 dec2pn_l0"
+for TAG in $TAGS; do
   push E:/MyLLM_exp/serve_dec/${TAG}_ctx.bin
   sed -i 's/\r//' E:/MyLLM_exp/_repro/rb/manifest_g2_${TAG}
   push E:/MyLLM_exp/_repro/rb/manifest_g2_${TAG}

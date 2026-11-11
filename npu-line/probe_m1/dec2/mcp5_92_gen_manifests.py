@@ -11,7 +11,8 @@ SDK = "/mnt/e/MyLLM/qairt/2.44.0.260225"
 SERVE = "/mnt/e/MyLLM_exp/serve_dec"
 OUTD = "/mnt/e/MyLLM_exp/_repro/rb"
 ST = "/mnt/e/wsl_stage"
-TAGS = ["dec2p_l0", "dec2pt_l0", "dec2pc_l0", "dec2pn_l0"]
+# G5 (W8 prefill): TAGS_CSV=dec2p_l0,w8natp_l0 env override for the W8-vs-fp16 A/B.
+TAGS = os.environ.get("TAGS_CSV", "dec2p_l0,dec2pt_l0,dec2pc_l0,dec2pn_l0").split(",")
 
 
 def dump(ctx):
