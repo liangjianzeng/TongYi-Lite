@@ -195,3 +195,15 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 | wall（含 42 ctx 启动税） | ~9.5s（驻留热态后只剩 exec） |
 
 **⑤ 调试期间定罪的两大协议坑（坑 49/50，详见交接档）**：ao 布局三重掩蔽（S=1 恒等 + head-major 假相等 + **h 被 residual 主导**——判 h 必须配 attn 分支单判，BRANCH_{k}_COS 判据已入 mcp5_63）；**mask 窗口语义 off-by-one**（chunk c 执行时 cache 真值行数 = c·S 而非 (c+1)·S——参照与设备两侧同错即判分假绿，HF 层级 vs HF 全前向 0.8586 才是照妖镜）。
+
+**⑥ prefill 终态 KV → decode 续链 PASS（2026-11-11，mcp5_8x 系列，工具与复跑入口 npu-line/probe_m1/dec2/DEC640.md）**：真对话 prefill 终态 cache（④ 产物 d2q_*）接 decode 图 8 步贪心续链——这是「真对话」全链（prefill→KV→decode）在 740 上的首次贯通。
+
+关键障碍与解法：HTP **S=1 attention 内核在 K=513 非对齐列 × 特定 cache 数据（eos-heavy 77-prompt）probs 均匀化塌缩**（手工 softmax / K-split 旁路均无效，内核级；S=128 pre2 图与 72-prompt cache 不触发，坑 51）。解 = **NC=640 pad（512 真值 + 128 零行）+ 逐步 amask**：roll（drop-oldest+append）使零 pad 窗每步左移一行，故第 t 步必须 mask 注意力列 `[512-t .. 639-t]=-1e4`（新 token 列 640 常开）——静态/零 amask 皆错（坑 52）。
+
+| 判据 | 向量 A（80-era 真对话，EOS 退化贪心链） | 向量 B（72-prompt 有意义贪心链） |
+|---|---|---|
+| 8 步 logits vs HF rolled-window greedy 参照 | **8/8 cos 1.0000** | **8/8 cos 1.0000** |
+| argmax / top8 | 8/8 MATCH / 8/8 | 8/8 MATCH / 8/8（"清晰完整的回答。技术讨论应"） |
+| exec | A 575ms / C 807ms（含 norm+head），wall ≈ 895ms/token | 同档 |
+
+定罪链要点（坑 53/54，交接档）：首轮 FAIL 三连环——**跨 prompt 配对错**（wsl_stage 里 72-era feeds/refs 配 77-prompt cache，feeds/refs/cache 必须同代同 prompt，ORT-vs-HF host 回放 mcp5_86 是分钟级仲裁）；**stale d2e_hs_t0.raw 残留**（chain_run5 reseed 在 t=0 读 `d2e_hs_t0.raw`，旧代文件毒化第 0 步——启动脚本必须 `cp hs0→hs_t0` 规范化；顺序跑 vs 门控跑差异由此而来）；**零 amask 单层探针的自洽盲区**（设备|ORT 同图互证不证 HF 等价，真 mask + ORT/HF 锚缺一不可）。逐层扫（mcp5_89）与链式自喂扫（mcp5_90）构成「逐层无罪→链级定罪」的隔离阶梯。
