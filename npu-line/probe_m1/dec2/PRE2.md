@@ -32,4 +32,23 @@ DEC_NC=512 DEC_S=128 DEC_NTAB=512 python3 mcp5_63_export_dec2.py all
 ```
 
 性能：exec 关键路径 ~116 tok/s（mask 版 ~26ms/层/chunk vs 无 mask 10ms，broadcast-add
-~2.5× 代价，优化候选=mask 折叠/降维）；wall ~9.5s 含 42 ctx 启动税。
+~2.5× 代价）；wall ~9.5s 含 42 ctx 启动税。
+**2026-11-11 G2 更新：broadcast-add 代价已消**——导后 ONNX 手术 `Tile(amask,[2,8,1,1])`
+使 scores Add 两侧同形（dynamo 会把 torch 侧物理 expand 折回广播，必须 post-export），
+exec 4.7s → 2.35s ≈ **218 tok/s（14ms/pass，-47%）**，设备输出与 baseline **逐位一致**
+（h/knew/vnew maxdiff=0），79j 复绿（cos 1.0000 / argmax / top8 8/8）。永久化在
+`mcp5_78_stage_pre2.sh` staging 段（tileall 幂等注入）。
+
+## G2 mask 优化工具（mcp5_92 系列）
+
+| 文件 | 作用 |
+|---|---|
+| `mcp5_92_g2_variants.py` | 导后手术生成器：`tileall`=staged dec2p onnx 就地 Tile 注入（幂等）；l0 三变体（tile/const/nomask）供 A/B |
+| `mcp5_92_gen_manifests.py` | A/B 单层 manifest 生成（从 ctx dump 读 gname/id/dims——图手术后 tensor id 漂移、amask dims NHWC 化但字节不变，坑 56） |
+| `mcp5_92_run_g2ab.sh` | 单 l0 4-chunk 变体 A/B 测时（CR5_STEP exec 和；拉输出做逐位对比 + Dozing 红线检查） |
+| `mcp5_92_build_dec2p.sh` | 42 层 Tile 化重建（**TAG 必须=dec2p_l{k}**：converter graph 名跟 `--output_path` TAG，错名 → manifest graphRetrieve 0x1773，坑 56） |
+| `mcp5_78_stage_pre2.sh` | staging（copy 出 dec2p onnx）+ **tileall 注入**——图改动唯一正门（勿手改 serve_dec 里的 ctx 名，swap 命名不齐=0x1773/0x1774 连环坑） |
+
+A/B 判据留档（单 l0，4-chunk exec 和）：baseline 120.7ms / **tile 77.2（-36%）** /
+const 57.8（常数 mask 最快但要每 chunk 一 ctx=168 个，弃）/ nomask 68.8（地板）。
+const/nomask 改 mask 语义、h 偏离属预期；tile 是唯一逐位无损变体。

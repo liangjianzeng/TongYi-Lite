@@ -191,7 +191,7 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 | logits vs HF 全前向 | **cos 1.0000**（absmax 18.09 vs 18.05） |
 | argmax / top8 | **一致（101715）** / **8/8** |
 | l0 终态 cache vs HF | kc/vc **1.0000** |
-| exec 关键路径 | 42 层×4 chunk ≈4.7s → **~116 tok/s**（mask 版单层 ~26ms vs 无 mask 10ms，broadcast-add 代价 ~2.5×，优化候选：mask 折叠/降维） |
+| exec 关键路径 | 42 层×4 chunk ≈4.7s → **~116 tok/s**（mask 版单层 ~26ms vs 无 mask 10ms，broadcast-add 代价 ~2.5×；**该代价已由 ⑧ Tile 注入消除** → 2.35s ≈ 218 tok/s） |
 | wall（含 42 ctx 启动税） | ~9.5s（驻留热态后只剩 exec） |
 
 **⑤ 调试期间定罪的两大协议坑（坑 49/50，详见交接档）**：ao 布局三重掩蔽（S=1 恒等 + head-major 假相等 + **h 被 residual 主导**——判 h 必须配 attn 分支单判，BRANCH_{k}_COS 判据已入 mcp5_63）；**mask 窗口语义 off-by-one**（chunk c 执行时 cache 真值行数 = c·S 而非 (c+1)·S——参照与设备两侧同错即判分假绿，HF 层级 vs HF 全前向 0.8586 才是照妖镜）。
@@ -209,3 +209,5 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 **⑦ 自回归闭环（2026-11-11，mcp5_91_autoreg，无 HF 在环）**：每步门控 N=1 启动（gate counter 预置 `3·STEP`，坑 55）→ 设备 logits → argmax → 主机 embed → 推下一步喂料，cache 经 CR5_ROLL_SAVE 跨启动滚动、逐步 amask 由 CR5_T0 驱动——设备**自选** token 序列 8/8 == HF greedy [62598,26619,46436,15343,396,5020,18219,1753]（「清晰完整的回答。技术讨论应」）MATCH。App 推理回环（NPU prefill + NPU/GPU decode）的正确性底座就位。
 
 定罪链要点（坑 53/54，交接档）：首轮 FAIL 三连环——**跨 prompt 配对错**（wsl_stage 里 72-era feeds/refs 配 77-prompt cache，feeds/refs/cache 必须同代同 prompt，ORT-vs-HF host 回放 mcp5_86 是分钟级仲裁）；**stale d2e_hs_t0.raw 残留**（chain_run5 reseed 在 t=0 读 `d2e_hs_t0.raw`，旧代文件毒化第 0 步——启动脚本必须 `cp hs0→hs_t0` 规范化；顺序跑 vs 门控跑差异由此而来）；**零 amask 单层探针的自洽盲区**（设备|ORT 同图互证不证 HF 等价，真 mask + ORT/HF 锚缺一不可）。逐层扫（mcp5_89）与链式自喂扫（mcp5_90）构成「逐层无罪→链级定罪」的隔离阶梯。
+
+**⑧ prefill mask 优化——Tile 注入消 broadcast-add（2026-11-11，mcp5_92 系列）**：④ 记下的 2.5× mask 代价定罪在 scores 的广播加：`Add(mul_6 [2,8,128,640], amask [1,1,128,640])` 外两维广播走 HTP 慢路径。解 = **导后 ONNX 手术注入 `Tile(amask,[2,8,1,1])` 使 Add 两侧同形**（torch 侧物理 expand 会被 dynamo 折回广播，MASK_FULL 路不通，必须 post-export）；单 l0 A/B（`mcp5_92_run_g2ab.sh`，4 chunk exec 和）：baseline 120.7ms → **tile 77.2ms（-36%）**，const 常数 mask 57.8（更快但每 chunk 一 ctx，168 个不现实）、nomask 地板 68.8。设备输出 h/knew/vnew **与 baseline 逐位一致**（maxdiff=0，Tile 纯拷贝），故正确性由原 79j 判分背书；42 层全量重 build（TAG=dec2p）后全链回归 **cos 1.0000 / argmax MATCH / top8 8/8** 复绿，exec 和 4.7s → **2.35s（14ms/pass，~218 tok/s，-47%）**。图手术连带两坑（坑 56，交接档）：qnn-onnx-converter 的 graph 名 = `--output_path` **TAG**（不是 onnx graph.name，改名 build → manifest 0x1773）；Tile 使 ctx tensor id 漂移（130/132/134→141/143/145）且 amask dims 表示变 `[1,128,640,1]`（字节序不变）——**任何图手术后 manifest 必须经 dump 脚本重生成，勿硬编码 id**。永久化：`mcp5_78_stage_pre2.sh` staging 段已内联 tileall（幂等），复跑入口 npu-line/probe_m1/dec2/PRE2.md。
