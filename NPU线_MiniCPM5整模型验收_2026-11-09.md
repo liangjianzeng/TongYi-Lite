@@ -206,4 +206,6 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 | argmax / top8 | 8/8 MATCH / 8/8 | 8/8 MATCH / 8/8（"清晰完整的回答。技术讨论应"） |
 | exec | A 575ms / C 807ms（含 norm+head），wall ≈ 895ms/token | 同档 |
 
+**⑦ 自回归闭环（2026-11-11，mcp5_91_autoreg，无 HF 在环）**：每步门控 N=1 启动（gate counter 预置 `3·STEP`，坑 55）→ 设备 logits → argmax → 主机 embed → 推下一步喂料，cache 经 CR5_ROLL_SAVE 跨启动滚动、逐步 amask 由 CR5_T0 驱动——设备**自选** token 序列 8/8 == HF greedy [62598,26619,46436,15343,396,5020,18219,1753]（「清晰完整的回答。技术讨论应」）MATCH。App 推理回环（NPU prefill + NPU/GPU decode）的正确性底座就位。
+
 定罪链要点（坑 53/54，交接档）：首轮 FAIL 三连环——**跨 prompt 配对错**（wsl_stage 里 72-era feeds/refs 配 77-prompt cache，feeds/refs/cache 必须同代同 prompt，ORT-vs-HF host 回放 mcp5_86 是分钟级仲裁）；**stale d2e_hs_t0.raw 残留**（chain_run5 reseed 在 t=0 读 `d2e_hs_t0.raw`，旧代文件毒化第 0 步——启动脚本必须 `cp hs0→hs_t0` 规范化；顺序跑 vs 门控跑差异由此而来）；**零 amask 单层探针的自洽盲区**（设备|ORT 同图互证不证 HF 等价，真 mask + ORT/HF 锚缺一不可）。逐层扫（mcp5_89）与链式自喂扫（mcp5_90）构成「逐层无罪→链级定罪」的隔离阶梯。
