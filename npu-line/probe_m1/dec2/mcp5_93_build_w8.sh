@@ -28,6 +28,32 @@ if [ -n "${ENCOVR:-}" ]; then
   # in-channels (2048) but ctxgen validator wanted n | activation dims (head shape).
   export W8_ALLOW_FC=${W8_ALLOW_FC:-1}
 fi
+# HTPCFG=NOOPT_AUTO: generate a per-TAG opt_level=0 ext config (graph_names must name the
+# TAG exactly, so batch builds cannot share one static json).
+if [ "${HTPCFG:-}" = "NOOPT_AUTO" ]; then
+  HTPCFG=$OUT/htp_ext_noopt.json
+  cat > "$HTPCFG" <<EOF
+{
+  "devices": [
+    { "device_id": 0, "core_id": [0], "core_type": 0,
+      "soc_model": 43, "dsp_arch": "v73", "pd_session": "unsigned" }
+  ],
+  "graphs": [
+    { "graph_names": ["$TAG"], "optimization_level": 0 }
+  ]
+}
+EOF
+  export HTPCFG_HACK=$OUT/host_cfg_noopt.json
+  cat > "$HTPCFG_HACK" <<EOF
+{
+  "backend_extensions": {
+    "shared_library_path": "/mnt/e/MyLLM/qairt/2.44.0.260225/lib/x86_64-linux-clang/libQnnHtpNetRunExtensions.so",
+    "config_file_path": "$HTPCFG"
+  }
+}
+EOF
+  HTPCFG=$HTPCFG_HACK
+fi
 # NOENC=1: all wrapper patches (C21/C25/FIXUP4/5) active but ZERO quantization —
 # discriminator between "wrapper poisons the layer" and "quantized tensors poison it".
 if [ "${NOENC:-0}" = "1" ]; then
@@ -46,7 +72,7 @@ grep -a "CONVERSION COMPLETE" $OUT/conv.log || { echo NO_COMPLETE; tail -5 $OUT/
 $SDK/bin/x86_64-linux-clang/qnn-context-binary-generator \
   --dlc_path $OUT/${TAG} \
   --backend $SDK/lib/x86_64-linux-clang/libQnnHtp.so \
-  --config_file /mnt/e/MyLLM_exp/_repro/host_cfg_740.json \
+  --config_file "${HTPCFG:-/mnt/e/MyLLM_exp/_repro/host_cfg_740.json}" \
   --binary_file ${TAG}_ctx --output_dir $OUT > $OUT/ctxgen.log 2>&1 \
   || { echo CTXGEN_FAIL; grep -a ERROR $OUT/ctxgen.log | head -5; exit 1; }
 md5sum $OUT/${TAG}_ctx.bin
