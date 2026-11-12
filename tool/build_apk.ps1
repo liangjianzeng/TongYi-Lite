@@ -101,7 +101,10 @@ if ($Check) { Write-Host "`n自检全部通过。"; exit 0 }
 # ---------- 构建 ----------
 Set-Location $PROJ
 $env:ANDROID_HOME = $AndroidSdk; $env:ANDROID_SDK_ROOT = $AndroidSdk; $env:JAVA_HOME = $Jdk17
-$Modes = if ($Release) { @("release") } elseif ($Debug) { @("debug") } else { @("debug","release") }
+# PS5.1 陷阱（2026-11-12）：`$Modes = if (...) { @("debug") }` 单元素数组经
+# if 管道赋值被解包成字符串 → 索引 for 里 $Modes[0] 取出字符 'd' → 验收找
+# app-d.apk 假失败。外层 @( ) 强制保持数组。
+$Modes = @(if ($Release) { "release" } elseif ($Debug) { "debug" } else { "debug"; "release" })
 
 if ($Analyze) { Write-Host "== flutter analyze"; & $Flutter analyze --no-pub }
 Write-Host "== flutter pub get"; & $Flutter pub get
@@ -113,7 +116,8 @@ if ($CleanNative) {
     Remove-Item -Recurse -Force "$PROJ\android\app\.cxx","$PROJ\build\app\intermediates\cxx" -EA SilentlyContinue
 }
 
-foreach ($m in $Modes) {
+for ($mi = 0; $mi -lt $Modes.Count; $mi++) {
+    $m = $Modes[$mi]
     if ($Fast) {
         # 两步法（根因 3/4）：assemble → 同步 intermediates → gradlew -x
         Write-Host "== [fast] flutter assemble $m"
@@ -139,7 +143,9 @@ foreach ($m in $Modes) {
         if ($m -eq "debug") {
             # debug 直接 flutter build 在部分机器静默失败（根因 3），失败自动转两步法
             & $Flutter build apk --debug
-            if ($LASTEXITCODE) { Warn "flutter build apk --debug 失败 → 自动转两步法（根因 3）"; $Fast = $true; $Modes = @($m) + ($Modes | Where-Object { $_ -ne $m }); continue }
+            # 假绿根因（2026-11-12）：旧实现在 foreach 固定枚举器里改 $Modes+continue，
+            # 兜底循环永不重入 → 拿旧 APK 过签名验收报“完成”。改索引 for + $mi-- 重入同 mode。
+            if ($LASTEXITCODE) { Warn "flutter build apk --debug 失败 → 自动转两步法（根因 3）"; $Fast = $true; $mi--; continue }
         } else {
             & $Flutter build apk --release --target-platform android-arm64
             if ($LASTEXITCODE) { throw "flutter build apk 失败" }

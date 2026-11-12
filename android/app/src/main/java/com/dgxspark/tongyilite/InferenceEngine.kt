@@ -126,6 +126,36 @@ class InferenceEngine(private val context: Context) {
     private external fun nativeSetKvCacheType(type: String)
     private external fun nativeSetFlashAttn(enabled: Boolean)
 
+    // --- [NPU·M2 Phase C] 混合调度（NPU prefill + GPU decode，hyb_jni.cpp）---
+    // 返回结构化 JSON：{ok, code, stage, message, ...}；code ∈ HYB_*。
+    // Dart 侧（lib/agent/llm/hybrid_bridge.dart）按 ok/code 自动回退纯 GPU。
+    private external fun nativeStartHybridPrefill(
+        kvDir: String,
+        idsPath: String,
+        chainDir: String,
+        chainBin: String,
+        qnnLibDir: String,
+        manifestsCsv: String,
+        nChunks: Int,
+        prompt: String?,
+        messagesJson: String,
+        nRealCap: Int,
+        timeoutMs: Int
+    ): String
+
+    private external fun nativeBridgeAndResumeDecode(
+        kvDir: String,
+        idsPath: String,
+        outPath: String,
+        nReal: Int,
+        posBase: Long,
+        firstTok: Int,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        callback: InferenceCallback?
+    ): String
+
     // --- Public API ---
 
     fun init(): Boolean {
@@ -246,6 +276,93 @@ class InferenceEngine(private val context: Context) {
     /** Clear the KV cache to start a brand-new conversation (multi-turn append-only). */
     fun resetContext() {
         nativeResetContext()
+    }
+
+    // ------------------------------------------------------------------
+    // [NPU·M2 Phase C] Hybrid path (NPU prefill + KV bridge + GPU decode).
+    // 与 completion 同一引擎线程队列调度（MainActivity 里 engine.onEngineThread），
+    // 天然不与 GPU 生成交错；任何一步失败 Dart 侧自动回退纯 GPU 现路径。
+    // ------------------------------------------------------------------
+
+    /**
+     * 拉起 NPU prefill helper（chain_run5/QNN）收 84 片 KV。
+     *
+     * 冻结设备侧语义 = npu-line/probe_m1/dec2/mcp5_95_run_a3b_seq.py：
+     * 三段 manifest 串行拉起（env LD_LIBRARY_PATH/ADSP_LIBRARY_PATH、
+     * CHAIN_KEEP=1 CR5_ROLL_SAVE=1、逐段等 CR5_DONE、进程消失即收
+     * p{k}.log 尾巴进回包）。
+     *
+     * 路径缺省（[P0-3 review fix] W^X 布局）：chainDir = filesDir/npu_m1
+     * （manifest/产物工作区，NpuAssets.extract），chainBin =
+     * nativeLibraryDir/libchain_run5_exec.so、qnnLibDir = nativeLibraryDir
+     * （jniLibs + useLegacyPackaging 安装期解出的真文件，system_file 标签，
+     * App uid 可 execve/dlopen；app_data_file 不可 exec，见 build.gradle.kts
+     * 的 W^X 红线注）。chainDir/lib 由 NpuAssets.extract 建为指向
+     * nativeLibraryDir 的符号链接，chain_run5 的 dlopen("./lib/libQnnHtp.so")
+     * 按 cwd=chainDir 相对解析即落真身。
+     * 回包 {ok, code, stage, message, n_real, ids_path, first_tok, ...}；
+     * n_real = native tokenize 的真实 token 数（无-pad 协议）。
+     */
+    fun startHybridPrefill(
+        kvDir: String,
+        idsPath: String,
+        chainDir: String? = null,
+        chainBin: String? = null,
+        qnnLibDir: String? = null,
+        manifestsCsv: String? = null,
+        nChunks: Int = 4,
+        prompt: String? = null,
+        messagesJson: String = "[]",
+        nRealCap: Int = 512,
+        timeoutMs: Int = 120000
+    ): String {
+        checkNotDestroyed()
+        val cd = chainDir ?: NpuAssets.chainDir(context).absolutePath
+        // [P0-3] 可执行体只认 nativeLibraryDir（system_file 可 exec/dlopen）
+        val nlib = context.applicationInfo.nativeLibraryDir
+        return nativeStartHybridPrefill(
+            kvDir, idsPath, cd,
+            chainBin ?: "$nlib/libchain_run5_exec.so",
+            qnnLibDir ?: nlib,
+            manifestsCsv ?: "", nChunks, prompt, messagesJson,
+            nRealCap, timeoutMs
+        )
+    }
+
+    /**
+     * native 桥转（hyb_kv_bridge.c，官方 state 容器，冻结配方，v4 容器 =
+     * lc fork loader）→ llama_state_seq_load_file → GPU 续 decode。
+     * [firstTok] <0 时 native 先「重算末 prompt token 一步」取 argmax 作
+     * 首 token（计划 §1.3 兜底路线）。回包
+     * {ok, code, stage, n_gen, first_tok, load_ms, state_path, stopped, text}；
+     * 整段文本一次带回（token 级流式 [onToken] 回调已备好，接线留 C-3）。
+     */
+    fun bridgeAndResumeDecode(
+        kvDir: String,
+        idsPath: String,
+        outPath: String,
+        nReal: Int,
+        posBase: Long,
+        firstTok: Int,
+        maxTokens: Int = 512,
+        temperature: Float = 0.7f,
+        topP: Float = 0.9f,
+        onToken: ((String) -> Boolean)? = null
+    ): String {
+        checkNotDestroyed()
+        val callback = if (onToken != null) {
+            object : InferenceCallback {
+                override fun onToken(token: String): Boolean = onToken.invoke(token)
+            }
+        } else {
+            object : InferenceCallback {
+                override fun onToken(token: String): Boolean = true
+            }
+        }
+        return nativeBridgeAndResumeDecode(
+            kvDir, idsPath, outPath, nReal, posBase, firstTok,
+            maxTokens, temperature, topP, callback
+        )
     }
 
     /**

@@ -325,8 +325,20 @@ add_subdirectory(${LLAMA_CPP_DIR}/tools/mtmd ${CMAKE_CURRENT_BINARY_DIR}/mtmd)
 # --------------------------------------------------------------------------
 # tongyilite_jni: our JNI bridge
 # --------------------------------------------------------------------------
+# [npu-line M2 Phase C] hybrid path (NPU prefill + GPU decode):
+#   hyb_kv_bridge.c — NPU kc/vc raw -> official llama state container
+#     (byte-exact vs frozen Python reference; host self-gate:
+#      hyb_kv_bridge_selftest.sh). Pure C + stdio, host-compilable.
+#   hyb_feeds.c — d2q_* prompt feeds generator, byte-isomorphic with
+#     npu-line/probe_m1/dec2/mcp5_95_prep77b.py (host self-gate:
+#      hyb_feeds_selftest.sh vs WSL torch reference). Pure C + stdio.
+#   hyb_jni.cpp — JNI entries (startHybridPrefill / bridgeAndResumeDecode),
+#     kept out of tongyilite_jni.cpp so the GPU path stays byte-unchanged.
 add_library(tongyilite_jni SHARED
     tongyilite_jni.cpp
+    hyb_kv_bridge.c
+    hyb_feeds.c
+    hyb_jni.cpp
 )
 
 target_compile_features(tongyilite_jni PRIVATE cxx_std_17)

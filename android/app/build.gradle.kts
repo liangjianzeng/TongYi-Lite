@@ -100,6 +100,29 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // [npu-line C-3 P0-3] NPU 链五件套保字节入库：libchain_run5_exec.so
+            // 是伪装成 .so 的 ELF 可执行体，QNN 四件按 sha256 治理（README）；
+            // AGP 默认 strip 会让包内字节 ≠ staging 源（实测 exec 被 strip 到
+            // 52536B）。strip 对语义理论无害，但分发一致性优先，五件全豁免。
+            // AGP 8.7 实证（StripDebugSymbolsDelegate 反汇编 + jshell NIO glob
+            // + 全量重跑对拍）：豁免集 = jniLibs.keepDebugSymbols，它是
+            // StripDebugSymbolsTask 的唯一消费口（8.7 的 jniLibs 块已无
+            // doNotStrip；旧 packagingOptions.doNotStrip 桥接不保证）。匹配是
+            // NIO PathMatcher，模式经 compileGlob **原样**拼进 "glob:"（实测
+            // 裸名 "n.so" 与 "*n.so" 均不命中、显式 "**/n.so" 命中）；匹配
+            // 对象是 merged_native_libs 的相对路径 "lib/<abi>/<n>.so"（实测
+            // 探针）。注意 NIO 的 "**/" 要求 ≥1 段目录，所以文档常见的
+            // "lib/arm64-v8a/n.so" 直写永远不命中。用 "**/文件名"。
+            // 另：strip 任务是增量的——改豁免集后必须删
+            // build/app/intermediates/stripped_native_libs/ 强制全量重跑，
+            // 否则旧 stripped 产物会让验证假阴性。
+            keepDebugSymbols += setOf(
+                "**/libchain_run5_exec.so",
+                "**/libQnnHtp.so",
+                "**/libQnnHtpV73Skel.so",
+                "**/libQnnHtpV73Stub.so",
+                "**/libQnnSystem.so",
+            )
             // CRITICAL: exclude the Vulkan validation layer. A stale
             // libVkLayer_khronos_validation.so got baked into the APK; Android's
             // Vulkan loader auto-injects ANY layer found in the APK's lib dir as
@@ -112,6 +135,20 @@ android {
 
     // JNI libs from llama.cpp pre-build
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+
+    // [npu-line M2 C-3 review rework] 可执行体（libchain_run5_exec.so + QNN
+    // 四件）走上方 jniLibs + useLegacyPackaging（nativeLibraryDir 真身，
+    // system_file 可 exec/dlopen）；assets/npu_libs 只剩 manifest 等非可执行
+    // 件 → NpuAssets.extract 解包 filesDir/npu_m1（链 cwd/产物区）。assets
+    // 的 so/bin/raw 保持 STORED：解包成纯字节拷贝（md5 与设备侧推送一致，
+    // 便于核对）；.bin 条目留给未来改名的链二进制变体。
+    androidResources {
+        noCompress += "so"
+        noCompress += "bin"     // chain_run5 staged as chain_run5.bin? (we keep
+                                 // the plain name; this entry covers the
+                                 // ".bin" variant if ever renamed)
+        noCompress += "raw"     // 链 IO 探针（调试资产）
+    }
 }
 
 // Chaquopy锛歱ython_exec 宸ュ叿杩愯鏃躲€傞鏈熶笉瑁呯涓夋柟搴擄紙鏍囧噯搴撹冻澶燂級锛?

@@ -405,6 +405,140 @@ class InferenceService {
   }
 
   // ------------------------------------------------------------------
+  // [npu-line M2 Phase C] 混合调度（NPU prefill + GPU decode，hyb_jni.cpp）
+  //
+  // 两步契约（native 返回结构化 JSON {ok, code, stage, message, ...}，
+  // code ∈ HYB_*；见 android/app/src/main/cpp/hyb_kv_bridge.h）：
+  //   1. startHybridPrefill     — 拉起 chain_run5/QNN 收 84 片 KV；
+  //   2. bridgeAndResumeDecode  — native 桥转（官方 state 容器）→
+  //                               llama_state_seq_load_file → 续 decode。
+  // Phase C-1：chain helper / state load 未接线 → code=HYB_ERR_NOT_ENABLED。
+  // **调用方（lib/agent/llm/hybrid_bridge.dart）在任何非 ok 结果上自动
+  // 回退纯 GPU decode 现路径**——本层只转发，不做回退决策。
+  // ------------------------------------------------------------------
+
+  static Map<String, dynamic> _asOutcomeMap(dynamic r) {
+    if (r is Map) return Map<String, dynamic>.from(r);
+    if (r is String) {
+      try {
+        final d = jsonDecode(r);
+        if (d is Map) return Map<String, dynamic>.from(d);
+      } catch (_) {}
+    }
+    return <String, dynamic>{
+      'ok': false,
+      'code': 'HYB_ERR_BAD_REPLY',
+      'stage': 'channel',
+      'message': 'unrecognized native reply: $r',
+    };
+  }
+
+  /// 拉起 NPU 分层链（chain_run5 三段串行）收 84 片 KV。
+  ///
+  /// [idsPath] i32 LE prompt token 文件（native 由 [messagesJson]/[prompt] 经
+  /// GPU 路径同款模板+分词产出并落盘，回包 `ids_path`/`n_real` 为真值——
+  /// [nRealCap] 只是链窗上界 NC=512）。[chainDir] null → native 默认
+  /// filesDir/npu_m1（NpuAssets 解包目录）；[manifests] null → 冻结三段
+  /// manifest_pre2_A/B/C；[nChunks] 每段链步数（冻结 4）。每段超时
+  /// [timeoutMs]，进程消失时回包带 p{k}.log 尾巴。失败/异常一律回结构化
+  /// outcome，不 throw。
+  Future<Map<String, dynamic>> startHybridPrefill({
+    required String kvDir,
+    required String idsPath,
+    String? chainDir,
+    String? chainBin,
+    String? qnnLibDir,
+    List<String>? manifests,
+    int nChunks = 4,
+    String? prompt,
+    String messagesJson = '[]',
+    int nRealCap = 512,
+    int timeoutMs = 120000,
+  }) async {
+    debugPrint(
+        '[InferenceService] startHybridPrefill kvDir=$kvDir ids=$idsPath chain=$chainDir manifests=${manifests?.join(",")} nChunks=$nChunks cap=$nRealCap msgs=${messagesJson.length}');
+    try {
+      final r = await _channel.invokeMethod('startHybridPrefill', {
+        'kvDir': kvDir,
+        'idsPath': idsPath,
+        'chainDir': chainDir,
+        'chainBin': chainBin,
+        'qnnLibDir': qnnLibDir,
+        'manifests': manifests,
+        'nChunks': nChunks,
+        'prompt': prompt,
+        'messagesJson': messagesJson,
+        'nRealCap': nRealCap,
+        'timeoutMs': timeoutMs,
+      });
+      return _asOutcomeMap(r);
+    } catch (e) {
+      debugPrint('[InferenceService] startHybridPrefill failed: $e');
+      return <String, dynamic>{
+        'ok': false,
+        'code': 'HYB_ERR_EXCEPTION',
+        'stage': 'channel',
+        'message': '$e',
+      };
+    }
+  }
+
+  /// [npu-line M2 Phase C-2] NPU 链资产解包（assets/npu_libs → filesDir/npu_m1，
+  /// NpuAssets.kt）。幂等；[force] 全量重写。返回 {相对路径 -> copied/skipped}；
+  /// 通道异常回 null（调用方按「资产未就绪」处理）。
+  Future<Map<String, dynamic>?> extractNpuAssets({bool force = false}) async {
+    try {
+      final r = await _channel.invokeMethod('extractNpuAssets', {
+        'force': force,
+      });
+      if (r is Map) return Map<String, dynamic>.from(r);
+      return null;
+    } catch (e) {
+      debugPrint('[InferenceService] extractNpuAssets failed: $e');
+      return null;
+    }
+  }
+
+  /// native 桥转 + state load + 从 [firstTok] 续 decode。
+  /// [posBase] 冻结 A5/172 协议默认 88；state 容器输出到 [outPath]。
+  Future<Map<String, dynamic>> bridgeAndResumeDecode({
+    required String kvDir,
+    required String idsPath,
+    required String outPath,
+    required int nReal,
+    required int firstTok,
+    int posBase = 88,
+    int maxTokens = 512,
+    double temperature = 0.7,
+    double topP = 0.9,
+  }) async {
+    debugPrint(
+        '[InferenceService] bridgeAndResumeDecode kvDir=$kvDir ids=$idsPath out=$outPath nReal=$nReal posBase=$posBase firstTok=$firstTok');
+    try {
+      final r = await _channel.invokeMethod('bridgeAndResumeDecode', {
+        'kvDir': kvDir,
+        'idsPath': idsPath,
+        'outPath': outPath,
+        'nReal': nReal,
+        'posBase': posBase,
+        'firstTok': firstTok,
+        'maxTokens': maxTokens,
+        'temperature': temperature,
+        'topP': topP,
+      });
+      return _asOutcomeMap(r);
+    } catch (e) {
+      debugPrint('[InferenceService] bridgeAndResumeDecode failed: $e');
+      return <String, dynamic>{
+        'ok': false,
+        'code': 'HYB_ERR_EXCEPTION',
+        'stage': 'channel',
+        'message': '$e',
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
   // 语音输入（端侧拾音 + 原生语音理解）
   // ------------------------------------------------------------------
 

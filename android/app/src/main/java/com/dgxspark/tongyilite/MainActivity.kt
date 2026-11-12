@@ -117,6 +117,10 @@ class MainActivity : FlutterActivity() {
                 "setKvCacheType"          -> handleSetKvCacheType(call, result)
                 "setFlashAttn"           -> handleSetFlashAttn(call, result)
                 "resetContext"            -> handleResetContext(result)
+                // [npu-line M2 Phase C] 混合调度（NPU prefill + GPU decode）
+                "startHybridPrefill"      -> handleStartHybridPrefill(call, result)
+                "bridgeAndResumeDecode"   -> handleBridgeAndResumeDecode(call, result)
+                "extractNpuAssets"        -> handleExtractNpuAssets(call, result)
                 "benchmark"     -> handleBenchmark(call, result)
                 "getModelInfo"  -> handleGetModelInfo(result)
                 "getMemoryInfo" -> handleGetMemoryInfo(result)
@@ -1193,6 +1197,130 @@ class MainActivity : FlutterActivity() {
         replyGuard(result, "handleSetFlashAttn") {
             engine.setFlashAttn(enabled)
             result.success(true)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // [npu-line M2 Phase C] 混合调度（NPU prefill + GPU decode）。
+    // 两个 handler 都入引擎单线程队列（与 completion 同一串行面，杜绝
+    // 与 GPU 生成交错）；返回 native 的结构化 JSON，Dart 侧按 ok/code
+    // 自动回退纯 GPU 现路径（lib/agent/llm/hybrid_bridge.dart）。
+    // ------------------------------------------------------------------
+
+    private fun handleStartHybridPrefill(call: MethodCall, result: MethodChannel.Result) {
+        val kvDir = call.argument<String>("kvDir") ?: ""
+        val idsPath = call.argument<String>("idsPath") ?: ""
+        val chainDir = call.argument<String>("chainDir")
+        val chainBin = call.argument<String>("chainBin")
+        val qnnLibDir = call.argument<String>("qnnLibDir")
+        val manifests = (call.argument<List<String>>("manifests") ?: emptyList())
+            .joinToString(",")
+        val nChunks = call.argument<Int>("nChunks") ?: 4
+        val prompt = call.argument<String>("prompt")
+        val messagesJson = call.argument<String>("messagesJson") ?: "[]"
+        val nRealCap = call.argument<Int>("nRealCap") ?: 512
+        val timeoutMs = call.argument<Int>("timeoutMs") ?: 120000
+        logI("handleStartHybridPrefill", "kvDir=$kvDir, ids=$idsPath, chain=$chainDir, manifests=$manifests, nChunks=$nChunks, cap=$nRealCap, msgs=${messagesJson.length}")
+        try {
+            // 入引擎单线程队列执行，工作线程 .get() 等待后主线程回 JSON
+            // （同 completion 的 post 纪律）。链三段串行、每段 ≤timeoutMs。
+            Thread {
+                try {
+                    val json = engine.onEngineThread {
+                        engine.startHybridPrefill(
+                            kvDir = kvDir,
+                            idsPath = idsPath,
+                            chainDir = chainDir,
+                            chainBin = chainBin,
+                            qnnLibDir = qnnLibDir,
+                            manifestsCsv = manifests.ifBlank { null },
+                            nChunks = nChunks,
+                            prompt = prompt,
+                            messagesJson = messagesJson,
+                            nRealCap = nRealCap,
+                            timeoutMs = timeoutMs
+                        )
+                    }.get()
+                    mainHandler.post { result.success(json) }
+                } catch (e: Exception) {
+                    logW("handleStartHybridPrefill", "error: ${e.message}", e)
+                    mainHandler.post { result.error("HYBRID_PREFILL_ERROR", e.message, null) }
+                }
+            }.start()
+        } catch (e: Exception) {
+            logW("handleStartHybridPrefill", "engine executor rejected (destroying?)", e)
+            mainHandler.post {
+                result.error("ENGINE_DESTROYED", "推理引擎已销毁（应用退出中）", null)
+            }
+        }
+    }
+
+    /**
+     * [npu-line M2 Phase C-2] NPU 链资产解包（assets/npu_libs → filesDir/npu_m1）。
+     * [P1-7 review fix] 解包是 IO 密集（force 全量重写含 MB 级文件），必须离
+     * 主线程（同 handleStartHybridPrefill 的 Thread + mainHandler.post 纪律），
+     * 否则主线程卡 IO 触发 ANR。
+     */
+    private fun handleExtractNpuAssets(call: MethodCall, result: MethodChannel.Result) {
+        val force = call.argument<Boolean>("force") ?: false
+        logI("handleExtractNpuAssets", "force=$force")
+        Thread {
+            try {
+                val map = NpuAssets.extract(applicationContext, force)
+                mainHandler.post { result.success(map) }
+            } catch (e: Exception) {
+                logW("handleExtractNpuAssets", "error: ${e.message}", e)
+                mainHandler.post {
+                    result.error("NPU_EXTRACT_ERROR", e.message, null)
+                }
+            }
+        }.start()
+    }
+
+    private fun handleBridgeAndResumeDecode(call: MethodCall, result: MethodChannel.Result) {
+        val kvDir = call.argument<String>("kvDir") ?: ""
+        val idsPath = call.argument<String>("idsPath") ?: ""
+        val outPath = call.argument<String>("outPath") ?: ""
+        val nReal = call.argument<Int>("nReal") ?: 0
+        val posBase = (call.argument<Number>("posBase") ?: 88).toLong()
+        val firstTok = call.argument<Int>("firstTok") ?: -1
+        val maxTokens = call.argument<Int>("maxTokens") ?: 512
+        val temperature = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
+        val topP = call.argument<Double>("topP")?.toFloat() ?: 0.9f
+        logI("handleBridgeAndResumeDecode", "kvDir=$kvDir, ids=$idsPath, out=$outPath, nReal=$nReal, posBase=$posBase, firstTok=$firstTok")
+
+        val sink = TokenStream.sink
+        try {
+            Thread {
+                try {
+                    val json = engine.onEngineThread {
+                        engine.bridgeAndResumeDecode(
+                            kvDir = kvDir,
+                            idsPath = idsPath,
+                            outPath = outPath,
+                            nReal = nReal,
+                            posBase = posBase,
+                            firstTok = firstTok,
+                            maxTokens = maxTokens,
+                            temperature = temperature,
+                            topP = topP,
+                            onToken = { token ->
+                                mainHandler.post { sink?.success(token) }
+                                true
+                            }
+                        )
+                    }.get()
+                    mainHandler.post { result.success(json) }
+                } catch (e: Exception) {
+                    logW("handleBridgeAndResumeDecode", "error: ${e.message}", e)
+                    mainHandler.post { result.error("HYBRID_BRIDGE_ERROR", e.message, null) }
+                }
+            }.start()
+        } catch (e: Exception) {
+            logW("handleBridgeAndResumeDecode", "engine executor rejected (destroying?)", e)
+            mainHandler.post {
+                result.error("ENGINE_DESTROYED", "推理引擎已销毁（应用退出中）", null)
+            }
         }
     }
 

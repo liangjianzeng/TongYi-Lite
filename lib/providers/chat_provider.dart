@@ -1747,6 +1747,9 @@ class ChatNotifier extends StateNotifier<bool> {
             maxThinkingChars: settings.agentThinkingMaxChars,
             // 强制不思考后要知道该恢复成什么（用户的全局思考开关）。
             thinkingEnabled: settings.enableThinking,
+            // [npu-line M2 Phase C] NPU prefill + GPU decode 混合调度
+            // （默认 OFF = 现路径逐字节不变；ON 且任何一步失败自动回退）。
+            hybridPrefillEnabled: settings.hybridPrefillEnabled,
           );
 
     // [NewAgent] 新 seam 活跃标记（验证 Phase 3 代码路径；验证后可删）

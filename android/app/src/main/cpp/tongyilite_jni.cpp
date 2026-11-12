@@ -42,10 +42,20 @@
 #include "sampling.h"      // common_sampler / common_sampler_sample_and_accept_n
 #include "chat.h"          // common_chat_templates_* — GGUF 内嵌 jinja 模板（CLI --jinja 同路径）
 #include "ggml-backend.h"
+// [npu-line M2 Phase C-3] feeds accessors read the loaded model's own GGUF
+// directly (gguf API + ggml type traits for dequant); hyb_feeds.h supplies
+// the f32→f16 converter so bit rounding matches the chain generators.
+#include "ggml.h"
+#include "gguf.h"
+#include "hyb_feeds.h"
 
 // mtmd — llama.cpp mainline vision/multimodal library (mmproj + image encoding)
 #include "mtmd.h"
 #include "mtmd-helper.h"
+
+// [npu-line M2 Phase C-2] engine accessor for the hybrid path (hyb_jni.cpp).
+// GPU path untouched: this header + the vtable below are the ONLY additions.
+#include "tongyilite_engine.h"
 
 #define LOG_TAG "TongYiLite"
 static void reportLoadingLog(const char *message);
@@ -473,6 +483,12 @@ static std::string apply_chat_template_grown(
     return std::string(buf.data(), (size_t)n);
 }
 
+// [npu-line M2 Phase C-3] GGUF path of the currently loaded model, captured
+// once in InferenceEngine::load() for the hybrid feeds accessors at the file
+// bottom (gguf-direct token_embd read). Pure bookkeeping — the GPU path
+// never reads it and its behavior is byte-unchanged.
+static std::string g_hyb_model_path;
+
 struct InferenceEngine {
     llama_model *model   = nullptr;
     const struct llama_vocab *vocab = nullptr; // extracted from model for new API
@@ -637,6 +653,7 @@ struct InferenceEngine {
         }
 
         LOGI("Loading model from: %s", model_path);
+        g_hyb_model_path = model_path;  // [npu-line C-3] feeds accessors bookkeeping
         reportLoadingLog("正在加载 GGUF 模型文件...");
 
         // Model params
@@ -3475,6 +3492,15 @@ static InferenceEngine g_engine;
 static JavaVM *g_jvm = nullptr;
 
 // ============================================================================
+// [npu-line M2 Phase C-2] Hybrid-path accessor (tongyilite_engine.h).
+// The ONLY cross-TU surface exposed to hyb_jni.cpp; GPU codepaths untouched.
+// Implementations live near the bottom of this TU (they reuse the static
+// helpers parseMessagesJson/apply_chat_template_grown); fields are refreshed
+// per call by tongyilite_engine_handle().
+// ============================================================================
+extern "C" const TongYiLiteEngineHandle *tongyilite_engine_handle(void);
+
+// ============================================================================
 // JNI Helpers
 // ============================================================================
 
@@ -4432,3 +4458,271 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeGetModelInfo(JNIEnv *env, job
 }
 
 } // extern "C"
+
+// ============================================================================
+// [npu-line M2 Phase C-2] Hybrid-path accessor implementation
+// (tongyilite_engine.h). The ONLY cross-TU surface exposed to hyb_jni.cpp —
+// GPU codepaths untouched. Claim semantics mirror completion(): is_running +
+// should_stop, so a hybrid generation can never interleave with a GPU
+// generation. Placed at the bottom of the TU to reuse the static helpers
+// parseMessagesJson / apply_chat_template_grown declared above.
+// ============================================================================
+static int hyb_is_loaded(void) { return g_engine.is_loaded() ? 1 : 0; }
+
+static int hyb_begin(void) {
+    if (!g_engine.is_loaded()) return 0;
+    bool expected = false;
+    if (!g_engine.is_running.compare_exchange_strong(expected, true)) return 0; // busy
+    g_engine.should_stop.store(false);
+    // The injected state replaces the main ctx KV from pos p0 on: the
+    // cross-turn KV bookkeeping (LCP prefix cache + tier-1 checkpoint) is
+    // stale after it. Drop it so the next GPU turn rebuilds honestly —
+    // never truncates against cells it no longer owns.
+    {
+        std::lock_guard<std::mutex> lk(g_engine.mtx);
+        g_engine.prev_prompt_tokens.clear();
+        g_engine.have_prev_kv = false;
+        g_engine.rs_ckp_valid = false;
+    }
+    return 1;
+}
+
+static void hyb_end(void)         { g_engine.is_running.store(false); }
+static int  hyb_should_stop(void) { return g_engine.should_stop.load() ? 1 : 0; }
+
+static int hyb_build_prompt_ids(void *env_v, jstring jmessages, const char *prompt,
+                                int32_t *out, int out_cap) {
+    if (!g_engine.is_loaded() || !out || out_cap <= 0) return -1;
+    JNIEnv *env = static_cast<JNIEnv *>(env_v);
+
+    // Model-specific GGUF-embedded-jinja routes (clover / bailing-ling /
+    // nanbeige) are applied inside completion(); replicating their gating
+    // here is a C-3 device-parity item (plan Phase C gate needs 50-prompt
+    // token parity anyway). Until then the hybrid chain is chatml-route only:
+    // refuse, and the Dart side falls back to the GPU path.
+    const char *emb = llama_model_chat_template(g_engine.model, nullptr);
+    const bool gated = g_engine.is_clover_model || g_engine.is_nanbeige_model ||
+                       (emb && strstr(emb, "<role>ASSISTANT</role>") != nullptr);
+    if (gated) return -2;
+
+    std::deque<std::string> store;
+    std::vector<llama_chat_message> chat;
+    if (jmessages) chat = parseMessagesJson(env, jmessages, store);
+
+    std::string text;
+    if (!chat.empty()) {
+        text = apply_chat_template_grown(chat, true, "hyb");
+        if (text.empty()) return -3;
+    } else if (prompt && prompt[0]) {
+        text = prompt; // raw-prompt parity with nativeCompletion()'s prompt path
+    } else {
+        return -4;
+    }
+
+    std::vector<llama_token> toks =
+        g_engine.tokenize(text.c_str(), llama_vocab_get_add_bos(g_engine.vocab));
+    if (toks.empty()) return -5;
+    if ((int)toks.size() > out_cap) return -6;
+    for (size_t i = 0; i < toks.size(); i++) out[i] = (int32_t)toks[i];
+    LOGI("hyb_build_prompt_ids: %zu tokens (add_bos=%d, msgs=%zu)",
+         toks.size(), (int)llama_vocab_get_add_bos(g_engine.vocab), chat.size());
+    return (int)toks.size();
+}
+
+// ---- [npu-line M2 Phase C-3] prompt feeds accessors -----------------------
+// Direct read of the LOADED model's own GGUF (never llama internals): the
+// hybrid chain needs rope theta / rotary dims / embedding rows to reproduce
+// the prep77b feeds protocol (hyb_feeds.c) bit-isomorphically. Cached per
+// model path; both accessors return -1 when unavailable, and hyb_jni.cpp
+// keeps its structured stage=prefill_feeds failure (GPU fallback).
+namespace {
+struct HybGgufFeeds {
+    std::mutex  mu;
+    std::string path;                       // GGUF cached below
+    bool        valid     = false;
+    double      theta     = 0.0;            // llama.rope.freq_base（fail-closed，无默认值）
+    int         hd        = 0;              // rotary dims = hid / head_count
+    int         hid       = 0;              // llama.embedding_length (token_embd ne0)
+    int         n_vocab   = 0;              // token_embd ne1
+    size_t      embd_off  = 0;              // absolute file offset of token_embd
+    size_t      row_bytes = 0;              // ggml_row_size(embd_type, hid)
+    ggml_type   embd_type = GGML_TYPE_COUNT;
+    bool        eos_found = false;          // tokenizer.ggml.eos_token_id[0]
+    int32_t     eos_id    = -1;             //   （A3b gen_ids 冻结取法）
+};
+HybGgufFeeds g_hyb_gguf;   // accessed under its own mu; engine-executor anyway
+
+// Caller holds g_hyb_gguf.mu. Reparse when the loaded model changed.
+bool hyb_gguf_ensure_locked(void) {
+    if (g_hyb_gguf.valid && g_hyb_gguf.path == g_hyb_model_path) return true;
+    g_hyb_gguf.valid = false;
+    if (g_hyb_model_path.empty()) return false;
+    struct gguf_context *gg = gguf_init_from_file(
+        g_hyb_model_path.c_str(), {/*no_alloc*/false, /*ctx*/nullptr});
+    if (!gg) return false;
+    auto get_i32 = [&](const char *key, int *dst) -> bool {
+        int64_t k = gguf_find_key(gg, key);
+        if (k < 0) return false;
+        switch (gguf_get_kv_type(gg, k)) {
+            case GGUF_TYPE_INT32:  *dst = (int)gguf_get_val_i32(gg, k);  return true;
+            case GGUF_TYPE_UINT32: *dst = (int)gguf_get_val_u32(gg, k);  return true;
+            default: return false;
+        }
+    };
+    int head_count = 0;
+    bool ok = get_i32("llama.embedding_length", &g_hyb_gguf.hid) &&
+              get_i32("llama.attention.head_count", &head_count) &&
+              head_count > 0 && g_hyb_gguf.hid > 0;
+    g_hyb_gguf.hd = ok ? g_hyb_gguf.hid / head_count : 0;
+    ok = ok && g_hyb_gguf.hd > 0 && (g_hyb_gguf.hd % 2) == 0;
+    // [P1-6 fail-closed] theta 绝不静默落 10000 默认值：MiniCPM5 真身
+    // freq_base=5e6，缺 key / 类型不符直接判 GGUF 不可用（feeds_model_info
+    // 回 -1 → stage=prefill_feeds 结构化失败回 GPU）——10000 会让 trig 表
+    // 全错却不崩溃，是最坏的静默失效形态。f32/f64 两种存法都收（不同转换
+    // 工具写法不一），f32 转 double 精度足够 fp16 表使用。
+    g_hyb_gguf.theta = 0.0;
+    int64_t k = gguf_find_key(gg, "llama.rope.freq_base");
+    if (ok && k >= 0) {
+        switch (gguf_get_kv_type(gg, k)) {
+            case GGUF_TYPE_FLOAT64: g_hyb_gguf.theta = gguf_get_val_f64(gg, k); break;
+            case GGUF_TYPE_FLOAT32: g_hyb_gguf.theta = (double)gguf_get_val_f32(gg, k); break;
+            default: break;
+        }
+    }
+    ok = ok && g_hyb_gguf.theta > 0.0;
+
+    // [P2-8] eos pad id = tokenizer.ggml.eos_token_id[0]（A3b gen_ids /
+    // prep77b tok.eos_token_id 的 GGUF 直读同构，u32/i32 数组均收）。
+    // 缺失不致命到这里——feeds_eos_id 单独回 -1，由 hyb_jni 对链 ids pad
+    // fail-closed（桥/生成路径不依赖它时不受影响）。
+    g_hyb_gguf.eos_found = false;
+    g_hyb_gguf.eos_id    = -1;
+    int64_t ke = gguf_find_key(gg, "tokenizer.ggml.eos_token_id");
+    if (ke >= 0 && gguf_get_kv_type(gg, ke) == GGUF_TYPE_ARRAY) {
+        enum gguf_type at = gguf_get_arr_type(gg, ke);
+        if (at == GGUF_TYPE_UINT32 || at == GGUF_TYPE_INT32) {
+            size_t n_e = gguf_get_arr_n(gg, ke);
+            const void *ev = n_e >= 1 ? gguf_get_arr_data(gg, ke) : nullptr;
+            if (ev) {
+                g_hyb_gguf.eos_found = true;
+                g_hyb_gguf.eos_id = (at == GGUF_TYPE_UINT32)
+                    ? (int32_t)((const uint32_t *)ev)[0]
+                    : ((const int32_t *)ev)[0];
+            }
+        }
+    }
+    int64_t tid = ok ? gguf_find_tensor(gg, "token_embd") : -1;
+    ok = ok && tid >= 0;
+    if (ok) {
+        const int64_t *ne     = gguf_get_tensor_ne(gg, tid);
+        g_hyb_gguf.hid        = (int)ne[0];
+        g_hyb_gguf.n_vocab    = (int)ne[1];
+        g_hyb_gguf.embd_type  = gguf_get_tensor_type(gg, tid);
+        g_hyb_gguf.embd_off   = gguf_get_data_offset(gg)
+                                + gguf_get_tensor_offset(gg, tid);
+        g_hyb_gguf.row_bytes  = ggml_row_size(g_hyb_gguf.embd_type,
+                                              g_hyb_gguf.hid);
+        ok = g_hyb_gguf.row_bytes > 0;
+    }
+    gguf_free(gg);
+    g_hyb_gguf.path  = g_hyb_model_path;
+    g_hyb_gguf.valid = ok;
+    LOGI("hyb feeds gguf: ok=%d hid=%d hd=%d vocab=%d theta=%.1f embd_type=%d off=%zu row=%zu eos_found=%d eos=%d",
+         (int)ok, g_hyb_gguf.hid, g_hyb_gguf.hd, g_hyb_gguf.n_vocab,
+         g_hyb_gguf.theta, (int)g_hyb_gguf.embd_type,
+         g_hyb_gguf.embd_off, g_hyb_gguf.row_bytes,
+         (int)g_hyb_gguf.eos_found, (int)g_hyb_gguf.eos_id);
+    return ok;
+}
+} // namespace
+
+static int hyb_feeds_model_info(double *theta, int *hd, int *hid, int *n_vocab) {
+    if (!g_engine.is_loaded() || !theta || !hd || !hid || !n_vocab) return -1;
+    std::lock_guard<std::mutex> lk(g_hyb_gguf.mu);
+    if (!hyb_gguf_ensure_locked()) return -1;
+    *theta   = g_hyb_gguf.theta;
+    *hd      = g_hyb_gguf.hd;
+    *hid     = g_hyb_gguf.hid;
+    *n_vocab = g_hyb_gguf.n_vocab;
+    return 0;
+}
+
+static int hyb_feeds_read_embd(const int32_t *ids, int n, uint16_t *out) {
+    if (!g_engine.is_loaded() || !ids || !out || n <= 0) return -1;
+    std::lock_guard<std::mutex> lk(g_hyb_gguf.mu);
+    if (!hyb_gguf_ensure_locked()) return -1;
+    FILE *f = fopen(g_hyb_model_path.c_str(), "rb");
+    if (!f) return -1;
+    const size_t row = g_hyb_gguf.row_bytes;
+    std::vector<uint8_t> rbuf(row);
+    std::vector<float>   fbuf(g_hyb_gguf.hid);
+    const ggml_type_traits *tt = nullptr;
+    if (g_hyb_gguf.embd_type != GGML_TYPE_F16 &&
+        g_hyb_gguf.embd_type != GGML_TYPE_F32) {
+        tt = ggml_get_type_traits(g_hyb_gguf.embd_type);
+        if (!tt || !tt->to_float) { fclose(f); return -1; }
+    }
+    for (int i = 0; i < n; i++) {
+        int32_t id = ids[i];
+        if (id < 0 || id >= g_hyb_gguf.n_vocab) { fclose(f); return -1; }
+        off_t off = (off_t)(g_hyb_gguf.embd_off + (size_t)id * row);
+        if (fseeko(f, off, SEEK_SET) != 0 || fread(rbuf.data(), 1, row, f) != row) {
+            fclose(f); return -1;
+        }
+        uint16_t *dst = out + (size_t)i * (size_t)g_hyb_gguf.hid;
+        if (g_hyb_gguf.embd_type == GGML_TYPE_F16) {
+            memcpy(dst, rbuf.data(), row);          // bit copy vs HF fp16 table
+        } else if (g_hyb_gguf.embd_type == GGML_TYPE_F32) {
+            const float *src = (const float *)rbuf.data();
+            for (int h = 0; h < g_hyb_gguf.hid; h++) dst[h] = hyb_f32_to_f16(src[h]);
+        } else {
+            tt->to_float(rbuf.data(), fbuf.data(), g_hyb_gguf.hid);
+            for (int h = 0; h < g_hyb_gguf.hid; h++) dst[h] = hyb_f32_to_f16(fbuf[h]);
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+/* [P0-4] engine's own KV-cache selector (0=q4_0/1=q8_0/2=f16 — the
+ * nativeSetKvCacheType encoding, see tongyilite_engine.h). */
+static int hyb_kv_cache_type(void) {
+    return g_kv_cache_type.load(std::memory_order_relaxed);
+}
+
+/* [P2-8] GGUF tokenizer.ggml.eos_token_id[0] — the frozen A3b pad source.
+ * -1 = key absent/unusable; the chain-ids staging fail-closes on this. */
+static int hyb_feeds_eos_id(int32_t *eos) {
+    if (!g_engine.is_loaded() || !eos) return -1;
+    std::lock_guard<std::mutex> lk(g_hyb_gguf.mu);
+    if (!hyb_gguf_ensure_locked()) return -1;
+    if (!g_hyb_gguf.eos_found) return -1;
+    *eos = g_hyb_gguf.eos_id;
+    return 0;
+}
+
+static TongYiLiteEngineHandle g_engine_handle = {
+    /*abi*/             TONGYILITE_ENGINE_ABI,
+    /*model*/           nullptr,
+    /*context*/         nullptr,
+    /*jvm*/             nullptr,
+    /*is_loaded*/       hyb_is_loaded,
+    /*begin*/           hyb_begin,
+    /*end*/             hyb_end,
+    /*should_stop*/     hyb_should_stop,
+    /*build_prompt_ids*/hyb_build_prompt_ids,
+    /*feeds_model_info*/hyb_feeds_model_info,
+    /*feeds_read_embd*/ hyb_feeds_read_embd,
+    /*kv_cache_type*/   hyb_kv_cache_type,
+    /*feeds_eos_id*/    hyb_feeds_eos_id,
+};
+
+/* Refresh pointer fields on EVERY call (model may be reloaded between
+ * hybrid sessions; JNI_OnLoad fills jvm late). Single-threaded by the
+ * engine-executor contract; callers re-read the handle each entry. */
+extern "C" const TongYiLiteEngineHandle *tongyilite_engine_handle(void) {
+    g_engine_handle.model   = (void *)g_engine.model;
+    g_engine_handle.context = (void *)g_engine.context;
+    g_engine_handle.jvm     = (void *)g_jvm;
+    return &g_engine_handle;
+}

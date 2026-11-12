@@ -529,6 +529,62 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
 
           const SizedBox(height: 10),
 
+          // ---- NPU 混合调度卡片（npu-line M2 Phase C：实验性，默认关） ----
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '🧠 NPU 混合调度（NPU prefill + GPU decode，实验性）',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(
+                        value: false,
+                        label: Text('关（默认）'),
+                        icon: Icon(Icons.memory_outlined, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: true,
+                        label: Text('开'),
+                        icon: Icon(Icons.bolt_outlined, size: 16),
+                      ),
+                    ],
+                    selected: {gpuSettings.hybridPrefillEnabled},
+                    onSelectionChanged: (sel) {
+                      final v = sel.first;
+                      if (v != gpuSettings.hybridPrefillEnabled) {
+                        gpuNotifier.setHybridPrefillEnabled(v);
+                      }
+                    },
+                    showSelectedIcon: false,
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '长 prompt 首 token 加速实验（计划 §6.4：512-prompt '
+                    'TTFT 26.9s→4.9s）：文本生成先试 NPU 分层链 prefill，'
+                    'KV 桥进官方 state 后由 GPU 续 decode。链侧设备验证'
+                    '（Phase C-2）前保持关是预期状态；开启后任何一步失败'
+                    '自动回退纯 GPU 现路径，仅支持纯文本（带图/音不走）。',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
           // ---- 引擎状态卡片 ----
           Card(
             child: Padding(

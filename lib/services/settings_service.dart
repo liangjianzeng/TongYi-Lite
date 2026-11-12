@@ -429,6 +429,13 @@ class InferenceSettings {
   /// 量化格式；hybrid（recurrent 层）架构原生层会强制关闭。改后重新加载生效。
   final bool flashAttn;
 
+  /// [npu-line M2 Phase C] NPU prefill + GPU decode 混合调度
+  /// （设置→推理引擎→NPU 混合调度）。**默认 OFF = 现纯 GPU 路径不变**
+  /// （零回归红线）。ON 时本地引擎先试混合链（chain_run5 收 KV → native
+  /// 桥转官方 state → load 续 decode），任何一步失败自动回退现路径。
+  /// 实验特性：链侧未过设备验证（Phase C-2）前保持 OFF 是预期状态。
+  final bool hybridPrefillEnabled;
+
   /// GPU 推理时限制刷新率（防闪纹，2026-10-07 小米13 定案）：模型加载/
   /// prefill 的瞬时显存带宽会挤占显示供帧（Adreno UMA），期间临时锁 60Hz、
   /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
@@ -624,6 +631,7 @@ class InferenceSettings {
     this.oomPostHeadroomMb = 1536,
     this.kvCacheType = 'q4_0',
     this.flashAttn = false,
+    this.hybridPrefillEnabled = false,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -832,6 +840,7 @@ class InferenceSettings {
     int? oomPostHeadroomMb,
     String? kvCacheType,
     bool? flashAttn,
+    bool? hybridPrefillEnabled,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
     bool? smartMoeEnabled,
@@ -977,6 +986,8 @@ class InferenceSettings {
       oomPostHeadroomMb: oomPostHeadroomMb ?? this.oomPostHeadroomMb,
       kvCacheType: kvCacheType ?? this.kvCacheType,
       flashAttn: flashAttn ?? this.flashAttn,
+      hybridPrefillEnabled:
+          hybridPrefillEnabled ?? this.hybridPrefillEnabled,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
       agentPersonas: agentPersonas ?? this.agentPersonas,
@@ -1096,6 +1107,7 @@ class InferenceSettings {
         'oomPostHeadroomMb': oomPostHeadroomMb,
         'kvCacheType': kvCacheType,
         'flashAttn': flashAttn,
+        'hybridPrefillEnabled': hybridPrefillEnabled,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
         'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
@@ -1288,6 +1300,9 @@ class InferenceSettings {
           ? json['kvCacheType'] as String
           : 'q4_0',
       flashAttn: (json['flashAttn'] as bool?) ?? false,
+      // [npu-line M2 Phase C] 混合调度默认 OFF（缺字段 = 现纯 GPU 路径）
+      hybridPrefillEnabled:
+          (json['hybridPrefillEnabled'] as bool?) ?? false,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
       agentPersonas: _parsePersonas(json['agentPersonas']),

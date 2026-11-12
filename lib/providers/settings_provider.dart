@@ -957,6 +957,16 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// [npu-line M2 Phase C] NPU prefill + GPU decode 混合调度开关
+  /// （设置→推理引擎→NPU 混合调度）。**默认 OFF = 现纯 GPU 路径不变**；
+  /// ON 后本地引擎逐回合尝试混合链，任何一步失败自动回退现路径。
+  /// 逐回合构造 adapter 时读取（chat_provider 组合根），改后立即生效。
+  Future<void> setHybridPrefillEnabled(bool value) async {
+    if (value == state.hybridPrefillEnabled) return;
+    state = state.copyWith(hybridPrefillEnabled: value);
+    await _persist();
+  }
+
   /// GPU 推理时限制刷新率（防闪纹）。关 = 推理期间不干预屏幕刷新率。
   Future<void> setInferenceLimitRefreshRate(bool value) async {
     state = state.copyWith(inferenceLimitRefreshRate: value);
