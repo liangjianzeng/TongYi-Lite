@@ -3791,6 +3791,14 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeLoadModel(
     std::string draft_path = j_draft_path ? jstring_to_std(env, j_draft_path) : "";
     std::string moe_manifest = j_moe_manifest ? jstring_to_std(env, j_moe_manifest) : "";
 
+    // [冷启 warmup 实验 2026-11-13 判死备案] 曾在此 setenv GGML_OPENCL_KERNEL_CACHE_DIR
+    //（fork cl-program-cache 默认路径在 Android 静默失效→每次冷启 warmup 恒付 ~25s
+    // clBuildProgram）实测：cache MISS 全编路径可完成（218 .clbin，24.7s），但后续冷启
+    // **HIT 路径死锁**（293 bin 后 4 分钟零进展零日志，warmup 行不出，App 挂在 safe_decode）
+    // ——本机 Adreno 740 驱动对 clCreateProgramWithBinary 后的 dispatch 不可靠，优化判死回滚。
+    // 冷启 25s 是当前可接受代价；再攻此点须先在 shell 域用 llama-simple 复现并定位
+    // cl-program-cache 的 HIT 分支（换 clLink 或 binary 类型判别），勿直接上 App。
+
     // Fresh failure-reason slate per attempt (see g_last_loading_msg above).
     g_last_loading_msg[0] = '\0';
 
