@@ -35,7 +35,8 @@ DEV="${DEV:-<redacted-tailscale>:5555}"
 ADB="${ADB:-$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe}"
 PKG="${PKG:-com.dgxspark.tongyilite}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${BIN:-$REPO/android/app/assets/npu_libs/chain_run5}"
+# P0-3 后 chain_run5 已 .so 化入 jniLibs（nativeLibraryDir exec 形态），push 源随其后缀名走。
+BIN="${BIN:-$REPO/android/app/src/main/jniLibs/arm64-v8a/libchain_run5_exec.so}"
 D_PROBE=/data/local/tmp/npu_exec_probe
 CONFIRM="${CONFIRM:-}"
 
@@ -75,15 +76,20 @@ classify() { # $1=组名 $2=输出 $3=退出码
 }
 
 # 控制组：shell 域 /data/local/tmp
+# Windows-native adb.exe 不认 MSYS 路径（且本脚本 MSYS_NO_PATHCONV=1 抑制自动转换）→ host 源显式 cygpath。
+BIN_WIN="$BIN"
+command -v cygpath >/dev/null && BIN_WIN="$(cygpath -w "$BIN")"
 sh_out mkdir -p "$D_PROBE"
-"$ADB" -s "$DEV" push "$BIN" "$D_PROBE/chain_run5" >/dev/null
+"$ADB" -s "$DEV" push "$BIN_WIN" "$D_PROBE/chain_run5" >/dev/null
 sh_out chmod 755 "$D_PROBE/chain_run5"
 out="$(sh_out "$D_PROBE/chain_run5" 2>&1)"; rc=$?
 classify ctl_shell_tmp "$out" "$rc"
 
-# 实验组：run-as 代理进 App filesDir（等价 App 自身 execve 语境）
-out="$(sh_out run-as "$PKG" sh -c \
-  "mkdir -p files/npu_exec_probe && cp $D_PROBE/chain_run5 files/npu_exec_probe/chain_run5 && chmod 755 files/npu_exec_probe/chain_run5 && id -Z && ls -Z files/npu_exec_probe/chain_run5 && files/npu_exec_probe/chain_run5 2>&1; echo RCX=\$?")"
+# 实验组：run-as 代理进 App filesDir（等价 App 自身 execve 语境）。
+# adb shell 把多 argv join 后交设备 sh 二次解析 ⇒ sh -c 的引号会丢（mkdir 只收到 1 参判例）；
+# 整条命令包成单 argv（单引号包裹）让设备 shell 一次解析。
+CMD="mkdir -p files/npu_exec_probe && cp $D_PROBE/chain_run5 files/npu_exec_probe/chain_run5 && chmod 755 files/npu_exec_probe/chain_run5 && id -Z && ls -Z files/npu_exec_probe/chain_run5 && files/npu_exec_probe/chain_run5 2>&1; echo RCX=\$?"
+out="$(sh_out "run-as $PKG sh -c '$CMD'")"
 rc=$?
 echo "$out" | grep -E "^u:|^RCX=" | head -4
 classify app_filesdir "$(grep -v '^RCX=' <<<"$out")" "$(sed -n 's/^RCX=//p' <<<"$out" | tail -1)"
