@@ -41,10 +41,14 @@ int main(int argc, char ** argv) {
 
     std::vector<llama_token> tk(n);
     size_t loaded = 0;
-    double tload0 = (double)clock() / CLOCKS_PER_SEC;
+    // [decode-tps 口径判例 2026-11-13] 计时一律 wall（ggml_time_ms）：clock()=
+    // 进程 CPU 时间总和，OpenCL 驱动 spin 线程的 CPU 会被计入 → tps 被低估
+    // ~40%（6.26 vs 真值 10+，三臂对照 vkl simple 10.27 / fork 库+simple 10.23
+    // / fork hyb_load 6.26 定罪）。llama_perf 同为 wall 口径。
+    double tload0 = (double)ggml_time_ms();
     size_t r = llama_state_seq_load_file(ctx, statef, 0, tk.data(), n, &loaded);
     if (r == 0) die("state load");
-    double tload = 1e3 * ((double)clock() / CLOCKS_PER_SEC - tload0);
+    double tload = (double)ggml_time_ms() - tload0;
     llama_pos nextpos = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) + 1;
     printf("STATE_LOADED tokens=%zu next_pos=%lld load_ms=%.0f\n", loaded, (long long)nextpos, tload);
 
@@ -56,7 +60,7 @@ int main(int argc, char ** argv) {
     std::vector<uint16_t> lbuf(nv);
     llama_token t = first;
     llama_seq_id s0 = 0;
-    double t0 = (double)clock() / CLOCKS_PER_SEC;
+    double t0 = (double)ggml_time_ms(); // wall, 同 tload0 口径（clock() 判例见上）
     double tfirst = -1;
     for (int i = 0; i < ngreedy; i++) {
         // zero-init token-only batch: compat layer auto-derives pos from
@@ -74,13 +78,13 @@ int main(int argc, char ** argv) {
         for (int j = 1; j < nv; j++) if (l[j] > l[best]) best = j;
         t = best;
         if (i == 0) {
-            double tf = 1e3 * ((double)clock() / CLOCKS_PER_SEC - t0);
+            double tf = (double)ggml_time_ms() - t0;
             printf("FIRST_TOK_MS %.0f (state+step0 decode)\n", tf);
         }
         printf("T %d %d\n", i, t);
         // no eog break: forced decoding keeps the compare series full length
     }
-    double dt = (double)clock() / CLOCKS_PER_SEC - t0;
+    double dt = ((double)ggml_time_ms() - t0) / 1e3;
     printf("HYB_DECODE tps=%.2f secs=%.2f\n", ngreedy / (dt > 0 ? dt : 1), dt);
     printf("LOAD_TOOL_DONE\n");
     llama_free(ctx); llama_model_free(m);
