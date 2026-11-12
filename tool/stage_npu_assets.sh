@@ -106,11 +106,17 @@ if [ "${SKIP_BUILD:-0}" = "1" ] && [ -s "$WORK/chain_run5_built" ]; then
     echo "SKIP_BUILD=1，复用 $WORK/chain_run5_built"
 else
     [ -f "$SRC" ] || fail "缺源 $SRC"
+    # [MC 设备窗口判例 2026-11-12] flags 必须与历史全绿配方逐字对齐（PRE2/坑 47
+    # 链的 chain_run5 = `aarch64-linux-android29-clang++ -O2 -I<QNN_INC> src`）：
+    # **-ldl（或 -std=c++17）会让 HTP deviceCreate 0x36b1**——同源码同 env 同 QNN
+    # 库四件 md5 全等下，加 -ldl -std=c++17 死、历史 flags 活（WSL r27c 与
+    # Windows 27.0 两个 NDK 交叉复证）。推定 libdl PLT 路径 dlopen 在「.so 直跑
+    # 可执行」形态下改了 loader 行为；不再深挖，冻结配方即真相。
     wsl.exe -d "$WSL_DIST" -- bash -c \
         "\"$NDK_WSL/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++\" \
---target=aarch64-linux-android29 -O2 -std=c++17 -Wall \
+--target=aarch64-linux-android29 -O2 \
 -I\"$QNN_INC\" \"$(wslpath_u "$SRC")\" \
--ldl -o \"$(wslpath_u "$WORK/chain_run5_built")\"" \
+-o \"$(wslpath_u "$WORK/chain_run5_built")\"" \
         || fail "chain_run5 编译失败（NDK_WSL=$NDK_WSL QNN_INC=$QNN_INC）"
 fi
 file "$WORK/chain_run5_built" 2>/dev/null | grep -q "ARM aarch64" \

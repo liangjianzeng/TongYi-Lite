@@ -9,7 +9,6 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -314,112 +313,45 @@ class LocalEngineAdapter extends BaseEngineAdapter {
   ) async {
     if (cancel?.isCompleted ?? false) throw const AgentCancelledException();
 
-    final work = await HybridBridge.prepareWorkDir();
-    if (work == null) return null;
-    // [npu-line M2 D6] 混合工作目录（84 片 KV + 9MB state 容器）是回合中间
-    // 产物，路径已入日志可事后取证 → 出口 finally 尽力删除，防每回合泄漏。
-    try {
-      // NPU 链资产（chain_run5/manifest/QNN .so）解包到私有目录，幂等低成本；
-      // 失败不阻断——native 预检给 stage=prefill_* 结构化错误，同样回退。
-      await HybridBridge.ensureAssets(_inference);
-
-      // 步骤 1：NPU prefill（chain_run5 三段串行收 84 片 KV；native 用 GPU
-      // 路径同款模板+分词由 messagesJson 产出 ids.raw，回包 n_real/ids_path）
-      final pre = await HybridBridge.startPrefill(
-        _inference,
-        kvDir: work.kvDir,
-        idsPath: work.idsPath,
-        messagesJson: messagesJson,
-      );
-      if (!pre.ok) {
-        debugPrint('[AgentLlm][Hybrid] prefill 不可用: $pre');
-        return null;
-      }
+    // [npu-line M2 C-3] 编排出坞到 HybridBridge.runTurn（唯一真源，普通聊天
+    // 共用防协议漂移）；本层保留 agent 语义外裹：cancel 逐段检查转
+    // AgentCancelledException（runTurn 只回 null）、processor 解析、
+    // [npu-line M2 D3/D4] usage 取回包真值（native g_last_stats 只由 GPU 路径
+    // 写，混合回合读它 = 上一 GPU 回合的陈旧计数）+ 采样诚实化。
+    final turn = await HybridBridge.runTurn(
+      _inference,
+      messagesJson: messagesJson,
+      maxTokens: options.maxTokens ?? 512,
+      temperature: options.temperature,
+      cancelled: () => cancel?.isCompleted ?? false,
+    );
+    if (turn == null) {
       if (cancel?.isCompleted ?? false) throw const AgentCancelledException();
-
-      // NREAL（真实 token 数，无-pad 协议）与 ids 文件以 native 为权威；缺失
-      // 即协议不满足 → 回退。首 token：prefill 回包恒 -1，native 在 decode 前
-      // 「重算末 prompt token 一步」取 argmax（计划 §1.3 兜底路线）。
-      final nReal = pre.nReal;
-      final idsPath = pre.idsPath;
-      if (nReal == null || nReal < 1) {
-        debugPrint('[AgentLlm][Hybrid] prefill 回包缺 n_real → 回退');
-        return null;
-      }
-
-      // 步骤 2：桥转 → llama_state_seq_load_file → 续 decode
-      final dec = await HybridBridge.bridgeAndResumeDecode(
-        _inference,
-        paths: HybridWorkPaths(
-          kvDir: work.kvDir,
-          idsPath: idsPath ?? work.idsPath,
-          statePath: work.statePath,
-        ),
-        nReal: nReal,
-        firstTok: pre.firstTok ?? -1,
-        posBaseOverride: pre.posBase,
-        maxTokens: options.maxTokens ?? 512,
-        temperature: options.temperature,
-      );
-      if (!dec.ok) {
-        debugPrint('[AgentLlm][Hybrid] 桥转/decode 不可用: $dec '
-            '(state=${dec.statePath})');
-        return null;
-      }
-      if (cancel?.isCompleted ?? false) throw const AgentCancelledException();
-      // [npu-line M2 D2] native 的用户止损同样回 ok:true + partial text
-      // （hyb_jni user-stop 契约）。非本回合手停却见 stopped=user ⇒ 外部
-      // 止损（如引擎侧 stopGeneration）→ 回退 GPU 重生成完整答案，
-      // 绝不把半截贪心文本当完整回复提交。
-      if (dec.stopped == 'user') {
-        debugPrint('[AgentLlm][Hybrid] decode 被外部止损（stopped=user）→ 回退 GPU');
-        return null;
-      }
-
-      // C-2：native 回完整 text（token 流式形态待设备侧 ack 协议接线，见
-      // hybrid_bridge.dart 头注释）。空文本按失败回退，不污染现路径语义。
-      final text = dec.text;
-      if (text == null || text.isEmpty) {
-        debugPrint('[AgentLlm][Hybrid] decode ok 但 text 空 → 回退');
-        return null;
-      }
-
-      final rawBuffer = StringBuffer(text);
-      final processor = AgentStreamProcessor();
-      processor.add(text);
-      if (onToken != null) onToken.add(processor.visibleText);
-      if (onThinking != null) onThinking.add(processor.thinkingText);
-      debugPrint('[AgentLlm][Hybrid] 混合生成完成 (NPU prefill + GPU decode), '
-          'len=${text.length}, state=${dec.statePath}');
-      // [npu-line M2 D3/D4] usage 取回包真值：native g_last_stats 只由 GPU
-      // 路径写（hyb_jni 零写入），旧 _readLocalUsage 在混合回合报的是上一
-      // GPU 回合的陈旧计数。采样诚实化：混合续解码是贪心 argmax（C-3 前
-      // 冻结配方），usage 声明 + 温度被弃时日志一行。
-      final parsed = await parseAndReturn(rawBuffer, processor);
-      final usage = <String, dynamic>{
-        'prompt_tokens': nReal,
-        'engine': 'npu_prefill+gpu_decode',
-        'sampling': 'greedy',
-      };
-      final nGen = dec.nGen;
-      if (nGen != null) usage['completion_tokens'] = nGen;
-      final loadMs = dec.loadMs;
-      if (loadMs != null) usage['load_ms'] = loadMs;
-      if (options.temperature > 0) {
-        debugPrint('[AgentLlm][Hybrid] 混合回合强制贪心（temperature='
-            '${options.temperature} 未生效；真采样在 C-3 排期）');
-      }
-      return LlmResult(
-        text: parsed.text,
-        toolCalls: parsed.toolCalls,
-        usage: usage,
-      );
-    } finally {
-      try {
-        await Directory(File(work.statePath).parent.path)
-            .delete(recursive: true);
-      } catch (_) {}
+      return null;
     }
+
+    final rawBuffer = StringBuffer(turn.text);
+    final processor = AgentStreamProcessor();
+    processor.add(turn.text);
+    if (onToken != null) onToken.add(processor.visibleText);
+    if (onThinking != null) onThinking.add(processor.thinkingText);
+    final parsed = await parseAndReturn(rawBuffer, processor);
+    final usage = <String, dynamic>{
+      'prompt_tokens': turn.nReal,
+      'engine': 'npu_prefill+gpu_decode',
+      'sampling': 'greedy',
+    };
+    if (turn.nGen != null) usage['completion_tokens'] = turn.nGen;
+    if (turn.loadMs != null) usage['load_ms'] = turn.loadMs;
+    if (options.temperature > 0) {
+      debugPrint('[AgentLlm][Hybrid] 混合回合强制贪心（temperature='
+          '${options.temperature} 未生效；真采样在 C-3 排期）');
+    }
+    return LlmResult(
+      text: parsed.text,
+      toolCalls: parsed.toolCalls,
+      usage: usage,
+    );
   }
 
   /// C4：本地 usage 回传——生成刚结束，原生 stats 即本次的真实计数。

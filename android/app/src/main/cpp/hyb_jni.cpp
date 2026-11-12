@@ -339,6 +339,11 @@ static SegResult run_segment(const char *chainDir, const char *chainBin,
         char steps[16];
         snprintf(steps, sizeof(steps), "%d", n_chunks);
         std::string ld = std::string("LD_LIBRARY_PATH=") + qnnLibDir;
+        // [MC 设备窗口判例 2026-11-12 + 坑 47 复核] ADSP_LIBRARY_PATH 缺失即
+        // HTP deviceCreate 0x36b1。两设备配方不同：830 用 '//<dir>;native'
+        // （make_fullchain_probe/mcp5_18），**740 用裸绝对路径**（mcp5_93 坑 47
+        // 冻结、mcp5_95_run_a3b_seq 同款全绿）。R11 的 '//' 形态在 740 上仍
+        // 0x36b1（p0.log 尾行），按本机判例回裸路径。
         std::string ad = std::string("ADSP_LIBRARY_PATH=") + qnnLibDir;
         char *envp[] = {
             (char *)"PATH=/system/bin:/system/xbin",
@@ -411,7 +416,11 @@ static SegResult run_segment(const char *chainDir, const char *chainBin,
  * JNI entry 1/2: NPU prefill (chain_run5) + token staging
  * =================================================================== */
 
-JNIEXPORT jstring JNICALL
+// [MC 设备窗口判例] extern "C" 不可省：本文件是 .cpp，裸 JNIEXPORT 会走 Itanium
+// C++ mangling（导出成 ...P7_JNIEnvP8_jobject... 长名）→ Java 侧
+// UnsatisfiedLinkError "No implementation found"，且 so 里 grep 符号名还能命中
+// （假在场），只有对比 Kotlin 尝试名才见差异。
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeStartHybridPrefill(
     JNIEnv *env, jobject /*thiz*/,
     jstring kvDir, jstring idsPath, jstring chainDir, jstring chainBin,
@@ -755,7 +764,7 @@ static bool hyb_emit(JNIEnv *env, jobject cb, jmethodID mid, const char *text)
     return keep == JNI_TRUE;
 }
 
-JNIEXPORT jstring JNICALL
+extern "C" JNIEXPORT jstring JNICALL
 Java_com_dgxspark_tongyilite_InferenceEngine_nativeBridgeAndResumeDecode(
     JNIEnv *env, jobject /*thiz*/, jstring kvDir, jstring idsPath,
     jstring outPath, jint nReal, jlong posBase, jint firstTok,

@@ -1435,6 +1435,15 @@ struct InferenceEngine {
         ctx_params.type_v = (model_is_mla ||
                              ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED)
                                 ? ctx_params.type_k : GGML_TYPE_F16;
+        // [MC 设备窗口判例 2026-11-12] g_kv_cache_type 是「实际 KV 类型」唯一真源
+        // （:1168 内存系数、hyb_jni f16-KV fail-closed 门 vtable 都读它）。上面
+        // clover/OpenCL/MLA 三个 force-F16 分支只改 ctx_params → 真身 F16 而
+        // selector 仍 0，混合门假报 HYB_ERR_NOT_ENABLED（R8 实锤：OpenCL 强制
+        // F16 成功、prefill_kvtype 却拒）。终值统一回写，语义=实际类型。
+        g_kv_cache_type.store(ctx_params.type_k == GGML_TYPE_F16    ? 2
+                              : ctx_params.type_k == GGML_TYPE_Q8_0 ? 1
+                                                                    : 0,
+                              std::memory_order_relaxed);
         LOGI("KV cache: type_k=%s type_v=%s flash_attn=%s%s%s",
              ggml_type_name(ctx_params.type_k), ggml_type_name(ctx_params.type_v),
              ctx_params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED ? "auto" : "off",
@@ -4595,23 +4604,37 @@ bool hyb_gguf_ensure_locked(void) {
     // prep77b tok.eos_token_id 的 GGUF 直读同构，u32/i32 数组均收）。
     // 缺失不致命到这里——feeds_eos_id 单独回 -1，由 hyb_jni 对链 ids pad
     // fail-closed（桥/生成路径不依赖它时不受影响）。
+    // [MC 设备窗口判例 2026-11-12] 本 Q4（convert_hf_to_gguf→设备 llama-quantize
+    // 血统）把 eos_token_id 存成 **INT32 标量**（probe: =1），旧代码只收 ARRAY →
+    // eos_found=0 → chain ids pad fail-closed 拒（R9 实锤）。标量/数组两形态都收。
     g_hyb_gguf.eos_found = false;
     g_hyb_gguf.eos_id    = -1;
     int64_t ke = gguf_find_key(gg, "tokenizer.ggml.eos_token_id");
-    if (ke >= 0 && gguf_get_kv_type(gg, ke) == GGUF_TYPE_ARRAY) {
-        enum gguf_type at = gguf_get_arr_type(gg, ke);
-        if (at == GGUF_TYPE_UINT32 || at == GGUF_TYPE_INT32) {
-            size_t n_e = gguf_get_arr_n(gg, ke);
-            const void *ev = n_e >= 1 ? gguf_get_arr_data(gg, ke) : nullptr;
-            if (ev) {
-                g_hyb_gguf.eos_found = true;
-                g_hyb_gguf.eos_id = (at == GGUF_TYPE_UINT32)
-                    ? (int32_t)((const uint32_t *)ev)[0]
-                    : ((const int32_t *)ev)[0];
+    if (ke >= 0) {
+        enum gguf_type kt = gguf_get_kv_type(gg, ke);
+        if (kt == GGUF_TYPE_UINT32 || kt == GGUF_TYPE_INT32) {
+            g_hyb_gguf.eos_found = true;
+            g_hyb_gguf.eos_id = kt == GGUF_TYPE_UINT32
+                ? (int32_t)gguf_get_val_u32(gg, ke)
+                : gguf_get_val_i32(gg, ke);
+        } else if (kt == GGUF_TYPE_ARRAY) {
+            enum gguf_type at = gguf_get_arr_type(gg, ke);
+            if (at == GGUF_TYPE_UINT32 || at == GGUF_TYPE_INT32) {
+                size_t n_e = gguf_get_arr_n(gg, ke);
+                const void *ev = n_e >= 1 ? gguf_get_arr_data(gg, ke) : nullptr;
+                if (ev) {
+                    g_hyb_gguf.eos_found = true;
+                    g_hyb_gguf.eos_id = (at == GGUF_TYPE_UINT32)
+                        ? (int32_t)((const uint32_t *)ev)[0]
+                        : ((const int32_t *)ev)[0];
+                }
             }
         }
     }
-    int64_t tid = ok ? gguf_find_tensor(gg, "token_embd") : -1;
+    // [MC 判例] GGUF 张量名带 .weight 后缀（token_embd.weight，probe 实锤无裸名）；
+    // 双试兼容两代转换工具命名。
+    int64_t tid = ok ? gguf_find_tensor(gg, "token_embd.weight") : -1;
+    if (tid < 0 && ok) tid = gguf_find_tensor(gg, "token_embd");
     ok = ok && tid >= 0;
     if (ok) {
         const int64_t *ne     = gguf_get_tensor_ne(gg, tid);

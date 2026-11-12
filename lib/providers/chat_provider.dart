@@ -40,6 +40,7 @@ import '../agent/tools/guard.dart'
 import '../models/model_catalog.dart' show ModelCatalog;
 import '../agent/llm/adapter.dart'
     show LlmAdapter, ProviderKind, GenerateOptions;
+import '../agent/llm/hybrid_bridge.dart' show HybridBridge;
 import '../agent/llm/local_adapter.dart' show LocalEngineAdapter;
 import '../agent/llm/openai_adapter.dart' show OpenAiAdapter;
 import '../agent/protocol/native_tool_protocol.dart' show NativeToolProtocol;
@@ -83,8 +84,7 @@ import '../agent/session/event.dart'
         kEventTurnEnd,
         kEventUserMessage,
         SessionEvent;
-import '../agent/metrics/turn_metrics.dart'
-    show TurnMetrics, TurnMetricsStore;
+import '../agent/metrics/turn_metrics.dart' show TurnMetrics, TurnMetricsStore;
 import '../agent/session/trace_export.dart' as trace_export;
 import '../models/api_model.dart';
 import '../services/inference_service.dart';
@@ -287,8 +287,9 @@ final messagesProvider = StreamProvider.autoDispose
     });
   }
 
-  final sub =
-      storage.messageChanges.where((id) => id == convId).listen((_) => schedule());
+  final sub = storage.messageChanges
+      .where((id) => id == convId)
+      .listen((_) => schedule());
   final heartbeat =
       Timer.periodic(const Duration(seconds: 2), (_) => schedule());
   ref.onDispose(() {
@@ -438,8 +439,7 @@ class ChatNotifier extends StateNotifier<bool> {
 
   Future<GoalStore> _goalStore() async {
     _goalStoreCache ??= GoalStore(
-        baseDir:
-            '${(await getApplicationSupportDirectory()).path}/goals');
+        baseDir: '${(await getApplicationSupportDirectory()).path}/goals');
     return _goalStoreCache!;
   }
 
@@ -498,13 +498,13 @@ class ChatNotifier extends StateNotifier<bool> {
       }
       if (gpuTurnActive && !_rateLimitEngaged) {
         _rateLimitEngaged = true;
-        AppBridge.setPreferredRefreshRate(60).then((ok) => debugPrint(
-            '[ChatNotifier] [refresh-rate] engage 60Hz ok=$ok '
-            'backend=${s.gpuBackend}'));
+        AppBridge.setPreferredRefreshRate(60).then((ok) =>
+            debugPrint('[ChatNotifier] [refresh-rate] engage 60Hz ok=$ok '
+                'backend=${s.gpuBackend}'));
       } else if (!gpuTurnActive && _rateLimitEngaged) {
         _rateLimitEngaged = false;
-        AppBridge.setPreferredRefreshRate(0).then((ok) =>
-            debugPrint('[ChatNotifier] [refresh-rate] restore ok=$ok'));
+        AppBridge.setPreferredRefreshRate(0).then(
+            (ok) => debugPrint('[ChatNotifier] [refresh-rate] restore ok=$ok'));
       }
     } catch (e) {
       debugPrint('[ChatNotifier] refresh-rate limit failed: $e');
@@ -592,13 +592,15 @@ class ChatNotifier extends StateNotifier<bool> {
     ));
   }
 
-  Future<String> sendMessage(    String conversationId,
+  Future<String> sendMessage(
+    String conversationId,
     String prompt, {
     String? imagePath,
     List<String>? imagePaths,
     List<String>? attachmentPaths,
     String? audioPath,
-  }) async {    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
+  }) async {
+    // 槽位门控 + 顶部同步占位（注册与检查之间无 await，防双开竞态）。
     // 路由未定时先按纯槽位计数预检；路由确定后再补「本地互斥」校验。
     final settings = _ref.read(settingsProvider);
     // 新消息发出 → 停掉正在进行的播报（避免旧回答声音与新提问交叠）。
@@ -648,8 +650,8 @@ class ChatNotifier extends StateNotifier<bool> {
         case GoalAction.settle:
           return;
         case GoalAction.expire:
-          final finished =
-              await (await _goalStore()).finish(conversationId, GoalStatus.expired);
+          final finished = await (await _goalStore())
+              .finish(conversationId, GoalStatus.expired);
           await _storage.saveMessage(ChatMessage(
             id: 'goalfin_${DateTime.now().millisecondsSinceEpoch}',
             conversationId: conversationId,
@@ -661,8 +663,7 @@ class ChatNotifier extends StateNotifier<bool> {
           return;
         case GoalAction.continueTurn:
           final bumped = await (await _goalStore()).bumpRound(conversationId);
-          final notice =
-              '[目标续跑 ${bumped.rounds}/${bumped.maxRounds}] '
+          final notice = '[目标续跑 ${bumped.rounds}/${bumped.maxRounds}] '
               '${bumped.progressText()}\n'
               '请继续推进（全部工具可用）：完成当前步骤立即 plan_step_update，'
               '再进入下一步；全部步骤完成后调用 goal_complete 总结收尾；'
@@ -791,16 +792,14 @@ class ChatNotifier extends StateNotifier<bool> {
           '${(result.ms / 1000).toStringAsFixed(1)} 秒）';
     } on ImageGenException catch (e) {
       if (e.kind == ImageGenErrorKind.cancelled) {
-        await _storage.saveMessage(
-            finalize('🎨 生图已取消：${slash.prompt}'));
+        await _storage.saveMessage(finalize('🎨 生图已取消：${slash.prompt}'));
         return '🎨 生图已取消';
       }
       await _storage
           .saveMessage(finalize('🎨 生图失败：${e.message}（${slash.prompt}）'));
       return '🎨 生图失败：${e.message}';
     } catch (e) {
-      await _storage
-          .saveMessage(finalize('🎨 生图失败：$e（${slash.prompt}）'));
+      await _storage.saveMessage(finalize('🎨 生图失败：$e（${slash.prompt}）'));
       return '🎨 生图失败：$e';
     }
   }
@@ -907,8 +906,8 @@ class ChatNotifier extends StateNotifier<bool> {
       // Step 2: Save user message first (so it's available in history for template)
       // 用户视图（imagePaths=原图）入库展示；模型视图（长图切块/缩放）单独
       // 计算存 visionPaths——切片对用户不可见，只在发给模型时使用。
-      final originals = imagePaths ??
-          (imagePath != null ? [imagePath] : const <String>[]);
+      final originals =
+          imagePaths ?? (imagePath != null ? [imagePath] : const <String>[]);
       final vision = await _prepareVisionPaths(originals, useApi: useApi);
       final visionChanged = !_samePaths(vision, originals);
       final userMsg = ChatMessage(
@@ -1007,25 +1006,53 @@ class ChatNotifier extends StateNotifier<bool> {
           final localImages = vision;
           if (localImages.isNotEmpty) {
             debugPrint('[ChatNotifier] 本地路线携带图片 ${localImages.length} 张');
-            manager.appendInferenceLog(
-                '请求 | 携带图片 ${localImages.length} 张'
+            manager.appendInferenceLog('请求 | 携带图片 ${localImages.length} 张'
                 '${visionChanged && localImages.length > 1 ? '（含长图切块）' : ''}');
           }
           if (audioPath != null) {
             debugPrint('[ChatNotifier] 本地路线携带语音: $audioPath');
             manager.appendInferenceLog('请求 | 携带语音消息 🎤');
           }
-          stream = _inference.completionWithMessages(
-            prompt: prompt,
-            messagesJson: messagesJson,
-            imagePath: vision.isNotEmpty ? vision.first : imagePath,
-            imagePaths: localImages.isNotEmpty ? localImages : null,
-            audioPath: audioPath,
-            maxTokens:
-                1024, // on-device cap: large token budgets make long runs unbearable
-            temperature: 0.7,
-            topP: 0.9,
-          );
+          // [npu-line M2 C-3] 混合预分支（设备窗口定罪判例：UI 普通聊天直调
+          // completionWithMessages、不经 LlmAdapter，NPU 混合开关在此路径没有
+          // 入口 = 设置页开关对普通聊天永远无效）。成功 → 全文走单值流进下方
+          // 既有流骨架（一次性渲染；token 级流式 ack 协议留后续排期）；任何
+          // 失败/止损 → null → 现路径逐字节不变（默认 OFF 短路 = 零回归红线）。
+          Stream<String>? hybStream;
+          if (_ref.read(settingsProvider).hybridPrefillEnabled &&
+              localImages.isEmpty &&
+              audioPath == null) {
+            debugPrint(
+                '[ChatNotifier][Hybrid] 尝试 NPU prefill + GPU decode ...');
+            final hybTurn = await HybridBridge.runTurn(
+              _inference,
+              messagesJson: messagesJson,
+              maxTokens: 1024,
+              temperature: 0.7,
+            );
+            if (hybTurn != null) {
+              debugPrint('[ChatNotifier][Hybrid] 成功 len=${hybTurn.text.length} '
+                  'n_real=${hybTurn.nReal} n_gen=${hybTurn.nGen} '
+                  'load_ms=${hybTurn.loadMs}');
+              manager.appendInferenceLog(
+                  '请求 | NPU+GPU 混合 ✓ len=${hybTurn.text.length}');
+              hybStream = Stream.value(hybTurn.text);
+            } else {
+              debugPrint('[ChatNotifier][Hybrid] 不可用 → 回退纯 GPU decode 现路径');
+            }
+          }
+          stream = hybStream ??
+              _inference.completionWithMessages(
+                prompt: prompt,
+                messagesJson: messagesJson,
+                imagePath: vision.isNotEmpty ? vision.first : imagePath,
+                imagePaths: localImages.isNotEmpty ? localImages : null,
+                audioPath: audioPath,
+                maxTokens:
+                    1024, // on-device cap: large token budgets make long runs unbearable
+                temperature: 0.7,
+                topP: 0.9,
+              );
         }
 
         debugPrint('[ChatNotifier] Listening to token stream...');
@@ -1360,14 +1387,13 @@ class ChatNotifier extends StateNotifier<bool> {
     // ---- 模型视图（发送时才切块；UI/存储的 imagePaths 永远是原图）----
     // 上限 10 张指**模型视图**张数（长图切块后可能超），超出部分不发送，
     // 如实告知模型；用户视角始终只有自己选的那几张图。
-    final originals = imagePaths ??
-        (imagePath != null ? [imagePath] : const <String>[]);
+    final originals =
+        imagePaths ?? (imagePath != null ? [imagePath] : const <String>[]);
     final vision = await _prepareVisionPaths(originals, useApi: useApi);
     final visionChanged = !_samePaths(vision, originals);
     final firstImage = vision.isNotEmpty ? vision.first : imagePath;
-    final visionImageCount = vision.isNotEmpty
-        ? vision.length
-        : (imagePath != null ? 1 : 0);
+    final visionImageCount =
+        vision.isNotEmpty ? vision.length : (imagePath != null ? 1 : 0);
     final droppedImages = visionImageCount > 10 ? visionImageCount - 10 : 0;
     // 多图本地降级：本地引擎视觉仅支持单张（native 单图），如实告知模型。
     if (droppedImages > 0) {
@@ -1451,7 +1477,8 @@ class ChatNotifier extends StateNotifier<bool> {
       } else if (_currentKvPromptTierKey != promptTierKey) {
         // 同会话切换提示词档位（设置里改「提示词档位」或换了判定结果）：
         // 系统提示前缀整个变了，KV 续跑 = 旧提示词接着生成，必答非所问。
-        debugPrint('[ChatNotifier] prompt tier switch ($_currentKvPromptTierKey '
+        debugPrint(
+            '[ChatNotifier] prompt tier switch ($_currentKvPromptTierKey '
             '-> $promptTierKey): resetContext()');
         await _inference.resetContext();
         kvReset = true;
@@ -1469,7 +1496,6 @@ class ChatNotifier extends StateNotifier<bool> {
       _currentKvPromptTierKey = promptTierKey;
     }
 
-
     // Skills：内置（rank 100）+ 用户目录 ApplicationSupport/skills（rank 200）。
     // 提前构建（与 load_skill 工具注册、agent 注入共用同一实例）。
     final userSkills = await loadUserSkills();
@@ -1485,15 +1511,13 @@ class ChatNotifier extends StateNotifier<bool> {
             _skillDirectoryCache[conversationId];
       } else {
         if (_skillDirectoryCache.length >= 32) {
-          _skillDirectoryCache
-              .remove(_skillDirectoryCache.keys.first);
+          _skillDirectoryCache.remove(_skillDirectoryCache.keys.first);
         }
         _skillDirectoryCache[conversationId] =
             skillProvider.availableSkillsText(
                 loadSkillAvailable: true, saveSkillAvailable: true);
       }
     }
-
 
     final registry = _buildAgentRegistry(settings, agentModelKey,
         conversationId: conversationId);
@@ -1624,8 +1648,7 @@ class ChatNotifier extends StateNotifier<bool> {
             .where((t) => t.name == name)
             .toList();
         if (matches.isEmpty) {
-          return ToolResult.error(
-              '未知工具：$name（run_code 只能调用本回合已注册的其他工具）');
+          return ToolResult.error('未知工具：$name（run_code 只能调用本回合已注册的其他工具）');
         }
         try {
           return await matches.first.execute(args);
@@ -1640,9 +1663,8 @@ class ChatNotifier extends StateNotifier<bool> {
     final capsBase = _engineCapabilitiesFor(agentModelKey, activeApi);
     // 精简档：一步只发一个工具调用（tiny 同时吐两个调用块基本必解析失败），
     // 并把工具清单渲染切成"一行一名 + 描述首句"。
-    final caps = compactPrompt
-        ? capsBase.copyWith(maxParallelToolCalls: 1)
-        : capsBase;
+    final caps =
+        compactPrompt ? capsBase.copyWith(maxParallelToolCalls: 1) : capsBase;
     final protocol = selectProtocol(
         [NativeToolProtocol(), PromptJsonProtocol(compact: compactPrompt)],
         caps);
@@ -1678,8 +1700,8 @@ class ChatNotifier extends StateNotifier<bool> {
       try {
         // devWorkspaceId 是历史上的"只写不读"存放位，这里当恢复种子传进去，
         // 老用户配过的激活工作区不会因换了落盘位置而丢（DevStore 值优先）。
-        await DevSessionController.instance.init(
-            preferredActiveId: settings.devWorkspaceId);
+        await DevSessionController.instance
+            .init(preferredActiveId: settings.devWorkspaceId);
         final devContext = await buildDevContext(
           workspaceId: DevSessionController.instance.activeWorkspaceId,
           taskId: DevSessionController.instance.activeTaskId,
@@ -1839,16 +1861,16 @@ class ChatNotifier extends StateNotifier<bool> {
     // 的思考事件补写成 💭 行：内容去重、时间戳取事件真实时刻——恰好落回
     // 被杀回合的区间，排序自然正确。
     try {
-      final lastEndIdx = sessionLog.rawEvents
-          .lastIndexWhere((e) => e.type == kEventTurnEnd);
+      final lastEndIdx =
+          sessionLog.rawEvents.lastIndexWhere((e) => e.type == kEventTurnEnd);
       final stranded = sessionLog.rawEvents
           .skip(lastEndIdx + 1)
           .where((e) => e.type == kEventAgentThinking)
           .toList();
       if (stranded.isNotEmpty) {
         final have = <String>{
-          for (final m in await _storage.getMessages(conversationId,
-              limit: 200))
+          for (final m
+              in await _storage.getMessages(conversationId, limit: 200))
             if (m.kind == MessageKind.thinking) m.content,
         };
         for (final e in stranded) {
@@ -1955,8 +1977,7 @@ class ChatNotifier extends StateNotifier<bool> {
       agentsMdText = agentsMd.content;
       // P2-D2：远端工作区叠加远端 AGENTS.md（SFTP 读取；失败静默降级）。
       final remoteMd = await readRemoteAgentsMd(
-          DevSessionController.instance.activeWorkspaceId,
-          settings.sshConfigs);
+          DevSessionController.instance.activeWorkspaceId, settings.sshConfigs);
       if (remoteMd != null && remoteMd.trim().isNotEmpty) {
         agentsMdText = agentsMdText.trim().isEmpty
             ? remoteMd
@@ -2066,8 +2087,7 @@ class ChatNotifier extends StateNotifier<bool> {
       // 环境快照（当前时间）：仅 API 档。P1-C 改为**尾部注入**形态——
       // provider 每 step 取一次，内容变化才以尾部 user 消息追加；系统提示
       // 逐字节稳定，API prompt cache 不再因时间快照每回合全段破缓存。
-      environmentNoteProvider:
-          useApi ? () => _formatEnvironmentNote() : null,
+      environmentNoteProvider: useApi ? () => _formatEnvironmentNote() : null,
       // 上下文压缩（确定性裁剪 + B2 LLM 摘要）：设置可关；关 = 超限直接
       // 走失败终止。摘要模型失败时插件内部回退确定性摘要。
       compaction: agentCompaction,
@@ -2100,8 +2120,7 @@ class ChatNotifier extends StateNotifier<bool> {
       ' | 技能=${compactPrompt ? "关" : skillProvider.count}'
       ' | AGENTS.md=${compactPrompt ? "关" : (mdLen == 0 ? "无" : "$mdLen 字")}',
     );
-    if (compactPrompt &&
-        systemPrompt.length > kAgentPromptCompactBudgetChars) {
+    if (compactPrompt && systemPrompt.length > kAgentPromptCompactBudgetChars) {
       logManager.appendInferenceLog(
         '⚠️ 精简档系统提示 ${systemPrompt.length} 字符，已超预算 '
         '${kAgentPromptCompactBudgetChars}——小模型会重新滑向答非所问，'
@@ -2144,8 +2163,7 @@ class ChatNotifier extends StateNotifier<bool> {
         ];
         if (compactions.isNotEmpty) {
           final last = compactions.last;
-          final summaryLen =
-              ((last.data['content'] as String?) ?? '').length;
+          final summaryLen = ((last.data['content'] as String?) ?? '').length;
           logManager.appendInferenceLog(
             '上下文压缩 | 本回合 ${compactions.length} 次 | '
             '来源=${last.data['provider'] ?? '?'} | 摘要 $summaryLen 字',
@@ -2154,8 +2172,7 @@ class ChatNotifier extends StateNotifier<bool> {
       } catch (_) {}
       // P0 遥测：回合指标从日志纯派生（循环零侵入），JSONL 落盘。
       try {
-        final metrics =
-            TurnMetrics.fromLog(sessionLog, agent.phaseState.turn);
+        final metrics = TurnMetrics.fromLog(sessionLog, agent.phaseState.turn);
         if (metrics != null) {
           _metricsStore ??= TurnMetricsStore(
               baseDir:
@@ -2403,7 +2420,8 @@ class ChatNotifier extends StateNotifier<bool> {
               }
             case UiTimelineStepText(:final index):
               final texts = uiState?.stepTexts ?? const <String>[];
-              if (index >= 0 && index < texts.length &&
+              if (index >= 0 &&
+                  index < texts.length &&
                   stepRowsByStep.containsKey(index + 1)) {
                 trace.add(TurnUiItem.step(stepRowsByStep[index + 1]!));
               }
@@ -2700,9 +2718,8 @@ class ChatNotifier extends StateNotifier<bool> {
       // 还原失败/部分未知 → 按普通 assistant 文本规则再判一次。
       return textNearDup('assistant/message', m.content, tsMs);
     }
-    final type = m.role == MessageRole.user
-        ? 'user/message'
-        : 'assistant/message';
+    final type =
+        m.role == MessageRole.user ? 'user/message' : 'assistant/message';
     return textNearDup(type, m.content, tsMs);
   }
 
@@ -2771,9 +2788,8 @@ class ChatNotifier extends StateNotifier<bool> {
     final isXmlFamily = ['spark', 'qwen', 'tongyi'].any(lower.contains);
     final isBailingV3 = lower.startsWith('ling');
     return EngineCapabilities(
-      toolTemplate: isXmlFamily
-          ? 'spark-xml'
-          : (isBailingV3 ? 'bailing-v3' : null),
+      toolTemplate:
+          isXmlFamily ? 'spark-xml' : (isBailingV3 ? 'bailing-v3' : null),
       maxParallelToolCalls: 2,
     );
   }
@@ -2871,9 +2887,7 @@ class ChatNotifier extends StateNotifier<bool> {
     if (used == null || ctx == null || ctx <= 0) return;
     // 本地 KV 单实例：当前快照只对刚测量完的会话有效，清掉其它会话的
     // 陈旧值（切会话后旧占用圈仍显示是误导）。
-    _ref
-        .read(contextUsageProvider.notifier)
-        .clearLocalExcept(conversationId);
+    _ref.read(contextUsageProvider.notifier).clearLocalExcept(conversationId);
     _ref.read(contextUsageProvider.notifier).update(
           conversationId,
           usedTokens: used.toInt(),
@@ -2924,17 +2938,16 @@ class ChatNotifier extends StateNotifier<bool> {
 
       final all = await _storage.getMessages(conversationId, limit: 200);
       if (all.isEmpty) return;
-      final log = _sessionStore
-          .importFromMessages(conversationId, _messagesForModelContext(all));
+      final log = _sessionStore.importFromMessages(
+          conversationId, _messagesForModelContext(all));
       final est = estimateContextTokens(log.deriveModelMessages());
       if (est <= 0) return;
 
       int? window;
       var source = '';
       if (apiRouted && apiCfg != null) {
-        final fetched = await _ref
-            .read(openAiServiceProvider)
-            .fetchContextWindow(apiCfg);
+        final fetched =
+            await _ref.read(openAiServiceProvider).fetchContextWindow(apiCfg);
         if (fetched != null && fetched > 0) {
           window = fetched;
           source = '实测';
@@ -3025,8 +3038,7 @@ class ChatNotifier extends StateNotifier<bool> {
       final boundary = folded.last.timestamp;
       final topics = [
         for (final m in folded)
-          if (m.role == MessageRole.user)
-            m.content.trim().split('\n').first
+          if (m.role == MessageRole.user) m.content.trim().split('\n').first
       ].take(5).map((t) => '「${t.length > 16 ? t.substring(0, 16) : t}」');
       summaryText = '【上下文已压缩】此前 ${folded.length} 条消息已移出模型'
           '上下文（聊天记录不受影响）。用户此前问过：${topics.join('、')}。'
@@ -3061,8 +3073,8 @@ class ChatNotifier extends StateNotifier<bool> {
       ' | 摘要 $summaryChars 字',
     );
     final updated = await _storage.getMessages(conversationId, limit: 200);
-    final log = _sessionStore
-        .importFromMessages(conversationId, _messagesForModelContext(updated));
+    final log = _sessionStore.importFromMessages(
+        conversationId, _messagesForModelContext(updated));
     final est = estimateContextTokens(log.deriveModelMessages());
     final prev =
         _ref.read(contextUsageProvider.notifier).usageFor(conversationId);
@@ -3140,8 +3152,8 @@ class ChatNotifier extends StateNotifier<bool> {
   }
 
   /// C1：MCP 工具注册（防跨 server 撞名）。
-  void _registerMcpTools(ToolRegistry registry, String serverName,
-      List<ToolDefinition> tools) {
+  void _registerMcpTools(
+      ToolRegistry registry, String serverName, List<ToolDefinition> tools) {
     final existing = registry.all.map((t) => t.name).toSet();
     for (final t in tools) {
       if (!existing.contains(t.name)) registry.register(t);
@@ -3168,8 +3180,9 @@ class ChatNotifier extends StateNotifier<bool> {
         // imagePaths 的 assistant 消息落库（固定前缀 id `imggen_`，
         // agent_workflow 认得它并渲染成回合过程区图片卡）；重进会话可
         // 回看（todo 卡 onTodosChanged 同款先例）。
-        imageGenConfigLoader:
-            settings.imageGenEnabled ? () async => settings.imageGenConfig() : null,
+        imageGenConfigLoader: settings.imageGenEnabled
+            ? () async => settings.imageGenConfig()
+            : null,
         onImageGenerated: conversationId == null
             ? null
             : (result, prompt, model) => unawaited(_storage.saveMessage(
@@ -3180,9 +3193,8 @@ class ChatNotifier extends StateNotifier<bool> {
                     role: MessageRole.assistant,
                     content: '🎨 生图（$model · ${result.size} · '
                         'seed ${result.seed}）：$prompt',
-                    imagePath: result.paths.isNotEmpty
-                        ? result.paths.first
-                        : null,
+                    imagePath:
+                        result.paths.isNotEmpty ? result.paths.first : null,
                     imagePaths: result.paths,
                   ),
                 )),
@@ -3336,8 +3348,7 @@ class ChatNotifier extends StateNotifier<bool> {
   /// 类型化判定（2026-10-25）：新消息写 kind；旧 DB 行读取层已按前缀推断
   /// 填充 kind，此处不再做字符串前缀兜底。
   static bool _isToolActivityMessage(ChatMessage msg) =>
-      msg.role == MessageRole.assistant &&
-      msg.kind != MessageKind.text;
+      msg.role == MessageRole.assistant && msg.kind != MessageKind.text;
 
   /// return promptly. The streaming controller then closes, the
   /// `await for` in [sendMessage] ends, and isGenerating flips back to false.
@@ -3364,7 +3375,8 @@ class ChatNotifier extends StateNotifier<bool> {
       // /图 直连生图回合：取消对象是生图请求本身（dio CancelToken），
       // 绝不能落到下面去停本地引擎/API——会误杀其他并行回合。
       if (turn.slashImage) {
-        debugPrint('[ChatNotifier] stopGeneration: cancel slash-image turn conv=$id');
+        debugPrint(
+            '[ChatNotifier] stopGeneration: cancel slash-image turn conv=$id');
         ImageGenService.instance.cancelActive();
         continue;
       }
@@ -3452,8 +3464,7 @@ class _AgentActivitySession {
         isStreaming: false,
         timestamp: DateTime.fromMillisecondsSinceEpoch(now),
         kind: MessageKind.toolActivity,
-        toolData: ToolActivityData(
-            phase: 'executing', name: activity.name),
+        toolData: ToolActivityData(phase: 'executing', name: activity.name),
       );
       writtenIds.add(msg.id);
       _executingQueue.add(msg.id);

@@ -29,6 +29,11 @@ android {
         applicationId = "com.dgxspark.tongyilite"
         minSdk = 33
         targetSdk = 34
+        // [MC 设备窗 2026-11-13 实验判例] targetSdk 27（untrusted_app_27 域）
+        // 实测 HTP deviceCreate 仍 0x36b1 ⇒ MIUI 对普通 App 两代域（34/27）均
+        // 关闭 Hexagon fastrpc（/dev/adsprpc-smd search 都拒、dontaudit 无行）
+        // ——App 内 NPU prefill 在本机的域墙定性见计划 §7.6，targetSdk 逃生门
+        // 已试并回滚。
         // 版本单一真源 = pubspec.yaml 的 version:（Flutter 构建期注入
         // flutter.versionName / flutter.versionCode）。此前是硬编 31/"0.3.8"，
         // 把 pubspec 的号整个盖掉——0.3.9+32 发出去两个包都自报 0.3.8/31。
