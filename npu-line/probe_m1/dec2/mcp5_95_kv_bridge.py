@@ -17,7 +17,11 @@ OUTF = sys.argv[2] if len(sys.argv) > 2 else "E:/MyLLM_exp/hyb/bridged.state"
 # the 77 protocol; decode causal mask cannot exclude pads, so we drop them)
 NREAL = int(sys.argv[3]) if len(sys.argv) > 3 else 172
 NC, HD, NKV, NL, P0 = 512, 128, 2, 42, 88
-MAGIC, VER, F16 = 0x67677371, 3, 1
+MAGIC, F16 = 0x67677371, 1
+# VER: upstream 5c200e0 = 3; lc fork (c1a2cb0, GPU/OpenCL, = App lineage) = 4.
+# Container layout byte-identical between them (state_write/read diffed clean);
+# only the header version field differs. Phase C targets the fork -> VER=4.
+VER = int(os.environ.get("BRIDGE_VER", "3"))
 ROW = 512
 
 ids = np.fromfile(IDS, dtype="<i4")[:NREAL]
@@ -48,7 +52,12 @@ with open(OUTF, "wb") as f:
     w("<I", 1); w("<I", NC_)
     for i in range(NC_):
         w("<iII", P0 + i, 1, 0)
-    w("<II", 0, NL)
+    if VER >= 4:
+        # fork (lc c1a2cb0) v4 adds n_rot_k/n_rot_v after n_layer (llama-kv-cache.cpp:2703);
+        # F16 (non-quantized) K/V cache => attn_rot off => both 0 (loader msg confirms)
+        w("<IIII", 0, NL, 0, 0)
+    else:
+        w("<II", 0, NL)
     for il in range(NL):
         w("<iQ", F16, ROW); f.write(kc[il][:NC_].tobytes())
     for il in range(NL):
