@@ -454,9 +454,10 @@ class InferenceService {
     String messagesJson = '[]',
     int nRealCap = 512,
     int timeoutMs = 120000,
+    bool feedsOnly = false,
   }) async {
     debugPrint(
-        '[InferenceService] startHybridPrefill kvDir=$kvDir ids=$idsPath chain=$chainDir manifests=${manifests?.join(",")} nChunks=$nChunks cap=$nRealCap msgs=${messagesJson.length}');
+        '[InferenceService] startHybridPrefill kvDir=$kvDir ids=$idsPath chain=$chainDir manifests=${manifests?.join(",")} nChunks=$nChunks cap=$nRealCap msgs=${messagesJson.length} feedsOnly=$feedsOnly');
     try {
       final r = await _channel.invokeMethod('startHybridPrefill', {
         'kvDir': kvDir,
@@ -470,6 +471,7 @@ class InferenceService {
         'messagesJson': messagesJson,
         'nRealCap': nRealCap,
         'timeoutMs': timeoutMs,
+        'feedsOnly': feedsOnly,
       });
       return _asOutcomeMap(r);
     } catch (e) {

@@ -29,6 +29,12 @@ class LocalEngineAdapter extends BaseEngineAdapter {
   /// OFF 时 [generate] 的混合分支短路——现路径逐字节不变（零回归红线）。
   final bool _hybridPrefillEnabled;
 
+  /// [npu-line M3-shell] 混合 prefill 走 shell 域（App 内置 adb 通道自连本机
+  /// adbd 派发 chain_run5；§7.6bis App 域 QNN 判死的绕行）。仅在
+  /// [_hybridPrefillEnabled]=ON 时有意义；ON 时 [_attemptHybridDecode] 调
+  /// [HybridBridge.runTurnShell]，密钥缺失/任何失败仍回退纯 GPU（零回归）。
+  final bool _hybridViaShell;
+
   /// 思考失控守卫阈值（设置可调；默认 [kMaxThinkingChars]）。
   final int _maxThinkingChars;
 
@@ -52,10 +58,12 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     bool thinkingEnabled = false,
     this.stallTimeout = const Duration(seconds: 120),
     bool hybridPrefillEnabled = false,
+    bool hybridViaShell = false,
   })  : _inference = inference,
         _maxThinkingChars = maxThinkingChars,
         _thinkingEnabled = thinkingEnabled,
         _hybridPrefillEnabled = hybridPrefillEnabled,
+        _hybridViaShell = hybridViaShell,
         super(protocol: protocol, capabilities: capabilities);
 
   /// 取消：中止「归属本次取消」的 Dart 侧流（基类令牌条件），存在归属
@@ -318,13 +326,29 @@ class LocalEngineAdapter extends BaseEngineAdapter {
     // AgentCancelledException（runTurn 只回 null）、processor 解析、
     // [npu-line M2 D3/D4] usage 取回包真值（native g_last_stats 只由 GPU 路径
     // 写，混合回合读它 = 上一 GPU 回合的陈旧计数）+ 采样诚实化。
-    final turn = await HybridBridge.runTurn(
-      _inference,
-      messagesJson: messagesJson,
-      maxTokens: options.maxTokens ?? 512,
-      temperature: options.temperature,
-      cancelled: () => cancel?.isCompleted ?? false,
-    );
+    // [npu-line M3-shell] shell 域路由（与普通聊天 chat_provider 同一开关源）：
+    // ON 且密钥就绪 → runTurnShell；密钥缺失 → 不硬试 App 域死路，null 回退 GPU。
+    final adbKey = _hybridViaShell ? await HybridBridge.loadDeveloperKey() : null;
+    if (_hybridViaShell && adbKey == null) {
+      debugPrint('[AgentLlm][Hybrid] shell 域密钥缺失（adbkey.pem）→ 回退纯 GPU');
+      return null;
+    }
+    final turn = _hybridViaShell
+        ? await HybridBridge.runTurnShell(
+            _inference,
+            messagesJson: messagesJson,
+            maxTokens: options.maxTokens ?? 512,
+            temperature: options.temperature,
+            key: adbKey!,
+            cancelled: () => cancel?.isCompleted ?? false,
+          )
+        : await HybridBridge.runTurn(
+            _inference,
+            messagesJson: messagesJson,
+            maxTokens: options.maxTokens ?? 512,
+            temperature: options.temperature,
+            cancelled: () => cancel?.isCompleted ?? false,
+          );
     if (turn == null) {
       if (cancel?.isCompleted ?? false) throw const AgentCancelledException();
       return null;

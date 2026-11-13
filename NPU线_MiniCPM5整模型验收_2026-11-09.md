@@ -261,3 +261,41 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 结论：**双档定案**——real ≤120 走 NC128 单 chunk 档（exec 5.3×、混合 TTFT hot 1.66s = A6 的 1/3），>120 仍 static-512 档；
 rev3b 批判与 MC 50/50 档同权通过，指标已回填计划 §6.4bis。复跑入口：`mcp5_98_run_nc128.py`（push/sanity/batch 三面）
 + `mcp5_98_gen_nc128_manifests.py`（WSL，读 serve_dec ctx 出 manifest）。
+
+**⑬ M3-shell：App 内嵌 adb 混合冒烟 M3SHELL_SMOKE_PASS（2026-11-13，mcp5_99 系列）**：
+App 面首次全冒烟（NPU prefill + GPU decode，App 自带 adb 通道在 shell 域跑三段链）——
+「App 在真机上 NPU prefill + GPU decode 实现正确推理」的验收轮。
+
+- **架构（域墙绕行，§7.6bis 判死 App 域 NPU exec/dlopen）**：`nativeStartHybridPrefill` 加 `feedsOnly` 档——
+  App 域只 tokenize + 落 ids.raw 与 d2q feeds（12 文件）到本地 chainDir 即返回（不碰 manifest/QNN/chain）；
+  Dart `runTurnShell`（`hybridViaShell` 开关，**默认 OFF**）经 App 自带 adb 客户端（127.0.0.1:5555 shell 域）
+  push feeds（md5 闭环）→ seed kc0/vc0 → 三段链 spawn（nohup + rm log + `CR5 segs=` 头行 + h 计数 14/28/42
+  硬闸，坑 61/63）→ pull 84 KV → 进程内 bridge + GPU decode。同二进制 libchain_run5_exec.so（sha e5b50bb2）。
+- **两定罪修复（hyb_jni.cpp，坑 64/65）**：
+  ① **state_load 拒载 → classic ctx**：引擎主 ctx kv_unified=true（unified KV）`state_read` 在 kv 段后还要读
+  mem_recr 尾块，冻结桥容器（工具判卷 50/50 同源）只到 kv → App unified 拒载、工具 runner 双库组 STATE_LOADED。
+  修复 = 混合回合临时建 classic ctx（kv_unified=false，n_ctx=pos_base+n_real+maxTokens+64，n_batch=n_real，
+  共享 model 权重零重载）；引擎 unified 主 ctx 不碰 = 普通聊天现路径逐字节不变（零回归红线）。
+  ② **first_tok 重算 batch 形态**：显式 pos/seq/logits 数组 batch 在临时 classic ctx 上 9ms 入口级拒绝（无内部日志）
+  → `llama_memory_seq_rm` 掉尾 cell 后 token-only 零初始化 batch（自动 pos 派生 seq_pos_max+1 恰落 p_last）
+  = 工具侧 STATE_LOADED+贪心全绿的唯一形态。
+- **冒烟结果（p3，tool 162 tok / App 174 tok，2-real-chunk 512 档）**：
+
+| 判据 | 值 |
+|---|---|
+| Phase A 工具链 3seg wall | 3.48 / 3.67 / 3.78s（512 档 4-chunk = 2 real + 2 pad） |
+| HYB×2 确定性 | n_gen=205 len=1014 **逐字一致** |
+| TTFT（含 ~40s 冷载模） | 49.68 / 48.47s |
+| decode tps | ~9.1（bridge+decode 22.4s / 205 tok；工具 parity ~10.3 同档） |
+| rev3b 三臂判卷（**App ids**） | cosh0=0.9869 / prefix_cos_min=0.9863 / lcp_h=7（非决定性）/ dec_h=null ⇒ **PASS** |
+
+- **取证链（m3s 原 prompt App 195 tok FAIL → 定罪 → p3 PASS）**：m3s 唯一失败 = step-0 决定性翻转
+  （GOLD margin 1.422，NPU ~1 logit decode 误差），**非系统性**：p1(133)/p3(162) 工具 ids 判卷均 PASS、
+  p3 App ids 重门 PASS；knew/vnew 排除（桥不碰）；App feeds 字节验证（am/zero seed EXACT、cos/sin 0.000488
+  fp16 舍入、emb ~0.005 GGUF-vs-HF 噪声）；App chain ≈ tool chain（同 ids 84 文件 kc maxabsdiff 0.24–0.30）；
+  NPU 链 KV vs GPU prefill KV 全局 0.72–0.999 但 cosh0=0.9766 落 MC 批 [0.9625, 0.9975] 范围；MC 50/50 批
+  仅用 1-real-chunk prompts（36–81 tok），m3s 是首个 2-real-chunk 判卷轮——2-chunk 档非系统性坏，m3s 边界
+  不幸（坑 66）。
+- **红线执行**：Dozing 进/出（仅 UI 驱动瞬态唤醒，stayon 禁）；冒烟结束开关恢复 OFF、设备 Dozing 退出；
+  临时物只落 E:/MyLLM_exp。复跑入口：`mcp5_99_run_m3shell_smoke.py`（Phase A 工具参照 / Phase B App arms /
+  Phase C 轻+重双门）+ `mcp5_99b_judge_only.py`（重门单独重跑）。

@@ -425,7 +425,8 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeStartHybridPrefill(
     JNIEnv *env, jobject /*thiz*/,
     jstring kvDir, jstring idsPath, jstring chainDir, jstring chainBin,
     jstring qnnLibDir, jstring manifestsCsv, jint nChunks,
-    jstring prompt, jstring messagesJson, jint nRealCap, jint timeoutMs)
+    jstring prompt, jstring messagesJson, jint nRealCap, jint timeoutMs,
+    jboolean feedsOnly)
 {
     std::lock_guard<std::mutex> lk(g_hyb_mu);
 
@@ -549,8 +550,10 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeStartHybridPrefill(
         fclose(cf);
     }
 
-    /* ---- chain dir sanity (assets extraction + staged feeds) ---- */
-    if (!file_exists(chainBinPath)) {
+    /* ---- chain dir sanity (assets extraction + staged feeds) ----
+     * [m3shell] feedsOnly（App 自带 adb 通道派 shell 域跑链）时本进程不碰
+     * chain/QNN —— App 域 exec/dlopen 判死（§7.6bis 域墙），这些检查无意义。 */
+    if (!feedsOnly && !file_exists(chainBinPath)) {
         return hyb_json(env, false, HYB_ERR_IO, "prefill_bin",
                         "chain_run5 binary missing (expect "
                         "nativeLibraryDir/libchain_run5_exec.so from jniLibs "
@@ -558,7 +561,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeStartHybridPrefill(
     }
     char htp[4096];
     snprintf(htp, sizeof(htp), "%s/libQnnHtp.so", qlp);
-    if (!file_exists(htp)) {
+    if (!feedsOnly && !file_exists(htp)) {
         return hyb_json(env, false, HYB_ERR_IO, "prefill_qnn_lib",
                         "QNN libQnnHtp.so missing under qnnLibDir — "
                         "jniLibs install/extract failed?", NULL);
@@ -643,6 +646,21 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeStartHybridPrefill(
                  "hid=%d hd=%d theta=%.1f pos_base=%d)",
                  chunks, s, hid, hd, theta, HYB_FEEDS_P0_DEFAULT);
         }
+    }
+
+    /* [m3shell] feedsOnly：ids.raw + d2q feeds 已落本地 chainDir，到此为止
+     * （manifest/seed/三段 spawn/收集全由 Dart 经 App 自带 adb 通道在
+     * shell 域完成——App 域 NPU 判死 §7.6bis，shell 域同二进制全绿）。 */
+    if (feedsOnly) {
+        char extras[512];
+        snprintf(extras, sizeof(extras),
+                 ",\"n_real\":%d,\"ids_path\":\"%s\",\"feeds_dir\":\"%s\","
+                 "\"first_tok\":-1,\"pos_base\":%d,\"n_chunks\":%d",
+                 n_real, ids, cdir, HYB_P0_DEFAULT, nChunks);
+        LOGI("hyb prefill(feedsOnly): n_real=%d dir=%s", n_real, cdir);
+        return hyb_json(env, true, HYB_OK, "feeds_done",
+                        "ids+feeds staged locally for shell-domain chain",
+                        extras);
     }
 
     /* ---- manifests ---- */
@@ -853,17 +871,36 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeBridgeAndResumeDecode(
                         NULL);
     }
 
-    llama_model   *m   = (llama_model *)h->model;
-    llama_context *ctx = (llama_context *)h->context;
+    llama_model *m = (llama_model *)h->model;
     const llama_vocab *vocab = m ? llama_model_get_vocab(m) : nullptr;
-    if (!m || !ctx || !vocab) {
+    if (!m || !h->context || !vocab) {
         h->end_hybrid();
         return hyb_json(env, false, HYB_ERR_INTERNAL, "engine_handles",
                         "engine handles null after claim", NULL);
     }
 
+    /* [m3shell 定罪修复 2026-11-13] 引擎主 ctx 是 kv_unified=true（unified KV，
+     * 2026-10-16 大批次正确性定案的产物）→ state 载入走 llama_memory_hybrid::
+     * state_read：kv 段之后还要读 mem_recr 尾块；而桥容器是冻结契约（工具判卷
+     * 50/50 同源），只到 kv。取证链：同一容器（md5 与主机 Python 重桥逐字节
+     * 一致）在工具 runner 上双库组都 STATE_LOADED，App unified 拒载——差量唯一
+     * 在 unified。修复 = 混合回合临时建 classic ctx（llama_context_default_
+     * params 的 kv_unified=false，与工具 mcp5_95_hyb_load 同参形：n_ctx =
+     * pos_base+n_real+maxTokens+64、n_batch=n_real），共享 model 权重零重载；
+     * 引擎 unified 主 ctx 不碰 = 普通聊天现路径逐字节不变（零回归红线）。 */
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = (uint32_t)(posBase + (long long)nReal + maxTokens + 64);
+    cp.n_batch = (uint32_t)nReal;
+    llama_context *ctx = llama_init_from_model(m, cp);
+    if (!ctx) {
+        h->end_hybrid();
+        return hyb_json(env, false, HYB_ERR_INTERNAL, "decode_ctx_init",
+                        "classic decode ctx alloc failed (OOM?)", NULL);
+    }
+
     const int n_ctx = (int)llama_n_ctx(ctx);
     if (posBase + (long long)nReal + maxTokens + 2 > (long long)n_ctx) {
+        llama_free(ctx);
         h->end_hybrid();
         char msg[192];
         snprintf(msg, sizeof(msg),
@@ -882,6 +919,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeBridgeAndResumeDecode(
     const double load_ms = (ts1.tv_sec - ts0.tv_sec) * 1e3 +
                            (ts1.tv_nsec - ts0.tv_nsec) / 1e6;
     if (r == 0) {
+        llama_free(ctx);
         h->end_hybrid();
         return hyb_json(env, false, HYB_ERR_IO, "state_load",
                         "llama_state_seq_load_file rejected the container "
@@ -893,30 +931,51 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeBridgeAndResumeDecode(
     int next_tok = (int)firstTok;
     if (next_tok < 0) {
         /* plan §1.3 fallback "GPU 侧重算一步": re-decode the LAST prompt
-         * token at its own pos (explicit batch) and argmax. The cell gets
-         * the GPU row (overwrites the NPU row for that one token — self-
-         * consistent); pos accounting is untouched (same cell). */
+         * token at its own pos and argmax. The cell gets the GPU row
+         * (overwrites the NPU row for that one token — self-consistent).
+         * [m3shell 2026-11-13] batch 形态对齐工具 runner 已证路径：显式
+         * pos/seq/logits 数组在临时 classic ctx 上 decode 即败（无内部日志，
+         * 9ms 入口级拒绝），token-only 零初始化 batch 是工具 STATE_LOADED+贪心
+         * 全绿的唯一形态——先 seq_rm 掉尾 cell，token-only 的自动 pos 派生
+         * (seq_pos_max+1) 恰好落回 p_last（尾 cell 删除后 max=p_last-1）。 */
         const int last = idsBuf[(size_t)nReal - 1];
-        llama_pos p1 = (llama_pos)(posBase + nReal - 1);
-        llama_seq_id s0 = 0;
-        llama_seq_id *seqp = &s0; /* batch.seq_id is seq_id** (per-token array) */
-        int32_t nseq1 = 1;
-        int8_t logit1 = 1;
+        const llama_pos p_last = (llama_pos)(posBase + nReal - 1);
+        llama_memory_seq_rm(llama_get_memory(ctx), 0, p_last, p_last + 1);
         llama_token t1 = (llama_token)last;
         llama_batch b = {};
         b.n_tokens = 1;
         b.token = &t1;
-        b.pos = &p1;
-        b.n_seq_id = &nseq1;
-        b.seq_id = &seqp;
-        b.logits = &logit1;
-        if (llama_decode(ctx, b) != 0) {
+        /* [m3shell 审讯灯] decode 入口级失败无 logcat（tag "llama" 通道在
+         * 本进程被 App log bridge 占用且冒烟过滤吞过），本窗口临时捕获
+         * llama 内部日志拼进 error message，让真凶开口。 */
+        static std::mutex g_cap_mtx;
+        static std::string g_cap;
+        llama_log_set(
+            [](ggml_log_level, const char *text, void *) {
+                if (!text) return;
+                std::lock_guard<std::mutex> lk(g_cap_mtx);
+                if (g_cap.size() < 2048) g_cap += text;
+            },
+            nullptr);
+        const int drc = llama_decode(ctx, b);
+        llama_log_set(nullptr, nullptr);
+        std::string cap;
+        {
+            std::lock_guard<std::mutex> lk(g_cap_mtx);
+            cap = g_cap;
+            g_cap.clear();
+        }
+        LOGI("hyb decode: recompute rc=%d llama_log=[%s]", drc, cap.c_str());
+        if (drc != 0) {
+            llama_free(ctx);
             h->end_hybrid();
+            std::string msg = "recompute-step decode failed: " + cap;
             return hyb_json(env, false, HYB_ERR_INTERNAL, "first_tok_recompute",
-                            "recompute-step decode failed", NULL);
+                            msg.c_str(), NULL);
         }
         const float *lg = llama_get_logits_ith(ctx, 0);
         if (!lg) {
+            llama_free(ctx);
             h->end_hybrid();
             return hyb_json(env, false, HYB_ERR_INTERNAL, "first_tok_recompute",
                             "no logits after recompute-step", NULL);
@@ -971,6 +1030,7 @@ Java_com_dgxspark_tongyilite_InferenceEngine_nativeBridgeAndResumeDecode(
         for (int j = 1; j < nv; j++) if (lg[j] > lg[best]) best = j;
         t = (llama_token)best;
     }
+    llama_free(ctx);
     h->end_hybrid();
 
     if (decode_fail) {

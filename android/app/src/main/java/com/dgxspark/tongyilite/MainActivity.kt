@@ -1220,6 +1220,7 @@ class MainActivity : FlutterActivity() {
         val messagesJson = call.argument<String>("messagesJson") ?: "[]"
         val nRealCap = call.argument<Int>("nRealCap") ?: 512
         val timeoutMs = call.argument<Int>("timeoutMs") ?: 120000
+        val feedsOnly = call.argument<Boolean>("feedsOnly") ?: false
         logI("handleStartHybridPrefill", "kvDir=$kvDir, ids=$idsPath, chain=$chainDir, manifests=$manifests, nChunks=$nChunks, cap=$nRealCap, msgs=${messagesJson.length}")
         try {
             // 入引擎单线程队列执行，工作线程 .get() 等待后主线程回 JSON
@@ -1238,7 +1239,8 @@ class MainActivity : FlutterActivity() {
                             prompt = prompt,
                             messagesJson = messagesJson,
                             nRealCap = nRealCap,
-                            timeoutMs = timeoutMs
+                            timeoutMs = timeoutMs,
+                            feedsOnly = feedsOnly
                         )
                     }.get()
                     mainHandler.post { result.success(json) }

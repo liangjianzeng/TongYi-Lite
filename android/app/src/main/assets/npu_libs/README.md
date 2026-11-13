@@ -9,7 +9,7 @@ dlopen("./lib/libQnnHtp.so") 相对 cwd 解析到真身）。字节与设备
 
 | 资产 | 位置 | 字节 | sha256 | 来源 |
 |---|---|---|---|---|
-| libchain_run5_exec.so | jniLibs/arm64-v8a | 69168 | a74eedd7d4824a8d68ad0646e3f4788dc8e54866eb08a540e1815771bcbe06f3 | WSL NDK r27c 编 npu-line/probe_m1/dec2/chain_run5.cpp（QAIRT 2.44.0.260225 QNN 头，-ldl）|
+| libchain_run5_exec.so | jniLibs/arm64-v8a | 69168 | e5b50bb2a8d951944ca9eaaeca665ab645554f75dcdfa3427feaf06f29837b20 | WSL NDK r27c 编 npu-line/probe_m1/dec2/chain_run5.cpp（QAIRT 2.44.0.260225 QNN 头，-ldl）|
 | manifest_pre2_A | assets/npu_libs | 5896 | b904f378d4c2490da5e8492771bf71b8807627fca9597d9a7b0d5e1528a3606c | 设备只读 pull（dec2p 三段闸门 manifest，42 层 = A l0-13/B l14-27/C l28-41）|
 | manifest_pre2_B | assets/npu_libs | 5978 | 250227156337f23c1950ef0f92f8891c2208b8d3ae5f7b6c87639df531c0d806 | 设备只读 pull（dec2p 三段闸门 manifest，42 层 = A l0-13/B l14-27/C l28-41）|
 | manifest_pre2_C | assets/npu_libs | 5978 | 5dec8c95d26d819cc3c1c2df30697f28afe9a069f0b7984472d188264c49b571 | 设备只读 pull（dec2p 三段闸门 manifest，42 层 = A l0-13/B l14-27/C l28-41）|

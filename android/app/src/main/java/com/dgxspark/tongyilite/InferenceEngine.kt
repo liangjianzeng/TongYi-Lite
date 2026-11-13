@@ -140,7 +140,8 @@ class InferenceEngine(private val context: Context) {
         prompt: String?,
         messagesJson: String,
         nRealCap: Int,
-        timeoutMs: Int
+        timeoutMs: Int,
+        feedsOnly: Boolean
     ): String
 
     private external fun nativeBridgeAndResumeDecode(
@@ -314,7 +315,8 @@ class InferenceEngine(private val context: Context) {
         prompt: String? = null,
         messagesJson: String = "[]",
         nRealCap: Int = 512,
-        timeoutMs: Int = 120000
+        timeoutMs: Int = 120000,
+        feedsOnly: Boolean = false
     ): String {
         checkNotDestroyed()
         val cd = chainDir ?: NpuAssets.chainDir(context).absolutePath
@@ -325,7 +327,7 @@ class InferenceEngine(private val context: Context) {
             chainBin ?: "$nlib/libchain_run5_exec.so",
             qnnLibDir ?: nlib,
             manifestsCsv ?: "", nChunks, prompt, messagesJson,
-            nRealCap, timeoutMs
+            nRealCap, timeoutMs, feedsOnly
         )
     }
 

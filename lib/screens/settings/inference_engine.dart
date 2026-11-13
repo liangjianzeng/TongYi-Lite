@@ -578,6 +578,49 @@ class InferenceEngineSettingsBody extends ConsumerWidget {
                     '自动回退纯 GPU 现路径，仅支持纯文本（带图/音不走）。',
                     style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                   ),
+                  // [npu-line M3-shell] shell 域 prefill 子开关（仅混合 ON 时
+                  // 露出；§7.6bis：App 域 QNN 判死 → App 自带 adb 通道自连
+                  // 本机 adbd 派发链，失败仍回退纯 GPU）。
+                  if (gpuSettings.hybridPrefillEnabled) ...[
+                    const SizedBox(height: 10),
+                    SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment(
+                          value: false,
+                          label: Text('App 域（已判死·会回退）'),
+                          icon: Icon(Icons.shield_outlined, size: 16),
+                        ),
+                        ButtonSegment(
+                          value: true,
+                          label: Text('shell 域（adb·推荐）'),
+                          icon: Icon(Icons.terminal_outlined, size: 16),
+                        ),
+                      ],
+                      selected: {gpuSettings.hybridViaShell},
+                      onSelectionChanged: (sel) {
+                        final v = sel.first;
+                        if (v != gpuSettings.hybridViaShell) {
+                          gpuNotifier.setHybridViaShell(v);
+                        }
+                      },
+                      showSelectedIcon: false,
+                      style: ButtonStyle(
+                        visualDensity: VisualDensity.compact,
+                        textStyle: WidgetStatePropertyAll(
+                          TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'shell 域 = prefill 链经 App 内置 adb 客户端连本机 '
+                      'adbd(127.0.0.1:5555) 在 shell 域执行（App 进程域 Hexagon '
+                      '被系统策略封死，判例 §7.6bis）。需设备已开网络调试且 App '
+                      '外置目录放 adbkey.pem（与授权 adbd 的私钥同格式）；'
+                      '任何一步失败自动回退纯 GPU。',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                    ),
+                  ],
                 ],
               ),
             ),

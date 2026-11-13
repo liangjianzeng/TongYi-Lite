@@ -27,8 +27,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:path_provider/path_provider.dart';
 
 import '../../services/inference_service.dart';
+import '../adb/adb_client.dart';
+import '../adb/adb_connection.dart' show AdbTransportException;
+import '../adb/adb_rsa.dart';
 
 /// 混合链单次回合的工作文件（native 读写）。
 class HybridWorkPaths {
@@ -343,6 +347,296 @@ class HybridBridge {
       try {
         await Directory(File(work.statePath).parent.path)
             .delete(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  // =========================================================================
+  // [npu-line M3-shell] shell 域混合模式：App 进程域跑 QNN 判死（计划 §7.6bis
+  // 域墙：deviceCreate 0x36b1，MIUI 对 App uid 关 Hexagon fastrpc，targetSdk27
+  // 逃生门亦死），而 shell 域同二进制全绿（工具级判卷 50/50）。本模式把
+  // prefill 派发到 **App 自带 adb 通道**（AdbClient 自连本机 adbd TCP 5555）
+  // 的 shell 域执行：native 只做 tokenize+feeds（feedsOnly）→ adb push 12 件
+  // → 三段 chain_run5（工具级硬化协议：rm log + DONE 伴 CR5 segs= 头行 +
+  // 三击死亡）→ adb pull 84 片 KV → 回 App 进程走既有 native 桥转 + GPU
+  // decode。任何一步失败 → null → 调用方回退纯 GPU（零回归红线不变）。
+  // 信任模型 = 开发者/评测路径（与 PC 侧工具面同一授权域：需设备 adbd TCP
+  // 已开且 App 持已授权 RSA 私钥；§7.4 ① 的机内变体）。
+  // =========================================================================
+
+  static const List<String> _shellFeedFiles = [
+    'd2q_emb_0.raw',
+    'd2q_emb_1.raw',
+    'd2q_emb_2.raw',
+    'd2q_emb_3.raw',
+    'd2q_am_0.raw',
+    'd2q_am_1.raw',
+    'd2q_am_2.raw',
+    'd2q_am_3.raw',
+    'd2q_cos_table.raw',
+    'd2q_sin_table.raw',
+    'd2q_kc0.raw',
+    'd2q_vc0.raw',
+  ];
+
+  /// 开发者/评测密钥：App 专属外置目录 `adbkey.pem`（adb shell 可写 → 免 UI
+  /// 贴 key；与 ~/.android/adbkey 同格式，AdbRsaKeyPair.fromPem 直收）。
+  /// 生产分发（M3 议题）时改走 secure store + 设置页导入。
+  static Future<AdbRsaKeyPair?> loadDeveloperKey() async {
+    try {
+      final dir = await getExternalStorageDirectory();
+      if (dir == null) return null;
+      final f = File('${dir.path}/adbkey.pem');
+      if (!await f.exists()) return null;
+      return AdbRsaKeyPair.fromPem(await f.readAsString());
+    } catch (e) {
+      debugPrint('[HybridShell] loadDeveloperKey failed: $e');
+      return null;
+    }
+  }
+
+  static void _t(String stage, Stopwatch sw) {
+    debugPrint('[HybridShell][T] stage=$stage ms=${sw.elapsedMilliseconds}');
+    sw
+      ..reset()
+      ..start();
+  }
+
+  /// shell 域混合回合（与 [runTurn] 同契约：成功回 [HybridTurn]，任何一步
+  /// 不 ok 回 null 由调用方回退纯 GPU）。[key] 为已获目标 adbd 授权的私钥。
+  static Future<HybridTurn?> runTurnShell(
+    InferenceService inference, {
+    required String messagesJson,
+    required int maxTokens,
+    required double temperature,
+    required AdbRsaKeyPair key,
+    String host = '127.0.0.1',
+    int port = 5555,
+    String remoteDir = '/data/local/tmp/npu_m1',
+    List<String> manifests = defaultManifests,
+    int? nChunksOverride,
+    bool Function()? cancelled,
+  }) async {
+    final nCh = nChunksOverride ?? nChunks;
+    if (cancelled?.call() ?? false) return null;
+    final work = await prepareWorkDir();
+    if (work == null) return null;
+    final baseDir = File(work.statePath).parent.path;
+    final feedsDir = Directory('$baseDir/feeds')..createSync(recursive: true);
+    final sw = Stopwatch()..start();
+    try {
+      // ① native tokenize + ids.raw + d2q feeds（feedsOnly：App 域零 QNN 触碰）
+      final pre = HybridOutcome.from(await inference
+          .startHybridPrefill(
+            kvDir: feedsDir.path,
+            idsPath: work.idsPath,
+            chainDir: feedsDir.path,
+            messagesJson: messagesJson,
+            nRealCap: nc,
+            timeoutMs: 60000,
+            feedsOnly: true,
+          )
+          .timeout(const Duration(seconds: 90)));
+      if (!pre.ok) {
+        debugPrint('[HybridShell] feeds 准备失败: $pre');
+        return null;
+      }
+      final nReal = pre.nReal;
+      if (nReal == null || nReal < 1 || nReal > nc) {
+        debugPrint('[HybridShell] n_real 非法: $nReal');
+        return null;
+      }
+      _t('feeds', sw);
+
+      // ②〜⑥ shell 域段。[m3shell 2026-11-13 判例] adbd「流已关闭」抖动
+      // 两次（push/seed 段）→ 整段封装为可重跑闭包：hygiene rm 幂等、链
+      // 从头重 spawn、pull 覆盖写，断线只许重连重跑一击再回退。
+      Future<bool> shellDomainRun() async {
+        final adb = await AdbClient.connect(host: host, port: port, key: key)
+            .timeout(const Duration(seconds: 10));
+        try {
+          _t('adb_connect', sw);
+
+          // ③ 预检 shell 域资产（fail-closed：缺件直接回退，绝不动设备状态）
+          final chk = await adb.shell(
+              'test -f $remoteDir/chain_run5 && test -f $remoteDir/${manifests.first} '
+              '&& ls $remoteDir/dec2p_l0_ctx.bin >/dev/null 2>&1 && test -d $remoteDir/lib '
+              '&& echo STAGED_OK || echo STAGED_MISS');
+          if (!chk.stdout.contains('STAGED_OK')) {
+            debugPrint('[HybridShell] shell 域资产未入位: ${chk.stdout.trim()}');
+            return false;
+          }
+
+          // ④ 卫生 + push 12 件 feeds（shell uid，回合产物目录复用工具级 npu_m1）
+          await adb.shell(
+              'rm -f $remoteDir/d2q_kc_*.raw $remoteDir/d2q_vc_*.raw '
+              '$remoteDir/d2q_knew_* $remoteDir/d2q_vnew_* $remoteDir/d2q_h_l*_* '
+              '$remoteDir/p0.log $remoteDir/p1.log $remoteDir/p2.log; '
+              'rm -rf $remoteDir/gate');
+          for (final f in _shellFeedFiles) {
+            final lf = File('${feedsDir.path}/$f');
+            if (!await lf.exists()) {
+              debugPrint('[HybridShell] 本地 feeds 缺件 $f');
+              return false;
+            }
+            await adb.push(await lf.readAsBytes(), '$remoteDir/$f');
+          }
+          // ids.raw 也上机：链不读它（只认 d2q_*），但 App 侧回合后的 rev3b
+          // 判卷/ids 审计需要（App 沙箱内临时目录随回合销毁，设备副本是凭证）。
+          await adb.push(
+              await File(work.idsPath).readAsBytes(), '$remoteDir/ids.raw');
+          await adb.shell(
+              'cd $remoteDir && for i in \$(seq 0 ${nLayers - 1}); do '
+              'cp d2q_kc0.raw d2q_kc_\$i.raw; cp d2q_vc0.raw d2q_vc_\$i.raw; done');
+          _t('push+seed', sw);
+
+          // ⑤ 三段链（工具级硬化：spawn 前 rm log；DONE 须伴新 run 头行；
+          //    3 击死亡；</dev/null + 父壳 sleep 1 护脱身）+ h 计数硬闸
+          final nSeg = manifests.length;
+          for (var k = 0; k < nSeg; k++) {
+            final log = '$remoteDir/p$k.log';
+            var started = false;
+            for (var attempt = 0; attempt < 3 && !started; attempt++) {
+              await adb.shell('rm -f $log');
+              await adb.shell(
+                  'cd $remoteDir && export LD_LIBRARY_PATH=$remoteDir/lib '
+                  'ADSP_LIBRARY_PATH=$remoteDir/lib && CHAIN_KEEP=1 CR5_ROLL_SAVE=1 '
+                  'nohup ./chain_run5 ${manifests[k]} $nCh > p$k.log 2>&1 </dev/null '
+                  '& sleep 1; touch $log; echo SPAWNED_$k');
+              for (var t = 0; t < 5 && !started; t++) {
+                await Future<void>.delayed(const Duration(seconds: 3));
+                final hdr = await adb
+                    .shell("grep -ac 'CR5 segs=' $log 2>/dev/null || echo 0");
+                started = hdr.stdout.trim().split('\n').last.trim() == '1';
+              }
+              if (!started) {
+                debugPrint(
+                    '[HybridShell] seg $k attempt $attempt 无头行 → 重 spawn');
+                await adb.shell("pkill -f 'chain_[r]un5' 2>/dev/null || true");
+                await Future<void>.delayed(const Duration(seconds: 3));
+              }
+            }
+            if (!started) {
+              debugPrint('[HybridShell] seg $k spawn 失败');
+              return false;
+            }
+            var done = false;
+            var death = 0;
+            for (var t = 0; t < 100; t++) {
+              final c = await adb
+                  .shell('grep -ac CR5_DONE $log 2>/dev/null || echo 0');
+              final h = await adb
+                  .shell("grep -ac 'CR5 segs=' $log 2>/dev/null || echo 0");
+              if (c.stdout.trim().split('\n').last.trim() == '1' &&
+                  h.stdout.trim().split('\n').last.trim() == '1') {
+                done = true;
+                break;
+              }
+              final a = await adb.shell("pgrep -f 'chain_[r]un5' | wc -l");
+              final alive =
+                  int.tryParse(a.stdout.trim().split('\n').last.trim()) ?? 1;
+              death = (alive == 0 && t > 4) ? death + 1 : 0;
+              if (death >= 3) break;
+              await Future<void>.delayed(const Duration(seconds: 3));
+            }
+            if (!done) {
+              final tail = await adb.shell('tail -3 $log 2>/dev/null');
+              debugPrint('[HybridShell] seg $k 未 DONE: ${tail.stdout.trim()}');
+              return false;
+            }
+            final nh =
+                await adb.shell('ls $remoteDir/d2q_h_l*_* 2>/dev/null | wc -l');
+            final hcount =
+                int.tryParse(nh.stdout.trim().split('\n').last.trim()) ?? -1;
+            // 每段 h 件 = 14 层 × nChunks（512 档 4 chunk → 56/段；NC128 单
+            // chunk 档才是 14——2026-11-13 冒烟定罪照搬 128 档闸的错）。
+            final hWant = 14 * nCh * (k + 1);
+            if (hcount != hWant) {
+              debugPrint('[HybridShell] seg $k h 计数 $hcount != $hWant');
+              return false;
+            }
+            final dl = await adb.shell('grep -a CR5_DONE $log');
+            debugPrint('[HybridShell] seg $k: ${dl.stdout.trim()}');
+          }
+          _t('chain(3seg)', sw);
+          await adb.shell("pkill -f 'chain_[r]un5' 2>/dev/null || true");
+
+          // ⑥ 收 84 片 KV（sync RECV，shell 文件 o+r；回 App 私有 kvDir）
+          for (var i = 0; i < nLayers; i++) {
+            for (final t in const ['kc', 'vc']) {
+              final name = 'd2q_${t}_$i.raw';
+              final data = await adb.pull('$remoteDir/$name',
+                  timeout: const Duration(seconds: 30));
+              File('${work.kvDir}/$name').writeAsBytesSync(data);
+            }
+          }
+          _t('pull84', sw);
+          return true;
+        } finally {
+          try {
+            adb.close();
+          } catch (_) {}
+        }
+      }
+
+      var shellOk = false;
+      for (var attempt = 0; attempt < 2 && !shellOk; attempt++) {
+        try {
+          shellOk = await shellDomainRun();
+        } on AdbTransportException catch (e) {
+          debugPrint('[HybridShell] adb 断线（attempt $attempt）：$e → '
+              '${attempt == 0 ? '重连重跑 shell 段' : '回退 GPU'}');
+        }
+      }
+      if (!shellOk) return null;
+
+      // ⑦ 桥转 + GPU decode —— App 进程内既有真路径（GPU 无域墙）
+      if (cancelled?.call() ?? false) return null;
+      final dec = await bridgeAndResumeDecode(
+        inference,
+        paths: HybridWorkPaths(
+          kvDir: work.kvDir,
+          idsPath: work.idsPath,
+          statePath: work.statePath,
+        ),
+        nReal: nReal,
+        firstTok: -1,
+        maxTokens: maxTokens,
+        temperature: temperature,
+      );
+      if (!dec.ok) {
+        debugPrint('[HybridShell] 桥转/decode 不可用: $dec');
+        // [m3shell 取证] 拒载容器留档到 code_cache 根（App 内部：run-as 可读，
+        // 外置目录 FUSE 对 run-as 判死判例 2026-11-13），供主机重桥字节比对定罪。
+        try {
+          final root = File(work.statePath).parent.parent.path; // code_cache
+          if (await File(work.statePath).exists()) {
+            await File(work.statePath).copy('$root/m3s_forensic.state');
+            await File(work.idsPath).copy('$root/m3s_forensic_ids.raw');
+            debugPrint('[HybridShell] 取证容器已留档 code_cache/m3s_forensic.state');
+          }
+        } catch (_) {}
+        return null;
+      }
+      if (dec.stopped == 'user') {
+        debugPrint('[HybridShell] decode 被外部止损 → 回退 GPU');
+        return null;
+      }
+      final text = dec.text;
+      if (text == null || text.isEmpty) {
+        debugPrint('[HybridShell] decode ok 但 text 空 → 回退');
+        return null;
+      }
+      _t('bridge+decode', sw);
+      debugPrint('[HybridShell] shell 域混合完成 nReal=$nReal len=${text.length}');
+      return HybridTurn(
+          text: text, nReal: nReal, nGen: dec.nGen, loadMs: dec.loadMs);
+    } catch (e) {
+      debugPrint('[HybridShell] 异常（回退 GPU）: $e');
+      return null;
+    } finally {
+      try {
+        await Directory(baseDir).delete(recursive: true);
       } catch (_) {}
     }
   }

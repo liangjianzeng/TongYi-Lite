@@ -1019,17 +1019,39 @@ class ChatNotifier extends StateNotifier<bool> {
           // 既有流骨架（一次性渲染；token 级流式 ack 协议留后续排期）；任何
           // 失败/止损 → null → 现路径逐字节不变（默认 OFF 短路 = 零回归红线）。
           Stream<String>? hybStream;
-          if (_ref.read(settingsProvider).hybridPrefillEnabled &&
+          final hybSettings = _ref.read(settingsProvider);
+          if (hybSettings.hybridPrefillEnabled &&
               localImages.isEmpty &&
               audioPath == null) {
-            debugPrint(
-                '[ChatNotifier][Hybrid] 尝试 NPU prefill + GPU decode ...');
-            final hybTurn = await HybridBridge.runTurn(
-              _inference,
-              messagesJson: messagesJson,
-              maxTokens: 1024,
-              temperature: 0.7,
-            );
+            // [npu-line M3-shell] shell 域路由：App 进程域 QNN 判死（§7.6bis
+            // deviceCreate 0x36b1）→ 推荐经 App 内置 adb 通道在 shell 域跑链。
+            // 密钥缺失（外置目录无 adbkey.pem）→ 不硬试 App 域死路，直接回退
+            // GPU（开关语义 = 开发者路径，静默降级与失败回退同一红线）。
+            final viaShell = hybSettings.hybridViaShell;
+            final adbKey = viaShell ? await HybridBridge.loadDeveloperKey() : null;
+            if (viaShell && adbKey == null) {
+              debugPrint('[ChatNotifier][Hybrid] shell 域密钥缺失'
+                  '（外置目录 adbkey.pem）→ 回退纯 GPU');
+            } else {
+              debugPrint('[ChatNotifier][Hybrid] 尝试 NPU prefill + GPU decode'
+                  '（域=${viaShell ? "shell/adb" : "app"}）...');
+            }
+            final hybTurn = (!viaShell)
+                ? await HybridBridge.runTurn(
+                    _inference,
+                    messagesJson: messagesJson,
+                    maxTokens: 1024,
+                    temperature: 0.7,
+                  )
+                : (adbKey == null
+                    ? null
+                    : await HybridBridge.runTurnShell(
+                        _inference,
+                        messagesJson: messagesJson,
+                        maxTokens: 1024,
+                        temperature: 0.7,
+                        key: adbKey,
+                      ));
             if (hybTurn != null) {
               debugPrint('[ChatNotifier][Hybrid] 成功 len=${hybTurn.text.length} '
                   'n_real=${hybTurn.nReal} n_gen=${hybTurn.nGen} '
@@ -1772,6 +1794,8 @@ class ChatNotifier extends StateNotifier<bool> {
             // [npu-line M2 Phase C] NPU prefill + GPU decode 混合调度
             // （默认 OFF = 现路径逐字节不变；ON 且任何一步失败自动回退）。
             hybridPrefillEnabled: settings.hybridPrefillEnabled,
+            // [npu-line M3-shell] shell 域派发（§7.6bis App 域判死绕行）。
+            hybridViaShell: settings.hybridViaShell,
           );
 
     // [NewAgent] 新 seam 活跃标记（验证 Phase 3 代码路径；验证后可删）

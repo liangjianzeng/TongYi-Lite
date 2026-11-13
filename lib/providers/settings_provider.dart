@@ -967,6 +967,15 @@ class SettingsNotifier extends StateNotifier<InferenceSettings> {
     await _persist();
   }
 
+  /// [npu-line M3-shell] 混合 prefill 走 shell 域开关（App 自带 adb 通道自连
+  /// 本机 adbd 派发 chain_run5；§7.6bis 域墙绕行）。仅在混合调度 ON 时有意义；
+  /// 失败仍回退纯 GPU。逐回合构造/路由时读取，改后立即生效。
+  Future<void> setHybridViaShell(bool value) async {
+    if (value == state.hybridViaShell) return;
+    state = state.copyWith(hybridViaShell: value);
+    await _persist();
+  }
+
   /// GPU 推理时限制刷新率（防闪纹）。关 = 推理期间不干预屏幕刷新率。
   Future<void> setInferenceLimitRefreshRate(bool value) async {
     state = state.copyWith(inferenceLimitRefreshRate: value);

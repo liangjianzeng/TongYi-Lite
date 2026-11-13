@@ -4513,13 +4513,17 @@ static int hyb_build_prompt_ids(void *env_v, jstring jmessages, const char *prom
     JNIEnv *env = static_cast<JNIEnv *>(env_v);
 
     // Model-specific GGUF-embedded-jinja routes (clover / bailing-ling /
-    // nanbeige) are applied inside completion(); replicating their gating
-    // here is a C-3 device-parity item (plan Phase C gate needs 50-prompt
-    // token parity anyway). Until then the hybrid chain is chatml-route only:
-    // refuse, and the Dart side falls back to the GPU path.
+    // nanbeige) are applied inside completion(); [m3shell 2026-11-13] gating
+    // now MIRRORS the GPU path exactly: jinja route only when the flag is
+    // set AND an embedded template exists ((clover||bailing||nanbeige) &&
+    // emb). emb=NULL → GPU renders plain chatml too, so hybrid must not
+    // refuse (the old flag-only refusal locked clover-family models out of
+    // the hybrid path while their GPU route was chatml anyway).
     const char *emb = llama_model_chat_template(g_engine.model, nullptr);
-    const bool gated = g_engine.is_clover_model || g_engine.is_nanbeige_model ||
-                       (emb && strstr(emb, "<role>ASSISTANT</role>") != nullptr);
+    const bool emb_is_bailing = emb &&
+        strstr(emb, "<role>ASSISTANT</role>") != nullptr;
+    const bool gated = (g_engine.is_clover_model || emb_is_bailing ||
+                        g_engine.is_nanbeige_model) && emb != nullptr;
     if (gated) return -2;
 
     std::deque<std::string> store;
@@ -4530,8 +4534,34 @@ static int hyb_build_prompt_ids(void *env_v, jstring jmessages, const char *prom
     if (!chat.empty()) {
         text = apply_chat_template_grown(chat, true, "hyb");
         if (text.empty()) return -3;
+        /* [m3shell 2026-11-13 dingzui] no-think trigger byte-parity with
+         * the GPU chatml branch: when user thinking is off and the
+         * rendered prompt ends with the assistant-open marker, GPU
+         * appends an empty think block (Qwen3 documented no-think
+         * trigger). Missing here -> thinking-variant models enter
+         * unclosed thinking -> greedy runs to the 1024 cap and the
+         * Dart thinking filter swallows the whole reply -> empty UI
+         * (740 field: 4382 chars swallowed, n_gen=1024).
+         * [toolchain judgment] hex char arrays on purpose: this file
+         * was twice corrupted by an editor channel swallowing newline
+         * escapes inside string literals - keep this block
+         * backslash-free. */
+        static const char kHybAsstMarker[] = {
+            0x61, 0x73, 0x73, 0x69, 0x73, 0x74, 0x61, 0x6E, 0x74, 0x0A, 0x00};
+        static const char kHybEmptyThink[] = {
+            0x3C, 0x74, 0x68, 0x69, 0x6E, 0x6B, 0x3E,
+            0x0A, 0x0A,
+            0x3C, 0x2F, 0x74, 0x68, 0x69, 0x6E, 0x6B, 0x3E,
+            0x0A, 0x0A, 0x00};
+        const size_t am = sizeof(kHybAsstMarker) - 1;
+        if (!g_engine.enable_thinking.load() &&
+            text.size() >= am &&
+            text.compare(text.size() - am, am, kHybAsstMarker) == 0) {
+            text += kHybEmptyThink;
+            LOGI("hyb tmpl: thinking disabled -> empty think block appended");
+        }
     } else if (prompt && prompt[0]) {
-        text = prompt; // raw-prompt parity with nativeCompletion()'s prompt path
+        text = prompt; // raw-prompt parity with nativeCompletion() prompt path
     } else {
         return -4;
     }

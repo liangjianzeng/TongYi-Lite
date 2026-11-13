@@ -436,6 +436,13 @@ class InferenceSettings {
   /// 实验特性：链侧未过设备验证（Phase C-2）前保持 OFF 是预期状态。
   final bool hybridPrefillEnabled;
 
+  /// [npu-line M3-shell] 混合 prefill 走 shell 域（App 自带 adb 通道自连本机
+  /// adbd 派发 chain_run5；计划 §7.6bis：App 进程域 QNN deviceCreate 0x36b1
+  /// 判死，shell 域全绿）。仅在 [hybridPrefillEnabled]=ON 时有意义；ON 时
+  /// runTurnShell 取代 runTurn，失败仍回退纯 GPU（零回归红线不变）。
+  /// **默认 OFF**；开发者路径（需 adbd TCP 5555 已开 + 外置目录 adbkey.pem）。
+  final bool hybridViaShell;
+
   /// GPU 推理时限制刷新率（防闪纹，2026-10-07 小米13 定案）：模型加载/
   /// prefill 的瞬时显存带宽会挤占显示供帧（Adreno UMA），期间临时锁 60Hz、
   /// 回合结束恢复。默认开；CPU 后端无此现象（chat_provider 侧跳过）。
@@ -632,6 +639,7 @@ class InferenceSettings {
     this.kvCacheType = 'q4_0',
     this.flashAttn = false,
     this.hybridPrefillEnabled = false,
+    this.hybridViaShell = false,
     Map<String, List<String>>? agentToolsByModel,
     Map<String, Map<String, dynamic>>? agentByModel,
     List<AgentPersona>? agentPersonas,
@@ -841,6 +849,7 @@ class InferenceSettings {
     String? kvCacheType,
     bool? flashAttn,
     bool? hybridPrefillEnabled,
+    bool? hybridViaShell,
     int? gpuNUbatch,
     bool? vkNoSubgroup,
     bool? smartMoeEnabled,
@@ -988,6 +997,7 @@ class InferenceSettings {
       flashAttn: flashAttn ?? this.flashAttn,
       hybridPrefillEnabled:
           hybridPrefillEnabled ?? this.hybridPrefillEnabled,
+      hybridViaShell: hybridViaShell ?? this.hybridViaShell,
       agentToolsByModel: agentToolsByModel ?? this.agentToolsByModel,
       agentByModel: agentByModel ?? this.agentByModel,
       agentPersonas: agentPersonas ?? this.agentPersonas,
@@ -1108,6 +1118,7 @@ class InferenceSettings {
         'kvCacheType': kvCacheType,
         'flashAttn': flashAttn,
         'hybridPrefillEnabled': hybridPrefillEnabled,
+        'hybridViaShell': hybridViaShell,
         'agentToolsByModel': agentToolsByModel,
         'agentByModel': agentByModel,
         'agentPersonas': agentPersonas.map((p) => p.toJson()).toList(),
@@ -1303,6 +1314,7 @@ class InferenceSettings {
       // [npu-line M2 Phase C] 混合调度默认 OFF（缺字段 = 现纯 GPU 路径）
       hybridPrefillEnabled:
           (json['hybridPrefillEnabled'] as bool?) ?? false,
+      hybridViaShell: (json['hybridViaShell'] as bool?) ?? false,
       agentToolsByModel: _parseAgentTools(json['agentToolsByModel']),
       agentByModel: _parseAgentByModel(json['agentByModel']),
       agentPersonas: _parsePersonas(json['agentPersonas']),
