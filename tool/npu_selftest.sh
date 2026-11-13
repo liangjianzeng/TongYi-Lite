@@ -5,7 +5,7 @@
 # → head（vocab 130560）单跑 → WSL 判分（HF 参考 logits cos + top-6）。
 # 布局铁则（踩过的坑，勿改）：层间输出 T-layout [1,2048,16] 线性直传；
 # norm 输出是 natural [1,16,2048]，喂 head 前必须 transpose——当年 devchain 生成器
-# 把这步写丢过，"分两段跑"才是验收真配方（见 NPU线_MiniCPM5整模型验收_2026-11-09.md）。
+# 把这步写丢过，"分两段跑"才是验收真配方（见私有 docs 仓 NPU线_MiniCPM5整模型验收_2026-11-09.md）。
 #
 # 用法（Git Bash）：
 #   DEV=<adb序列号> bash tool/npu_selftest.sh    # 序列号真值见私有区映射表，不落仓

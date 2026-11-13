@@ -146,13 +146,18 @@ cd android && .\gradlew.bat assembleDebug -x compileFlutterBuildDebug
 - **推理日志**：加载/卸载/生成全过程 + 每次交互性能指标（提示长度、生成 token 数、首 token 延迟、tok/s 等），  
   `tok/s` 与 JNI 回传的真实 `n_gen` / `t_gen_ms` 对齐。
 - **存储信息**：按候选目录扫描所有 `.gguf`（含 `.mmproj` / `.dspark.gguf`），即使模型不在 catalog 中也能显示。
-- **高通 NPU（Hexagon HTP）端侧推理线（进行中，`npu-line` 分支）**：基于 Qualcomm AI Runtime（QNN）
-  的 HTP 直推路线，目标为 740（SM8550/V73）/830（SM8750/V79）双机 native ctx 推理。
-  **已达成：catalog 原版权重 MiniCPM5-2B（Llama GQA 42 层）fp16 整模型 HTP 跑通，
-  logits 对 torch 参考 cos 0.9999、top-6 token 全一致、prefill ≈65–75 tok/s**；
-  Spark-X2.6-4B（W4A16 配方定案）主靶在途。现状与复跑指引见
-  [`NPU线_剩余任务交接_2026-10-31.md`](NPU线_剩余任务交接_2026-10-31.md) 与
-  [`NPU线_MiniCPM5整模型验收_2026-11-09.md`](NPU线_MiniCPM5整模型验收_2026-11-09.md)。
+- **三 U 混合架构实验线（NPU + GPU + CPU，`npu-line` 实验线 · 实验性默认关）**：MiniCPM5-2B
+  （Llama GQA 42 层）文本回合**按段接力而非并行**——**NPU prefill**：Hexagon HTP 加载 42 张逐层
+  QNN ctx（fp16 ≈3.9GB，设备端预置）跑分层链；**KV 桥**：逐层 K/V 重排为 llama.cpp STATE 容器；
+  **GPU decode**：Adreno（OpenCL）载 Q4_K_M 权重重算首 token 后贪心续写；**CPU** 全程兜底——
+  任一步失败自动回退纯 GPU 现路径。入口：设置 → 推理引擎 →「NPU 混合调度」（仅纯文本生效）。
+  **双真机过 rev3b 三臂判卷**（740=SM8550/Adreno 740、830=SM8750/Adreno 830；cosh0 0.987/0.989，
+  首 token 跨设备逐字同源）：NPU prefill ≈218 tok/s（GPU 同档 ≈19），全链 3 段 wall 740 ≈3.5s /
+  830 ≈2.4s，decode 740 ≈10 t/s / 830 ≈17.9 t/s。前身基线：fp16 整模型 HTP 直推（logits 对
+  torch 参考 cos 0.9999、top-6 全一致）。工程实录与判例（所有者私有文档仓）：
+  [M2 混合架构实验计划](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/NPU线_M2混合架构实验计划_2026-11-12.md) ·
+  [MiniCPM5 整模型验收](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/NPU线_MiniCPM5整模型验收_2026-11-09.md) ·
+  [剩余任务交接](https://github.com/liangjianzeng/TongYi-Lite-docs/blob/main/NPU线_剩余任务交接_2026-10-31.md)。
 
 ### 多模态：视觉理解
 

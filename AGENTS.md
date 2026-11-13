@@ -9,6 +9,13 @@
   `thinking_runaway_notes.md`、`thinking_effort_token_meter_notes.md`
 - 迁移清单与逐字节 sha256 校验：私有仓 `私有化迁移_自公开仓_2026-10-28.md`
 
+**第二批（2026-11-13）**：根目录 12 份过程实验线 md（NPU线_剩余任务交接 / NPU线_M2混合架构实验计划 /
+NPU线_MiniCPM5整模型验收 / GPU发射税减税专项 / K40真机复验 / 稠密4B_OpenCL排空税_交接 /
+高通NPU_架构详解与工作汇报 / Windows移植_CPU_GPU_NPU_实施方案 / 智能体harness重构_落地记录 /
+智能体UI重构_落地记录 / _my_opencl_lesson / 私有化交接）同样迁入私有仓；
+清单与 sha256：私有仓 `私有化迁移_自公开仓_2026-11-13.md`。
+README / CHANGELOG 中原指向这些文件的链接已改指私有仓 blob URL。
+
 公开克隆中 `docs/` 是无访问权限的子模块指针，上述文件只对所有者可见。
 面向使用者的文档请看 [`README.md`](README.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md)、
 [`CHANGELOG.md`](CHANGELOG.md)；构建入口见 `tool/build_apk.sh` / `tool/build_apk.ps1`。
