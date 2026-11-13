@@ -226,3 +226,38 @@ decode t/s 未测（需 KV-cache 链，见 §5）。830（V79）复测未做（�
 → **NPU prefill ≈11× GPU；GPU decode ≈5× NPU**——「App 正确形态 = NPU prefill + GPU decode 混合调度」（§九④结论）首次拿到同模数据背书。GPU 口径判例：leg 273 的 4B pp512=33.2 是发射税调优专项数字（dense4b_1104 时代 kernel/repack 调优），非 2B 公允基线；同口径复跑（`GGML_DISABLE_VULKAN=1 -fa 0`，对齐 273）与默认口径同档（19.04/10.75 vs 19.34/10.61），2B 公允基线 = 本表。GPU 链路：HF→GGUF（`convert_hf_to_gguf.py --outtype bf16`，WSL /home/liang/lc，llama 壳 GQA 16/2）→ 81×60MB socket 分块推送（**31 号定案的 curl -r 在设备 curl 8.12.0-DEV 上静默失效**——Range 头不发，3 秒全量流假象；分块+md5 对拍 `9659b784…` 逐字节一致）→ 设备 `llama-quantize Q4_K_M`（34s）。
 
 **功耗三测就绪未跑**（工具冻结 `npu-line/probe_m1/dec2/mcp5_94_pwr_{decode,prefill,gpu}.py` + `mcp5_94_adbsock.py`）：协议 = 电池模式硬闸门（USB/AC powered=true 即弃）+ idle 基线扣除 + Charge counter 差分×电压（正则**必须行首锚定**——dumpsys 里 `Max charging voltage: 5000000`（µV）在真 `voltage: 4307`（mV）之上，未锚定正则抓 µV 报 5000W）；GPU 表格行解析（build 62bcdf0e 无 `-f csv`）。**两道设备闸门待开**：①拔线（电池模式）②「后台进程限制=不允许后台进程」UI 级设置——**内存墙判例（坑 60）**：fp16 三进程驻留需 ~7.3G（3×HTP 池+535M head），shell 侧榨尽顶值 6.9G（kill-all 峰）仍差 ~400M，lmkd 按压力边跑边杀（空日志=秒死签名，t=4s 三活→t=14s 剩 1）；自启洪峰 boot 后 1-3 分钟回填吞掉 kill-all 窗口；force-stop/`background_process_limit`/`disable-user`（仅 2/12 成功，protected 包 shell 禁不掉）全部无效——**UI 级设置是唯一路径**。过程事故一并入档：**adb.exe 被 Android Studio 更新蒸发**（platform-tools 只剩 dll）→ `E:/MyLLM_exp/ptools/` 重装 v37.0.1 并回拷 SDK 目录；期间纯 socket mini-adb 客户端（`mcp5_94_adbsock.py`，挂 :5037 存活 server，shell/push/pull 全覆盖）撑起全部工作面——**adb 客户端缺失不是死局**。
+
+**⑫ NC128 单 chunk prefill 档——prompts50 实词档：prefill exec 从 4 chunk 税降到 1 chunk（2026-11-13，mcp5_98 系列，NC128_JUDGE_PASS 50/50）**：
+动机 = 计划 §6.4×§7.2：A6 exec 3.72s 是 **static-512 图 4×929.5ms 全付**，而 prompts50 判卷集 real token 实测 36–81
+全落单 chunk 区——判卷集白付 3 个 chunk。解 = **NC128 图族**：`DEC_NC=128 DEC_S=128` 重导 42 层 →
+`nc128_build_all.sh` 批 ctx → `serve_dec/dec2_l{k}_ctx.bin`（与 512 档 dec2p 分立共存；导出期 torch 2.14 默认 dynamo
+路漂移定罪 l34+ 死，显式 `dynamo=False` 回落 legacy 后 42/42 全绿，L41 vs-HF cos 1.0000）。
+**执行链**（驱动 `mcp5_98_run_nc128.py`，97 C 批 clone，rev3b 三臂、可续跑）：
+
+- **gen98 manifest**（`mcp5_98_gen_nc128_manifests.py`）：gname/tensor id/dims **逐层从 ctx 二进制读**
+  （qnn-context-binary-utility dump；坑 56 纪律——**勿跨图族硬编码**）→ 三段闸门 `manifest_nc128_{A,B,C}`；
+  roll 指令 `knew:roll=kcache@512`（roll_row 512B=(HD,NKV) fp16 行）、cos/sin `@32768` 单 S-block、
+  amask `d2q128_am_0.raw`（c=0 全遮 128 缓存列+新列因果）。
+- **42 张 ctx md5 验收**：host md5 → device `md5sum` 全量比对，漂移 → 60MB socket 分片重推 → 设备 cat 合件 → 再 md5
+  （坑 62 判例：验收实测 **41/42** 系陈旧代际文件冒充，重推后全绿——"文件数对"≠"内容对"）。
+- **单 chunk 链**：三段闸门串行 A/B/C，`CHAIN_KEEP=1 CR5_ROLL_SAVE=1 chain_run5 manifest_nc128_{g} 1`（**steps=1**）；
+  spawn 前 `rm -f` 日志 + 认 DONE 须同时见新 run 头行 `CR5 segs=`（坑 61 判例）；链 gate = **CR5_DONE + 三击死亡，
+  仅此两条**（§7.2 定案不变），另设驱动侧硬闸"seg DONE 后 h 计数 14/28/42"（坑 63 附判例）。
+- **kv_bridge NC=128**：env `NPU_NC=128 NPU_PFX=d2q128 NPU_KV_DIR=npu_kv128 NPU_IDS=ids.raw`，
+  per-layer cache reshape (128,HD,NKV) 取 **前 NREAL 行**（NREAL=real tokens，驱动闸门 16–120），K=h2i/V=copy 配方不变，
+  `BRIDGE_VER=4`（fork c1a2cb0 容器），P0=88（坑 63 判例：prep 侧 `D2Q_PFX` 参数化须 host 读方同一 env `NPU_PFX` 贯通）。
+- **三臂 + rev3b 判卷**：GOLD=fork `hyb_save -ngl 99` / FLOOR=上游 CPU `hyb_save_up -ngl 0` /
+  HYB=`hyb_load(bridged128_c{N}.state) -ngl 99`；每轮首尾 mWakefulness 复查（Awake 即 223）；ids sha 碰撞守卫防
+  prompt 注入退化（97 判例回归装载）。
+
+| 判据 | 值 |
+|---|---|
+| oks | **50/50**（批判线 ≥45） |
+| med_cosh0 | **0.9929**（min 0.9625，线 ≥0.97） |
+| dec_h_total | **0**（lcp_h：9/50 全 64 步同 GOLD，其余早失配全非决定性） |
+| med chain exec（1 chunk A+B+C） | **0.70s**（0.60–0.84；A6 3.72s ⇒ 5.3×） |
+| med TTFT hot / cold | **1.66s**（1.49–1.84）/ 8.76s（cold 为三段冷 preload 税，非目标形态） |
+
+结论：**双档定案**——real ≤120 走 NC128 单 chunk 档（exec 5.3×、混合 TTFT hot 1.66s = A6 的 1/3），>120 仍 static-512 档；
+rev3b 批判与 MC 50/50 档同权通过，指标已回填计划 §6.4bis。复跑入口：`mcp5_98_run_nc128.py`（push/sanity/batch 三面）
++ `mcp5_98_gen_nc128_manifests.py`（WSL，读 serve_dec ctx 出 manifest）。
