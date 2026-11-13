@@ -299,3 +299,36 @@ App 面首次全冒烟（NPU prefill + GPU decode，App 自带 adb 通道在 she
 - **红线执行**：Dozing 进/出（仅 UI 驱动瞬态唤醒，stayon 禁）；冒烟结束开关恢复 OFF、设备 Dozing 退出；
   临时物只落 E:/MyLLM_exp。复跑入口：`mcp5_99_run_m3shell_smoke.py`（Phase A 工具参照 / Phase B App arms /
   Phase C 轻+重双门）+ `mcp5_99b_judge_only.py`（重门单独重跑）。
+
+## 十⑭ M830：跨机型混合冒烟 V79 判定 PASS（2026-11-13）
+
+**动机**：m3shell 结档后用户令"打 830"——M332BF（SM8750 sun / Adreno 830 / HTP V79，USB <redacted-serial>）。
+原预期 QNN ctx SoC 后端绑定、V73 ctx 须 42 张重导（~40min）。
+
+**决定性快测推翻预期**：先推 seg A（14 ctx + chain_run5 + manifest_pre2_A + d2q feeds）上 830，
+前台 `./chain_run5 manifest_pre2_A 4` → `CR5_DONE wall=3667.1ms`，h=56/knew=56/vnew=56 全对——
+**V73 ctx 在 V79 可加载可执行，免重导**（坑 71 正向判例）。随后 28 ctx + manifest B/C + Q4 GGUF
+（1.45G）+ 判卷二进制（hybllm/hybllm_dev 19 件 268M）全部 740→host→830 两段迁移
+（Wi-Fi ~6.3MB/s 拉、USB ~40MB/s 推，md5/计数闭环）。
+
+**830 实测**（feeds/ids 与 740 M3SHELL 冒烟同源：p3 App ids n_real=174）：
+
+| 项 | 830 (SM8750/A830/V79) | 740 (SM8550/A740/V73) 对照 |
+|---|---|---|
+| 全链 3seg wall | 2.57 / 2.40 / 2.34s | 3.48 / 3.67 / 3.78s（**~35% 快**） |
+| exec（3seg） | 713 / 785 / 713ms | 同量级 |
+| classic ctx state load | 13ms | 12ms（坑 64 修复在 830 同样生效） |
+| GPU decode（hyb_load g=64 wall 口径） | **17.85 t/s** | ~10.3 t/s（**~1.75×**） |
+| first_tok | **1207**（830 GPU/CPU/NPU 三方同值） | 1207（跨 SoC 逐字同源） |
+| rev3b 判卷（GOLD vs HYB，64 步） | cosh0=0.9888 / prefix_cos_min=0.9678 / lcp_h=37（marg 0.781 非决定性）/ dec_h=null ⇒ **PASS** | cosh0=0.9869 / lcp_h=7 非决定性 ⇒ PASS |
+
+- 判卷流程：84 KV 拉回 host → kv_bridge（NPU_IDS=ids_m3s.raw, n_real=174, BRIDGE_OK 7.5MB 容器）
+  → 推回 830 hybllm_dev → GOLD(hyb_save ngl99, first_tok=1207)/HYB(hyb_load -t 1207, STATE_LOADED
+  tokens=174 next_pos=262)/FLOOR(hyb_save_up ngl0, first_tok=1207) 三臂 → logits 拉回 host numpy
+  对比（token 序列 = logits 贪心 argmax 重建，与 stdout T 系列等价；前 36/64 步逐 token 一致）。
+- 红线：830 App（com.dgxspark.tongyilite）设置全程未动（默认 OFF）；测试纯 shell 域工具链，
+  未启用 App 混合开关；结束设备熄屏。
+- 落位：host 快照 E:/MyLLM_exp/hyb/m830（42 ctx/gguf/manifest/feeds）+ m830_bin（判卷二进制）+
+  npu_kv_830（84 KV）+ bridged_830.state + lg_830{g,h,u}.raw；830 侧 /data/local/tmp/npu_m1
+  （42 ctx + chain_run5 + manifest_pre2_A/B/C + d2q feeds）+ hybllm/hybllm_dev +
+  minicpm5-2b-q4k.gguf——830 从此具备混合链全要素。
