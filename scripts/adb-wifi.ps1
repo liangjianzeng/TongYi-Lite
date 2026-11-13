@@ -4,8 +4,8 @@
   Usage:
     scripts\adb-wifi.bat                  auto: USB present -> read wlan0 + tun IPs, switch adbd to tcp,
                                           connect BOTH the LAN and the VPN channel
-    scripts\adb-wifi.bat 192.168.0.107    explicit LAN IP
-    scripts\adb-wifi.bat -VpnIp 100.70.7.18   explicit VPN IP
+    scripts\adb-wifi.bat <redacted-tailscale>    explicit LAN IP
+    scripts\adb-wifi.bat -VpnIp <redacted-tailscale>   explicit VPN IP
     scripts\adb-wifi.bat -Port 5555       custom port
     scripts\adb-wifi.bat -Status          list devices + per-channel health check
     scripts\adb-wifi.bat -Disconnect      drop the wireless connections
@@ -123,7 +123,7 @@ if ($usb) {
 
     $rawAll = (& $adb -s $usb shell "ip -4 addr show" 2>$null) -join "`n"
     $addrs = [regex]::Matches($rawAll, 'inet (\d+\.\d+\.\d+\.\d+)') | ForEach-Object { $_.Groups[1].Value }
-    # Tailscale lives in the CGNAT range 100.64.0.0/10
+    # Tailscale lives in the CGNAT range <redacted-tailscale>/10
     $vpnFromUsb = $addrs | Where-Object { $_ -match '^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\.' } | Select-Object -First 1
 
     if ($lanFromUsb) { Write-Host "[2/5] phone LAN IP: $lanFromUsb" } else {
@@ -150,7 +150,7 @@ if ($Ip)    { Set-Content -Path $ipCache    -Value $Ip    -NoNewline -Encoding a
 if ($VpnIp) { Set-Content -Path $vpnIpCache -Value $VpnIp -NoNewline -Encoding ascii }
 
 if (-not $Ip -and -not $VpnIp) {
-    Write-Host "ERROR: phone IP unknown. Plug USB, or pass it explicitly: scripts\adb-wifi.bat 192.168.0.107"
+    Write-Host "ERROR: phone IP unknown. Plug USB, or pass it explicitly: scripts\adb-wifi.bat <redacted-tailscale>"
     exit 1
 }
 
