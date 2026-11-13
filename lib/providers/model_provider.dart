@@ -547,6 +547,16 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
         await _inference.setEnableThinking(gpu.enableThinking);
         debugPrint('[ModelManager] Loaded: $modelId ($displayName), '
             'enableThinking=${gpu.enableThinking}');
+        // 会话恢复记录：加载成功即记为「上次模型」，未星标默认时重启自动恢复。
+        try {
+          final svc = _ref.read(settingsServiceProvider);
+          final s = await svc.load();
+          if (s.lastLoadedModelId != modelId) {
+            await svc.save(s.copyWith(lastLoadedModelId: modelId));
+          }
+        } catch (e) {
+          debugPrint('[ModelManager] lastLoadedModelId persist failed: $e');
+        }
         return true;
       } else {
         String errorMsg = '模型加载失败（原生层返回 false）';
@@ -608,6 +618,17 @@ class ModelManagerNotifier extends StateNotifier<ModelState> {
 
       debugPrint('[ModelManager] Unloaded: $id ($name)');
       state = const ModelState(); // reset to idle (default phase=idle)
+      // 显式卸载 = 退出「启动恢复上次模型」：清掉会话恢复记录，
+      // 否则用户卸载后重启又会被自动加载回来。
+      try {
+        final svc = _ref.read(settingsServiceProvider);
+        final s = await svc.load();
+        if (s.lastLoadedModelId != null) {
+          await svc.save(s.copyWith(clearLastLoadedModelId: true));
+        }
+      } catch (e) {
+        debugPrint('[ModelManager] lastLoadedModelId clear failed: $e');
+      }
       return true;
     } on Exception catch (e, st) {
       debugPrint('[ModelManager] Unload failed: $e\n$st');

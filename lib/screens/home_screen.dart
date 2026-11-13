@@ -24,6 +24,7 @@ import '../providers/settings_provider.dart' show settingsProvider;
 import '../services/attachment_service.dart'
     show kMaxAttachments, kSupportedExtensions;
 import '../services/inference_service.dart';
+import '../services/model_storage_service.dart';
 import '../providers/shared_providers.dart';
 import '../providers/context_usage_provider.dart' show contextUsageProvider;
 import '../models/agent_persona.dart' show AgentPersona, kStandardPersonaId;
@@ -212,7 +213,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // 直接读持久化设置，避免 settingsProvider 异步 _load 未完成时读到默认 null。
     final settings = await SettingsService().load();
-    final defaultId = settings.defaultModelId;
+    // 未星标默认时回退「上次模型」会话恢复（加载成功即记、显式卸载即清）。
+    var defaultId = settings.defaultModelId;
+    if (defaultId == null || defaultId.isEmpty) {
+      defaultId = settings.lastLoadedModelId;
+    }
     if (defaultId == null || defaultId.isEmpty || !mounted) return;
 
     final manager = ref.read(modelManagerProvider.notifier);
@@ -227,7 +232,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       return;
     }
 
-    final cached = await manager.isModelCached(defaultId);
+    // 真存在性检查：notifier.isModelCached 走 getModelPath，找不到文件也返回
+    // 兜底路径（恒 true，死代码）；这里用 storage 层 existsSync 真检查，
+    // 文件缺失静默跳过，与上方注释宣称的本意一致。
+    final cached = await ModelStorageService().isModelCached(defaultId);
     if (!cached || !mounted) return;
 
     final ok = await manager.loadModel(defaultId);

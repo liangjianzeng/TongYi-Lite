@@ -103,6 +103,11 @@ class InferenceSettings {
   /// 启动进入首页时若该模型已缓存则自动加载，保证开箱即用??
   final String? defaultModelId;
 
+  /// 上一次成功加载进内存的模型 id（会话恢复用）。null = 无加载记录：
+  /// 与 defaultModelId（显式星标）不同，任何加载成功都更新、显式卸载即清空；
+  /// 启动自动加载在未设默认时回退到它（重启恢复上次模型），卸载即退出自动恢复。
+  final String? lastLoadedModelId;
+
   /// 已配置的 OpenAI 兼容远程模型列表（可配多个，密钥明文存本地）??
   final List<ApiModelConfig> apiModels;
 
@@ -546,6 +551,7 @@ class InferenceSettings {
     Map<String, String>? quantChoiceByFamily,
     this.enableDsparkFeature = false,
     this.defaultModelId,
+    this.lastLoadedModelId,
     List<ApiModelConfig>? apiModels,
     this.activeApiModelId,
     // ---- 智能体（Agent??---
@@ -762,6 +768,8 @@ class InferenceSettings {
     // defaultModelId 为可??String，无法用 `?? this` 区分「未传」与「清空」，
     // 故增加显式清空标记，供取消默认模型时使用??
     bool clearDefaultModel = false,
+    String? lastLoadedModelId,
+    bool clearLastLoadedModelId = false,
     List<ApiModelConfig>? apiModels,
     String? activeApiModelId,
     // activeApiModelId 同样可空，需显式标记以区分「未传」与「停用」??
@@ -883,6 +891,9 @@ class InferenceSettings {
       enableDsparkFeature: enableDsparkFeature ?? this.enableDsparkFeature,
       defaultModelId:
           clearDefaultModel ? null : defaultModelId ?? this.defaultModelId,
+      lastLoadedModelId: clearLastLoadedModelId
+          ? null
+          : lastLoadedModelId ?? this.lastLoadedModelId,
       apiModels: apiModels ?? this.apiModels,
       activeApiModelId: clearActiveApiModel
           ? null
@@ -1030,6 +1041,7 @@ class InferenceSettings {
         'quantChoiceByFamily': quantChoiceByFamily,
         'enableDsparkFeature': enableDsparkFeature,
         'defaultModelId': defaultModelId,
+        'lastLoadedModelId': lastLoadedModelId,
         'apiModels': apiModels.map((m) => m.toJson()).toList(),
         'activeApiModelId': activeApiModelId,
         // ---- 智能体（Agent??---
@@ -1155,6 +1167,7 @@ class InferenceSettings {
       quantChoiceByFamily: _parseStringMap(json['quantChoiceByFamily']),
       enableDsparkFeature: json['enableDsparkFeature'] as bool? ?? false,
       defaultModelId: json['defaultModelId'] as String?,
+      lastLoadedModelId: json['lastLoadedModelId'] as String?,
       // 旧配置缺这两个字段时默认空列??+ 停用，向后兼容??
       apiModels: _parseApiModels(json['apiModels']),
       activeApiModelId: json['activeApiModelId'] as String?,
